@@ -15,14 +15,45 @@
 /// channel (demand_pull → B2).
 pub const INTERNAL_CHANNEL_CAP_DEFAULT: usize = 1024;
 
-/// REQ-AXO-901906 — capacity for the pipeline-A channels that carry file
-/// CONTENT (`A1→A2`, `A2→A3` hold a `PreparedFile`/`ParsedFile` with up to
-/// `max_parse_bytes` ≈ 5 MB each). This is the canonical pipeline-A memory
-/// bound: `a_content × 5 MB × 2 channels`. Kept small + paired with
-/// `send().await` backpressure (mirrors pipeline B's channel-as-buffer model)
-/// — this replaces the deleted in-flight byte budget. Override via
-/// `AXON_PIPELINE_A_CONTENT_CAP`.
-pub const A_CONTENT_CHANNEL_CAP_DEFAULT: usize = 256;
+/// REQ-AXO-901906 / REQ-AXO-902038 — capacity for the pipeline-A channels
+/// that carry file CONTENT (`A1→A2`, `A2→A3` hold a `PreparedFile`/
+/// `ParsedFile` with up to `max_parse_bytes` ≈ 5 MB each). This is the
+/// canonical pipeline-A memory bound: `a_content × max_parse_bytes × 2
+/// channels`. Paired with `send().await` backpressure (channel-as-buffer).
+///
+/// REQ-AXO-902038 (session 84) — the old raw-count default of 256 bounded
+/// worst-case A buffering at `256 × 5 MB × 2 ≈ 2.5 GB`, which thrashed a
+/// host co-running the live instance under a slow/wedged B drain (PIL-AXO-007
+/// host-safety / PIL-AXO-004 cohabitation violation). The effective default
+/// is now DERIVED from a host-safe memory budget (see
+/// [`A_CONTENT_MEMORY_BUDGET_MB_DEFAULT`] + [`derive_a_content_cap`]) so the
+/// bound tracks `max_parse_bytes` instead of a blind file count. This const
+/// is the static fallback used by `Default` (no env) — itself sized to keep
+/// the worst case ≈ 640 MB. Override the count directly via
+/// `AXON_PIPELINE_A_CONTENT_CAP`, or the budget via
+/// `AXON_PIPELINE_A_MEMORY_BUDGET_MB`.
+pub const A_CONTENT_CHANNEL_CAP_DEFAULT: usize = 64;
+
+/// REQ-AXO-902038 — host-safe memory budget (MiB) for the two pipeline-A
+/// content channels combined. The effective `a_content` capacity is derived
+/// as `budget / (max_parse_bytes × 2)` so the worst-case A buffering stays
+/// bounded regardless of file sizes, on a host shared with the live
+/// instance. 768 MiB keeps the bound well under 1 GB. Operators on a
+/// dedicated indexing host can raise it via `AXON_PIPELINE_A_MEMORY_BUDGET_MB`
+/// for more A↔A pipelining depth. Override: `AXON_PIPELINE_A_MEMORY_BUDGET_MB`.
+pub const A_CONTENT_MEMORY_BUDGET_MB_DEFAULT: u64 = 768;
+
+/// REQ-AXO-902038 — derive the host-safe `a_content` channel capacity from a
+/// total memory `budget_mb` and the per-file `max_parse_bytes` ceiling.
+/// Bound = `a_content × max_parse_bytes × 2 channels ≤ budget`. Clamped to a
+/// sane pipelining range so a tiny budget still pipelines and a huge one does
+/// not over-buffer. Pure (no env) → unit-testable.
+pub fn derive_a_content_cap(budget_mb: u64, max_parse_bytes: u64) -> usize {
+    let budget_bytes = budget_mb.saturating_mul(1024 * 1024);
+    let per_slot_bytes = max_parse_bytes.max(1).saturating_mul(2); // two channels
+    let derived = (budget_bytes / per_slot_bytes) as usize;
+    derived.clamp(8, 512)
+}
 
 /// REQ-AXO-289 S4b'/REQ-AXO-262 — Default batch size for the B2 GPU
 /// embedder. ORT/TensorRT BGE-Large hits its peak throughput around
@@ -130,12 +161,24 @@ impl PipelineChannelCaps {
                 }
             }
         }
-        if let Ok(raw) = std::env::var("AXON_PIPELINE_A_CONTENT_CAP") {
-            if let Ok(parsed) = raw.trim().parse::<usize>() {
-                if parsed > 0 {
-                    caps.a_content = parsed;
-                }
-            }
+        // REQ-AXO-902038 — host-safe A content-channel sizing. An explicit
+        // count override wins; otherwise DERIVE the cap from a memory budget
+        // so the worst-case A buffering (`a_content × max_parse_bytes × 2`)
+        // stays host-safe regardless of file sizes (the 2.5 GB thrash, s84).
+        if let Some(explicit) = std::env::var("AXON_PIPELINE_A_CONTENT_CAP")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|&v| v > 0)
+        {
+            caps.a_content = explicit;
+        } else {
+            let budget_mb = std::env::var("AXON_PIPELINE_A_MEMORY_BUDGET_MB")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(A_CONTENT_MEMORY_BUDGET_MB_DEFAULT);
+            caps.a_content =
+                derive_a_content_cap(budget_mb, crate::indexing_policy::max_parse_bytes());
         }
         if let Ok(raw) = std::env::var("AXON_B2_BATCH_SIZE") {
             if let Ok(parsed) = raw.trim().parse::<usize>() {
@@ -187,5 +230,62 @@ impl PipelineChannelCaps {
             }
         }
         caps
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_a_content_cap_keeps_worst_case_under_budget() {
+        // REQ-AXO-902038 — default 768 MiB budget, 5 MiB max parse → the
+        // worst-case A buffering (cap × 5 MiB × 2 channels) must stay under
+        // the budget, and well under the 2.5 GB that thrashed the host.
+        let five_mib = 5 * 1024 * 1024;
+        let cap = derive_a_content_cap(A_CONTENT_MEMORY_BUDGET_MB_DEFAULT, five_mib);
+        let worst_case_bytes = (cap as u64) * five_mib * 2;
+        let budget_bytes = A_CONTENT_MEMORY_BUDGET_MB_DEFAULT * 1024 * 1024;
+        assert!(
+            worst_case_bytes <= budget_bytes,
+            "worst case {worst_case_bytes} must be <= budget {budget_bytes} (cap={cap})"
+        );
+        assert!(
+            worst_case_bytes < 1024 * 1024 * 1024,
+            "worst case must stay under 1 GiB, got {worst_case_bytes} (cap={cap})"
+        );
+        // Sanity: still deep enough to pipeline (not collapsed to the floor).
+        assert!(cap >= 32, "cap should still allow real pipelining, got {cap}");
+    }
+
+    #[test]
+    fn derive_a_content_cap_tracks_max_parse_bytes() {
+        // A smaller per-file ceiling permits a deeper channel for the same
+        // memory budget (the bound is precise w.r.t. max_parse_bytes, not a
+        // blind file count).
+        let small = derive_a_content_cap(768, 1024 * 1024); // 1 MiB files
+        let large = derive_a_content_cap(768, 5 * 1024 * 1024); // 5 MiB files
+        assert!(
+            small > large,
+            "smaller files → deeper cap (small={small}, large={large})"
+        );
+    }
+
+    #[test]
+    fn derive_a_content_cap_is_clamped() {
+        // Tiny budget still pipelines (floor), huge budget does not unbound.
+        assert_eq!(derive_a_content_cap(1, 100 * 1024 * 1024), 8); // floor
+        assert_eq!(derive_a_content_cap(1_000_000, 1024), 512); // ceiling
+    }
+
+    #[test]
+    fn default_a_content_cap_is_host_safe() {
+        // The static Default (no env) must keep the worst case well bounded
+        // (≈ 640 MiB at 5 MiB/file), never the legacy 2.5 GB.
+        let worst = (A_CONTENT_CHANNEL_CAP_DEFAULT as u64) * 5 * 1024 * 1024 * 2;
+        assert!(
+            worst <= 768 * 1024 * 1024,
+            "default worst case {worst} must be host-safe"
+        );
     }
 }
