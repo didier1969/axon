@@ -466,6 +466,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "data_catalog",
+                "description": "[DATA] REQ-AXO-902017 — inventory of a DATA-CENTRIC project's data artifacts (CSV lakes, fixtures, manifests) from its normalized pivot catalog `data/CATALOG.json`. Answers 'how many assets, what kinds, how many rows, which lack a manifest' in one call instead of a shell dredge (ls/head/wc). Read-only; code↔data cross-reference is a later slice.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. OPV). Default: AXO." },
+                        "catalog_path": { "type": "string", "description": "Optional override for the catalog location (absolute, or relative to the project root). Default: data/CATALOG.json." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "soll_acyclic_audit",
                 "description": "[SOLL] REQ-AXO-91492 — enumerate strongly-connected components (size>1) and self-loops in the SOLL intentional graph for one project. Pre-requisite for activating the DEC-AXO-098 cycle validator on `soll_manager(action=link)`. Read-only ; no mutation.",
                 "inputSchema": {

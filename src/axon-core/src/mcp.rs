@@ -18,6 +18,7 @@ mod soll;
 mod tests;
 mod tool_contracts;
 mod tools_context;
+mod tools_data_catalog;
 mod tools_dx;
 mod tools_framework;
 mod tools_framework_anomalies;
@@ -1432,6 +1433,9 @@ impl McpServer {
             // REQ-AXO-902031 (N3) — queryable tech-debt inventory (migrations +
             // HAS_REMNANT remnants + progress).
             "tech_debt_inventory" => self.axon_tech_debt_inventory(arguments),
+            // REQ-AXO-902017 slice 1 — data-artifact catalog (data/CATALOG.json
+            // pivot) inventory for data-centric projects.
+            "data_catalog" => self.axon_data_catalog(arguments),
             "soll_rollback_revision" => self.axon_soll_rollback_revision(arguments),
             "retrieve_context" => self.axon_retrieve_context(arguments),
             // REQ-AXO-264 Phase A — layered envelope (intent + code + recent

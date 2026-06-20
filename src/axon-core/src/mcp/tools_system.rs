@@ -989,7 +989,7 @@ impl McpServer {
         // Step 1 — resolve project_path via soll.ProjectCodeRegistry.
         // Inline (instead of touching workflow_project.rs) so the file
         // allocation contract for sub-B2 is respected.
-        let project_path = match self.lookup_project_path_for_rescan(&project_code) {
+        let project_path = match self.lookup_project_path(&project_code) {
             Some(path) => path,
             None => return Some(rescan_error_envelope(
                 &project_code,
@@ -1073,7 +1073,10 @@ impl McpServer {
     /// `workflow_project::lookup_project_path_by_code` so sub-B2 file
     /// allocation stays tight (see PR contract). Returns the absolute
     /// project_path string on hit, `None` otherwise.
-    fn lookup_project_path_for_rescan(&self, project_code: &str) -> Option<String> {
+    /// Resolve a project's canonical absolute path from `soll.ProjectCodeRegistry`.
+    /// Shared by `rescan_project` and `data_catalog` (REQ-AXO-902017). Returns
+    /// `None` when the code is unknown or its registry path is empty.
+    pub(crate) fn lookup_project_path(&self, project_code: &str) -> Option<String> {
         let escaped = project_code.replace('\'', "''");
         let raw = self
             .graph_store
