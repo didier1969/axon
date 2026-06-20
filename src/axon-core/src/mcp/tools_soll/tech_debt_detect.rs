@@ -58,8 +58,10 @@ const RULESETS: &[RemnantRuleset] = &[
     },
     RemnantRuleset {
         detect_key: "age_to_pg",
-        // AGE-specific API tokens, NOT the bare word "age" (→ page/storage/…).
-        symbol_name_regex: Some("ag_catalog|agtype|cypher"),
+        // AGE-specific API tokens ONLY. NOT the bare word "age" (→ page/storage/…)
+        // and NOT "cypher" — Cypher is the legitimate CURRENT query language of
+        // the Memgraph projection (build_cypherl, send_cypher, …), not AGE residue.
+        symbol_name_regex: Some("ag_catalog|agtype"),
         chunk_content_regex: None,
     },
     RemnantRuleset {
@@ -68,6 +70,35 @@ const RULESETS: &[RemnantRuleset] = &[
         chunk_content_regex: Some(r"nvidia[_-]smi"),
     },
 ];
+
+/// Code symbol kinds (ist.Symbol.kind). EXCLUDES `section` (markdown/doc
+/// headings — 4894 of them in AXO), `element` (markup), `TODO` (comment), and
+/// config/db kinds: a doc heading like "Axon DuckDB Migration Plan" DOCUMENTS a
+/// migration, it is not its residue (the same comment/doc-noise the 4-agent
+/// review flagged, manifested through doc-derived symbols). Anchoring the scan
+/// to real code kinds is what makes "proof of closure ~0" hold.
+const CODE_SYMBOL_KINDS: &[&str] = &[
+    "function",
+    "method",
+    "module",
+    "struct",
+    "impl",
+    "enum",
+    "class",
+    "variable",
+    "type_alias",
+    "macro",
+    "interface",
+];
+
+/// PG `IN ('a','b',…)` list of the code kinds, for the symbol scan filter.
+fn code_kinds_in_clause() -> String {
+    CODE_SYMBOL_KINDS
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 fn block_comment_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -120,6 +151,13 @@ impl McpServer {
             .get("detect_key")
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty());
+        // Re-record baseline_remnants to the current count even if one exists —
+        // use after cleaning residue (or after a ruleset precision fix) so
+        // progress is measured against an honest baseline.
+        let reset_baseline = args
+            .get("reset_baseline")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let mut summaries: Vec<Value> = Vec::new();
         let mut total_remnants = 0usize;
@@ -161,18 +199,32 @@ impl McpServer {
                 }
             }
 
+            // Reconcile the edge set to the current scan: add new matches, prune
+            // edges whose target no longer matches (a fixed pattern or cleaned
+            // residue) so the inventory converges instead of accumulating stale
+            // edges.
+            let current_ids: std::collections::HashSet<String> =
+                targets.iter().map(|(id, _)| id.clone()).collect();
+            let existing = self.existing_remnant_targets(&tmg_id);
             let mut created = 0usize;
             for (target_id, kind) in &targets {
-                if self.insert_remnant_edge_idempotent(&tmg_id, target_id, kind, &project_code) {
+                if !existing.contains(target_id)
+                    && self.insert_remnant_edge_idempotent(&tmg_id, target_id, kind, &project_code)
+                {
                     created += 1;
                 }
             }
+            let stale: Vec<String> = existing
+                .into_iter()
+                .filter(|e| !current_ids.contains(e))
+                .collect();
+            let removed = self.prune_remnant_edges(&tmg_id, &stale);
             let found = targets.len();
             total_remnants += found;
 
             // Record the baseline once so a later 0 reads as "scanned-and-clean",
             // not "never scanned" (REQ-902051 §4).
-            let baseline_set = if !has_baseline {
+            let baseline_set = if !has_baseline || reset_baseline {
                 self.set_tmg_baseline(&tmg_id, found);
                 true
             } else {
@@ -184,6 +236,7 @@ impl McpServer {
                 "migration_id": tmg_id,
                 "remnants_found": found,
                 "edges_created": created,
+                "edges_removed": removed,
                 "baseline_set": baseline_set,
             }));
         }
@@ -196,10 +249,11 @@ impl McpServer {
                     format!("- {key}: not seeded (see hint)")
                 } else {
                     format!(
-                        "- {key} ({}): {} remnant(s), {} new edge(s){}",
+                        "- {key} ({}): {} remnant(s), +{} / -{} edge(s){}",
                         s.get("migration_id").and_then(|v| v.as_str()).unwrap_or("?"),
                         s.get("remnants_found").and_then(|v| v.as_u64()).unwrap_or(0),
                         s.get("edges_created").and_then(|v| v.as_u64()).unwrap_or(0),
+                        s.get("edges_removed").and_then(|v| v.as_u64()).unwrap_or(0),
                         if s.get("baseline_set").and_then(|v| v.as_bool()) == Some(true) {
                             " [baseline recorded]"
                         } else {
@@ -246,11 +300,13 @@ impl McpServer {
     }
 
     /// `ist.Symbol.id`s whose `name` matches `pattern` (PG POSIX `~*`,
-    /// case-insensitive). Comment-free by construction.
+    /// case-insensitive), restricted to CODE kinds so doc/section headings
+    /// (which document a migration, not its residue) are excluded.
     fn scan_symbol_names(&self, project_code: &str, pattern: &str) -> Vec<String> {
         let sql = format!(
-            "SELECT id FROM ist.Symbol WHERE project_code = '{}' AND name ~* '{}'",
+            "SELECT id FROM ist.Symbol WHERE project_code = '{}' AND kind IN ({}) AND name ~* '{}'",
             escape_sql(project_code),
+            code_kinds_in_clause(),
             escape_sql(pattern),
         );
         let Ok(raw) = self.graph_store.query_json(&sql) else {
@@ -265,8 +321,14 @@ impl McpServer {
     /// Candidate `(chunk_id, content)` whose raw content matches `pattern`. The
     /// caller re-checks against comment-stripped content before linking.
     fn scan_chunk_candidates(&self, project_code: &str, pattern: &str) -> Vec<(String, String)> {
+        // Exclude documentation files (.md/.txt/.rst and any /docs/ path): prose
+        // discussing a migration is not its code residue. Comment-stripping then
+        // removes in-code comments from the remaining code/script chunks.
         let sql = format!(
-            "SELECT id, content FROM ist.Chunk WHERE project_code = '{}' AND content ~* '{}'",
+            "SELECT id, content FROM ist.Chunk \
+             WHERE project_code = '{}' AND content ~* '{}' \
+             AND coalesce(file_path, '') !~* '\\.(md|markdown|txt|rst)$' \
+             AND coalesce(file_path, '') !~* '/docs/'",
             escape_sql(project_code),
             escape_sql(pattern),
         );
@@ -313,6 +375,52 @@ impl McpServer {
                 &json!([tmg_id, target_id, metadata, project_code]),
             )
             .is_ok()
+    }
+
+    /// The set of `target_id`s this TMG currently has HAS_REMNANT edges to.
+    fn existing_remnant_targets(&self, tmg_id: &str) -> std::collections::HashSet<String> {
+        let sql = format!(
+            "SELECT target_id FROM soll.Edge WHERE source_id = '{}' AND relation_type = 'HAS_REMNANT'",
+            escape_sql(tmg_id),
+        );
+        let Ok(raw) = self.graph_store.query_json(&sql) else {
+            return std::collections::HashSet::new();
+        };
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|r| r.into_iter().next().and_then(|v| v.as_str().map(str::to_string)))
+            .collect()
+    }
+
+    /// Delete HAS_REMNANT edges from `tmg_id` to targets that no longer match
+    /// (reconciliation). HAS_REMNANT is a detector-managed projection, not
+    /// intent, so pruning a stale edge is safe (never touches SOLL intent
+    /// nodes). Returns the count removed.
+    fn prune_remnant_edges(&self, tmg_id: &str, stale: &[String]) -> usize {
+        if stale.is_empty() {
+            return 0;
+        }
+        let in_list = stale
+            .iter()
+            .map(|t| format!("'{}'", escape_sql(t)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let ok = self
+            .graph_store
+            .execute_param(
+                &format!(
+                    "DELETE FROM soll.Edge WHERE source_id = '{}' AND relation_type = 'HAS_REMNANT' AND target_id IN ({})",
+                    escape_sql(tmg_id),
+                    in_list
+                ),
+                &json!([]),
+            )
+            .is_ok();
+        if ok {
+            stale.len()
+        } else {
+            0
+        }
     }
 
     /// Set `metadata.baseline_remnants` once (first run) so `tech_debt_inventory`
@@ -376,10 +484,28 @@ mod tests {
     }
 
     #[test]
-    fn age_pattern_does_not_match_bare_age_words() {
-        let re = Regex::new(r"(?i)ag_catalog|agtype|cypher").unwrap();
+    fn age_pattern_matches_age_api_not_bare_words_nor_memgraph_cypher() {
+        let re = Regex::new(r"(?i)ag_catalog|agtype").unwrap();
         assert!(!re.is_match("page_count"));
         assert!(!re.is_match("message_storage"));
-        assert!(re.is_match("ag_catalog.cypher"));
+        assert!(re.is_match("ag_catalog"));
+        assert!(re.is_match("agtype_value"));
+        // `cypher` is dropped: it is the CURRENT Memgraph projection language,
+        // not AGE residue (build_cypherl / send_cypher must NOT be flagged).
+        assert!(!re.is_match("build_cypherl"));
+        assert!(!re.is_match("send_cypher"));
+    }
+
+    #[test]
+    fn code_kinds_clause_excludes_doc_section_kind() {
+        let clause = code_kinds_in_clause();
+        assert!(clause.contains("'function'") && clause.contains("'struct'"));
+        // The doc/markup/comment kinds that caused false positives must be absent.
+        for excluded in ["'section'", "'element'", "'TODO'", "'config_key'", "'table'"] {
+            assert!(
+                !clause.contains(excluded),
+                "code-kind allowlist must exclude {excluded}"
+            );
+        }
     }
 }

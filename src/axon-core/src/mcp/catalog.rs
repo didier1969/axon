@@ -484,7 +484,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
-                        "detect_key": { "type": "string", "description": "Optional: scope to one migration ruleset (pipeline_v1_to_v2 | nvidia_smi_to_nvml | duckdb_to_pg | age_to_pg)." }
+                        "detect_key": { "type": "string", "description": "Optional: scope to one migration ruleset (pipeline_v1_to_v2 | nvidia_smi_to_nvml | duckdb_to_pg | age_to_pg)." },
+                        "reset_baseline": { "type": "boolean", "description": "Optional (default false): re-record baseline_remnants to the current count even if one exists. Use after cleaning residue or a ruleset fix so progress is measured honestly." }
                     },
                     "required": []
                 }
