@@ -11,6 +11,7 @@ mod dispatch;
 mod format;
 mod guidance;
 mod protocol;
+mod revision_docs_listener;
 mod runtime_topology_support;
 mod soll;
 #[cfg(test)]
@@ -1053,6 +1054,30 @@ impl McpServer {
             "stale_docs": false,
             "render": "background",
         })
+    }
+
+    /// REQ-AXO-309 (DEC-AXO-901640) — regenerate the non-canonical derived docs
+    /// for one project, reusing the shared inflight-coalescing set + render-lock
+    /// (via `schedule_background_derived_docs_refresh`) so a journal-driven
+    /// refresh never double-renders or races the per-tool-hook render. Invoked by
+    /// the `soll_revision_committed` subscriber.
+    pub(crate) fn regenerate_derived_docs_for(self: &Arc<Self>, project_code: String) {
+        if let Some(site_root) = canonical_soll_site_dir() {
+            let _ = self.schedule_background_derived_docs_refresh(
+                self.clone(),
+                project_code,
+                site_root,
+            );
+        }
+    }
+
+    /// REQ-AXO-309 (DEC-AXO-901640) — spawn the SOLL revision-committed journal
+    /// subscriber: regenerates the derived autodoc site on any SOLL mutation,
+    /// decoupled from the per-tool hooks (one emitter / N subscribers). Call once
+    /// at serve time after `init_self_arc`. The subscriber reuses THIS serving
+    /// instance, so its render coalesces with the legacy hook.
+    pub fn spawn_revision_docs_subscriber(self: &Arc<Self>, database_url: String) {
+        revision_docs_listener::spawn(self.clone(), database_url);
     }
 
     #[allow(dead_code)]

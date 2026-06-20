@@ -127,6 +127,10 @@ pub fn load_canonical_ddl_files() -> Vec<String> {
             "12_llm_feedback.sql",
             include_str!("../../../../db/ddl/12_llm_feedback.sql"),
         ),
+        (
+            "13_soll_revision_notify.sql",
+            include_str!("../../../../db/ddl/13_soll_revision_notify.sql"),
+        ),
     ];
     let mut stmts = Vec::new();
     for (_name, body) in FILES {
