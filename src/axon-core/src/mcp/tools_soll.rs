@@ -4,21 +4,31 @@
 //!
 //! SOLL reads are split into two deliberately-consistent lanes; this is NOT an
 //! accidental hybrid (operator directive: "soit PG soit RAM, pas les deux" —
-//! pick one lane *per category*):
+//! pick one lane *per category*). The REQ-AXO-901757 Slice C audit confirmed the
+//! split is correctly applied: the fusion lane is on RAM, every remaining direct
+//! `soll.*` SELECT is a justified-PG read (description-bearing / aggregate / FTS /
+//! ANN / revision / cross-project / mutation-path) with zero RAM-eligible-but-
+//! still-on-PG read left to migrate.
 //!
 //! * **RAM lane** — the canonical FUSED retrieval surface (`query`, `why`,
-//!   `retrieve_context`, `soll_query_context`, `soll_work_plan`) reads SOLL
+//!   `retrieve_context` symbol→governing-intent reads) plus `soll_work_plan`
+//!   (which runs its waves/cycle detection on `SollSnapshot::graph()`) read SOLL
 //!   through the in-RAM `SollSnapshotCache` (petgraph), co-resident with the IST
 //!   RAM graph so why↔code traversals stay at memory speed. This is where the
 //!   SOLL+IST fusion value lives (VIS-AXO-001 / PIL-AXO-9002).
-//! * **PG lane** — the specialised admin / reporting tools in this module
-//!   (tech_debt, completeness, docs generation, planning/revision, registry,
-//!   the raw `sql` pass-through, complex non-portable aggregates) read directly
-//!   from `soll.*` via PG. They are low-frequency, don't need fusion, and PG is
-//!   the authoritative writer — so a direct SELECT here is the deliberate,
-//!   correct choice, NOT a cache bypass to "fix". They are NOT migrated to RAM
-//!   (REQ-AXO-902029 rejected): 94 mechanical sites + cold-cache risk for a
-//!   metric-only gain, while the fusion already lives in the RAM lane.
+//! * **PG lane** — the specialised admin / reporting / mutation tools (tech_debt,
+//!   completeness, docs generation, planning/revision, registry, inference,
+//!   skills, validation, the raw `sql` pass-through, complex non-portable
+//!   aggregates) AND `soll_query_context` read directly from `soll.*` via PG.
+//!   `soll_query_context` belongs here, NOT in the RAM lane: it returns Vision
+//!   description digests, `soll.Revision` metadata, `GROUP BY type` aggregates
+//!   and an FTS mode — none snapshot-eligible — and it self-flags
+//!   `surfaces_used:["soll_pg"]` (REQ-AXO-91526). These reads are low-frequency,
+//!   don't need fusion, and PG is the authoritative writer — so a direct SELECT
+//!   here is the deliberate, correct choice, NOT a cache bypass to "fix". They
+//!   are NOT migrated to RAM (REQ-AXO-902029 rejected): ~90 mechanical sites +
+//!   cold-cache/description/aggregate gaps for a metric-only gain, while the
+//!   fusion already lives in the RAM lane.
 
 use anyhow::anyhow;
 use serde_json::{json, Value};
