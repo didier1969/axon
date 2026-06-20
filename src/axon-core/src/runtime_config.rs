@@ -15,9 +15,9 @@ use serde_json::json;
 use crate::graph::GraphStore;
 use crate::pipeline_v2::channels::{
     B2_BATCH_SIZE_DEFAULT, B2_BATCH_TIMEOUT_MS_DEFAULT, B3_BATCH_SIZE_DEFAULT,
-    B3_BATCH_TIMEOUT_MS_DEFAULT, INGRESS_DRAIN_BATCH_DEFAULT, INTERNAL_CHANNEL_CAP_DEFAULT,
+    B3_BATCH_TIMEOUT_MS_DEFAULT, CHUNK_PENDING_NOTIFY_CHANNEL, INGRESS_DRAIN_BATCH_DEFAULT,
+    INTERNAL_CHANNEL_CAP_DEFAULT,
 };
-use crate::pipeline_v2::notify_listener::LISTEN_CHANNEL;
 use crate::pipeline_v2_runtime::{VECTOR_DRAIN_BACKOFF_INITIAL_MS, VECTOR_DRAIN_BACKOFF_MAX_MS};
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -79,10 +79,10 @@ pub fn compose_indexer_config() -> serde_json::Value {
             // dashboard.
             "b_chunks_cap": INTERNAL_CHANNEL_CAP_DEFAULT,
         },
-        // Canonical PG NOTIFY channel for the brain demand-pull
-        // listener — exposed as `pub const` from notify_listener so this
-        // value isn't hardcoded in 3 separate places.
-        "notify_channel": LISTEN_CHANNEL,
+        // Canonical PG NOTIFY channel for the chunk-pending signal — single
+        // `pub const` in pipeline_v2::channels so the value isn't hardcoded
+        // across the surfaces that report it.
+        "notify_channel": CHUNK_PENDING_NOTIFY_CHANNEL,
         // Sorted-drain idle backoff cadence (DEC-AXO-901631), from the pub
         // consts in pipeline_v2_runtime — the dashboard reads these instead
         // of a hardcoded "200ms/30s".
@@ -132,7 +132,7 @@ mod tests {
         );
         assert_eq!(
             v["notify_channel"],
-            crate::pipeline_v2::notify_listener::LISTEN_CHANNEL
+            crate::pipeline_v2::channels::CHUNK_PENDING_NOTIFY_CHANNEL
         );
         assert!(v["vector_drain_backoff_initial_ms"].is_number());
         assert!(v["vector_drain_backoff_max_ms"].is_number());

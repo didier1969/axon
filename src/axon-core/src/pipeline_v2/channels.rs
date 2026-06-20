@@ -15,6 +15,15 @@
 /// channel (demand_pull → B2).
 pub const INTERNAL_CHANNEL_CAP_DEFAULT: usize = 1024;
 
+/// Canonical PG `NOTIFY` channel name fired by the `trg_chunk_notify_pending`
+/// trigger (`db/ddl/03_ist_schema.sql`) on every `ist.Chunk` insert / content
+/// change. Single source of truth so the value isn't hardcoded across the
+/// config/diagnostics surfaces that report it (`runtime_config`,
+/// `embedding_status`). The brain-side state-only LISTEN consumer was retired
+/// with the sleep/wake subsystem (DEC-AXO-901631 / REQ-AXO-902036); the channel
+/// itself remains emitted by the indexer trigger.
+pub const CHUNK_PENDING_NOTIFY_CHANNEL: &str = "chunk_pending_embed";
+
 /// REQ-AXO-901906 / REQ-AXO-902038 — capacity for the pipeline-A channels
 /// that carry file CONTENT (`A1→A2`, `A2→A3` hold a `PreparedFile`/
 /// `ParsedFile` with up to `max_parse_bytes` ≈ 5 MB each). This is the

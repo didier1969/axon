@@ -55,7 +55,6 @@ pub mod embedder_gpu;
 pub mod in_flight;
 pub mod indexed_file_cache;
 pub mod metrics;
-pub mod notify_listener;
 pub mod orchestrator;
 pub mod project_resolver;
 pub mod stage_a1;
@@ -72,7 +71,6 @@ pub use channels::{PipelineChannelCaps, INTERNAL_CHANNEL_CAP_DEFAULT};
 pub use embedder_gpu::GpuB2Embedder;
 pub use indexed_file_cache::{IndexedFileCache, IndexedFileEntry};
 pub use metrics::{StageMetrics, StageSnapshot};
-pub use notify_listener::{spawn_chunk_pending_state_listener, spawn_pending_reconcile_loop};
 pub use orchestrator::{
     spawn_pipeline_a, spawn_pipeline_a_with_cache, spawn_pipeline_b_full,
     spawn_pipeline_b_full_multi, PipelineAHandles, PipelineAWorkerCounts, PipelineBFullHandles,

@@ -7,10 +7,13 @@
 //! row lands. `retrieve_context` consults `pending_subset` to expose a
 //! cheap freshness gate without an extra DB round-trip.
 //!
-//! Slice 1A (this module) ships the in-memory state surface alone — the
-//! A3/B3 mark calls, the PG `LISTEN chunk_pending_embed` task, the
-//! reconcile loop, and the `EmbedderLifecycle` 2-state sleep/wake
-//! machine all build on this primitive in Slice 1B → Slice 3.
+//! The pending set is fed by A3 pre-commit (`mark_pending`) and drained by
+//! B3 post-commit (`mark_embedded`); `pending_count` is the operator-visible
+//! backlog metric surfaced by `embedding_status` + the lifecycle heartbeat.
+//! The brain-side `LISTEN chunk_pending_embed` task, the wholesale reconcile
+//! loop, and the 2-state sleep/wake machine that once built on this primitive
+//! were retired with the sleep/wake subsystem (DEC-AXO-901631 / REQ-AXO-902036:
+//! the GPU is freed by stopping the indexer, not by sleeping).
 //!
 //! Concurrency contract :
 //! - All mutations and reads go through a `parking_lot::RwLock` so MCP
@@ -19,13 +22,6 @@
 //! - The set is intentionally a flat `HashSet<String>` of chunk_ids.
 //!   Project-code scoping happens upstream — chunk_ids are globally
 //!   unique already (`{project_code}::{symbol_id}::{chunk_idx}`).
-//!
-//! Boot hydration :
-//! - `hydrate_from_db_rows` rebuilds the set from a caller-supplied row
-//!   iterator (chunk_ids that have NO matching ChunkEmbedding row, OR a
-//!   stale `source_hash`). Keeping the DB query out of this module lets
-//!   it unit-test without a live PG ; the orchestrator wires the actual
-//!   `LEFT JOIN ChunkEmbedding` query.
 //!
 //! Invariants :
 //! - `mark_pending` is idempotent (no-op on already-pending).
@@ -56,35 +52,6 @@ pub fn process_state() -> &'static Arc<EmbedderRuntimeState> {
 impl EmbedderRuntimeState {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Replace the pending set wholesale with the DB-authoritative truth.
-    ///
-    /// Used at boot AND by the periodic reconcile loop (REQ-AXO-901931).
-    /// The argument is the result of the canonical orphan query
-    /// (`SELECT chunk_id FROM Chunk WHERE NOT EXISTS (matching
-    /// ChunkEmbedding)`) — i.e. the complete set of chunks that genuinely
-    /// still need an embedding. Replacing wholesale (rather than the
-    /// historical additive-only union) is what makes the pending set
-    /// **self-healing**: any chunk_id marked `pending` but never
-    /// `mark_embedded` (dedup-skip on the B lane, unchanged re-chunk,
-    /// dropped handoff, …) is purged on the next reconcile tick instead
-    /// of poisoning `EmbedderLifecycle::should_sleep` forever and pinning
-    /// VRAM at idle.
-    ///
-    /// Safety of wholesale replace: the in-memory set drives ONLY
-    /// `should_sleep` and `retrieve_context` freshness — NOT the embed
-    /// pipeline (demand_pull_b reads pending chunks from PG directly). A
-    /// chunk marked pending by A3 pre-commit but not yet committed when a
-    /// reconcile fires is transiently absent from the freshness envelope
-    /// for at most one reconcile interval; it is still embedded by the B
-    /// lane and reappears in the next orphan query. No embedding is lost.
-    pub fn hydrate_from_db_rows<I>(&self, rows: I)
-    where
-        I: IntoIterator<Item = String>,
-    {
-        let new_set: HashSet<String> = rows.into_iter().collect();
-        *self.pending.write() = new_set;
     }
 
     /// Idempotent. Called by A3 pre-commit when a new or content-changed
@@ -157,62 +124,6 @@ mod tests {
         let state = EmbedderRuntimeState::new();
         state.mark_embedded("never-pending");
         assert_eq!(state.pending_count(), 0);
-    }
-
-    #[test]
-    fn hydrate_from_db_rows_replaces_set_wholesale() {
-        let state = EmbedderRuntimeState::new();
-        state.mark_pending("legacy");
-        state.hydrate_from_db_rows(["fresh-1".to_string(), "fresh-2".to_string()]);
-        assert_eq!(state.pending_count(), 2);
-        // Legacy entry is dropped — hydrate is canonical wholesale.
-        assert!(state.pending_subset(&["legacy".into()]).is_empty());
-        assert_eq!(
-            state.pending_subset(&["fresh-1".into(), "missing".into()]),
-            vec!["fresh-1".to_string()]
-        );
-    }
-
-    #[test]
-    fn reconcile_purges_phantom_pending_against_empty_db_truth() {
-        // REQ-AXO-901931 regression — 200 chunks marked pending but never
-        // mark_embedded (dedup-skip / unchanged re-chunk) poison the set.
-        // DB coverage is 100% (orphan query returns empty) → a wholesale
-        // reconcile MUST drain them so should_sleep can fire and VRAM is
-        // released. The historical additive-only reconcile left them
-        // forever, pinning the GPU session at idle.
-        let state = EmbedderRuntimeState::new();
-        for i in 0..200 {
-            state.mark_pending(format!("phantom-{i}"));
-        }
-        assert_eq!(state.pending_count(), 200);
-        assert!(state.pending_count() > 0);
-        // DB says nothing is orphaned → wholesale replace with empty truth.
-        state.hydrate_from_db_rows(Vec::<String>::new());
-        assert_eq!(state.pending_count(), 0);
-        assert!(
-            state.pending_count() == 0,
-            "phantom pending must be purged so should_sleep can fire"
-        );
-    }
-
-    #[test]
-    fn reconcile_keeps_genuine_db_pending_and_drops_only_phantoms() {
-        // Mixed case: some entries are genuine DB orphans (must survive),
-        // others are leaked phantoms (must be dropped).
-        let state = EmbedderRuntimeState::new();
-        state.mark_pending("phantom-leaked");
-        state.mark_pending("genuine-1");
-        // DB truth: only genuine-1 and a freshly-discovered genuine-2.
-        state.hydrate_from_db_rows(["genuine-1".to_string(), "genuine-2".to_string()]);
-        assert_eq!(state.pending_count(), 2);
-        assert!(state.pending_subset(&["phantom-leaked".into()]).is_empty());
-        assert_eq!(
-            state
-                .pending_subset(&["genuine-1".into(), "genuine-2".into()])
-                .len(),
-            2
-        );
     }
 
     #[test]

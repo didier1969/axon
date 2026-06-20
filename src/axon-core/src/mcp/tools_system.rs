@@ -654,7 +654,7 @@ impl McpServer {
                     // is already exposed as the top-level `pending_chunks` field.
                     "replenish": replenish_b
                 },
-                "notify_channel": crate::pipeline_v2::notify_listener::LISTEN_CHANNEL,
+                "notify_channel": crate::pipeline_v2::channels::CHUNK_PENDING_NOTIFY_CHANNEL,
                 "runtime_pending_count": runtime_pending,
                 "runtime_idle": runtime_pending_empty,
                 // Slice 3 SOTA — surface pipeline_status + blocked_reason
