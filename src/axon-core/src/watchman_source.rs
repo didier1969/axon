@@ -563,19 +563,52 @@ async fn run_root_subscription(
     let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<FeedAction>();
     let feeder_input_tx = input_tx.clone();
     let feeder_store = store.clone();
+    // REQ-AXO-902049 — per-file churn guard (trailing-edge debounce). Coalesces
+    // a file changing faster than we can index it (data lakes, logs, generated
+    // outputs) to ≤ 1 feed per cooldown, while still feeding the latest content
+    // on the trailing edge so a one-shot rapid re-save is never lost.
+    let cooldown_ms =
+        watch_cooldown_ms_from_env(std::env::var("AXON_WATCH_COOLDOWN_MS").ok().as_deref());
     let feeder = tokio::spawn(async move {
-        while let Some(action) = feed_rx.recv().await {
-            match action {
-                FeedAction::Upsert(path) => {
-                    if feeder_input_tx.send(path).await.is_err() {
-                        return; // pipeline A closed
+        let mut guard = ChurnGuard::new(cooldown_ms);
+        let mut flush = tokio::time::interval(Duration::from_millis(CHURN_FLUSH_INTERVAL_MS));
+        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                maybe = feed_rx.recv() => {
+                    let Some(action) = maybe else { break }; // sender dropped → drain done
+                    match action {
+                        FeedAction::Upsert(path) => {
+                            let now = now_unix_ms();
+                            if guard.admit(&path, now) {
+                                if feeder_input_tx.send(path).await.is_err() {
+                                    return; // pipeline A closed
+                                }
+                            } else {
+                                // Inside cooldown — defer to the trailing edge.
+                                guard.mark_pending(&path, now);
+                            }
+                        }
+                        FeedAction::Delete(path) => {
+                            guard.forget(&path); // a delete supersedes a pending upsert
+                            let store = feeder_store.clone();
+                            let p = path.to_string_lossy().to_string();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                store.delete_file_cascade(&p)
+                            })
+                            .await;
+                        }
                     }
                 }
-                FeedAction::Delete(path) => {
-                    let store = feeder_store.clone();
-                    let p = path.to_string_lossy().to_string();
-                    let _ =
-                        tokio::task::spawn_blocking(move || store.delete_file_cascade(&p)).await;
+                _ = flush.tick() => {
+                    // Trailing edge: feed the latest content of any path whose
+                    // cooldown has now elapsed.
+                    let now = now_unix_ms();
+                    for path in guard.drain_due(now) {
+                        if feeder_input_tx.send(path).await.is_err() {
+                            return; // pipeline A closed
+                        }
+                    }
                 }
             }
         }
@@ -698,6 +731,141 @@ fn plan_feed_actions(
         }
     }
     out
+}
+
+/// REQ-AXO-902049 — default per-file feed cooldown. A file re-changed within
+/// this window after its last feed is coalesced (the latest content is fed once
+/// the window elapses), so a data-lake/log/generated file rewritten every ~2 s
+/// no longer triggers a re-chunk + re-embed storm (session 86: a 420-chunk
+/// `*_done.txt` rewritten every 2 s held the host at 300-450% CPU). 0 disables.
+const DEFAULT_WATCH_COOLDOWN_MS: i64 = 5_000;
+/// How often the feeder flushes the trailing edge of coalesced changes. Bounds
+/// the extra latency a coalesced (non-churning) edit sees to ≤ cooldown + this.
+const CHURN_FLUSH_INTERVAL_MS: u64 = 1_000;
+/// Idle `last_fed` entries are pruned once they exceed this multiple of the
+/// cooldown with no pending change — bounds the guard's memory to the active set.
+const CHURN_GUARD_RETENTION_MULT: i64 = 12;
+
+/// REQ-AXO-902049 — parse `AXON_WATCH_COOLDOWN_MS`. Non-negative integer ms; any
+/// invalid / negative value falls back to the default. `0` disables the guard
+/// (every change feeds immediately — the pre-902049 behaviour). Pure for tests.
+fn watch_cooldown_ms_from_env(raw: Option<&str>) -> i64 {
+    match raw {
+        Some(v) => v
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n >= 0)
+            .unwrap_or(DEFAULT_WATCH_COOLDOWN_MS),
+        None => DEFAULT_WATCH_COOLDOWN_MS,
+    }
+}
+
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+/// REQ-AXO-902049 — per-file churn guard (trailing-edge debounce). Lives in the
+/// feeder task (one per Watchman root); the upstream subscription loop is
+/// unchanged. Two-edge contract so a coalesced edit is **deferred, never
+/// dropped** (a naive leading-only coalesce would lose a one-shot human edit
+/// until the 900 s reconciliation walk):
+///   * leading edge ([`admit`]) — the first change to a path (or the first after
+///     the cooldown elapsed) feeds immediately,
+///   * trailing edge ([`drain_due`]) — a change that arrived inside the cooldown
+///     is remembered and fed once the window elapses, carrying the latest
+///     content.
+/// A persistent churner is therefore throttled to ≤ 1 feed per cooldown; a
+/// single rapid re-save is delayed by at most `cooldown + flush_interval`. The
+/// reconciliation walk remains the eventual-consistency net behind it.
+#[derive(Debug)]
+struct ChurnGuard {
+    cooldown_ms: i64,
+    /// path → wall-clock ms of its last ACTUAL feed (leading or trailing).
+    last_fed_ms: HashMap<PathBuf, i64>,
+    /// path → ms of a change coalesced while inside the cooldown, awaiting its
+    /// trailing-edge feed. Holds only the latest change time (we feed once).
+    pending_ms: HashMap<PathBuf, i64>,
+}
+
+impl ChurnGuard {
+    fn new(cooldown_ms: i64) -> Self {
+        Self {
+            cooldown_ms,
+            last_fed_ms: HashMap::new(),
+            pending_ms: HashMap::new(),
+        }
+    }
+
+    fn disabled(&self) -> bool {
+        self.cooldown_ms <= 0
+    }
+
+    /// Leading edge. `true` → feed `path` now (records the feed time, clears any
+    /// pending). `false` → still inside the cooldown; the caller must
+    /// [`mark_pending`] so the latest content is fed on the trailing edge.
+    fn admit(&mut self, path: &Path, now_ms: i64) -> bool {
+        if self.disabled() {
+            return true;
+        }
+        match self.last_fed_ms.get(path) {
+            Some(&last) if now_ms.saturating_sub(last) < self.cooldown_ms => false,
+            _ => {
+                self.record_fed(path, now_ms);
+                true
+            }
+        }
+    }
+
+    fn record_fed(&mut self, path: &Path, now_ms: i64) {
+        self.last_fed_ms.insert(path.to_path_buf(), now_ms);
+        self.pending_ms.remove(path);
+    }
+
+    /// Remember a change coalesced inside the cooldown so it is fed on the
+    /// trailing edge. Idempotent; keeps the latest change time.
+    fn mark_pending(&mut self, path: &Path, now_ms: i64) {
+        self.pending_ms.insert(path.to_path_buf(), now_ms);
+    }
+
+    /// A delete supersedes any pending upsert — drop the path's state so a
+    /// removed file never gets a trailing-edge re-feed.
+    fn forget(&mut self, path: &Path) {
+        self.last_fed_ms.remove(path);
+        self.pending_ms.remove(path);
+    }
+
+    /// Trailing edge. Returns the paths whose cooldown has elapsed since their
+    /// last feed AND that have a pending change; marks them fed. Also prunes
+    /// idle `last_fed` entries to keep the guard bounded to the active set.
+    fn drain_due(&mut self, now_ms: i64) -> Vec<PathBuf> {
+        if self.disabled() {
+            return Vec::new();
+        }
+        let ready: Vec<PathBuf> = self
+            .pending_ms
+            .keys()
+            .filter(|p| {
+                let last = self.last_fed_ms.get(*p).copied().unwrap_or(0);
+                now_ms.saturating_sub(last) >= self.cooldown_ms
+            })
+            .cloned()
+            .collect();
+        for path in &ready {
+            self.record_fed(path, now_ms);
+        }
+        // Bound memory: forget paths idle beyond the retention window that have
+        // no pending change. `pending` snapshot avoids a double borrow of self.
+        let pending_keys: HashSet<PathBuf> = self.pending_ms.keys().cloned().collect();
+        let retention = self.cooldown_ms.saturating_mul(CHURN_GUARD_RETENTION_MULT);
+        self.last_fed_ms.retain(|p, &mut last| {
+            pending_keys.contains(p) || now_ms.saturating_sub(last) < retention
+        });
+        ready
+    }
 }
 
 /// Write a `.watchmanconfig` (`ignore_dirs` from the canonical `DIRECTORY_RULES`)
@@ -841,6 +1009,106 @@ mod tests {
 
     fn rels(items: &[(&str, bool)]) -> Vec<(PathBuf, bool)> {
         items.iter().map(|(p, e)| (PathBuf::from(p), *e)).collect()
+    }
+
+    // ── REQ-AXO-902049 — churn guard (trailing-edge debounce) ───────────────
+
+    #[test]
+    fn watch_cooldown_env_parsing() {
+        assert_eq!(watch_cooldown_ms_from_env(None), DEFAULT_WATCH_COOLDOWN_MS);
+        assert_eq!(watch_cooldown_ms_from_env(Some("3000")), 3000);
+        assert_eq!(watch_cooldown_ms_from_env(Some(" 7500 ")), 7500);
+        assert_eq!(watch_cooldown_ms_from_env(Some("0")), 0, "0 disables");
+        // Invalid / negative → default (never panic, never a negative cooldown).
+        assert_eq!(
+            watch_cooldown_ms_from_env(Some("-5")),
+            DEFAULT_WATCH_COOLDOWN_MS
+        );
+        assert_eq!(
+            watch_cooldown_ms_from_env(Some("abc")),
+            DEFAULT_WATCH_COOLDOWN_MS
+        );
+    }
+
+    #[test]
+    fn churn_guard_leading_edge_feeds_first_change() {
+        let mut g = ChurnGuard::new(5_000);
+        let p = Path::new("/repo/data/lake.txt");
+        assert!(g.admit(p, 0), "first ever change feeds immediately");
+    }
+
+    #[test]
+    fn churn_guard_coalesces_rapid_rewrites() {
+        let mut g = ChurnGuard::new(5_000);
+        let p = Path::new("/repo/data/lake.txt");
+        assert!(g.admit(p, 0)); // fed at t=0
+        assert!(!g.admit(p, 2_000), "2s later is inside the 5s cooldown");
+        assert!(!g.admit(p, 4_000), "still inside the window");
+        // Nothing is due until the window elapses; the deferred change waits.
+        g.mark_pending(p, 4_000);
+        assert!(g.drain_due(4_500).is_empty(), "not due before cooldown");
+    }
+
+    #[test]
+    fn churn_guard_trailing_edge_feeds_latest_after_cooldown() {
+        let mut g = ChurnGuard::new(5_000);
+        let p = Path::new("/repo/data/lake.txt");
+        assert!(g.admit(p, 0));
+        // A change arrives inside the window → deferred, not dropped.
+        assert!(!g.admit(p, 3_000));
+        g.mark_pending(p, 3_000);
+        // At t=5_000 the cooldown since the last feed (t=0) has elapsed → fed.
+        let due = g.drain_due(5_000);
+        assert_eq!(due, vec![p.to_path_buf()], "deferred change is fed, not lost");
+        // Once fed, it is no longer pending.
+        assert!(g.drain_due(6_000).is_empty());
+    }
+
+    #[test]
+    fn churn_guard_persistent_churn_throttles_to_one_per_cooldown() {
+        let mut g = ChurnGuard::new(5_000);
+        let p = Path::new("/repo/data/done.txt");
+        let mut feeds = 0;
+        // Simulate a 2 s churn over 20 s (changes at 0,2,4,…,20) + 1 s flushes.
+        for t in (0..=20_000).step_by(1_000) {
+            if t % 2_000 == 0 {
+                if g.admit(p, t) {
+                    feeds += 1;
+                } else {
+                    g.mark_pending(p, t);
+                }
+            }
+            feeds += g.drain_due(t).len();
+        }
+        // Without the guard a 2 s churn over 20 s = ~11 feeds; throttled to
+        // roughly one per 5 s cooldown (≤ 5), a >50% reduction.
+        assert!(
+            (2..=5).contains(&feeds),
+            "expected throttled feed count, got {feeds}"
+        );
+    }
+
+    #[test]
+    fn churn_guard_delete_supersedes_pending_upsert() {
+        let mut g = ChurnGuard::new(5_000);
+        let p = Path::new("/repo/data/lake.txt");
+        assert!(g.admit(p, 0));
+        assert!(!g.admit(p, 1_000));
+        g.mark_pending(p, 1_000);
+        g.forget(p); // delete arrives
+        assert!(
+            g.drain_due(10_000).is_empty(),
+            "a deleted file must not get a trailing re-feed"
+        );
+    }
+
+    #[test]
+    fn churn_guard_disabled_always_admits() {
+        let mut g = ChurnGuard::new(0);
+        let p = Path::new("/repo/data/lake.txt");
+        assert!(g.admit(p, 0));
+        assert!(g.admit(p, 1), "cooldown=0 feeds every change immediately");
+        assert!(g.drain_due(2).is_empty(), "nothing deferred when disabled");
     }
 
     // REQ-AXO-901899 — `axon_registry_changed` payload parsing. The shape is
