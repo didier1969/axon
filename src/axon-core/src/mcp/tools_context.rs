@@ -5835,6 +5835,74 @@ mod tests {
         evict_process_snapshot(code);
     }
 
+    // REQ-AXO-902043 — `fuse` returns a symbol's governing SOLL intent (WHY) AND
+    // its IST impact radius (HOW) in one RAM read, WHY-primary. IST published to
+    // RAM + SOLL traceability seeded in PG (loaded into the snapshot cache).
+    #[test]
+    fn fuse_returns_governing_intent_and_impact_from_ram() {
+        use crate::ist_snapshot::snapshot::{IstGraph, NodeFlags, NodeKind, NodeRecord};
+        use crate::ist_snapshot::{evict_process_snapshot, publish_process_snapshot};
+        let code = "TFU";
+        let symbol_id = "TFU::widget.rs::render".to_string();
+        evict_process_snapshot(code);
+        publish_process_snapshot(
+            code.to_string(),
+            Arc::new(IstGraph::build(
+                vec![NodeRecord {
+                    id: symbol_id.clone(),
+                    name: "render".to_string(),
+                    project_code: code.to_string(),
+                    kind: NodeKind::Function,
+                    flags: NodeFlags::default(),
+                }],
+                vec![],
+            )),
+        );
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        // SOLL: a REQ governing the `render` symbol via Symbol traceability.
+        store
+            .execute(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('REQ-TFU-001','Requirement','TFU','fuse req','body','planned','{}') \
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref) \
+                 VALUES ('T-TFU-1','Requirement','REQ-TFU-001','Symbol','render') ON CONFLICT (id) DO NOTHING",
+            )
+            .unwrap();
+        let server = McpServer::new(store);
+
+        let out = server
+            .axon_fuse(&json!({"symbol": "render", "project": code}))
+            .expect("fuse returns a response");
+        assert_eq!(out["data"]["status"], "ok");
+        let intent = out["data"]["governing_intent"]
+            .as_array()
+            .expect("governing_intent array");
+        assert!(
+            intent.iter().any(|n| n["id"] == "REQ-TFU-001"),
+            "the governing REQ is fused in: {intent:?}"
+        );
+        // Impact radius present (render has no callers in this fixture → 0).
+        assert!(out["data"]["impact"]["radius"].is_i64());
+        assert_eq!(out["data"]["fusion_provenance"]["soll"], "soll_ram");
+        evict_process_snapshot(code);
+    }
+
+    #[test]
+    fn fuse_unresolved_symbol_is_loud_not_pg_fallback() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = McpServer::new(store);
+        let out = server
+            .axon_fuse(&json!({"symbol": "no_such_symbol_xyz", "project": "ZZZ"}))
+            .expect("fuse returns a response");
+        assert_eq!(out["data"]["status"], "input_not_found");
+        assert_eq!(out["isError"], true);
+    }
+
     #[test]
     fn multipart_uri_reuse_allows_one_adjacent_anchor_chunk() {
         let first = candidate("PRJ::sym", "/repo/file.rs", 1, 3, true, true);

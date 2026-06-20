@@ -163,6 +163,7 @@ impl McpServer {
             "conception_view" => &["anomalies", "path", "why"],
             "change_safety" => &["impact", "path", "inspect"],
             "impact" => &["simulate_mutation", "path", "why"],
+            "fuse" => &["why", "impact", "inspect"],
             "audit" => &["health", "anomalies", "change_safety"],
             "health" => &["status", "audit", "project_status"],
             "architectural_drift" => &["conception_view", "anomalies", "why"],
@@ -308,6 +309,7 @@ impl McpServer {
             "why" => "recover governing intent and rationale",
             "path" | "bidi_trace" => "understand source/sink or dependency flow between anchors",
             "impact" => "estimate blast radius before mutation",
+            "fuse" => "fuse a symbol's governing intent (WHY) with its impact radius (HOW) in one read",
             "anomalies" => "surface structural risks worth explicit follow-up",
             "conception_view" => "read the derived architecture map",
             "change_safety" => "decide whether a mutation is safe enough to proceed",
@@ -372,6 +374,7 @@ impl McpServer {
                 "use when you need a compact evidence packet that minimizes downstream LLM tokens"
             }
             "impact" => "use when you need blast radius before editing or mutating",
+            "fuse" => "use when you need a symbol's governing intent and impact together in one call",
             "path" => "use when the missing truth is connectivity or source-to-sink flow",
             "why" => "use when the missing truth is rationale or governing intent",
             "anomalies" => "use when you need prioritized structural findings",
@@ -1380,6 +1383,7 @@ impl McpServer {
             "inspect" => self.axon_inspect(arguments),
             "audit" => self.axon_audit(arguments),
             "impact" => self.axon_impact(arguments),
+            "fuse" => self.axon_fuse(arguments),
             "health" => self.axon_health(arguments),
             "status" => self.axon_status(arguments),
             "mcp_surface_diagnostics" => self.axon_mcp_surface_diagnostics(arguments),

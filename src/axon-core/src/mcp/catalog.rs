@@ -818,6 +818,20 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "fuse",
+                "description": "[DX] Fused WHY+HOW for one symbol: its governing SOLL intent (REQ/DEC/PIL) AND its IST impact radius in a single RAM read. WHY-primary. RAM-only (cold/unscoped → degraded, no PG fallback).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": { "type": "string", "description": "Symbol name or canonical id to fuse." },
+                        "project": { "type": "string", "description": "Project scope; auto-resolved from the symbol when omitted." },
+                        "depth": { "type": "integer", "description": "Impact reverse-reach depth (default 3, clamped 1..5)." },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"], "description": "verbose adds the impacted-symbol list." }
+                    },
+                    "required": ["symbol"]
+                }
+            },
+            {
                 "name": "health",
                 "description": "[GOVERNANCE] Aggregated health report (dead code, test gaps, entry points).",
                 "inputSchema": {

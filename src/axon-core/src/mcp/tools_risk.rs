@@ -278,55 +278,13 @@ impl McpServer {
                 // BFS forward over the SOLL graph (depth < 10) collecting the
                 // reachable intent nodes. Per-project scope (the RAM snapshot
                 // is per-project) ; the impacted symbols all live in proj_key.
-                let mut soll_rows: Vec<Vec<Value>> = Vec::new();
-                if let Ok(snap) = self.soll_cache().snapshot(proj_key) {
-                    use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
-                    let mut seen: HashSet<String> = HashSet::new();
-                    let mut depth_of: StdHashMap<String, u32> = StdHashMap::new();
-                    let mut queue: VecDeque<String> = VecDeque::new();
-                    for t in &snap.traceability {
-                        if t.artifact_type == "Symbol"
-                            && (impacted_symbol_ids.contains(&t.artifact_ref)
-                                || impacted_symbol_names.contains(&t.artifact_ref))
-                            && seen.insert(t.soll_entity_id.clone())
-                        {
-                            depth_of.insert(t.soll_entity_id.clone(), 1);
-                            queue.push_back(t.soll_entity_id.clone());
-                        }
-                    }
-                    while let Some(id) = queue.pop_front() {
-                        let d = depth_of.get(&id).copied().unwrap_or(1);
-                        if d >= 10 {
-                            continue;
-                        }
-                        let targets: Vec<String> = snap
-                            .outgoing_edges(&id)
-                            .map(|(tgt, _rel)| tgt.to_string())
-                            .collect();
-                        for tgt in targets {
-                            if seen.insert(tgt.clone()) {
-                                depth_of.insert(tgt.clone(), d + 1);
-                                queue.push_back(tgt);
-                            }
-                        }
-                    }
-                    let mut collected: Vec<(String, String, String)> = seen
-                        .iter()
-                        .filter_map(|id| {
-                            snap.nodes
-                                .get(id)
-                                .map(|n| (n.id.clone(), n.entity_type.clone(), n.title.clone()))
-                        })
-                        .collect();
-                    // ORDER BY n.type DESC, n.id
-                    collected.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                    soll_rows = collected
-                        .into_iter()
-                        .map(|(id, t, title)| {
-                            vec![Value::from(id), Value::from(t), Value::from(title)]
-                        })
-                        .collect();
-                }
+                // REQ-AXO-902043 — the symbol→governing-intent traversal is shared
+                // with `fuse` (single source).
+                let soll_rows = self.fused_governing_intent_ram(
+                    proj_key,
+                    &impacted_symbol_ids,
+                    &impacted_symbol_names,
+                );
 
                 if !soll_rows.is_empty() {
                     table.push_str("\n### 🏛️ SOLL Impact (Architecture Compromise)\n\n| Entity | Type | Title |\n| --- | --- | --- |\n");
@@ -521,6 +479,221 @@ impl McpServer {
             "direction": direction,
             "confidence": confidence,
         }))
+    }
+
+    /// REQ-AXO-901952 (gap C) / REQ-AXO-902043 — governing SOLL intent reachable
+    /// from a set of impacted symbols, traversed over the RAM SOLL snapshot. Find
+    /// the SOLL entry points whose Symbol traceability matches an impacted symbol
+    /// (id or name), then BFS forward over the SOLL graph (depth < 10) collecting
+    /// the reachable intent nodes. Per-project (the RAM snapshot is per-project).
+    /// Returns `[id, type, title]` rows ordered by (type DESC, id ASC). Shared by
+    /// `impact` (architecture-compromise section) and `fuse` (WHY-primary lead) so
+    /// the symbol→intent traversal lives in exactly one place.
+    pub(crate) fn fused_governing_intent_ram(
+        &self,
+        proj_key: &str,
+        impacted_symbol_ids: &BTreeSet<String>,
+        impacted_symbol_names: &BTreeSet<String>,
+    ) -> Vec<Vec<Value>> {
+        let mut soll_rows: Vec<Vec<Value>> = Vec::new();
+        if let Ok(snap) = self.soll_cache().snapshot(proj_key) {
+            use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut depth_of: StdHashMap<String, u32> = StdHashMap::new();
+            let mut queue: VecDeque<String> = VecDeque::new();
+            for t in &snap.traceability {
+                if t.artifact_type == "Symbol"
+                    && (impacted_symbol_ids.contains(&t.artifact_ref)
+                        || impacted_symbol_names.contains(&t.artifact_ref))
+                    && seen.insert(t.soll_entity_id.clone())
+                {
+                    depth_of.insert(t.soll_entity_id.clone(), 1);
+                    queue.push_back(t.soll_entity_id.clone());
+                }
+            }
+            while let Some(id) = queue.pop_front() {
+                let d = depth_of.get(&id).copied().unwrap_or(1);
+                if d >= 10 {
+                    continue;
+                }
+                let targets: Vec<String> = snap
+                    .outgoing_edges(&id)
+                    .map(|(tgt, _rel)| tgt.to_string())
+                    .collect();
+                for tgt in targets {
+                    if seen.insert(tgt.clone()) {
+                        depth_of.insert(tgt.clone(), d + 1);
+                        queue.push_back(tgt);
+                    }
+                }
+            }
+            let mut collected: Vec<(String, String, String)> = seen
+                .iter()
+                .filter_map(|id| {
+                    snap.nodes
+                        .get(id)
+                        .map(|n| (n.id.clone(), n.entity_type.clone(), n.title.clone()))
+                })
+                .collect();
+            // ORDER BY n.type DESC, n.id
+            collected.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            soll_rows = collected
+                .into_iter()
+                .map(|(id, t, title)| vec![Value::from(id), Value::from(t), Value::from(title)])
+                .collect();
+        }
+        soll_rows
+    }
+
+    /// REQ-AXO-902043 — `fuse`: the WHY⊕HOW primitive. For one code symbol, return
+    /// its governing SOLL intent (REQ/DEC/PIL) AND its IST impact radius in a single
+    /// coherent RAM traversal. `why` answers SOLL→code, `impact` answers IST blast
+    /// radius; `fuse` fuses both, WHY-primary (VIS-AXO-001: the why governs, the how
+    /// is inferred). RAM-only (PIL-AXO-9002): cold cache / unscoped → loud degraded
+    /// error, never a PG fallback.
+    pub(crate) fn axon_fuse(&self, args: &Value) -> Option<Value> {
+        let symbol = args.get("symbol")?.as_str()?;
+        let mode = args.get("mode").and_then(|v| v.as_str());
+        let project = args.get("project").and_then(|v| v.as_str());
+        let depth = args
+            .get("depth")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3)
+            .clamp(1, 5);
+
+        let Some(target_id) = self.resolve_scoped_symbol_id(symbol, project) else {
+            return Some(Self::fuse_unresolved_error(symbol, project));
+        };
+        let effective_project: Option<String> = match project {
+            Some(p) => Some(p.to_string()),
+            None => self.symbol_project_code(&target_id),
+        };
+        let ram_attempted = effective_project
+            .as_deref()
+            .map(|p| self.ensure_ram_snapshot_warm(p))
+            .unwrap_or(false);
+        if !ram_attempted {
+            let why = if effective_project.is_none() {
+                "fuse could not resolve the symbol's project for the RAM snapshot; pass an explicit `project` (PIL-AXO-9002, no PG fallback)"
+            } else {
+                "IST RAM snapshot is cold for this project; call `ist_snapshot_warm` then retry (PIL-AXO-9002, no PG fallback)"
+            };
+            return Some(Self::fuse_ram_unavailable_error(symbol, project, why));
+        }
+        let proj_key = effective_project.as_deref().unwrap_or("");
+        let view = process_view();
+
+        // IST leg — reverse reach (blast radius).
+        let res = self.build_impact_rows_from_ram(&view, proj_key, &target_id, depth);
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        let mut impacted_symbol_ids = BTreeSet::<String>::new();
+        let mut impacted_symbol_names = BTreeSet::<String>::new();
+        let mut impact_display: Vec<Value> = Vec::new();
+        for row in &rows {
+            let caller_id = row.first().and_then(|v| v.as_str()).unwrap_or("");
+            let origin = row.get(2).and_then(|v| v.as_str()).unwrap_or("Unknown");
+            let name = row.get(3).and_then(|v| v.as_str()).unwrap_or("-");
+            let kind = row.get(4).and_then(|v| v.as_str()).unwrap_or("-");
+            if !caller_id.is_empty() {
+                impacted_symbol_ids.insert(caller_id.to_string());
+                impact_display.push(json!({"symbol": name, "kind": kind, "origin": origin}));
+            }
+            if !name.is_empty() {
+                impacted_symbol_names.insert(name.to_string());
+            }
+        }
+        impacted_symbol_ids.insert(target_id.clone());
+        impacted_symbol_names.insert(symbol.to_string());
+        // Radius excludes the target symbol itself.
+        let impact_radius = impacted_symbol_ids.len().saturating_sub(1) as i64;
+
+        // SOLL leg — governing intent (WHY), fused on the same impacted set.
+        let soll_rows =
+            self.fused_governing_intent_ram(proj_key, &impacted_symbol_ids, &impacted_symbol_names);
+        crate::soll_snapshot::record_fusion_read(true);
+        let governing_intent: Vec<Value> = soll_rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.first().and_then(|v| v.as_str()).unwrap_or("-"),
+                    "type": r.get(1).and_then(|v| v.as_str()).unwrap_or("-"),
+                    "title": r.get(2).and_then(|v| v.as_str()).unwrap_or("-"),
+                })
+            })
+            .collect();
+
+        // WHY-primary envelope (GUI-AXO-1026 terse; verbose adds the impacted list).
+        let intent_count = governing_intent.len();
+        let mut text = format!("## 🔗 Fuse: {symbol}\n\n");
+        if soll_rows.is_empty() {
+            text.push_str(
+                "**Governing intent (WHY):** none traced — no SOLL node references this symbol or its impact set.\n\n",
+            );
+        } else {
+            text.push_str(&format!(
+                "**Governing intent (WHY) — {intent_count}:**\n\n| Entity | Type | Title |\n| --- | --- | --- |\n"
+            ));
+            for r in &soll_rows {
+                let id = r.first().and_then(|v| v.as_str()).unwrap_or("-");
+                let t = r.get(1).and_then(|v| v.as_str()).unwrap_or("-");
+                let title = r.get(2).and_then(|v| v.as_str()).unwrap_or("-");
+                text.push_str(&format!("| `{id}` | `{t}` | {title} |\n"));
+            }
+            text.push('\n');
+        }
+        text.push_str(&format!(
+            "**Impact (HOW):** radius {impact_radius} at depth {depth}.\n"
+        ));
+
+        Some(json!({
+            "content": [{ "type": "text", "text": text }],
+            "data": {
+                "status": "ok",
+                "symbol": symbol,
+                "project": effective_project,
+                "depth": depth,
+                "governing_intent": governing_intent,
+                "impact": {
+                    "radius": impact_radius,
+                    "symbols": if mode == Some("verbose") { Value::Array(impact_display) } else { Value::Null },
+                },
+                "surfaces_used": ["soll_ram", "graph_ram"],
+                "fusion_provenance": { "soll": "soll_ram", "ist": "graph_ram" },
+                "next_call_hint": format!("`why symbol={symbol}` for full rationale, `impact symbol={symbol}` for full blast radius"),
+                "next_action": { "tool": "why", "arguments": { "symbol": symbol } }
+            }
+        }))
+    }
+
+    fn fuse_unresolved_error(symbol: &str, project: Option<&str>) -> Value {
+        json!({
+            "content": [{ "type": "text", "text": format!(
+                "fuse: symbol `{symbol}` not found in the IST. Widen via `query`, or pass an explicit `project`."
+            )}],
+            "isError": true,
+            "data": {
+                "status": "input_not_found",
+                "symbol": symbol,
+                "project": project,
+                "next_action": { "tool": "query", "arguments": { "query": symbol } },
+                "operator_guidance": { "follow_up_tools": ["query", "inspect"], "confidence": "high" }
+            }
+        })
+    }
+
+    fn fuse_ram_unavailable_error(symbol: &str, project: Option<&str>, why: &str) -> Value {
+        json!({
+            "content": [{ "type": "text", "text": format!("fuse degraded: {why}") }],
+            "isError": true,
+            "data": {
+                "status": "degraded",
+                "symbol": symbol,
+                "project": project,
+                "reason": why,
+                "next_action": { "tool": "ist_snapshot_warm", "arguments": { "project": project } },
+                "operator_guidance": { "follow_up_tools": ["ist_snapshot_warm"], "confidence": "high" }
+            }
+        })
     }
 
     fn axon_impact_without_calls(
