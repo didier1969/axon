@@ -232,10 +232,13 @@ impl GraphStore {
             b3_consecutive_failures: row.get(10).and_then(parse_i64_field).unwrap_or_default(),
             b3_total_failures: row.get(11).and_then(parse_i64_field).unwrap_or_default(),
             b3_total_successes: row.get(12).and_then(parse_i64_field).unwrap_or_default(),
+            // REQ-AXO-902050 — query_json_writer renders a SQL NULL as the
+            // literal string "null"; filter it (and empty) so a healthy B3
+            // surfaces JSON null, not a fake "null" error string.
             b3_last_error: row
                 .get(13)
                 .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty())
+                .filter(|value| !value.is_empty() && *value != "null")
                 .map(str::to_string),
             b3_last_error_count: row.get(14).and_then(parse_i64_field).unwrap_or_default(),
             b3_last_error_last_seen_ms: row.get(15).and_then(parse_i64_field).unwrap_or_default(),
