@@ -545,9 +545,74 @@ impl McpServer {
         let indexer_build_id = indexer_heartbeat
             .as_ref()
             .and_then(|row| row.build_id.clone());
+        // REQ-AXO-902047 slice 1b — B3 (embedding persist) health, published by
+        // the indexer in the same heartbeat row. Surfaces the REAL PG error
+        // (root message + SQLSTATE, deduped) + a systemic-failure verdict so an
+        // LLM diagnoses a wedged embed writer (the REQ-AXO-902046 incident) in
+        // ONE call instead of gdb + 4 h. Only the indexer runs B3 — when no
+        // fresh indexer heartbeat exists the verdict is HEALTHY/unknown, never a
+        // brain-local fabrication.
+        use crate::pipeline_v2::stage_health::B3_SYSTEMIC_FAILURE_THRESHOLD;
+        let (
+            b3_consecutive_failures,
+            b3_total_failures,
+            b3_total_successes,
+            b3_last_error,
+            b3_last_error_count,
+            b3_last_error_last_seen_ms,
+        ) = match indexer_heartbeat.as_ref() {
+            Some(row) => (
+                row.b3_consecutive_failures,
+                row.b3_total_failures,
+                row.b3_total_successes,
+                row.b3_last_error.clone(),
+                row.b3_last_error_count,
+                row.b3_last_error_last_seen_ms,
+            ),
+            None => (0, 0, 0, None, 0, 0),
+        };
+        let b3_total_attempts = b3_total_failures + b3_total_successes;
+        let b3_error_rate = if b3_total_attempts > 0 {
+            b3_total_failures as f64 / b3_total_attempts as f64
+        } else {
+            0.0
+        };
+        let b3_systemically_failing =
+            b3_consecutive_failures >= B3_SYSTEMIC_FAILURE_THRESHOLD as i64;
+        let b3_verdict = if b3_systemically_failing {
+            "DEGRADED"
+        } else {
+            "HEALTHY"
+        };
+        // Recovery hint only when DEGRADED — a healthy stage needs no advice.
+        let b3_recovery_hint = if b3_systemically_failing {
+            Some(format!(
+                "B3 embedding-persist has failed {b3_consecutive_failures} batches in a row; the sorted-drain has backed off to protect CPU. Last error: {}. This signature (e.g. `missing chunk … toast … XX001`) points at corrupt ist.ChunkEmbedding rows poisoning the HNSW index — see reference_hnsw_toast_corruption_remediation (scan ctid + pg_surgery.heap_force_kill + REINDEX CONCURRENTLY). Recovery is automatic once the DB is repaired (a probe batch runs after each backoff sleep).",
+                b3_last_error.as_deref().unwrap_or("<none captured>")
+            ))
+        } else {
+            None
+        };
         let heartbeat_age_suffix = lifecycle_heartbeat_age_ms
             .map(|age| format!(", heartbeat_age_ms={age}"))
             .unwrap_or_default();
+        // REQ-AXO-902047 slice 1b — one human-readable B3 health line for the
+        // text report (the structured block carries the machine fields).
+        let b3_health_line = if b3_systemically_failing {
+            format!(
+                "- B3 health: ⚠️ DEGRADED — {b3_consecutive_failures} consecutive failures, error_rate={:.1}%, last_error={} (×{b3_last_error_count}). Run `diagnose_indexing`; see recovery_hint.",
+                b3_error_rate * 100.0,
+                b3_last_error.as_deref().unwrap_or("<none>")
+            )
+        } else if b3_total_failures > 0 {
+            format!(
+                "- B3 health: HEALTHY (recovered) — error_rate={:.2}%, last_error={} (×{b3_last_error_count}), {b3_total_successes} successes",
+                b3_error_rate * 100.0,
+                b3_last_error.as_deref().unwrap_or("<none>")
+            )
+        } else {
+            "- B3 health: HEALTHY — no persist failure observed".to_string()
+        };
         // ── Per-project breakdown text ──────────────────────────
         let breakdown_text = if project == "*" {
             if let Some(arr) = per_project_breakdown.as_array() {
@@ -615,7 +680,8 @@ impl McpServer {
              - B fed via:        sorted-drain (ORDER BY token_count, reservoir + channel backpressure, 200ms→30s idle backoff) — DEC-AXO-901631\n\
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
              - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\
-             - Compute (observed): {observed_compute}  (source={observed_compute_source}) — DEC-AXO-901626, same canonical signal as status.embedder_runtime + dashboard\n\n\
+             - Compute (observed): {observed_compute}  (source={observed_compute_source}) — DEC-AXO-901626, same canonical signal as status.embedder_runtime + dashboard\n\
+             {b3_health_line}\n\n\
              ### File source — Watchman + DBQ-A (REQ-AXO-901893 / REQ-AXO-901897)\n\
              - Feed: Watchman clock/cursor deltas → pipeline A input_tx (legacy ingress drain + periodic sweep RIPPED)\n\
              - Backlog drainer: DBQ-A claim feeder (discovered stock below)\n\n\
@@ -673,6 +739,23 @@ impl McpServer {
                 "lifecycle_sleep_count": lifecycle_sleep_count,
                 "lifecycle_source": lifecycle_source,
                 "lifecycle_heartbeat_age_ms": lifecycle_heartbeat_age_ms,
+                // REQ-AXO-902047 slice 1b — B3 (embedding persist) health. One
+                // call gives an LLM the systemic-failure verdict, the REAL PG
+                // error (root + SQLSTATE), the error rate, and a recovery hint —
+                // no log access, no gdb (the REQ-AXO-902046 incident).
+                "b3_health": {
+                    "verdict": b3_verdict,
+                    "systemically_failing": b3_systemically_failing,
+                    "consecutive_failures": b3_consecutive_failures,
+                    "systemic_threshold": B3_SYSTEMIC_FAILURE_THRESHOLD,
+                    "total_failures": b3_total_failures,
+                    "total_successes": b3_total_successes,
+                    "error_rate": b3_error_rate,
+                    "last_error": b3_last_error,
+                    "last_error_count": b3_last_error_count,
+                    "last_error_last_seen_ms": b3_last_error_last_seen_ms,
+                    "recovery_hint": b3_recovery_hint,
+                },
                 // DEC-AXO-901626 — observed compute verdict (canonical, same
                 // source as status.embedder_runtime + the dashboard).
                 "compute": observed_compute,

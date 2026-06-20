@@ -96,6 +96,49 @@ impl StageHealth {
     pub fn last_error(&self) -> Option<StageErrorRecord> {
         self.last_error.lock().ok().and_then(|g| g.clone())
     }
+
+    /// REQ-AXO-902047 slice 1b — flat, owned snapshot of the health counters
+    /// for cross-process publication (the indexer captures this on every
+    /// heartbeat tick and UPSERTs it so the brain's `embedding_status` reads
+    /// the real B3 error state in one MCP call, no log access).
+    pub fn snapshot(&self) -> StageHealthSnapshot {
+        StageHealthSnapshot {
+            consecutive_failures: self.consecutive_failures(),
+            total_failures: self.total_failures(),
+            total_successes: self.total_successes(),
+            last_error: self.last_error(),
+        }
+    }
+}
+
+/// REQ-AXO-902047 slice 1b — owned, serializable snapshot of a [`StageHealth`].
+/// Decoupled from the atomics so it can cross the process boundary (heartbeat
+/// UPSERT) and be compared in tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StageHealthSnapshot {
+    pub consecutive_failures: u64,
+    pub total_failures: u64,
+    pub total_successes: u64,
+    pub last_error: Option<StageErrorRecord>,
+}
+
+impl StageHealthSnapshot {
+    /// True once consecutive failures reach the systemic threshold — the same
+    /// verdict the drain uses to back off, surfaced to readers as DEGRADED.
+    pub fn is_systemically_failing(&self, threshold: u64) -> bool {
+        self.consecutive_failures >= threshold
+    }
+
+    /// Error rate over the lifetime of the process: failures / (failures +
+    /// successes). Returns 0.0 when no batch has been attempted yet.
+    pub fn error_rate(&self) -> f64 {
+        let total = self.total_failures + self.total_successes;
+        if total == 0 {
+            0.0
+        } else {
+            self.total_failures as f64 / total as f64
+        }
+    }
 }
 
 /// Consecutive-failure count at which B3 is judged systemically broken and the
@@ -151,6 +194,37 @@ mod tests {
         assert!(!h.is_systemically_failing(2));
         assert_eq!(h.total_failures(), 2);
         assert_eq!(h.total_successes(), 1);
+    }
+
+    #[test]
+    fn snapshot_mirrors_live_counters_and_last_error() {
+        let h = StageHealth::default();
+        h.record_success();
+        h.record_failure("missing chunk number 0 for toast value (XX001)", 42);
+        let snap = h.snapshot();
+        assert_eq!(snap.consecutive_failures, 1);
+        assert_eq!(snap.total_failures, 1);
+        assert_eq!(snap.total_successes, 1);
+        assert_eq!(
+            snap.last_error.as_ref().map(|r| r.message.as_str()),
+            Some("missing chunk number 0 for toast value (XX001)")
+        );
+    }
+
+    #[test]
+    fn snapshot_error_rate_and_systemic_verdict() {
+        let empty = StageHealthSnapshot::default();
+        assert_eq!(empty.error_rate(), 0.0, "no batches → no error rate");
+        assert!(!empty.is_systemically_failing(B3_SYSTEMIC_FAILURE_THRESHOLD));
+
+        let snap = StageHealthSnapshot {
+            consecutive_failures: B3_SYSTEMIC_FAILURE_THRESHOLD,
+            total_failures: 3,
+            total_successes: 1,
+            last_error: None,
+        };
+        assert!(snap.is_systemically_failing(B3_SYSTEMIC_FAILURE_THRESHOLD));
+        assert_eq!(snap.error_rate(), 0.75);
     }
 
     #[test]

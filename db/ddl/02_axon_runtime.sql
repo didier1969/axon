@@ -153,6 +153,26 @@ ALTER TABLE axon.EmbedderLifecycleHeartbeat
 ALTER TABLE axon.EmbedderLifecycleHeartbeat
     ADD COLUMN IF NOT EXISTS build_id       TEXT;
 
+-- REQ-AXO-902047 slice 1b: cross-process B3 (embedding persist) health. The
+-- indexer publishes its in-RAM `pipeline_v2::stage_health::b3_health()`
+-- snapshot every heartbeat tick so the brain's `embedding_status` surfaces the
+-- real PG error + systemic-failure verdict in ONE MCP call, without log access
+-- (the REQ-AXO-902046 incident took gdb + 4 h because the error was
+-- process-local). `b3_last_error` is the full anyhow chain (root PG message +
+-- SQLSTATE), deduped by signature. Idempotent for existing instances.
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b3_consecutive_failures    BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b3_total_failures          BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b3_total_successes         BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b3_last_error              TEXT;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b3_last_error_count        BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b3_last_error_last_seen_ms BIGINT NOT NULL DEFAULT 0;
+
 -- REQ-AXO-901854: cross-process indexer runtime truth. Rates/workers/queues
 -- were previously sourced from a brain-LOCAL telemetry snapshot (empty under
 -- brain_only — the indexer, not the brain, runs the pipeline). The indexer

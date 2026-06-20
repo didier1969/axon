@@ -181,7 +181,8 @@ impl GraphStore {
     ) -> Result<Option<EmbedderLifecycleHeartbeatRecord>> {
         let table_ref = self.axon_table_ref("EmbedderLifecycleHeartbeat");
         let raw = self.query_json_writer(&format!(
-            "SELECT process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms, compute, compute_source, build_id \
+            "SELECT process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms, compute, compute_source, build_id, \
+                    b3_consecutive_failures, b3_total_failures, b3_total_successes, b3_last_error, b3_last_error_count, b3_last_error_last_seen_ms \
              FROM {table_ref} \
              WHERE process_role = '{}' \
              LIMIT 1",
@@ -225,6 +226,19 @@ impl GraphStore {
                 .and_then(|value| value.as_str())
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
+            // REQ-AXO-902047 slice 1b — B3 health (columns added by additive
+            // ALTER ; rows from a publisher predating the columns surface as 0 /
+            // None, which the reader treats as "healthy / no error yet").
+            b3_consecutive_failures: row.get(10).and_then(parse_i64_field).unwrap_or_default(),
+            b3_total_failures: row.get(11).and_then(parse_i64_field).unwrap_or_default(),
+            b3_total_successes: row.get(12).and_then(parse_i64_field).unwrap_or_default(),
+            b3_last_error: row
+                .get(13)
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            b3_last_error_count: row.get(14).and_then(parse_i64_field).unwrap_or_default(),
+            b3_last_error_last_seen_ms: row.get(15).and_then(parse_i64_field).unwrap_or_default(),
         }))
     }
 
@@ -322,15 +336,33 @@ fn build_lifecycle_heartbeat_upsert_sql(
         Some(value) => format!("'{}'", GraphStore::escape_sql(value)),
         None => "NULL".to_string(),
     };
+    // REQ-AXO-902047 slice 1b — B3 health columns. `b3_last_error` is the full
+    // anyhow chain (root PG message + SQLSTATE) or NULL when B3 has never failed.
+    let (b3_last_error_sql, b3_last_error_count, b3_last_error_last_seen_ms) =
+        match snapshot.b3.last_error.as_ref() {
+            Some(rec) => (
+                format!("'{}'", GraphStore::escape_sql(&rec.message)),
+                rec.count,
+                rec.last_seen_ms,
+            ),
+            None => ("NULL".to_string(), 0, 0),
+        };
     format!(
         "INSERT INTO axon.EmbedderLifecycleHeartbeat \
-         (process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms, compute, compute_source, build_id) \
-         VALUES ('{}', '{}', {}, {}, {}, {}, {}, '{}', '{}', {}) \
+         (process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms, compute, compute_source, build_id, \
+          b3_consecutive_failures, b3_total_failures, b3_total_successes, b3_last_error, b3_last_error_count, b3_last_error_last_seen_ms) \
+         VALUES ('{}', '{}', {}, {}, {}, {}, {}, '{}', '{}', {}, {}, {}, {}, {}, {}, {}) \
          ON CONFLICT (process_role) DO UPDATE SET \
             phase = EXCLUDED.phase, last_used_ms = EXCLUDED.last_used_ms, \
             wake_count = EXCLUDED.wake_count, sleep_count = EXCLUDED.sleep_count, \
             pending_count = EXCLUDED.pending_count, heartbeat_ms = EXCLUDED.heartbeat_ms, \
-            compute = EXCLUDED.compute, compute_source = EXCLUDED.compute_source, build_id = EXCLUDED.build_id",
+            compute = EXCLUDED.compute, compute_source = EXCLUDED.compute_source, build_id = EXCLUDED.build_id, \
+            b3_consecutive_failures = EXCLUDED.b3_consecutive_failures, \
+            b3_total_failures = EXCLUDED.b3_total_failures, \
+            b3_total_successes = EXCLUDED.b3_total_successes, \
+            b3_last_error = EXCLUDED.b3_last_error, \
+            b3_last_error_count = EXCLUDED.b3_last_error_count, \
+            b3_last_error_last_seen_ms = EXCLUDED.b3_last_error_last_seen_ms",
         GraphStore::escape_sql(process_role),
         snapshot.phase.as_str(),
         snapshot.last_used_ms,
@@ -341,6 +373,12 @@ fn build_lifecycle_heartbeat_upsert_sql(
         GraphStore::escape_sql(&snapshot.compute),
         GraphStore::escape_sql(&snapshot.compute_source),
         build_id_sql,
+        snapshot.b3.consecutive_failures,
+        snapshot.b3.total_failures,
+        snapshot.b3.total_successes,
+        b3_last_error_sql,
+        b3_last_error_count,
+        b3_last_error_last_seen_ms,
     )
 }
 
@@ -523,6 +561,7 @@ mod tests {
     #[test]
     fn lifecycle_heartbeat_upsert_sql_shape() {
         use crate::embedder::lifecycle_machine::{EmbedderPhase, LifecycleHeartbeatSnapshot};
+        use crate::pipeline_v2::stage_health::{StageErrorRecord, StageHealthSnapshot};
         let snapshot = LifecycleHeartbeatSnapshot {
             phase: EmbedderPhase::Sleeping,
             last_used_ms: 1_700_000_000_000,
@@ -533,6 +572,19 @@ mod tests {
             compute: "GPU".to_string(),
             compute_source: "nvidia_smi".to_string(),
             build_id: Some("v0.8.0-795-gf1cdab19".to_string()),
+            // REQ-AXO-902047 slice 1b — populated B3 health so the shape test
+            // covers the cross-process error plumbing.
+            b3: StageHealthSnapshot {
+                consecutive_failures: 9,
+                total_failures: 9,
+                total_successes: 100,
+                last_error: Some(StageErrorRecord {
+                    message: "missing chunk number 0 for toast value (XX001)".to_string(),
+                    count: 9,
+                    first_seen_ms: 1_700_000_001_000,
+                    last_seen_ms: 1_700_000_004_000,
+                }),
+            },
         };
         let sql = super::build_lifecycle_heartbeat_upsert_sql("indexer", &snapshot);
         // Shape contract.
@@ -548,6 +600,12 @@ mod tests {
             "compute",
             "compute_source",
             "build_id",
+            "b3_consecutive_failures",
+            "b3_total_failures",
+            "b3_total_successes",
+            "b3_last_error",
+            "b3_last_error_count",
+            "b3_last_error_last_seen_ms",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),
@@ -562,6 +620,9 @@ mod tests {
         assert!(sql.contains("'GPU'"));
         assert!(sql.contains("'nvidia_smi'"));
         assert!(sql.contains("'v0.8.0-795-gf1cdab19'"));
+        // REQ-AXO-902047 slice 1b — the real PG error (root + SQLSTATE) must
+        // reach the row verbatim, not the masked "stage merge".
+        assert!(sql.contains("'missing chunk number 0 for toast value (XX001)'"));
     }
 
     #[test]
@@ -635,13 +696,20 @@ mod tests {
             compute: "CPU".to_string(),
             compute_source: "unknown".to_string(),
             build_id: None,
+            b3: Default::default(),
         };
         let sql = super::build_lifecycle_heartbeat_upsert_sql("indexer", &snapshot);
         // No quoted build_id literal; the NULL keyword carries the absence.
         assert!(sql.contains("'CPU'"));
         assert!(sql.contains("'unknown'"));
-        assert!(sql.trim_end().ends_with("build_id = EXCLUDED.build_id"));
-        assert!(sql.contains(", NULL)"));
+        // The UPSERT tail now ends with the last B3 column (slice 1b).
+        assert!(sql
+            .trim_end()
+            .ends_with("b3_last_error_last_seen_ms = EXCLUDED.b3_last_error_last_seen_ms"));
+        // Both the absent build_id AND the absent B3 last_error render as NULL.
+        assert!(sql.contains("NULL"));
+        // With no B3 failure yet, the row carries a NULL error then zero counts.
+        assert!(sql.contains("NULL, 0, 0)"));
     }
 
     #[test]
@@ -657,6 +725,7 @@ mod tests {
             compute: "CPU".to_string(),
             compute_source: "unknown".to_string(),
             build_id: None,
+            b3: Default::default(),
         };
         // Pathological role containing single quote must be escaped.
         let sql = super::build_lifecycle_heartbeat_upsert_sql("ind'exer", &snapshot);

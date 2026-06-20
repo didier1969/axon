@@ -145,6 +145,18 @@ pub struct EmbedderLifecycleHeartbeatRecord {
     /// DEC-AXO-901626 — release identity of the publishing process; lets
     /// the brain confirm the paired indexer runs the same build.
     pub build_id: Option<String>,
+    /// REQ-AXO-902047 slice 1b — B3 (embedding persist) health, published by
+    /// the indexer so the brain's `embedding_status` surfaces the real error
+    /// state in one call. Defaults (0 / None) when the publisher predates the
+    /// columns — read as "healthy / no failure yet".
+    pub b3_consecutive_failures: i64,
+    pub b3_total_failures: i64,
+    pub b3_total_successes: i64,
+    /// Full anyhow error chain (root PG message + SQLSTATE), deduped by
+    /// signature. `None` when B3 has never failed.
+    pub b3_last_error: Option<String>,
+    pub b3_last_error_count: i64,
+    pub b3_last_error_last_seen_ms: i64,
 }
 
 /// REQ-AXO-901854 — cross-process indexer runtime truth row read from / written
