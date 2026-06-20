@@ -222,6 +222,12 @@ impl McpServer {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // REQ-AXO-901932 F2 — one-call explanation of the eligible↔indexed gap
+        // so an LLM can assert "all relevant source is indexed" without a second
+        // round-trip. Scoped projects only (a global "*" walk over every watch
+        // root would blow the gateway budget).
+        let scope_section = self.scope_explanation_section(project);
+
         // REQ-AXO-901893 (LEGACY FEED PURGE) — the ingress drain + periodic
         // sweep diagnosis blocks were ripped with the ingress_buffer. Watchman
         // feeds pipeline A directly; DBQ-A drains the backlog. Use
@@ -247,7 +253,8 @@ impl McpServer {
              * check watch root and ignored paths\n\
              * inspect parser support and `last_error_reason`\n\
              * if symbols > 0 but calls = 0, run bridge refinement and inspect FFI boundaries\n\
-             * if the 'discovered' backlog (stock_a in `pipeline_status`) stays high, check the indexer is running and the Watchman daemon is reachable",
+             * if the 'discovered' backlog (stock_a in `pipeline_status`) stays high, check the indexer is running and the Watchman daemon is reachable\
+             {}",
             project,
             known,
             completed,
@@ -259,6 +266,76 @@ impl McpServer {
             cause_lines,
             reason_lines,
             error_lines,
+            scope_section,
+        )
+    }
+
+    /// REQ-AXO-901932 F2 — render the `scope_explanation` block: walk the
+    /// scoped project's tree and account for the eligible↔indexed gap by the
+    /// canonical ignore taxonomy (`Scanner::scope_breakdown`). Empty string for
+    /// `*` (global) or an unregistered project_code — the diagnosis is still
+    /// useful without it, and a global walk over every watch root is too costly
+    /// for the synchronous gateway budget.
+    fn scope_explanation_section(&self, project: &str) -> String {
+        if project == "*" {
+            return String::new();
+        }
+        let escaped = project.replace('\'', "''");
+        let project_path = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT project_path FROM {} WHERE project_code = '{}'",
+                self.graph_store.soll_table("ProjectCodeRegistry"),
+                escaped
+            ))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|row| row.into_iter().next())
+            .filter(|p| !p.trim().is_empty());
+        let Some(project_path) = project_path else {
+            return String::new();
+        };
+
+        let indexed = self.sql_scalar(&format!(
+            "SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM axon.project_telemetry WHERE project_code = '{}'",
+            escaped
+        ));
+
+        let breakdown = crate::scanner::Scanner::new(&project_path, project).scope_breakdown();
+        let eligible = breakdown.eligible as i64;
+        let gap = eligible - indexed;
+
+        let verdict = if breakdown.eligible == 0 {
+            "⚠️ zero eligible source files under the project root — check the watch root / ignore rules."
+        } else if gap == 0 {
+            "✅ every eligible source file is indexed; the wider on-disk population is fully accounted for by the exclusion reasons below (assert: all relevant source is indexed)."
+        } else if gap > 0 {
+            "⏳ indexing incomplete: eligible source files are not yet all enrolled — wait an indexer cycle or check pipeline A health."
+        } else {
+            "ℹ️ more indexed rows than currently-eligible files: stale IndexedFile rows for paths now removed/ignored (purged on next full walk)."
+        };
+
+        let reason_lines = if breakdown.excluded_by_reason.is_empty() {
+            "* (none — every walked file is eligible)".to_string()
+        } else {
+            breakdown
+                .excluded_by_reason
+                .iter()
+                .map(|(reason, count)| format!("* `{}`: {}", reason, count))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        format!(
+            "\n\n### Scope explanation (REQ-AXO-901932 F2 — eligible↔indexed reconciliation)\n\
+             * eligible (would be indexed): {eligible}\n\
+             * indexed (ist.IndexedFile rows): {indexed}\n\
+             * gap (eligible − indexed): {gap}\n\
+             * files walked (build/dependency/VCS dirs pruned at descent): {walked}\n\n\
+             **Excluded files by reason** (out-of-ecosystem = data/CSV/JSON/binary/docs):\n{reason_lines}\n\n\
+             **Verdict:** {verdict}",
+            walked = breakdown.walked_files,
         )
     }
 

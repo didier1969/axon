@@ -286,6 +286,22 @@ pub fn spawn_pipeline_a_with_cache(
                     }
                     forwarded += 1;
                 } else {
+                    // REQ-AXO-902045 MUR 2 — content is unchanged, but L1
+                    // forwarded this file because its mtime/size drifted (a
+                    // `touch` / checkout / reformat-then-revert). Without
+                    // refreshing the cached metadata, L1 re-reads + re-hashes it
+                    // on EVERY reconciliation walk forever (the host-wide-watch
+                    // CPU leak). Refresh L1 with the new mtime/size so the next
+                    // walk skips it with zero I/O. The durable PG row self-heals
+                    // on the next genuine content change (A3 UPSERT).
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    cache.mark_indexed(
+                        path_str,
+                        prep.content_hash,
+                        now_ms,
+                        prep.mtime_ms,
+                        prep.size_bytes,
+                    );
                     skipped += 1;
                 }
                 if (forwarded + skipped) % 500 == 0 && (forwarded + skipped) > 0 {

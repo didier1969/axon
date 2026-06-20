@@ -33,6 +33,41 @@ struct DiscoveryPolicy {
 
 const SCANNER_BATCH_SIZE: usize = 512;
 
+/// REQ-AXO-901932 F2 — one-call explanation of the eligible↔indexed gap.
+/// `eligible` counts files the indexer WOULD enrol (same `should_process_path`
+/// predicate as `enumerate_files`); `excluded_by_reason` buckets the rest by
+/// the canonical [`Scanner::explain_ignore_decision`] taxonomy (single source
+/// of truth, GUI-PRO-013). `noise_dirs_pruned` counts build/dependency/VCS
+/// directories skipped at descent (node_modules / target / _build / .git /
+/// .axon …) — excluded by design and intentionally NOT walked.
+#[derive(Debug, Default, Clone)]
+pub struct ScopeBreakdown {
+    pub eligible: u64,
+    pub walked_files: u64,
+    /// `(reason, count)` sorted by count desc, then reason asc.
+    pub excluded_by_reason: Vec<(String, u64)>,
+}
+
+/// REQ-AXO-902045 MUR 0 — true when the file walker must NOT descend into
+/// `dir`: it is a build-output / dependency-store / VCS / tooling-state
+/// directory the indexing policy excludes (node_modules, target, _build,
+/// .git, .axon, .venv, …), honouring the soft-exclude allowlist. Identical
+/// verdict to the per-file noise filter (`classify_path`), lifted to DESCENT
+/// so the reconciliation walk never enumerates the millions of build artefacts
+/// it would reject per-file anyway — the host-wide-watch CPU spin. Single
+/// source of truth with the per-file path (GUI-PRO-013).
+pub(crate) fn is_noise_directory(root: &Path, dir: &Path) -> bool {
+    !matches!(
+        classify_path(
+            root,
+            dir,
+            &crate::config::CONFIG.indexing,
+            supported_parser_ecosystems(),
+        ),
+        PathDisposition::Allow
+    )
+}
+
 impl Scanner {
     pub fn new(root: &str, project_code: &str) -> Self {
         let root_path = PathBuf::from(root);
@@ -215,6 +250,44 @@ impl Scanner {
         "eligible".to_string()
     }
 
+    /// REQ-AXO-901932 F2 — walk the project tree once and explain, in a single
+    /// call, why the on-disk file population differs from the indexed set.
+    /// Build/dependency/VCS directories are pruned at descent (so a 126k-file
+    /// `cargo-target` / `node_modules` is never enumerated); every remaining
+    /// file is bucketed as eligible (would be indexed) or excluded-by-reason
+    /// using the same predicates the live indexer applies. Lets an LLM assert
+    /// "all relevant source is indexed" without a second round-trip.
+    pub fn scope_breakdown(&self) -> ScopeBreakdown {
+        let mut eligible = 0u64;
+        let mut walked = 0u64;
+        let mut reasons: HashMap<String, u64> = HashMap::new();
+        // `build_walker_from` already prunes build/dependency/VCS/tooling
+        // directories at descent (REQ-AXO-902045 MUR 0), so this walk only
+        // enumerates the source neighbourhood — never the millions of build
+        // artefacts. Per-file eligibility decides the rest.
+        for entry in self.build_walker_from(&self.root).build().filter_map(|e| e.ok()) {
+            if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                continue;
+            }
+            walked += 1;
+            let path = entry.path();
+            if self.should_process_path(path) {
+                eligible += 1;
+            } else {
+                *reasons.entry(self.explain_ignore_decision(path, false)).or_insert(0) += 1;
+            }
+        }
+
+        let mut excluded_by_reason: Vec<(String, u64)> = reasons.into_iter().collect();
+        excluded_by_reason.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        ScopeBreakdown {
+            eligible,
+            walked_files: walked,
+            excluded_by_reason,
+        }
+    }
+
     fn extract_project_code(&self, graph: &GraphStore, path: &Path) -> Result<String> {
         let explicit = self.project_code.trim();
         if !explicit.is_empty() {
@@ -232,6 +305,19 @@ impl Scanner {
         builder.git_ignore(false);
         builder.git_global(crate::config::CONFIG.indexing.use_git_global_ignore);
         builder.git_exclude(false);
+        // REQ-AXO-902045 MUR 0 — prune build/dependency/VCS/tooling directories
+        // at DESCENT so a host-wide watch root never STATs the millions of build
+        // artefacts under node_modules/target/.axon/_build/… just to keep the
+        // ~tens of k source files (the reconciliation-walk CPU spin). Per-file
+        // eligibility (`should_process_path`) still runs downstream unchanged, so
+        // the YIELDED file set is identical — only the wasted traversal is cut.
+        // 'static closure (captures the root only) per `ignore`'s filter_entry
+        // contract.
+        let prune_root = self.root.clone();
+        builder.filter_entry(move |entry| {
+            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            !is_dir || entry.depth() == 0 || !is_noise_directory(&prune_root, entry.path())
+        });
         builder
     }
 
@@ -790,6 +876,135 @@ mod tests {
         let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
         assert!(scanner.should_process_path(Path::new(&kept)));
         assert!(!scanner.should_process_path(Path::new(&skipped)));
+    }
+
+    /// REQ-AXO-901932 F2 — scope_breakdown explains the eligible↔indexed gap
+    /// on a real tree: source files count as eligible, out-of-ecosystem data
+    /// files (.csv/.json) bucket under the extension reason, gitignored source
+    /// buckets under the gitignore reason, and a node_modules dependency tree
+    /// is pruned at descent (never enumerated), not counted file-by-file.
+    #[test]
+    fn test_scope_breakdown_buckets_excluded_files_by_reason_and_prunes_noise_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let prj = root.join("prj");
+        std::fs::create_dir_all(prj.join("data")).unwrap();
+        std::fs::create_dir_all(prj.join("node_modules").join("react")).unwrap();
+
+        // Eligible source.
+        std::fs::write(prj.join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(prj.join("lib.py"), "x = 1\n").unwrap();
+        // Out-of-ecosystem data artefacts (the data-centric gap the F2 friction
+        // could not explain). `.csv`/`.parquet` are NOT in supported_extensions
+        // (unlike `.json`, which IS indexed), so both bucket under the extension
+        // reason.
+        std::fs::write(prj.join("data").join("panel.csv"), "a,b\n1,2\n").unwrap();
+        std::fs::write(prj.join("data").join("prices.parquet"), "BINARY\n").unwrap();
+        // Gitignored source.
+        std::fs::write(prj.join(".gitignore"), "secret.py\n").unwrap();
+        std::fs::write(prj.join("secret.py"), "TOKEN = 1\n").unwrap();
+        // Dependency tree — must be pruned at descent, not walked file-by-file.
+        std::fs::write(prj.join("node_modules").join("react").join("index.js"), "//\n").unwrap();
+
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
+        let bd = scanner.scope_breakdown();
+
+        // main.rs + lib.py are eligible; secret.py is gitignored (not eligible),
+        // csv/parquet are out-of-ecosystem.
+        assert_eq!(bd.eligible, 2, "two source files should be eligible: {bd:?}");
+
+        let reason = |key: &str| -> u64 {
+            bd.excluded_by_reason
+                .iter()
+                .find(|(r, _)| r == key)
+                .map(|(_, c)| *c)
+                .unwrap_or(0)
+        };
+        // .csv + .parquet (+ the .gitignore control file) → extension bucket.
+        assert!(
+            reason("ignored_by_extension_or_hidden_filter") >= 2,
+            "csv+parquet data artefacts must bucket under the extension reason: {bd:?}"
+        );
+        // secret.py → gitignore bucket.
+        assert_eq!(
+            reason("ignored_by_gitignore_or_exclude"),
+            1,
+            "gitignored source must bucket under the gitignore reason: {bd:?}"
+        );
+        // node_modules was pruned at descent: its index.js is never enumerated,
+        // so it appears in NO bucket (not even the hard-deny per-file one).
+        assert!(
+            !bd.excluded_by_reason
+                .iter()
+                .any(|(r, _)| r == "ignored_by_hard_deny_directory_segment"),
+            "pruned dependency files must not appear as per-file exclusions: {bd:?}"
+        );
+    }
+
+    /// REQ-AXO-902045 MUR 0 — is_noise_directory matches the indexing policy:
+    /// build/dependency/VCS dirs are noise (prune at descent); ordinary source
+    /// dirs and non-excluded dot-dirs (e.g. `.github`) are NOT pruned.
+    #[test]
+    fn test_is_noise_directory_matches_indexing_policy() {
+        let root = Path::new("/workspace");
+        for noise in [
+            "/workspace/proj/node_modules",
+            "/workspace/proj/target",
+            "/workspace/proj/.git",
+            "/workspace/proj/.axon",
+            "/workspace/proj/_build",
+        ] {
+            assert!(
+                super::is_noise_directory(root, Path::new(noise)),
+                "must be pruned at descent: {noise}"
+            );
+        }
+        for keep in [
+            "/workspace/proj/src",
+            "/workspace/proj/lib",
+            "/workspace/proj/.github", // dot-dir but NOT a policy exclusion
+        ] {
+            assert!(
+                !super::is_noise_directory(root, Path::new(keep)),
+                "must NOT be pruned: {keep}"
+            );
+        }
+    }
+
+    /// REQ-AXO-902045 MUR 0 — the file walker prunes noise directories AT
+    /// DESCENT: a dependency tree is never enumerated (the raw walker yields no
+    /// entry under it), while ordinary source is walked. This is the cut that
+    /// turns a 2M-entry host-wide traversal into the source neighbourhood.
+    #[test]
+    fn test_build_walker_prunes_noise_dirs_at_descent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let prj = root.join("prj");
+        std::fs::create_dir_all(prj.join("node_modules").join("react").join("deep")).unwrap();
+        std::fs::create_dir_all(prj.join("src")).unwrap();
+        std::fs::write(prj.join("src").join("main.rs"), "fn main(){}\n").unwrap();
+        std::fs::write(
+            prj.join("node_modules").join("react").join("deep").join("index.js"),
+            "//\n",
+        )
+        .unwrap();
+
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
+        let walked: Vec<String> = scanner
+            .build_walker_from(root)
+            .build()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            walked.iter().any(|p| p.ends_with("src/main.rs")),
+            "source must be walked: {walked:?}"
+        );
+        assert!(
+            !walked.iter().any(|p| p.contains("node_modules")),
+            "node_modules must be pruned at descent, never enumerated: {walked:?}"
+        );
     }
 
     #[test]

@@ -206,6 +206,27 @@ mod tests {
         assert!(cache.should_read("/tmp/f.rs", 100, 43));
     }
 
+    /// REQ-AXO-902045 MUR 2 — a touched-but-unchanged file (mtime drifted,
+    /// content identical) must stop being re-read after the dedup filter
+    /// refreshes L1. Without the refresh, `should_read` stays true forever and
+    /// the file is re-read + re-hashed on every reconciliation walk.
+    #[test]
+    fn touched_unchanged_refresh_stops_perpetual_reread() {
+        let cache = IndexedFileCache::from_iter(vec![(
+            "/p/f.rs".to_string(),
+            entry("hash-a", 1, 1_000, 10),
+        )]);
+        // File `touch`ed: mtime moved 1_000 → 2_000, size + content identical.
+        assert!(cache.should_read("/p/f.rs", 2_000, 10), "L1 forwards on mtime drift");
+        // L2 finds the content hash unchanged → MUR 2 refresh with new mtime.
+        cache.mark_indexed("/p/f.rs".into(), "hash-a".into(), 9, 2_000, 10);
+        // Next reconciliation walk: L1 now skips with zero I/O.
+        assert!(
+            !cache.should_read("/p/f.rs", 2_000, 10),
+            "after MUR 2 refresh the touched file is skipped, not re-read"
+        );
+    }
+
     // --- Level 2: should_index (content_hash) — the parse skip ---
 
     #[test]
