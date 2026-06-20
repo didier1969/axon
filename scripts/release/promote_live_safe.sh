@@ -314,6 +314,14 @@ ensure_head_stable
 bash "$ROOT_DIR/scripts/axon-live" status 2>&1 | tee -a "$PROMOTE_LOG" || true
 promote_log "   ✅ step 7 (finalize) done"
 
+# REQ-AXO-902052 #6-B — fire-and-forget Memgraph publication refresh. Runs
+# OUTSIDE `run_step` (which aborts on rc≠0) and can NEVER fail the promote: the
+# wrapper is graceful (clean skip + marker, exit 0, when Docker/tools are
+# unavailable — the current WSL state), and it is backgrounded so the promote
+# never waits on the ~200 MB export/load. PIL-AXO-005 fail-closed is untouched.
+( nohup bash "$ROOT_DIR/scripts/publish-memgraph.sh" >>"$PROMOTE_LOG" 2>&1 & ) || true
+promote_log "   ▶ Memgraph publication refresh dispatched (background, best-effort)"
+
 # --- Final summary ---
 final_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "unknown")"
 final_build_id="$(python3 -c "
