@@ -1433,6 +1433,9 @@ impl McpServer {
             // REQ-AXO-902031 (N3) — queryable tech-debt inventory (migrations +
             // HAS_REMNANT remnants + progress).
             "tech_debt_inventory" => self.axon_tech_debt_inventory(arguments),
+            // REQ-AXO-902051 — advisory residue detector: scans the IST
+            // (code-anchored) and (re)links HAS_REMNANT for seeded migrations.
+            "detect_remnants" => self.axon_detect_remnants(arguments),
             // REQ-AXO-902017 slice 1 — data-artifact catalog (data/CATALOG.json
             // pivot) inventory for data-centric projects.
             "data_catalog" => self.axon_data_catalog(arguments),

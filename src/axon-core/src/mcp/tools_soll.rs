@@ -62,6 +62,7 @@ mod relation_policy;
 mod shared;
 mod storage;
 mod tech_debt;
+mod tech_debt_detect;
 mod workflow;
 
 use inference::*;

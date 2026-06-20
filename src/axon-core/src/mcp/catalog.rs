@@ -478,6 +478,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "detect_remnants",
+                "description": "[SOLL] REQ-AXO-902051 — advisory scan of the IST for code-anchored residue of seeded TechnologyMigration nodes (comments excluded; sanctioned-permanent tokens like pipeline_v2 / WITH RECURSIVE never flagged). (Re)creates idempotent HAS_REMNANT edges so tech_debt_inventory + pre-flight + work-plan surface the residue. Advisory only — never a gate. Runs off the ingestion hot-path.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "detect_key": { "type": "string", "description": "Optional: scope to one migration ruleset (pipeline_v1_to_v2 | nvidia_smi_to_nvml | duckdb_to_pg | age_to_pg)." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "soll_acyclic_audit",
                 "description": "[SOLL] REQ-AXO-91492 — enumerate strongly-connected components (size>1) and self-loops in the SOLL intentional graph for one project. Pre-requisite for activating the DEC-AXO-098 cycle validator on `soll_manager(action=link)`. Read-only ; no mutation.",
                 "inputSchema": {
