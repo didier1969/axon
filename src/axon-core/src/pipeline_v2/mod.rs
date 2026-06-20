@@ -63,6 +63,7 @@ pub mod stage_a3;
 pub mod stage_b1;
 pub mod stage_b2;
 pub mod stage_b3;
+pub mod stage_health;
 pub mod tsv_worker;
 pub mod types;
 pub mod worker_pool;

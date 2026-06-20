@@ -1595,7 +1595,12 @@ impl GraphStore {
             self.pool
                 .native
                 .flush_chunk_embeddings_copy(project_code, model_id, &rows, embedded_at_ms)
-                .map_err(|e| anyhow!("upsert_chunk_embedding_v2_batch COPY flush failed: {e}"))?;
+                // REQ-AXO-902047 — preserve the error CHAIN (`.context` keeps the
+                // source) instead of flattening it with `anyhow!("…: {e}")`. The
+                // old form discarded the root PG message + SQLSTATE, so B3 only
+                // ever logged "stage merge" and the real cause (toast corruption,
+                // XX001) was invisible — hours of misdirected diagnosis.
+                .map_err(|e| e.context("upsert_chunk_embedding_v2_batch COPY flush failed"))?;
             let chunk_ids_in: Vec<String> = deduped
                 .iter()
                 .map(|it| format!("'{}'", Self::escape_sql(&it.0)))

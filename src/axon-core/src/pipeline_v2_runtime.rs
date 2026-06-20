@@ -84,7 +84,27 @@ fn spawn_vector_sorted_drain(
 ) {
     tokio::spawn(async move {
         let mut backoff_ms = VECTOR_DRAIN_BACKOFF_INITIAL_MS;
+        // REQ-AXO-902047 — separate backoff for systemic B3-persist failure.
+        let mut systemic_backoff_ms = VECTOR_DRAIN_BACKOFF_INITIAL_MS;
         loop {
+            // REQ-AXO-902047 — systemic B3-failure backoff. When the persist
+            // stage fails every batch (corrupt index / schema mismatch — the
+            // REQ-AXO-902046 incident), embedding more chunks that cannot be
+            // written is pure wasted CPU (the 250-700 % hemorrhage). Throttle
+            // hard (doubling up to 30 s) instead of tight-looping, but STILL
+            // let one probe batch through after each sleep so recovery (e.g.
+            // once the operator repairs the DB) is detected automatically —
+            // a successful persist resets the latch in stage_b3.
+            if crate::pipeline_v2::stage_health::b3_health()
+                .is_systemically_failing(crate::pipeline_v2::stage_health::B3_SYSTEMIC_FAILURE_THRESHOLD)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(systemic_backoff_ms)).await;
+                systemic_backoff_ms = systemic_backoff_ms
+                    .saturating_mul(2)
+                    .min(VECTOR_DRAIN_BACKOFF_MAX_MS);
+            } else {
+                systemic_backoff_ms = VECTOR_DRAIN_BACKOFF_INITIAL_MS;
+            }
             // Blocking PG SELECT off the tokio runtime.
             let store_for_q = store.clone();
             let rows = match tokio::task::spawn_blocking(move || {

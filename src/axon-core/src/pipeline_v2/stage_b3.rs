@@ -188,6 +188,10 @@ pub fn spawn_b3_batched_worker(
                 let group_len = group_batch.len();
                 match join_result {
                     Ok(Ok(())) => {
+                        // REQ-AXO-902047 — a clean persist resets the systemic
+                        // failure latch so a transient blip never sticks the
+                        // drain in backoff.
+                        crate::pipeline_v2::stage_health::b3_health().record_success();
                         // REQ-AXO-90009 Slice 1 — clear pending state for
                         // every chunk just committed. Batched UPSERT
                         // succeeded for the whole group atomically, so it
@@ -217,7 +221,24 @@ pub fn spawn_b3_batched_worker(
                         }
                     }
                     Ok(Err(err)) => {
-                        warn!(stage = "B3", error = ?err, "upsert_chunk_embedding_v2_batch failed");
+                        // REQ-AXO-902047 — capture the REAL error (anyhow
+                        // alternate Display = full `caused by` chain incl the
+                        // root PG message + SQLSTATE, no longer masked) into the
+                        // process-global B3 health signal, deduped by signature.
+                        // Throttle the WARN so a systemic failure (every batch)
+                        // does not flood the log thousands of times — log the
+                        // first and every 50th, with the running count.
+                        let n = crate::pipeline_v2::stage_health::b3_health()
+                            .record_failure(format!("{err:#}"), now_ms);
+                        if n == 1 || n % 50 == 0 {
+                            warn!(
+                                stage = "B3",
+                                consecutive_failures = n,
+                                error = format!("{err:#}"),
+                                "upsert_chunk_embedding_v2_batch failed (B3 persist) — \
+                                 see embedding_status / pipeline_health for the live signal"
+                            );
+                        }
                         for _ in 0..group_len {
                             metrics.record_error();
                         }
