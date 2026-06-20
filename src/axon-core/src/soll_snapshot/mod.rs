@@ -23,3 +23,39 @@ pub mod snapshot;
 
 pub use cache::SollSnapshotCache;
 pub use snapshot::{SnapshotEdge, SnapshotNode, SnapshotTraceability, SollSnapshot};
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// REQ-AXO-902039 element 3 — fused-retrieval-lane RAM coverage, process-global.
+//
+// Distinct from `SollSnapshotCache::read_stats()`, which counts whole-snapshot
+// cache warmth across EVERY tool that calls `snapshot()` (admin reporting tools
+// included). DEC-AXO-901646 flagged that conflation as a "faux signal": the
+// headline coverage figure must measure the WHY/retrieve_context fusion lane
+// specifically — the symbol→governing-intent structural reads — RAM-served vs
+// PG-fallback. These two counters are incremented only on that lane (see
+// `tools_context.rs::{resolve_scoped_symbol_id_canonical, has_direct_soll_
+// traceability, collect_soll_entities}`), so the ratio reflects how much of the
+// fusion substrate is actually served from RAM (PIL-AXO-9002 invariant: RAM
+// mirror primary, PG fallback explicit and measured, never silent).
+static FUSION_RAM_READS: AtomicU64 = AtomicU64::new(0);
+static FUSION_PG_READS: AtomicU64 = AtomicU64::new(0);
+
+/// Record one fused-retrieval-lane SOLL/IST structural read: `ram=true` when it
+/// was served from a RAM snapshot, `ram=false` when it fell back to a PG SELECT
+/// (project unscoped, snapshot cold, or a column not mirrored in RAM).
+pub fn record_fusion_read(ram: bool) {
+    if ram {
+        FUSION_RAM_READS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        FUSION_PG_READS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `(ram_reads, pg_reads)` on the fused retrieval lane since process start.
+pub fn fusion_read_stats() -> (u64, u64) {
+    (
+        FUSION_RAM_READS.load(Ordering::Relaxed),
+        FUSION_PG_READS.load(Ordering::Relaxed),
+    )
+}

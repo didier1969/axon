@@ -588,8 +588,11 @@ impl McpServer {
             }
         }
         let _ = next_best_kind; // retained in data.truth_cockpit.next_best_action
-        // REQ-AXO-901757 slice C (AC4) — SOLL read RAM-coverage from the snapshot
-        // cache hit/miss counters. Ratio = ram_hits / (ram_hits + pg_loads).
+        // REQ-AXO-901757 slice C (AC4) — snapshot-cache warmth from the cache
+        // hit/miss counters. Ratio = ram_hits / (ram_hits + pg_loads). This is
+        // the WHOLE-snapshot cache-warmth across every tool that calls
+        // `snapshot()` (admin reporting tools included) — NOT the retrieval
+        // fusion lane (see the fused-lane line below).
         let (soll_ram_hits, soll_pg_loads) = self.soll_cache().read_stats();
         let soll_ram_ratio = {
             let total = soll_ram_hits + soll_pg_loads;
@@ -599,12 +602,31 @@ impl McpServer {
                 soll_ram_hits as f64 / total as f64
             }
         };
+        // REQ-AXO-902039 element 3 — fused-retrieval-lane RAM coverage. DEC-AXO-
+        // 901646: the headline coverage must measure the why/retrieve_context
+        // fusion lane (symbol→governing-intent structural reads), not admin SQL
+        // tools. This pair counts only that lane, RAM-served vs PG-fallback.
+        let (fusion_ram, fusion_pg) = crate::soll_snapshot::fusion_read_stats();
+        let fusion_ram_ratio = {
+            let total = fusion_ram + fusion_pg;
+            if total == 0 {
+                1.0
+            } else {
+                fusion_ram as f64 / total as f64
+            }
+        };
         if matches!(mode, Some("verbose") | Some("VERBOSE")) {
             evidence.push_str(&format!(
-                "**SOLL read coverage:** {:.1}% RAM ({} RAM hits / {} PG loads)\n",
+                "**SOLL snapshot-cache warmth:** {:.1}% RAM ({} RAM hits / {} PG loads)\n",
                 soll_ram_ratio * 100.0,
                 soll_ram_hits,
                 soll_pg_loads
+            ));
+            evidence.push_str(&format!(
+                "**SOLL fusion-lane RAM coverage:** {:.1}% RAM ({} RAM / {} PG fallback)\n",
+                fusion_ram_ratio * 100.0,
+                fusion_ram,
+                fusion_pg
             ));
         }
         if matches!(mode, Some("verbose") | Some("VERBOSE")) {
@@ -1265,15 +1287,27 @@ impl McpServer {
                     "oldest_semantic_pending_age_ms": oldest_semantic_pending_age_ms
                 },
                 "public_tools": public_tool_names,
-                // REQ-AXO-901757 slice C (AC4) — SOLL snapshot read RAM-coverage.
-                // Reads served from the RAM graph vs PG (re)loads (cold cache /
-                // invalidation). Raw `FROM soll.*` SELECTs that bypass the cache
-                // are the migration target tracked separately (slice C AC1-3).
+                // REQ-AXO-901757 slice C (AC4) — SOLL snapshot-cache warmth.
+                // Whole-snapshot reads served from RAM vs PG (re)loads (cold cache /
+                // invalidation), across EVERY tool that calls snapshot() — admin
+                // reporting tools included. NOT the retrieval fusion lane; see
+                // `soll_fusion_lane_coverage` for that (REQ-AXO-902039 element 3).
                 "soll_read_coverage": {
                     "ram_hits": soll_ram_hits,
                     "pg_loads": soll_pg_loads,
                     "ram_ratio": soll_ram_ratio,
-                    "scope": "soll_snapshot_cache (cache-routed reads; raw FROM soll.* SELECTs not yet counted)"
+                    "scope": "soll_snapshot_cache_warmth (all tools; not fusion-lane specific)"
+                },
+                // REQ-AXO-902039 element 3 / DEC-AXO-901646 — fused-retrieval-lane
+                // RAM coverage. The honest headline: how much of the why/
+                // retrieve_context symbol→governing-intent structural lookup is
+                // served from RAM vs an explicit annotated PG fallback (project
+                // unscoped, snapshot cold, or a column not mirrored in RAM).
+                "soll_fusion_lane_coverage": {
+                    "ram_reads": fusion_ram,
+                    "pg_reads": fusion_pg,
+                    "ram_ratio": fusion_ram_ratio,
+                    "scope": "why/retrieve_context fusion lane (resolve_scoped_symbol_id + traceability + concept bridges)"
                 },
                 "async_policy": {
                     "mode": "allowlist",

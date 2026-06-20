@@ -71,6 +71,28 @@ impl McpServer {
         symbol: &str,
         project: Option<&str>,
     ) -> Option<String> {
+        // REQ-AXO-902039 element 2 — RAM-first via IstGraphView (PIL-AXO-9002).
+        // This is the `SELECT id FROM Symbol WHERE name=$sym OR id=$sym` the REQ
+        // names explicitly. When the project is scoped and the IST snapshot is
+        // warm, resolve `symbol` as a canonical id (already present) or by short
+        // name without touching PG. A cold cache returns None below and we fall
+        // through to the explicit PG fallback.
+        if let Some(proj) = project {
+            let view = crate::ist_snapshot::process_view();
+            // `symbol` may already be a canonical id.
+            if view.node_kind_db(proj, symbol).is_some() {
+                crate::soll_snapshot::record_fusion_read(true);
+                return Some(symbol.to_string());
+            }
+            // Otherwise resolve by short name (PG used LIMIT 1; first id matches).
+            if let Some(ids) = view.ids_for_short_name(proj, symbol) {
+                crate::soll_snapshot::record_fusion_read(true);
+                return ids.into_iter().next();
+            }
+            // ids_for_short_name returned None ⇒ snapshot cold ⇒ PG fallback.
+        }
+        // PG-direct fallback: project unscoped or IST snapshot cold (PIL-AXO-9002).
+        crate::soll_snapshot::record_fusion_read(false);
         let query = if project.is_some() {
             format!(
                 "SELECT id FROM Symbol \
@@ -96,6 +118,11 @@ impl McpServer {
         project: Option<&str>,
         limit: usize,
     ) -> String {
+        // PG-direct (deliberate, REQ-AXO-902039 element 4): error-path symbol
+        // suggestions. Off the hot fusion lane (only fires when resolution fails),
+        // and returns name+kind+project_code as a JSON shape the lexical RAM
+        // search does not mirror 1:1. Kept on PG by design — not a cache bypass to
+        // migrate (PIL-AXO-9002 PG lane for reporting-shaped reads).
         let needle = symbol.trim();
         if needle.is_empty() {
             return "[]".to_string();
@@ -3532,6 +3559,19 @@ impl McpServer {
         entry_candidates: &[EntryCandidate],
         project: Option<&str>,
     ) -> bool {
+        // REQ-AXO-902039 element 2 — RAM-first via SollSnapshot (PIL-AXO-9002).
+        // The PG form is `count(*) FROM soll.Traceability JOIN soll.Node`; the
+        // RAM equivalent scans the per-project snapshot's traceability rows for a
+        // Symbol/File artifact whose governing node is present in this project's
+        // snapshot (the JOIN + project_filter are implicit: the snapshot is
+        // scoped to one project). Project unscoped or snapshot cold ⇒ PG fallback.
+        if let Some(proj) = project {
+            if let Ok(snap) = self.soll_cache().snapshot(proj) {
+                crate::soll_snapshot::record_fusion_read(true);
+                return Self::snapshot_has_direct_traceability(&snap, entry_candidates);
+            }
+        }
+        crate::soll_snapshot::record_fusion_read(false);
         let symbol_names = entry_candidates
             .iter()
             .filter(|candidate| candidate.kind != "file")
@@ -3587,7 +3627,238 @@ impl McpServer {
         self.graph_store.query_count(&query).unwrap_or(0) > 0
     }
 
+    /// REQ-AXO-902039 element 2 — RAM form of `has_direct_soll_traceability`.
+    /// Any Symbol/File traceability row whose governing node is present in this
+    /// project's snapshot (the snapshot scopes the JOIN + project_filter).
+    fn snapshot_has_direct_traceability(
+        snap: &crate::soll_snapshot::SollSnapshot,
+        entry_candidates: &[EntryCandidate],
+    ) -> bool {
+        use std::collections::HashSet;
+        let symbol_names: HashSet<String> = entry_candidates
+            .iter()
+            .filter(|c| c.kind != "file")
+            .map(|c| c.name.to_ascii_lowercase())
+            .collect();
+        let file_paths: HashSet<&str> = entry_candidates
+            .iter()
+            .filter(|c| !c.uri.is_empty())
+            .map(|c| c.uri.as_str())
+            .collect();
+        if symbol_names.is_empty() && file_paths.is_empty() {
+            return false;
+        }
+        snap.traceability.iter().any(|t| {
+            let matches = (t.artifact_type == "Symbol"
+                && symbol_names.contains(&t.artifact_ref.to_ascii_lowercase()))
+                || (t.artifact_type == "File" && file_paths.contains(t.artifact_ref.as_str()));
+            matches && snap.nodes.contains_key(&t.soll_entity_id)
+        })
+    }
+
     fn collect_soll_entities(
+        &self,
+        entry_candidates: &[EntryCandidate],
+        project: Option<&str>,
+        terms: &[String],
+        top_k: usize,
+    ) -> Vec<Value> {
+        // REQ-AXO-902039 element 2 — RAM-first fusion (PIL-AXO-9002). When the
+        // project is scoped and the SOLL snapshot is warm, serve the
+        // symbol→governing-intent traceability + concept-bridge reads from RAM.
+        // The lexical title+description fallback stays on PG: `description` is not
+        // mirrored in SollSnapshot, so a RAM-empty result falls through to the
+        // explicit PG path below (annotated fallback the REQ permits).
+        if let Some(proj) = project {
+            if let Ok(snap) = self.soll_cache().snapshot(proj) {
+                let mut selected =
+                    Self::collect_soll_traceability_ram(&snap, entry_candidates, top_k);
+                Self::expand_concept_governing_entities_ram(&snap, &mut selected, top_k);
+                if !selected.is_empty() {
+                    crate::soll_snapshot::record_fusion_read(true);
+                    return selected;
+                }
+                // RAM traceability empty → PG lexical fallback (description join).
+            }
+        }
+        crate::soll_snapshot::record_fusion_read(false);
+        self.collect_soll_entities_pg(entry_candidates, project, terms, top_k)
+    }
+
+    /// REQ-AXO-902039 element 2 — RAM reimplementation of the traceability branch
+    /// of `collect_soll_entities`. Faithful to the PG query (Symbol→100 /
+    /// File→95 ranking; ORDER score DESC, type DESC, id ASC; LIMIT min(top_k,2))
+    /// but deterministic: the PG `LEFT JOIN soll.Edge` multiplied rows per
+    /// outgoing edge with a score independent of the edge, so here each governing
+    /// node yields one row, preferring a `SOLVES` relation_type when present.
+    fn collect_soll_traceability_ram(
+        snap: &crate::soll_snapshot::SollSnapshot,
+        entry_candidates: &[EntryCandidate],
+        top_k: usize,
+    ) -> Vec<Value> {
+        use std::collections::HashSet;
+        let symbol_names: HashSet<String> = entry_candidates
+            .iter()
+            .filter(|c| c.kind != "file")
+            .map(|c| c.name.to_ascii_lowercase())
+            .collect();
+        let file_paths: HashSet<&str> = entry_candidates
+            .iter()
+            .filter(|c| !c.uri.is_empty())
+            .map(|c| c.uri.as_str())
+            .collect();
+        if symbol_names.is_empty() && file_paths.is_empty() {
+            return Vec::new();
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut scored: Vec<(i64, String, String, Value)> = Vec::new();
+        for t in &snap.traceability {
+            let (artifact_type, score, reason) = if t.artifact_type == "Symbol"
+                && symbol_names.contains(&t.artifact_ref.to_ascii_lowercase())
+            {
+                ("Symbol", 100i64, "direct_symbol_traceability")
+            } else if t.artifact_type == "File" && file_paths.contains(t.artifact_ref.as_str()) {
+                ("File", 95i64, "direct_file_traceability")
+            } else {
+                continue;
+            };
+            let Some(node) = snap.nodes.get(&t.soll_entity_id) else {
+                continue; // mirrors PG `JOIN soll.Node` (+ implicit project scope)
+            };
+            if !seen.insert(node.id.clone()) {
+                continue;
+            }
+            let mut relation_type = String::new();
+            for (_tgt, rel) in snap.outgoing_edges(&node.id) {
+                if rel == "SOLVES" {
+                    relation_type = rel.to_string();
+                    break;
+                }
+                if relation_type.is_empty() {
+                    relation_type = rel.to_string();
+                }
+            }
+            scored.push((
+                score,
+                node.entity_type.clone(),
+                node.id.clone(),
+                json!({
+                    "id": node.id.clone(),
+                    "type": node.entity_type.clone(),
+                    "title": node.title.clone(),
+                    "relation_type": relation_type,
+                    "source_symbol": t.artifact_ref.clone(),
+                    "artifact_type": artifact_type,
+                    "ranking_reasons": [reason],
+                    "ranking_score": score,
+                    "evidence_class": "soll_traceability",
+                }),
+            ));
+        }
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        scored
+            .into_iter()
+            .take(top_k.min(2))
+            .map(|(_, _, _, v)| v)
+            .collect()
+    }
+
+    /// REQ-AXO-902039 element 2 — RAM reimplementation of
+    /// `expand_concept_governing_entities`: concept→Requirement (score 88) and
+    /// concept→Requirement→Decision (score 84) bridges traversed over the SOLL
+    /// petgraph snapshot instead of PG `soll.Edge` joins.
+    fn expand_concept_governing_entities_ram(
+        snap: &crate::soll_snapshot::SollSnapshot,
+        selected: &mut Vec<Value>,
+        top_k: usize,
+    ) {
+        use std::collections::HashSet;
+        let concept_ids: Vec<String> = selected
+            .iter()
+            .filter(|row| row.get("type").and_then(|v| v.as_str()) == Some("Concept"))
+            .filter_map(|row| row.get("id").and_then(|v| v.as_str()))
+            .map(str::to_string)
+            .collect();
+        if concept_ids.is_empty() {
+            return;
+        }
+        let mut seen_ids: HashSet<String> = selected
+            .iter()
+            .filter_map(|row| row.get("id").and_then(|v| v.as_str()))
+            .map(str::to_string)
+            .collect();
+        let limit = top_k.min(4);
+
+        let mut req_rows: Vec<(String, Value)> = Vec::new();
+        for concept_id in &concept_ids {
+            for (tgt, rel) in snap.outgoing_edges(concept_id) {
+                let Some(node) = snap.nodes.get(tgt) else { continue };
+                if node.entity_type != "Requirement" {
+                    continue;
+                }
+                req_rows.push((
+                    node.id.clone(),
+                    json!({
+                        "id": node.id.clone(),
+                        "type": "Requirement",
+                        "title": node.title.clone(),
+                        "relation_type": rel.to_string(),
+                        "source_symbol": concept_id.clone(),
+                        "artifact_type": "",
+                        "ranking_reasons": ["concept_requirement_bridge"],
+                        "ranking_score": 88,
+                        "evidence_class": "soll_traceability",
+                    }),
+                ));
+            }
+        }
+        let mut dec_rows: Vec<(String, Value)> = Vec::new();
+        for concept_id in &concept_ids {
+            for (req_tgt, _rel) in snap.outgoing_edges(concept_id) {
+                let Some(req_node) = snap.nodes.get(req_tgt) else { continue };
+                if req_node.entity_type != "Requirement" {
+                    continue;
+                }
+                for (dec_src, de_rel) in snap.incoming_edges(&req_node.id) {
+                    let Some(dec_node) = snap.nodes.get(dec_src) else { continue };
+                    if dec_node.entity_type != "Decision" {
+                        continue;
+                    }
+                    dec_rows.push((
+                        dec_node.id.clone(),
+                        json!({
+                            "id": dec_node.id.clone(),
+                            "type": "Decision",
+                            "title": dec_node.title.clone(),
+                            "relation_type": de_rel.to_string(),
+                            "source_symbol": concept_id.clone(),
+                            "artifact_type": "",
+                            "ranking_reasons": ["concept_decision_bridge"],
+                            "ranking_score": 84,
+                            "evidence_class": "soll_traceability",
+                        }),
+                    ));
+                }
+            }
+        }
+        req_rows.sort_by(|a, b| a.0.cmp(&b.0));
+        dec_rows.sort_by(|a, b| a.0.cmp(&b.0));
+        for (id, row) in req_rows
+            .into_iter()
+            .take(limit)
+            .chain(dec_rows.into_iter().take(limit))
+        {
+            if seen_ids.insert(id) {
+                selected.push(row);
+            }
+        }
+    }
+
+    fn collect_soll_entities_pg(
         &self,
         entry_candidates: &[EntryCandidate],
         project: Option<&str>,
@@ -5353,6 +5624,215 @@ mod tests {
 
         evict_process_snapshot(code);
         evict_process_snapshot("ZZZ");
+    }
+
+    // REQ-AXO-902039 element 2/5 — RAM-fusion helpers + SOLL↔IST co-residence.
+    // Pure-RAM unit tests: `SollSnapshot::build` mirrors the SOLL graph without a
+    // PG round-trip, so these prove the RAM reimplementation of the
+    // symbol→governing-intent fusion reads is faithful and that the SOLL-RAM and
+    // IST-RAM mirrors are co-resident + traversable for the same project.
+    fn fusion_entry(name: &str, kind: &str, uri: &str) -> super::EntryCandidate {
+        super::EntryCandidate {
+            id: format!("X::{name}"),
+            name: name.to_string(),
+            kind: kind.to_string(),
+            project_code: "TSF".to_string(),
+            uri: uri.to_string(),
+            lexical_hits: 0,
+            exact_match: false,
+            score: 0.0,
+            reasons: Vec::new(),
+            semantic_distance: None,
+        }
+    }
+
+    fn fusion_snapshot() -> crate::soll_snapshot::SollSnapshot {
+        use crate::soll_snapshot::{SnapshotEdge, SnapshotNode, SnapshotTraceability, SollSnapshot};
+        let mk_node = |id: &str, ty: &str| SnapshotNode {
+            id: id.to_string(),
+            entity_type: ty.to_string(),
+            title: format!("title-{id}"),
+            status: "current".to_string(),
+            metadata_raw: "{}".to_string(),
+        };
+        let mut nodes = HashMap::new();
+        nodes.insert("REQ-TSF-001".to_string(), mk_node("REQ-TSF-001", "Requirement"));
+        nodes.insert("DEC-TSF-001".to_string(), mk_node("DEC-TSF-001", "Decision"));
+        nodes.insert("CPT-TSF-001".to_string(), mk_node("CPT-TSF-001", "Concept"));
+        let edges = vec![
+            SnapshotEdge {
+                source_id: "DEC-TSF-001".to_string(),
+                target_id: "REQ-TSF-001".to_string(),
+                relation_type: "SOLVES".to_string(),
+            },
+            SnapshotEdge {
+                source_id: "CPT-TSF-001".to_string(),
+                target_id: "REQ-TSF-001".to_string(),
+                relation_type: "BELONGS_TO".to_string(),
+            },
+        ];
+        // Symbol `render` implements DEC-TSF-001 (which SOLVES REQ-TSF-001). The
+        // governing node therefore has an outgoing SOLVES edge, exercising the
+        // RAM relation_type preference.
+        let trace = vec![SnapshotTraceability {
+            id: "T-TSF-1".to_string(),
+            soll_entity_type: "Decision".to_string(),
+            soll_entity_id: "DEC-TSF-001".to_string(),
+            artifact_type: "Symbol".to_string(),
+            artifact_ref: "render".to_string(),
+            artifact_status: "ok".to_string(),
+        }];
+        SollSnapshot::build("TSF", 1, nodes, edges, trace)
+    }
+
+    #[test]
+    fn collect_soll_traceability_ram_resolves_governing_req() {
+        let snap = fusion_snapshot();
+        let cands = vec![fusion_entry("render", "function", "")];
+        let rows = McpServer::collect_soll_traceability_ram(&snap, &cands, 5);
+        assert_eq!(rows.len(), 1, "one governing node for the `render` symbol");
+        assert_eq!(rows[0]["id"], "DEC-TSF-001");
+        assert_eq!(rows[0]["type"], "Decision");
+        assert_eq!(rows[0]["artifact_type"], "Symbol");
+        assert_eq!(rows[0]["ranking_score"], 100);
+        // SOLVES preferred among the node's outgoing edges (deterministic).
+        assert_eq!(rows[0]["relation_type"], "SOLVES");
+        assert_eq!(rows[0]["evidence_class"], "soll_traceability");
+        assert_eq!(rows[0]["ranking_reasons"][0], "direct_symbol_traceability");
+        // Case-insensitive symbol match (PG used lower(artifact_ref)).
+        let upper = vec![fusion_entry("RENDER", "function", "")];
+        assert_eq!(
+            McpServer::collect_soll_traceability_ram(&snap, &upper, 5).len(),
+            1
+        );
+        // No match → empty (no governing intent).
+        let none = vec![fusion_entry("absent_symbol", "function", "")];
+        assert!(McpServer::collect_soll_traceability_ram(&snap, &none, 5).is_empty());
+    }
+
+    #[test]
+    fn snapshot_has_direct_traceability_ram_matches_pg_semantics() {
+        let snap = fusion_snapshot();
+        assert!(McpServer::snapshot_has_direct_traceability(
+            &snap,
+            &[fusion_entry("render", "function", "")]
+        ));
+        assert!(!McpServer::snapshot_has_direct_traceability(
+            &snap,
+            &[fusion_entry("nope", "function", "")]
+        ));
+        // Empty candidate set → false (mirrors the PG `predicates.is_empty()` guard).
+        assert!(!McpServer::snapshot_has_direct_traceability(&snap, &[]));
+    }
+
+    #[test]
+    fn expand_concept_governing_entities_ram_bridges_req_and_decision() {
+        let snap = fusion_snapshot();
+        let mut selected = vec![json!({
+            "id": "CPT-TSF-001",
+            "type": "Concept",
+            "title": "concept",
+            "ranking_reasons": ["seed"],
+        })];
+        McpServer::expand_concept_governing_entities_ram(&snap, &mut selected, 5);
+        let ids: Vec<&str> = selected
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            ids.contains(&"REQ-TSF-001"),
+            "concept→requirement bridge added the governing REQ"
+        );
+        assert!(
+            ids.contains(&"DEC-TSF-001"),
+            "concept→requirement→decision bridge added the governing DEC"
+        );
+        // Decision row carries the bridge reason + score from the RAM traversal.
+        let dec = selected
+            .iter()
+            .find(|r| r.get("id").and_then(|v| v.as_str()) == Some("DEC-TSF-001"))
+            .unwrap();
+        assert_eq!(dec["ranking_reasons"][0], "concept_decision_bridge");
+        assert_eq!(dec["ranking_score"], 84);
+    }
+
+    #[test]
+    fn soll_and_ist_ram_mirrors_are_coresident_for_one_project() {
+        use crate::ist_snapshot::snapshot::{
+            EdgeTriple, IstGraph, NodeFlags, NodeKind, NodeRecord,
+        };
+        // IST-RAM: the `render` symbol (what the code IS).
+        let symbol_id = "TSF::widget.rs::render";
+        let ist = IstGraph::build(
+            vec![NodeRecord {
+                id: symbol_id.to_string(),
+                name: "render".to_string(),
+                project_code: "TSF".to_string(),
+                kind: NodeKind::Function,
+                flags: NodeFlags::default(),
+            }],
+            Vec::<EdgeTriple>::new(),
+        );
+        // SOLL-RAM: the REQ governing that same symbol (what it is FOR).
+        let snap = fusion_snapshot();
+
+        // Co-residence + coherence: the SAME short name `render` bridges the two
+        // mirrors — IST resolves the code symbol id, SOLL resolves its governing
+        // intent — under one coherent project scope, both purely in RAM.
+        assert_eq!(
+            ist.ids_with_short_name("render"),
+            vec![symbol_id],
+            "IST RAM resolves the code symbol"
+        );
+        let intent = McpServer::collect_soll_traceability_ram(
+            &snap,
+            &[fusion_entry("render", "function", "")],
+            5,
+        );
+        assert_eq!(
+            intent[0]["id"], "DEC-TSF-001",
+            "SOLL RAM resolves the governing intent for the same symbol"
+        );
+        assert_eq!(snap.project_code, "TSF");
+    }
+
+    #[test]
+    fn resolve_scoped_symbol_id_canonical_uses_ist_ram() {
+        use crate::ist_snapshot::snapshot::{IstGraph, NodeFlags, NodeKind, NodeRecord};
+        use crate::ist_snapshot::{evict_process_snapshot, publish_process_snapshot};
+        let code = "TSR"; // test-symbol-resolve ; single-threaded --lib run, evicted below.
+        let symbol_id = "TSR::widget.rs::render".to_string();
+        evict_process_snapshot(code);
+        publish_process_snapshot(
+            code.to_string(),
+            Arc::new(IstGraph::build(
+                vec![NodeRecord {
+                    id: symbol_id.clone(),
+                    name: "render".to_string(),
+                    project_code: code.to_string(),
+                    kind: NodeKind::Function,
+                    flags: NodeFlags::default(),
+                }],
+                vec![],
+            )),
+        );
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = McpServer::new(store);
+        // By short name → IST RAM resolves the canonical id (no PG).
+        assert_eq!(
+            server
+                .resolve_scoped_symbol_id_canonical("render", Some(code))
+                .as_deref(),
+            Some(symbol_id.as_str())
+        );
+        // By canonical id → recognised directly from RAM.
+        assert_eq!(
+            server
+                .resolve_scoped_symbol_id_canonical(&symbol_id, Some(code))
+                .as_deref(),
+            Some(symbol_id.as_str())
+        );
+        evict_process_snapshot(code);
     }
 
     #[test]
