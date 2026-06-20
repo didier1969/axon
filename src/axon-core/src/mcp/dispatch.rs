@@ -212,10 +212,13 @@ impl McpServer {
                 // allowed values spelled out. Folded into the text channel below
                 // so HTTP/curl clients (which surface only content[0].text) get the
                 // vocabulary too.
-                let fields_form = super::tool_contracts::parameter_form_from_schema(
+                let mut fields_form = super::tool_contracts::parameter_form_from_schema(
                     schema.as_ref(),
                     &required_fields,
                 );
+                // REQ-AXO-901947 slice 2 — fill dynamic valid_values (project codes
+                // from the registry) the static schema can't carry.
+                self.enrich_form_dynamic_values(&mut fields_form);
                 let form_text = super::tool_contracts::render_parameter_form(&fields_form);
                 let parameter_repair = json!({
                     "invalid_field": first_invalid_field,

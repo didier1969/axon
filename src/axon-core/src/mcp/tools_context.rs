@@ -5903,6 +5903,31 @@ mod tests {
         assert_eq!(out["isError"], true);
     }
 
+    // REQ-AXO-901947 slice 2 — the reactive repair form fills a project field's
+    // valid_values with the registered project codes (real registry), so a
+    // wrong-project failure surfaces the valid set without a second round-trip.
+    #[test]
+    fn enrich_form_dynamic_values_fills_project_codes_from_registry() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = McpServer::new(store);
+        let mut form = vec![
+            json!({"name": "project", "required": false, "type": "string"}),
+            json!({"name": "symbol", "required": true, "type": "string"}),
+        ];
+        server.enrich_form_dynamic_values(&mut form);
+        let project = form.iter().find(|f| f["name"] == "project").unwrap();
+        let vv: Vec<&str> = project["valid_values"]
+            .as_array()
+            .expect("project valid_values filled from registry")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(vv.contains(&"AXO"), "registered codes surfaced: {vv:?}");
+        // Non-project field is left untouched.
+        let symbol = form.iter().find(|f| f["name"] == "symbol").unwrap();
+        assert!(symbol.get("valid_values").is_none());
+    }
+
     #[test]
     fn multipart_uri_reuse_allows_one_adjacent_anchor_chunk() {
         let first = candidate("PRJ::sym", "/repo/file.rs", 1, 3, true, true);

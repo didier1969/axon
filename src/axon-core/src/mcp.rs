@@ -478,6 +478,51 @@ impl McpServer {
         }))
     }
 
+    /// REQ-AXO-901947 slice 2 — enrich the reactive repair form with dynamic
+    /// `valid_values` the static schema cannot carry. Today: a `project`/
+    /// `project_code` field gets the registered project codes (capped), so a
+    /// wrong-project failure surfaces the valid set in the same response instead
+    /// of forcing a `project_registry_lookup` round-trip. Closed-enum fields keep
+    /// their schema-derived values (set in `parameter_form_from_schema`); this
+    /// only fills fields that have no `valid_values` yet. Cheap: one indexed
+    /// registry SELECT, only on the (rare) validation-failure path.
+    pub(crate) fn enrich_form_dynamic_values(&self, form: &mut [Value]) {
+        let has_project_field = form.iter().any(|f| {
+            matches!(
+                f.get("name").and_then(Value::as_str),
+                Some("project") | Some("project_code")
+            ) && f.get("valid_values").is_none()
+        });
+        if !has_project_field {
+            return;
+        }
+        let raw = self
+            .graph_store
+            .query_json(
+                "SELECT project_code FROM soll.ProjectCodeRegistry \
+                 WHERE project_code <> '' ORDER BY project_code ASC LIMIT 20",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let codes: Vec<Value> = rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .filter(|value| value.as_str().map(|s| !s.is_empty()).unwrap_or(false))
+            .collect();
+        if codes.is_empty() {
+            return;
+        }
+        for field in form.iter_mut() {
+            if matches!(
+                field.get("name").and_then(Value::as_str),
+                Some("project") | Some("project_code")
+            ) && field.get("valid_values").is_none()
+            {
+                field["valid_values"] = Value::Array(codes.clone());
+            }
+        }
+    }
+
     fn infer_dispatch_guidance_outcome(response: &Value) -> GuidanceOutcome {
         let response_text = response
             .get("content")
