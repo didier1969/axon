@@ -404,6 +404,120 @@ pub(crate) fn render_pg_repair_text(repair: &Value) -> String {
     out
 }
 
+/// REQ-AXO-901947 (DEC-AXO-901638 slice 1) — build the reactive full-form repair:
+/// for every field in the tool's inputSchema surface `name` / `required` / `type`
+/// and, crucially, the **valid_values** of any closed enum. The pre-existing
+/// repair handed the LLM `<FILL:type>` stubs with no allowed-value list, so
+/// closed-enum fields (`query.mode`, `*.semantic`, `status.mode`, …) were the #1
+/// re-call cause: the agent had to guess the vocabulary or probe `help`.
+/// Schema-derived only (no DB) — deterministic + unit-testable. Dynamic resolvers
+/// (project_code from the registry, target_id candidates from SOLL) are a wired
+/// follow-up; the closed-enum surface is the high-frequency win.
+pub(crate) fn parameter_form_from_schema(
+    schema: Option<&Value>,
+    required_fields: &[String],
+) -> Vec<Value> {
+    let Some(props) = schema
+        .and_then(|s| s.get("properties"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let mut form: Vec<Value> = props
+        .iter()
+        .map(|(name, spec)| {
+            let required = required_fields.iter().any(|r| r == name);
+            let mut field = serde_json::json!({
+                "name": name,
+                "required": required,
+                "type": field_type_label(spec),
+            });
+            if let Some(values) = closed_enum_values(spec) {
+                field["valid_values"] = Value::Array(values);
+            }
+            field
+        })
+        .collect();
+    // Deterministic, scannable order: required fields first, then alphabetical.
+    form.sort_by(|a, b| {
+        let ar = a.get("required").and_then(Value::as_bool).unwrap_or(false);
+        let br = b.get("required").and_then(Value::as_bool).unwrap_or(false);
+        br.cmp(&ar).then_with(|| field_form_name(a).cmp(field_form_name(b)))
+    });
+    form
+}
+
+fn field_form_name(v: &Value) -> &str {
+    v.get("name").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Readable type label from an inputSchema property, tolerating `type` being a
+/// string (`"string"`) or an array (`["string","null"]` for optionals — the
+/// schemars encoding of `Option<T>`). The `null` member is dropped.
+fn field_type_label(spec: &Value) -> String {
+    match spec.get("type") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => {
+            let parts: Vec<&str> = arr
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|t| *t != "null")
+                .collect();
+            if parts.is_empty() {
+                "value".to_string()
+            } else {
+                parts.join("|")
+            }
+        }
+        _ => "value".to_string(),
+    }
+}
+
+/// Closed-enum allowed values, dropping a `null` sentinel (an optional enum
+/// encodes the absent case as a `null` member). `None` when there is no enum.
+pub(crate) fn closed_enum_values(spec: &Value) -> Option<Vec<Value>> {
+    let arr = spec.get("enum").and_then(Value::as_array)?;
+    let values: Vec<Value> = arr.iter().filter(|v| !v.is_null()).cloned().collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+/// Render the field form into the inline text channel — HTTP/curl clients surface
+/// only `content[0].text`, so the enum vocabulary must live there too (AC#6), not
+/// just in `data.parameter_repair.fields`. Compact, one line per field.
+pub(crate) fn render_parameter_form(form: &[Value]) -> String {
+    if form.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\nFields:");
+    for field in form {
+        let name = field_form_name(field);
+        let required = field
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let ty = field.get("type").and_then(Value::as_str).unwrap_or("value");
+        let req = if required { "required" } else { "optional" };
+        out.push_str(&format!("\n  {name} ({req}, {ty}"));
+        if let Some(values) = field.get("valid_values").and_then(Value::as_array) {
+            let opts: Vec<String> = values
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| v.to_string())
+                })
+                .collect();
+            out.push_str(&format!(", one-of: {}", opts.join("|")));
+        }
+        out.push(')');
+    }
+    out
+}
+
 /// Derived JSON Schema for a tracer-bullet tool, or `None` for any tool still
 /// served by the hand-written catalog literal (slice-2 rollout).
 pub(crate) fn derived_input_schema(name: &str) -> Option<Value> {
@@ -856,5 +970,89 @@ mod tests {
             rendered.contains("relation_type"),
             "data fields must be advertised"
         );
+    }
+
+    // REQ-AXO-901947 (DEC-AXO-901638 slice 1) — the reactive repair form surfaces
+    // closed-enum vocabularies so the LLM fills the right value in one round-trip.
+    #[test]
+    fn parameter_form_surfaces_closed_enum_valid_values_from_real_schema() {
+        let schema = derived_input_schema("query").unwrap();
+        let required: Vec<String> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        let form = parameter_form_from_schema(Some(&schema), &required);
+        // `query` (the required string) sorts first.
+        assert_eq!(form[0]["name"], "query");
+        assert_eq!(form[0]["required"], true);
+        // `mode` carries its allowed values, with the `null` sentinel dropped.
+        let mode = form
+            .iter()
+            .find(|f| f["name"] == "mode")
+            .expect("mode field present");
+        let vv: Vec<&str> = mode["valid_values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            vv.contains(&"brief") && vv.contains(&"verbose"),
+            "mode enum surfaced: {mode}"
+        );
+        assert!(!vv.contains(&"null"), "null sentinel must be dropped");
+        assert_eq!(mode["required"], false);
+    }
+
+    #[test]
+    fn parameter_form_orders_required_first_and_skips_non_enum_values() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "zeta": {"type": "string"},
+                "name": {"type": "string"},
+                "mode": {"type": "string", "enum": ["a", "b", null]},
+            }
+        });
+        let form = parameter_form_from_schema(Some(&schema), &["name".to_string()]);
+        // required first, then alphabetical.
+        assert_eq!(form[0]["name"], "name");
+        assert_eq!(form[0]["required"], true);
+        // non-enum field carries no valid_values key.
+        let zeta = form.iter().find(|f| f["name"] == "zeta").unwrap();
+        assert!(zeta.get("valid_values").is_none());
+        // enum field surfaces values, null dropped.
+        let mode = form.iter().find(|f| f["name"] == "mode").unwrap();
+        let vv: Vec<&str> = mode["valid_values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(vv, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn render_parameter_form_folds_enum_into_text_channel() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["q"],
+            "properties": {
+                "q": {"type": "string"},
+                "mode": {"type": "string", "enum": ["brief", "verbose"]},
+            }
+        });
+        let form = parameter_form_from_schema(Some(&schema), &["q".to_string()]);
+        let text = render_parameter_form(&form);
+        assert!(text.contains("q (required, string)"), "{text}");
+        assert!(
+            text.contains("mode (optional, string, one-of: brief|verbose)"),
+            "{text}"
+        );
+        // Empty form → empty string (no spurious header).
+        assert_eq!(render_parameter_form(&[]), "");
     }
 }

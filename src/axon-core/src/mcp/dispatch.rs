@@ -159,16 +159,36 @@ impl McpServer {
                 // input schema, so a single field-fill round-trip succeeds.
                 let mut corrected_arguments = arguments.as_object().cloned().unwrap_or_default();
                 for field in &top_level_missing {
-                    let expected_type = schema
+                    let prop = schema
                         .as_ref()
                         .and_then(|s| s.get("properties"))
-                        .and_then(|p| p.get(field))
-                        .and_then(|f| f.get("type"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("value");
+                        .and_then(|p| p.get(field));
+                    // REQ-AXO-901947 — a closed-enum field stubs with its allowed
+                    // values (`<FILL:one-of:a|b|c>`), not a bare `<FILL:type>`, so
+                    // the LLM fills the right vocabulary in one round-trip.
+                    let stub = match prop.and_then(super::tool_contracts::closed_enum_values) {
+                        Some(values) => {
+                            let opts: Vec<String> = values
+                                .iter()
+                                .map(|v| {
+                                    v.as_str()
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| v.to_string())
+                                })
+                                .collect();
+                            format!("<FILL:one-of:{}>", opts.join("|"))
+                        }
+                        None => {
+                            let expected_type = prop
+                                .and_then(|f| f.get("type"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("value");
+                            format!("<FILL:{expected_type}>")
+                        }
+                    };
                     corrected_arguments
                         .entry(field.clone())
-                        .or_insert_with(|| Value::String(format!("<FILL:{expected_type}>")));
+                        .or_insert_with(|| Value::String(stub));
                 }
                 // Nested stubs for per-action conditional fields (`data.<field>`).
                 for (path, expected_type) in &conditional_missing {
@@ -187,11 +207,22 @@ impl McpServer {
                     "tool": normalized_name,
                     "arguments": corrected_arguments
                 });
+                // REQ-AXO-901947 (DEC-AXO-901638 slice 1) — the full reactive form:
+                // every field with required/type and, for closed enums, the
+                // allowed values spelled out. Folded into the text channel below
+                // so HTTP/curl clients (which surface only content[0].text) get the
+                // vocabulary too.
+                let fields_form = super::tool_contracts::parameter_form_from_schema(
+                    schema.as_ref(),
+                    &required_fields,
+                );
+                let form_text = super::tool_contracts::render_parameter_form(&fields_form);
                 let parameter_repair = json!({
                     "invalid_field": first_invalid_field,
                     "tool": normalized_name,
                     "missing_required_fields": missing_required,
                     "required_fields": required_fields,
+                    "fields": fields_form,
                     "supplied_arguments": arguments,
                     "input_schema": schema,
                     "corrected_call": corrected_call,
@@ -207,8 +238,8 @@ impl McpServer {
                     "content": [{
                         "type": "text",
                         "text": format!(
-                            "Invalid arguments for tool `{}`.\n\nYou sent:\n```json\n{}\n```\n\nExpected schema:\n```json\n{}\n```\n\nFix: check required fields and types, then retry.",
-                            normalized_name, args_str, schema_str
+                            "Invalid arguments for tool `{}`.\n\nYou sent:\n```json\n{}\n```\n\nExpected schema:\n```json\n{}\n```\n\nFix: check required fields and types, then retry.{}",
+                            normalized_name, args_str, schema_str, form_text
                         )
                     }],
                     "isError": true,
