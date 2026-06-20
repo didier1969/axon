@@ -80,6 +80,16 @@ impl OrtGpuFirstTextEmbedding {
         let memory_pattern_enabled = ort_memory_pattern_enabled_from_env(
             std::env::var("AXON_ORT_MEMORY_PATTERN").ok().as_deref(),
         );
+        // REQ-AXO-902048 — disable ONNX Runtime intra/inter-op spin-wait by
+        // default. ORT's thread pool busy-spins between inference calls, burning
+        // ~3 cores at idle even when no chunk is being embedded (gdb session 86:
+        // onnxruntime::concurrency ×30 + Eigen ×15 on an idle indexer). Parking
+        // the pool when idle costs a few µs of wake latency but reclaims the
+        // cores; TensorRT/CUDA execution is unaffected. Override with
+        // `AXON_ORT_ALLOW_SPINNING=1` for throughput benchmarking.
+        let allow_spinning = ort_allow_spinning_from_env(
+            std::env::var("AXON_ORT_ALLOW_SPINNING").ok().as_deref(),
+        );
         let mut builder = Session::builder()
             .map_err(|err| anyhow!("failed to create ORT session builder: {err}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
@@ -87,6 +97,14 @@ impl OrtGpuFirstTextEmbedding {
             .with_memory_pattern(memory_pattern_enabled)
             .map_err(|err| {
                 anyhow!("failed to set ORT memory pattern={memory_pattern_enabled}: {err}")
+            })?
+            .with_intra_op_spinning(allow_spinning)
+            .map_err(|err| {
+                anyhow!("failed to set ORT intra-op spinning={allow_spinning}: {err}")
+            })?
+            .with_inter_op_spinning(allow_spinning)
+            .map_err(|err| {
+                anyhow!("failed to set ORT inter-op spinning={allow_spinning}: {err}")
             })?;
 
         // REQ-AXO-901798 — track which provider the session actually loaded
@@ -468,6 +486,21 @@ pub(super) fn ort_memory_pattern_enabled_from_env(raw: Option<&str>) -> bool {
             !(trimmed == "0" || trimmed.eq_ignore_ascii_case("false"))
         }
         None => true,
+    }
+}
+
+/// REQ-AXO-902048 — pure helper to parse `AXON_ORT_ALLOW_SPINNING` env
+/// override. Default = false (spin-wait DISABLED → the idle-CPU fix).
+/// Accepts `1`, `true`, `True`, `TRUE` (any case) as the re-enable marker;
+/// everything else (incl. unset, `0`, `false`) keeps spinning off.
+/// Sibling-tested in `gpu_backend_tests.rs` per GUI-PRO-001.
+pub(super) fn ort_allow_spinning_from_env(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => {
+            let trimmed = v.trim();
+            trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+        }
+        None => false,
     }
 }
 

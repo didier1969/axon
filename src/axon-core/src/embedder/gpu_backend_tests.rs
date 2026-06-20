@@ -1,9 +1,42 @@
 // REQ-AXO-262 / GUI-PRO-001 — sibling tests for gpu_backend helpers.
 
 use super::{
-    bucket_up, cuda_tf32_enabled_from_env, ort_bind_output_per_iter_from_env,
-    ort_memory_pattern_enabled_from_env, parse_seq_buckets_from_env, DEFAULT_SEQ_BUCKETS,
+    bucket_up, cuda_tf32_enabled_from_env, ort_allow_spinning_from_env,
+    ort_bind_output_per_iter_from_env, ort_memory_pattern_enabled_from_env,
+    parse_seq_buckets_from_env, DEFAULT_SEQ_BUCKETS,
 };
+
+// ── REQ-AXO-902048 — ONNX intra/inter-op spin-wait disabled by default ───
+
+#[test]
+fn ort_allow_spinning_default_is_false() {
+    // The idle-CPU fix: spinning OFF unless explicitly re-enabled.
+    assert!(!ort_allow_spinning_from_env(None));
+}
+
+#[test]
+fn ort_allow_spinning_one_or_true_enables() {
+    assert!(ort_allow_spinning_from_env(Some("1")));
+    assert!(ort_allow_spinning_from_env(Some("true")));
+    assert!(ort_allow_spinning_from_env(Some("True")));
+    assert!(ort_allow_spinning_from_env(Some("TRUE")));
+}
+
+#[test]
+fn ort_allow_spinning_other_values_keep_disabled() {
+    assert!(!ort_allow_spinning_from_env(Some("0")));
+    assert!(!ort_allow_spinning_from_env(Some("false")));
+    assert!(!ort_allow_spinning_from_env(Some("yes")));
+    assert!(!ort_allow_spinning_from_env(Some("on")));
+    assert!(!ort_allow_spinning_from_env(Some("")));
+}
+
+#[test]
+fn ort_allow_spinning_trims_whitespace() {
+    assert!(ort_allow_spinning_from_env(Some(" 1 ")));
+    assert!(ort_allow_spinning_from_env(Some(" true ")));
+    assert!(!ort_allow_spinning_from_env(Some(" 0 ")));
+}
 
 #[test]
 fn ort_memory_pattern_default_is_true() {
