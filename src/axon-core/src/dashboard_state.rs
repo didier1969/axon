@@ -241,17 +241,20 @@ pub(crate) fn compute_pipeline_status(
     }
 
     // indexer modes (indexer_graph / indexer_vector / indexer_full).
-    if !runtime_idle {
-        return ("indexer_active", None);
-    }
-
-    // Idle. Distinguish done from blocked by whether there's pending
-    // work the pipeline should be draining.
+    // REQ-AXO-902044 — pending_chunks (PG ground truth) is authoritative for
+    // idleness. The in-memory `runtime_idle` heartbeat drifts inflated since the
+    // reconcile self-healing was retired (REQ-AXO-902036: a chunk marked pending
+    // by A3 but dedup-skipped on the B lane never clears), so it can stick falsely
+    // non-idle. It may therefore only UPGRADE a pending pipeline to "active"; it
+    // can NEVER mask a genuinely-drained one (pending==0) as still-working.
     if pending_gt_zero {
-        ("indexer_idle_blocked", Some("vector_drain_stalled"))
-    } else {
-        ("indexer_idle_done", None)
+        if !runtime_idle || indexer_paired {
+            return ("indexer_active", None);
+        }
+        return ("indexer_idle_blocked", Some("vector_drain_stalled"));
     }
+    // No pending work (PG truth) → done, regardless of the drifting heartbeat.
+    ("indexer_idle_done", None)
 }
 
 /// Compose the `dashboard_state_v1` JSON envelope from live in-memory
@@ -419,6 +422,17 @@ mod tests {
     #[test]
     fn pipeline_status_indexer_idle_done_when_pending_zero() {
         let (status, reason) = compute_pipeline_status("indexer_full", true, 0, None, false);
+        assert_eq!(status, "indexer_idle_done");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn pipeline_status_indexer_idle_done_even_if_runtime_heartbeat_drifts_nonidle() {
+        // REQ-AXO-902044 — the in-memory pending-set can stick falsely non-idle
+        // (reconcile retired in 902036). With PG ground truth pending==0 the
+        // verdict must read idle_done, not a phantom indexer_active. Before the
+        // fix, runtime_idle=false short-circuited to "indexer_active" here.
+        let (status, reason) = compute_pipeline_status("indexer_full", false, 0, None, false);
         assert_eq!(status, "indexer_idle_done");
         assert_eq!(reason, None);
     }

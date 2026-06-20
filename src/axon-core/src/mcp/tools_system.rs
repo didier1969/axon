@@ -415,12 +415,15 @@ impl McpServer {
         // sweep telemetry was ripped with the ingress_buffer. Watchman feeds
         // pipeline A directly; DBQ-A drains the backlog (stock_a below).
 
-        // REQ-AXO-90009 Slice 2 — in-memory pending set heartbeat.
-        // `runtime_pending` reflects what THIS process's
-        // `EmbedderRuntimeState` is tracking ; `pending_chunks` above
-        // is the DB-derived ground truth. The two should converge
-        // within `reconcile_interval` ; a wide divergence flags a
-        // NOTIFY listener drop or a missed mark_embedded.
+        // REQ-AXO-90009 Slice 2 / REQ-AXO-902044 — best-effort in-memory pending
+        // heartbeat. `runtime_pending` is what THIS process's `EmbedderRuntimeState`
+        // tracks (A3 mark_pending → B3 mark_embedded); `pending_chunks` above is the
+        // DB-derived GROUND TRUTH and is authoritative. The two no longer auto-
+        // reconcile: the wholesale self-healing loop was retired (REQ-AXO-902036),
+        // so `runtime_pending` can drift inflated (chunks pending-marked by A3 but
+        // dedup-skipped on the B lane never clear). Treat it as a coarse liveness
+        // hint only; `compute_pipeline_status` below reads pending_chunks for the
+        // idle verdict so the drift can never mask a genuinely-drained pipeline.
         let runtime_pending = crate::embedder::lifecycle::process_state().pending_count();
         let runtime_pending_empty = runtime_pending == 0;
 
