@@ -248,7 +248,14 @@ in
     mkdir -p $ELIXIR_HOME
 
     # Auto Pre-warming (Necessary for Systemd or first setup)
-    if [ "''${AXON_SKIP_ELIXIR_PREWARM:-0}" != "1" ] && [ ! -f "$MIX_HOME/archives/hex-"* ]; then
+    # REQ-AXO-902064 slice 2 — the guard tested `-f` (regular file) but
+    # `mix local.hex` installs the archive as a DIRECTORY ($MIX_HOME/archives/
+    # hex-X.Y.Z/), so `! -f` was ALWAYS true and the prewarm re-ran on EVERY
+    # shell enter (≈30-60s) — the dominant non-brain contribution to the ~93s
+    # MCP promote downtime, even though hex was already installed. `-e` (exists,
+    # file or dir) makes it the intended one-time install. MIX_HOME is persistent
+    # (.axon/elixir_home), so the dashboard keeps hex; this is a pure no-op skip.
+    if [ "''${AXON_SKIP_ELIXIR_PREWARM:-0}" != "1" ] && [ ! -e "$MIX_HOME/archives/hex-"* ]; then
       echo "📦 Pre-warming Elixir environment (Hex/Rebar)..." >&2
       mix local.hex --force > /dev/null 2>&1
       mix local.rebar --force > /dev/null 2>&1
