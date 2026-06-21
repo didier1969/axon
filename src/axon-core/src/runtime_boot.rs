@@ -1126,11 +1126,75 @@ mod tests {
         apply_canonical_ort_thread_defaults_from_openmp, apply_graph_first_indexer_memory_defaults,
         canonical_effective_embedding_lane_config, canonical_embedding_provider_request,
         graph_first_indexer_lane_sizing, parse_boot_warm_project_codes,
-        parse_build_info_identity, RuntimeBootProfile, RuntimeBootRole,
+        parse_build_info_identity, resource_release_identity, RuntimeBootProfile, RuntimeBootRole,
     };
     use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_profile::{EmbeddingLaneSizing, RuntimeProfile};
     use crate::runtime_writer_guard::WriterTarget;
+
+    /// REQ-AXO-902064 — the active-identity re-source OVERRIDES the inherited
+    /// (stale) env from the promote-written file. This is the mechanism that lets
+    /// an in-place `process restart` report the PROMOTED identity despite the
+    /// daemon's frozen env. Saves/restores the process env around the assertion.
+    #[test]
+    fn resource_release_identity_overrides_env_from_active_file() {
+        let saved_file = std::env::var("AXON_ACTIVE_IDENTITY_FILE").ok();
+        let saved_build = std::env::var("AXON_BUILD_ID").ok();
+        let saved_gen = std::env::var("AXON_INSTALL_GENERATION").ok();
+
+        let path = std::env::temp_dir().join("axon_test_active_identity_REQ902064.env");
+        std::fs::write(
+            &path,
+            "AXON_BUILD_ID=v9.9.9-promoted\nAXON_INSTALL_GENERATION=gen-promoted\n",
+        )
+        .unwrap();
+        // Simulate the in-place restart: the daemon reinjected a STALE build_id.
+        std::env::set_var("AXON_BUILD_ID", "v0.0.0-stale-inherited");
+        std::env::set_var("AXON_INSTALL_GENERATION", "gen-stale");
+        std::env::set_var("AXON_ACTIVE_IDENTITY_FILE", path.to_str().unwrap());
+
+        resource_release_identity();
+
+        let got_build = std::env::var("AXON_BUILD_ID").unwrap();
+        let got_gen = std::env::var("AXON_INSTALL_GENERATION").unwrap();
+
+        // restore env before asserting (so a failure can't leak state)
+        match saved_file {
+            Some(v) => std::env::set_var("AXON_ACTIVE_IDENTITY_FILE", v),
+            None => std::env::remove_var("AXON_ACTIVE_IDENTITY_FILE"),
+        }
+        match saved_build {
+            Some(v) => std::env::set_var("AXON_BUILD_ID", v),
+            None => std::env::remove_var("AXON_BUILD_ID"),
+        }
+        match saved_gen {
+            Some(v) => std::env::set_var("AXON_INSTALL_GENERATION", v),
+            None => std::env::remove_var("AXON_INSTALL_GENERATION"),
+        }
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(got_build, "v9.9.9-promoted", "active-identity must override stale env");
+        assert_eq!(got_gen, "gen-promoted");
+    }
+
+    #[test]
+    fn resource_release_identity_noop_without_env() {
+        let saved_file = std::env::var("AXON_ACTIVE_IDENTITY_FILE").ok();
+        let saved_build = std::env::var("AXON_BUILD_ID").ok();
+        std::env::remove_var("AXON_ACTIVE_IDENTITY_FILE");
+        std::env::set_var("AXON_BUILD_ID", "v1.2.3-keep");
+        resource_release_identity(); // no file env → must not touch AXON_BUILD_ID
+        let got = std::env::var("AXON_BUILD_ID").unwrap();
+        match saved_file {
+            Some(v) => std::env::set_var("AXON_ACTIVE_IDENTITY_FILE", v),
+            None => std::env::remove_var("AXON_ACTIVE_IDENTITY_FILE"),
+        }
+        match saved_build {
+            Some(v) => std::env::set_var("AXON_BUILD_ID", v),
+            None => std::env::remove_var("AXON_BUILD_ID"),
+        }
+        assert_eq!(got, "v1.2.3-keep", "no active-identity env → env untouched");
+    }
 
     /// REQ-AXO-902064 slice 3 — build-info identity parse: keeps only the four
     /// release-identity vars, strips shlex single-quotes, ignores other lines.
