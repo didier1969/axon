@@ -707,6 +707,56 @@ impl RustParser {
                 properties: HashMap::new(),
             });
         }
+        // CPT-AXO-90050 — capture function calls NESTED inside the macro's
+        // arguments. tree-sitter does not expand macros, so the args are a raw
+        // `token_tree` (no structured `call_expression`). Heuristic: an
+        // `identifier` immediately followed by a `token_tree` is a call site
+        // (e.g. `assert!(commit_message_is_refactor(x))` → calls
+        // commit_message_is_refactor). Without this, the test→code-under-test
+        // CALLS edges were dropped (tests call the SUT inside assert!/assert_eq!),
+        // making test_impact/tests_for impossible and the audit over-report dead
+        // code (REQ-901958, validated on OPV: 85% false positives).
+        if let Some(tt) = self.find_child_by_type(node, "token_tree") {
+            self.extract_calls_in_token_tree(tt, source, result, current_function);
+        }
+    }
+
+    /// CPT-AXO-90050 — heuristic call extraction inside an unexpanded macro
+    /// `token_tree`: `identifier` followed by a `token_tree` ⇒ a call; recurse
+    /// into nested token_trees (e.g. `assert_eq!(a, foo(bar(x)))`).
+    fn extract_calls_in_token_tree<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        current_function: &str,
+    ) {
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        for (idx, child) in children.iter().enumerate() {
+            match child.kind() {
+                "identifier" => {
+                    if children
+                        .get(idx + 1)
+                        .map(|n| n.kind() == "token_tree")
+                        .unwrap_or(false)
+                    {
+                        if let Ok(name) = child.utf8_text(source) {
+                            result.relations.push(Relation {
+                                from: current_function.to_string(),
+                                to: name.to_string(),
+                                rel_type: "calls".to_string(),
+                                properties: HashMap::new(),
+                            });
+                        }
+                    }
+                }
+                "token_tree" => {
+                    self.extract_calls_in_token_tree(*child, source, result, current_function)
+                }
+                _ => {}
+            }
+        }
     }
 
     fn walk_for_calls<'a>(
@@ -836,6 +886,27 @@ mod tests {
         let println_call: Vec<&&Relation> = cs.iter().filter(|c| c.to == "println!").collect();
         assert_eq!(println_call.len(), 1);
         assert_eq!(println_call[0].from, "alpha");
+    }
+
+    #[test]
+    fn calls_nested_in_macro_args_are_captured() {
+        // CPT-AXO-90050 — the call to the code-under-test lives INSIDE the
+        // assert! macro; without token_tree recursion only `assert!` was caught,
+        // dropping the test→SUT edge. Nested calls (assert_eq!(a, foo(bar(x))))
+        // must surface foo AND bar.
+        let p = parser();
+        let result = p.parse(
+            "fn t() { assert!(commit_message_is_refactor(\"refactor: x\")); assert_eq!(a, foo(bar(z))); }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let targets: Vec<&str> = calls(&result.relations).iter().map(|c| c.to.as_str()).collect();
+        assert!(targets.contains(&"commit_message_is_refactor"), "got {:?}", targets);
+        assert!(targets.contains(&"foo"), "got {:?}", targets);
+        assert!(targets.contains(&"bar"), "got {:?}", targets);
+        assert!(targets.contains(&"assert!"), "macro name still captured: {:?}", targets);
     }
 
     #[test]
