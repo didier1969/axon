@@ -1325,4 +1325,160 @@ impl McpServer {
             }
         })
     }
+
+    /// REQ-AXO-162/160 — resolve a user symbol (canonical id or bare name) to its
+    /// canonical IST id: exact id first, else the shortest `::name` suffix match.
+    fn resolve_test_target_id(&self, project: &str, symbol: &str) -> Option<String> {
+        let esc = |s: &str| s.replace('\'', "''");
+        let sql = format!(
+            "SELECT id FROM ist.Symbol WHERE project_code = '{p}' AND (id = '{s}' OR id LIKE '%::{s}') ORDER BY length(id) ASC LIMIT 1",
+            p = esc(project),
+            s = esc(symbol)
+        );
+        let raw = self.graph_store.query_json(&sql).ok()?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).ok()?;
+        rows.into_iter()
+            .next()?
+            .into_iter()
+            .next()?
+            .as_str()
+            .map(String::from)
+    }
+
+    /// REQ-AXO-162 — tests that exercise `symbol_id`: reverse-CALLS callers
+    /// (radius ≤ N) carrying the `tested` flag (test fns + folded pytest
+    /// fixtures, REQ-AXO-901958). Pure RAM IST traversal (PIL-AXO-9002).
+    fn tests_exercising(&self, project: &str, symbol_id: &str, radius: u32) -> Vec<String> {
+        let view = process_view();
+        let mut tests: Vec<String> = view
+            .reverse_at_radius(
+                project,
+                symbol_id,
+                radius,
+                10_000,
+                &[RelationType::Calls, RelationType::CallsNif],
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| view.node_tested(project, c) == Some(true))
+            .collect();
+        tests.sort();
+        tests.dedup();
+        tests
+    }
+
+    /// REQ-AXO-162 — `tests_for(symbol)`: which tests exercise a symbol. Atomic
+    /// primitive that composes into `test_impact`. Activates fully once the
+    /// macro-call edges (CPT-AXO-90050) are live via a reindex.
+    pub(crate) fn axon_tests_for(&self, args: &Value) -> Option<Value> {
+        let Some(symbol) = args.get("symbol").and_then(|v| v.as_str()) else {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "`tests_for` requires `symbol`." }],
+                "isError": true,
+                "data": { "status": "input_invalid", "parameter_repair": { "invalid_field": "symbol" } }
+            }));
+        };
+        let project = args
+            .get("project_code")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| self.symbol_project_code(symbol));
+        let Some(project) = project else {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "`tests_for`: could not resolve project; pass `project_code`." }],
+                "isError": true,
+                "data": { "status": "input_invalid", "parameter_repair": { "invalid_field": "project_code" } }
+            }));
+        };
+        let radius = args.get("radius").and_then(|v| v.as_u64()).unwrap_or(4).clamp(1, 8) as u32;
+        let Some(symbol_id) = self.resolve_test_target_id(&project, symbol) else {
+            return Some(json!({
+                "content": [{ "type": "text", "text": format!("`tests_for`: symbol '{symbol}' not found in {project}.") }],
+                "data": { "status": "input_not_found", "symbol": symbol, "next_action": { "tool": "query" } }
+            }));
+        };
+        if !self.ensure_ram_snapshot_warm(&project) {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "`tests_for`: RAM IST snapshot cold." }],
+                "data": { "status": "degraded", "surfaces_degraded": ["graph_ram_unavailable"], "next_action": { "tool": "ist_snapshot_warm" } }
+            }));
+        }
+        let tests = self.tests_exercising(&project, &symbol_id, radius);
+        Some(json!({
+            "content": [{ "type": "text", "text": format!("{} test(s) exercise {symbol_id}", tests.len()) }],
+            "data": {
+                "status": "ok",
+                "symbol": symbol_id,
+                "tests": tests,
+                "surfaces_used": ["graph_ram"],
+                "follow_up_tools": ["test_impact", "inspect"]
+            }
+        }))
+    }
+
+    /// REQ-AXO-160 — `test_impact(symbols)`: the minimal regression-test set for a
+    /// set of changed symbols (union of `tests_for` over each). Commercial
+    /// flagship. `symbols` = changed symbol names/ids (diff→symbol resolution is a
+    /// thin convenience layer to add once `query --changed` lands).
+    pub(crate) fn axon_test_impact(&self, args: &Value) -> Option<Value> {
+        let symbols: Vec<String> = args
+            .get("symbols")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if symbols.is_empty() {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "`test_impact` requires `symbols` (changed symbol names/ids)." }],
+                "isError": true,
+                "data": { "status": "input_invalid", "parameter_repair": { "invalid_field": "symbols" } }
+            }));
+        }
+        let project = args
+            .get("project_code")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| self.symbol_project_code(&symbols[0]));
+        let Some(project) = project else {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "`test_impact`: pass `project_code`." }],
+                "isError": true,
+                "data": { "status": "input_invalid", "parameter_repair": { "invalid_field": "project_code" } }
+            }));
+        };
+        let radius = args.get("radius").and_then(|v| v.as_u64()).unwrap_or(4).clamp(1, 8) as u32;
+        if !self.ensure_ram_snapshot_warm(&project) {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "`test_impact`: RAM IST snapshot cold." }],
+                "data": { "status": "degraded", "surfaces_degraded": ["graph_ram_unavailable"] }
+            }));
+        }
+        let mut all_tests: BTreeSet<String> = BTreeSet::new();
+        let mut per_symbol = serde_json::Map::new();
+        let mut unresolved: Vec<String> = Vec::new();
+        for sym in &symbols {
+            match self.resolve_test_target_id(&project, sym) {
+                Some(id) => {
+                    let t = self.tests_exercising(&project, &id, radius);
+                    for x in &t {
+                        all_tests.insert(x.clone());
+                    }
+                    per_symbol.insert(sym.clone(), json!(t));
+                }
+                None => unresolved.push(sym.clone()),
+            }
+        }
+        let minimal: Vec<String> = all_tests.into_iter().collect();
+        Some(json!({
+            "content": [{ "type": "text", "text": format!("Minimal test set: {} test(s) across {} changed symbol(s)", minimal.len(), symbols.len()) }],
+            "data": {
+                "status": "ok",
+                "project": project,
+                "minimal_test_set": minimal,
+                "per_symbol": per_symbol,
+                "unresolved": unresolved,
+                "surfaces_used": ["graph_ram"],
+                "follow_up_tools": ["tests_for"]
+            }
+        }))
+    }
 }

@@ -1491,6 +1491,8 @@ impl McpServer {
             "inspect" => self.axon_inspect(arguments),
             "audit" => self.axon_audit(arguments),
             "impact" => self.axon_impact(arguments),
+            "tests_for" => self.axon_tests_for(arguments),
+            "test_impact" => self.axon_test_impact(arguments),
             "fuse" => self.axon_fuse(arguments),
             "health" => self.axon_health(arguments),
             "status" => self.axon_status(arguments),

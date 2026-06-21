@@ -879,6 +879,32 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "tests_for",
+                "description": "[RISK] Which tests exercise a symbol (REQ-AXO-162): reverse-CALLS callers carrying the `tested` flag (test fns + pytest fixtures). Atomic primitive composing into `test_impact`. RAM-only (PIL-AXO-9002).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": { "type": "string", "description": "Symbol name or canonical IST id." },
+                        "project_code": { "type": "string", "description": "Project scope (auto-resolved from the symbol when omitted)." },
+                        "radius": { "type": "integer", "description": "Reverse-CALLS radius (default 4, 1-8)." }
+                    },
+                    "required": ["symbol"]
+                }
+            },
+            {
+                "name": "test_impact",
+                "description": "[RISK] Minimal regression-test set for a set of changed symbols (REQ-AXO-160, commercial flagship): union of `tests_for` over each symbol. RAM-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "symbols": { "type": "array", "items": { "type": "string" }, "description": "Changed symbol names/ids." },
+                        "project_code": { "type": "string", "description": "Project scope (auto-resolved from the first symbol when omitted)." },
+                        "radius": { "type": "integer", "description": "Reverse-CALLS radius (default 4, 1-8)." }
+                    },
+                    "required": ["symbols"]
+                }
+            },
+            {
                 "name": "fuse",
                 "description": "[DX] Fused WHY+HOW for one symbol: its governing SOLL intent (REQ/DEC/PIL) AND its IST impact radius in a single RAM read. WHY-primary. RAM-only (cold/unscoped → degraded, no PG fallback).",
                 "inputSchema": {
