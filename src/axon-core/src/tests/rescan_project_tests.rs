@@ -123,15 +123,15 @@ mod tests {
         // full sweep INVALIDATES the cache (drops that hash + re-enrols the
         // files as `discovered`), forcing a full re-parse.
         // REQ-AXO-901860 — IndexedFile.project_code is a NOT NULL FK to
-        // ist.Project, so the parent row + an explicit project_code are
+        // axon.Project, so the parent row + an explicit project_code are
         // required (the legacy seed omitted both and broke post-901860).
         let safe_code = code.replace('\'', "''");
         store
             .execute_raw_sql_gateway(&format!(
-                "INSERT INTO ist.Project (code) VALUES ('{}') ON CONFLICT (code) DO NOTHING",
+                "INSERT INTO axon.Project (code) VALUES ('{}') ON CONFLICT (code) DO NOTHING",
                 safe_code
             ))
-            .expect("seed ist.Project parent");
+            .expect("seed axon.Project parent");
         let now_ms: i64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)

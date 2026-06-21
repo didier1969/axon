@@ -359,7 +359,7 @@ ON CONFLICT (project_code) DO NOTHING;\n";
 /// on the IST/SOLL tables **in the test template only**, so raw-SQL and
 /// builder fixtures that insert `Symbol` / `Chunk` / `Edge` /
 /// `GraphProjectionState` / `soll.Node` rows no longer have to hand-seed the
-/// FK parents (`ist.Project`, `ist.IndexedFile`) or repeat `project_code` that
+/// FK parents (`axon.Project`, `ist.IndexedFile`) or repeat `project_code` that
 /// production guarantees via the A3 writer (REQ-AXO-901860 made
 /// `project_code` a NOT NULL FK and `Chunk.file_path` a FK to `IndexedFile`).
 /// Production DDL is untouched: the triggers live solely in
@@ -373,13 +373,13 @@ fn apply_test_autoseed_triggers(pg_port: &str, dbname: &str) {
     const SQL: &str = "\
 CREATE OR REPLACE FUNCTION ist.test_autoseed_project() RETURNS TRIGGER AS $$\n\
 BEGIN\n\
-    INSERT INTO ist.Project (code) VALUES (NEW.project_code) ON CONFLICT (code) DO NOTHING;\n\
+    INSERT INTO axon.Project (code) VALUES (NEW.project_code) ON CONFLICT (code) DO NOTHING;\n\
     RETURN NEW;\n\
 END;\n\
 $$ LANGUAGE plpgsql;\n\
 CREATE OR REPLACE FUNCTION ist.test_autoseed_chunk() RETURNS TRIGGER AS $$\n\
 BEGIN\n\
-    INSERT INTO ist.Project (code) VALUES (NEW.project_code) ON CONFLICT (code) DO NOTHING;\n\
+    INSERT INTO axon.Project (code) VALUES (NEW.project_code) ON CONFLICT (code) DO NOTHING;\n\
     IF NEW.file_path IS NOT NULL THEN\n\
         INSERT INTO ist.IndexedFile (path, project_code, last_seen_ms)\n\
         VALUES (NEW.file_path, NEW.project_code, 0) ON CONFLICT (path) DO NOTHING;\n\
@@ -392,7 +392,7 @@ BEGIN\n\
     IF NEW.project_code IS NULL OR NEW.project_code = '' THEN\n\
         NEW.project_code := upper(split_part(NEW.anchor_id, '::', 1));\n\
     END IF;\n\
-    INSERT INTO ist.Project (code) VALUES (NEW.project_code) ON CONFLICT (code) DO NOTHING;\n\
+    INSERT INTO axon.Project (code) VALUES (NEW.project_code) ON CONFLICT (code) DO NOTHING;\n\
     RETURN NEW;\n\
 END;\n\
 $$ LANGUAGE plpgsql;\n\

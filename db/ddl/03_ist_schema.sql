@@ -5,7 +5,7 @@
 -- pure schema-qualification, not a rename.
 --
 -- Every table carries a `project_code` that is a NOT NULL FOREIGN KEY to
--- ist.Project(code): a row cannot exist without a registered project, so
+-- axon.Project(code): a row cannot exist without a registered project, so
 -- the old silent `UNK` bucket is impossible (fail-loud at enrolment).
 -- Pre-launch full-reindex rewrite: NO data migration; the indexer
 -- repopulates ist from source.
@@ -21,27 +21,12 @@ CREATE SCHEMA IF NOT EXISTS ist;
 -- per-session SET only covers THIS file's own CREATE statements.
 SET search_path = ist, "$user", public;
 
--- ── Project registry ─────────────────────────────────────────────────
--- Canonical per-project root; FK target for every IST table's
--- `project_code`. Enriched vs the old name-only public.Project so the
--- scanner can resolve path→project and telemetry reports per-project
--- roots. Populated by the scanner BEFORE enrolling files.
-CREATE TABLE IF NOT EXISTS ist.Project (
-    code           TEXT PRIMARY KEY,
-    name           TEXT NOT NULL DEFAULT '',
-    root_path      TEXT NOT NULL DEFAULT '',
-    watch_root     TEXT NOT NULL DEFAULT '',
-    status         TEXT NOT NULL DEFAULT 'active',
-    enrolled_at_ms BIGINT NOT NULL DEFAULT 0,
-    CONSTRAINT project_status_check CHECK (status IN ('active', 'paused', 'retired'))
-);
-
--- ── Runtime build metadata (KV) ──────────────────────────────────────
--- Probed by scripts/start.sh as the schema gate.
-CREATE TABLE IF NOT EXISTS ist.RuntimeMetadata (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-);
+-- ── Project registry / runtime metadata: MOVED to `axon` ─────────────
+-- REQ-AXO-901914: axon.Project, axon.RuntimeMetadata and axon.EmbeddingModel
+-- are DURABLE config and live in the `axon` schema (created in 02), so the
+-- `ist` schema stays entirely disposable (TRUNCATE/DROP-blind). Every IST
+-- table's `project_code` FK below targets axon.Project(code). The migration
+-- that moves pre-existing rows is in 02_axon_runtime.sql.
 
 -- ── Indexed files (durable discovery queue) ──────────────────────────
 -- DEC-AXO-901619: scanner writes 'discovered', A3 promotes to 'indexed'.
@@ -51,7 +36,7 @@ CREATE TABLE IF NOT EXISTS ist.RuntimeMetadata (
 -- root of indexed_files=0 per project).
 CREATE TABLE IF NOT EXISTS ist.IndexedFile (
     path            TEXT   PRIMARY KEY,
-    project_code    TEXT   NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
+    project_code    TEXT   NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
     content_hash    TEXT   NOT NULL DEFAULT '',
     last_seen_ms    BIGINT NOT NULL,
     status          TEXT   NOT NULL DEFAULT 'discovered',
@@ -158,7 +143,7 @@ CREATE TABLE IF NOT EXISTS ist.Symbol (
     is_public    BOOLEAN NOT NULL DEFAULT FALSE,
     is_nif       BOOLEAN NOT NULL DEFAULT FALSE,
     is_unsafe    BOOLEAN NOT NULL DEFAULT FALSE,
-    project_code TEXT    NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
+    project_code TEXT    NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
     embedding    vector(1024)
 );
 
@@ -168,7 +153,7 @@ CREATE TABLE IF NOT EXISTS ist.Chunk (
     id               TEXT PRIMARY KEY,
     source_type      TEXT,
     source_id        TEXT,
-    project_code     TEXT NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
+    project_code     TEXT NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
     file_path        TEXT REFERENCES ist.IndexedFile(path) ON DELETE CASCADE,
     kind             TEXT,
     content          TEXT,
@@ -211,7 +196,7 @@ ALTER TABLE ist.Chunk
 CREATE TABLE IF NOT EXISTS ist.ChunkEmbedding (
     chunk_id        TEXT NOT NULL REFERENCES ist.Chunk(id) ON DELETE CASCADE,
     model_id        TEXT NOT NULL,
-    project_code    TEXT NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
+    project_code    TEXT NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
     source_hash     TEXT NOT NULL,
     embedding       vector(1024) NOT NULL,
     embedded_at_ms  BIGINT NOT NULL,
@@ -223,20 +208,13 @@ CREATE TABLE IF NOT EXISTS ist.Edge (
     source_id     TEXT NOT NULL,
     target_id     TEXT NOT NULL,
     relation_type TEXT NOT NULL,
-    project_code  TEXT NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
+    project_code  TEXT NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
     metadata      JSONB,
     created_at_ms BIGINT NOT NULL,
     PRIMARY KEY (source_id, target_id, relation_type, project_code)
 );
 
-CREATE TABLE IF NOT EXISTS ist.EmbeddingModel (
-    id          TEXT PRIMARY KEY,
-    kind        TEXT,
-    model_name  TEXT,
-    dimension   BIGINT,
-    version     TEXT,
-    created_at  BIGINT
-);
+-- ist.EmbeddingModel MOVED to axon.EmbeddingModel (REQ-AXO-901914, see 02).
 
 -- ── Graph traversal caches ───────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS ist.GraphProjection (
@@ -247,7 +225,7 @@ CREATE TABLE IF NOT EXISTS ist.GraphProjection (
     edge_kind          TEXT,
     distance           BIGINT,
     radius             BIGINT NOT NULL,
-    project_code       TEXT   NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
+    project_code       TEXT   NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
     projection_version TEXT,
     created_at         BIGINT
 );
@@ -256,7 +234,7 @@ CREATE TABLE IF NOT EXISTS ist.GraphProjectionState (
     anchor_type        TEXT NOT NULL,
     anchor_id          TEXT NOT NULL,
     radius             BIGINT NOT NULL,
-    project_code       TEXT   NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
+    project_code       TEXT   NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
     source_signature   TEXT,
     projection_version TEXT,
     updated_at         BIGINT,
@@ -268,7 +246,7 @@ CREATE TABLE IF NOT EXISTS ist.GraphEmbedding (
     anchor_id          TEXT NOT NULL,
     radius             BIGINT NOT NULL,
     model_id           TEXT NOT NULL,
-    project_code       TEXT NOT NULL REFERENCES ist.Project(code) ON DELETE CASCADE,
+    project_code       TEXT NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
     source_signature   TEXT,
     projection_version TEXT,
     embedding          vector(1024),
@@ -353,7 +331,7 @@ CREATE INDEX IF NOT EXISTS file_lifecycle_stage_status_idx
 
 -- ── FK-covering indexes (REQ-AXO-901860) ─────────────────────────────
 -- PostgreSQL does NOT auto-index the referencing side of a FOREIGN KEY.
--- Without these, every ON DELETE CASCADE from ist.Project / ist.IndexedFile
+-- Without these, every ON DELETE CASCADE from axon.Project / ist.IndexedFile
 -- triggers a sequential scan of the child table, and FK-join lookups are
 -- unindexed. project_code FKs on the big tables (Symbol/Chunk/Edge/
 -- ChunkEmbedding) are already covered by their project-leading indexes
@@ -418,7 +396,7 @@ SELECT
     COALESCE(c.chunks_pending, 0)   AS chunks_pending,
     COALESCE(c.chunks_fts, 0)       AS chunks_fts,
     COALESCE(e.edges, 0)            AS edges
-FROM ist.Project p
+FROM axon.Project p
 LEFT JOIN (
     SELECT i.project_code,
            count(*)                                          AS files_total,

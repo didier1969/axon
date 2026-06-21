@@ -3606,11 +3606,11 @@ fn test_axon_audit_taint_analysis() {
     let server = create_test_server();
     // REQ-AXO-901860 — audit/health readiness gate (file_count_for_project ->
     // ist.project_telemetry.files_total) counts ENROLLED files via
-    // ist.Project x ist.IndexedFile. Seed the parent Project + IndexedFile
+    // axon.Project x ist.IndexedFile. Seed the parent Project + IndexedFile
     // rows (path = CONTAINS-edge source_id) so the project is indexed.
     server
         .graph_store
-        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .execute("INSERT INTO axon.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
         .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/api.rs', 'PRJ', 'hash-src/api.rs', 0), ('src/api_dummy.rs', 'PRJ', 'hash-src/api_dummy.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
@@ -3679,7 +3679,7 @@ fn test_axon_audit_technical_debt() {
     // get_technical_debt's IndexedFile JOIN.
     server
         .graph_store
-        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .execute("INSERT INTO axon.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
         .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/danger.rs', 'PRJ', 'hash-src/danger.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
@@ -3736,7 +3736,7 @@ fn test_axon_audit_technical_debt_comments() {
     // so audit isn't gated and the tech-debt IndexedFile JOIN matches.
     server
         .graph_store
-        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .execute("INSERT INTO axon.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
         .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/todo.rs', 'PRJ', 'hash-src/todo.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
@@ -3790,7 +3790,7 @@ fn test_axon_audit_secrets_detection() {
     // so audit isn't gated and the secrets tech-debt JOIN matches.
     server
         .graph_store
-        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .execute("INSERT INTO axon.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
         .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/config.rs', 'PRJ', 'hash-src/config.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
@@ -3852,7 +3852,7 @@ fn test_axon_audit_cross_language_taint() {
     let (api, dummy) = (format!("{code}/api.ex"), format!("{code}/api_dummy.ex"));
     server
         .graph_store
-        .execute(&format!("INSERT INTO ist.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"))
+        .execute(&format!("INSERT INTO axon.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('{api}', '{code}', 'hash-{api}', 0), ('{dummy}', '{code}', 'hash-{dummy}', 0) ON CONFLICT (path) DO NOTHING")).unwrap();
     server
@@ -3918,7 +3918,7 @@ fn test_axon_health_god_objects() {
     // unindexed; god-objects then surface via get_god_objects (project=*).
     server
         .graph_store
-        .execute("INSERT INTO ist.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .execute("INSERT INTO axon.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
         .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/god.rs', 'PRJ', 'hash-src/god.rs', 0), ('src/god_dummy.rs', 'PRJ', 'hash-src/god_dummy.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
@@ -4038,11 +4038,11 @@ fn test_axon_audit_respects_project_scope() {
     // scoped audit (project=PJA) isn't gated as unindexed.
     server
         .graph_store
-        .execute("INSERT INTO ist.Project (code) VALUES ('PJA') ON CONFLICT (code) DO NOTHING")
+        .execute("INSERT INTO axon.Project (code) VALUES ('PJA') ON CONFLICT (code) DO NOTHING")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Project (code) VALUES ('PJB') ON CONFLICT (code) DO NOTHING")
+        .execute("INSERT INTO axon.Project (code) VALUES ('PJB') ON CONFLICT (code) DO NOTHING")
         .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('apps/pja/lib/input.rs', 'PJA', 'hash-apps/pja/lib/input.rs', 0), ('apps/pjb/lib/unsafe.rs', 'PJB', 'hash-apps/pjb/lib/unsafe.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server
@@ -4105,11 +4105,11 @@ fn test_axon_health_respects_project_scope() {
     // scoped health (project=PJA) isn't gated as unindexed.
     server
         .graph_store
-        .execute("INSERT INTO ist.Project (code) VALUES ('PJA') ON CONFLICT (code) DO NOTHING")
+        .execute("INSERT INTO axon.Project (code) VALUES ('PJA') ON CONFLICT (code) DO NOTHING")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Project (code) VALUES ('PJB') ON CONFLICT (code) DO NOTHING")
+        .execute("INSERT INTO axon.Project (code) VALUES ('PJB') ON CONFLICT (code) DO NOTHING")
         .unwrap();
     server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('apps/pja/lib/covered.rs', 'PJA', 'hash-apps/pja/lib/covered.rs', 0), ('apps/pjb/lib/god.rs', 'PJB', 'hash-apps/pjb/lib/god.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
     server

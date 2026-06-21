@@ -1,12 +1,12 @@
 use super::*;
 
-/// REQ-AXO-91560 — satisfy the `ist.Chunk` FK parents (`ist.Project` +
+/// REQ-AXO-91560 — satisfy the `ist.Chunk` FK parents (`axon.Project` +
 /// `ist.IndexedFile`, both made NOT NULL by the FK-integrity hardening of
 /// REQ-AXO-901860) before a test inserts a chunk against the isolated DB.
 /// Idempotent — safe to call once per chunk insert.
 fn seed_ist_path(server: &McpServer, code: &str, path: &str) {
     let _ = server.graph_store.execute(&format!(
-        "INSERT INTO ist.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"
+        "INSERT INTO axon.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"
     ));
     let _ = server.graph_store.execute(&format!(
         "INSERT INTO ist.IndexedFile (path, project_code, last_seen_ms) VALUES ('{path}', '{code}', 0) ON CONFLICT (path) DO NOTHING"

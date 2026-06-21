@@ -568,7 +568,7 @@ impl GraphStore {
             .unwrap()
             .as_secs() as i64;
         self.execute(&format!(
-            "INSERT INTO EmbeddingModel (id, kind, model_name, dimension, version, created_at) \
+            "INSERT INTO axon.EmbeddingModel (id, kind, model_name, dimension, version, created_at) \
              VALUES ('{}', '{}', '{}', {}, '{}', {}) \
              ON CONFLICT(id) DO UPDATE SET \
                 kind=EXCLUDED.kind, \
@@ -1090,7 +1090,7 @@ impl GraphStore {
 
         // REQ-AXO-901860 — unregistered files resolve to the "UNK" sentinel
         // (pipeline_v2_runtime resolver fallback). project_code is now a NOT
-        // NULL FK to ist.Project, so writing UNK rows would either resurrect
+        // NULL FK to axon.Project, so writing UNK rows would either resurrect
         // the "UNK" bucket the refonte deleted or fail the FK and poison the
         // pooled writer connection (25P02 cascade). Skip cleanly — the
         // resolver already logged the resolution failure (fail-loud, graceful).

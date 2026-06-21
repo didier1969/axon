@@ -633,15 +633,15 @@ fn persist_discovery_batch(
     }
     let now_ms = chrono::Utc::now().timestamp_millis();
     // REQ-AXO-901860: IndexedFile.project_code is a NOT NULL FK to
-    // ist.Project, so every project this batch references must exist BEFORE
+    // axon.Project, so every project this batch references must exist BEFORE
     // the file rows. Enrol the distinct projects first (idempotent).
     let mut projects: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     let mut values = Vec::with_capacity(batch.len());
     for (path, project, size, mtime) in batch {
         // REQ-AXO-901860 — NEVER enrol the "UNK" sentinel (unresolved project).
-        // project_code is a NOT NULL FK to ist.Project; enrolling UNK both
+        // project_code is a NOT NULL FK to axon.Project; enrolling UNK both
         // resurrects the garbage bucket the canonical project/path resolution
-        // retired AND creates an "UNK" ist.Project row (the `INSERT INTO Project
+        // retired AND creates an "UNK" axon.Project row (the `INSERT INTO Project
         // … ON CONFLICT DO NOTHING` below would mint it). Files that don't
         // resolve to a registered project are dropped here, mirroring
         // graph_ingestion's UNK skip — no UNK Project, no UNK IndexedFile, ever.
@@ -666,10 +666,10 @@ fn persist_discovery_batch(
         .map(|p| format!("('{}', {now_ms})", p.replace('\'', "''")))
         .collect();
     graph.execute(&format!(
-        "INSERT INTO Project (code, enrolled_at_ms) VALUES {} ON CONFLICT (code) DO NOTHING",
+        "INSERT INTO axon.Project (code, enrolled_at_ms) VALUES {} ON CONFLICT (code) DO NOTHING",
         proj_values.join(", ")
     ))?;
-    // REQ-AXO-901867 — enrich ist.Project.name / root_path from the canonical
+    // REQ-AXO-901867 — enrich axon.Project.name / root_path from the canonical
     // registry (soll.ProjectCodeRegistry). The discovery INSERT above only
     // carries (code, enrolled_at_ms), leaving name/root_path blank, so the
     // project_telemetry view (and the dashboard reading it) showed empty
@@ -682,7 +682,7 @@ fn persist_discovery_batch(
         .map(|p| format!("'{}'", p.replace('\'', "''")))
         .collect();
     graph.execute(&format!(
-        "UPDATE ist.Project p \
+        "UPDATE axon.Project p \
          SET name = COALESCE(NULLIF(r.project_name, ''), \
                              NULLIF(regexp_replace(r.project_path, '^.*/', ''), ''), p.name), \
              root_path = COALESCE(NULLIF(r.project_path, ''), p.root_path) \
@@ -1293,7 +1293,7 @@ mod tests {
         let gone = format!("{root_canon}/gone.rs"); // never created on disk
 
         store
-            .execute("INSERT INTO ist.Project (code, enrolled_at_ms) VALUES ('TST', 1) ON CONFLICT (code) DO NOTHING")
+            .execute("INSERT INTO axon.Project (code, enrolled_at_ms) VALUES ('TST', 1) ON CONFLICT (code) DO NOTHING")
             .unwrap();
         // 1. parsed row, discovered_ms=0 (live A3 writeback shape) — excluded from
         //    the candidate set entirely (discovered_ms>0 filter) → must survive.
@@ -1387,7 +1387,7 @@ mod tests {
             .to_string();
 
         store
-            .execute("INSERT INTO ist.Project (code, enrolled_at_ms) VALUES ('TST', 1) ON CONFLICT (code) DO NOTHING")
+            .execute("INSERT INTO axon.Project (code, enrolled_at_ms) VALUES ('TST', 1) ON CONFLICT (code) DO NOTHING")
             .unwrap();
         for p in [&keep, &ignored] {
             store

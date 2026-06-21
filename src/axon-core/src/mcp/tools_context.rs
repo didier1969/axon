@@ -6711,11 +6711,11 @@ mod tests {
 
         // Seed the IST FK targets (Project, then IndexedFile) the Chunk rows
         // reference — same shape as `seed_ist_path` in the soll_and_guidelines
-        // module. The Chunk/Embedding FKs point at `ist.Project`.
+        // module. The Chunk/Embedding FKs point at `axon.Project`.
         server
             .graph_store
             .execute(&format!(
-                "INSERT INTO ist.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"
+                "INSERT INTO axon.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"
             ))
             .unwrap();
         for path in [&near_path, &far_path] {

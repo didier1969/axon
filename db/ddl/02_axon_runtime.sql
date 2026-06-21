@@ -31,6 +31,62 @@ BEGIN
   END IF;
 END $$;
 
+-- ── REQ-AXO-901914: durable config/registry tables leave the disposable
+-- `ist` schema for `axon` ──────────────────────────────────────────────
+-- The `ist` schema is meant to be ENTIRELY disposable (Data Policy: "IST dev:
+-- delete freely; rebuilt by indexer from source" + PIL-AXO-9002/9004 — IST is a
+-- reconstructible projection). Three tables violated that by holding durable
+-- config: the project enrolment registry (de-enrols the whole fleet if wiped),
+-- the embedding-model config, and the runtime KV. Move them to `axon` so
+-- `TRUNCATE ist.*` / `DROP SCHEMA ist CASCADE` is safe table-blind.
+--
+-- Same move-preserving-data pattern as the axon_runtime consolidation above:
+-- ALTER ... SET SCHEMA carries the data AND repoints every FK (ist children
+-- reference the table by OID, so their project_code FK follows to axon.Project
+-- transparently). Guarded so it runs once; the CREATE IF NOT EXISTS below is a
+-- no-op afterward (and creates fresh on a brand-new DB where the ALTER skips).
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT unnest(ARRAY['project', 'runtimemetadata', 'embeddingmodel']) AS tbl
+  LOOP
+    IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'ist' AND tablename = r.tbl)
+       AND NOT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'axon' AND tablename = r.tbl) THEN
+      EXECUTE format('ALTER TABLE ist.%I SET SCHEMA axon', r.tbl);
+    END IF;
+  END LOOP;
+END $$;
+
+-- Project enrolment registry (REQ-AXO-901914, ex-ist.Project). Canonical
+-- per-project root; FK target for every IST table's `project_code`. Durable:
+-- survives an IST wipe so a re-measure / migration never de-enrols the fleet.
+CREATE TABLE IF NOT EXISTS axon.Project (
+    code           TEXT PRIMARY KEY,
+    name           TEXT NOT NULL DEFAULT '',
+    root_path      TEXT NOT NULL DEFAULT '',
+    watch_root     TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'active',
+    enrolled_at_ms BIGINT NOT NULL DEFAULT 0,
+    CONSTRAINT project_status_check CHECK (status IN ('active', 'paused', 'retired'))
+);
+
+-- Runtime build metadata (KV) — durable, ex-ist.RuntimeMetadata.
+CREATE TABLE IF NOT EXISTS axon.RuntimeMetadata (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+-- Embedding-model config — durable, ex-ist.EmbeddingModel.
+CREATE TABLE IF NOT EXISTS axon.EmbeddingModel (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT,
+    model_name  TEXT,
+    dimension   BIGINT,
+    version     TEXT,
+    created_at  BIGINT
+);
+
 -- ── Tables ───────────────────────────────────────────────────────────
 
 -- Vector lane fatal-fault log. Captures stage + reason + provider so

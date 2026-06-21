@@ -1085,7 +1085,7 @@ impl GraphStore {
     // idempotent and replay from ist.IndexedFile + ist.Chunk.
 
     fn load_runtime_metadata(&self) -> Result<std::collections::HashMap<String, String>> {
-        let existing = self.query_json("SELECT key, value FROM RuntimeMetadata")?;
+        let existing = self.query_json("SELECT key, value FROM axon.RuntimeMetadata")?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&existing).unwrap_or_default();
         let mut current = std::collections::HashMap::new();
         for row in rows {
@@ -1097,10 +1097,10 @@ impl GraphStore {
     }
 
     fn write_runtime_metadata(&self, expected: &[(&str, &str)]) -> Result<()> {
-        self.execute("DELETE FROM RuntimeMetadata")?;
+        self.execute("DELETE FROM axon.RuntimeMetadata")?;
         for (key, value) in expected {
             self.execute(&format!(
-                "INSERT INTO RuntimeMetadata (key, value) VALUES ('{}', '{}')",
+                "INSERT INTO axon.RuntimeMetadata (key, value) VALUES ('{}', '{}')",
                 key, value
             ))?;
         }
@@ -1214,10 +1214,10 @@ mod graph_bootstrap_tests {
         let indexer = GraphStore::new_indexer_ist_writer_without_soll(&db_root_str).unwrap();
         assert!(!indexer.soll_attached);
         // REQ-AXO-901860 — ist.IndexedFile.project_code is a NOT NULL FK to
-        // ist.Project; seed the parent row + an explicit project_code (the
+        // axon.Project; seed the parent row + an explicit project_code (the
         // legacy seed omitted both and broke post-901860).
         indexer
-            .execute("INSERT INTO ist.Project (code) VALUES ('AXO') ON CONFLICT (code) DO NOTHING")
+            .execute("INSERT INTO axon.Project (code) VALUES ('AXO') ON CONFLICT (code) DO NOTHING")
             .unwrap();
         // The production constructors above resolve to the process-shared test
         // DB (env override), so a hard-coded path collides across the parallel

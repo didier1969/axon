@@ -465,7 +465,7 @@ pub struct PgBulkBatch {
     pub indexed_files: Vec<(String, String, i64, i64, i64)>,
     /// REQ-AXO-901860 — the single project_code this batch belongs to
     /// (A3 groups by resolved project_code, one group per flush). The
-    /// writer uses it to UPSERT the `ist.Project` FK parent first and to
+    /// writer uses it to UPSERT the `axon.Project` FK parent first and to
     /// stamp `ist.IndexedFile.project_code` directly, so a file reaching
     /// A3 before the scanner enrolled it still satisfies the NOT NULL FK
     /// instead of poisoning the whole writer transaction with a FK
@@ -544,22 +544,22 @@ pub(crate) async fn flush_batch_async(
 
     // REQ-AXO-901860 — guarantee the FK parents exist before any child row.
     // Symbol / Chunk / IndexedFile all carry a NOT NULL project_code FK to
-    // ist.Project; Chunk additionally FKs ist.IndexedFile(path). A file that
+    // axon.Project; Chunk additionally FKs ist.IndexedFile(path). A file that
     // reaches A3 before the scanner enrolled it (the bootstrap walk feeds A1
     // directly) used to fail the Symbol/Chunk insert with a FK violation,
     // aborting the tx and poisoning the pooled connection — a 25P02 cascade
     // that blocked embeddings, the heartbeat UPSERT, and dashboard_state for
     // every project sharing the connection. The writer now owns its FK
-    // parents: ensure ist.Project, then ist.IndexedFile, before the children.
+    // parents: ensure axon.Project, then ist.IndexedFile, before the children.
     if !batch.project_code.is_empty() {
         let now_ms = chrono::Utc::now().timestamp_millis();
         tx.execute(
-            "INSERT INTO Project (code, enrolled_at_ms) VALUES ($1, $2) \
+            "INSERT INTO axon.Project (code, enrolled_at_ms) VALUES ($1, $2) \
              ON CONFLICT (code) DO NOTHING",
             &[&batch.project_code, &now_ms],
         )
         .await
-        .context("bulk_writer batch ensure ist.Project FK parent")?;
+        .context("bulk_writer batch ensure axon.Project FK parent")?;
     }
     if !batch.indexed_files.is_empty() {
         // REQ-AXO-902011 — re-index-safe purge BEFORE the COPY merge, same tx:
@@ -973,8 +973,8 @@ async fn copy_indexed_files_in_tx(
         .await
         .context("bulk_writer indexedfile copy_in finish")?;
 
-    // REQ-AXO-901860: project_code is a NOT NULL FK to ist.Project. A3 owns
-    // its FK parents (the ist.Project row is UPSERTed first in
+    // REQ-AXO-901860: project_code is a NOT NULL FK to axon.Project. A3 owns
+    // its FK parents (the axon.Project row is UPSERTed first in
     // flush_batch_async), so the IndexedFile row is stamped with the batch's
     // resolved project_code directly. The previous JOIN-recovery against an
     // already-discovered IndexedFile row silently DROPPED any file the
