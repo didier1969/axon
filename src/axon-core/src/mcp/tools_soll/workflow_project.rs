@@ -274,7 +274,13 @@ impl McpServer {
         if let Some(dir) = resolved_project_path.as_ref() {
             add_cmd.current_dir(dir);
         }
-        add_cmd.arg("add");
+        // REQ-AXO-902062 (llm_feedback id14, FSF) — `-A -- <paths>` stages
+        // additions, modifications AND deletions for the given pathspecs. Plain
+        // `git add <deleted_path>` fails 'pathspec did not match any files' once
+        // the file (and its directory) are gone from the worktree, which blocked
+        // committing a pure file deletion. `-A` still errors on a genuinely
+        // never-tracked path, preserving the REQ-AXO-138 missing-path guard.
+        add_cmd.arg("add").arg("-A").arg("--");
         for p in diff_paths {
             if let Some(path_str) = p.as_str() {
                 add_cmd.arg(path_str);
