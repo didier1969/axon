@@ -14,6 +14,30 @@ fn minimal_evidence_example(accepted_schema: &[String]) -> String {
     )
 }
 
+/// REQ-AXO-901983 (REQ-AXO-087 family) — resolve the artifact reference + type
+/// from one artifact object, accepting the aliases an LLM naturally reaches for.
+/// `artifact_ref` aliases: `ref` / `path` / `file_path` / `uri`; `artifact_type`
+/// aliases: `kind` / `type`. The 11% error rate on this tool (telemetry 168h)
+/// was dominated by exactly the `{kind, ref}` shape — a contract that rejects
+/// the obvious synonym is the bug, not the call.
+fn resolve_artifact_ref_and_type(art: &Value) -> (&str, &str) {
+    let artifact_ref = art
+        .get("artifact_ref")
+        .or_else(|| art.get("ref"))
+        .or_else(|| art.get("path"))
+        .or_else(|| art.get("file_path"))
+        .or_else(|| art.get("uri"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let artifact_type = art
+        .get("artifact_type")
+        .or_else(|| art.get("kind"))
+        .or_else(|| art.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    (artifact_ref, artifact_type)
+}
+
 impl McpServer {
     fn normalize_file_artifact_ref(
         &self,
@@ -123,17 +147,7 @@ impl McpServer {
             .map(|p| p.to_string_lossy().into_owned());
 
         for (idx, art) in artifacts.iter().enumerate() {
-            let raw_artifact_ref = art
-                .get("artifact_ref")
-                .or_else(|| art.get("path"))
-                .or_else(|| art.get("file_path"))
-                .or_else(|| art.get("uri"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let artifact_type = art
-                .get("artifact_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let (raw_artifact_ref, artifact_type) = resolve_artifact_ref_and_type(art);
             let normalized_artifact_type =
                 normalize_evidence_artifact_type(artifact_type, raw_artifact_ref);
             let mut diagnostic_reasons = Vec::new();
@@ -230,7 +244,7 @@ impl McpServer {
                 );
             }
             fallback_guidance.push(
-                "Use `artifact_ref`, `path`, `file_path`, or `uri`; file artifacts are normalized against the canonical project root when possible."
+                "Use `artifact_ref` (aliases: `ref`, `path`, `file_path`, `uri`); file artifacts are normalized against the canonical project root when possible."
                     .to_string(),
             );
         }
@@ -277,8 +291,8 @@ impl McpServer {
                 // names/values across 2-3 retries (observed: `{kind, ref}` →
                 // reject → `{artifact_type:"commit", artifact_ref}` → reject).
                 Some("missing_artifact_ref") => Some(format!(
-                    "each artifact needs an `artifact_ref` (or `path` / `file_path` / `uri` alias). \
-                     Accepted `artifact_type` for {}: {:?}. Example: {}",
+                    "each artifact needs an `artifact_ref` (aliases accepted: `ref` / `path` / `file_path` / `uri`). \
+                     Accepted `artifact_type` (aliases: `kind` / `type`) for {}: {:?}. Example: {}",
                     normalized_entity_type,
                     accepted_schema,
                     minimal_evidence_example(&accepted_schema)
@@ -379,7 +393,7 @@ impl McpServer {
                 "hint": "supply at least one artifact object in the `artifacts` array; \
                         each artifact needs `artifact_type` and one of `artifact_ref` / \
                         `path` / `file_path` / `uri`",
-                "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                "accepted_aliases": ["artifact_ref", "ref", "path", "file_path", "uri"],
                 "accepted_artifact_schema": accepted_schema,
             }),
             _ => first_rejected_repair(&artifact_diagnostics, &accepted_schema).unwrap_or_else(
@@ -387,7 +401,7 @@ impl McpServer {
                     json!({
                         "invalid_field": "artifacts",
                         "hint": "review `artifact_diagnostics` for per-artifact rejection reasons",
-                        "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                        "accepted_aliases": ["artifact_ref", "ref", "path", "file_path", "uri"],
                         "accepted_artifact_schema": accepted_schema,
                     })
                 },
@@ -464,6 +478,43 @@ fn build_suggested_absolute_path(raw_ref: &str, project_root: Option<&str>) -> O
     let root = project_root?;
     let joined = Path::new(root).join(p);
     Some(joined.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod resolve_artifact_ref_and_type_tests {
+    use super::resolve_artifact_ref_and_type;
+    use serde_json::json;
+
+    #[test]
+    fn canonical_fields_resolve() {
+        let art = json!({"artifact_type": "file", "artifact_ref": "src/x.rs"});
+        assert_eq!(resolve_artifact_ref_and_type(&art), ("src/x.rs", "file"));
+    }
+
+    #[test]
+    fn kind_and_ref_aliases_resolve() {
+        // The exact shape that dominated the 11% error rate (telemetry 168h).
+        let art = json!({"kind": "commit", "ref": "abc1234"});
+        assert_eq!(resolve_artifact_ref_and_type(&art), ("abc1234", "commit"));
+    }
+
+    #[test]
+    fn type_and_path_aliases_resolve() {
+        let art = json!({"type": "document", "path": "docs/y.md"});
+        assert_eq!(resolve_artifact_ref_and_type(&art), ("docs/y.md", "document"));
+    }
+
+    #[test]
+    fn canonical_wins_over_alias() {
+        let art = json!({"artifact_ref": "canon", "ref": "alias", "artifact_type": "file", "kind": "x"});
+        assert_eq!(resolve_artifact_ref_and_type(&art), ("canon", "file"));
+    }
+
+    #[test]
+    fn missing_fields_yield_empty() {
+        let art = json!({"note": "no ref here"});
+        assert_eq!(resolve_artifact_ref_and_type(&art), ("", ""));
+    }
 }
 
 #[cfg(test)]
@@ -556,7 +607,7 @@ fn first_rejected_repair(
                 "rejected_artifact_index": idx,
                 "rejected_artifact_kind": kind,
                 "primary_reason": primary,
-                "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                "accepted_aliases": ["artifact_ref", "ref", "path", "file_path", "uri"],
                 "required_field_hint": required_field_hint_for_artifact_kind(kind),
                 "hint": format!(
                     "artifact #{idx} ({kind}) is missing a value: {}",
@@ -591,7 +642,7 @@ fn first_rejected_repair(
                     "rejected_artifact_kind": kind,
                     "supplied_artifact_ref": raw_ref,
                     "primary_reason": primary,
-                    "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                    "accepted_aliases": ["artifact_ref", "ref", "path", "file_path", "uri"],
                     "required_field_hint": required_field_hint_for_artifact_kind(kind),
                 });
                 if let Some(s) = &suggested {
@@ -624,7 +675,7 @@ fn first_rejected_repair(
                 "rejected_artifact_index": idx,
                 "rejected_artifact_kind": kind,
                 "primary_reason": other,
-                "accepted_aliases": ["artifact_ref", "path", "file_path", "uri"],
+                "accepted_aliases": ["artifact_ref", "ref", "path", "file_path", "uri"],
                 "required_field_hint": required_field_hint_for_artifact_kind(kind),
                 "hint": format!(
                     "artifact #{idx} rejected: `{other}`; see artifact_diagnostics for full detail"

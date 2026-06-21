@@ -2,6 +2,21 @@
 
 > **MAJ session 78 (post-latence)** : catalogue désormais **72 outils** (+`embed_provider`, REQ-AXO-901984). Latence sémantique corrigée (REQ-AXO-901978 B1/A/B2/B3 — GPU query-embed, `semantic=auto`, cache) ; honnêteté status (REQ-AXO-901979). Les latences du tableau ci-dessous = **ancien binaire live** (avant promote) ; mesure réelle post-promote via `mcp_telemetry_report`. **Insight friction** (axon.mcp_friction) : top OPEN = `query/degraded` ×35 (adressé par 901978), `soll_attach_evidence/artifact_ref` ×34 + `sql/input_invalid` ×27 + `soll_manager/forbidden_relation` ×11 (→ REQ-AXO-901947 Guided MCP). **Re-éval une-à-une complète** : backlog REQ-AXO-901983.
 
+> **MAJ session 87 (2026-06-21, REQ-AXO-902xxx audit + corrections retenues)** — re-passe ancrée sur la télémétrie réelle (`mcp_telemetry_report` 168 h, 9447 appels, 4.5 % err) + signatures friction (`axon.mcp_friction`). **Verdict par classe d'erreur, pas re-score heuristique des 71 lignes** (le tableau ci-dessous reste valide).
+>
+> **Top erreurs réelles (168 h) → classement audit (clean-win / deliberate-keep / tracké / négligeable) :**
+>
+> | Outil | err% (n) | Signature friction (occ) | Verdict |
+> |---|---|---|---|
+> | `soll_apply_plan` | 25 % (32/129) | relations_misplaced (4) + id_field_forbidden (3) | **basse-fréq → child-REQ** (guidance shape) ; le gros des 25 % = rejets de validation légitimes |
+> | `query` | 21 % (84/403) | invalid_arguments (8) | **tracké** : latence/err = ancien binaire ; tri-modal 901978 non encore promu |
+> | `document_intent` | 15 % (9/59) | — | négligeable (classification/attach, faible volume) |
+> | `soll_attach_evidence` | 11 % (97/852) | **artifact_ref (83) + partial (34) + artifact_type (3) = 120** | ✅ **CLEAN-WIN CORRIGÉ ce run** : `ref`/`kind`/`type` ajoutés comme alias (REQ-087 family). Le commentaire du code décrivait déjà la friction `{kind,ref}` mais n'avait amélioré que le message. |
+> | `soll_manager` | 5 % (89/1804) | forbidden_relation (44) + status legacy (14) + wrong_scope (10) | **tracké** : Guided MCP REQ-AXO-901947 (DEC-901638 form) + statuts legacy atténués 901962 |
+> | `sql` | 5 % (88/1677) | input_invalid (98) + invalid_arguments (10) | **deliberate-keep** : `sql` lecture-seule par spec ; les rejets de mutation/colonne-erronée SONT le comportement correct, et le repair liste déjà les colonnes réelles (auto-correcteur) |
+>
+> **Conclusion** : la friction actionnable était massivement concentrée sur `soll_attach_evidence` (120 occ) — **corrigé**. Le reste = rejets légitimes à bon repair (`sql`), déjà-tracké (`soll_manager` Guided MCP), ou basse-fréquence (`soll_apply_plan` shape → child-REQ). Aucune autre correction « propre » non encore tracée. Pas de re-score des heuristiques (stable depuis session 78).
+
 **Périmètre** : 71 entrées du catalogue canonique (`catalog.rs`) = 70 publiques + `resume_vectorization` (non-publique en `brain_only`). *(72 depuis REQ-901984 / embed_provider.)*
 
 **⚠️ Déploiement** : les correctifs de cette session (901952 reliquat + 901977 classe + alignement petgraph) sont **commités sur `main` local, validés en dev (brain `g82eaa8c1`), NON promus en live et NON poussés**. Les latences/taux d'erreur ci-dessous proviennent de la télémétrie live (fenêtre 720 h) = **ancien binaire** ; ex. `query` 3453 ms/33 % err reflète l'ancien code, pas le `query` tri-modal corrigé.
