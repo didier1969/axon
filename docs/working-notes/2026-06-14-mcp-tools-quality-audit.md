@@ -16,6 +16,13 @@
 > | `sql` | 5 % (88/1677) | input_invalid (98) + invalid_arguments (10) | **deliberate-keep** : `sql` lecture-seule par spec ; les rejets de mutation/colonne-erronée SONT le comportement correct, et le repair liste déjà les colonnes réelles (auto-correcteur) |
 >
 > **Conclusion** : la friction actionnable était massivement concentrée sur `soll_attach_evidence` (120 occ) — **corrigé**. Le reste = rejets légitimes à bon repair (`sql`), déjà-tracké (`soll_manager` Guided MCP), ou basse-fréquence (`soll_apply_plan` shape → child-REQ). Aucune autre correction « propre » non encore tracée. Pas de re-score des heuristiques (stable depuis session 78).
+>
+> **MAJ token (session 88) — inspection des outliers « Token% bas » : DÉJÀ optimisés.** La colonne Token% est **heuristique et NON fiable** (aucune mesure dure des tokens de sortie ; `mcp_call_stat` ne mesure que latence/erreurs). Inspection code des 3 pires (`soll_export` 60 %, `retrieve_context` 68 %, `why` 75 %) :
+> - `soll_export` : écrit le markdown complet dans un FICHIER, ne renvoie qu'un aperçu **300 chars** (`operations.rs:242`). Déjà terse-default.
+> - `retrieve_context` : **snippets** (truncate 220 chars, `tools_context.rs:3324`) + `token_budget` + bandes RRF. Déjà budgeté.
+> - `why` : `token_budget` défaut **700 (brief) / 1400 (verbose)** (`tools_framework_rationale.rs:461`). Déjà terse-default.
+>
+> → La migration GUI-AXO-1026 #4 (terse-default + pull) est **déjà appliquée** sur ces outils. Une passe terse-default à l'aveugle = make-work/risque sur du code optimal (anti audit-proofs). **Le seul levier data-driven restant = instrumenter `mcp_call_stat.output_tokens`** puis cibler les vrais outliers (suspect par VOLUME : `status`, 1398 appels × `data` toujours-plein — mais trim risqué pour le contrat agent-native PIL-AXO-002). Décision instrumentation = opérateur.
 
 **Périmètre** : 71 entrées du catalogue canonique (`catalog.rs`) = 70 publiques + `resume_vectorization` (non-publique en `brain_only`). *(72 depuis REQ-901984 / embed_provider.)*
 
