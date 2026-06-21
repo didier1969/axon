@@ -87,6 +87,7 @@ run_step() {
   CURRENT_STEP_NAME="$step_name"
   promote_log ""
   promote_log "== step ${step_num}: ${step_name} =="
+  local _step_t0=$SECONDS
   local step_tmp
   step_tmp="$(mktemp)"
   set +e
@@ -96,7 +97,7 @@ run_step() {
   cat "$step_tmp" | tee -a "$PROMOTE_LOG"
   rm -f "$step_tmp"
   if [[ "$rc" -ne 0 ]]; then
-    promote_log "   step ${step_num} (${step_name}) returned exit code ${rc}"
+    promote_log "   step ${step_num} (${step_name}) returned exit code ${rc} after $((SECONDS - _step_t0))s"
     promote_log ""
     promote_log "❌ PROMOTE FAILED at step ${step_num}: ${step_name}"
     promote_log "   Exit code: ${rc}"
@@ -105,12 +106,24 @@ run_step() {
     echo "❌ PROMOTE FAILED at step ${step_num}: ${step_name} — see ${PROMOTE_LOG}" >&2
     exit "$rc"
   fi
-  promote_log "   ✅ step ${step_num} (${step_name}) done"
+  promote_log "   ✅ step ${step_num} (${step_name}) done in $((SECONDS - _step_t0))s"
 }
 
 start_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 promote_log "promote_live_safe.sh started at ${PROMOTE_TIMESTAMP}"
 promote_log "project=${PROJECT_CODE} head=${start_head} skip_build=${SKIP_BUILD} skip_qualify=${SKIP_QUALIFY} skip_dev=${SKIP_DEV_VALIDATION}"
+
+# REQ-AXO-902064 — fail-fast tracked-dirty gate BEFORE the (~2 min) build. The
+# authoritative gate is step 3 release-preflight, but it runs AFTER the build, so
+# a dirty tree used to waste the whole compile (observed session 88). This light
+# pre-check (tracked changes only, <1s) fails fast; step 3 stays the full gate.
+if [[ "$SKIP_BUILD" -ne 1 ]] && ! git -C "$ROOT_DIR" diff --quiet HEAD 2>/dev/null; then
+  promote_log ""
+  promote_log "❌ Tracked git state is dirty — failing fast BEFORE the build (step 3 preflight is the full gate)."
+  git -C "$ROOT_DIR" status --short 2>/dev/null | tee -a "$PROMOTE_LOG" >&2 || true
+  echo "❌ PROMOTE aborted: commit or stash tracked changes first (fast pre-gate, saved a full build)." >&2
+  exit 1
+fi
 
 ensure_head_stable() {
   local current_head

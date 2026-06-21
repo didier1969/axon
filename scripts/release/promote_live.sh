@@ -29,7 +29,7 @@ ASSERT_STOPPED_INTERVAL_S="${PROMOTE_LIVE_ASSERT_STOPPED_INTERVAL_S:-0.1}"
 # + indexer rise), 150s expirait alors que readyz=ready + build_id correct ⇒
 # promote marqué FAILED à tort + manifeste désynchronisé (viole PIL-AXO-005).
 POSTCHECK_TIMEOUT_S="${PROMOTE_LIVE_POSTCHECK_TIMEOUT_S:-300}"
-POSTCHECK_INTERVAL_S="${PROMOTE_LIVE_POSTCHECK_INTERVAL_S:-2}"
+POSTCHECK_INTERVAL_S="${PROMOTE_LIVE_POSTCHECK_INTERVAL_S:-1}"
 
 # poll_until <description> <timeout_seconds> <interval_seconds> <command...>
 # Returns 0 as soon as <command> succeeds, 1 after <timeout> seconds elapse.
