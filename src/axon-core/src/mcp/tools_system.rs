@@ -1231,6 +1231,119 @@ impl McpServer {
         let enrolled = scanner.scan_subtree(graph, &subtree);
         format!("enrolled:{enrolled}")
     }
+
+    /// REQ-AXO-165 (+ absorbs REQ-AXO-161 writer-lock / build-info drift) —
+    /// read-only filesystem health for an instance: the IST/SOLL writer locks
+    /// (ORPHAN detection — a lock whose owner pid is dead blocks the next writer)
+    /// and build-info drift (binary newer than its recorded identity). Scope is
+    /// deliberately the launcher-AGNOSTIC artifacts: pid-file and socket paths
+    /// diverge between the axonctl layout and the live process-compose runtime
+    /// (HTTP :44129, `.axon/live-run/*.pid`), so process liveness stays with
+    /// `status` / `mcp_surface_diagnostics`. Writer-lock + build-info are the
+    /// artifacts an operator can't read at a glance — exactly REQ-AXO-161's intent.
+    pub(crate) fn axon_runtime_filesystem_health(&self, args: &Value) -> Option<Value> {
+        use std::path::{Path, PathBuf};
+        let instance = args.get("instance").and_then(|v| v.as_str()).unwrap_or("live");
+        let role = args.get("role").and_then(|v| v.as_str()).unwrap_or("brain");
+        let instance_dir = if instance == "dev" { ".axon-dev" } else { ".axon" };
+        let binary = if role == "indexer" { "axon-indexer" } else { "axon-brain" };
+        let root = std::env::var("AXON_PROJECT_ROOT")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let db_root = root.join(instance_dir).join("graph_v2");
+
+        let pid_alive = |pid: i64| Path::new(&format!("/proc/{pid}")).exists();
+        // Writer locks use the runtime_writer_guard.rs format:
+        // "owner=<identity>;pid=<N>" on the owner line (cf. axonctl::parse_lock_file_pid).
+        let lock_owner = |p: &Path| -> Option<(String, i64)> {
+            let content = std::fs::read_to_string(p).ok()?;
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("owner=") {
+                    if let Some(pid_part) = rest.split(";pid=").nth(1) {
+                        if let Ok(pid) = pid_part.trim().parse::<i64>() {
+                            let identity = rest.split(";pid=").next().unwrap_or("").to_string();
+                            return Some((identity, pid));
+                        }
+                    }
+                }
+            }
+            None
+        };
+
+        let mut artifacts: Vec<Value> = Vec::new();
+        let mut issues = 0usize;
+
+        // IST + SOLL writer locks — orphan detection.
+        for (label, lock) in [
+            ("ist_writer_lock", db_root.join(".axon-ist.writer.lock")),
+            ("soll_writer_lock", db_root.join(".axon-soll.writer.lock")),
+        ] {
+            let (present, status, detail) = if lock.exists() {
+                match lock_owner(&lock) {
+                    Some((id, pid)) if pid_alive(pid) => {
+                        (true, "ok", format!("held by live owner {id} (pid {pid})"))
+                    }
+                    Some((id, pid)) => {
+                        issues += 1;
+                        (true, "stale", format!("ORPHAN lock — owner {id} (pid {pid}) is dead; next writer will block"))
+                    }
+                    None => {
+                        issues += 1;
+                        (true, "unknown", "lock present but owner/pid not parseable".to_string())
+                    }
+                }
+            } else {
+                (false, "absent", "no writer lock held (writer idle or not this instance)".to_string())
+            };
+            artifacts.push(json!({
+                "artifact": label, "path": lock.to_string_lossy(),
+                "present": present, "status": status, "detail": detail
+            }));
+        }
+
+        // build-info drift (live binaries live in bin/; dev runs from cargo-target).
+        let build_info = root.join("bin").join(format!("{binary}.build-info"));
+        let binary_path = root.join("bin").join(binary);
+        let (present, status, detail) = if build_info.exists() {
+            let stale = matches!(
+                (
+                    std::fs::metadata(&build_info).and_then(|m| m.modified()),
+                    std::fs::metadata(&binary_path).and_then(|m| m.modified())
+                ),
+                (Ok(bi), Ok(bin)) if bin > bi
+            );
+            if stale {
+                issues += 1;
+                (true, "stale", "binary mtime newer than build-info — identity drift".to_string())
+            } else {
+                (true, "ok", "build-info current".to_string())
+            }
+        } else {
+            (false, "absent", format!("no bin/{binary}.build-info (dev binary lives in cargo-target)"))
+        };
+        artifacts.push(json!({
+            "artifact": "build_info", "path": build_info.to_string_lossy(),
+            "present": present, "status": status, "detail": detail
+        }));
+
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Filesystem health {instance}/{role}: {} artifact(s), {issues} issue(s)", artifacts.len())
+            }],
+            "data": {
+                "status": "ok",
+                "instance": instance,
+                "role": role,
+                "issues": issues,
+                "artifacts": artifacts,
+                "scope_note": "launcher-agnostic FS artifacts only (writer locks + build-info); process/socket liveness via status / mcp_surface_diagnostics",
+                "follow_up_tools": ["status", "truth_check"]
+            }
+        }))
+    }
 }
 
 /// Build a standard MCP error envelope for rescan_project failures.

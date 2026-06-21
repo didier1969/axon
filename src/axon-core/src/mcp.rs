@@ -1526,6 +1526,7 @@ impl McpServer {
             // REQ-AXO-902020 — content-rich READ/triage counterpart to mcp_feedback.
             "mcp_feedback_report" => self.axon_mcp_feedback_report(arguments),
             "truth_check" => self.axon_truth_check(arguments),
+            "runtime_filesystem_health" => self.axon_runtime_filesystem_health(arguments),
             "resume_vectorization" => self.axon_resume_vectorization(arguments),
             // REQ-AXO-901676 — proportionate recovery: force delta / full rescan
             // of a project subtree without restarting the indexer.

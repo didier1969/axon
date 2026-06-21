@@ -1131,6 +1131,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             }),
             json!({
+                "name": "runtime_filesystem_health",
+                "description": "[SYSTEM] Read-only on-disk health for an instance (REQ-AXO-165): IST/SOLL writer locks (ORPHAN detection — dead-owner lock blocks the next writer) + build-info drift (binary newer than recorded identity). Launcher-agnostic FS artifacts; process/socket liveness stays with `status`/`mcp_surface_diagnostics`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "instance": { "type": "string", "enum": ["live", "dev"], "description": "Instance kind (default live)." },
+                        "role": { "type": "string", "enum": ["brain", "indexer"], "description": "Runtime role (default brain)." }
+                    },
+                    "required": []
+                }
+            }),
+            json!({
                 "name": "resume_vectorization",
                 "description": "[SYSTEM] Explicitly recreates the missing vectorization queue from already graph_indexed files.",
                 "inputSchema": {
