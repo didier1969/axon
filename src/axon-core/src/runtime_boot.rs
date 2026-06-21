@@ -499,7 +499,16 @@ pub fn resource_release_identity_from_build_info() {
         return;
     };
     for (k, v) in parse_build_info_identity(&contents) {
-        std::env::set_var(k, v);
+        // REQ-AXO-902064 — only FILL a MISSING var; never override one start.sh
+        // already set from the promotion manifest. The build-info build_id reflects
+        // the BUILD, which cargo caches for a binary-unchanged (script-only) commit,
+        // so it can LAG the promote's manifest build_id — overriding the env with it
+        // broke the PIL-AXO-005 post-check ("expected ...9f0b790c, got ...4c4bfda3").
+        // The manifest env is authoritative for a full restart; this re-source now
+        // only helps a context that left the var unset.
+        if std::env::var_os(&k).is_none() {
+            std::env::set_var(k, v);
+        }
     }
 }
 
