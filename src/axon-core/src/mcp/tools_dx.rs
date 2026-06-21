@@ -46,6 +46,35 @@ fn materialize_symbol_rows(server: &super::McpServer, ids: &[String]) -> String 
         .unwrap_or_else(|_| "[]".to_string())
 }
 
+/// REQ-AXO-902059 — cap for the named caller/callee lists surfaced by `inspect`
+/// (GUI-AXO-1004 cognitive pagination). The full COUNT stays authoritative;
+/// only the materialized NAME list is bounded.
+const INSPECT_NAMED_CAP: usize = 50;
+
+/// REQ-AXO-902059 — named caller/callee rows `{name,kind,project_code}` for
+/// `inspect`, capped to `cap`. Kills the round-trip where an LLM had only the
+/// counts and had to re-query (bidi_trace/impact) just to learn the names —
+/// the dominant token cost reported by the fleet (llm_feedback id9, DOC DocGen).
+fn materialize_named_symbols(server: &super::McpServer, ids: &[String], cap: usize) -> Vec<Value> {
+    let capped: Vec<String> = ids.iter().take(cap).cloned().collect();
+    parse_named_symbol_rows(&materialize_symbol_rows(server, &capped))
+}
+
+/// Parse the `[[name, kind, project_code], …]` shape returned by
+/// [`materialize_symbol_rows`] into `[{name,kind,project_code}]`. Pure (no I/O)
+/// so the projection is unit-testable without a DB.
+fn parse_named_symbol_rows(raw: &str) -> Vec<Value> {
+    let rows: Vec<Vec<Value>> = serde_json::from_str(raw).unwrap_or_default();
+    rows.into_iter()
+        .filter_map(|r| {
+            let name = r.first()?.as_str()?.to_string();
+            let kind = r.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+            let project_code = r.get(2).and_then(Value::as_str).unwrap_or("").to_string();
+            Some(json!({ "name": name, "kind": kind, "project_code": project_code }))
+        })
+        .collect()
+}
+
 impl McpServer {
     fn canonical_source_names(canonical_sources: Option<&Value>) -> Vec<String> {
         canonical_sources
@@ -1750,14 +1779,19 @@ impl McpServer {
         let inspect_view = process_view();
         let inspect_call_rels: [RelationType; 2] = [RelationType::Calls, RelationType::CallsNif];
         let project_key = project.unwrap_or("");
-        let ram_callers_count = inspect_view
+        let caller_ids = inspect_view
             .reverse_at_radius(project_key, &symbol_id, 1, 10_000, &inspect_call_rels)
-            .map(|v| v.len() as i64)
-            .unwrap_or(0);
-        let ram_callees_count = inspect_view
+            .unwrap_or_default();
+        let callee_ids = inspect_view
             .forward_at_radius(project_key, &symbol_id, 1, 10_000, &inspect_call_rels)
-            .map(|v| v.len() as i64)
-            .unwrap_or(0);
+            .unwrap_or_default();
+        let ram_callers_count = caller_ids.len() as i64;
+        let ram_callees_count = callee_ids.len() as i64;
+        // REQ-AXO-902059 — materialize the NAMES (not just counts), capped, so a
+        // single inspect call lets an LLM draw caller→symbol→callee without a
+        // second bidi_trace/impact round-trip (llm_feedback id9, DOC DocGen).
+        let callers_named = materialize_named_symbols(self, &caller_ids, INSPECT_NAMED_CAP);
+        let callees_named = materialize_named_symbols(self, &callee_ids, INSPECT_NAMED_CAP);
 
         // REQ-AXO-901952 — the SQL row carries node ATTRIBUTES only
         // (name/kind/tested = canonical Symbol lookup, not graph traversal).
@@ -1962,7 +1996,16 @@ impl McpServer {
                             "kind": kind,
                             "tested": tested,
                             "callers": callers,
-                            "callees": callees
+                            "callees": callees,
+                            // REQ-AXO-902059 — named lists {name,kind,project_code},
+                            // capped at INSPECT_NAMED_CAP (counts above stay the
+                            // authoritative totals). `*_named_truncated` flags when
+                            // the count exceeds the cap so the LLM knows to paginate
+                            // via bidi_trace if it needs the tail.
+                            "callers_named": callers_named,
+                            "callees_named": callees_named,
+                            "callers_named_truncated": callers > INSPECT_NAMED_CAP as i64,
+                            "callees_named_truncated": callees > INSPECT_NAMED_CAP as i64
                         },
                         "operator_guidance": {
                             "actionable_now": degraded_note.is_none() && !backend_pressure,
@@ -2412,6 +2455,46 @@ impl McpServer {
     }
 
     // MIL-AXO-017 slice 6B: AGE helper bidi_trace_via_age removed ; SQL is canonical.
+}
+
+#[cfg(test)]
+mod parse_named_symbol_rows_tests {
+    use super::parse_named_symbol_rows;
+
+    #[test]
+    fn projects_name_kind_project_code() {
+        let raw = r#"[["compose_dashboard_state_v1","function","AXO"],["b3_health","function","AXO"]]"#;
+        let out = parse_named_symbol_rows(raw);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["name"], "compose_dashboard_state_v1");
+        assert_eq!(out[0]["kind"], "function");
+        assert_eq!(out[0]["project_code"], "AXO");
+        assert_eq!(out[1]["name"], "b3_health");
+    }
+
+    #[test]
+    fn empty_and_malformed_yield_empty() {
+        assert!(parse_named_symbol_rows("[]").is_empty());
+        assert!(parse_named_symbol_rows("not json").is_empty());
+    }
+
+    #[test]
+    fn missing_optional_columns_default_to_empty_string() {
+        let raw = r#"[["lonely"]]"#;
+        let out = parse_named_symbol_rows(raw);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["name"], "lonely");
+        assert_eq!(out[0]["kind"], "");
+        assert_eq!(out[0]["project_code"], "");
+    }
+
+    #[test]
+    fn row_without_name_is_skipped() {
+        let raw = r#"[[null,"function","AXO"],["ok","function","AXO"]]"#;
+        let out = parse_named_symbol_rows(raw);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["name"], "ok");
+    }
 }
 
 #[cfg(test)]
