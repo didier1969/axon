@@ -466,6 +466,16 @@ fn parse_build_info_identity(contents: &str) -> Vec<(String, String)> {
             // build_info_target is written via shlex.quote — strip the optional
             // surrounding single-quotes (identity values are quote-free in practice).
             let v = v.trim().trim_matches('\'').to_string();
+            // REQ-AXO-902064 — never override a real env value with a placeholder.
+            // The cargo-build-time build-info carries AXON_INSTALL_GENERATION=
+            // "workspace" (the generation is assigned at PROMOTE time, not build
+            // time, and reaches a full restart via start.sh's env). Only the
+            // in-place atomic swap writes the real generation into build-info, so
+            // re-source it ONLY when it is a genuine value — otherwise keep the
+            // env that start.sh already set correctly.
+            if v.is_empty() || (k == "AXON_INSTALL_GENERATION" && v == "workspace") {
+                return None;
+            }
             Some((k.to_string(), v))
         })
         .collect()
@@ -1139,6 +1149,22 @@ mod tests {
     fn parse_build_info_identity_empty_and_malformed() {
         assert!(parse_build_info_identity("").is_empty());
         assert!(parse_build_info_identity("no-equals-sign\n").is_empty());
+    }
+
+    #[test]
+    fn parse_build_info_identity_skips_workspace_generation_placeholder() {
+        // REQ-AXO-902064 — the cargo-build build-info carries the "workspace"
+        // placeholder generation; it must NOT override the real env value that
+        // start.sh sets for a full restart. build_id (real) is still re-sourced.
+        let raw = "AXON_BUILD_ID=v0.8.0-1142-g9d0f3164\n\
+                   AXON_INSTALL_GENERATION=workspace\n";
+        let map: std::collections::HashMap<_, _> =
+            parse_build_info_identity(raw).into_iter().collect();
+        assert_eq!(map.get("AXON_BUILD_ID").map(String::as_str), Some("v0.8.0-1142-g9d0f3164"));
+        assert!(
+            !map.contains_key("AXON_INSTALL_GENERATION"),
+            "workspace placeholder must be skipped"
+        );
     }
 
     /// REQ-AXO-901869 A1 — the boot-warm project enumeration tolerates the
