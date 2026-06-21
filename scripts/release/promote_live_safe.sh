@@ -276,7 +276,7 @@ promote_log "   ✅ step 4 (manifest) done — $manifest_path"
 # --- Step 5: promote (copy + restart) ---
 ensure_head_stable
 old_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
-run_step 5 promote_copy_restart "$ROOT_DIR/scripts/axon" promote-live --manifest "$manifest_path" --restart-live --in-place
+run_step 5 promote_copy_restart "$ROOT_DIR/scripts/axon" promote-live --manifest "$manifest_path" --restart-live
 new_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
 promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
 # NOTE: an UNCHANGED md5 is NOT a failure — re-promoting an identical build
