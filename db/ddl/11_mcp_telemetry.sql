@@ -26,3 +26,26 @@ CREATE TABLE IF NOT EXISTS axon.mcp_call_stat (
 -- Recent-window scans (analytics projections + retention sweeps).
 CREATE INDEX IF NOT EXISTS mcp_call_stat_recent_idx
     ON axon.mcp_call_stat (bucket_hour DESC, tool);
+
+-- CPT-AXO-90052 — `sql` tool query-SHAPE rollup. mcp_call_stat proves `sql` is
+-- the 2nd most-called tool (clients drop to raw SQL for want of a command) but is
+-- signature-only, so it can't say WHICH queries recur. This table stores the
+-- NORMALIZED shape (string/number literals → '?', whitespace collapsed,
+-- lowercased; identifiers like `v2` preserved) — NEVER literal values
+-- (PIL-AXO-9003). Mining the high-frequency shapes over a few sessions reveals
+-- which raw-SQL patterns to promote to first-class MCP commands (or extend
+-- query/retrieve_context/status). Same bounded rollup model as mcp_call_stat.
+CREATE TABLE IF NOT EXISTS axon.sql_shape_stat (
+    shape_hash       TEXT        NOT NULL,
+    shape            TEXT        NOT NULL,
+    project_code     TEXT        NOT NULL DEFAULT '',
+    status           TEXT        NOT NULL DEFAULT 'ok',   -- 'ok' | 'error'
+    bucket_hour      TIMESTAMPTZ NOT NULL,
+    call_count       BIGINT      NOT NULL DEFAULT 0,
+    latency_sum_ms   BIGINT      NOT NULL DEFAULT 0,
+    latency_max_ms   INTEGER     NOT NULL DEFAULT 0,
+    PRIMARY KEY (shape_hash, status, bucket_hour)
+);
+
+CREATE INDEX IF NOT EXISTS sql_shape_stat_freq_idx
+    ON axon.sql_shape_stat (bucket_hour DESC, call_count DESC);

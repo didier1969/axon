@@ -6,6 +6,60 @@ use super::McpServer;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
+/// CPT-AXO-90052 — normalize a SQL query to a content-free SHAPE for the
+/// `axon.sql_shape_stat` rollup: string/number literals → `?`, whitespace
+/// collapsed, lowercased. Identifiers embedding digits (e.g. `pipeline_v2`) are
+/// preserved — a digit becomes `?` only when NOT preceded by an identifier char.
+/// Never stores literal values (PIL-AXO-9003 commercial privacy).
+fn normalize_sql_shape(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\'' {
+            out.push('?');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    // doubled '' is an escaped quote inside the literal
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        } else if b.is_ascii_digit()
+            && !(i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+        {
+            out.push('?');
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                i += 1;
+            }
+        } else if (b as char).is_ascii_whitespace() {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+            i += 1;
+        } else {
+            out.push((b as char).to_ascii_lowercase());
+            i += 1;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// CPT-AXO-90052 — stable 16-hex hash of a normalized shape (rollup PK key).
+fn sql_shape_hash(shape: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    shape.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 impl McpServer {
     pub(crate) fn axon_resume_vectorization(&self, _args: &Value) -> Option<Value> {
         let runtime_mode = AxonRuntimeMode::from_env();
@@ -770,6 +824,27 @@ impl McpServer {
         }))
     }
 
+    /// CPT-AXO-90052 — upsert the normalized shape of a `sql` query into the
+    /// hourly rollup. Best-effort + content-free: a telemetry write failure
+    /// (e.g. table not yet created on an old runtime) never affects the response.
+    fn record_sql_shape(&self, sql: &str, status: &str, latency_ms: i64) {
+        let shape: String = normalize_sql_shape(sql).chars().take(2000).collect();
+        if shape.is_empty() {
+            return;
+        }
+        let hash = sql_shape_hash(&shape);
+        let lm = latency_ms.max(0);
+        let _ = self.graph_store.execute_param(
+            "INSERT INTO axon.sql_shape_stat (shape_hash, shape, project_code, status, bucket_hour, call_count, latency_sum_ms, latency_max_ms)
+             VALUES (?, ?, '', ?, date_trunc('hour', now()), 1, ?, ?)
+             ON CONFLICT (shape_hash, status, bucket_hour)
+             DO UPDATE SET call_count = axon.sql_shape_stat.call_count + 1,
+                           latency_sum_ms = axon.sql_shape_stat.latency_sum_ms + EXCLUDED.latency_sum_ms,
+                           latency_max_ms = greatest(axon.sql_shape_stat.latency_max_ms, EXCLUDED.latency_max_ms)",
+            &json!([hash, shape, status, lm, lm]),
+        );
+    }
+
     pub(crate) fn axon_sql(&self, args: &Value) -> Option<Value> {
         let sql = args.get("sql")?.as_str()?;
         let q = sql.trim();
@@ -797,7 +872,18 @@ impl McpServer {
         // queries is dead code under this invariant ; dropped. The
         // raw `query_json` path below handles every consumer.
 
-        match self.graph_store.query_json(q) {
+        // CPT-AXO-90052 — record the NORMALIZED query shape (no literal values)
+        // so recurring raw-SQL patterns can be mined and promoted to commands.
+        // Best-effort: a telemetry write never affects the tool response.
+        let _sql_t0 = std::time::Instant::now();
+        let outcome = self.graph_store.query_json(q);
+        let _sql_latency_ms = _sql_t0.elapsed().as_millis() as i64;
+        self.record_sql_shape(
+            q,
+            if outcome.is_ok() { "ok" } else { "error" },
+            _sql_latency_ms,
+        );
+        match outcome {
             Ok(result) => {
                 // REQ-AXO-901949 inv.5 — auto-continue: surface the valid next
                 // moves from the single-source tool_routing record.
@@ -1169,4 +1255,37 @@ fn rescan_error_envelope(project_code: &str, code: &str, message: &str) -> Value
         },
         "isError": true,
     })
+}
+
+#[cfg(test)]
+mod sql_shape_tests {
+    //! CPT-AXO-90052 — lock the SQL shape normalizer: literal values stripped to
+    //! `?` (so structurally-identical queries collapse), identifiers preserved,
+    //! never any literal content stored.
+    use super::normalize_sql_shape;
+
+    #[test]
+    fn strips_string_and_number_literals() {
+        let s = normalize_sql_shape(
+            "SELECT id FROM ist.Symbol WHERE name='foo' AND project_code = 'AXO' LIMIT 10",
+        );
+        assert_eq!(
+            s,
+            "select id from ist.symbol where name=? and project_code = ? limit ?"
+        );
+    }
+
+    #[test]
+    fn same_structure_different_values_collapse_to_one_shape() {
+        let a = normalize_sql_shape("SELECT x FROM t WHERE id='abc' AND n=5");
+        let b = normalize_sql_shape("SELECT x FROM t WHERE id='zzzzz' AND n=999");
+        assert_eq!(a, b);
+        assert_eq!(a, "select x from t where id=? and n=?");
+    }
+
+    #[test]
+    fn preserves_digit_inside_identifier() {
+        let s = normalize_sql_shape("SELECT * FROM pipeline_v2 WHERE port=44129");
+        assert_eq!(s, "select * from pipeline_v2 where port=?");
+    }
 }
