@@ -134,11 +134,22 @@ impl PythonParser {
         let is_test = func_name.starts_with("test_");
 
         // Find decorators
+        // REQ-AXO-901958 — recognise pytest fixtures (`@fixture` / `@pytest.fixture`
+        // / `@pytest_asyncio.fixture`). A fixture is invoked by the test framework,
+        // never by an explicit call expression, so it has no inbound CALLS edge and
+        // was mis-reported as dead code. We fold it into the already-persisted
+        // `tested` flag (which dead_code_count / orphan_code_symbols already skip),
+        // avoiding a new Symbol column on the COPY-BINARY ingestion path.
+        let mut is_fixture = false;
         if let Some(parent) = node.parent() {
             if parent.kind() == "decorated_definition" {
                 let mut cursor = parent.walk();
                 for child in parent.children(&mut cursor) {
                     if child.kind() == "decorator" {
+                        let dec_text = child.utf8_text(source).unwrap_or("");
+                        if dec_text.contains("fixture") {
+                            is_fixture = true;
+                        }
                         if let Some(id) = self.find_child_by_type(child, "identifier") {
                             let dec_name = id.utf8_text(source).unwrap_or("").to_string();
                             props.insert(format!("decorator_{}", dec_name), "true".to_string());
@@ -201,7 +212,9 @@ impl PythonParser {
             docstring: None,
             is_entry_point: func_name == "main" || is_nif,
             is_public: !func_name.starts_with("_") || func_name == "__init__",
-            tested: is_test,
+            // REQ-AXO-901958 — fixtures fold into `tested` (framework-invoked, no
+            // inbound CALLS edge → would be mis-flagged as dead).
+            tested: is_test || is_fixture,
             is_nif,
             is_unsafe,
             properties: props,

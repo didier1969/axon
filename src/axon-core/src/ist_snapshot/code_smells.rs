@@ -23,7 +23,11 @@ const ANALYTICS_LIMIT: usize = 20;
 const GOD_OBJECT_FAN_OUT_THRESHOLD: usize = 20;
 const FEATURE_ENVY_MIN_TOTAL: usize = 3;
 const FEATURE_ENVY_MIN_FOREIGN: usize = 2;
-const TEST_PATH_FRAGMENTS: &[&str] = &["/tests/", "/test/"];
+// REQ-AXO-901958 — `/scripts/` joins the test-path exclusion: script helpers are
+// invoked from module-level top-level code (not captured as CALLS edges) or run
+// directly, so an uncalled private fn in scripts/ is an entry-point-like utility,
+// not dead code. This kills the script-dir slice of the ~85% false-positive set.
+const TEST_PATH_FRAGMENTS: &[&str] = &["/tests/", "/test/", "/scripts/"];
 const TEST_PATH_SUFFIXES: &[&str] = &["_test.rs", "_test.exs", ".test.ts", ".test.js"];
 
 fn is_callable(kind_byte: u8) -> bool {
