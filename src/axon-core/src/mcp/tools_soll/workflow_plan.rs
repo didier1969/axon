@@ -66,6 +66,13 @@ impl McpServer {
                             "expected_field": "relations",
                             "items_silently_dropped": len,
                             "hint": "move `relations: [...]` out of `plan` so the call looks like `{project_code, plan:{requirements:[...]}, relations:[...]}`",
+                            // REQ-AXO-902055 — inline minimal valid call so the LLM
+                            // corrects in one round-trip (pattern: evidence repair).
+                            "corrected_call": {
+                                "project_code": "<CODE>",
+                                "plan": { "requirements": [{ "logical_key": "k1", "title": "…" }] },
+                                "relations": [{ "source_logical_key": "k1", "target_id": "<PARENT-ID>", "relation_type": "BELONGS_TO" }]
+                            },
                             "follow_up_tools": ["help", "soll_apply_plan"],
                         },
                         "canonical_source": "REQ-AXO-901625",
@@ -134,6 +141,16 @@ impl McpServer {
                                             "metadata"
                                         ],
                                         "hint": "To CREATE: remove the id, supply logical_key + title (server allocates the id). To UPDATE this existing node: call soll_manager(action=update, data={id, …}) — do NOT pass the id as logical_key (creates a duplicate).",
+                                        // REQ-AXO-902055 — both corrected calls inline (one round-trip).
+                                        "corrected_call_create": {
+                                            "project_code": "<CODE>",
+                                            "plan": { "requirements": [{ "logical_key": "k1", "title": "…" }] }
+                                        },
+                                        "corrected_call_update": {
+                                            "action": "update",
+                                            "entity": "requirement",
+                                            "data": { "id": id, "status": "delivered" }
+                                        },
                                         "update_path": "soll_manager(action=update, data={id, status|description|…})",
                                         "follow_up_tools": ["soll_manager", "soll_apply_plan"],
                                     },

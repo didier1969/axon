@@ -97,7 +97,14 @@ fn mcp_server_identity_name() -> &'static str {
 }
 
 impl McpServer {
-    pub(crate) const ASYNC_JOB_TOOL_NAMES: &[&str] = &["restore_soll", "soll_apply_plan"];
+    // REQ-AXO-902061 (llm_feedback id5, SVZ) — apply_guidelines joins the async
+    // allowlist: a 20-rule batch is slow enough to trip a client timeout while
+    // succeeding server-side (false-timeout → wasted re-verification). Async mode
+    // returns a job_id immediately. Gated by mcp_mutation_jobs_enabled (sync by
+    // default, unchanged); reserve_mutation_ids no-ops for it (only soll_apply_plan
+    // reserves a preview_id), so launch_mutation_job runs it generically.
+    pub(crate) const ASYNC_JOB_TOOL_NAMES: &[&str] =
+        &["restore_soll", "soll_apply_plan", "apply_guidelines"];
     pub(crate) const MONITORED_SYNC_MUTATION_TOOLS: &[&str] = &["soll_commit_revision"];
     pub(crate) const SOLL_DERIVED_DOCS_REFRESH_TOOLS: &[&str] = &[
         "restore_soll",

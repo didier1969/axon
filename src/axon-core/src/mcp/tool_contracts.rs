@@ -130,6 +130,13 @@ pub(crate) struct SollManagerData {
     /// Tag list (metadata-routed; consumed by soll_query_context filter).
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// REQ-AXO-902062 (llm_feedback id13, DOC) — acceptance criteria
+    /// (metadata-routed). Declared so the field is DISCOVERABLE in the derived
+    /// schema: a Requirement cannot move `partial → done` (soll_verify_requirements)
+    /// without criteria, yet the field was previously only accepted as an
+    /// undeclared extra property. e.g. ["test X green", "metric Y < Z"].
+    #[serde(default)]
+    pub acceptance_criteria: Option<Vec<String>>,
 }
 
 /// `soll_manager` — create / update / link / unlink intent entities.
