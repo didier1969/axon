@@ -446,6 +446,53 @@ fn parse_boot_warm_project_codes(raw: &str) -> Vec<String> {
 /// so boot always warms ; per-project failures log and leave that project's
 /// snapshot cold (callers then surface a loud degraded error, never a silent
 /// 0). Runs on a blocking thread so it never stalls the async runtime at boot.
+/// REQ-AXO-902064 slice 3 — parse `KEY=value` (shlex-quoted) build-info lines,
+/// keeping only the release-identity vars. Pure (no I/O) for unit testing.
+fn parse_build_info_identity(contents: &str) -> Vec<(String, String)> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            let k = k.trim();
+            if !matches!(
+                k,
+                "AXON_BUILD_ID"
+                    | "AXON_RELEASE_VERSION"
+                    | "AXON_PACKAGE_VERSION"
+                    | "AXON_INSTALL_GENERATION"
+            ) {
+                return None;
+            }
+            // build_info_target is written via shlex.quote — strip the optional
+            // surrounding single-quotes (identity values are quote-free in practice).
+            let v = v.trim().trim_matches('\'').to_string();
+            Some((k.to_string(), v))
+        })
+        .collect()
+}
+
+/// REQ-AXO-902064 slice 3 — set the release-identity env vars from the loaded
+/// binary's `<exe>.build-info` (written by the promote atomic bin swap). Makes an
+/// in-place restart report the SWAPPED binary's identity instead of the env the
+/// process-compose daemon reinjected. Best-effort: missing file / unreadable exe
+/// leaves the existing env untouched.
+pub fn resource_release_identity_from_build_info() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let name = exe
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("axon-brain");
+    let info_path = exe.with_file_name(format!("{name}.build-info"));
+    let Ok(contents) = std::fs::read_to_string(&info_path) else {
+        return;
+    };
+    for (k, v) in parse_build_info_identity(&contents) {
+        std::env::set_var(k, v);
+    }
+}
+
 fn warm_all_ist_snapshots_at_boot(graph_store: Arc<GraphStore>) {
     tokio::task::spawn_blocking(move || {
         let store = IstLoaderSqlStore(graph_store);
@@ -496,6 +543,17 @@ pub fn run_indexer() -> anyhow::Result<()> {
 }
 
 fn run(profile: RuntimeBootProfile) -> anyhow::Result<()> {
+    // REQ-AXO-902064 slice 3 — re-source release identity from the loaded
+    // binary's build-info BEFORE the tokio runtime spawns (single-threaded here,
+    // so env::set_var is sound). An in-place promote restart relies on
+    // process-compose's availability:restart, which reinjects the daemon's
+    // ORIGINAL env — so the auto-restarted process runs the SWAPPED binary but
+    // would otherwise report the inherited (stale) AXON_BUILD_ID /
+    // INSTALL_GENERATION, failing the PIL-AXO-005 identity post-check. The
+    // build-info on disk (rewritten by the atomic bin swap) is the authoritative
+    // identity of the loaded binary; prefer it. No-op for a dev build with no
+    // build-info file.
+    resource_release_identity_from_build_info();
     let runtime_profile = RuntimeProfile::detect();
 
     tokio::runtime::Builder::new_multi_thread()
@@ -1052,12 +1110,36 @@ mod tests {
         apply_canonical_embedding_lane_sizing_defaults, apply_canonical_ort_runtime_env,
         apply_canonical_ort_thread_defaults_from_openmp, apply_graph_first_indexer_memory_defaults,
         canonical_effective_embedding_lane_config, canonical_embedding_provider_request,
-        graph_first_indexer_lane_sizing, parse_boot_warm_project_codes, RuntimeBootProfile,
-        RuntimeBootRole,
+        graph_first_indexer_lane_sizing, parse_boot_warm_project_codes,
+        parse_build_info_identity, RuntimeBootProfile, RuntimeBootRole,
     };
     use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_profile::{EmbeddingLaneSizing, RuntimeProfile};
     use crate::runtime_writer_guard::WriterTarget;
+
+    /// REQ-AXO-902064 slice 3 — build-info identity parse: keeps only the four
+    /// release-identity vars, strips shlex single-quotes, ignores other lines.
+    #[test]
+    fn parse_build_info_identity_extracts_release_vars() {
+        let raw = "AXON_RELEASE_VERSION=v0.8.0\n\
+                   AXON_BUILD_ID=v0.8.0-1139-ged70b99f\n\
+                   AXON_PACKAGE_VERSION='0.8.0'\n\
+                   AXON_INSTALL_GENERATION=live-20260621T113105Z\n\
+                   AXON_OTHER=ignored\n";
+        let got = parse_build_info_identity(raw);
+        assert_eq!(got.len(), 4, "only the 4 identity vars, not AXON_OTHER");
+        let map: std::collections::HashMap<_, _> = got.into_iter().collect();
+        assert_eq!(map["AXON_BUILD_ID"], "v0.8.0-1139-ged70b99f");
+        assert_eq!(map["AXON_PACKAGE_VERSION"], "0.8.0"); // single-quotes stripped
+        assert_eq!(map["AXON_INSTALL_GENERATION"], "live-20260621T113105Z");
+        assert!(!map.contains_key("AXON_OTHER"));
+    }
+
+    #[test]
+    fn parse_build_info_identity_empty_and_malformed() {
+        assert!(parse_build_info_identity("").is_empty());
+        assert!(parse_build_info_identity("no-equals-sign\n").is_empty());
+    }
 
     /// REQ-AXO-901869 A1 — the boot-warm project enumeration tolerates the
     /// `query_json` 2-D array shape, filters null/empty codes, and degrades
