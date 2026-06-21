@@ -573,6 +573,27 @@ impl McpServer {
                 evidence.push_str(&format!("**Optional refresh (live reads):** `{}`\n", cmd));
             }
         }
+        // REQ-AXO-902053 P1 (DEC-AXO-901640 G3) — surface visualization-surface
+        // freshness (Memgraph publication + last SOLL revision) so a skipped
+        // publish (Docker down) or a stale projection is detectable IN-MCP, not
+        // only by reading the on-disk marker. Brief line only when the Memgraph
+        // projection is NOT fresh (keeps the canonical happy-path output clean);
+        // the full block always lands in `data.viz_freshness`.
+        let viz_freshness = crate::viz_freshness::viz_freshness_snapshot(now_ms);
+        let memgraph_verdict = viz_freshness
+            .pointer("/memgraph_publication/verdict")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if memgraph_verdict != "fresh" {
+            let memgraph_detail = viz_freshness
+                .pointer("/memgraph_publication/detail")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            evidence.push_str(&format!(
+                "**Viz (Memgraph):** {} — {} (non-canonical projection; `bash scripts/publish-memgraph.sh` to refresh)\n",
+                memgraph_verdict, memgraph_detail
+            ));
+        }
         // Genuine degradation (NOT the freshness lag, already conveyed above)
         // still surfaces as a blocker so real problems are never hidden.
         let real_blocker = degraded_notes
@@ -1287,6 +1308,10 @@ impl McpServer {
                     "oldest_semantic_pending_age_ms": oldest_semantic_pending_age_ms
                 },
                 "public_tools": public_tool_names,
+                // REQ-AXO-902053 P1 (DEC-AXO-901640 G3) — visualization-surface
+                // freshness: Memgraph publication marker (aged + verdict) + last
+                // SOLL revision observed by the dashboard's autodoc-regen listener.
+                "viz_freshness": viz_freshness,
                 // REQ-AXO-901757 slice C (AC4) — SOLL snapshot-cache warmth.
                 // Whole-snapshot reads served from RAM vs PG (re)loads (cold cache /
                 // invalidation), across EVERY tool that calls snapshot() — admin

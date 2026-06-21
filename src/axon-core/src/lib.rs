@@ -53,6 +53,7 @@ pub mod soll_snapshot;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod vector_control;
+pub mod viz_freshness;
 // REQ-AXO-901893 — Watchman-backed file source (clock/cursor reconciliation).
 // The legacy notify/inotify watcher + ingress_buffer FIFO + reconciliation/
 // periodic sweeps it replaced were RIPPED in the LEGACY FEED PURGE (REQ-AXO-901893

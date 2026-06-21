@@ -124,7 +124,13 @@ async fn listen_once(server: &Arc<McpServer>, database_url: &str) -> Result<()> 
                 None => break,
             }
         }
+        // REQ-AXO-902053 P2 — feed the viz-freshness signal so `status`/`health`
+        // and the dashboard event (`compose_dashboard_state_v1`) surface "when
+        // did SOLL last change" without a shell. Fire-and-forget alongside the
+        // autodoc regen (the existing subscriber duty).
+        let now_ms = chrono::Utc::now().timestamp_millis();
         for project in &projects {
+            crate::viz_freshness::record_soll_revision(project.clone(), now_ms);
             server.regenerate_derived_docs_for(project.clone());
         }
     }

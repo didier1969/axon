@@ -803,6 +803,26 @@ impl McpServer {
                 .collect();
             evidence.push_str(&format!("\nGod Objects detected: {}", god_list.join(", ")));
         }
+        // REQ-AXO-902053 P1 (DEC-AXO-901640 G3) — flag a non-fresh Memgraph
+        // projection (skipped/failed/stale/absent) so viz drift is visible from
+        // the health surface, not only via the on-disk marker.
+        let viz_now_ms = chrono::Utc::now().timestamp_millis();
+        let viz_freshness = crate::viz_freshness::viz_freshness_snapshot(viz_now_ms);
+        if let Some(verdict) = viz_freshness
+            .pointer("/memgraph_publication/verdict")
+            .and_then(|v| v.as_str())
+        {
+            if verdict != "fresh" {
+                let detail = viz_freshness
+                    .pointer("/memgraph_publication/detail")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                evidence.push_str(&format!(
+                    "\nViz (Memgraph projection, non-canonical): {} — {}",
+                    verdict, detail
+                ));
+            }
+        }
 
         let report = format!(
             "## 🏥 Health Report: {}\n\n{}",

@@ -342,6 +342,11 @@ pub(crate) fn compose_dashboard_state_v1(
             "scheduler": live.scheduler_state,
         },
         "lifecycle": lifecycle,
+        // REQ-AXO-902053 P2 — last SOLL mutation signal (DEC-AXO-901640). The
+        // dashboard is IST-centric and refreshes IST at 1 Hz; this block lets it
+        // also reflect when the SOLL knowledge last changed (project + age +
+        // bursts-since-boot), fed by the soll_revision_committed listener.
+        "soll_revision": crate::viz_freshness::soll_revision_snapshot(live.ts_ms as i64),
         "totals": pg_state.get("totals").cloned().unwrap_or_else(|| json!({})),
         "per_project": pg_state.get("per_project").cloned().unwrap_or_else(|| json!([])),
         "runtime_config": pg_state.get("runtime_config").cloned().unwrap_or_else(|| json!({})),
@@ -554,6 +559,10 @@ mod tests {
         assert_eq!(event["telemetry"]["service_pressure"], "healthy");
         // Lifecycle block embedded as-is.
         assert_eq!(event["lifecycle"]["phase"], "ready");
+        // REQ-AXO-902053 P2 — SOLL-revision freshness block is always present
+        // (verdict `none_since_boot` until the listener fires).
+        assert!(event.get("soll_revision").is_some());
+        assert!(event["soll_revision"]["verdict"].is_string());
         // PG composite blocks extracted from pg_state (covers the F5
         // dashboard pipeline_live worker-config table + funnel).
         assert_eq!(event["totals"]["files"], 14855);
