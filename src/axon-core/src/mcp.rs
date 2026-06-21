@@ -1169,7 +1169,16 @@ impl McpServer {
                     "0" | "false" | "no" | "off"
                 )
             })
-            .unwrap_or(true)
+            // REQ-AXO-902064 slice 2 — default NON-blocking. Blocking prewarm ran
+            // a full `why` (ORT model load ~8-10s + tri-modal fusion) BEFORE the
+            // HTTP bind, so /readyz was unreachable for ~16s at boot — the brain's
+            // contribution to MCP promote downtime. Prewarm's job is to make the
+            // FIRST query fast; doing it before serving defeats availability. The
+            // non-blocking path warms caches in background while the brain serves
+            // immediately (cold caches fall back to PG/CPU — correct, just slower
+            // for the first call). Set AXON_MCP_PREWARM_BLOCKING=1 to restore the
+            // old blocking behaviour (e.g. a bench that wants warm-from-first-call).
+            .unwrap_or(false)
     }
 
     pub(crate) fn mcp_guidance_shadow_enabled() -> bool {
