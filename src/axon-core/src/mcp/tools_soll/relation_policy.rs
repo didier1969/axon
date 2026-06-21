@@ -180,7 +180,11 @@ pub(super) fn relation_policy_for_pair(
         // REQ-AXO-901727 (Option A) — TechnologyMigration belongs to a Pillar
         // for theming/queryability (like CPT/GUI→PIL) and REFINES the Decision
         // that mandated the migration (e.g. the DuckDB→PG or AGE-retirement DEC).
-        // The HAS_REMNANT TMG→IST cross-graph edge is a follow-up slice (N2).
+        // The HAS_REMNANT TMG→ART (IST) cross-graph edge is delivered below
+        // (REQ-AXO-902060 / session 88): detect_remnants anchors a migration to
+        // its code remnants via HAS_REMNANT, so TMG→ART must be a legal pair —
+        // without it soll_validate flagged every advisory remnant edge as a
+        // forbidden relation (31 false-positives).
         ("TMG", "PIL") => Some(RelationPolicy {
             allowed: &["BELONGS_TO"],
             default: Some("BELONGS_TO"),
@@ -199,6 +203,19 @@ pub(super) fn relation_policy_for_pair(
                 role: ProjectionRole::Lateral,
                 parent_preference_rank: 90,
                 child_order_rank: 120,
+            },
+        }),
+        // REQ-AXO-902060 — TMG anchors its code remnants in the IST via
+        // HAS_REMNANT (advisory, cross-graph SOLL→IST). Legal pair so
+        // detect_remnants' edges validate by construction.
+        ("TMG", "ART") => Some(RelationPolicy {
+            allowed: &["HAS_REMNANT"],
+            default: Some("HAS_REMNANT"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 95,
+                child_order_rank: 130,
             },
         }),
         ("DEC", "REQ") => Some(RelationPolicy {
@@ -852,6 +869,34 @@ mod blocked_by_policy_tests {
                 policy.allowed
             );
         }
+    }
+
+    /// REQ-AXO-902060 — TMG -> ART (HAS_REMNANT) is the canonical cross-graph
+    /// edge detect_remnants writes (a TechnologyMigration anchored to its code
+    /// remnants). Without it soll_validate flagged every advisory remnant edge
+    /// as a forbidden relation (31 false-positives, session 88).
+    #[test]
+    fn has_remnant_allowed_for_tmg_artifact() {
+        let policy = relation_policy_for_pair("TMG", "ART")
+            .expect("TMG -> ART must have a relation policy");
+        assert!(
+            policy.allowed.contains(&"HAS_REMNANT"),
+            "TMG -> ART must allow HAS_REMNANT (allowed = {:?})",
+            policy.allowed
+        );
+    }
+
+    /// HAS_REMNANT must NOT bleed onto other source kinds (only TMG anchors
+    /// remnants).
+    #[test]
+    fn has_remnant_not_allowed_from_requirement() {
+        // REQ -> ART exists (SUBSTANTIATES/BLOCKED_BY) but must not carry HAS_REMNANT.
+        let policy = relation_policy_for_pair("REQ", "ART").expect("REQ -> ART policy exists");
+        assert!(
+            !policy.allowed.contains(&"HAS_REMNANT"),
+            "REQ -> ART must not allow HAS_REMNANT (allowed = {:?})",
+            policy.allowed
+        );
     }
 
     /// BLOCKED_BY must NOT bleed onto unrelated pairs (e.g. VAL -> ART evidence).

@@ -939,6 +939,19 @@ impl McpServer {
                 .and_then(|value| value.as_str())
                 .and_then(Self::project_code_from_soll_entity_id)
                 .and_then(|project_code| self.resolve_project_code(&project_code).ok()),
+            // REQ-AXO-902060 — `soll_manager action=link/update` carries no
+            // top-level project_code/entity_id; its target lives in `data`
+            // (source_id/id/target_id/attach_to). Without deriving it here the
+            // SOLL snapshot is NOT invalidated after a link, so soll_validate
+            // reads a stale RAM snapshot and reports edges that exist as missing
+            // (llm_feedback id8, SNN).
+            "soll_manager" => arguments.get("data").and_then(|data| {
+                ["source_id", "id", "target_id", "attach_to"]
+                    .iter()
+                    .find_map(|key| data.get(*key).and_then(|value| value.as_str()))
+                    .and_then(Self::project_code_from_soll_entity_id)
+                    .and_then(|project_code| self.resolve_project_code(&project_code).ok())
+            }),
             _ => None,
         }
     }
