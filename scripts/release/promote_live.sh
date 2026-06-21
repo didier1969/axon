@@ -161,9 +161,16 @@ PY
   # flakiness. With axon-brain shutdown.timeout_seconds=3 + backoff_seconds=1,
   # validated dev MCP downtime = 3.3s. The restarted brain re-sources its identity
   # from the swapped build-info (slice 3), so the post-check passes.
-  local pc; pc="$(run_devenv 'which process-compose' 2>/dev/null | tail -1)"
-  [[ -x "${pc:-}" ]] || {
-    echo "in-place: process-compose binary not resolved; full restart." >&2
+  # Resolve process-compose from the RUNNING daemon's own exe. promote_live.sh
+  # runs OUTSIDE the devenv shell (process-compose is not on PATH, and run_devenv
+  # is not in scope here — the previous run_devenv call silently failed, so
+  # in-place ALWAYS fell back). The daemon managing :pc_port IS a process-compose
+  # process, so /proc/<pid>/exe is the exact, executable binary.
+  local pc_daemon_pid pc
+  pc_daemon_pid="$(pgrep -f "process-compose .*-p ${pc_port}" | head -1)"
+  pc="$(readlink -f "/proc/${pc_daemon_pid:-0}/exe" 2>/dev/null || true)"
+  [[ -n "${pc_daemon_pid:-}" && -x "${pc:-}" ]] || {
+    echo "in-place: process-compose not resolved from daemon pid (:${pc_port}); full restart." >&2
     return 1
   }
   if ! "$pc" process restart axon-brain -p "$pc_port" >/dev/null 2>&1; then
