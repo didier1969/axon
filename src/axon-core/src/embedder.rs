@@ -10,7 +10,7 @@ use crate::graph::GraphStore;
 use crate::queue::QueueStore;
 use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
 use crate::runtime_mode::AxonRuntimeMode;
-use crate::runtime_profile::{recommend_embedding_lane_sizing, RuntimeProfile};
+use crate::runtime_capacity_profile::{recommend_embedding_lane_sizing, RuntimeProfile};
 use crate::runtime_tuning::{
     current_runtime_tuning_snapshot as runtime_tuning_snapshot,
     current_runtime_tuning_state as runtime_tuning_state,
@@ -3467,7 +3467,7 @@ mod tests {
 
         let canonical = crate::runtime_mode::canonical_embedding_provider_request_for_mode(
             crate::runtime_mode::AxonRuntimeMode::from_env(),
-            crate::runtime_profile::RuntimeProfile::detect().gpu_present,
+            crate::runtime_capacity_profile::RuntimeProfile::detect().gpu_present,
         )
         .to_ascii_lowercase();
         let provider = super::effective_provider_request_for_lane("query");

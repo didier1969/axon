@@ -198,7 +198,7 @@ fn main() -> ExitCode {
     // REQ-AXO-902035 — optional blocking-pool cap so the bench can be
     // pinned to a PRODUCTION-like `max_blocking_threads` for controlled
     // experiments (the production indexer caps it via
-    // runtime_profile::recommend_sizing). DEFAULT stays at tokio's standard
+    // runtime_capacity_profile::recommend_sizing). DEFAULT stays at tokio's standard
     // 512-thread pool so the bench is never the bottleneck for routine
     // throughput characterisation; set AXON_MAX_BLOCKING_THREADS to pin it
     // (e.g. to reproduce / probe the A-starves-B contention). NB the bench's

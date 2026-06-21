@@ -3,7 +3,7 @@ use crate::optimizer;
 use crate::runtime_command_proxy::RuntimeCommandProxy;
 use crate::runtime_mode::{canonical_embedding_provider_request_for_mode, AxonRuntimeMode};
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
-use crate::runtime_profile::RuntimeProfile;
+use crate::runtime_capacity_profile::RuntimeProfile;
 use crate::runtime_topology::{current_runtime_shadow_role, AxonProcessRole};
 use crate::service_guard;
 use crate::vector_control::{

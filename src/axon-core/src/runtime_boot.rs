@@ -9,7 +9,7 @@ use crate::main_telemetry;
 use crate::queue::QueueStore;
 use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
 use crate::runtime_mode::AxonRuntimeMode;
-use crate::runtime_profile::{
+use crate::runtime_capacity_profile::{
     recommend_embedding_lane_sizing, EmbeddingLaneSizing, RuntimeProfile,
 };
 use crate::runtime_writer_guard::WriterGuard;
@@ -1129,7 +1129,7 @@ mod tests {
         parse_build_info_identity, resource_release_identity, RuntimeBootProfile, RuntimeBootRole,
     };
     use crate::runtime_mode::AxonRuntimeMode;
-    use crate::runtime_profile::{EmbeddingLaneSizing, RuntimeProfile};
+    use crate::runtime_capacity_profile::{EmbeddingLaneSizing, RuntimeProfile};
     use crate::runtime_writer_guard::WriterTarget;
 
     /// REQ-AXO-902064 — the active-identity re-source OVERRIDES the inherited

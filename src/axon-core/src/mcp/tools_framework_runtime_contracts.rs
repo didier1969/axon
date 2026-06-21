@@ -2,7 +2,7 @@ use crate::embedder::{
     bootstrap_runtime_tuning_state, current_runtime_tuning_state, embedding_lane_config_from_env,
 };
 use crate::runtime_mode::{canonical_embedding_provider_request_for_mode, AxonRuntimeMode};
-use crate::runtime_profile::{
+use crate::runtime_capacity_profile::{
     canonical_watcher_first_priority_lanes, current_admission_controller_state,
     current_graph_production_state, current_runtime_priority_contract_state,
     current_vector_downstream_state, recommend_admission_controller_profile,

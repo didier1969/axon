@@ -5,7 +5,7 @@ use super::provider_contract::{
     ProviderSupportRole,
 };
 use crate::runtime_mode::{canonical_embedding_provider_request_for_mode, AxonRuntimeMode};
-use crate::runtime_profile::RuntimeProfile;
+use crate::runtime_capacity_profile::RuntimeProfile;
 
 /// REQ-AXO-901737 : Single source of truth for embedder provider state.
 /// `AXON_EMBEDDING_PROVIDER` env var is the ONLY operator-facing input (request).

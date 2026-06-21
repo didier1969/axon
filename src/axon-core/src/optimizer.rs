@@ -6,7 +6,7 @@ use crate::embedding_contract::CHUNK_MODEL_ID;
 use crate::graph::GraphStore;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_observability::{process_memory_snapshot, ProcessMemorySnapshot};
-use crate::runtime_profile::RuntimeProfile;
+use crate::runtime_capacity_profile::RuntimeProfile;
 use crate::service_guard;
 use crate::vector_control::current_vector_batch_controller_diagnostics;
 use serde::{Deserialize, Serialize};
