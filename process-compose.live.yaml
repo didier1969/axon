@@ -48,6 +48,10 @@ processes:
       - "AXON_RUNTIME_IDENTITY=axon-live-axon-brain"
       - "AXON_RUNTIME_SHADOW_ROLE=brain"
       - "AXON_RUN_ROOT=.axon/run-brain"
+      # REQ-AXO-902064 — promote-written identity file; the brain re-sources its
+      # build_id/install_generation from it so an in-place `process restart`
+      # (frozen daemon env) still reports the PROMOTED identity (PIL-AXO-005).
+      - "AXON_ACTIVE_IDENTITY_FILE=.axon/live-release/active-identity.env"
       - "AXON_LIVE_DATABASE_URL=${AXON_LIVE_DATABASE_URL:-postgres://axon@127.0.0.1:44144/axon_live}"
       # REQ-AXO-901835 — explicit per-process sockets (cf. dev YAML pour
       # le diagnostic complet). Sans cette override, brain et indexer

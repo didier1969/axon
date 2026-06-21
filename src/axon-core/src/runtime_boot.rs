@@ -481,34 +481,33 @@ fn parse_build_info_identity(contents: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// REQ-AXO-902064 slice 3 — set the release-identity env vars from the loaded
-/// binary's `<exe>.build-info` (written by the promote atomic bin swap). Makes an
-/// in-place restart report the SWAPPED binary's identity instead of the env the
-/// process-compose daemon reinjected. Best-effort: missing file / unreadable exe
-/// leaves the existing env untouched.
-pub fn resource_release_identity_from_build_info() {
-    let Ok(exe) = std::env::current_exe() else {
+/// REQ-AXO-902064 — set release identity from the promote-written active-identity
+/// file (path in AXON_ACTIVE_IDENTITY_FILE), OVERRIDING the inherited env. The
+/// promote writes this file with the MANIFEST build_id + install_generation, so an
+/// in-place `process restart` (which re-execs the brain with the daemon's FROZEN
+/// env, lagging the new build) reports the PROMOTED identity and passes the
+/// PIL-AXO-005 post-check. Unlike `<exe>.build-info` (which cargo caches for a
+/// binary-unchanged / script-only commit → stale build_id), this file is always
+/// the manifest value, so an override is correct for BOTH the full restart (env
+/// already == manifest) and the in-place restart (env stale). No env var / empty
+/// path / unreadable file → inherited env stays (dev / fresh checkout). Pure
+/// identity reporting: it never touches the SOLL writer lock or any state, so the
+/// in-place restart stays a normal sequential single-brain stop→start (no
+/// concurrent-writer / lock-handoff risk — that is the blue-green slice).
+pub fn resource_release_identity() {
+    let Ok(path) = std::env::var("AXON_ACTIVE_IDENTITY_FILE") else {
         return;
     };
-    let name = exe
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("axon-brain");
-    let info_path = exe.with_file_name(format!("{name}.build-info"));
-    let Ok(contents) = std::fs::read_to_string(&info_path) else {
+    if path.trim().is_empty() {
+        return;
+    }
+    let Ok(contents) = std::fs::read_to_string(&path) else {
         return;
     };
     for (k, v) in parse_build_info_identity(&contents) {
-        // REQ-AXO-902064 — only FILL a MISSING var; never override one start.sh
-        // already set from the promotion manifest. The build-info build_id reflects
-        // the BUILD, which cargo caches for a binary-unchanged (script-only) commit,
-        // so it can LAG the promote's manifest build_id — overriding the env with it
-        // broke the PIL-AXO-005 post-check ("expected ...9f0b790c, got ...4c4bfda3").
-        // The manifest env is authoritative for a full restart; this re-source now
-        // only helps a context that left the var unset.
-        if std::env::var_os(&k).is_none() {
-            std::env::set_var(k, v);
-        }
+        // Promote-authoritative: the file always carries the manifest identity,
+        // so overriding the (possibly stale, inherited) env is correct.
+        std::env::set_var(k, v);
     }
 }
 
@@ -562,17 +561,14 @@ pub fn run_indexer() -> anyhow::Result<()> {
 }
 
 fn run(profile: RuntimeBootProfile) -> anyhow::Result<()> {
-    // REQ-AXO-902064 slice 3 — re-source release identity from the loaded
-    // binary's build-info BEFORE the tokio runtime spawns (single-threaded here,
-    // so env::set_var is sound). An in-place promote restart relies on
-    // process-compose's availability:restart, which reinjects the daemon's
-    // ORIGINAL env — so the auto-restarted process runs the SWAPPED binary but
-    // would otherwise report the inherited (stale) AXON_BUILD_ID /
-    // INSTALL_GENERATION, failing the PIL-AXO-005 identity post-check. The
-    // build-info on disk (rewritten by the atomic bin swap) is the authoritative
-    // identity of the loaded binary; prefer it. No-op for a dev build with no
-    // build-info file.
-    resource_release_identity_from_build_info();
+    // REQ-AXO-902064 — re-source release identity from the promote-written
+    // active-identity file BEFORE the tokio runtime spawns (single-threaded here,
+    // so env::set_var is sound). An in-place `process restart` re-execs the brain
+    // with the daemon's FROZEN env, which lags the new build → without this the
+    // brain would report the stale AXON_BUILD_ID / INSTALL_GENERATION and fail the
+    // PIL-AXO-005 identity post-check. The active-identity file carries the promote
+    // MANIFEST values, so it is authoritative for both full and in-place restarts.
+    resource_release_identity();
     let runtime_profile = RuntimeProfile::detect();
 
     tokio::runtime::Builder::new_multi_thread()

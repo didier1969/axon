@@ -42,6 +42,8 @@ processes:
       - "AXON_RUNTIME_SHADOW_ROLE=brain"
       - "AXON_RUNTIME_STATE_FILE=.axon-dev/run-brain/runtime.env"
       - "AXON_RUN_ROOT=.axon-dev/run-brain"
+      # REQ-AXO-902064 — promote-written identity file (symmetric to live).
+      - "AXON_ACTIVE_IDENTITY_FILE=.axon-dev/active-identity.env"
       # REQ-AXO-901835 — per-process socket paths. Without these explicit
       # overrides, brain inherits AXON_TELEMETRY_SOCK from start.sh which
       # exports a SINGLE path based on the launch mode (full→indexer name).

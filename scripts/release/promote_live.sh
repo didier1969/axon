@@ -502,9 +502,24 @@ verified=0
 restart_failed=0
 postcheck_failed=0
 if [[ "$RESTART_LIVE" -eq 1 ]]; then
+  # REQ-AXO-902064 — write the promote-authoritative active-identity file BEFORE
+  # any restart. The brain re-sources its build_id/install_generation from it at
+  # boot, so an in-place `process restart` (which re-execs the brain with the
+  # daemon's FROZEN env, lagging the new build) still reports the PROMOTED
+  # identity and passes the PIL-AXO-005 post-check. Atomic write (tmp + mv). Path
+  # matches AXON_ACTIVE_IDENTITY_FILE in process-compose.live.yaml.
+  _active_identity_file="$ROOT_DIR/.axon/live-release/active-identity.env"
+  mkdir -p "$(dirname "$_active_identity_file")"
+  {
+    printf 'AXON_BUILD_ID=%s\n' "$build_id"
+    printf 'AXON_RELEASE_VERSION=%s\n' "$release_version"
+    printf 'AXON_PACKAGE_VERSION=%s\n' "$package_version"
+    printf 'AXON_INSTALL_GENERATION=%s\n' "$install_generation"
+  } > "${_active_identity_file}.tmp" && mv -f "${_active_identity_file}.tmp" "$_active_identity_file"
+
   # REQ-AXO-902064 — try the fast in-place restart first (atomic bin swap +
-  # SIGTERM + process-compose auto-restart, ~6s MCP downtime). On any failure it
-  # returns non-zero and we fall through to the proven full stop+copy+start.
+  # managed `process restart`, ~3s MCP downtime, identity via the file above). On
+  # any failure it returns non-zero and we fall through to full stop+copy+start.
   inplace_done=0
   if [[ "$IN_PLACE" -eq 1 ]]; then
     if inplace_restart_live; then
