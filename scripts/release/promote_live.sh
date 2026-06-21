@@ -12,6 +12,10 @@ axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
 
 MANIFEST_PATH=""
 RESTART_LIVE=0
+# REQ-AXO-902064 — opt-in in-place restart (atomic-swap binaries + SIGTERM, let
+# process-compose auto-restart) for ~6s MCP downtime vs ~82s full stop+start.
+# Default 0 keeps the proven full path; falls back to it on any in-place failure.
+IN_PLACE=0
 SKIP_POSTCHECK=0
 DRY_RUN=0
 FINALIZE_ONLY=0
@@ -106,9 +110,69 @@ if missing:
 PY
 }
 
+# REQ-AXO-902064 — in-place restart: ~6s MCP downtime vs ~82s full stop+start.
+# Atomically swaps bin/* (os.replace works even on a running executable — the
+# live process keeps the old inode, the next exec opens the new one), then
+# SIGTERMs brain[+indexer] and lets process-compose's availability:restart bring
+# them back on the new binary. The brain re-applies its idempotent DDL at boot
+# (graph_bootstrap) and re-acquires the SOLL writer lock. Returns 1 on any
+# failure so the caller falls back to the proven full stop+copy+start path.
+# Empirically validated: SIGTERM→readyz recovery = 6.4s (session 88).
+inplace_restart_live() {
+  local pc_port=8080  # live process-compose management API (axon-supervisor.sh)
+  if ! curl -sf -m 2 "http://127.0.0.1:${pc_port}/live" >/dev/null 2>&1; then
+    echo "in-place: live process-compose daemon not healthy on :${pc_port}; full restart." >&2
+    return 1
+  fi
+  # Atomic binary swap (no stop needed — os.replace renames over the running file).
+  if ! RELEASE_MANIFEST="$MANIFEST_PATH" ROOT_DIR="$ROOT_DIR" \
+       RELEASE_VERSION="$release_version" BUILD_ID="$build_id" \
+       PACKAGE_VERSION="$package_version" INSTALL_GENERATION="$install_generation" \
+       python3 - <<'PY'
+import json, os, pathlib, shlex, shutil
+root = pathlib.Path(os.environ["ROOT_DIR"])
+manifest = json.loads(pathlib.Path(os.environ["RELEASE_MANIFEST"]).read_text())
+artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+if not artifacts:
+    artifacts = {"axon-core": manifest["artifact"]}
+for name, entry in artifacts.items():
+    source = pathlib.Path(entry["path"])
+    target = root / "bin" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = root / "bin" / f"{name}.inplace.new"
+    shutil.copy2(source, tmp)
+    os.replace(tmp, target)  # atomic; safe while the old binary runs
+    bi = root / "bin" / f"{name}.build-info"
+    src_bi = entry.get("build_info_path")
+    if isinstance(src_bi, str) and pathlib.Path(src_bi).exists():
+        shutil.copy2(src_bi, bi)
+    else:
+        with bi.open("w") as h:
+            for k in ("RELEASE_VERSION", "BUILD_ID", "PACKAGE_VERSION", "INSTALL_GENERATION"):
+                h.write(f"AXON_{k}={shlex.quote(os.environ[k])}\n")
+PY
+  then
+    echo "in-place: binary swap failed; full restart." >&2
+    return 1
+  fi
+  # SIGTERM brain (+ indexer when present); process-compose auto-restarts them.
+  local pids; pids="$(pgrep -f 'bin/axon-brain' || true)"
+  pids="$pids $(pgrep -f 'bin/axon-indexer' || true)"
+  local p
+  for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
+  # Wait for the brain to come back on /readyz (auto-restart). Bounded.
+  if poll_until "brain readyz after in-place restart" 60 0.2 \
+       bash -c "curl -sf -m 2 http://127.0.0.1:44129/readyz >/dev/null 2>&1"; then
+    echo "✅ in-place restart: brain back on /readyz (process-compose auto-restart)." >&2
+    return 0
+  fi
+  echo "in-place: brain did not return on /readyz within 60s; full restart." >&2
+  return 1
+}
+
 usage() {
   cat <<'EOF'
-Usage: bash scripts/release/promote_live.sh --manifest <manifest.json> [--restart-live] [--skip-postcheck] [--dry-run] [--finalize-only] [--resume]
+Usage: bash scripts/release/promote_live.sh --manifest <manifest.json> [--restart-live] [--in-place] [--skip-postcheck] [--dry-run] [--finalize-only] [--resume]
 
   --restart-live    Stop the live canonical, copy bin/* from the manifest, then
                     bring the FULL live profile up (brain + indexer + dashboard
@@ -143,6 +207,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --manifest) MANIFEST_PATH="${2:-}"; shift 2 ;;
     --restart-live) RESTART_LIVE=1; shift ;;
+    --in-place) IN_PLACE=1; shift ;;
     --skip-postcheck) SKIP_POSTCHECK=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --finalize-only) FINALIZE_ONLY=1; shift ;;
@@ -421,17 +486,31 @@ verified=0
 restart_failed=0
 postcheck_failed=0
 if [[ "$RESTART_LIVE" -eq 1 ]]; then
-  # REQ-AXO-286 Bug 1 fix: stop services BEFORE copying binaries.
+  # REQ-AXO-902064 — try the fast in-place restart first (atomic bin swap +
+  # SIGTERM + process-compose auto-restart, ~6s MCP downtime). On any failure it
+  # returns non-zero and we fall through to the proven full stop+copy+start.
+  inplace_done=0
+  if [[ "$IN_PLACE" -eq 1 ]]; then
+    if inplace_restart_live; then
+      inplace_done=1
+    else
+      echo "in-place restart did not complete; falling back to full stop+copy+start." >&2
+    fi
+  fi
+
+  # REQ-AXO-286 Bug 1 fix: stop services BEFORE copying binaries (full path only).
   # Previously the copy ran first and failed with `OSError: [Errno 26] Text
   # file busy` whenever the live brain held bin/axon-brain open. The stop
   # then never ran, leaving the script aborted mid-promotion.
-  if ! "$ROOT_DIR/scripts/axon" --instance live stop; then
-    restart_failed=1
-  elif ! assert_live_stopped; then
-    restart_failed=1
+  if [[ "$inplace_done" -ne 1 ]]; then
+    if ! "$ROOT_DIR/scripts/axon" --instance live stop; then
+      restart_failed=1
+    elif ! assert_live_stopped; then
+      restart_failed=1
+    fi
   fi
 
-  if [[ "$restart_failed" -ne 1 ]]; then
+  if [[ "$restart_failed" -ne 1 && "$inplace_done" -ne 1 ]]; then
     # REQ-AXO-286 Bug 1 follow-up: AXON_SKIP_BIN_SYNC=1 short-circuit.
     # When the operator has already pre-staged the binary (canonical recovery
     # pattern via AXON_LIVE_RELEASE_MANIFEST + AXON_SKIP_BIN_SYNC, or via
@@ -493,10 +572,15 @@ PY
   # pass. The canonical live profile is `start full` (brain + indexer +
   # dashboard) — matches what the operator gets via `./scripts/axon-live
   # start full` and what the rest of the qualified-release lineage assumes.
-  if [[ "$restart_failed" -ne 1 ]]; then
+  if [[ "$restart_failed" -ne 1 && "$inplace_done" -ne 1 ]]; then
     if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start full; then
       restart_failed=1
-    elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
+    fi
+  fi
+
+  # REQ-AXO-902064 — post-check (identity verify) runs for BOTH the full-restart
+  # and in-place paths (the in-place path skipped `start full` above).
+  if [[ "$restart_failed" -ne 1 && "$SKIP_POSTCHECK" -ne 1 ]]; then
       # REQ-AXO-901638 : poll_until replaces the legacy 24*5s fixed-sleep
       # loop. Default 150s timeout (covers brain cold-start: BGE-Large model
       # load + Phoenix dashboard, REQ-AXO-155 cold-start budget). Polling
@@ -527,7 +611,6 @@ PY
           --manifest "$MANIFEST_PATH" --url "$AXON_MCP_URL" \
           --install-generation "$install_generation" >&2 || true
       fi
-    fi
   fi
 fi
 
