@@ -35,13 +35,18 @@ impl McpServer {
                 .as_deref(),
         );
         let cache_key = format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}",
             mode.unwrap_or("brief"),
             runtime_mode.as_str(),
             runtime_profile.as_str(),
             // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
             crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "unknown",),
-            std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string())
+            std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string()),
+            // REQ-AXO-902065 : bind cache lifetime to the live release identity so an
+            // in-place promote (which rewrites AXON_INSTALL_GENERATION + AXON_BUILD_ID via
+            // AXON_ACTIVE_IDENTITY_FILE but NOT AXON_RUNTIME_IDENTITY) forces a cache miss
+            // instead of serving the prior build_id for up to STATUS_CACHE_TTL_MS.
+            std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string())
         );
         let status_cache_ttl_ms = match mode.unwrap_or("brief") {
             "full" => STATUS_FULL_CACHE_TTL_MS,
