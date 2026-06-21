@@ -613,6 +613,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "soll_id_registry",
+                "description": "[SOLL] Returns the per-type `soll.Registry` allocation counters and the NEXT canonical id each `soll_manager(create)` would assign, so an id can be referenced in a doc/memo before it is allocated (REQ-AXO-901618). `next_id` is a lower bound (allocate_node_id gap-skips).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. \"AXO\")." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
                 "name": "soll_relation_schema",
                 "description": "[SOLL] Exposes the canonical SOLL relation policy for a source/target pair or from a source type/id. Discovers valid links without trial and error.",
                 "inputSchema": {

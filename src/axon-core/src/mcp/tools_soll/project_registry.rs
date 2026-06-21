@@ -675,6 +675,111 @@ impl McpServer {
             }
         }))
     }
+
+    /// REQ-AXO-901618 — expose the `soll.Registry` allocation counters and the
+    /// NEXT id the server would assign per entity type, so an LLM can reference a
+    /// canonical id in a doc/memo BEFORE the `soll_manager(create)` call that
+    /// allocates it. Read-only projection of the registry row (the actual
+    /// allocation still goes through `soll.allocate_node_id`, which gap-skips —
+    /// `next_id` is therefore the lower bound the next create will land on or
+    /// after, never below).
+    pub(crate) fn axon_soll_id_registry(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let _ = self.sync_project_code_registry_from_meta();
+        let project_code = args
+            .get("project_code")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let project_code = match project_code {
+            Some(code) => code,
+            None => {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": "`soll_id_registry` attend `project_code`." }],
+                    "isError": true,
+                    "data": {
+                        "status": "input_invalid",
+                        "parameter_repair": {
+                            "invalid_field": "project_code",
+                            "follow_up_tools": ["project_registry_lookup", "status"],
+                            "hint": "supply the canonical project_code (e.g. \"AXO\")"
+                        }
+                    }
+                }));
+            }
+        };
+        const COUNTERS: &[(&str, &str)] = &[
+            ("last_vis", "VIS"),
+            ("last_pil", "PIL"),
+            ("last_req", "REQ"),
+            ("last_cpt", "CPT"),
+            ("last_dec", "DEC"),
+            ("last_mil", "MIL"),
+            ("last_val", "VAL"),
+            ("last_stk", "STK"),
+            ("last_gui", "GUI"),
+            ("last_ski", "SKI"),
+            ("last_prt", "PRT"),
+        ];
+        let cols = COUNTERS
+            .iter()
+            .map(|(col, _)| format!("COALESCE({col}, 0)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT {cols} FROM soll.Registry WHERE project_code = '{}'",
+            escape_sql(project_code)
+        );
+        let raw = self
+            .graph_store
+            .query_json(&query)
+            .unwrap_or_else(|_| "[]".to_string());
+        // BIGINT cells come back from query_json as either a JSON number OR a
+        // JSON string depending on the codec path — mirror the canonical
+        // `query_single_i64_writer` extraction (number-or-parsed-string).
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let found = !rows.is_empty();
+        let row = rows.first().cloned().unwrap_or_default();
+        let cell_i64 = |v: &serde_json::Value| -> i64 {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+                .unwrap_or(0)
+        };
+        let counters: Vec<serde_json::Value> = COUNTERS
+            .iter()
+            .enumerate()
+            .map(|(i, (_, prefix))| {
+                let last = row.get(i).map(cell_i64).unwrap_or(0);
+                serde_json::json!({
+                    "type": prefix,
+                    "last": last,
+                    "next_id": format!("{}-{}-{}", prefix, project_code, last + 1)
+                })
+            })
+            .collect();
+        let preview = counters
+            .iter()
+            .filter(|c| c.get("last").and_then(|v| v.as_i64()).unwrap_or(0) > 0)
+            .filter_map(|c| c.get("next_id").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": if found {
+                format!("ID registry {project_code} — next allocatable: {preview}")
+            } else {
+                format!("No soll.Registry row for `{project_code}` (project not initialized).")
+            } }],
+            "data": {
+                "status": if found { "ok" } else { "input_not_found" },
+                "project_code": project_code,
+                "counters": counters,
+                "note": "next_id is a lower bound; soll.allocate_node_id gap-skips, so the real id may be higher.",
+                "follow_up_tools": ["soll_manager", "soll_query_context"]
+            }
+        }))
+    }
 }
 
 #[cfg(test)]
