@@ -248,6 +248,21 @@ pub(super) fn relation_policy_for_pair(
                 child_order_rank: 50,
             },
         }),
+        // REQ-AXO-258 — a Validation can REFUTE a Decision (evidence AGAINST a
+        // chosen approach), the negative-evidence counterpart to VAL→REQ
+        // VERIFIES. First-class edge so soll_validate can later enforce
+        // REFUTES/VERIFIES mutual-exclusivity instead of relying on a
+        // description-line `functionality_key` tag.
+        ("VAL", "DEC") => Some(RelationPolicy {
+            allowed: &["REFUTES", "VERIFIES"],
+            default: Some("REFUTES"),
+            allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 20,
+                child_order_rank: 50,
+            },
+        }),
         ("STK", "REQ") => Some(RelationPolicy {
             allowed: &["ORIGINATES", "CONTRIBUTES_TO"],
             default: Some("ORIGINATES"),
@@ -916,5 +931,18 @@ mod blocked_by_policy_tests {
         assert!(policy.allowed.contains(&"SUBSTANTIATES"));
         assert!(policy.allowed.contains(&"BLOCKED_BY"));
         assert!(policy.allow_multiple_types);
+    }
+
+    /// REQ-AXO-258 — a Validation can REFUTE a Decision, and REFUTES/VERIFIES
+    /// stay mutually exclusive on the same VAL→DEC pair (allow_multiple_types=false).
+    #[test]
+    fn validation_decision_allows_refutes_exclusive() {
+        let policy = relation_policy_for_pair("VAL", "DEC").expect("VAL -> DEC policy exists");
+        assert!(policy.allowed.contains(&"REFUTES"), "VAL -> DEC must allow REFUTES");
+        assert!(policy.allowed.contains(&"VERIFIES"));
+        assert!(
+            !policy.allow_multiple_types,
+            "REFUTES and VERIFIES must be mutually exclusive on the same VAL->DEC pair"
+        );
     }
 }
