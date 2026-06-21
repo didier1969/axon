@@ -335,6 +335,13 @@ promote_log "   ✅ step 7 (finalize) done"
 ( nohup bash "$ROOT_DIR/scripts/publish-memgraph.sh" >>"$PROMOTE_LOG" 2>&1 & ) || true
 promote_log "   ▶ Memgraph publication refresh dispatched (background, best-effort)"
 
+# REQ-AXO-311 tier 3 — anchor a permanent (never-expiring) SOLL snapshot to this
+# qualified release. Same fire-and-forget contract as the Memgraph hook above:
+# runs outside run_step, backgrounded, can never fail the promote. PIL-AXO-005
+# fail-closed is untouched.
+( nohup bash "$ROOT_DIR/scripts/backup_soll_daily.sh" --keeper >>"$PROMOTE_LOG" 2>&1 & ) || true
+promote_log "   ▶ SOLL keeper backup dispatched (background, best-effort)"
+
 # --- Final summary ---
 final_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "unknown")"
 final_build_id="$(python3 -c "
