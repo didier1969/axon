@@ -1481,6 +1481,7 @@ impl McpServer {
             "apply_methodology_bundle" => self.axon_apply_methodology_bundle(arguments),
             "commit_work" => self.axon_commit_work(arguments),
             "pre_flight_check" => self.axon_pre_flight_check(arguments),
+            "handoff_check" => self.axon_handoff_check(arguments),
             "soll_export" => self.axon_export_soll(arguments),
             "soll_generate_docs" => self.axon_soll_generate_docs(arguments),
             "diagnose_indexing" => self.axon_diagnose_indexing(arguments),

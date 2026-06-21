@@ -207,6 +207,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "axon_handoff_check",
+                "description": "[DX/SOLL] Session-close validation, symmetric to `axon_pre_flight_check` (REQ-AXO-239). Runs read-only checks (git working tree, unpushed commits, soll_validate, live runtime) and returns a pass/warn/fail verdict per check + an overall roll-up + the GUI-PRO-028 manual reminders.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code to scope soll_validate (e.g. \"AXO\")." },
+                        "project_path": { "type": "string", "description": "Absolute repo path for the git checks (defaults to the brain cwd)." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "soll_apply_plan",
                 "description": "[SOLL] Idempotent high-level wrapper to apply a SOLL plan (pillars, requirements, decisions, milestones, visions, concepts) with dry-run, canonical relations, and created/updated/skipped/errors report. Async mutation: poll `job_status` until terminal. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {

@@ -368,6 +368,123 @@ impl McpServer {
         Some(response)
     }
 
+    /// REQ-AXO-239 — session-close validation surface, symmetric to
+    /// `axon_pre_flight_check`. Runs the structured checks an operator would
+    /// otherwise reason through by hand before a handoff (GUI-PRO-028) and
+    /// returns a pass/warn/fail verdict per check plus an overall roll-up.
+    /// Read-only: reuses the existing `soll_validate` / `status` primitives and
+    /// `git` porcelain; never mutates.
+    pub(crate) fn axon_handoff_check(&self, args: &Value) -> Option<Value> {
+        let project_dir = args.get("project_path").and_then(|v| v.as_str());
+        let git = |a: &[&str]| -> Option<String> {
+            let mut c = std::process::Command::new("git");
+            if let Some(d) = project_dir {
+                c.current_dir(d);
+            }
+            c.args(a)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        let mut checks: Vec<Value> = Vec::new();
+        let mut warns = 0usize;
+        let mut fails = 0usize;
+
+        // 1. working tree clean
+        let dirty = git(&["status", "--porcelain"]).unwrap_or_default();
+        let clean = dirty.is_empty();
+        if !clean {
+            warns += 1;
+        }
+        checks.push(json!({
+            "check": "git_working_tree",
+            "status": if clean { "pass" } else { "warn" },
+            "detail": if clean { "working tree clean".to_string() }
+                      else { format!("{} uncommitted path(s)", dirty.lines().count()) },
+            "remediation": if clean { "" } else { "commit via axon_commit_work or stash before handoff" }
+        }));
+
+        // 2. branch pushed (no upstream => undetermined, treated as pass)
+        let unpushed = git(&["log", "--oneline", "@{u}.."]).unwrap_or_default();
+        let n_unpushed = if unpushed.is_empty() { 0 } else { unpushed.lines().count() };
+        if n_unpushed > 0 {
+            warns += 1;
+        }
+        checks.push(json!({
+            "check": "branch_pushed",
+            "status": if n_unpushed == 0 { "pass" } else { "warn" },
+            "detail": format!("{} unpushed commit(s)", n_unpushed),
+            "remediation": if n_unpushed > 0 { "push to origin (operator-gated)" } else { "" }
+        }));
+
+        // 3. SOLL coherence (reuse soll_validate)
+        let soll = self.axon_validate_soll(&json!({ "project_code": args.get("project_code") }));
+        let soll_ok = soll
+            .as_ref()
+            .map(|r| {
+                serde_json::to_string(r)
+                    .unwrap_or_default()
+                    .contains("0 minimal coherence violation")
+            })
+            .unwrap_or(false);
+        if !soll_ok {
+            warns += 1;
+        }
+        checks.push(json!({
+            "check": "soll_validate",
+            "status": if soll_ok { "pass" } else { "warn" },
+            "detail": if soll_ok { "0 SOLL coherence violations" } else { "SOLL violations present or validate unavailable" },
+            "remediation": if soll_ok { "" } else { "run soll_validate and resolve / /curate-soll" }
+        }));
+
+        // 4. live runtime health (reuse status brief)
+        let st = self.axon_status(&json!({ "mode": "brief" }));
+        let st_ok = st
+            .as_ref()
+            .map(|r| {
+                !serde_json::to_string(r)
+                    .unwrap_or_default()
+                    .contains("\"isError\":true")
+            })
+            .unwrap_or(false);
+        if !st_ok {
+            fails += 1;
+        }
+        checks.push(json!({
+            "check": "live_runtime",
+            "status": if st_ok { "pass" } else { "fail" },
+            "detail": if st_ok { "runtime status reachable" } else { "runtime status unreachable / error" },
+            "remediation": if st_ok { "" } else { "./scripts/axon-live status" }
+        }));
+
+        let overall = if fails > 0 {
+            "fail"
+        } else if warns > 0 {
+            "warn"
+        } else {
+            "pass"
+        };
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Handoff check: {} — {} check(s), {} warn, {} fail",
+                    overall.to_uppercase(), checks.len(), warns, fails
+                )
+            }],
+            "data": {
+                "status": "ok",
+                "overall": overall,
+                "checks": checks,
+                "manual_reminders": [
+                    "GUI-PRO-028 manual steps not auto-checked: update the rolling session_pointer (CPT-{P}-052), prune boot docs, audit docs/working-notes, run `cargo test --lib` if runtime logic changed"
+                ],
+                "follow_up_tools": ["axon_commit_work", "soll_validate", "status"]
+            }
+        }))
+    }
+
     /// REQ-AXO-901754 — scan diff_paths for legacy SOLL proximity.
     fn detect_diff_paths_legacy_proximity(&self, diff_paths: &[Value]) -> Option<Value> {
         use std::collections::HashSet;
