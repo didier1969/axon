@@ -340,6 +340,15 @@ impl McpServer {
             }
         };
         let project_code = project_code_owned.as_str();
+        // REQ-AXO-91501 — opt-in tri-modal RRF retrieval around a seed SOLL node.
+        // Returns early so the default wave machinery below is untouched when the
+        // mode is absent.
+        if args.get("mode").and_then(|v| v.as_str()) == Some("rrf_trimodal") {
+            if let Some(seed) = args.get("seed_node").and_then(|v| v.as_str()) {
+                let top_k = args.get("top").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                return self.axon_soll_rrf_trimodal(project_code, seed, top_k);
+            }
+        }
         // REQ-AXO-901936 — token-economy: the default wave listing is small
         // (the LLM pays every returned item in context). A 50-item default
         // dumped most of the backlog on every call. Reconciles CPT-AXO-90009
@@ -1119,6 +1128,142 @@ impl McpServer {
                 "chapters": chapters,
                 "note": "Derived view: chapter = dominant Pillar of the milestone's REQs; order = current>planned, ready>blocked>done, id. Explicit MIL->PIL/MIL->MIL ordering needs the policy extension (REQ-AXO-902066 layer 2).",
                 "follow_up_tools": ["soll_work_plan", "soll_query_context"]
+            }
+        }))
+    }
+
+    /// Run a single-column id SQL lane and return the ids in row order.
+    fn rrf_lane_ids(&self, sql: &str) -> Vec<String> {
+        let raw = self.graph_store.query_json(sql).unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|r| r.into_iter().next().and_then(|v| v.as_str().map(String::from)))
+            .collect()
+    }
+
+    /// REQ-AXO-91501 — tri-modal RRF retrieval of SOLL nodes RELATED to a seed
+    /// node, fusing three independent rank lanes via Reciprocal Rank Fusion
+    /// (k=60). Lanes: (1) ANN over the seed's STORED embedding (pure SQL
+    /// self-join — no embed round-trip), (2) FTS on the seed's title, (3) 1-hop
+    /// graph neighbours from the RAM SOLL snapshot. Each lane degrades to empty
+    /// without poisoning the fusion (e.g. seed lacks an embedding).
+    pub(crate) fn axon_soll_rrf_trimodal(
+        &self,
+        project_code: &str,
+        seed: &str,
+        top_k: usize,
+    ) -> Option<Value> {
+        let seed_esc = escape_sql(seed);
+        let pc = escape_sql(project_code);
+        let mid = escape_sql(crate::embedding_contract::SOLL_MODEL_ID);
+
+        // Lane 1 — ANN by the seed's stored embedding.
+        let ann_sql = format!(
+            "SELECT e.node_id FROM soll.NodeEmbedding e \
+             JOIN soll.Node n ON n.id = e.node_id AND n.project_code = '{pc}' \
+             CROSS JOIN (SELECT embedding FROM soll.NodeEmbedding WHERE node_id = '{seed}' AND model_id = '{mid}') s \
+             WHERE e.model_id = '{mid}' AND e.node_id <> '{seed}' \
+             ORDER BY e.embedding <=> s.embedding LIMIT 50",
+            pc = pc, seed = seed_esc, mid = mid
+        );
+        let ann_lane = self.rrf_lane_ids(&ann_sql);
+
+        // Lane 2 — FTS on the seed's title.
+        let title_raw = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT COALESCE(title,'') FROM soll.Node WHERE id = '{seed}'",
+                seed = seed_esc
+            ))
+            .unwrap_or_else(|_| "[]".to_string());
+        let title = serde_json::from_str::<Vec<Vec<Value>>>(&title_raw)
+            .ok()
+            .and_then(|rows| {
+                rows.first()
+                    .and_then(|r| r.first())
+                    .and_then(|v| v.as_str().map(String::from))
+            })
+            .unwrap_or_default();
+        let fts_lane = if title.trim().is_empty() {
+            Vec::new()
+        } else {
+            let q = escape_sql(&title);
+            let fts_sql = format!(
+                "SELECT id FROM soll.Node \
+                 WHERE project_code = '{pc}' AND id <> '{seed}' \
+                   AND to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,'')) \
+                       @@ plainto_tsquery('simple', '{q}') \
+                 ORDER BY ts_rank(to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,'')), \
+                                  plainto_tsquery('simple', '{q}')) DESC LIMIT 50",
+                pc = pc, seed = seed_esc, q = q
+            );
+            self.rrf_lane_ids(&fts_sql)
+        };
+
+        // Lane 3 — 1-hop graph neighbours from the RAM SOLL snapshot.
+        let graph_lane: Vec<String> = self
+            .soll_cache()
+            .snapshot(project_code)
+            .ok()
+            .and_then(|snap| {
+                snap.node_index(seed).map(|idx| {
+                    let mut out: Vec<String> = Vec::new();
+                    for dir in [Direction::Outgoing, Direction::Incoming] {
+                        for e in snap.graph().edges_directed(idx, dir) {
+                            let nb = if e.source() == idx {
+                                snap.graph()[e.target()].clone()
+                            } else {
+                                snap.graph()[e.source()].clone()
+                            };
+                            if nb != seed && !out.contains(&nb) {
+                                out.push(nb);
+                            }
+                        }
+                    }
+                    out
+                })
+            })
+            .unwrap_or_default();
+
+        // RRF fusion (k=60).
+        let mut score: HashMap<String, f64> = HashMap::new();
+        let lanes_present = [!ann_lane.is_empty(), !fts_lane.is_empty(), !graph_lane.is_empty()];
+        for lane in [&ann_lane, &fts_lane, &graph_lane] {
+            for (rank, id) in lane.iter().enumerate() {
+                *score.entry(id.clone()).or_insert(0.0) += 1.0 / (60.0 + (rank as f64) + 1.0);
+            }
+        }
+        let mut fused: Vec<(String, f64)> = score.into_iter().collect();
+        fused.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        fused.truncate(top_k.max(1));
+
+        let results: Vec<Value> = fused
+            .iter()
+            .map(|(id, s)| json!({ "id": id, "rrf_score": (s * 1000.0).round() / 1000.0 }))
+            .collect();
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Tri-modal RRF around {seed}: {} related node(s) [lanes ann={} fts={} graph={}]",
+                    results.len(),
+                    if lanes_present[0] { "on" } else { "off" },
+                    if lanes_present[1] { "on" } else { "off" },
+                    if lanes_present[2] { "on" } else { "off" }
+                )
+            }],
+            "data": {
+                "status": "ok",
+                "mode": "rrf_trimodal",
+                "seed_node": seed,
+                "surfaces_used": ["soll_ann", "soll_fts", "graph_ram"],
+                "lanes": { "ann": ann_lane.len(), "fts": fts_lane.len(), "graph": graph_lane.len() },
+                "results": results,
+                "follow_up_tools": ["soll_query_context", "retrieve_context"]
             }
         }))
     }

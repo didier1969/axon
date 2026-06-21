@@ -340,7 +340,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "include_decay": { "type": "boolean", "description": "REQ-AXO-144: temporal score decay. Default true. Set false to disable (benchmarking, A/B). Decays score by exp(-age_days/half_life_days) when the node carries `updated_at` metadata." },
                         "half_life_days": { "type": "number", "description": "REQ-AXO-144: half-life (in days) for the temporal decay curve. Default 30." },
                         "actionable": { "type": "boolean", "description": "REQ-AXO-346 Slice 2 + REQ-AXO-901617: when true (default), return open Requirement leaves ordered by (parent_score DESC, priority ASC, score DESC). Pass false explicitly to surface parent Decisions/Milestones (audit / priority-debug surface)." },
-                        "format": { "type": "string", "enum": ["brief", "verbose", "json"] }
+                        "format": { "type": "string", "enum": ["brief", "verbose", "json"] },
+                        "mode": { "type": "string", "enum": ["rrf_trimodal"], "description": "REQ-AXO-91501: opt-in tri-modal RRF retrieval of SOLL nodes related to `seed_node` (ANN over the seed embedding + FTS on its title + 1-hop graph neighbours, fused via Reciprocal Rank Fusion). Requires `seed_node`." },
+                        "seed_node": { "type": "string", "description": "REQ-AXO-91501: canonical SOLL id to seed the rrf_trimodal retrieval (e.g. \"REQ-AXO-289\")." }
                     },
                     "required": ["project_code"]
                 }
