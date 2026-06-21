@@ -82,10 +82,18 @@ processes:
     availability:
       restart: "on_failure"
       max_restarts: 3
-      backoff_seconds: 5
+      # REQ-AXO-902064 — minimal restart backoff: the brain exits cleanly on
+      # SIGTERM in ~1s (WriterGuard Drop releases the SOLL lock) and reaches
+      # /readyz in ~0.8s, so a 5s backoff only inflated promote/restart MCP
+      # downtime (and made repeated restarts accumulate delay). 1s keeps light
+      # crash-loop protection (bounded anyway by max_restarts).
+      backoff_seconds: 1
     shutdown:
       signal: 15
-      timeout_seconds: 10
+      # REQ-AXO-902064 — the brain terminates in ~1s on SIGTERM; a 10s grace
+      # only stretched the restart stop-phase. 3s is ample headroom for a clean
+      # lock release + flush before the (rare) SIGKILL.
+      timeout_seconds: 3
 
   axon-indexer:
     command: "${AXON_INDEXER_BIN:-bin/axon-indexer}"

@@ -155,15 +155,31 @@ PY
     echo "in-place: binary swap failed; full restart." >&2
     return 1
   fi
-  # SIGTERM brain (+ indexer when present); process-compose auto-restarts them.
-  local pids; pids="$(pgrep -f 'bin/axon-brain' || true)"
-  pids="$pids $(pgrep -f 'bin/axon-indexer' || true)"
-  local p
-  for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
-  # Wait for the brain to come back on /readyz (auto-restart). Bounded.
-  if poll_until "brain readyz after in-place restart" 60 0.2 \
+  # REQ-AXO-902064 — restart via process-compose's MANAGED `process restart`
+  # (not raw SIGTERM): it stops with the configured shutdown grace then restarts
+  # and waits the readiness_probe, with no raw-SIGTERM backoff-accumulation
+  # flakiness. With axon-brain shutdown.timeout_seconds=3 + backoff_seconds=1,
+  # validated dev MCP downtime = 3.3s. The restarted brain re-sources its identity
+  # from the swapped build-info (slice 3), so the post-check passes.
+  local pc; pc="$(run_devenv 'which process-compose' 2>/dev/null | tail -1)"
+  [[ -x "${pc:-}" ]] || {
+    echo "in-place: process-compose binary not resolved; full restart." >&2
+    return 1
+  }
+  if ! "$pc" process restart axon-brain -p "$pc_port" >/dev/null 2>&1; then
+    echo "in-place: process-compose restart axon-brain failed; full restart." >&2
+    return 1
+  fi
+  # Restart the indexer too when it is part of the live profile (its binary was
+  # swapped as well, and the post-check requires indexer_ready). Best-effort.
+  if pgrep -f 'bin/axon-indexer' >/dev/null 2>&1; then
+    "$pc" process restart axon-indexer -p "$pc_port" >/dev/null 2>&1 || true
+  fi
+  # Confirm the MCP port is actually serving (process restart already gated on
+  # the readiness_probe; this verifies the real :44129/readyz).
+  if poll_until "brain readyz after in-place process restart" 60 0.2 \
        bash -c "curl -sf -m 2 http://127.0.0.1:44129/readyz >/dev/null 2>&1"; then
-    echo "✅ in-place restart: brain back on /readyz (process-compose auto-restart)." >&2
+    echo "✅ in-place restart: axon-brain restarted via process-compose (managed)." >&2
     return 0
   fi
   echo "in-place: brain did not return on /readyz within 60s; full restart." >&2

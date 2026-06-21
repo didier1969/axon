@@ -70,10 +70,12 @@ processes:
     availability:
       restart: "on_failure"
       max_restarts: 3
-      backoff_seconds: 5
+      # REQ-AXO-902064 — minimal restart backoff (brain exits ~1s on SIGTERM,
+      # /readyz ~0.8s) ; symmetric to process-compose.live.yaml.
+      backoff_seconds: 1
     shutdown:
       signal: 15
-      timeout_seconds: 10
+      timeout_seconds: 3
 
   # Indexer = pipeline (IST writer, SOLL reader). Holds the IST lock.
   axon-indexer:
