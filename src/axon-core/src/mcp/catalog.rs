@@ -346,6 +346,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "soll_roadmap",
+                "description": "[SOLL] Milestone-level roadmap DERIVED from the SOLL graph (REQ-AXO-902066): each open milestone becomes a chapter keyed by the dominant Pillar of the Requirements it TARGETS, with an open/blocked/delivered rollup and a ready/blocked/done readiness verdict. Zero new edges; complements `soll_work_plan` (REQ-leaf waves) with a milestone-level lens.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. \"AXO\")." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
                 "name": "soll_attach_evidence",
                 "description": "[SOLL] Attaches evidence (file/test/metric/dashboard) to a SOLL entity. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {

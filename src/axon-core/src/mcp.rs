@@ -1455,6 +1455,7 @@ impl McpServer {
             "soll_commit_revision" => self.axon_soll_commit_revision(arguments),
             "soll_query_context" => self.axon_soll_query_context(arguments),
             "soll_work_plan" => self.axon_soll_work_plan(arguments),
+            "soll_roadmap" => self.axon_soll_roadmap(arguments),
             "soll_attach_evidence" => self.axon_soll_attach_evidence(arguments),
             "soll_remove_evidence" => self.axon_soll_remove_evidence(arguments),
             "document_intent" => self.axon_document_intent(arguments),

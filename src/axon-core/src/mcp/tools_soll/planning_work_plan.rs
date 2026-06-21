@@ -942,6 +942,188 @@ fn compact_soll_validation(data: &Value) -> Value {
     })
 }
 
+impl McpServer {
+    /// REQ-AXO-902066 — milestone-level roadmap DERIVED from the SOLL graph
+    /// (zero new edges). Each open milestone becomes a chapter keyed by the
+    /// DOMINANT Pillar of the Requirements it TARGETS, with an
+    /// open/blocked/delivered rollup and a readiness verdict. Uses a direct
+    /// SOLL SQL join: the SOLL corpus is small and PG-canonical, and the
+    /// RAM-first rule (PIL-AXO-9002) governs IST hot-path traversal, not this
+    /// planning aggregation.
+    pub(crate) fn axon_soll_roadmap(&self, args: &Value) -> Option<Value> {
+        let project_code_input = args
+            .get("project_code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let project_code_owned = match self.resolve_project_code(project_code_input) {
+            Ok(code) => code,
+            Err(_) => {
+                return Some(self.wrong_project_scope_response(project_code_input, "soll_roadmap"));
+            }
+        };
+        let pc = escape_sql(project_code_owned.as_str());
+        let query = format!(
+            "SELECT m.id, COALESCE(m.title,''), m.status, r.id, r.status, COALESCE(p.title,'') \
+             FROM soll.Node m \
+             JOIN soll.Edge te ON te.source_id = m.id AND te.relation_type = 'TARGETS' \
+             JOIN soll.Node r ON r.id = te.target_id AND r.type = 'Requirement' \
+             LEFT JOIN soll.Edge be ON be.source_id = r.id AND be.relation_type = 'BELONGS_TO' \
+             LEFT JOIN soll.Node p ON p.id = be.target_id AND p.type = 'Pillar' \
+             WHERE m.type = 'Milestone' AND m.project_code = '{pc}' \
+               AND m.status IN ('current','planned') \
+             ORDER BY m.id"
+        );
+        let raw = self
+            .graph_store
+            .query_json(&query)
+            .unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+
+        let is_terminal = |s: &str| {
+            matches!(
+                s,
+                "delivered" | "completed" | "accepted" | "superseded" | "rejected" | "archived"
+            )
+        };
+        let cell = |row: &[Value], i: usize| -> String {
+            row.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string()
+        };
+
+        struct Agg {
+            title: String,
+            status: String,
+            reqs: HashMap<String, String>,    // req id -> status
+            pillars: HashMap<String, usize>,  // pillar title -> req count
+        }
+        let mut by_milestone: HashMap<String, Agg> = HashMap::new();
+        for row in &rows {
+            let m_id = cell(row, 0);
+            if m_id.is_empty() {
+                continue;
+            }
+            let agg = by_milestone.entry(m_id).or_insert_with(|| Agg {
+                title: cell(row, 1),
+                status: cell(row, 2),
+                reqs: HashMap::new(),
+                pillars: HashMap::new(),
+            });
+            let r_id = cell(row, 3);
+            let r_status = cell(row, 4);
+            let pillar = cell(row, 5);
+            if !r_id.is_empty() {
+                let first_seen = !agg.reqs.contains_key(&r_id);
+                agg.reqs.insert(r_id, r_status);
+                if first_seen && !pillar.is_empty() {
+                    *agg.pillars.entry(pillar).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut chapters: Vec<Value> = by_milestone
+            .into_iter()
+            .map(|(m_id, agg)| {
+                let total = agg.reqs.len();
+                let mut open = 0usize;
+                let mut blocked = 0usize;
+                let mut done = 0usize;
+                for st in agg.reqs.values() {
+                    if st == "blocked" {
+                        blocked += 1;
+                    }
+                    if is_terminal(st) {
+                        done += 1;
+                    } else {
+                        open += 1;
+                    }
+                }
+                let chapter = agg
+                    .pillars
+                    .iter()
+                    .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+                    .map(|(p, _)| p.clone())
+                    .unwrap_or_else(|| "(unthemed)".to_string());
+                // readiness: a milestone is "ready" when it has actionable open
+                // work and nothing currently blocked; "blocked" when any req is
+                // blocked; "done" when nothing open remains.
+                let readiness = if open == 0 {
+                    "done"
+                } else if blocked > 0 {
+                    "blocked"
+                } else {
+                    "ready"
+                };
+                json!({
+                    "milestone": m_id,
+                    "title": agg.title,
+                    "status": agg.status,
+                    "chapter": chapter,
+                    "readiness": readiness,
+                    "reqs": { "total": total, "open": open, "blocked": blocked, "delivered": done }
+                })
+            })
+            .collect();
+
+        // Derived ordering (no MIL->MIL edges available): current before
+        // planned, then ready < blocked < done, then milestone id.
+        let status_rank = |s: &str| match s {
+            "current" => 0,
+            "planned" => 1,
+            _ => 2,
+        };
+        let readiness_rank = |s: &str| match s {
+            "ready" => 0,
+            "blocked" => 1,
+            _ => 2,
+        };
+        chapters.sort_by(|a, b| {
+            let sa = a.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let sb = b.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            status_rank(sa)
+                .cmp(&status_rank(sb))
+                .then_with(|| {
+                    let ra = a.get("readiness").and_then(|v| v.as_str()).unwrap_or("");
+                    let rb = b.get("readiness").and_then(|v| v.as_str()).unwrap_or("");
+                    readiness_rank(ra).cmp(&readiness_rank(rb))
+                })
+                .then_with(|| {
+                    let ia = a.get("milestone").and_then(|v| v.as_str()).unwrap_or("");
+                    let ib = b.get("milestone").and_then(|v| v.as_str()).unwrap_or("");
+                    ia.cmp(ib)
+                })
+        });
+
+        let summary = chapters
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} [{}] {} — {} (open {})",
+                    c.get("milestone").and_then(|v| v.as_str()).unwrap_or(""),
+                    c.get("readiness").and_then(|v| v.as_str()).unwrap_or(""),
+                    c.get("chapter").and_then(|v| v.as_str()).unwrap_or(""),
+                    c.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                    c.get("reqs").and_then(|v| v.get("open")).and_then(|v| v.as_u64()).unwrap_or(0)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Roadmap {} — {} open milestone(s)\n{}", project_code_owned, chapters.len(), summary)
+            }],
+            "data": {
+                "status": "ok",
+                "project_code": project_code_owned,
+                "layer": "derived",
+                "chapters": chapters,
+                "note": "Derived view: chapter = dominant Pillar of the milestone's REQs; order = current>planned, ready>blocked>done, id. Explicit MIL->PIL/MIL->MIL ordering needs the policy extension (REQ-AXO-902066 layer 2).",
+                "follow_up_tools": ["soll_work_plan", "soll_query_context"]
+            }
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! REQ-AXO-91500 patch A regression test.
