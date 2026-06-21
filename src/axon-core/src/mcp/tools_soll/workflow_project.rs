@@ -113,6 +113,37 @@ fn path_satisfies_required_path(path: &str, required_path: &str) -> bool {
     false
 }
 
+/// REQ-AXO-159 — extract canonical `REQ-<PROJ>-<N>` ids from a commit message
+/// for auto-evidence attachment. Deduplicates, preserves first-seen order. No
+/// regex dependency: scans `REQ-` anchors then validates `<UPPER>+-<DIGITS>+`.
+pub(super) fn parse_commit_req_ids(message: &str) -> Vec<String> {
+    let bytes = message.as_bytes();
+    let mut ids: Vec<String> = Vec::new();
+    for (start, _) in message.match_indices("REQ-") {
+        let mut j = start + 4;
+        let proj_start = j;
+        while j < bytes.len() && bytes[j].is_ascii_uppercase() {
+            j += 1;
+        }
+        if j == proj_start || j >= bytes.len() || bytes[j] != b'-' {
+            continue;
+        }
+        j += 1; // skip the '-' between PROJ and the number
+        let dig_start = j;
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j == dig_start {
+            continue;
+        }
+        let id = message[start..j].to_string();
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
 impl McpServer {
     pub(crate) fn axon_commit_work(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         let diff_paths = args.get("diff_paths")?.as_array()?;
@@ -348,10 +379,24 @@ impl McpServer {
         match commit_out {
             Ok(output) => {
                 let status = if output.status.success() {
-                    format!(
+                    let mut s = format!(
                         "Commit succeeded.\n{}",
                         String::from_utf8_lossy(&output.stdout)
-                    )
+                    );
+                    // REQ-AXO-159 — auto-attach commit evidence (Traceability) to
+                    // each EXISTING Requirement referenced in the message, so a
+                    // delivered REQ accrues its proof without a manual
+                    // soll_attach_evidence round-trip (feeds the REQ-902041 gap).
+                    let note = self.auto_attach_commit_evidence(
+                        message,
+                        diff_paths,
+                        resolved_project_path.as_deref(),
+                    );
+                    if !note.is_empty() {
+                        s.push('\n');
+                        s.push_str(&note);
+                    }
+                    s
                 } else {
                     format!(
                         "Commit failed.\n{}",
@@ -370,6 +415,79 @@ impl McpServer {
                 "git commit invocation failed; verify the git binary is on PATH and the repo is in a valid state, then retry `axon_pre_flight_check`",
                 Some(&e.to_string()),
             )),
+        }
+    }
+
+    /// REQ-AXO-159 — after a successful commit, attach a Traceability "Commit"
+    /// artifact (the HEAD sha) to each EXISTING Requirement referenced in the
+    /// message. confidence=0.7 (inferred from the message, not manually
+    /// verified). No FK on soll.Traceability → existence is checked first to
+    /// avoid dangling rows. Returns a one-line note for the response, or "".
+    fn auto_attach_commit_evidence(
+        &self,
+        message: &str,
+        diff_paths: &[serde_json::Value],
+        project_dir: Option<&std::path::Path>,
+    ) -> String {
+        let ids = parse_commit_req_ids(message);
+        if ids.is_empty() {
+            return String::new();
+        }
+        let mut sha_cmd = std::process::Command::new("git");
+        if let Some(dir) = project_dir {
+            sha_cmd.current_dir(dir);
+        }
+        let sha = match sha_cmd.arg("rev-parse").arg("HEAD").output() {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => return String::new(),
+        };
+        if sha.is_empty() {
+            return String::new();
+        }
+        let now = now_unix_ms();
+        let subject = message.lines().next().unwrap_or("").to_string();
+        let files: Vec<&str> = diff_paths.iter().filter_map(|p| p.as_str()).collect();
+        let metadata = serde_json::json!({
+            "source": "auto_commit_work",
+            "subject": subject,
+            "files": files,
+        })
+        .to_string();
+        let mut attached: Vec<String> = Vec::new();
+        for (idx, id) in ids.iter().enumerate() {
+            // No FK on soll.Traceability → only attach to an EXISTING Requirement.
+            let exists = self
+                .graph_store
+                .query_count_param(
+                    "SELECT COUNT(*) FROM soll.Node WHERE id = ? AND type = 'Requirement'",
+                    &serde_json::json!([id]),
+                )
+                .unwrap_or(0)
+                > 0;
+            if !exists {
+                continue;
+            }
+            let trace_id = format!("TRC-{}-{}-auto{}", id, now, idx);
+            if self
+                .graph_store
+                .execute_param(
+                    "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    &serde_json::json!([trace_id, "requirement", id, "Commit", sha, 0.7_f64, metadata, now]),
+                )
+                .is_ok()
+            {
+                attached.push(id.clone());
+            }
+        }
+        if attached.is_empty() {
+            String::new()
+        } else {
+            let short = &sha[..sha.len().min(8)];
+            format!(
+                "REQ-AXO-159 auto-evidence : commit {} attach\u{00e9} \u{00e0} {}",
+                short,
+                attached.join(", ")
+            )
         }
     }
 
@@ -1715,5 +1833,33 @@ mod guideline_digest_tests {
     fn embedded_newlines_in_short_body_are_flattened() {
         let digest = guideline_digest("line one\nline two");
         assert_eq!(digest, "line one line two");
+    }
+}
+
+#[cfg(test)]
+mod commit_req_id_tests {
+    //! REQ-AXO-159 — lock the commit-message REQ-id parser used for
+    //! auto-evidence attachment: canonical TYPE-PROJ-N only, deduped, in order.
+    use super::parse_commit_req_ids;
+
+    #[test]
+    fn extracts_multiple_distinct_ids_in_order() {
+        let msg = "feat(x): do thing (REQ-AXO-159)\n\nAlso closes REQ-AXO-902041 and REQ-AXO-159 again.";
+        assert_eq!(
+            parse_commit_req_ids(msg),
+            vec!["REQ-AXO-159".to_string(), "REQ-AXO-902041".to_string()]
+        );
+    }
+
+    #[test]
+    fn ignores_malformed_and_non_req_tokens() {
+        // no digits, no proj, lowercase, and a non-REQ prefix must all be skipped
+        let msg = "REQ- REQ-AXO- REQ-axo-1 DEC-AXO-085 fixes REQ-PRO-12 ok";
+        assert_eq!(parse_commit_req_ids(msg), vec!["REQ-PRO-12".to_string()]);
+    }
+
+    #[test]
+    fn empty_when_no_ids() {
+        assert!(parse_commit_req_ids("chore: tidy up, no refs").is_empty());
     }
 }
