@@ -348,6 +348,11 @@ PC_BIN="$(run_devenv 'which process-compose' 2>/dev/null | tail -1)"
 [[ -x "${PC_BIN:-}" ]] || { echo "❌ process-compose not found in devenv."; exit 1; }
 export AXON_PGREADY_BIN="$(run_devenv 'which pg_isready' 2>/dev/null | tail -1)"
 
+# REQ-AXO-902064 slice 1 (measure-first) — stamp the launch→readyz window so
+# every promote prints the brain-boot contribution to MCP downtime (the comment
+# at the readyz wait names ORT init + per-project IST snapshot boot-warm as the
+# cost; this quantifies it before any optimization). Pure echo, zero risk.
+AXON_LAUNCH_T0_MS=$(date +%s%3N)
 echo "🚀 Starting Axon (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
 echo "   Brain: $BRAIN_BIN | Indexer: $INDEXER_BIN"
 echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
@@ -414,6 +419,9 @@ echo "⏳ Waiting for brain :${AXON_BRAIN_PORT}/readyz (timeout ${BRAIN_TIMEOUT_
 for ((i=1; i<=BRAIN_TIMEOUT_S; i++)); do
     curl -sf --connect-timeout 3 "http://127.0.0.1:${AXON_BRAIN_PORT}/readyz" >/dev/null 2>&1 && {
         echo "✅ Axon ready (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
+        # REQ-AXO-902064 slice 1 — brain launch→readyz wall-time (the boot
+        # contribution to MCP downtime during a promote/restart).
+        echo "   [timing] brain launch→readyz: $(( $(date +%s%3N) - AXON_LAUNCH_T0_MS ))ms"
         echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
         if [[ "$RUNTIME_MODE" == indexer_* ]]; then
             echo "   Indexer: initializing in background (GPU model load)"

@@ -290,13 +290,24 @@ async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible>>> 
     let endpoint_event =
         stream::once(async { Ok(Event::default().event("endpoint").data("/mcp")) });
 
-    // 2. Keep-alive heartbeat every 15 seconds to prevent proxy timeouts
+    // 2. REQ-AXO-902063 — proactively tell a (re)connecting client its cached
+    // tool list may be stale. After a promote restarts the brain with a changed
+    // surface, a client that reconnects without re-running `initialize` keeps the
+    // old registry and reads new tools as "absent" (the systemic cause of 3 false
+    // llm_feedback doléances). The spec-compliant notifications/tools/list_changed
+    // prompts a compliant client to re-fetch tools/list. Additive + harmless to
+    // clients that ignore it (they still get the `status` anti-stale note).
+    let list_changed = stream::once(async {
+        Ok(Event::default().data(r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#))
+    });
+
+    // 3. Keep-alive heartbeat every 15 seconds to prevent proxy timeouts
     let heartbeat = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
         std::time::Duration::from_secs(15),
     ))
     .map(|_| Ok(Event::default().comment("heartbeat")));
 
-    let stream = endpoint_event.chain(heartbeat);
+    let stream = endpoint_event.chain(list_changed).chain(heartbeat);
     Sse::new(stream)
 }
 
