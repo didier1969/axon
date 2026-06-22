@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -11,6 +12,53 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import pyarrow.parquet as pq
+
+
+# REQ-AXO-310 — incremental projection (content_hash diff, soll_generate_docs_v3
+# model). The injected publication fields change every run, so they are excluded
+# from the hash — only the source row content drives the diff.
+_INJECTED_FIELDS = ("publication_id", "human_only")
+
+
+def row_content_hash(row: dict[str, Any]) -> str:
+    """Stable short content hash of a source row, ignoring injected publication
+    fields. Two rows with the same source content hash equal, so an unchanged
+    node/edge is skipped on the next publication."""
+    items = sorted((k, v) for k, v in row.items() if k not in _INJECTED_FIELDS)
+    digest = hashlib.sha256()
+    for key, value in items:
+        digest.update(repr(key).encode("utf-8"))
+        digest.update(b"=")
+        digest.update(repr(value).encode("utf-8"))
+        digest.update(b";")
+    return digest.hexdigest()[:16]
+
+
+def edge_diff_key(row: dict[str, Any]) -> str:
+    """Identity of an edge for the incremental diff: (from, to, relation). The
+    relation is normalised exactly like the emitted Memgraph type (safe_ident +
+    upper) so the DELETE match on `type(r)` lines up."""
+    relation = safe_ident(str(row.get("relation_type") or "RELATED_TO"), "RELATED_TO").upper()
+    return f"{row.get('from_id')}\x1f{row.get('to_id')}\x1f{relation}"
+
+
+def load_prior_hashes(prior_dir: Path | None) -> tuple[dict[str, str], dict[str, str]]:
+    """Read a previous publication's parquet and return `(node id -> hash,
+    edge key -> hash)` for the diff. Returns empty maps when no prior
+    publication exists — the first incremental run then MERGEs everything."""
+    node_hashes: dict[str, str] = {}
+    edge_hashes: dict[str, str] = {}
+    if prior_dir is None:
+        return node_hashes, edge_hashes
+    nodes_path = prior_dir / "nodes.parquet"
+    edges_path = prior_dir / "edges.parquet"
+    if nodes_path.exists():
+        for row in iter_rows(nodes_path):
+            node_hashes[str(row.get("id"))] = row_content_hash(row)
+    if edges_path.exists():
+        for row in iter_rows(edges_path):
+            edge_hashes[edge_diff_key(row)] = row_content_hash(row)
+    return node_hashes, edge_hashes
 
 
 IDENT_RE = re.compile(r"[^A-Za-z0-9_]")
@@ -24,6 +72,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path)
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--keep-existing", action="store_true")
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="REQ-AXO-310: emit MERGE/DELETE deltas vs --prior-publication-dir "
+        "(content_hash diff, skips unchanged rows) instead of a full wipe+rebuild.",
+    )
+    parser.add_argument(
+        "--prior-publication-dir",
+        type=Path,
+        default=None,
+        help="Previous publication dir to diff against in --incremental mode.",
+    )
     parser.add_argument(
         "--query-dir",
         type=Path,
@@ -232,74 +292,125 @@ def build_import(
     batch_size: int,
     keep_existing: bool,
     query_dir: Path,
+    incremental: bool = False,
+    prior_publication_dir: Path | None = None,
 ) -> dict[str, Any]:
     manifest_path = publication_dir / "manifest.json"
     nodes_path = publication_dir / "nodes.parquet"
     edges_path = publication_dir / "edges.parquet"
     manifest = json.loads(manifest_path.read_text())
 
+    # REQ-AXO-310 — incremental mode diffs against the previous publication and
+    # emits MERGE deltas (changed/new) + DETACH DELETE (removed), skipping
+    # unchanged rows; it never wipes the graph. With no prior publication it
+    # degrades to a full MERGE (idempotent, no duplicates).
+    prior_node_hashes, prior_edge_hashes = (
+        load_prior_hashes(prior_publication_dir) if incremental else ({}, {})
+    )
+
     labels: dict[str, int] = {}
     relations: dict[str, int] = {}
     total_nodes = 0
     total_edges = 0
+    nodes_skipped = 0
+    edges_skipped = 0
+    nodes_deleted = 0
+    edges_deleted = 0
+    current_node_ids: set[str] = set()
+    current_edge_keys: set[str] = set()
     query_rows = prepared_query_rows(query_dir, manifest["publication_id"])
+
+    def node_suffix(label: str) -> str:
+        if incremental:
+            return f"AS row MERGE (n:AxonNode {{id: row.id}}) SET n:{label}, n += row;"
+        return f"AS row CREATE (n:AxonNode:{label}) SET n += row;"
+
+    def edge_suffix(relation: str) -> str:
+        verb = "MERGE" if incremental else "CREATE"
+        return (
+            "AS row MATCH (a:AxonNode {id: row.from_id}), (b:AxonNode {id: row.to_id}) "
+            f"{verb} (a)-[r:{relation}]->(b) SET r += row;"
+        )
 
     with out_path.open("w", encoding="utf-8") as out:
         write_drop_indexes(out)
-        if not keep_existing:
+        if not keep_existing and not incremental:
             out.write("MATCH (n) DETACH DELETE n;\n\n")
         write_indexes(out)
 
         node_batches: dict[str, list[dict[str, Any]]] = {}
         for row in iter_rows(nodes_path):
             label = safe_ident(str(row.get("label") or "AxonNode"), "AxonNode")
+            if incremental:
+                node_id = str(row.get("id"))
+                current_node_ids.add(node_id)
+                if prior_node_hashes.get(node_id) == row_content_hash(row):
+                    nodes_skipped += 1
+                    continue
             row["publication_id"] = manifest["publication_id"]
             row["human_only"] = True
             node_batches.setdefault(label, []).append(row)
             labels[label] = labels.get(label, 0) + 1
             total_nodes += 1
             if len(node_batches[label]) >= batch_size:
-                write_batch(
-                    out,
-                    "UNWIND ",
-                    node_batches[label],
-                    f"AS row CREATE (n:AxonNode:{label}) SET n += row;",
-                )
+                write_batch(out, "UNWIND ", node_batches[label], node_suffix(label))
                 node_batches[label] = []
 
         for label, rows in node_batches.items():
-            write_batch(out, "UNWIND ", rows, f"AS row CREATE (n:AxonNode:{label}) SET n += row;")
+            write_batch(out, "UNWIND ", rows, node_suffix(label))
+
+        if incremental:
+            deleted_nodes = [nid for nid in prior_node_hashes if nid not in current_node_ids]
+            nodes_deleted = len(deleted_nodes)
+            for start in range(0, len(deleted_nodes), batch_size):
+                chunk = deleted_nodes[start : start + batch_size]
+                out.write(
+                    "UNWIND "
+                    + json.dumps(chunk)
+                    + " AS id MATCH (n:AxonNode {id: id}) DETACH DELETE n;\n\n"
+                )
 
         edge_batches: dict[str, list[dict[str, Any]]] = {}
         for row in iter_rows(edges_path):
             relation = safe_ident(str(row.get("relation_type") or "RELATED_TO"), "RELATED_TO").upper()
+            if incremental:
+                key = edge_diff_key(row)
+                current_edge_keys.add(key)
+                if prior_edge_hashes.get(key) == row_content_hash(row):
+                    edges_skipped += 1
+                    continue
             row["publication_id"] = manifest["publication_id"]
             row["human_only"] = True
             edge_batches.setdefault(relation, []).append(row)
             relations[relation] = relations.get(relation, 0) + 1
             total_edges += 1
             if len(edge_batches[relation]) >= batch_size:
-                write_batch(
-                    out,
-                    "UNWIND ",
-                    edge_batches[relation],
-                    (
-                        "AS row MATCH (a:AxonNode {id: row.from_id}), (b:AxonNode {id: row.to_id}) "
-                        f"CREATE (a)-[r:{relation}]->(b) SET r += row;"
-                    ),
-                )
+                write_batch(out, "UNWIND ", edge_batches[relation], edge_suffix(relation))
                 edge_batches[relation] = []
 
         for relation, rows in edge_batches.items():
-            write_batch(
-                out,
-                "UNWIND ",
-                rows,
-                (
-                    "AS row MATCH (a:AxonNode {id: row.from_id}), (b:AxonNode {id: row.to_id}) "
-                    f"CREATE (a)-[r:{relation}]->(b) SET r += row;"
-                ),
-            )
+            write_batch(out, "UNWIND ", rows, edge_suffix(relation))
+
+        if incremental:
+            deleted_edges = [
+                {
+                    "from_id": key.split("\x1f")[0],
+                    "to_id": key.split("\x1f")[1],
+                    "rel": key.split("\x1f")[2],
+                }
+                for key in prior_edge_hashes
+                if key not in current_edge_keys
+            ]
+            edges_deleted = len(deleted_edges)
+            for start in range(0, len(deleted_edges), batch_size):
+                chunk = deleted_edges[start : start + batch_size]
+                write_batch(
+                    out,
+                    "UNWIND ",
+                    chunk,
+                    "AS row MATCH (a:AxonNode {id: row.from_id})-[r]->(b:AxonNode {id: row.to_id}) "
+                    "WHERE type(r) = row.rel DELETE r;",
+                )
 
         out.write("MATCH (q:PreparedQuery) DETACH DELETE q;\n\n")
         out.write("MATCH (p:PreparedQueryPack) DETACH DELETE p;\n\n")
@@ -328,8 +439,15 @@ def build_import(
         "publication_id": manifest["publication_id"],
         "input_manifest": str(manifest_path),
         "output": str(out_path),
+        "incremental": incremental,
         "nodes": total_nodes,
         "edges": total_edges,
+        "nodes_emitted": total_nodes,
+        "nodes_skipped": nodes_skipped,
+        "nodes_deleted": nodes_deleted,
+        "edges_emitted": total_edges,
+        "edges_skipped": edges_skipped,
+        "edges_deleted": edges_deleted,
         "prepared_queries": len(query_rows),
         "query_dir": str(query_dir),
         "labels": labels,
@@ -382,12 +500,19 @@ def main() -> int:
         path = publication_dir / name
         if not path.exists():
             raise SystemExit(f"missing publication artifact: {path}")
+    prior_dir = (
+        args.prior_publication_dir.resolve()
+        if args.incremental and args.prior_publication_dir is not None
+        else None
+    )
     summary = build_import(
         publication_dir,
         out_path,
         args.batch_size,
         args.keep_existing,
         args.query_dir.resolve(),
+        incremental=args.incremental,
+        prior_publication_dir=prior_dir,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
