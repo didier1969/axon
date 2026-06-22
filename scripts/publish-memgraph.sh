@@ -75,6 +75,20 @@ bash "$SCRIPT_DIR/memgraph-projection.sh" start >/dev/null 2>&1 || true
 
 PUB_ID="pub-$(date +%s)"
 PUB_DIR="$PUB_ROOT/$PUB_ID"
+
+# REQ-AXO-310 — incremental projection: diff the new publication against the most
+# recent prior one (MERGE/DELETE deltas, skip unchanged) instead of a full wipe.
+# The prior dir is captured BEFORE the new one is created; with no prior the
+# builder degrades to a full idempotent MERGE. Set AXON_MEMGRAPH_FULL_REBUILD=1
+# to force a clean wipe+rebuild (e.g. after a projection schema change).
+BUILD_INCREMENTAL=()
+if [ -z "${AXON_MEMGRAPH_FULL_REBUILD:-}" ]; then
+  PRIOR_DIR="$(ls -1dt "$PUB_ROOT"/pub-* 2>/dev/null | head -1 || true)"
+  if [ -n "${PRIOR_DIR:-}" ] && [ -f "$PRIOR_DIR/nodes.parquet" ] && [ "$PRIOR_DIR" != "$PUB_DIR" ]; then
+    BUILD_INCREMENTAL=(--incremental --prior-publication-dir "$PRIOR_DIR")
+  fi
+fi
+
 mkdir -p "$PUB_DIR"
 
 if ! python3 "$SCRIPT_DIR/memgraph_export_publication.py" \
@@ -84,7 +98,8 @@ if ! python3 "$SCRIPT_DIR/memgraph_export_publication.py" \
   exit 0
 fi
 if ! python3 "$SCRIPT_DIR/memgraph_build_cypherl.py" \
-      --publication-dir "$PUB_DIR" --out "$PUB_DIR/memgraph_import.cypherl" >/dev/null; then
+      --publication-dir "$PUB_DIR" --out "$PUB_DIR/memgraph_import.cypherl" \
+      "${BUILD_INCREMENTAL[@]}" >/dev/null; then
   write_marker "failed" "build_cypherl step failed"
   exit 0
 fi
