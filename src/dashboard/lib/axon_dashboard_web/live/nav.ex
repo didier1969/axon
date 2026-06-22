@@ -147,16 +147,19 @@ defmodule AxonDashboardWeb.Live.Nav do
   defp badge_dot_class(_), do: "bg-slate-400"
 
   # REQ-AXO-901856 — derive one honest health verdict from observed truth.
-  # A fresh envelope (not stale) whose only complaint is a missing telemetry
-  # heartbeat is NOT degraded — it is an idle/quiet system, so it reads INFO,
-  # never a red DEGRADED alarm. Order: stale > hard-degraded > idle > live.
+  # `observed_age_ms` is the brain's broadcast freshness; `degraded_reason` is
+  # the brain's verdict on the runtime-truth feed (e.g. the indexer telemetry
+  # heartbeat going stale → "missing_runtime_truth_heartbeat"). A fresh envelope
+  # does NOT clear a degraded_reason — the brain can broadcast on schedule while
+  # the indexer feed is dead — so any degraded_reason surfaces honestly as
+  # DEGRADED rather than being masked. Order: stale > degraded > idle > live.
   defp health(stale, observed_age_ms, degraded_reason, runtime_idle) do
     cond do
       stale or (is_integer(observed_age_ms) and observed_age_ms > 10_000) ->
         {:danger, "STALE", age_label(observed_age_ms, true)}
 
-      is_binary(degraded_reason) and not heartbeat_reason?(degraded_reason) ->
-        {:warn, "DEGRADED", degraded_reason}
+      is_binary(degraded_reason) ->
+        {:warn, "DEGRADED", degraded_label(degraded_reason)}
 
       runtime_idle ->
         {:info, "IDLE", "quiet cruise"}
@@ -166,7 +169,11 @@ defmodule AxonDashboardWeb.Live.Nav do
     end
   end
 
-  defp heartbeat_reason?(reason), do: String.contains?(reason, "heartbeat")
+  # Human-friendly rendering of known degraded reasons (clarté statut).
+  defp degraded_label("missing_runtime_truth_heartbeat"),
+    do: "runtime-truth heartbeat stale — indexer feed not reporting"
+
+  defp degraded_label(reason), do: reason
 
   defp gpu_tone("cuda"), do: :ok
   defp gpu_tone("tensorrt"), do: :ok
