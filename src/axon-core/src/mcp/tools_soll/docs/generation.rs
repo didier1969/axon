@@ -543,23 +543,33 @@ impl McpServer {
                 relation_line_html(&local_edges, &nodes_by_id),
                 relation_diagnostic_table_html(&local_edges, &nodes_by_id)
             );
-            // REQ-AXO-312 — partition the level ±1 neighbourhood so the local
-            // graph renders macro (parents / containing roots) on the left and
-            // micro (children) on the right. Use the HIERARCHY parent/child
-            // sets, never raw incoming/outgoing edges: SOLL stores REFINES /
-            // BELONGS_TO child→parent, so a node's children arrive as *incoming*
-            // edges — folding incoming into macro emptied the micro column.
-            // Lateral neighbours (EXPLAINS / VERIFIES …) fall through to the
-            // ambient macro column in render_mermaid_graph.
-            let macro_ids = parent_ids
+            // REQ-AXO-312 — partition the level ±1 neighbourhood by EDGE
+            // DIRECTION, not the single preferred-parent hierarchy set. SOLL
+            // stores filiation child→parent, so:
+            //   macro (left)  = what the focus points to  = outgoing targets
+            //                   (its parents / governing intent) + containing
+            //                   roots.
+            //   micro (right) = what points at the focus   = incoming sources
+            //                   (children / refinements / evidence).
+            // Using raw incoming/outgoing keeps children that prefer a
+            // *different* hierarchy parent — e.g. a REQ that BELONGS_TO this
+            // Milestone but REFINES a Decision, or a Pillar that EPITOMIZES the
+            // Vision but REFINES another Pillar — in the micro column. The
+            // hierarchy parent/child sets still drive the right-panel lists.
+            // micro wins ties: anything pointing INTO the focus is a child even
+            // if the subtree projection also lists it as a containing root
+            // (a root absorbs its own outgoing targets, so a focus can appear
+            // as a "containing root" of its own parent — that must not pull a
+            // genuine child into macro).
+            let micro_ids = incoming_ids
                 .iter()
-                .chain(containing_roots.iter())
                 .filter(|id| **id != node.id)
                 .cloned()
                 .collect::<HashSet<_>>();
-            let micro_ids = child_ids
+            let macro_ids = outgoing_ids
                 .iter()
-                .filter(|id| **id != node.id && !macro_ids.contains(*id))
+                .chain(containing_roots.iter())
+                .filter(|id| **id != node.id && !micro_ids.contains(*id))
                 .cloned()
                 .collect::<HashSet<_>>();
             let node_focus = MermaidFocus {

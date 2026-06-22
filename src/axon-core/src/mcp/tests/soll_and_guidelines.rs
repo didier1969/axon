@@ -8753,17 +8753,26 @@ fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
         "Generated node page combining hierarchy, local context, and relation diagnostics"
     ));
 
-    // REQ-AXO-312 — a node WITH a hierarchy child must render the micro column.
-    // PIL-AXO-001 has child REQ-AXO-001 (BELONGS_TO) and parent VIS-AXO-001
-    // (EPITOMIZES), so its local graph carries both a macro and a micro
-    // subgraph. Regression guard for the inverted-edge bug that emptied micro.
+    // REQ-AXO-312 — a node with incoming filiation edges (children pointing at
+    // it) must render the micro column, regardless of the child's preferred
+    // hierarchy parent. PIL-AXO-001 has child REQ-AXO-001 (BELONGS_TO) and
+    // parent VIS-AXO-001 (EPITOMIZES) → both macro and micro subgraphs. The
+    // Vision, whose only relation is the incoming pillar (EPITOMIZES), must
+    // also render a micro column. Regression guard for the inverted-edge bug
+    // that emptied micro.
     let pillar_html = std::fs::read_to_string(out.path().join("nodes/PIL-AXO-001.html")).unwrap();
     assert!(
         pillar_html.contains("subgraph sgMicro"),
-        "a node with a hierarchy child must render a micro column"
+        "a node with an incoming child edge must render a micro column"
     );
     assert!(pillar_html.contains("▼ Micro"));
     assert!(pillar_html.contains("subgraph sgMacro"));
+
+    let vision_html = std::fs::read_to_string(out.path().join("nodes/VIS-AXO-001.html")).unwrap();
+    assert!(
+        vision_html.contains("subgraph sgMicro"),
+        "the vision must render its incoming pillar in the micro column"
+    );
 
     let subtree_html = std::fs::read_to_string(subtree_path).unwrap();
     assert!(subtree_html.contains("All Nodes In This Subtree"));
