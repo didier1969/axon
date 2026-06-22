@@ -176,7 +176,7 @@ impl McpServer {
             docs_ready,
         );
 
-        let root_graph = render_mermaid_graph(&graph_nodes, &graph_edges, &links);
+        let root_graph = render_mermaid_graph(&graph_nodes, &graph_edges, &links, None);
         let left_tree_html = format!(
             "<nav class=\"tree-shell\" aria-label=\"Portfolio tree\"><ul class=\"tree-root\">\
                <li class=\"tree-item branch root\"><details open>\

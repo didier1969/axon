@@ -1,6 +1,6 @@
 use super::hierarchy::{entity_type_short_label, html_escape};
 use super::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
@@ -58,10 +58,44 @@ pub(super) struct RenderedMermaidGraph {
     pub(super) link_map_json: String,
 }
 
+/// REQ-AXO-312 — Hierarchy Focus partition for the local (level ±1) graph.
+/// Drives a strict macro→micro left-to-right layout: `macro_ids` (parents /
+/// upstream / containing roots) land in the left column, the focus node in the
+/// middle, `micro_ids` (children / downstream) in the right column. Any local
+/// node not listed falls back into the macro column as ambient context.
+pub(super) struct MermaidFocus {
+    pub(super) focus_id: String,
+    pub(super) macro_ids: HashSet<String>,
+    pub(super) micro_ids: HashSet<String>,
+}
+
+fn mermaid_node_decl(
+    indent: &str,
+    node: &SollDocNode,
+    mermaid_ids: &HashMap<String, String>,
+) -> String {
+    let label = format!(
+        "{} {}: {}",
+        entity_type_short_label(&node.entity_type),
+        node.id,
+        summarize_for_label(&node.title, 42)
+    );
+    format!(
+        "{}{}[\"{}\"]\n",
+        indent,
+        mermaid_ids
+            .get(&node.id)
+            .map(String::as_str)
+            .unwrap_or("NODE"),
+        mermaid_escape_label(&label)
+    )
+}
+
 pub(super) fn render_mermaid_graph(
     nodes: &[SollDocNode],
     edges: &[SollDocEdge],
     links: &HashMap<String, String>,
+    focus: Option<&MermaidFocus>,
 ) -> RenderedMermaidGraph {
     let mut ordered_nodes = nodes.to_vec();
     ordered_nodes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -81,36 +115,83 @@ pub(super) fn render_mermaid_graph(
     });
 
     let mut graph = String::from("flowchart LR\n");
-    for node in ordered_nodes {
-        let label = format!(
-            "{} {}: {}",
-            entity_type_short_label(&node.entity_type),
-            node.id,
-            summarize_for_label(&node.title, 42)
-        );
-        graph.push_str(&format!(
-            "  {}[\"{}\"]\n",
-            mermaid_ids
-                .get(&node.id)
-                .map(String::as_str)
-                .unwrap_or("NODE"),
-            mermaid_escape_label(&label)
-        ));
+    match focus {
+        // REQ-AXO-312 — three-column macro → focus → micro layout. Subgraphs
+        // are declared left-to-right in `flowchart LR`, so declaration order
+        // fixes the columns; `direction TB` stacks each column vertically.
+        Some(focus) => {
+            let mut macro_nodes = Vec::new();
+            let mut focus_nodes = Vec::new();
+            let mut micro_nodes = Vec::new();
+            for node in &ordered_nodes {
+                if node.id == focus.focus_id {
+                    focus_nodes.push(node);
+                } else if focus.micro_ids.contains(&node.id) {
+                    micro_nodes.push(node);
+                } else if focus.macro_ids.contains(&node.id) {
+                    macro_nodes.push(node);
+                } else {
+                    // Any ambient local node not classified as a child reads as
+                    // "macro" relative to the focus, so it lands in the left
+                    // column rather than disappearing.
+                    macro_nodes.push(node);
+                }
+            }
+            let push_subgraph = |graph: &mut String, sg_id: &str, title: &str, bucket: &[&SollDocNode]| {
+                if bucket.is_empty() {
+                    return;
+                }
+                graph.push_str(&format!("  subgraph {}[\"{}\"]\n", sg_id, title));
+                graph.push_str("    direction TB\n");
+                for node in bucket {
+                    graph.push_str(&mermaid_node_decl("    ", node, &mermaid_ids));
+                }
+                graph.push_str("  end\n");
+            };
+            push_subgraph(&mut graph, "sgMacro", "▲ Macro · niveau −1", &macro_nodes);
+            push_subgraph(&mut graph, "sgFocus", "● Focus", &focus_nodes);
+            push_subgraph(&mut graph, "sgMicro", "▼ Micro · niveau +1", &micro_nodes);
+        }
+        None => {
+            for node in &ordered_nodes {
+                graph.push_str(&mermaid_node_decl("  ", node, &mermaid_ids));
+            }
+        }
     }
+    // REQ-AXO-312 — column rank for the focus layout: macro=0, focus=1,
+    // micro=2 (default 0). Edges are emitted from the lower rank to the higher
+    // rank so dagre flows them left→right, pinning macro left and micro right
+    // regardless of the stored (child→parent) SOLL direction. The relation
+    // label is preserved; exact relation direction stays in the right-panel
+    // diagnostics. Without a focus every rank is 0, so order is untouched.
+    let column_rank = |canonical_id: &str| -> u8 {
+        match focus {
+            Some(focus) if focus.focus_id == canonical_id => 1,
+            Some(focus) if focus.micro_ids.contains(canonical_id) => 2,
+            Some(_) => 0,
+            None => 0,
+        }
+    };
     for edge in ordered_edges {
-        let source_id = mermaid_ids
-            .get(&edge.source_id)
+        let (head_canonical, tail_canonical) =
+            if column_rank(&edge.source_id) > column_rank(&edge.target_id) {
+                (&edge.target_id, &edge.source_id)
+            } else {
+                (&edge.source_id, &edge.target_id)
+            };
+        let head_id = mermaid_ids
+            .get(head_canonical)
             .map(String::as_str)
             .unwrap_or("NODE");
-        let target_id = mermaid_ids
-            .get(&edge.target_id)
+        let tail_id = mermaid_ids
+            .get(tail_canonical)
             .map(String::as_str)
             .unwrap_or("NODE");
         graph.push_str(&format!(
             "  {} -- {} --> {}\n",
-            source_id,
+            head_id,
             mermaid_escape_label(&edge.relation_type),
-            target_id
+            tail_id
         ));
     }
 
@@ -242,14 +323,26 @@ pub(super) fn render_site_page(
       min-height: calc(100vh - 220px);
       margin-top: 18px;
     }}
-    body.left-collapsed .workspace {{
-      grid-template-columns: 0px 0px minmax(0, 1fr) var(--handle-width) var(--right-pane-width);
-    }}
+    /* REQ-AXO-313 — symmetric space redistribution across tree / graph /
+       details. Every collapse combination keeps the surviving panes sharing
+       the freed space; columns are [left][h][center][h][right]. */
     body.right-collapsed .workspace {{
       grid-template-columns: var(--left-pane-width) var(--handle-width) minmax(0, 1fr) 0px 0px;
     }}
+    body.left-collapsed .workspace {{
+      grid-template-columns: 0px 0px minmax(0, 1fr) var(--handle-width) var(--right-pane-width);
+    }}
+    body.center-collapsed .workspace {{
+      grid-template-columns: minmax(0, 1fr) 0px 0px 0px minmax(0, 1fr);
+    }}
     body.left-collapsed.right-collapsed .workspace {{
       grid-template-columns: 0px 0px minmax(0, 1fr) 0px 0px;
+    }}
+    body.center-collapsed.right-collapsed .workspace {{
+      grid-template-columns: minmax(0, 1fr) 0px 0px 0px 0px;
+    }}
+    body.left-collapsed.center-collapsed .workspace {{
+      grid-template-columns: 0px 0px 0px 0px minmax(0, 1fr);
     }}
     .pane, .center-pane {{
       min-width: 0;
@@ -280,9 +373,23 @@ pub(super) fn render_site_page(
       border-radius: 999px;
       background: rgba(64, 49, 21, 0.16);
     }}
+    /* A resize handle is meaningful only between a visible side pane and the
+       visible flexible center; in any center-collapsed split the two side
+       panes share space 50/50 with no draggable seam. Use visibility (not
+       display) so the handle keeps its grid cell — display:none would drop it
+       as a grid item and shift every following pane into the wrong column. */
     body.left-collapsed .resize-left,
-    body.right-collapsed .resize-right {{
-      display: none;
+    body.center-collapsed .resize-left,
+    body.right-collapsed .resize-right,
+    body.center-collapsed .resize-right {{
+      visibility: hidden;
+    }}
+    /* A collapsed pane keeps its (zero-width) grid cell but renders nothing,
+       so its padding box never bleeds over the surviving neighbour. */
+    body.left-collapsed .pane-left,
+    body.center-collapsed .center-pane,
+    body.right-collapsed .pane-right {{
+      visibility: hidden;
     }}
     .card {{ padding: 18px 18px 16px; }}
     .card h2, .card h3 {{ margin-top: 0; }}
@@ -374,9 +481,7 @@ pub(super) fn render_site_page(
         min-height: auto;
       }}
       .resize-handle {{ display: none; }}
-      body.left-collapsed .workspace,
-      body.right-collapsed .workspace,
-      body.left-collapsed.right-collapsed .workspace {{
+      body[class*="collapsed"] .workspace {{
         grid-template-columns: 1fr;
       }}
     }}
@@ -393,6 +498,7 @@ pub(super) fn render_site_page(
     </section>
     <section class="toolbar" aria-label="Pane controls">
       <button id="toggle-left" type="button" aria-expanded="true" aria-controls="left-pane">Toggle tree</button>
+      <button id="toggle-graph" type="button" aria-expanded="true" aria-controls="center-pane">Toggle graph</button>
       <button id="toggle-right" type="button" aria-expanded="true" aria-controls="right-pane">Toggle details</button>
     </section>
     <section class="workspace">
@@ -404,7 +510,7 @@ pub(super) fn render_site_page(
         </div>
       </aside>
       <div class="resize-handle resize-left" data-side="left" aria-hidden="true"></div>
-      <article class="center-pane">
+      <article class="center-pane" id="center-pane" aria-label="Graph">
         <h2>{center_title}</h2>
         <div class="mermaid" data-link-map='{graph_link_map_json}'>
 {graph_definition}
@@ -454,61 +560,78 @@ pub(super) fn render_site_page(
 
     const storage = safeStorage();
 
+    const PANES = [
+      {{ side: "left", cls: "left-collapsed", key: "axon-docs-left-collapsed", button: "toggle-left" }},
+      {{ side: "center", cls: "center-collapsed", key: "axon-docs-center-collapsed", button: "toggle-graph" }},
+      {{ side: "right", cls: "right-collapsed", key: "axon-docs-right-collapsed", button: "toggle-right" }},
+    ];
+
+    function visiblePaneCount() {{
+      return PANES.filter((pane) => !document.body.classList.contains(pane.cls)).length;
+    }}
+
+    function syncPaneButton(pane) {{
+      const button = document.getElementById(pane.button);
+      if (button) {{
+        button.setAttribute("aria-expanded", String(!document.body.classList.contains(pane.cls)));
+      }}
+    }}
+
     function applyPaneState() {{
       if (!storage) {{
         return;
       }}
       const leftWidth = storage.getItem("axon-docs-left-width");
       const rightWidth = storage.getItem("axon-docs-right-width");
-      const leftCollapsed = storage.getItem("axon-docs-left-collapsed") === "1";
-      const rightCollapsed = storage.getItem("axon-docs-right-collapsed") === "1";
       if (leftWidth) {{
         document.documentElement.style.setProperty("--left-pane-width", leftWidth);
       }}
       if (rightWidth) {{
         document.documentElement.style.setProperty("--right-pane-width", rightWidth);
       }}
-      document.body.classList.toggle("left-collapsed", leftCollapsed);
-      document.body.classList.toggle("right-collapsed", rightCollapsed);
-      const leftButton = document.getElementById("toggle-left");
-      const rightButton = document.getElementById("toggle-right");
-      if (leftButton) {{
-        leftButton.setAttribute("aria-expanded", String(!leftCollapsed));
+      PANES.forEach((pane) => {{
+        document.body.classList.toggle(pane.cls, storage.getItem(pane.key) === "1");
+      }});
+      // Never restore a fully-collapsed workspace — keep at least the graph.
+      if (visiblePaneCount() === 0) {{
+        document.body.classList.remove("center-collapsed");
       }}
-      if (rightButton) {{
-        rightButton.setAttribute("aria-expanded", String(!rightCollapsed));
-      }}
+      PANES.forEach(syncPaneButton);
     }}
 
     function persistPaneState() {{
       if (!storage) {{
         return;
       }}
-      storage.setItem("axon-docs-left-collapsed", document.body.classList.contains("left-collapsed") ? "1" : "0");
-      storage.setItem("axon-docs-right-collapsed", document.body.classList.contains("right-collapsed") ? "1" : "0");
+      PANES.forEach((pane) => {{
+        storage.setItem(pane.key, document.body.classList.contains(pane.cls) ? "1" : "0");
+      }});
       storage.setItem("axon-docs-left-width", getComputedStyle(document.documentElement).getPropertyValue("--left-pane-width").trim() || "300px");
       storage.setItem("axon-docs-right-width", getComputedStyle(document.documentElement).getPropertyValue("--right-pane-width").trim() || "360px");
     }}
 
     function togglePane(side) {{
-      const className = side === "left" ? "left-collapsed" : "right-collapsed";
-      document.body.classList.toggle(className);
-      const button = document.getElementById(side === "left" ? "toggle-left" : "toggle-right");
-      if (button) {{
-        button.setAttribute("aria-expanded", String(!document.body.classList.contains(className)));
+      const pane = PANES.find((entry) => entry.side === side);
+      if (!pane) {{
+        return;
       }}
+      const willCollapse = !document.body.classList.contains(pane.cls);
+      // Refuse to hide the last visible pane — at least one must stay open.
+      if (willCollapse && visiblePaneCount() <= 1) {{
+        return;
+      }}
+      document.body.classList.toggle(pane.cls);
+      syncPaneButton(pane);
       persistPaneState();
     }}
 
     function installPaneControls() {{
-      const leftButton = document.getElementById("toggle-left");
-      const rightButton = document.getElementById("toggle-right");
-      if (leftButton) {{
-        leftButton.addEventListener("click", () => togglePane("left"));
-      }}
-      if (rightButton) {{
-        rightButton.addEventListener("click", () => togglePane("right"));
-      }}
+      PANES.forEach((pane) => {{
+        const button = document.getElementById(pane.button);
+        if (button) {{
+          button.addEventListener("click", () => togglePane(pane.side));
+        }}
+      }});
 
       document.querySelectorAll(".resize-handle[data-side]").forEach((handle) => {{
         handle.addEventListener("pointerdown", (event) => {{
@@ -592,4 +715,166 @@ pub(super) fn render_site_page(
         right_title = html_escape(right_title),
         right_panel_html = right_panel_html,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: &str, kind: &str, title: &str) -> SollDocNode {
+        SollDocNode {
+            id: id.to_string(),
+            entity_type: kind.to_string(),
+            title: title.to_string(),
+            description: format!("Description for {}", id),
+            status: "current".to_string(),
+            metadata: "{}".to_string(),
+        }
+    }
+
+    fn edge(src: &str, rel: &str, tgt: &str) -> SollDocEdge {
+        SollDocEdge {
+            source_id: src.to_string(),
+            target_id: tgt.to_string(),
+            relation_type: rel.to_string(),
+        }
+    }
+
+    // REQ-AXO-312 — the focus layout must wrap nodes in macro / focus / micro
+    // subgraphs and reorient a stored child→parent edge so the parent (macro)
+    // becomes the edge head, pinning macro left of micro regardless of the
+    // SOLL direction. Without a focus the edge keeps its stored direction.
+    #[test]
+    fn focus_layout_builds_columns_and_reorients_edges() {
+        // ids chosen so sorted order is deterministic: AAA=N0, ZZZ=N1.
+        let nodes = vec![
+            node("AAA-AXO-001", "Milestone", "macro parent"),
+            node("ZZZ-AXO-009", "Requirement", "focus node"),
+        ];
+        // Stored direction is child→parent: focus REFINES the macro parent.
+        let edges = vec![edge("ZZZ-AXO-009", "REFINES", "AAA-AXO-001")];
+        let links = HashMap::new();
+        let focus = MermaidFocus {
+            focus_id: "ZZZ-AXO-009".to_string(),
+            macro_ids: ["AAA-AXO-001".to_string()].into_iter().collect(),
+            micro_ids: HashSet::new(),
+        };
+
+        let focused = render_mermaid_graph(&nodes, &edges, &links, Some(&focus)).definition;
+        assert!(focused.contains("subgraph sgMacro"), "{focused}");
+        assert!(focused.contains("subgraph sgFocus"), "{focused}");
+        assert!(focused.contains("▲ Macro"), "{focused}");
+        // Reoriented: macro (N0) is the head, focus (N1) the tail.
+        assert!(focused.contains("N0 -- REFINES --> N1"), "{focused}");
+
+        let flat = render_mermaid_graph(&nodes, &edges, &links, None).definition;
+        assert!(!flat.contains("subgraph"), "{flat}");
+        // Untouched: stored direction focus (N1) → macro (N0).
+        assert!(flat.contains("N1 -- REFINES --> N0"), "{flat}");
+    }
+
+    // REQ-AXO-313 — three independent toggles + symmetric grid collapse rules.
+    #[test]
+    fn site_page_exposes_three_toggles_and_symmetric_grid() {
+        let graph = render_mermaid_graph(&[], &[], &HashMap::new(), None);
+        let page = render_site_page(
+            "t", "e", "i", "b", "Tree", "tree", "Graph", &graph, "Details", "details", "s",
+        );
+        assert!(page.contains("id=\"toggle-left\""));
+        assert!(page.contains("id=\"toggle-graph\""));
+        assert!(page.contains("id=\"toggle-right\""));
+        assert!(page.contains("id=\"center-pane\""));
+        assert!(page.contains("body.center-collapsed .workspace"));
+        assert!(page.contains("axon-docs-center-collapsed"));
+        assert!(page.contains("visiblePaneCount"));
+    }
+
+    // REQ-AXO-312 / 313 visual preview. Run with AXON_AUTODOC_PREVIEW=1 to also
+    // dump representative pages to /tmp/axon-autodoc-preview/ for browser
+    // iteration; otherwise it only exercises the render path:
+    //   AXON_AUTODOC_PREVIEW=1 cargo test -p axon-core --lib \
+    //     render::tests::render_autodoc_preview -- --nocapture
+    #[test]
+    fn render_autodoc_preview() {
+        let nodes = vec![
+            node("MIL-AXO-040", "Milestone", "Complétude indexeur : call-graph complet"),
+            node("DEC-AXO-060", "Decision", "4 verbes canoniques runtime"),
+            node("REQ-AXO-100", "Requirement", "Hierarchy Focus macro→micro layout"),
+            node("REQ-AXO-101", "Requirement", "Toggle tree/graph/detail symétrique"),
+            node("REQ-AXO-102", "Requirement", "Subgraph LR colonnes"),
+            node("REQ-AXO-103", "Requirement", "Click-through mermaid nodes"),
+            node("CPT-AXO-054", "Concept", "Streaming pipeline v2"),
+            node("VAL-AXO-009", "Validation", "Preuve navigateur autodoc"),
+        ];
+        let edges = vec![
+            edge("REQ-AXO-100", "BELONGS_TO", "MIL-AXO-040"),
+            edge("REQ-AXO-100", "REFINES", "DEC-AXO-060"),
+            edge("REQ-AXO-101", "REFINES", "REQ-AXO-100"),
+            edge("REQ-AXO-102", "REFINES", "REQ-AXO-100"),
+            edge("REQ-AXO-103", "REFINES", "REQ-AXO-100"),
+            edge("CPT-AXO-054", "EXPLAINS", "REQ-AXO-100"),
+            edge("VAL-AXO-009", "VERIFIES", "REQ-AXO-100"),
+        ];
+        let links = nodes
+            .iter()
+            .map(|n| (n.id.clone(), node_file_name(&n.id)))
+            .collect::<HashMap<_, _>>();
+
+        let macro_ids = ["MIL-AXO-040", "DEC-AXO-060", "CPT-AXO-054"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<HashSet<_>>();
+        let micro_ids = ["REQ-AXO-101", "REQ-AXO-102", "REQ-AXO-103", "VAL-AXO-009"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<HashSet<_>>();
+        let focus = MermaidFocus {
+            focus_id: "REQ-AXO-100".to_string(),
+            macro_ids,
+            micro_ids,
+        };
+
+        let focused = render_mermaid_graph(&nodes, &edges, &links, Some(&focus));
+        let flat = render_mermaid_graph(&nodes, &edges, &links, None);
+
+        let node_page = render_site_page(
+            "REQ-AXO-100 · Hierarchy Focus macro→micro layout",
+            "SOLL Derived Node (preview)",
+            "Aperçu navigateur REQ-AXO-312 / 313 : graphe local niveau ±1 macro→micro + toggles tree/graph/detail.",
+            "<a href=\"#\">GLO</a><span>/</span><a href=\"#\">AXO</a><span>/</span><span>REQ-AXO-100</span>",
+            "Project Tree",
+            "<nav class=\"tree-shell\"><ul class=\"tree-root\"><li class=\"tree-item\"><a class=\"tree-link current\"><span class=\"tree-tag\">REQ</span><span>REQ-AXO-100</span></a></li></ul></nav>",
+            "Local Graph",
+            &focused,
+            "Details",
+            "<section class=\"card\"><h3>Description</h3><p>Aperçu de la mise en page macro→micro.</p></section><section class=\"card\"><h3>Incoming Neighbors</h3><ul class=\"node-list\"><li>CPT-AXO-054</li></ul></section>",
+            "<div class=\"cell\"><strong>Kind</strong><div>Requirement</div></div><div class=\"cell\"><strong>Relations</strong><div>7</div></div>",
+        );
+
+        let flat_page = render_site_page(
+            "Flat graph (focus-less) preview",
+            "SOLL Derived Root (preview)",
+            "Aperçu du rendu plat sans focus (pages projet / racine).",
+            "<span>GLO</span>",
+            "Portfolio Tree",
+            "<nav class=\"tree-shell\"><ul class=\"tree-root\"><li class=\"tree-item\"><span class=\"tree-link\">GLO</span></li></ul></nav>",
+            "Portfolio Focus",
+            &flat,
+            "Details",
+            "<section class=\"card\"><h3>Reading Model</h3><p>Rendu plat.</p></section>",
+            "<div class=\"cell\"><strong>Mode</strong><div>flat</div></div>",
+        );
+
+        // Both render paths must at least produce the focus + flat surfaces.
+        assert!(node_page.contains("subgraph sgMacro"));
+        assert!(flat_page.contains("flowchart LR"));
+
+        if std::env::var("AXON_AUTODOC_PREVIEW").is_ok() {
+            let dir = std::path::Path::new("/tmp/axon-autodoc-preview");
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("node-preview.html"), node_page).unwrap();
+            std::fs::write(dir.join("flat-preview.html"), flat_page).unwrap();
+            println!("autodoc preview written to {}", dir.display());
+        }
+    }
 }

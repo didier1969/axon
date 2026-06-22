@@ -199,6 +199,7 @@ impl McpServer {
                     &project_graph_nodes,
                     &project_graph_edges,
                     &project_graph_links,
+                    None,
                 ),
                 "Details",
                 &project_right_html,
@@ -363,7 +364,7 @@ impl McpServer {
                 subtree_edges.len()
             );
             let subtree_graph =
-                render_mermaid_graph(&subtree_nodes, &subtree_edges, &subtree_links);
+                render_mermaid_graph(&subtree_nodes, &subtree_edges, &subtree_links, None);
             pages.push(SollDocPageSpec {
                 relative_path: format!("subtrees/{}", subtree_file_name(&root.id)),
                 title: format!("{} · {} subtree", root.id, root.title),
@@ -542,7 +543,29 @@ impl McpServer {
                 relation_line_html(&local_edges, &nodes_by_id),
                 relation_diagnostic_table_html(&local_edges, &nodes_by_id)
             );
-            let node_graph = render_mermaid_graph(&local_nodes, &local_edges, &local_links);
+            // REQ-AXO-312 — partition the level ±1 neighbourhood so the local
+            // graph renders macro (parents / upstream / containing roots) on
+            // the left and micro (children / downstream) on the right.
+            let macro_ids = parent_ids
+                .iter()
+                .chain(incoming_ids.iter())
+                .chain(containing_roots.iter())
+                .filter(|id| **id != node.id)
+                .cloned()
+                .collect::<HashSet<_>>();
+            let micro_ids = child_ids
+                .iter()
+                .chain(outgoing_ids.iter())
+                .filter(|id| **id != node.id && !macro_ids.contains(*id))
+                .cloned()
+                .collect::<HashSet<_>>();
+            let node_focus = MermaidFocus {
+                focus_id: node.id.clone(),
+                macro_ids,
+                micro_ids,
+            };
+            let node_graph =
+                render_mermaid_graph(&local_nodes, &local_edges, &local_links, Some(&node_focus));
             pages.push(SollDocPageSpec {
                 relative_path: format!("nodes/{}", node_file_name(&node.id)),
                 title: format!("{} · {}", node.id, node.title),
