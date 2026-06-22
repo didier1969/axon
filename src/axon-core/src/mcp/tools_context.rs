@@ -13,6 +13,8 @@ use super::format::{evidence_by_mode, format_standard_contract};
 use super::McpServer;
 
 mod retrieval_model;
+mod util;
+use util::*;
 use retrieval_model::{
     ChunkCandidate, EntryCandidate, RetrievalDiagnostics, RetrievalRoute, RetrievalRuntimeState,
     RetrievalTimings,
@@ -650,7 +652,7 @@ impl McpServer {
             "excluded_because": excluded_because,
             "token_budget_estimate": {
                 "requested_budget": token_budget,
-                "estimated_tokens": Self::estimate_tokens(&[
+                "estimated_tokens": estimate_tokens(&[
                     &answer_sketch,
                     &serde_json::to_string(&direct_evidence).unwrap_or_default(),
                     &serde_json::to_string(&supporting_chunks).unwrap_or_default(),
@@ -751,7 +753,7 @@ impl McpServer {
                     "impact the entrypoint for deeper blast radius",
                     "query the returned URIs directly if raw detail is needed",
                 ],
-                Self::confidence_label(
+                confidence_label(
                     data["packet"]["confidence"]["score"]
                         .as_f64()
                         .unwrap_or(0.0),
@@ -847,7 +849,7 @@ impl McpServer {
             "requirements": intent_requirements,
         }))
         .unwrap_or_default();
-        let intent_tokens_pre = Self::estimate_tokens(&[&intent_text_full]);
+        let intent_tokens_pre = estimate_tokens(&[&intent_text_full]);
 
         // Truncate intent rows in priority order: requirements > decisions > concepts.
         let (
@@ -878,7 +880,7 @@ impl McpServer {
             code_chunks_full.extend(supporting.iter().cloned());
         }
         let code_tokens_pre =
-            Self::estimate_tokens(&[&serde_json::to_string(&code_chunks_full).unwrap_or_default()]);
+            estimate_tokens(&[&serde_json::to_string(&code_chunks_full).unwrap_or_default()]);
         let (code_chunks, code_tokens_post, code_overflowed) =
             Self::truncate_chunks_band(code_chunks_full, code_budget);
 
@@ -1003,7 +1005,7 @@ impl McpServer {
                 "concepts": c, "decisions": d, "requirements": r
             }))
             .unwrap_or_default();
-            Self::estimate_tokens(&[&s])
+            estimate_tokens(&[&s])
         };
         let pre = measure(&concepts, &decisions, &requirements);
         if pre <= budget {
@@ -1034,19 +1036,19 @@ impl McpServer {
     // code_band truncation: drop chunks from the back (the lowest-ranked).
     fn truncate_chunks_band(chunks: Vec<Value>, budget: usize) -> (Vec<Value>, usize, usize) {
         let pre_text = serde_json::to_string(&chunks).unwrap_or_default();
-        let pre = Self::estimate_tokens(&[&pre_text]);
+        let pre = estimate_tokens(&[&pre_text]);
         if pre <= budget {
             return (chunks, pre, 0);
         }
         let mut kept = chunks;
         let initial = kept.len();
         while !kept.is_empty()
-            && Self::estimate_tokens(&[&serde_json::to_string(&kept).unwrap_or_default()]) > budget
+            && estimate_tokens(&[&serde_json::to_string(&kept).unwrap_or_default()]) > budget
         {
             kept.pop();
         }
         let dropped = initial - kept.len();
-        let post = Self::estimate_tokens(&[&serde_json::to_string(&kept).unwrap_or_default()]);
+        let post = estimate_tokens(&[&serde_json::to_string(&kept).unwrap_or_default()]);
         (kept, post, dropped)
     }
 
@@ -1058,7 +1060,7 @@ impl McpServer {
             .map(|a| std::mem::take(a))
             .unwrap_or_default();
         let pre_text = serde_json::to_string(&entries).unwrap_or_default();
-        let pre = Self::estimate_tokens(&[&pre_text]);
+        let pre = estimate_tokens(&[&pre_text]);
         if pre <= budget {
             // Restore entries unchanged + recompute tokens_used to be safe.
             band["git_recent_edits"] = json!(entries);
@@ -1068,13 +1070,13 @@ impl McpServer {
         let mut kept = entries;
         let initial = kept.len();
         while !kept.is_empty()
-            && Self::estimate_tokens(&[&serde_json::to_string(&kept).unwrap_or_default()]) > budget
+            && estimate_tokens(&[&serde_json::to_string(&kept).unwrap_or_default()]) > budget
         {
             // Entries are sorted newest-first; pop drops the oldest.
             kept.pop();
         }
         let dropped = initial - kept.len();
-        let post = Self::estimate_tokens(&[&serde_json::to_string(&kept).unwrap_or_default()]);
+        let post = estimate_tokens(&[&serde_json::to_string(&kept).unwrap_or_default()]);
         band["git_recent_edits"] = json!(kept);
         band["tokens_used"] = json!(post);
         (band, post, dropped)
@@ -1188,7 +1190,7 @@ impl McpServer {
                 .cmp(&a["last_commit_ts"].as_i64().unwrap_or(0))
         });
         let recent_text = serde_json::to_string(&entries).unwrap_or_default();
-        let tokens_used = Self::estimate_tokens(&[&recent_text]);
+        let tokens_used = estimate_tokens(&[&recent_text]);
 
         // current_focus: best-effort cwd hint (the dir we're in, relative to
         // the project root if possible). Does NOT touch open editor state.
@@ -1758,7 +1760,7 @@ impl McpServer {
         let offset = lower.find(&needle)?;
         let start = offset.saturating_sub(100);
         let end = (offset + needle.len() + 120).min(content.len());
-        Some(Self::truncate(
+        Some(truncate(
             content.get(start..end).unwrap_or(content).trim(),
             220,
         ))
@@ -1837,7 +1839,7 @@ impl McpServer {
             let match_term = matched_terms[0].clone();
             let lexical_hits = matched_terms.len();
             let snippet = Self::snippet_around_term(&content, &match_term)
-                .unwrap_or_else(|| Self::truncate(content.lines().next().unwrap_or_default(), 220));
+                .unwrap_or_else(|| truncate(content.lines().next().unwrap_or_default(), 220));
             matches.push((
                 Self::repo_literal_file_rank(&path_str),
                 lexical_hits,
@@ -2678,7 +2680,7 @@ impl McpServer {
                         excluded_because.push("semantic_chunk_search_unavailable".to_string());
                         excluded_because.push(format!(
                             "semantic_chunk_search_error:{}",
-                            Self::truncate(&err.to_string(), 120)
+                            truncate(&err.to_string(), 120)
                         ));
                         None
                     }
@@ -2754,8 +2756,8 @@ impl McpServer {
                     let source_id = row.get(1)?.as_str()?.to_string();
                     let project_code = row.get(2)?.as_str()?.to_string();
                     let content = row.get(3)?.as_str()?.to_string();
-                    let chunk_part_index = Self::parse_usize_value(row.get(4)?).unwrap_or(1).max(1);
-                    let chunk_part_count = Self::parse_usize_value(row.get(5)?).unwrap_or(1).max(1);
+                    let chunk_part_index = parse_usize_value(row.get(4)?).unwrap_or(1).max(1);
+                    let chunk_part_count = parse_usize_value(row.get(5)?).unwrap_or(1).max(1);
                     let chunk_path = row.get(6)?.as_str().unwrap_or("1/1").to_string();
                     let match_reason = row.get(7)?.as_str()?.to_string();
                     let uri = source_to_uri
@@ -2814,7 +2816,7 @@ impl McpServer {
                 Err(err) => {
                     excluded_because.push(format!(
                         "pg_semantic_vector_literal_error:{}",
-                        Self::truncate(&err.to_string(), 120)
+                        truncate(&err.to_string(), 120)
                     ));
                     return Vec::new();
                 }
@@ -2913,15 +2915,15 @@ impl McpServer {
                     uri = self.resolve_containing_file_ram(&project_code, &source_id);
                 }
                 let content = row.get(4)?.as_str()?.to_string();
-                let chunk_part_index = Self::parse_usize_value(row.get(5)?).unwrap_or(1).max(1);
-                let chunk_part_count = Self::parse_usize_value(row.get(6)?).unwrap_or(1).max(1);
+                let chunk_part_index = parse_usize_value(row.get(5)?).unwrap_or(1).max(1);
+                let chunk_part_count = parse_usize_value(row.get(6)?).unwrap_or(1).max(1);
                 let chunk_path = row.get(7)?.as_str().unwrap_or("1/1").to_string();
                 let match_reason = row.get(8)?.as_str()?.to_string();
                 // REQ-AXO-901883 — the native reader renders FLOAT8 as a string
                 // (`render_pg_value`); a bare `as_f64()` would drop every cosine
                 // distance. `parse_f64_value` accepts the string form + the
                 // `"null"` sentinel.
-                let semantic_distance = row.get(9).and_then(Self::parse_f64_value);
+                let semantic_distance = row.get(9).and_then(parse_f64_value);
                 let lexical_hits = terms
                     .iter()
                     .filter(|term| {
@@ -3318,11 +3320,11 @@ impl McpServer {
             if !selected_ids.insert(candidate.chunk_id.clone()) {
                 return false;
             }
-            if !Self::can_reuse_uri_for_multipart(candidate, seen_uris, selected_source_parts) {
+            if !can_reuse_uri_for_multipart(candidate, seen_uris, selected_source_parts) {
                 return false;
             }
-            let snippet = Self::truncate(&candidate.content, 220);
-            let estimated = Self::estimate_tokens(&[&snippet]);
+            let snippet = truncate(&candidate.content, 220);
+            let estimated = estimate_tokens(&[&snippet]);
             if *consumed_tokens + estimated > token_budget / 2 {
                 return false;
             }
@@ -5121,19 +5123,10 @@ impl McpServer {
         score = score.min(0.95);
         json!({
             "score": score,
-            "label": Self::confidence_label(score),
+            "label": confidence_label(score),
         })
     }
 
-    fn confidence_label(score: f64) -> &'static str {
-        if score >= 0.8 {
-            "high"
-        } else if score >= 0.55 {
-            "medium"
-        } else {
-            "low"
-        }
-    }
 
     fn render_evidence_packet(&self, packet: &Value, route: RetrievalRoute) -> String {
         let answer_sketch = packet
@@ -5382,82 +5375,6 @@ impl McpServer {
         rendered
     }
 
-    fn parse_usize_value(value: &Value) -> Option<usize> {
-        value
-            .as_u64()
-            .and_then(|raw| usize::try_from(raw).ok())
-            .or_else(|| {
-                value
-                    .as_i64()
-                    .and_then(|raw| usize::try_from(raw.max(0)).ok())
-            })
-            .or_else(|| value.as_str().and_then(|raw| raw.parse::<usize>().ok()))
-    }
-
-    /// REQ-AXO-901883 — the native PG reader (`render_pg_value`) renders every
-    /// column as a JSON string (rows are serialised `Vec<Vec<String>>`), so a
-    /// `FLOAT8` cosine distance arrives as `"0.1778"`, not a JSON number, and a
-    /// SQL `NULL` arrives as the literal string `"null"`. A bare `Value::as_f64`
-    /// therefore returns `None` for a perfectly good distance — silently dropping
-    /// the semantic top-k's `semantic_distance`. This mirrors `parse_usize_value`:
-    /// accept a JSON number, or a numeric string, and treat the `"null"` sentinel
-    /// (and an empty string) as absent.
-    fn parse_f64_value(value: &Value) -> Option<f64> {
-        value.as_f64().or_else(|| {
-            value.as_str().and_then(|raw| {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
-                    None
-                } else {
-                    trimmed.parse::<f64>().ok()
-                }
-            })
-        })
-    }
-
-    fn can_reuse_uri_for_multipart(
-        candidate: &ChunkCandidate,
-        seen_uris: &HashSet<String>,
-        selected_source_parts: &HashMap<String, Vec<usize>>,
-    ) -> bool {
-        if !seen_uris.contains(&candidate.uri) {
-            return true;
-        }
-        if !candidate.anchored_to_entry && !candidate.same_file_as_entry {
-            return false;
-        }
-        if candidate.chunk_part_count <= 1 {
-            return false;
-        }
-        let Some(existing_parts) = selected_source_parts.get(&candidate.source_id) else {
-            return false;
-        };
-        if existing_parts.len() >= 2 {
-            return false;
-        }
-        !existing_parts.contains(&candidate.chunk_part_index)
-            && existing_parts
-                .iter()
-                .any(|existing| existing.abs_diff(candidate.chunk_part_index) <= 1)
-    }
-
-    fn truncate(value: &str, max_chars: usize) -> String {
-        if value.chars().count() <= max_chars {
-            return value.replace('\n', " ");
-        }
-        let mut end = value.len();
-        for (count, (idx, _)) in value.char_indices().enumerate() {
-            if count == max_chars {
-                end = idx;
-                break;
-            }
-        }
-        format!("{}...", value[..end].replace('\n', " "))
-    }
-
-    fn estimate_tokens(parts: &[&str]) -> usize {
-        parts.iter().map(|part| part.chars().count() / 4 + 1).sum()
-    }
 
     fn escape_sql(value: &str) -> String {
         value.replace('\'', "''")

@@ -477,24 +477,24 @@ fn multipart_uri_reuse_allows_one_adjacent_anchor_chunk() {
     let mut selected_source_parts = HashMap::new();
     selected_source_parts.insert(first.source_id.clone(), vec![1]);
 
-    assert!(McpServer::can_reuse_uri_for_multipart(
+    assert!(super::util::can_reuse_uri_for_multipart(
         &second,
         &seen_uris,
         &selected_source_parts
     ));
-    assert!(!McpServer::can_reuse_uri_for_multipart(
+    assert!(!super::util::can_reuse_uri_for_multipart(
         &third,
         &seen_uris,
         &selected_source_parts
     ));
-    assert!(!McpServer::can_reuse_uri_for_multipart(
+    assert!(!super::util::can_reuse_uri_for_multipart(
         &other,
         &seen_uris,
         &selected_source_parts
     ));
 
     selected_source_parts.insert(first.source_id.clone(), vec![1, 2]);
-    assert!(!McpServer::can_reuse_uri_for_multipart(
+    assert!(!super::util::can_reuse_uri_for_multipart(
         &third,
         &seen_uris,
         &selected_source_parts
@@ -1438,7 +1438,7 @@ fn semantic_chunk_query_preserves_hybrid_composition() {
     // exact production parse, so the test asserts the value the lane delivers.
     let near_dist = semantic_row
         .get(9)
-        .and_then(McpServer::parse_f64_value)
+        .and_then(super::util::parse_f64_value)
         .expect("near chunk must carry a parseable cosine distance");
     assert!(
         (0.0..0.55).contains(&near_dist),
@@ -1458,7 +1458,7 @@ fn semantic_chunk_query_preserves_hybrid_composition() {
     assert!(
         lexical_row
             .get(9)
-            .and_then(McpServer::parse_f64_value)
+            .and_then(super::util::parse_f64_value)
             .is_none(),
         "lexical-arm row must have an absent (NULL) distance: {lexical_row:?}"
     );
