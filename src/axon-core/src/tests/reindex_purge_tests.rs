@@ -9,7 +9,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::parser::Symbol;
-    use crate::pipeline_v2::types::ParsedFile;
+    use crate::pipeline::types::ParsedFile;
     use crate::tests::test_helpers::create_test_db;
 
     fn sym(name: &str) -> Symbol {
@@ -49,7 +49,7 @@ mod tests {
         let path = "/tmp/reindex_purge_test_a.rs";
 
         store
-            .upsert_graph_v2_batch(
+            .upsert_graph_batch(
                 &[parsed_file(path, "fn func_alpha() {}", vec![sym("func_alpha")])],
                 "AXO",
             )
@@ -64,7 +64,7 @@ mod tests {
 
         // Re-index the SAME file with the symbol renamed.
         store
-            .upsert_graph_v2_batch(
+            .upsert_graph_batch(
                 &[parsed_file(path, "fn func_beta() {}", vec![sym("func_beta")])],
                 "AXO",
             )
@@ -108,7 +108,7 @@ mod tests {
         let path = "/tmp/reindex_callee_test.rs";
 
         store
-            .upsert_graph_v2_batch(
+            .upsert_graph_batch(
                 &[parsed_file(path, "fn callee_fn() {}", vec![sym("callee_fn")])],
                 "AXO",
             )
@@ -138,7 +138,7 @@ mod tests {
 
         // Re-index the callee file (same symbol, edited body).
         store
-            .upsert_graph_v2_batch(
+            .upsert_graph_batch(
                 &[parsed_file(
                     path,
                     "fn callee_fn() { let x = 1; }",
@@ -170,7 +170,7 @@ mod tests {
         let store = create_test_db().unwrap();
         let path = "/tmp/embed_quarantine_test.rs";
         store
-            .upsert_graph_v2_batch(
+            .upsert_graph_batch(
                 &[parsed_file(
                     path,
                     "fn embed_me() { let a = 1; let b = 2; let c = a + b; }",

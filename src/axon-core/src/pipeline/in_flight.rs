@@ -143,7 +143,7 @@ pub fn spawn_watchdog() {
             if let Some(snap) = InFlightRegistry::global().snapshot() {
                 if snap.age_ms >= warn_ms {
                     tracing::warn!(
-                        target: "pipeline_v2::in_flight",
+                        target: "pipeline::in_flight",
                         stage = snap.stage,
                         path = %snap.path,
                         age_ms = snap.age_ms as u64,

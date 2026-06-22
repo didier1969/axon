@@ -216,10 +216,10 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
             memory_utilization_ratio: 0.0,
         });
     // REQ-AXO-901653 Slice 3b / REQ-AXO-901674 — FVQ/GPQ queue tables dropped post
-    // MIL-AXO-017 / REQ-AXO-289 / slice-5d. Canonical pipeline_v2 writes Chunk +
+    // MIL-AXO-017 / REQ-AXO-289 / slice-5d. Canonical pipeline writes Chunk +
     // ChunkEmbedding directly. The signals stay as struct fields (read by 50+
     // optimizer heuristics) but are populated with constant 0 until the
-    // optimizer is rewired against pipeline_v2 ready-queue/inflight counters
+    // optimizer is rewired against pipeline ready-queue/inflight counters
     // (separate REQ).
     let (file_vectorization_queue_queued, _file_vectorization_queue_inflight): (usize, usize) =
         (0, 0);

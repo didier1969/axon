@@ -20,7 +20,7 @@ use crate::parser::{Relation, Symbol};
 ///
 /// Carries everything the parser stage (A2) needs to extract symbols, edges
 /// and chunks, without re-reading the file from disk. The `content_hash`
-/// field is the key the [`crate::pipeline_v2::IndexedFileCache`] uses to
+/// field is the key the [`crate::pipeline::IndexedFileCache`] uses to
 /// detect "already seen" duplicates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedFile {

@@ -132,7 +132,7 @@ pub struct LifecycleHeartbeatSnapshot {
     /// brain's `embedding_status` surfaces the real PG error + systemic-failure
     /// verdict in one MCP call without log access (the REQ-AXO-902046 incident
     /// took gdb + 4 h to diagnose because the error was process-local).
-    pub b3: crate::pipeline_v2::stage_health::StageHealthSnapshot,
+    pub b3: crate::pipeline::stage_health::StageHealthSnapshot,
 }
 
 impl LifecycleHeartbeatSnapshot {
@@ -154,7 +154,7 @@ impl LifecycleHeartbeatSnapshot {
             build_id: std::env::var("AXON_BUILD_ID")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
-            b3: crate::pipeline_v2::stage_health::b3_health().snapshot(),
+            b3: crate::pipeline::stage_health::b3_health().snapshot(),
         }
     }
 }

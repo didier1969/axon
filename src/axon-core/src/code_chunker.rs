@@ -662,7 +662,7 @@ pub fn build_file_chunks_with_budget(
         if !bailed && std::time::Instant::now() >= deadline {
             bailed = true;
             tracing::warn!(
-                target: "pipeline_v2::chunk",
+                target: "pipeline::chunk",
                 symbols = symbols.len(),
                 chunked_fine = i,
                 content_bytes = file_content.len(),
@@ -827,7 +827,7 @@ pub fn build_symbol_chunks_with_lines(
     }
     if bailed {
         tracing::warn!(
-            target: "pipeline_v2::chunk",
+            target: "pipeline::chunk",
             symbol = %symbol.name,
             kind = %symbol.kind,
             start_line = symbol.start_line,
@@ -855,7 +855,7 @@ pub fn build_symbol_chunks_with_lines(
     // for real code.
     if part_count > MAX_CHUNKS_PER_SYMBOL {
         tracing::warn!(
-            target: "pipeline_v2::chunk",
+            target: "pipeline::chunk",
             symbol = %symbol.name,
             kind = %symbol.kind,
             start_line = symbol.start_line,
@@ -874,7 +874,7 @@ pub fn build_symbol_chunks_with_lines(
     let use_byte_estimate = bailed || part_count > MAX_PRECISE_ENCODE_CHUNKS;
     if use_byte_estimate && !bailed {
         tracing::warn!(
-            target: "pipeline_v2::chunk",
+            target: "pipeline::chunk",
             symbol = %symbol.name,
             kind = %symbol.kind,
             start_line = symbol.start_line,

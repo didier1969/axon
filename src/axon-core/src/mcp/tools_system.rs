@@ -8,7 +8,7 @@ use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
 /// CPT-AXO-90052 — normalize a SQL query to a content-free SHAPE for the
 /// `axon.sql_shape_stat` rollup: string/number literals → `?`, whitespace
-/// collapsed, lowercased. Identifiers embedding digits (e.g. `pipeline_v2`) are
+/// collapsed, lowercased. Identifiers embedding digits (e.g. `pipeline`) are
 /// preserved — a digit becomes `?` only when NOT preceded by an identifier char.
 /// Never stores literal values (PIL-AXO-9003 commercial privacy).
 fn normalize_sql_shape(sql: &str) -> String {
@@ -173,10 +173,10 @@ impl McpServer {
 
     pub(crate) fn axon_query_examples(&self, _args: &Value) -> Option<Value> {
         // REQ-AXO-901653 slice-5d — examples migrated from public.File to
-        // pipeline_v2 canonical (IndexedFile + Chunk + ChunkEmbedding).
+        // pipeline canonical (IndexedFile + Chunk + ChunkEmbedding).
         let examples = r#"## 📚 Query Examples (SQL gateway / cypher tool)
 
-1) Workspace size (canonical pipeline_v2)
+1) Workspace size (canonical pipeline)
 `SELECT count(*) AS indexed_files FROM ist.IndexedFile;`
 
 2) Project health (Chunk = canonical per-file per-project pivot)
@@ -447,19 +447,19 @@ impl McpServer {
         let b3 = env_usize("AXON_B3_WORKERS", 2);
         let b2_batch = env_usize(
             "AXON_B2_BATCH_SIZE",
-            crate::pipeline_v2::channels::B2_BATCH_SIZE_DEFAULT,
+            crate::pipeline::channels::B2_BATCH_SIZE_DEFAULT,
         );
         let b2_timeout = env_u64(
             "AXON_B2_BATCH_TIMEOUT_MS",
-            crate::pipeline_v2::channels::B2_BATCH_TIMEOUT_MS_DEFAULT,
+            crate::pipeline::channels::B2_BATCH_TIMEOUT_MS_DEFAULT,
         );
         let b3_batch = env_usize(
             "AXON_B3_BATCH_SIZE",
-            crate::pipeline_v2::channels::B3_BATCH_SIZE_DEFAULT,
+            crate::pipeline::channels::B3_BATCH_SIZE_DEFAULT,
         );
         let b3_timeout = env_u64(
             "AXON_B3_BATCH_TIMEOUT_MS",
-            crate::pipeline_v2::channels::B3_BATCH_TIMEOUT_MS_DEFAULT,
+            crate::pipeline::channels::B3_BATCH_TIMEOUT_MS_DEFAULT,
         );
         // REQ-AXO-901678 — surface drain saturation knobs + counters so
         // the operator can spot A1 back-pressure without trawling
@@ -606,7 +606,7 @@ impl McpServer {
         // ONE call instead of gdb + 4 h. Only the indexer runs B3 — when no
         // fresh indexer heartbeat exists the verdict is HEALTHY/unknown, never a
         // brain-local fabrication.
-        use crate::pipeline_v2::stage_health::B3_SYSTEMIC_FAILURE_THRESHOLD;
+        use crate::pipeline::stage_health::B3_SYSTEMIC_FAILURE_THRESHOLD;
         let (
             b3_consecutive_failures,
             b3_total_failures,
@@ -777,7 +777,7 @@ impl McpServer {
                     // is already exposed as the top-level `pending_chunks` field.
                     "replenish": replenish_b
                 },
-                "notify_channel": crate::pipeline_v2::channels::CHUNK_PENDING_NOTIFY_CHANNEL,
+                "notify_channel": crate::pipeline::channels::CHUNK_PENDING_NOTIFY_CHANNEL,
                 "runtime_pending_count": runtime_pending,
                 "runtime_idle": runtime_pending_empty,
                 // Slice 3 SOTA — surface pipeline_status + blocked_reason
@@ -1398,7 +1398,7 @@ mod sql_shape_tests {
 
     #[test]
     fn preserves_digit_inside_identifier() {
-        let s = normalize_sql_shape("SELECT * FROM pipeline_v2 WHERE port=44129");
-        assert_eq!(s, "select * from pipeline_v2 where port=?");
+        let s = normalize_sql_shape("SELECT * FROM pipeline WHERE port=44129");
+        assert_eq!(s, "select * from pipeline where port=?");
     }
 }

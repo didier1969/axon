@@ -207,7 +207,7 @@ pub fn spawn_b2_batched_worker(
             let max_bytes = texts.iter().map(String::len).max().unwrap_or(0);
             let total_bytes: usize = texts.iter().map(String::len).sum();
             tracing::info!(
-                target: "pipeline_v2::b2",
+                target: "pipeline::b2",
                 n = batch.len(),
                 max_bytes,
                 total_bytes,
@@ -231,7 +231,7 @@ pub fn spawn_b2_batched_worker(
                 Ok(jr) => jr,
                 Err(_elapsed) => {
                     tracing::error!(
-                        target: "pipeline_v2::b2",
+                        target: "pipeline::b2",
                         n = batch.len(),
                         max_bytes,
                         timeout_ms = inference_budget.as_millis() as u64,

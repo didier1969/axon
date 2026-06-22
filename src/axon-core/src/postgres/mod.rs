@@ -73,7 +73,7 @@ pub fn database_url_for(instance: AxonInstance) -> Result<String> {
 /// `AXON_{DEV,LIVE}_DATABASE_URL`, with a `DATABASE_URL` fallback. An
 /// optional `override_url` short-circuits env resolution (per-test DBs,
 /// DEC-AXO-901594). This replaces the 4 divergent resolvers
-/// (graph_bootstrap / bulk_writer / pipeline_v2_runtime each rolled their
+/// (graph_bootstrap / bulk_writer / pipeline_runtime each rolled their
 /// own) whose drift produced the REQ-AXO-315 dev→live leak class.
 /// REQ-AXO-901903 — process-wide test override for the env-resolved database
 /// URL. Set ONCE by the test harness (`test_support::test_db`) so EVERY

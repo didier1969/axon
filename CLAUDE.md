@@ -23,8 +23,8 @@ Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (superv
 |---|---|---|
 | Runtime | `src/axon-core/` | Rust |
 | DB | PostgreSQL 17 + pgvector | canonical IST + SOLL. AGE retired (MIL-AXO-017, REQ-AXO-90005). DuckDB fully purged (REQ-AXO-271 slices 2-6). IST edges canonical = RAM IstGraphView (CSR snapshot, PIL-AXO-9002) ; PG `public.edge` is the persistence layer + fallback when RAM cold. |
-| Streaming pipeline v2 | `src/axon-core/src/pipeline_v2/` | A1/A2/A3 (graph + chunks + FTS, CPU) → try_send → B1/B2/B3 (GPU embed). REQ-AXO-289 / CPT-AXO-054 (session 19 canonical). Diagram: `docs/architecture/visualize-nexus-pull.html`. |
-| GPU | `src/axon-core/src/embedder/` | ONNX Runtime, CUDA/TensorRT EP, BGE-Large 1024d. `GpuB2Embedder` (pipeline_v2/embedder_gpu.rs) is the v2 wrapper. |
+| Streaming pipeline v2 | `src/axon-core/src/pipeline/` | A1/A2/A3 (graph + chunks + FTS, CPU) → try_send → B1/B2/B3 (GPU embed). REQ-AXO-289 / CPT-AXO-054 (session 19 canonical). Diagram: `docs/architecture/visualize-nexus-pull.html`. |
+| GPU | `src/axon-core/src/embedder/` | ONNX Runtime, CUDA/TensorRT EP, BGE-Large 1024d. `GpuB2Embedder` (pipeline/embedder_gpu.rs) is the v2 wrapper. |
 | MCP server | `src/axon-core/src/mcp/` | live tool count via `status mode=brief` |
 | Visualization | Memgraph | human-only, non-canonical |
 | Dashboard | Elixir/Phoenix | observation only |

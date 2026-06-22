@@ -136,7 +136,7 @@ impl RetrievalRuntimeState {
     /// caller (`axon_retrieve_context`) is the single construction site.
     pub(super) fn new_with_pressure(_server: &McpServer, pressure: ServicePressure) -> Self {
         // REQ-AXO-901653 Slice 3b — queue helpers removed (tables dropped
-        // post MIL-AXO-017 / REQ-AXO-289). Canonical pipeline_v2 path tracks
+        // post MIL-AXO-017 / REQ-AXO-289). Canonical pipeline path tracks
         // via Chunk + ChunkEmbedding directly.
         let (graph_projection_queue_queued, graph_projection_queue_inflight): (usize, usize) =
             (0, 0);

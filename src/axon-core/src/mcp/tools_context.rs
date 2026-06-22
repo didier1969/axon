@@ -2029,7 +2029,7 @@ impl McpServer {
         limit: usize,
     ) -> Vec<EntryCandidate> {
         // REQ-AXO-901653 slice-5d — public.File dropped ; project_code per
-        // file derives from ist.Chunk (canonical pivot post pipeline_v2).
+        // file derives from ist.Chunk (canonical pivot post pipeline).
         let path_match = Self::path_match_sql(path_hints, "c.file_path");
         let term_match = Self::term_match_sql(terms, "c.file_path");
         let query = format!(

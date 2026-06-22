@@ -165,13 +165,13 @@ pub struct EmbedderLifecycleHeartbeatRecord {
 /// projects it, so MCP/dashboard see values observed at the OWNER instead of
 /// the brain's own (empty under brain_only) telemetry snapshot. Same struct
 /// serves write input and read output — the fields are symmetric. Every field
-/// resolves to a canonical pipeline_v2 owner source, never a brain-local proxy.
+/// resolves to a canonical pipeline owner source, never a brain-local proxy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IndexerRuntimeTruthRecord {
     pub process_role: String,
     pub heartbeat_ms: i64,
     /// Σ inflight of pipeline A stages (A1/A2/A3) — canonical busy-graph-worker
-    /// gauge sourced from pipeline_v2 `StageMetrics`, NOT the dead v1 counter.
+    /// gauge sourced from pipeline `StageMetrics`, NOT the dead v1 counter.
     pub graph_workers_active: i64,
     pub chunk_embeddings_per_second: f64,
     /// REQ-AXO-901919 in-flight gauge — RAM in-flight registry (commit 0b860166):

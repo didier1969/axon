@@ -44,7 +44,7 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
     let _in_flight = super::in_flight::InFlightRegistry::global()
         .enter("A1", path.to_string_lossy().into_owned());
     // REQ-AXO-345 — A1 in/out trace for silent-drop hunt.
-    info!(target: "pipeline_v2::a1", "A1 in: {}", path.display());
+    info!(target: "pipeline::a1", "A1 in: {}", path.display());
 
     // Metadata FIRST so the size guard fires before reading the file into RAM.
     let metadata = tokio::fs::metadata(&path)
@@ -61,7 +61,7 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
     // so a later shrink/edit re-evaluates it.
     if size_bytes > crate::indexing_policy::max_parse_bytes() {
         info!(
-            target: "pipeline_v2::a1",
+            target: "pipeline::a1",
             "A1 skip: {} reason=oversized size={}",
             path.display(),
             size_bytes
@@ -76,7 +76,7 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
         Ok(content) => content,
         Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
             info!(
-                target: "pipeline_v2::a1",
+                target: "pipeline::a1",
                 "A1 skip: {} reason=binary size={}",
                 path.display(),
                 size_bytes
@@ -96,7 +96,7 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
     if crate::indexing_policy::is_minified(&content, crate::indexing_policy::max_line_bytes()) {
         let content_hash = sha256_hex(&content);
         info!(
-            target: "pipeline_v2::a1",
+            target: "pipeline::a1",
             "A1 skip: {} reason=minified size={}",
             path.display(),
             size_bytes
@@ -119,7 +119,7 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
     if crate::indexing_policy::is_generated_code_file(&path) {
         let content_hash = sha256_hex(&content);
         info!(
-            target: "pipeline_v2::a1",
+            target: "pipeline::a1",
             "A1 skip: {} reason=generated size={}",
             path.display(),
             size_bytes
@@ -135,7 +135,7 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
 
     let content_hash = sha256_hex(&content);
     info!(
-        target: "pipeline_v2::a1",
+        target: "pipeline::a1",
         "A1 out: {} size={}",
         path.display(),
         size_bytes

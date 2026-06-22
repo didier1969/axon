@@ -188,7 +188,7 @@ impl McpServer {
 
         // REQ-AXO-901653 slice-5d — public.File dropped ; project-scope files
         // count derives from ist.Chunk (project_code carrier). pending /
-        // indexing have no pipeline_v2 equivalent (writes are in-line) ;
+        // indexing have no pipeline equivalent (writes are in-line) ;
         // collapse to 0 and treat all known files as completed.
         let params = json!({ "project": project });
         let total_files = self
@@ -247,7 +247,7 @@ impl McpServer {
     }
 
     pub(crate) fn degraded_file_count(&self, _project: Option<&str>) -> i64 {
-        // REQ-AXO-901653 slice-5d — public.File dropped ; pipeline_v2 has no
+        // REQ-AXO-901653 slice-5d — public.File dropped ; pipeline has no
         // `indexed_degraded` status enum (failures surface via tracing logs,
         // not row state). Diagnostic always reports 0 degraded files.
         let _ = &self.graph_store;

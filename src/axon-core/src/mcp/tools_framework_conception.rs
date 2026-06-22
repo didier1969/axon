@@ -9,7 +9,7 @@ impl McpServer {
     pub(super) fn derive_conception_view(&self, project_code: &str) -> Value {
         let escaped_project = project_code.replace('\'', "''");
         // REQ-AXO-901653 slice-5c — public.File retired ; group by Chunk.file_path
-        // which is the canonical per-file pivot post pipeline_v2.
+        // which is the canonical per-file pivot post pipeline.
         let modules_raw = self
             .graph_store
             .query_json(&format!(

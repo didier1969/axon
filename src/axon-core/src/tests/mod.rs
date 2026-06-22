@@ -6,7 +6,7 @@ pub mod embedder_gpu_telemetry_tests;
 pub mod embedder_provider_runtime_tests;
 // REQ-AXO-901653 slice-5c — graph_ingestion_split_tests + maillon_tests +
 // pipeline_test deleted ; exercised legacy v1 worker.rs + File state-machine,
-// replaced by pipeline_v2 (REQ-AXO-289 / CPT-AXO-054). REQ-AXO-901634 absorbed.
+// replaced by pipeline (REQ-AXO-289 / CPT-AXO-054). REQ-AXO-901634 absorbed.
 pub mod queue_decoupling_tests;
 pub mod test_helpers;
 // REQ-AXO-901663 / 901669 — restored coverage for LIVE vector_runtime methods.

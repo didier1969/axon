@@ -14,7 +14,7 @@
 //
 // Resilience : on connection drop / channel close, loops forever with
 // exponential backoff (200ms → 30s cap) — same shape as the existing
-// `chunk_pending_embed` listener in pipeline_v2/notify_listener.rs.
+// `chunk_pending_embed` listener in pipeline/notify_listener.rs.
 
 use std::collections::HashSet;
 use std::sync::Arc;

@@ -286,7 +286,7 @@ impl McpServer {
         // REQ-AXO-901653 slice-5c — public.File + FileVectorizationQueue
         // dropped. Pipeline_v2 canonical : IndexedFile = persisted, Chunk =
         // graph-ready, ChunkEmbedding present = vector-ready. Queue depths
-        // are always 0 (in-memory pipeline_v2 stages own back-pressure).
+        // are always 0 (in-memory pipeline stages own back-pressure).
         let persisted_file_count = if graph_runtime_enabled || vector_runtime_enabled {
             self.graph_store
                 .query_count("SELECT count(*) FROM ist.IndexedFile")

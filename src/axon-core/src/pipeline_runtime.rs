@@ -2,7 +2,7 @@
 //!
 //! Thin bridge that:
 //!
-//! 1. Spawns [`pipeline_v2::spawn_pipeline_a`] (and `spawn_pipeline_b_full`
+//! 1. Spawns [`pipeline::spawn_pipeline_a`] (and `spawn_pipeline_b_full`
 //!    when the runtime mode enables semantic workers) with a multi-project
 //!    resolver (DEC-AXO-081).
 //! 2. Spawns the Watchman file source ([`crate::watchman_source`], REQ-AXO-901893):
@@ -34,8 +34,8 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::graph::GraphStore;
-use crate::pipeline_v2::orchestrator::spawn_pipeline_a_with_cache;
-use crate::pipeline_v2::{
+use crate::pipeline::orchestrator::spawn_pipeline_a_with_cache;
+use crate::pipeline::{
     GpuB2Embedder, IndexedFileCache, IndexedFileEntry, NoOpEmbedder, PipelineAWorkerCounts,
     PipelineBWorkerCounts, PipelineChannelCaps, ProjectCodeResolver, ProjectRegistrySnapshot,
 };
@@ -79,7 +79,7 @@ fn vector_drain_reservoir_from_env() -> usize {
 /// No dedup cache, no reorder band, no claim column.
 fn spawn_vector_sorted_drain(
     store: Arc<GraphStore>,
-    tx: mpsc::Sender<crate::pipeline_v2::ChunkForEmbedding>,
+    tx: mpsc::Sender<crate::pipeline::ChunkForEmbedding>,
     reservoir: usize,
 ) {
     tokio::spawn(async move {
@@ -95,8 +95,8 @@ fn spawn_vector_sorted_drain(
             // let one probe batch through after each sleep so recovery (e.g.
             // once the operator repairs the DB) is detected automatically —
             // a successful persist resets the latch in stage_b3.
-            if crate::pipeline_v2::stage_health::b3_health()
-                .is_systemically_failing(crate::pipeline_v2::stage_health::B3_SYSTEMIC_FAILURE_THRESHOLD)
+            if crate::pipeline::stage_health::b3_health()
+                .is_systemically_failing(crate::pipeline::stage_health::B3_SYSTEMIC_FAILURE_THRESHOLD)
             {
                 tokio::time::sleep(std::time::Duration::from_millis(systemic_backoff_ms)).await;
                 systemic_backoff_ms = systemic_backoff_ms
@@ -129,7 +129,7 @@ fn spawn_vector_sorted_drain(
             }
             backoff_ms = VECTOR_DRAIN_BACKOFF_INITIAL_MS;
             for (chunk_id, content, content_hash) in rows {
-                let payload = crate::pipeline_v2::ChunkForEmbedding {
+                let payload = crate::pipeline::ChunkForEmbedding {
                     chunk_id,
                     content,
                     content_hash,
@@ -175,7 +175,7 @@ fn resolve_database_url_for_listener() -> String {
 /// reported `indexer_ready=False` despite actively indexing (false negative).
 fn spawn_indexer_liveness_heartbeat(
     store: Arc<GraphStore>,
-    a_stage_metrics: [Arc<crate::pipeline_v2::StageMetrics>; 3],
+    a_stage_metrics: [Arc<crate::pipeline::StageMetrics>; 3],
 ) {
     crate::embedder::lifecycle_machine::spawn_lifecycle_heartbeat_publisher(
         std::time::Duration::from_secs(5),
@@ -187,10 +187,10 @@ fn spawn_indexer_liveness_heartbeat(
                 );
             }
             // REQ-AXO-901854 — publish runtime truth observed at the OWNER
-            // (PIL-AXO-001). Every field resolves to a canonical pipeline_v2
+            // (PIL-AXO-001). Every field resolves to a canonical pipeline
             // source, never a brain-local proxy or dead v1 counter:
             //   * graph_workers_active = Σ inflight of A1/A2/A3 (busy graph
-            //     workers, from pipeline_v2 StageMetrics);
+            //     workers, from pipeline StageMetrics);
             //   * chunk_embeddings_per_second = the indexer's embed-rate accessor;
             //   * in_flight_* = RAM in-flight registry (REQ-AXO-901919);
             //   * ready_queue_chunks / persist_queue_depth = vector_runtime_metrics
@@ -200,7 +200,7 @@ fn spawn_indexer_liveness_heartbeat(
                 .iter()
                 .map(|m| m.snapshot().inflight as i64)
                 .sum();
-            let in_flight = crate::pipeline_v2::in_flight::InFlightRegistry::global();
+            let in_flight = crate::pipeline::in_flight::InFlightRegistry::global();
             let in_flight_oldest = in_flight.snapshot();
             let vector_metrics = crate::service_guard::vector_runtime_metrics();
             let truth = crate::graph_ingestion::IndexerRuntimeTruthRecord {
@@ -231,7 +231,7 @@ fn spawn_indexer_liveness_heartbeat(
     );
 }
 
-pub fn spawn_pipeline_v2_indexer(
+pub fn spawn_pipeline_indexer(
     runtime_mode: AxonRuntimeMode,
     store: Arc<GraphStore>,
     watch_root: String,
@@ -267,16 +267,16 @@ pub fn spawn_pipeline_v2_indexer(
             let rows = ids
                 .into_iter()
                 .map(|id| (id.code, id.project_path.to_string_lossy().into_owned()));
-            info!("pipeline_v2: project resolver hydrated from PG registry ({n} projects, longest-prefix RAM)");
+            info!("pipeline: project resolver hydrated from PG registry ({n} projects, longest-prefix RAM)");
             ProjectRegistrySnapshot::from_rows(rows).into_resolver()
         }
         other => {
             match &other {
                 Err(e) => {
-                    warn!(error = %e, "pipeline_v2: registry snapshot hydration failed — per-file scanner fallback")
+                    warn!(error = %e, "pipeline: registry snapshot hydration failed — per-file scanner fallback")
                 }
                 Ok(_) => {
-                    warn!("pipeline_v2: PG project registry empty — per-file scanner fallback")
+                    warn!("pipeline: PG project registry empty — per-file scanner fallback")
                 }
             }
             let store_for_resolver = store.clone();
@@ -285,7 +285,7 @@ pub fn spawn_pipeline_v2_indexer(
                 match scanner_for_resolver.project_code_for_path(&store_for_resolver, path) {
                     Ok(code) => code,
                     Err(err) => {
-                        warn!(?path, error = %err, "pipeline_v2: project_code unresolved → file dropped (UNK sentinel)");
+                        warn!(?path, error = %err, "pipeline: project_code unresolved → file dropped (UNK sentinel)");
                         "UNK".to_string()
                     }
                 }
@@ -312,17 +312,17 @@ pub fn spawn_pipeline_v2_indexer(
                     )
                 },
             ));
-            info!("pipeline_v2: dedup cache hydrated with {count} entries from IndexedFile");
+            info!("pipeline: dedup cache hydrated with {count} entries from IndexedFile");
             Some(cache)
         }
         Err(err) => {
-            warn!(error = %err, "pipeline_v2: failed to hydrate dedup cache; all files will be re-parsed");
+            warn!(error = %err, "pipeline: failed to hydrate dedup cache; all files will be re-parsed");
             None
         }
     };
 
     info!(
-        "pipeline_v2: spawning pipeline A (a1={} a2={} a3={}) under runtime_mode={}",
+        "pipeline: spawning pipeline A (a1={} a2={} a3={}) under runtime_mode={}",
         counts_a.a1,
         counts_a.a2,
         counts_a.a3,
@@ -353,12 +353,12 @@ pub fn spawn_pipeline_v2_indexer(
     // spawn_pipeline_b_full_multi takes the rx. The channel carries
     // ChunkForEmbedding (one round-trip SELECT-with-content per drain wave).
     let (b_chunks_tx, b_chunks_rx) =
-        mpsc::channel::<crate::pipeline_v2::ChunkForEmbedding>(caps.internal);
+        mpsc::channel::<crate::pipeline::ChunkForEmbedding>(caps.internal);
 
     if runtime_mode.semantic_workers_enabled() {
         let counts_b = PipelineBWorkerCounts::from_env();
         info!(
-            "pipeline_v2: spawning pipeline B (b2={} b3={} ; no B1 — sorted-drain feeds B2)",
+            "pipeline: spawning pipeline B (b2={} b3={} ; no B1 — sorted-drain feeds B2)",
             counts_b.b2, counts_b.b3
         );
         // REQ-AXO-902027 — pre-flight is DIAGNOSTIC, not a gate. It loudly logs
@@ -372,14 +372,14 @@ pub fn spawn_pipeline_v2_indexer(
         // is genuinely corrupt it crashes there, but this log already named the
         // culprit instead of leaving only a dmesg trace.
         if let Err(reason) = crate::embedder::gpu_preflight::preflight_gpu_libraries() {
-            tracing::error!(reason = %reason, "pipeline_v2: GPU library pre-flight flagged a lib — proceeding to GPU init anyway; if the process crashes during init, THIS names the culprit");
+            tracing::error!(reason = %reason, "pipeline: GPU library pre-flight flagged a lib — proceeding to GPU init anyway; if the process crashes during init, THIS names the culprit");
         }
-        let embedder: Arc<dyn crate::pipeline_v2::B2Embedder> =
+        let embedder: Arc<dyn crate::pipeline::B2Embedder> =
             match GpuB2Embedder::try_new_cuda("indexer-pipeline-v2", 0) {
             // DEC-AXO-901631 — the GPU session stays resident for the worker's
             // lifetime (no idle watchdog / sleep-wake). Single-GPU live↔dev
             // cohabitation is handled at the process level (PIL-AXO-004).
-            Ok(e) => Arc::new(e) as Arc<dyn crate::pipeline_v2::B2Embedder>,
+            Ok(e) => Arc::new(e) as Arc<dyn crate::pipeline::B2Embedder>,
             Err(err) => {
                 // REQ-AXO-901630 — fail-fast when the operator has
                 // explicitly requested a GPU provider. Silent NoOp
@@ -389,35 +389,35 @@ pub fn spawn_pipeline_v2_indexer(
                 // `cpu`/unset branch is allowed to substitute NoOp.
                 if gpu_provider_explicitly_requested() {
                     return Err(anyhow!(
-                        "pipeline_v2: GPU embedder init failed but AXON_EMBEDDING_PROVIDER \
+                        "pipeline: GPU embedder init failed but AXON_EMBEDDING_PROVIDER \
                          requests a GPU provider (NoOpEmbedder fallback would silently \
                          produce junk vectors): {err}"
                     ));
                 }
-                warn!(error = %err, "pipeline_v2: GPU embedder init failed, falling back to NoOpEmbedder");
+                warn!(error = %err, "pipeline: GPU embedder init failed, falling back to NoOpEmbedder");
                 Arc::new(NoOpEmbedder)
             }
         };
         // REQ-AXO-901748 — when AXON_B2_WORKERS > 1, create one ORT
         // session per worker for true CUDA double-buffering (no Mutex
         // contention). Each session has its own TensorRT engine cache.
-        let embedders: Vec<Arc<dyn crate::pipeline_v2::B2Embedder>> = if counts_b.b2 > 1 {
+        let embedders: Vec<Arc<dyn crate::pipeline::B2Embedder>> = if counts_b.b2 > 1 {
             let mut v = vec![embedder];
             for i in 1..counts_b.b2 {
                 match GpuB2Embedder::try_new_cuda(&format!("indexer-pipeline-v2-b2w{i}"), i) {
-                    Ok(e) => v.push(Arc::new(e) as Arc<dyn crate::pipeline_v2::B2Embedder>),
+                    Ok(e) => v.push(Arc::new(e) as Arc<dyn crate::pipeline::B2Embedder>),
                     Err(err) => {
-                        warn!(worker = i, error = %err, "pipeline_v2: extra B2 worker init failed, continuing with fewer");
+                        warn!(worker = i, error = %err, "pipeline: extra B2 worker init failed, continuing with fewer");
                         break;
                     }
                 }
             }
-            info!("pipeline_v2: {} B2 GPU workers initialized", v.len());
+            info!("pipeline: {} B2 GPU workers initialized", v.len());
             v
         } else {
             vec![embedder]
         };
-        let mut handles_b = crate::pipeline_v2::orchestrator::spawn_pipeline_b_full_multi(
+        let mut handles_b = crate::pipeline::orchestrator::spawn_pipeline_b_full_multi(
             counts_b,
             caps,
             store.clone(),
@@ -506,7 +506,7 @@ pub fn spawn_pipeline_v2_indexer(
             .to_string_lossy()
             .into_owned();
         info!(
-            "pipeline_v2: direct-streaming bootstrap + reconciliation walk active \
+            "pipeline: direct-streaming bootstrap + reconciliation walk active \
              (sweep_secs={sweep_secs}) — enumerate → input_tx (PIL-AXO-007)"
         );
         tokio::spawn(async move {
@@ -527,7 +527,7 @@ pub fn spawn_pipeline_v2_indexer(
                     pushed += 1;
                 }
                 info!(
-                    "pipeline_v2: reconciliation walk fed {pushed}/{total} paths to input_tx \
+                    "pipeline: reconciliation walk fed {pushed}/{total} paths to input_tx \
                      in {:.1}s; next sweep in {sweep_secs}s",
                     started.elapsed().as_secs_f64()
                 );
@@ -548,12 +548,12 @@ pub fn spawn_pipeline_v2_indexer(
                 .await;
                 match purge {
                     Ok(Ok(deleted)) if !deleted.is_empty() => info!(
-                        "pipeline_v2: purged {} stale IndexedFile(s) (gone from disk)",
+                        "pipeline: purged {} stale IndexedFile(s) (gone from disk)",
                         deleted.len()
                     ),
                     Ok(Ok(_)) => {}
-                    Ok(Err(e)) => warn!(error = %e, "pipeline_v2: delete_stale failed (non-fatal)"),
-                    Err(e) => warn!(error = %e, "pipeline_v2: delete_stale task panicked"),
+                    Ok(Err(e)) => warn!(error = %e, "pipeline: delete_stale failed (non-fatal)"),
+                    Err(e) => warn!(error = %e, "pipeline: delete_stale task panicked"),
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(sweep_secs)).await;
             }
@@ -688,7 +688,7 @@ mod tests {
     }
 
     /// REQ-AXO-901874 — the indexer liveness heartbeat is spawned from
-    /// `spawn_pipeline_v2_indexer` (unconditionally, before pipeline B), so
+    /// `spawn_pipeline_indexer` (unconditionally, before pipeline B), so
     /// it covers every ingestion-enabled mode. Lock the exact condition the
     /// old GPU-branch placement fell into: graph-only is `ingestion_enabled`
     /// (heartbeat MUST publish) yet NOT `semantic_workers_enabled` (the old
@@ -700,7 +700,7 @@ mod tests {
         use crate::runtime_mode::AxonRuntimeMode;
         assert!(
             AxonRuntimeMode::IndexerGraph.ingestion_enabled(),
-            "graph-only indexes → reaches spawn_pipeline_v2_indexer → heartbeat must publish"
+            "graph-only indexes → reaches spawn_pipeline_indexer → heartbeat must publish"
         );
         assert!(
             !AxonRuntimeMode::IndexerGraph.semantic_workers_enabled(),
@@ -709,7 +709,7 @@ mod tests {
         assert!(AxonRuntimeMode::IndexerFull.ingestion_enabled());
         assert!(
             !AxonRuntimeMode::BrainOnly.ingestion_enabled(),
-            "brain never reaches spawn_pipeline_v2_indexer → no indexer heartbeat"
+            "brain never reaches spawn_pipeline_indexer → no indexer heartbeat"
         );
     }
 
@@ -717,7 +717,7 @@ mod tests {
     fn lifecycle_watchdog_defaults_match_dec_axo_086() {
         use std::time::Duration;
         // The expected DEC-AXO-086 defaults are hardcoded in
-        // `attempt_pipeline_v2_runtime` ; verifying numbers here
+        // `attempt_pipeline_runtime` ; verifying numbers here
         // produces a meaningful failure if someone changes them
         // without bumping DEC-AXO-086.
         let tick = Duration::from_secs(15);

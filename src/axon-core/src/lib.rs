@@ -17,7 +17,7 @@ pub mod graph_bootstrap;
 pub mod graph_ingestion;
 pub mod graph_query;
 // REQ-AXO-901653 slice-5d — `hot_status_cache` deleted (env-gated FileVectorizationQueue
-// flush path ; pipeline_v2 owns chunk-state directly).
+// flush path ; pipeline owns chunk-state directly).
 pub mod indexer_health_http;
 pub mod indexing_policy;
 pub mod ist_snapshot;
@@ -29,8 +29,8 @@ pub mod mcp_http;
 pub mod observed_gpu;
 pub mod optimizer;
 pub mod parser;
-pub mod pipeline_v2;
-pub mod pipeline_v2_runtime;
+pub mod pipeline;
+pub mod pipeline_runtime;
 pub mod postgres;
 pub mod project_meta;
 pub mod queue;
@@ -62,7 +62,7 @@ pub mod viz_freshness;
 pub mod watchman_source;
 // REQ-AXO-901653 slice-5c — legacy `pub mod worker;` removed (v1 WorkerPool +
 // writer-actor + DbWriteTask retired). Pipeline_v2 (REQ-AXO-289 / CPT-AXO-054)
-// owns the ingestion path via `pipeline_v2/worker_pool.rs`.
+// owns the ingestion path via `pipeline/worker_pool.rs`.
 
 #[cfg(test)]
 pub mod tests;

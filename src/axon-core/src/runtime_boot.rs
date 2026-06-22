@@ -1001,18 +1001,18 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
 
     if runtime_mode.ingestion_enabled() {
         // REQ-AXO-289 S7 / DEC-AXO-081 — streaming pipeline v2 replaces
-        // the DuckDB-era public.File state machine. spawn_pipeline_v2_indexer
+        // the DuckDB-era public.File state machine. spawn_pipeline_indexer
         // boots A1→A2→A3 (and B1→B2→B3 when semantic workers are enabled),
         // feeds them from the Watchman file source + the DBQ-A claim feeder
         // (REQ-AXO-901893 / REQ-AXO-901897), and resolves project_code per file.
         // The legacy notify watcher + federation/scope orchestrators that pushed
         // into the in-memory ingress_buffer were RIPPED in the LEGACY FEED PURGE.
-        if let Err(err) = crate::pipeline_v2_runtime::spawn_pipeline_v2_indexer(
+        if let Err(err) = crate::pipeline_runtime::spawn_pipeline_indexer(
             runtime_mode,
             graph_store.clone(),
             watch_root_str.clone(),
         ) {
-            warn!(error = %err, "pipeline_v2_runtime: failed to spawn streaming indexer");
+            warn!(error = %err, "pipeline_runtime: failed to spawn streaming indexer");
         }
         main_background::spawn_memory_reclaimer(queue_store.clone());
     } else {
@@ -1871,7 +1871,7 @@ mod tests {
     }
 }
 
-// REQ-AXO-901653 slice-5c — WorkerPool spawn removed ; pipeline_v2 owns ingestion.
+// REQ-AXO-901653 slice-5c — WorkerPool spawn removed ; pipeline owns ingestion.
 fn start_indexer_only_services(
     graph_store: Arc<GraphStore>,
     queue_store: Arc<QueueStore>,
@@ -1880,7 +1880,7 @@ fn start_indexer_only_services(
     runtime_mode: AxonRuntimeMode,
 ) {
     if runtime_mode.ingestion_enabled() {
-        info!("Runtime services: indexing handled by pipeline_v2 (REQ-AXO-289).");
+        info!("Runtime services: indexing handled by pipeline (REQ-AXO-289).");
     } else {
         info!("Runtime services: indexing workers disabled by runtime mode.");
     }

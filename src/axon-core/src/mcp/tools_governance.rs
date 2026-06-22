@@ -85,7 +85,7 @@ impl McpServer {
             Self::project_filter(project, "s.project_code")
         ));
         // REQ-AXO-901653 slice-5c — `status_reason` + `last_error_reason`
-        // were public.File columns ; pipeline_v2 doesn't carry equivalent
+        // were public.File columns ; pipeline doesn't carry equivalent
         // diagnostic data (failures are logged via tracing, not row state).
         let top_reasons: Vec<Vec<Value>> = Vec::new();
         let top_errors: Vec<Vec<Value>> = Vec::new();
@@ -144,7 +144,7 @@ impl McpServer {
             ));
         }
         // REQ-AXO-901653 slice-5c — `oversized_for_current_budget` status was
-        // a public.File enum ; pipeline_v2 enforces budget via in-line stage
+        // a public.File enum ; pipeline enforces budget via in-line stage
         // back-pressure (no persisted oversized flag).
         let oversized = 0i64;
         if oversized > 0 {

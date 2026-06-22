@@ -520,7 +520,7 @@ min_length = 10
 // REQ-AXO-347 — defensive empty-file fast-path.
 "#;
         let (symbols, relations) = engine.extract(
-            Path::new("src/pipeline_v2/stage_a2.rs"),
+            Path::new("src/pipeline/stage_a2.rs"),
             content,
             Some("AXO"),
         );

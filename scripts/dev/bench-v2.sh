@@ -125,7 +125,7 @@ NEEDS=0
 [[ ! -f "$BIN" ]] && NEEDS=1
 [[ "$REBUILD" == "1" ]] && NEEDS=1
 if [[ "$NEEDS" == "0" ]]; then
-    if find src/axon-core/src/pipeline_v2 src/axon-core/src/bin/axon-bench-pipeline-v2.rs \
+    if find src/axon-core/src/pipeline src/axon-core/src/bin/axon-bench-pipeline-v2.rs \
         -name '*.rs' -newer "$BIN" -print -quit 2>/dev/null | grep -q .; then
         NEEDS=1
     fi

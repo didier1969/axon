@@ -15,7 +15,7 @@
 //! String-literal residue that is not a symbol name (a `nvidia-smi` shell call)
 //! is matched against COMMENT-STRIPPED chunk content.
 //!
-//! Rulesets deliberately EXCLUDE sanctioned-permanent tokens: never `pipeline_v2`
+//! Rulesets deliberately EXCLUDE sanctioned-permanent tokens: never `pipeline`
 //! / the `_v2` suffix (canonical name, CPT-AXO-054 / GUI-PRO-108 case-2), never
 //! `WITH RECURSIVE` (the mandated PG fallback invariant, PIL-AXO-9002).
 
@@ -479,7 +479,7 @@ mod tests {
         let re = Regex::new(r"(?i)_v1([^0-9a-z]|$)").unwrap();
         assert!(re.is_match("compose_dashboard_state_v1"));
         assert!(re.is_match("tensorrt_ready_vector_pipeline_v1"));
-        assert!(!re.is_match("pipeline_v2"), "never flag the canonical v2 name");
+        assert!(!re.is_match("pipeline"), "never flag the canonical v2 name");
         assert!(!re.is_match("schema_v12"), "_v12 is not a v1 leaf");
     }
 

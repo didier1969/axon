@@ -70,7 +70,7 @@ pub(crate) fn spawn_runtime_telemetry(
             if !runtime_mode.ingestion_enabled() {
                 if let Ok(Some(truth)) = store.latest_indexer_runtime_truth("indexer") {
                     if (now_ms_tick as i64 - truth.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS {
-                        // Canonical, owner-observed (pipeline_v2). graph_workers_active
+                        // Canonical, owner-observed (pipeline). graph_workers_active
                         // = Σ A-stage inflight; embed rate = indexer's own accessor;
                         // ready_queue_chunks = the dashboard funnel's backlog signal.
                         // graph_workers_started_total is left untouched — no canonical
@@ -270,7 +270,7 @@ pub(crate) fn spawn_runtime_telemetry(
 
 // REQ-AXO-901653 slice-5c — `db_sender` parameter (Sender<worker::DbWriteTask>)
 // removed from telemetry. Worker.rs + DbWriteTask + EXECUTE_CYPHER command path
-// were the v1 writer-actor bridge ; pipeline_v2 (REQ-AXO-289) writes through
+// were the v1 writer-actor bridge ; pipeline (REQ-AXO-289) writes through
 // GraphStore directly. EXECUTE_CYPHER + PULL_PENDING command handlers deleted
 // — they had no production callers post v1 retirement.
 #[allow(clippy::too_many_arguments)]

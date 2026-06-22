@@ -25,7 +25,7 @@ use super::types::{ParsedFile, PreparedFile};
 /// (e.g. a file containing only comments) — it returns `Ok(ParsedFile { symbols: vec![], ... })`.
 pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
     // REQ-AXO-345 — A2 in/out trace.
-    info!(target: "pipeline_v2::a2", "A2 in: {}", prep.path.display());
+    info!(target: "pipeline::a2", "A2 in: {}", prep.path.display());
     let path_for_log = prep.path.clone();
     // REQ-AXO-347 — defensive empty-file fast-path. Some language
     // parsers (Elixir, Python with eager AST walks, etc.) error or
@@ -38,7 +38,7 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
     // error) but the file is empty anyway — no useful work was lost.
     if prep.content.is_empty() {
         info!(
-            target: "pipeline_v2::a2",
+            target: "pipeline::a2",
             "A2 out: {} symbols=0 relations=0 (empty-file fast-path)",
             path_for_log.display()
         );
@@ -92,7 +92,7 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
         // (observed: same ~2.1k files reprocessed ~10×/hour). Generalises the
         // REQ-AXO-347 empty-file fast-path: emit a valid zero-symbol
         // ParsedFile so A3 records the marker (zero chunks, because chunks are
-        // built per-symbol in upsert_graph_v2) and the watcher SkipsUnchanged
+        // built per-symbol in upsert_graph) and the watcher SkipsUnchanged
         // it on the next walk.
         Ok(ParsedFile {
             path: prep.path,
@@ -118,7 +118,7 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
             // zero-symbol skip → A3 marks 'parsed', no retry storm, and the
             // pipeline keeps draining other files.
             warn!(
-                target: "pipeline_v2::a2",
+                target: "pipeline::a2",
                 "A2 timeout: {} after {}ms — skipping (zero-symbol)",
                 path_for_log.display(),
                 parse_budget.as_millis()
@@ -136,7 +136,7 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
     };
     if let Ok(ref parsed) = result {
         info!(
-            target: "pipeline_v2::a2",
+            target: "pipeline::a2",
             "A2 out: {} symbols={} relations={}",
             path_for_log.display(),
             parsed.symbols.len(),

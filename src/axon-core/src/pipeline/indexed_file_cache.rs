@@ -15,7 +15,7 @@
 //!    A2 tree-sitter parse + A3 write.
 //!
 //! Once A3 successfully UPSERTs the graph, the A3 receipt drain (in
-//! `pipeline_v2_runtime`, not A3 itself) calls [`IndexedFileCache::mark_indexed`]
+//! `pipeline_runtime`, not A3 itself) calls [`IndexedFileCache::mark_indexed`]
 //! to record `(content_hash, mtime, size, last_seen_ms)` for the next walk.
 //!
 //! The cache lives behind an [`arc_swap::ArcSwap`] so bulk reloads (e.g. at

@@ -550,7 +550,7 @@ pub fn watchman_ignore_dirs() -> Vec<&'static str> {
 // REQ-AXO-901895 — Memory Shield (restored). The legacy Elixir/UDS pipeline
 // enforced a hard 5 MB size limit + binary skip + non-code extension skip
 // "before read attempts" (commit 67e39321 "Architected Memory Shield against
-// massive file OOMs"). The streaming pipeline_v2 migration dropped it
+// massive file OOMs"). The streaming pipeline migration dropped it
 // (REQ-AXO-901653 slice-5c removed the oversized gate on the false premise
 // that channel back-pressure bounds per-file cost — it bounds channel DEPTH,
 // not the CPU cost of parsing/chunking one pathological file). Result: a

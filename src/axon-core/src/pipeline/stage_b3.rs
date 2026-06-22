@@ -191,7 +191,7 @@ pub fn spawn_b3_batched_worker(
                         // REQ-AXO-902047 — a clean persist resets the systemic
                         // failure latch so a transient blip never sticks the
                         // drain in backoff.
-                        crate::pipeline_v2::stage_health::b3_health().record_success();
+                        crate::pipeline::stage_health::b3_health().record_success();
                         // REQ-AXO-90009 Slice 1 — clear pending state for
                         // every chunk just committed. Batched UPSERT
                         // succeeded for the whole group atomically, so it
@@ -228,7 +228,7 @@ pub fn spawn_b3_batched_worker(
                         // Throttle the WARN so a systemic failure (every batch)
                         // does not flood the log thousands of times — log the
                         // first and every 50th, with the running count.
-                        let n = crate::pipeline_v2::stage_health::b3_health()
+                        let n = crate::pipeline::stage_health::b3_health()
                             .record_failure(format!("{err:#}"), now_ms);
                         if n == 1 || n % 50 == 0 {
                             warn!(
@@ -309,7 +309,7 @@ mod tests {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let body = "fn b3_demo_target() { let q = 1; }\n";
         let chunk_ids = store
-            .upsert_graph_v2(
+            .upsert_graph(
                 "/tmp/b3_demo.rs",
                 "AXO",
                 body,
@@ -352,7 +352,7 @@ mod tests {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let body = "fn b3_idem() {}\n";
         let chunk_ids = store
-            .upsert_graph_v2(
+            .upsert_graph(
                 "/tmp/b3_idem.rs",
                 "AXO",
                 body,
@@ -395,7 +395,7 @@ mod tests {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let body = "fn b3_dim_test() {}\n";
         let chunk_ids = store
-            .upsert_graph_v2(
+            .upsert_graph(
                 "/tmp/b3_dim.rs",
                 "AXO",
                 body,
@@ -456,7 +456,7 @@ mod tests {
         .iter()
         .enumerate()
         {
-            // upsert_graph_v2 drives the bulk_writer's own runtime via block_on;
+            // upsert_graph drives the bulk_writer's own runtime via block_on;
             // calling it directly inside this #[tokio::test] panics ("runtime
             // within a runtime"), so seed on a blocking thread (no tokio context).
             let store_seed = store.clone();
@@ -464,7 +464,7 @@ mod tests {
             let name = name.to_string();
             let ids = tokio::task::spawn_blocking(move || {
                 store_seed
-                    .upsert_graph_v2(
+                    .upsert_graph(
                         &file,
                         "AXO",
                         &format!("fn {name}() {{}}\n"),

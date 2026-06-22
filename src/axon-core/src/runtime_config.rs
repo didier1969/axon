@@ -13,12 +13,12 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::graph::GraphStore;
-use crate::pipeline_v2::channels::{
+use crate::pipeline::channels::{
     B2_BATCH_SIZE_DEFAULT, B2_BATCH_TIMEOUT_MS_DEFAULT, B3_BATCH_SIZE_DEFAULT,
     B3_BATCH_TIMEOUT_MS_DEFAULT, CHUNK_PENDING_NOTIFY_CHANNEL, INGRESS_DRAIN_BATCH_DEFAULT,
     INTERNAL_CHANNEL_CAP_DEFAULT,
 };
-use crate::pipeline_v2_runtime::{VECTOR_DRAIN_BACKOFF_INITIAL_MS, VECTOR_DRAIN_BACKOFF_MAX_MS};
+use crate::pipeline_runtime::{VECTOR_DRAIN_BACKOFF_INITIAL_MS, VECTOR_DRAIN_BACKOFF_MAX_MS};
 
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
@@ -80,11 +80,11 @@ pub fn compose_indexer_config() -> serde_json::Value {
             "b_chunks_cap": INTERNAL_CHANNEL_CAP_DEFAULT,
         },
         // Canonical PG NOTIFY channel for the chunk-pending signal — single
-        // `pub const` in pipeline_v2::channels so the value isn't hardcoded
+        // `pub const` in pipeline::channels so the value isn't hardcoded
         // across the surfaces that report it.
         "notify_channel": CHUNK_PENDING_NOTIFY_CHANNEL,
         // Sorted-drain idle backoff cadence (DEC-AXO-901631), from the pub
-        // consts in pipeline_v2_runtime — the dashboard reads these instead
+        // consts in pipeline_runtime — the dashboard reads these instead
         // of a hardcoded "200ms/30s".
         "vector_drain_backoff_initial_ms": VECTOR_DRAIN_BACKOFF_INITIAL_MS,
         "vector_drain_backoff_max_ms": VECTOR_DRAIN_BACKOFF_MAX_MS,
@@ -128,11 +128,11 @@ mod tests {
         // The real A3→B channel cap is published from the const.
         assert_eq!(
             v["pipeline_b"]["b_chunks_cap"],
-            crate::pipeline_v2::channels::INTERNAL_CHANNEL_CAP_DEFAULT
+            crate::pipeline::channels::INTERNAL_CHANNEL_CAP_DEFAULT
         );
         assert_eq!(
             v["notify_channel"],
-            crate::pipeline_v2::channels::CHUNK_PENDING_NOTIFY_CHANNEL
+            crate::pipeline::channels::CHUNK_PENDING_NOTIFY_CHANNEL
         );
         assert!(v["vector_drain_backoff_initial_ms"].is_number());
         assert!(v["vector_drain_backoff_max_ms"].is_number());

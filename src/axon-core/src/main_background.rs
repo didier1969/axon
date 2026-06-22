@@ -500,7 +500,7 @@ pub(crate) fn runtime_telemetry_snapshot(
     let host_pressure = sample_host_pressure();
     let process_memory = process_memory_snapshot();
     // REQ-AXO-901674 — FVQ/GPQ queue tables dropped post MIL-AXO-017 / REQ-AXO-289 /
-    // slice-5d. Canonical pipeline_v2 path writes Chunk + ChunkEmbedding directly.
+    // slice-5d. Canonical pipeline path writes Chunk + ChunkEmbedding directly.
     let persisted_file_pending_depth = if graph_runtime_enabled {
         store.count_persisted_file_pending().unwrap_or(0)
     } else {
@@ -540,7 +540,7 @@ pub(crate) fn runtime_telemetry_snapshot(
         0
     };
     // REQ-AXO-901674 — FVQ depth stub (table dropped slice-5d) ; scheduler
-    // diagnostics consume 0 until rewired against pipeline_v2 ready-queue
+    // diagnostics consume 0 until rewired against pipeline ready-queue
     // counters (separate REQ).
     let utility_scheduler = current_utility_first_scheduler_diagnostics(
         effective_graph_scheduler_depth,

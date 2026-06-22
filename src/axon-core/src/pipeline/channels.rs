@@ -102,8 +102,8 @@ pub const A3_BATCH_TIMEOUT_MS_DEFAULT: u64 = 10;
 /// downstream throttle. Operator override: `AXON_B3_BATCH_SIZE`.
 pub const B3_BATCH_SIZE_DEFAULT: usize = 256;
 
-/// REQ-AXO-901678 — default batch size for the pipeline_v2 runtime drain
-/// loop in `pipeline_v2_runtime::spawn_pipeline_v2_indexer`. Replaces the
+/// REQ-AXO-901678 — default batch size for the pipeline runtime drain
+/// loop in `pipeline_runtime::spawn_pipeline_indexer`. Replaces the
 /// legacy hardcoded 256 cap that saturated under multi-project cold
 /// starts (session-54 bench : 338-file scan triggered repeated
 /// `last_batch_dropped_full=256` heartbeats, cumulative ~2.7k drops in

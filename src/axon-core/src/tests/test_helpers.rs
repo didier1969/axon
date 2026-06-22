@@ -53,7 +53,7 @@ pub fn create_test_db() -> Result<GraphStore> {
     // REQ-AXO-901877 — per-test PostgreSQL isolation. Each call gets a fresh
     // `createdb -T axon_test_template` clone (same canonical DDL + global seed +
     // auto-seed triggers) instead of the process-SHARED database, so non-mcp
-    // tests (graph_bootstrap, pipeline_v2 stage_a3/orchestrator, …) no longer
+    // tests (graph_bootstrap, pipeline stage_a3/orchestrator, …) no longer
     // pollute one another through shared IST/SOLL state. The store's native pool
     // (REQ-AXO-901959) writes the bulk graph COPY into THIS database, so the
     // pipeline tests read back what they wrote. The TestDb is parked

@@ -1,4 +1,4 @@
-//! Per-file `project_code` resolution for pipeline_v2 (DEC-AXO-081).
+//! Per-file `project_code` resolution for pipeline (DEC-AXO-081).
 //!
 //! The session-17 spawn_pipeline_a contract fixed `project_code: Arc<str>`
 //! at construction time — one indexer = one project, file paths got

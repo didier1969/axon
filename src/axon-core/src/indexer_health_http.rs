@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 /// État partagé minimal — flag StartupDone set par init runtime quand les
-/// workers sémantiques + pipeline_v2 sont spawnés.
+/// workers sémantiques + pipeline sont spawnés.
 #[derive(Clone, Default)]
 pub struct IndexerHealthState {
     pub startup_done: Arc<AtomicBool>,

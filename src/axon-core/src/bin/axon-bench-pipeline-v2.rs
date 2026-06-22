@@ -16,7 +16,7 @@
 //! (process all files then exit), --gpu, --project AXO, --csv.
 //!
 //! Requires `AXON_DEV_DATABASE_URL` (or `DATABASE_URL`) for GpuB2Embedder
-//! mode. The `--noop` mode uses [`axon_core::pipeline_v2::NoOpEmbedder`]
+//! mode. The `--noop` mode uses [`axon_core::pipeline::NoOpEmbedder`]
 //! but still writes through real PostgreSQL (DuckDB fully purged,
 //! REQ-AXO-271) — handy for verifying the topology end-to-end without GPU.
 
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use axon_core::graph::GraphStore;
-use axon_core::pipeline_v2::{
+use axon_core::pipeline::{
     const_resolver, spawn_pipeline_a, spawn_pipeline_b_full_multi,
     B2Embedder, ChunkForEmbedding, GpuB2Embedder, NoOpEmbedder, PipelineAWorkerCounts,
     PipelineBWorkerCounts, PipelineChannelCaps, StageSnapshot,
@@ -456,7 +456,7 @@ async fn run() -> Result<()> {
     // a zeroed "B1 (collapsed)" snapshot so historical bench CSV/table
     // schemas don't break ; downstream Polars scripts can treat
     // all-zero rows as "stage gone".
-    let snap_b1 = axon_core::pipeline_v2::StageMetrics::new("B1").snapshot();
+    let snap_b1 = axon_core::pipeline::StageMetrics::new("B1").snapshot();
     let snap_b2 = handles_b.metrics_b2.snapshot();
     let snap_b3 = handles_b.metrics_b3.snapshot();
 

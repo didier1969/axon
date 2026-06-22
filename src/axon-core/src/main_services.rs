@@ -43,8 +43,8 @@ impl RuntimeServiceOptions {
 
 // REQ-AXO-901653 slice-5c — v1 WorkerPool + writer-actor removed. The
 // `spawn_indexing_workers` option is preserved for telemetry semantics
-// but no longer spawns the legacy worker pool : pipeline_v2 (REQ-AXO-289
-// / CPT-AXO-054) owns the ingestion path entirely via `spawn_pipeline_v2_indexer`.
+// but no longer spawns the legacy worker pool : pipeline (REQ-AXO-289
+// / CPT-AXO-054) owns the ingestion path entirely via `spawn_pipeline_indexer`.
 pub(crate) fn start_runtime_services(
     graph_store: Arc<GraphStore>,
     queue_store: Arc<QueueStore>,
@@ -53,7 +53,7 @@ pub(crate) fn start_runtime_services(
     options: RuntimeServiceOptions,
 ) {
     if options.spawn_indexing_workers {
-        info!("Runtime services: indexing handled by pipeline_v2 (REQ-AXO-289).");
+        info!("Runtime services: indexing handled by pipeline (REQ-AXO-289).");
     } else {
         info!("Runtime services: indexing workers disabled by runtime mode.");
     }

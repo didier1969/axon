@@ -20,7 +20,7 @@ use std::sync::Mutex;
 
 /// Process-global set of alias names that have already emitted their
 /// one-shot deprecation warning. Prevents log spam when an alias is read
-/// from a hot loop (e.g. pipeline_v2 status snapshots).
+/// from a hot loop (e.g. pipeline status snapshots).
 static WARNED: Lazy<Mutex<HashSet<&'static str>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 fn warn_once(alias: &'static str, canonical: &'static str) {

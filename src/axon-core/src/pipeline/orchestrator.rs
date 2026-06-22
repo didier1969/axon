@@ -135,9 +135,9 @@ impl PipelineAWorkerCounts {
 ///
 /// Slice 5 SOTA — `b1_inbox_*` fields removed. The cross-pipeline
 /// channel A3→B1 is gone : B is fed exclusively by the demand-pull
-/// NOTIFY listener (`pipeline_v2/demand_pull.rs`) which SELECTs chunks
+/// NOTIFY listener (`pipeline/demand_pull.rs`) which SELECTs chunks
 /// with content directly and emits `ChunkForEmbedding` to the b_chunks
-/// channel owned by `pipeline_v2_runtime`.
+/// channel owned by `pipeline_runtime`.
 pub struct PipelineAHandles {
     pub input_tx: Sender<PathBuf>,
     pub output_rx: Receiver<EnrolledFile>,
@@ -156,7 +156,7 @@ pub struct PipelineAHandles {
 /// `resolver` returns the canonical 3-letter project_code for each
 /// file path the pipeline processes. DEC-AXO-081 (supersedes the
 /// single-project-per-indexer line in CPT-AXO-054): a single
-/// pipeline_v2 instance can serve N projects; A3 calls the resolver
+/// pipeline instance can serve N projects; A3 calls the resolver
 /// once per file and groups its batches by the resolved code so each
 /// PG transaction stays homogeneous-project. Bench / tests pass
 /// [`super::const_resolver`] for backward compatibility.
@@ -421,7 +421,7 @@ pub struct PipelineBFullHandles {
 /// caller must own a `Receiver<ChunkForEmbedding>` that demand_pull
 /// feeds directly (one SELECT-with-content round-trip per batch). B1
 /// stage workers (4× parallel SELECT-by-id) are gone : a single
-/// demand_pull task in `pipeline_v2_runtime` produces the b_chunks
+/// demand_pull task in `pipeline_runtime` produces the b_chunks
 /// stream, B2 GPU drum consumes it.
 pub fn spawn_pipeline_b_full(
     counts: PipelineBWorkerCounts,

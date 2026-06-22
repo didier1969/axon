@@ -138,14 +138,14 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
     // REQ-AXO-901653 slice-5c — public.File state-machine dropped ; the
     // legacy per-status counters (`pending`, `indexing`, `indexed_degraded`,
     // `oversized_for_current_budget`, `skipped`) no longer apply to
-    // pipeline_v2 (REQ-AXO-289). File presence is now `IndexedFile`,
+    // pipeline (REQ-AXO-289). File presence is now `IndexedFile`,
     // graph-readiness = Chunk row, vector-readiness = ChunkEmbedding row.
     let file_count = if graph_runtime_enabled || vector_runtime_enabled {
         snapshot_count("SELECT count(*) FROM ist.IndexedFile")
     } else {
         0
     };
-    let pending_count: i64 = 0; // pipeline_v2 has no pending-status concept.
+    let pending_count: i64 = 0; // pipeline has no pending-status concept.
     let indexing_count: i64 = 0;
     let degraded_count: i64 = 0;
     let oversized_count: i64 = 0;
@@ -170,7 +170,7 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         0
     };
     // REQ-AXO-901674 — FVQ/GPQ queue tables dropped post MIL-AXO-017 /
-    // REQ-AXO-289 / slice-5d. Canonical pipeline_v2 writes Chunk +
+    // REQ-AXO-289 / slice-5d. Canonical pipeline writes Chunk +
     // ChunkEmbedding directly.
     let canonical_file_count = if graph_runtime_enabled || vector_runtime_enabled {
         canonical_count("SELECT count(*) FROM ist.IndexedFile")

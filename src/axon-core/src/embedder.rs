@@ -801,7 +801,7 @@ impl SemanticWorkerPool {
         // REQ-AXO-901653 Slice 2 — vector_worker_loop +
         // vector_maintenance_worker_loop + vector_pipeline_3stages deleted.
         // The legacy DuckDB-era single-loop vector lane (DEC-AXO-070) and the
-        // 3-stage variant became dead code once pipeline_v2
+        // 3-stage variant became dead code once pipeline
         // (CPT-AXO-054 / DEC-AXO-081 / REQ-AXO-289) took over canonical
         // vectorization under the live runtime. The previous
         // AXON_LEGACY_VECTOR_WORKER_LOOP env-gate (REQ-AXO-901632, session 49)

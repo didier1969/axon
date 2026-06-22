@@ -96,7 +96,7 @@ impl McpServer {
             })
             .sum::<u64>();
         // REQ-AXO-901653 Slice 3b — queue helpers removed ; canonical
-        // pipeline_v2 path tracks via Chunk + ChunkEmbedding directly.
+        // pipeline path tracks via Chunk + ChunkEmbedding directly.
         let (db_queued_files, db_inflight_files): (usize, usize) = (0, 0);
         let queued_files = debug_queued_files.max(db_queued_files as u64);
         let inflight_files = debug_inflight_files.max(db_inflight_files as u64);
@@ -201,7 +201,7 @@ impl McpServer {
             .then(|| optimizer::collect_runtime_signals_window(&self.graph_store));
 
         // REQ-AXO-901653 slice-5c — total_file_count / vector_ready_depth
-        // now driven by IndexedFile (pipeline_v2 canonical) and ChunkEmbedding.
+        // now driven by IndexedFile (pipeline canonical) and ChunkEmbedding.
         let total_file_count =
             if runtime_mode.ingestion_enabled() || runtime_mode.semantic_workers_enabled() {
                 self.graph_store
@@ -1575,10 +1575,10 @@ const IST_CALL_GRAPH_COVERAGE_SQL: &str = "WITH symbol_file AS (\
 impl McpServer {
     /// REQ-AXO-231 — staleness magnitude diagnostic.
     /// REQ-AXO-901653 slice-5c — migrated from `public.File` (dropped) to
-    /// `ist.IndexedFile` (pipeline_v2 canonical). `last_seen_ms` is the
-    /// pipeline_v2 ingestion timestamp. Staleness here means : how far is
+    /// `ist.IndexedFile` (pipeline canonical). `last_seen_ms` is the
+    /// pipeline ingestion timestamp. Staleness here means : how far is
     /// the indexer behind the most-recent ingestion ? Returns 0 stale files
-    /// when IndexedFile keeps pace (pipeline_v2 writes in-line ; the legacy
+    /// when IndexedFile keeps pace (pipeline writes in-line ; the legacy
     /// "modified files since last publish" decoupling is gone).
     pub(crate) fn compute_staleness_snapshot(&self) -> Result<Value, String> {
         let sql = "SELECT \

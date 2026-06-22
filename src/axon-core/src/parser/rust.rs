@@ -824,7 +824,7 @@ mod tests {
 
     fn parser() -> RustParser {
         // The Rust grammar wasm is loaded from the same place the prod
-        // pipeline_v2 uses. If absent in the test environment, the
+        // pipeline uses. If absent in the test environment, the
         // RustParser falls back to an empty result — which would mask the
         // bug, so we skip the test rather than silently green-light it.
         RustParser::new()

@@ -8,7 +8,7 @@
 //!   transaction per file):
 //!     - [`stage_a1::a1_prepare`] — read file + sha256 + mtime → [`PreparedFile`]
 //!     - [`stage_a2::a2_transform`] — tree-sitter parse → [`ParsedFile`]
-//!     - [`stage_a3::a3_enroll`] → [`crate::graph::GraphStore::upsert_graph_v2`] :
+//!     - [`stage_a3::a3_enroll`] → [`crate::graph::GraphStore::upsert_graph`] :
 //!       Symbol + Chunk (full content) + CONTAINS/CALLS/CALLS_NIF persisted
 //!       to `ist.Edge` (REQ-AXO-295 / REQ-AXO-297 unified storage,
 //!       AGE retired per MIL-AXO-017 / REQ-AXO-90005) + IndexedFile UPSERT
@@ -28,7 +28,7 @@
 //! and `embed_status='pending'` is the durable B queue. There is NO
 //! cross-pipeline push channel and NO B1 worker pool (slice 4/5 SOTA,
 //! REQ-AXO-901746) — `try_send` is RETIRED. Pipeline B is fed EXCLUSIVELY by
-//! the sorted-drain feeder ([`crate::pipeline_v2_runtime::spawn_vector_sorted_drain`],
+//! the sorted-drain feeder ([`crate::pipeline_runtime::spawn_vector_sorted_drain`],
 //! DEC-AXO-901631), which SELECTs token-sorted pending chunks (content
 //! included) and feeds B2 in order via the internal `b_chunks` mpsc
 //! (cap [`INTERNAL_CHANNEL_CAP_DEFAULT`]).

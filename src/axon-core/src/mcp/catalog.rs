@@ -504,7 +504,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "detect_remnants",
-                "description": "[SOLL] REQ-AXO-902051 — advisory scan of the IST for code-anchored residue of seeded TechnologyMigration nodes (comments excluded; sanctioned-permanent tokens like pipeline_v2 / WITH RECURSIVE never flagged). (Re)creates idempotent HAS_REMNANT edges so tech_debt_inventory + pre-flight + work-plan surface the residue. Advisory only — never a gate. Runs off the ingestion hot-path.",
+                "description": "[SOLL] REQ-AXO-902051 — advisory scan of the IST for code-anchored residue of seeded TechnologyMigration nodes (comments excluded; sanctioned-permanent tokens like pipeline / WITH RECURSIVE never flagged). (Re)creates idempotent HAS_REMNANT edges so tech_debt_inventory + pre-flight + work-plan surface the residue. Advisory only — never a gate. Runs off the ingestion hot-path.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

@@ -45,7 +45,7 @@ impl GraphStore {
     // Each stub is marked `slice-5b-stub` for grep-based cleanup in slice-5c.
     // ============================================================================
 
-    // ---- count_* / oldest_*_age_ms : KPI display (return 0 — pipeline_v2
+    // ---- count_* / oldest_*_age_ms : KPI display (return 0 — pipeline
     //      tracks via IndexedFile + Chunk + ChunkEmbedding directly) ----
     pub fn count_persisted_file_pending(&self) -> Result<usize> {
         Ok(0)
@@ -73,7 +73,7 @@ impl GraphStore {
         Ok(0)
     } // slice-5b-stub
 
-    // ---- state-machine no-ops (legacy callers, pipeline_v2 bypasses) ----
+    // ---- state-machine no-ops (legacy callers, pipeline bypasses) ----
     pub fn backfill_file_vectorization_queue(&self) -> Result<usize> {
         Ok(0)
     } // slice-5b-stub
@@ -331,7 +331,7 @@ impl GraphStore {
     // `insert_file_data_batch_with_vectorization_policy` deleted ;
     // 800 LOC legacy DbWriteTask sink wrote to public.File +
     // FileVectorizationQueue + GraphProjectionQueue. Pipeline-v2's
-    // `upsert_graph_v2_batch` is the canonical successor.
+    // `upsert_graph_batch` is the canonical successor.
 
     // REQ-AXO-901653 slice-5a: `fetch_pending_batch`,
     // `fetch_pending_candidates`, `claim_pending_paths`,
@@ -672,7 +672,7 @@ impl GraphStore {
     /// `IndexedFile(path, content_hash, last_seen_ms)`. Idempotent via
     /// `ON CONFLICT (path) DO UPDATE`. Standalone helper for path-only
     /// callers (e.g. cache reconstitution tests); the streaming A3 stage
-    /// goes through [`upsert_graph_v2`] so the IndexedFile UPSERT lands
+    /// goes through [`upsert_graph`] so the IndexedFile UPSERT lands
     /// inside the same transaction as the Symbol + AGE relation inserts.
     pub fn upsert_indexed_file(
         &self,
@@ -879,7 +879,7 @@ impl GraphStore {
     /// these to the B1 inbox so the GPU lane picks them up immediately
     /// in steady-state; B1 cold-start poll DB catches any drops.
     #[allow(clippy::too_many_arguments)]
-    pub fn upsert_graph_v2(
+    pub fn upsert_graph(
         &self,
         path: &str,
         project_code: &str,
@@ -894,7 +894,7 @@ impl GraphStore {
 
         // REQ-AXO-901860 — skip the "UNK" sentinel (unregistered file) so a
         // single-file enrol can't pollute an UNK bucket or poison the writer
-        // tx on the NOT NULL project_code FK. Mirrors upsert_graph_v2_batch.
+        // tx on the NOT NULL project_code FK. Mirrors upsert_graph_batch.
         if project_code == "UNK" {
             return Ok(Vec::new());
         }
@@ -953,7 +953,7 @@ impl GraphStore {
         // deadline) is auto-diagnosable: the last `chunking <path>` line before
         // the CPU spin names the culprit. SPINPROBE-style dev diagnostic.
         tracing::info!(
-            target: "pipeline_v2::chunk",
+            target: "pipeline::chunk",
             path = %path,
             content_bytes = content.len(),
             symbols = unique_syms.len(),
@@ -1053,13 +1053,13 @@ impl GraphStore {
         };
         // REQ-AXO-901959 — route the live graph write through THIS store's
         // native pool (correct DB + lifetime-scoped), not bulk_writer's global
-        // env-resolved pool. Unblocks per-test DB isolation for the pipeline_v2
+        // env-resolved pool. Unblocks per-test DB isolation for the pipeline
         // stage_a3/orchestrator tests (REQ-AXO-901877 linchpin).
         self.pool.native.flush_batch_copy(&batch)?;
         Ok(chunk_ids_emitted)
     }
 
-    /// REQ-AXO-295 — Batched variant of [`Self::upsert_graph_v2`].
+    /// REQ-AXO-295 — Batched variant of [`Self::upsert_graph`].
     ///
     /// Aggregates Symbol/Chunk/relation [`rows`] across `files` into one
     /// [`crate::postgres::bulk_writer::PgBulkBatch`] flushed in a single
@@ -1076,9 +1076,9 @@ impl GraphStore {
     /// given identical inputs).
     /// REQ-AXO-901746 — each inner Vec carries (chunk_id, content, content_hash)
     /// so A3 can forward chunks inline to B1 without a PG round-trip.
-    pub fn upsert_graph_v2_batch(
+    pub fn upsert_graph_batch(
         &self,
-        files: &[crate::pipeline_v2::types::ParsedFile],
+        files: &[crate::pipeline::types::ParsedFile],
         project_code: &str,
     ) -> Result<Vec<Vec<(String, String, String)>>> {
         use crate::graph_ingestion::rows::{ChunkRow, RelationRow, SymbolRow};
@@ -1089,7 +1089,7 @@ impl GraphStore {
         }
 
         // REQ-AXO-901860 — unregistered files resolve to the "UNK" sentinel
-        // (pipeline_v2_runtime resolver fallback). project_code is now a NOT
+        // (pipeline_runtime resolver fallback). project_code is now a NOT
         // NULL FK to axon.Project, so writing UNK rows would either resurrect
         // the "UNK" bucket the refonte deleted or fail the FK and poison the
         // pooled writer connection (25P02 cascade). Skip cleanly — the
@@ -1098,7 +1098,7 @@ impl GraphStore {
             return Ok(files.iter().map(|_| Vec::new()).collect());
         }
 
-        // REQ-AXO-271 slice 2k : PG canonical only (see upsert_graph_v2).
+        // REQ-AXO-271 slice 2k : PG canonical only (see upsert_graph).
         // legacy relation render block + public.file fallback gate
         // collapsed below ; `ist.Edge` (REQ-AXO-295 / REQ-AXO-297) is
         // the sole structural edge storage.
@@ -1202,7 +1202,7 @@ impl GraphStore {
             // REQ-AXO-902024 — see twin log above: name the file before chunking
             // so a chunker wedge is auto-diagnosable from the last line emitted.
             tracing::info!(
-                target: "pipeline_v2::chunk",
+                target: "pipeline::chunk",
                 path = %path_str,
                 content_bytes = parsed.content.len(),
                 symbols = unique_syms.len(),
@@ -1359,7 +1359,7 @@ impl GraphStore {
         };
         // REQ-AXO-901959 — route the live graph write through THIS store's
         // native pool (correct DB + lifetime-scoped), not bulk_writer's global
-        // env-resolved pool. Unblocks per-test DB isolation for the pipeline_v2
+        // env-resolved pool. Unblocks per-test DB isolation for the pipeline
         // stage_a3/orchestrator tests (REQ-AXO-901877 linchpin).
         self.pool.native.flush_batch_copy(&batch)?;
         Ok(chunk_ids_per_file)
@@ -1844,7 +1844,7 @@ impl GraphStore {
     // `bulk_upsert_file_queries`, `is_file_tombstoned` deleted ; all
     // built/read SQL targeting public.File +
     // GraphProjectionQueue/FileVectorizationQueue. The pipeline-v2
-    // canonical writer (`upsert_graph_v2_batch`) does not stage rows
+    // canonical writer (`upsert_graph_batch`) does not stage rows
     // into public.File any more.
 }
 

@@ -54,12 +54,12 @@ pub struct EnrolledFile {
 /// with chunk_ids ready to fan out to B1.
 ///
 /// `resolver` returns the project_code for `parsed.path`. DEC-AXO-081
-/// allows a single pipeline_v2 instance to serve N projects — the
+/// allows a single pipeline instance to serve N projects — the
 /// resolver is invoked once per call, the resulting code stamps every
 /// Symbol / Chunk / IndexedFile row written for this file.
 ///
 /// Idempotent: re-running A3 on the same [`ParsedFile`] is a no-op for
-/// the canonical rows (every INSERT inside [`GraphStore::upsert_graph_v2`]
+/// the canonical rows (every INSERT inside [`GraphStore::upsert_graph`]
 /// uses `ON CONFLICT DO UPDATE` / `DO NOTHING`).
 pub async fn a3_enroll(
     parsed: ParsedFile,
@@ -77,7 +77,7 @@ pub async fn a3_enroll(
     let symbols_for_block = parsed.symbols.clone();
     let relations_for_block = parsed.relations.clone();
     let chunk_ids = tokio::task::spawn_blocking(move || {
-        store_clone.upsert_graph_v2(
+        store_clone.upsert_graph(
             &path_for_block,
             &project_code_str,
             &content_for_block,
@@ -106,7 +106,7 @@ pub async fn a3_enroll(
 /// Mirrors the pattern of [`super::stage_b2::spawn_b2_batched_worker`]:
 /// blocks on the first `ParsedFile`, then drains additional files until
 /// `batch_size` or `batch_timeout`, and writes the whole batch in one
-/// `GraphStore::upsert_graph_v2_batch` round-trip — one BEGIN/COMMIT
+/// `GraphStore::upsert_graph_batch` round-trip — one BEGIN/COMMIT
 /// per batch instead of one per file. The downstream `tx.send` carries
 /// the per-file [`EnrolledFile`] receipt. B1 (vectorization side) is
 /// fed via the PG NOTIFY `chunk_pending_embed` trigger + demand_pull_b
@@ -115,8 +115,8 @@ pub async fn a3_enroll(
 ///
 /// `resolver` returns the project_code per file (DEC-AXO-081). Each
 /// flush groups the batch by resolved project_code and issues one
-/// `upsert_graph_v2_batch` per group — keeping the single-PG-transaction
-/// guarantee within each project while letting a single pipeline_v2
+/// `upsert_graph_batch` per group — keeping the single-PG-transaction
+/// guarantee within each project while letting a single pipeline
 /// serve N projects.
 ///
 /// Metrics: `record_started` on each item entering the batch,
@@ -194,7 +194,7 @@ pub fn spawn_a3_batched_worker(
             }
 
             // DEC-AXO-081 — group the batch by per-file resolved
-            // project_code so each upsert_graph_v2_batch call still
+            // project_code so each upsert_graph_batch call still
             // sees a homogeneous-project group (the SQL renderer
             // assumes one project_code per call).
             let mut groups: std::collections::BTreeMap<String, Vec<ParsedFile>> =
@@ -208,7 +208,7 @@ pub fn spawn_a3_batched_worker(
             // REQ-AXO-344 — trace per-flush project_code distribution so we can
             // verify previously-unindexed projects (NBL, NEX, ODM, …) reach A3.
             info!(
-                target: "pipeline_v2::a3",
+                target: "pipeline::a3",
                 "A3 flush: total_items={} project_codes={:?}",
                 total_items,
                 groups.keys().collect::<Vec<_>>()
@@ -255,7 +255,7 @@ pub fn spawn_a3_batched_worker(
                 // include the prior groups' write time.
                 let group_started = Instant::now();
                 let join_result = tokio::task::spawn_blocking(move || {
-                    store_clone.upsert_graph_v2_batch(&group_batch, &pc_for_block)
+                    store_clone.upsert_graph_batch(&group_batch, &pc_for_block)
                 })
                 .await;
 
@@ -264,7 +264,7 @@ pub fn spawn_a3_batched_worker(
                         let chunks_total: usize =
                             chunk_metas_per_file.iter().map(|v| v.len()).sum();
                         info!(
-                            target: "pipeline_v2::a3",
+                            target: "pipeline::a3",
                             "A3 upsert ok: project={} files={} chunks_emitted={}",
                             pc_str,
                             group_len,
@@ -319,14 +319,14 @@ pub fn spawn_a3_batched_worker(
                             stage = "A3",
                             expected = group_len,
                             actual = chunk_ids_per_file.len(),
-                            "upsert_graph_v2_batch returned mismatched per-file count"
+                            "upsert_graph_batch returned mismatched per-file count"
                         );
                         for _ in 0..group_len {
                             metrics.record_error();
                         }
                     }
                     Ok(Err(err)) => {
-                        warn!(stage = "A3", error = ?err, "upsert_graph_v2_batch failed");
+                        warn!(stage = "A3", error = ?err, "upsert_graph_batch failed");
                         for _ in 0..group_len {
                             metrics.record_error();
                         }

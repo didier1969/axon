@@ -169,7 +169,7 @@ fn recommend_sizing(cpu_cores: usize, ram_total_gb: u64, gpu_present: bool) -> R
     };
 
     // REQ-AXO-902035 — the blocking pool must cover EVERY concurrent
-    // `spawn_blocking` consumer in pipeline_v2, not just the graph CPU
+    // `spawn_blocking` consumer in pipeline, not just the graph CPU
     // workers. Default topology fans out to A2 parse (8) + A3 upsert (2) +
     // B2 GPU embed (1) + B3 upsert (2) + sorted-drain SELECT (1) + query
     // embed (1) ≈ 15 concurrent blocking tasks. The old
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn test_recommend_sizing_reserves_blocking_slots_for_gpu_vector_lane() {
         // REQ-AXO-902035 — on a GPU host the blocking pool MUST exceed the
-        // default pipeline_v2 spawn_blocking fan-out (A2 8 + A3 2 + B2 1 +
+        // default pipeline spawn_blocking fan-out (A2 8 + A3 2 + B2 1 +
         // B3 2 + sorted-drain 1 + query 1 = 15) so Plane A's tree-sitter
         // flood can never starve the GPU dispatch / drain SELECT of a
         // blocking slot. The old ceil(0.75×workers).clamp(4,16) produced ~9

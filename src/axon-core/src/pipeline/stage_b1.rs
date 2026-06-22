@@ -71,7 +71,7 @@ mod tests {
     use std::sync::Arc;
 
     // REQ-AXO-901877 — the GraphStore test fixture (`create_test_db`) and the
-    // sync store methods (`upsert_graph_v2`, `query_count`) drive the PG plugin
+    // sync store methods (`upsert_graph`, `query_count`) drive the PG plugin
     // via an internal `block_on`, so they must run OUTSIDE a tokio runtime.
     // These tests therefore stay sync (`#[test]`) and drive only the genuinely
     // async stage fn (which internally uses `spawn_blocking`) through a local
@@ -114,7 +114,7 @@ mod tests {
         let body = "fn marker_for_b1_fetch_test() { let x = 1; }\n";
 
         let chunk_ids = store
-            .upsert_graph_v2(
+            .upsert_graph(
                 "/tmp/b1_fetch.rs",
                 "AXO",
                 body,
@@ -181,7 +181,7 @@ mod tests {
         ];
 
         let chunk_ids = store
-            .upsert_graph_v2(
+            .upsert_graph(
                 "/tmp/b1_roundtrip.rs",
                 "AXO",
                 &body,

@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn lifecycle_heartbeat_upsert_sql_shape() {
         use crate::embedder::lifecycle_machine::{EmbedderPhase, LifecycleHeartbeatSnapshot};
-        use crate::pipeline_v2::stage_health::{StageErrorRecord, StageHealthSnapshot};
+        use crate::pipeline::stage_health::{StageErrorRecord, StageHealthSnapshot};
         let snapshot = LifecycleHeartbeatSnapshot {
             phase: EmbedderPhase::Sleeping,
             last_used_ms: 1_700_000_000_000,
@@ -663,7 +663,7 @@ mod tests {
             );
         }
         // No fabricated cumulative "workers_started" column — there is no
-        // canonical pipeline_v2 source for it (REQ-AXO-901854 canonical-IO).
+        // canonical pipeline source for it (REQ-AXO-901854 canonical-IO).
         assert!(!sql.contains("graph_workers_started"), "{sql}");
         assert!(sql.contains("'indexer'"));
         assert!(sql.contains("1700000005000"));
