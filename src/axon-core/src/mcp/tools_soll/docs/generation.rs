@@ -544,18 +544,21 @@ impl McpServer {
                 relation_diagnostic_table_html(&local_edges, &nodes_by_id)
             );
             // REQ-AXO-312 — partition the level ±1 neighbourhood so the local
-            // graph renders macro (parents / upstream / containing roots) on
-            // the left and micro (children / downstream) on the right.
+            // graph renders macro (parents / containing roots) on the left and
+            // micro (children) on the right. Use the HIERARCHY parent/child
+            // sets, never raw incoming/outgoing edges: SOLL stores REFINES /
+            // BELONGS_TO child→parent, so a node's children arrive as *incoming*
+            // edges — folding incoming into macro emptied the micro column.
+            // Lateral neighbours (EXPLAINS / VERIFIES …) fall through to the
+            // ambient macro column in render_mermaid_graph.
             let macro_ids = parent_ids
                 .iter()
-                .chain(incoming_ids.iter())
                 .chain(containing_roots.iter())
                 .filter(|id| **id != node.id)
                 .cloned()
                 .collect::<HashSet<_>>();
             let micro_ids = child_ids
                 .iter()
-                .chain(outgoing_ids.iter())
                 .filter(|id| **id != node.id && !macro_ids.contains(*id))
                 .cloned()
                 .collect::<HashSet<_>>();
