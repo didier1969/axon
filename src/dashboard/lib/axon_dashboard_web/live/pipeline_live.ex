@@ -41,7 +41,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
       |> assign(:dashboard_state, initial)
       |> assign(:rate_series, :queue.new())
       |> assign(:last_push_ms, 0)
-      |> stream(:per_project, initial.per_project, dom_id: &"proj-#{&1.project_code}")
+      |> stream(:per_project, sort_projects(initial.per_project), dom_id: &"proj-#{&1.project_code}")
 
     {:ok, push_pipeline_state(socket, force: true)}
   end
@@ -53,7 +53,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
       |> assign(:dashboard_state, state)
       |> update_rate_series(state)
       |> maybe_push_pipeline_state()
-      |> stream(:per_project, state.per_project, reset: true, dom_id: &"proj-#{&1.project_code}")
+      |> stream(:per_project, sort_projects(state.per_project), reset: true, dom_id: &"proj-#{&1.project_code}")
 
     {:noreply, socket}
   end
@@ -72,6 +72,7 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
       instance_kind={runtime_field(@dashboard_state, :instance_kind, "unknown")}
       gpu_effective={embedder_field(@dashboard_state, :effective, "unknown")}
       degraded_reason={runtime_field(@dashboard_state, :degraded_reason, nil)}
+      runtime_idle={runtime_field(@dashboard_state, :runtime_idle, false)}
       stale={is_nil(@dashboard_state.ts_ms)}
       observed_age_ms={DashboardState.observed_age_ms(@dashboard_state)}
     >
@@ -255,9 +256,9 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
             <.kv label="Requested provider" value={embedder_field(@dashboard_state, :requested, "n/a")} />
             <.kv label="Effective provider" value={embedder_field(@dashboard_state, :effective, "n/a")} />
             <.kv label="Init error" value={embedder_field(@dashboard_state, :init_error, nil) || "—"} />
-            <.kv label="B2 batch" value={"#{pipeline_field(@dashboard_state, :b2_batch_size, 0)} chunks / #{pipeline_field(@dashboard_state, :b2_batch_timeout_ms, 0)} ms"} />
-            <.kv label="B3 batch" value={"#{pipeline_field(@dashboard_state, :b3_batch_size, 0)} chunks / #{pipeline_field(@dashboard_state, :b3_batch_timeout_ms, 0)} ms"} />
             <.kv label="Last lane" value={embedder_field(@dashboard_state, :last_lane, "unknown")} />
+            <%!-- B2/B3 batch sizes live in the Worker Configuration table (single
+                 source — REQ-AXO-901856 dedup). --%>
             <%!-- DEC-AXO-901626 — 3 distinct compute lanes, observed (nvidia-smi + PG),
                   never a self-reported provider slot. Brain + Pipeline A are CPU by
                   architecture; Pipeline B is the observed embedder verdict. --%>
@@ -342,11 +343,11 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
                 </tr>
               </thead>
               <tbody class="font-mono text-xs divide-y divide-slate-800/60">
-                <.stage_row name="A1" tone={:cyan} purpose="read + hash" workers={pipeline_field(@dashboard_state, :a1_workers, 0)} batch="—" />
-                <.stage_row name="A2" tone={:cyan} purpose="parse TS" workers={pipeline_field(@dashboard_state, :a2_workers, 0)} batch="—" />
-                <.stage_row name="A3" tone={:cyan} purpose="graph UPSERT" workers={pipeline_field(@dashboard_state, :a3_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :a3_batch_size, 0)} / #{pipeline_field(@dashboard_state, :a3_batch_timeout_ms, 0)} ms"} />
-                <.stage_row name="B2" tone={:emerald} purpose="embed GPU" workers={pipeline_field(@dashboard_state, :b2_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :b2_batch_size, 0)} / #{pipeline_field(@dashboard_state, :b2_batch_timeout_ms, 0)} ms"} />
-                <.stage_row name="B3" tone={:emerald} purpose="write embeddings" workers={pipeline_field(@dashboard_state, :b3_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :b3_batch_size, 0)} / #{pipeline_field(@dashboard_state, :b3_batch_timeout_ms, 0)} ms"} />
+                <.stage_row name="A1" tone={:info} purpose="read + hash" workers={pipeline_field(@dashboard_state, :a1_workers, 0)} batch="—" />
+                <.stage_row name="A2" tone={:info} purpose="parse TS" workers={pipeline_field(@dashboard_state, :a2_workers, 0)} batch="—" />
+                <.stage_row name="A3" tone={:info} purpose="graph UPSERT" workers={pipeline_field(@dashboard_state, :a3_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :a3_batch_size, 0)} / #{pipeline_field(@dashboard_state, :a3_batch_timeout_ms, 0)} ms"} />
+                <.stage_row name="B2" tone={:ok} purpose="embed GPU" workers={pipeline_field(@dashboard_state, :b2_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :b2_batch_size, 0)} / #{pipeline_field(@dashboard_state, :b2_batch_timeout_ms, 0)} ms"} />
+                <.stage_row name="B3" tone={:ok} purpose="write embeddings" workers={pipeline_field(@dashboard_state, :b3_workers, 0)} batch={"#{pipeline_field(@dashboard_state, :b3_batch_size, 0)} / #{pipeline_field(@dashboard_state, :b3_batch_timeout_ms, 0)} ms"} />
               </tbody>
             </table>
             <div class="px-4 py-3 bg-amber-950/20 border-t border-amber-900/40 text-[10px] text-amber-300/80">
@@ -356,45 +357,55 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
           </div>
         </section>
 
-        <%!-- PER-PROJECT BREAKDOWN (Phoenix.LiveView.stream) --%>
+        <%!-- PER-PROJECT FUNNEL (REQ-AXO-901856 / 901854). Each project shows
+             its progression through the funnel as two derived bars — Files
+             (chunked/enrolled) and Coverage (embedded/chunks) — sorted laggards
+             first so blocked or incomplete projects surface at the top. Bars are
+             honest server-side derivations of the published per_project values
+             (no client state). Empty projects (0 enrolled) sink to the bottom. --%>
         <section class="col-span-12 rounded-xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm">
-          <header class="px-5 py-3 border-b border-slate-800">
-            <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80">Per-Project Breakdown</div>
-            <h2 class="text-base font-semibold text-slate-100 mt-0.5">Indexed chunks, embeddings, symbols by project</h2>
+          <header class="flex items-center justify-between px-5 py-3 border-b border-slate-800">
+            <div>
+              <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80">Per-Project Funnel</div>
+              <h2 class="text-base font-semibold text-slate-100 mt-0.5">Enrolled → Chunked → Embedded, by project</h2>
+            </div>
+            <div class="text-[10px] font-mono uppercase tracking-wider text-slate-500">laggards first</div>
           </header>
-          <div class="overflow-hidden">
-            <table class="w-full text-sm">
-              <thead class="bg-slate-950/40 text-[10px] uppercase tracking-wider text-slate-500">
-                <tr>
-                  <th class="px-4 py-2 text-left">Project</th>
-                  <th class="px-4 py-2 text-right">Files (chunked/enrolled)</th>
-                  <th class="px-4 py-2 text-right">Symbols</th>
-                  <th class="px-4 py-2 text-right">Chunks</th>
-                  <th class="px-4 py-2 text-right">Embeddings</th>
-                  <th class="px-4 py-2 text-right">Coverage</th>
-                </tr>
-              </thead>
-              <tbody id="per_project_rows" phx-update="stream" class="font-mono text-xs divide-y divide-slate-800/60">
-                <tr :for={{dom_id, entry} <- @streams.per_project} id={dom_id} class="hover:bg-slate-800/30 transition-colors">
-                  <td class="px-4 py-2">
-                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] uppercase font-semibold tracking-wide border border-cyan-500/30 bg-cyan-500/5 text-cyan-200">
-                      {entry.project_code}
-                    </span>
-                  </td>
-                  <td class="px-4 py-2 text-right tabular-nums">
-                    <span class="text-slate-100">{full_int(entry.files_chunked)}</span><span class="text-slate-600">/{full_int(entry.files_total)}</span>
-                  </td>
-                  <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{full_int(entry.symbols)}</td>
-                  <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{full_int(entry.chunks)}</td>
-                  <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{full_int(entry.embedded)}</td>
-                  <td class="px-4 py-2 text-right tabular-nums">
-                    <span class={coverage_text_class(entry.coverage_pct)}>
-                      {:erlang.float_to_binary(entry.coverage_pct * 1.0, decimals: 2)}%
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="hidden md:grid grid-cols-12 gap-3 px-5 py-2 bg-slate-950/40 text-[10px] uppercase tracking-wider text-slate-500">
+            <div class="col-span-2">Project</div>
+            <div class="col-span-4">Files (chunked / enrolled)</div>
+            <div class="col-span-3">Coverage (embedded / chunks)</div>
+            <div class="col-span-3 text-right">Symbols · Chunks · Emb</div>
+          </div>
+          <div id="per_project_rows" phx-update="stream" class="divide-y divide-slate-800/60">
+            <div
+              :for={{dom_id, entry} <- @streams.per_project}
+              id={dom_id}
+              class={["grid grid-cols-12 gap-3 px-5 py-2.5 items-center hover:bg-slate-800/30 transition-colors", if(entry.files_total == 0, do: "opacity-50", else: "")]}
+            >
+              <div class="col-span-6 md:col-span-2">
+                <Nav.badge value={entry.project_code} tone={proj_tone(entry)} dot={true} />
+              </div>
+              <div class="col-span-6 md:col-span-4">
+                <.bar pct={safe_pct(entry.files_chunked, entry.files_total)} tone={files_bar_tone(entry)} />
+                <div class="mt-1 text-[10px] font-mono text-slate-500 tabular-nums">
+                  {full_int(entry.files_chunked)}<span class="text-slate-600">/{full_int(entry.files_total)}</span>
+                  <span class="text-slate-600 ml-1">{full_pct(entry.files_chunked, entry.files_total)}</span>
+                </div>
+              </div>
+              <div class="col-span-6 md:col-span-3">
+                <.bar pct={entry.coverage_pct * 1.0} tone={coverage_bar_tone(entry.coverage_pct)} />
+                <div class="mt-1 text-[10px] font-mono tabular-nums">
+                  <span class={coverage_text_class(entry.coverage_pct)}>{:erlang.float_to_binary(entry.coverage_pct * 1.0, decimals: 1)}%</span>
+                  <span class="text-slate-600 ml-1">{full_int(entry.embedded)}/{full_int(entry.chunks)}</span>
+                </div>
+              </div>
+              <div class="col-span-6 md:col-span-3 text-right font-mono text-[11px] text-slate-300 tabular-nums">
+                {full_int(entry.symbols)} <span class="text-slate-600">·</span>
+                {full_int(entry.chunks)} <span class="text-slate-600">·</span>
+                <span class="text-slate-100">{full_int(entry.embedded)}</span>
+              </div>
+            </div>
           </div>
         </section>
       </div>
@@ -451,19 +462,13 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
   attr :purpose, :string, required: true
   attr :workers, :integer, required: true
   attr :batch, :string, required: true
-  attr :tone, :atom, default: :cyan
+  attr :tone, :atom, default: :info
 
   defp stage_row(assigns) do
     ~H"""
     <tr class="hover:bg-slate-800/30 transition-colors">
       <td class="px-4 py-2">
-        <span class={[
-          "inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] uppercase font-semibold tracking-wide border",
-          stage_class(@tone)
-        ]}>
-          <span class={["h-1.5 w-1.5 rounded-full", stage_dot(@tone)]}></span>
-          {@name}
-        </span>
+        <Nav.badge value={@name} tone={@tone} dot={true} />
       </td>
       <td class="px-4 py-2 text-slate-300">{@purpose}</td>
       <td class="px-4 py-2 text-right text-slate-100 tabular-nums">{@workers}</td>
@@ -472,11 +477,55 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
     """
   end
 
-  defp stage_class(:cyan), do: "border-cyan-500/30 bg-cyan-500/5 text-cyan-200"
-  defp stage_class(:emerald), do: "border-emerald-500/30 bg-emerald-500/5 text-emerald-200"
+  ## Per-project funnel helpers (REQ-AXO-901856)
 
-  defp stage_dot(:cyan), do: "bg-cyan-400"
-  defp stage_dot(:emerald), do: "bg-emerald-400"
+  attr :pct, :float, required: true
+  attr :tone, :atom, default: :ok
+
+  defp bar(assigns) do
+    ~H"""
+    <div class="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+      <div class={["h-full rounded-full transition-all duration-300", bar_fill(@tone)]} style={"width: #{bar_w(@pct)}%"}></div>
+    </div>
+    """
+  end
+
+  defp bar_w(p) when is_number(p), do: p |> max(0.0) |> min(100.0) |> Float.round(1)
+  defp bar_w(_), do: 0.0
+
+  defp bar_fill(:ok), do: "bg-emerald-400"
+  defp bar_fill(:warn), do: "bg-amber-400"
+  defp bar_fill(:info), do: "bg-cyan-400"
+  defp bar_fill(_), do: "bg-slate-500"
+
+  defp safe_pct(num, den) when is_integer(num) and is_integer(den) and den > 0,
+    do: num * 100 / den
+
+  defp safe_pct(_num, _den), do: 0.0
+
+  # Laggards (non-empty, <100% covered) surface first; empty projects sink last.
+  defp sort_projects(entries) when is_list(entries) do
+    Enum.sort_by(entries, fn e ->
+      empty? = e.files_total == 0
+      {if(empty?, do: 1, else: 0), e.coverage_pct * 1.0, -e.files_total}
+    end)
+  end
+
+  defp sort_projects(_), do: []
+
+  defp proj_tone(%{files_total: 0}), do: :neutral
+  defp proj_tone(%{coverage_pct: p}) when is_number(p) and p >= 99.9, do: :ok
+  defp proj_tone(_), do: :warn
+
+  defp files_bar_tone(%{files_total: t, files_chunked: c}) when is_integer(t) and t > 0 and c >= t,
+    do: :ok
+
+  defp files_bar_tone(%{files_total: 0}), do: :neutral
+  defp files_bar_tone(_), do: :info
+
+  defp coverage_bar_tone(p) when is_number(p) and p >= 99.9, do: :ok
+  defp coverage_bar_tone(p) when is_number(p) and p > 0.0, do: :warn
+  defp coverage_bar_tone(_), do: :neutral
 
   ## Struct accessors — atom keys, nil-safe
 

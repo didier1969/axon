@@ -15,6 +15,7 @@ defmodule AxonDashboardWeb.Live.Nav do
   attr :instance_kind, :string, default: "unknown"
   attr :gpu_effective, :string, default: "unknown"
   attr :degraded_reason, :string, default: nil
+  attr :runtime_idle, :boolean, default: false
   attr :stale, :boolean, default: false
   attr :observed_age_ms, :integer, default: nil
   slot :inner_block, required: true
@@ -42,17 +43,32 @@ defmodule AxonDashboardWeb.Live.Nav do
             <.nav_link href="/mcp" current?={@current == :mcp} label="MCP" />
           </nav>
 
+          <% {h_tone, h_label, h_detail} = health(@stale, @observed_age_ms, @degraded_reason, @runtime_idle) %>
           <div class="ml-auto flex items-center gap-2 text-[11px] font-mono">
-            <.chip label="mode" value={@runtime_mode} tone={if @stale, do: :warn, else: :ok} />
-            <.chip label="instance" value={@instance_kind} tone={:neutral} />
-            <.chip label="gpu" value={@gpu_effective} tone={gpu_tone(@gpu_effective)} />
-            <.chip label="build" value={short_build(@build_id)} tone={:neutral} />
+            <.badge value={h_label} tone={h_tone} dot={true} />
+            <.badge label="instance" value={@instance_kind} tone={:neutral} />
+            <.badge label="mode" value={@runtime_mode} tone={:neutral} />
+            <.badge label="gpu" value={@gpu_effective} tone={gpu_tone(@gpu_effective)} />
+            <.badge label="build" value={short_build(@build_id)} tone={:neutral} />
           </div>
         </div>
-        <div :if={@degraded_reason} class="bg-amber-950/40 border-t border-amber-900/60 text-[11px] font-mono">
-          <div class="max-w-[1600px] mx-auto px-6 py-1.5 text-amber-300/90 flex items-center gap-2">
-            <span class="inline-block h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse"></span>
-            DEGRADED: {@degraded_reason}
+        <%!-- REQ-AXO-901856 — honest status line. The banner appears ONLY for a
+             real problem (stale envelope or a non-heartbeat degraded reason). A
+             fresh "missing_runtime_truth_heartbeat" while idle is no longer a red
+             alarm: the health pill reads IDLE and the footer carries the age. --%>
+        <div :if={h_tone in [:warn, :danger]} class={[
+          "border-t text-[11px] font-mono",
+          if(h_tone == :danger, do: "bg-red-950/40 border-red-900/60", else: "bg-amber-950/40 border-amber-900/60")
+        ]}>
+          <div class={[
+            "max-w-[1600px] mx-auto px-6 py-1.5 flex items-center gap-2",
+            if(h_tone == :danger, do: "text-red-300/90", else: "text-amber-300/90")
+          ]}>
+            <span class={[
+              "inline-block h-1.5 w-1.5 rounded-full animate-pulse",
+              if(h_tone == :danger, do: "bg-red-400", else: "bg-amber-400")
+            ]}></span>
+            {h_label}<span :if={h_detail}>: {h_detail}</span>
           </div>
         </div>
       </header>
@@ -93,33 +109,64 @@ defmodule AxonDashboardWeb.Live.Nav do
     """
   end
 
-  attr :label, :string, required: true
+  @doc """
+  REQ-AXO-901856 — single inline badge primitive shared across the whole
+  cockpit (header chips, stage tags, project tags). `label` is an optional
+  uppercase eyebrow; `value` the strong text; `tone` drives the one canonical
+  palette (ok/warn/danger/info/neutral); `dot` prepends a status dot.
+  """
+  attr :label, :string, default: nil
   attr :value, :string, required: true
   attr :tone, :atom, default: :neutral
+  attr :dot, :boolean, default: false
 
-  defp chip(assigns) do
+  def badge(assigns) do
     ~H"""
-    <div class={[
-      "flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px]",
-      chip_class(@tone)
+    <span class={[
+      "inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px] whitespace-nowrap",
+      badge_tone_class(@tone)
     ]}>
-      <span class="uppercase tracking-[0.14em] text-slate-500">{@label}</span>
-      <strong class="font-semibold tracking-wide">{@value}</strong>
-    </div>
+      <span :if={@dot} class={["h-1.5 w-1.5 rounded-full", badge_dot_class(@tone)]}></span>
+      <span :if={@label} class="uppercase tracking-[0.14em] text-slate-500">{@label}</span>
+      <strong class="font-semibold tracking-wide uppercase">{@value}</strong>
+    </span>
     """
   end
 
-  defp chip_class(:ok),
-    do: "border-emerald-500/30 bg-emerald-500/5 text-emerald-200"
+  @doc "Canonical tone → border/bg/text classes for every cockpit badge."
+  def badge_tone_class(:ok), do: "border-emerald-500/30 bg-emerald-500/5 text-emerald-200"
+  def badge_tone_class(:warn), do: "border-amber-500/40 bg-amber-500/10 text-amber-200"
+  def badge_tone_class(:danger), do: "border-red-500/40 bg-red-500/10 text-red-200"
+  def badge_tone_class(:info), do: "border-cyan-500/30 bg-cyan-500/5 text-cyan-200"
+  def badge_tone_class(_), do: "border-slate-700/60 bg-slate-800/40 text-slate-300"
 
-  defp chip_class(:warn),
-    do: "border-amber-500/40 bg-amber-500/10 text-amber-200"
+  defp badge_dot_class(:ok), do: "bg-emerald-400"
+  defp badge_dot_class(:warn), do: "bg-amber-400"
+  defp badge_dot_class(:danger), do: "bg-red-400"
+  defp badge_dot_class(:info), do: "bg-cyan-400"
+  defp badge_dot_class(_), do: "bg-slate-400"
 
-  defp chip_class(:danger),
-    do: "border-red-500/40 bg-red-500/10 text-red-200"
+  # REQ-AXO-901856 — derive one honest health verdict from observed truth.
+  # A fresh envelope (not stale) whose only complaint is a missing telemetry
+  # heartbeat is NOT degraded — it is an idle/quiet system, so it reads INFO,
+  # never a red DEGRADED alarm. Order: stale > hard-degraded > idle > live.
+  defp health(stale, observed_age_ms, degraded_reason, runtime_idle) do
+    cond do
+      stale or (is_integer(observed_age_ms) and observed_age_ms > 10_000) ->
+        {:danger, "STALE", age_label(observed_age_ms, true)}
 
-  defp chip_class(_),
-    do: "border-slate-700/60 bg-slate-800/40 text-slate-300"
+      is_binary(degraded_reason) and not heartbeat_reason?(degraded_reason) ->
+        {:warn, "DEGRADED", degraded_reason}
+
+      runtime_idle ->
+        {:info, "IDLE", "quiet cruise"}
+
+      true ->
+        {:ok, "LIVE", nil}
+    end
+  end
+
+  defp heartbeat_reason?(reason), do: String.contains?(reason, "heartbeat")
 
   defp gpu_tone("cuda"), do: :ok
   defp gpu_tone("tensorrt"), do: :ok
