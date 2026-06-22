@@ -8,6 +8,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// REQ-AXO-902028 — max implementors expanded from a single contract node in the
+/// dynamic-dispatch bridge, bounding path-search fan-out at high-fan-in traits
+/// (e.g. a marker trait with hundreds of impls).
+const CONTRACT_BRIDGE_FANOUT_CAP: usize = 32;
+
 /// IST relation_type domain (mirrors ist.edge.relation_type post-AGE
 /// retirement, before REQ-AXO-91505 broadens it). Stored as u8 in the CSR
 /// edge arrays for compactness.
@@ -750,35 +755,41 @@ impl IstGraph {
                     if visited.insert(target) {
                         parents.insert(target, (*node, rel));
                         if target == goal {
-                            // Reconstruct path by walking predecessors.
-                            // Each `parents[c] = (pred, edge_rel)` exposes
-                            // the edge `pred -> c`, so we accumulate one
-                            // relation_type per hop. chain_rel grows by
-                            // one less than chain_idx ; a placeholder is
-                            // prepended at index 0 to align lengths with
-                            // the source slot (which has no incoming edge
-                            // inside the path).
-                            let mut chain_idx: Vec<u32> = vec![goal];
-                            let mut chain_rel: Vec<RelationType> = Vec::new();
-                            let mut cursor = goal;
-                            while let Some((pred, edge_rel)) = parents.get(&cursor) {
-                                chain_idx.push(*pred);
-                                chain_rel.push(*edge_rel);
-                                if *pred == start {
-                                    break;
-                                }
-                                cursor = *pred;
-                            }
-                            chain_idx.reverse();
-                            chain_rel.reverse();
-                            chain_rel.insert(0, RelationType::Calls);
-                            let names: Vec<String> = chain_idx
-                                .iter()
-                                .map(|i| self.id_of(*i).to_string())
-                                .collect();
-                            return Some((names, chain_rel));
+                            return Some(self.reconstruct_bfs_path(goal, start, &parents));
                         }
                         next_frontier.push(target);
+                    }
+                }
+                // REQ-AXO-902028 — contract-dispatch bridge. A node that is the
+                // TARGET of IMPLEMENTS edges is a contract (trait / Protocol /
+                // ABC); follow those edges in REVERSE to reach the concrete
+                // implementors, so a path landing on the contract continues to
+                // the impl instead of dead-ending (dynamic-dispatch hole). The
+                // fan-out is capped to bound search blow-up at high-fan-in
+                // contracts, and it is gated on IMPLEMENTS being in the relation
+                // filter (so callers can opt out via an explicit filter). The
+                // bridged hop is recorded as an IMPLEMENTS relation traversed in
+                // reverse.
+                if rel_filter.is_empty() || rel_filter.contains(&RelationType::Implements) {
+                    let mut bridged = 0usize;
+                    for (implementor, rel) in self.reverse_neighbors(*node) {
+                        if rel != RelationType::Implements {
+                            continue;
+                        }
+                        if bridged >= CONTRACT_BRIDGE_FANOUT_CAP {
+                            break;
+                        }
+                        bridged += 1;
+                        if implementor != goal && excluded.contains(&implementor) {
+                            continue;
+                        }
+                        if visited.insert(implementor) {
+                            parents.insert(implementor, (*node, RelationType::Implements));
+                            if implementor == goal {
+                                return Some(self.reconstruct_bfs_path(goal, start, &parents));
+                            }
+                            next_frontier.push(implementor);
+                        }
                     }
                 }
             }
@@ -788,6 +799,38 @@ impl IstGraph {
             frontier = next_frontier;
         }
         None
+    }
+
+    /// Reconstruct a BFS path from `goal` back to `start` via the `parents`
+    /// predecessor map. Each `parents[c] = (pred, edge_rel)` exposes the edge
+    /// `pred -> c`, so one relation accumulates per hop; a placeholder `Calls`
+    /// is prepended at index 0 to align lengths with the source slot (which has
+    /// no incoming edge inside the path).
+    fn reconstruct_bfs_path(
+        &self,
+        goal: u32,
+        start: u32,
+        parents: &std::collections::HashMap<u32, (u32, RelationType)>,
+    ) -> (Vec<String>, Vec<RelationType>) {
+        let mut chain_idx: Vec<u32> = vec![goal];
+        let mut chain_rel: Vec<RelationType> = Vec::new();
+        let mut cursor = goal;
+        while let Some((pred, edge_rel)) = parents.get(&cursor) {
+            chain_idx.push(*pred);
+            chain_rel.push(*edge_rel);
+            if *pred == start {
+                break;
+            }
+            cursor = *pred;
+        }
+        chain_idx.reverse();
+        chain_rel.reverse();
+        chain_rel.insert(0, RelationType::Calls);
+        let names: Vec<String> = chain_idx
+            .iter()
+            .map(|i| self.id_of(*i).to_string())
+            .collect();
+        (names, chain_rel)
     }
 
     /// REQ-AXO-91486 — count reciprocal CALLS cycles (A→B + B→A) used by
@@ -1296,6 +1339,42 @@ mod tests {
         assert!(matches!(rels[0], RelationType::Calls)); // placeholder
         assert!(matches!(rels[1], RelationType::Calls)); // a→b
         assert!(matches!(rels[2], RelationType::Calls)); // b→c
+    }
+
+    #[test]
+    fn bfs_bridges_contract_to_implementor_via_reverse_implements() {
+        // REQ-AXO-902028 — dynamic dispatch: `caller` CALLS the contract `Trait`;
+        // `Foo` IMPLEMENTS `Trait` (edge Foo→Trait). A forward-only BFS dead-ends
+        // at `Trait`; the contract bridge follows the IMPLEMENTS edge in reverse
+        // so caller→Foo resolves to [caller, Trait, Foo].
+        let nodes = vec![
+            node("caller", "AXO", NodeKind::Function),
+            node("Trait", "AXO", NodeKind::Function),
+            node("Foo", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("caller", "Trait", RelationType::Calls),
+            edge("Foo", "Trait", RelationType::Implements),
+        ];
+        let g = IstGraph::build(nodes, edges);
+
+        let (names, rels) = g
+            .bfs_shortest_path("caller", "Foo", 6, &[])
+            .expect("contract bridge must connect caller→Foo");
+        assert_eq!(
+            names,
+            vec!["caller".to_string(), "Trait".to_string(), "Foo".to_string()]
+        );
+        assert!(matches!(rels[1], RelationType::Calls)); // caller→Trait
+        assert!(matches!(rels[2], RelationType::Implements)); // bridged Trait→Foo
+
+        // An explicit relation filter that omits IMPLEMENTS opts out of the
+        // bridge — the caller can still restrict traversal to pure call edges.
+        assert!(
+            g.bfs_shortest_path("caller", "Foo", 6, &[RelationType::Calls])
+                .is_none(),
+            "a CALLS-only filter must disable the implements bridge"
+        );
     }
 
     #[test]
