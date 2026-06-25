@@ -241,6 +241,14 @@ impl McpServer {
             }));
         }
 
+        // REQ-AXO-902067 — global no-phantom sweep. Prune every HAS_REMNANT edge
+        // whose target vanished from ALL canonical graphs (ist.Symbol ∪ ist.Chunk
+        // ∪ soll.Node), independent of which rulesets re-scanned. The s89 incident
+        // (TMG→gone chunks) was a transient RAM-snapshot lag, but a stale edge
+        // could otherwise linger if a target disappears without its ruleset being
+        // re-run; this sweep makes PIL-AXO-9002 no-phantom hold by construction.
+        let orphaned_pruned = self.prune_orphaned_remnant_edges(&project_code);
+
         let lines: Vec<String> = summaries
             .iter()
             .map(|s| {
@@ -264,7 +272,7 @@ impl McpServer {
             })
             .collect();
         let report = format!(
-            "## detect_remnants — project {project_code}\n\nAdvisory residue scan (code-anchored; comments excluded). Surfaces via `tech_debt_inventory` + pre-flight + work-plan.\n\n{}\n\nTotal remnants linked: {total_remnants}.",
+            "## detect_remnants — project {project_code}\n\nAdvisory residue scan (code-anchored; comments excluded). Surfaces via `tech_debt_inventory` + pre-flight + work-plan.\n\n{}\n\nTotal remnants linked: {total_remnants}. No-phantom sweep: {orphaned_pruned} orphaned edge(s) pruned.",
             lines.join("\n")
         );
 
@@ -273,6 +281,7 @@ impl McpServer {
             "structuredContent": {
                 "project_code": project_code,
                 "total_remnants": total_remnants,
+                "orphaned_pruned": orphaned_pruned,
                 "migrations": summaries,
             }
         }))
@@ -423,6 +432,24 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902067 — prune fully-orphaned HAS_REMNANT edges (target absent
+    /// from ist.Symbol ∪ ist.Chunk ∪ soll.Node) for `project_code`. Returns the
+    /// count removed. HAS_REMNANT is a detector-managed projection (never intent),
+    /// so deleting a phantom edge is safe and upholds PIL-AXO-9002 no-phantom by
+    /// construction.
+    fn prune_orphaned_remnant_edges(&self, project_code: &str) -> usize {
+        let n = self
+            .graph_store
+            .query_count(&orphaned_remnant_count_sql(project_code))
+            .unwrap_or(0) as usize;
+        if n > 0 {
+            let _ = self
+                .graph_store
+                .execute(&orphaned_remnant_prune_sql(project_code));
+        }
+        n
+    }
+
     /// Set `metadata.baseline_remnants` once (first run) so `tech_debt_inventory`
     /// can compute honest progress and a later 0 means "scanned-and-clean".
     fn set_tmg_baseline(&self, tmg_id: &str, baseline: usize) {
@@ -435,9 +462,63 @@ impl McpServer {
     }
 }
 
+/// REQ-AXO-902067 — count HAS_REMNANT edges for `project_code` whose target is
+/// absent from every canonical graph (the no-phantom orphan set).
+fn orphaned_remnant_count_sql(project_code: &str) -> String {
+    let p = escape_sql(project_code);
+    format!(
+        "SELECT count(*) FROM soll.Edge e WHERE e.relation_type = 'HAS_REMNANT' \
+         AND e.project_code = '{p}' \
+         AND NOT EXISTS (SELECT 1 FROM ist.Symbol s WHERE s.id = e.target_id) \
+         AND NOT EXISTS (SELECT 1 FROM ist.Chunk c WHERE c.id = e.target_id) \
+         AND NOT EXISTS (SELECT 1 FROM soll.Node n WHERE n.id = e.target_id)"
+    )
+}
+
+/// REQ-AXO-902067 — delete the orphan set computed by [`orphaned_remnant_count_sql`].
+/// HAS_REMNANT is a detector-managed projection (never intent), so the delete is
+/// safe; it upholds PIL-AXO-9002 no-phantom by construction at every run.
+fn orphaned_remnant_prune_sql(project_code: &str) -> String {
+    let p = escape_sql(project_code);
+    format!(
+        "DELETE FROM soll.Edge AS e WHERE e.relation_type = 'HAS_REMNANT' \
+         AND e.project_code = '{p}' \
+         AND NOT EXISTS (SELECT 1 FROM ist.Symbol s WHERE s.id = e.target_id) \
+         AND NOT EXISTS (SELECT 1 FROM ist.Chunk c WHERE c.id = e.target_id) \
+         AND NOT EXISTS (SELECT 1 FROM soll.Node n WHERE n.id = e.target_id)"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orphaned_prune_sql_targets_all_three_graphs() {
+        let sql = orphaned_remnant_prune_sql("AXO");
+        assert!(sql.starts_with("DELETE FROM soll.Edge"));
+        assert!(sql.contains("e.relation_type = 'HAS_REMNANT'"));
+        assert!(sql.contains("e.project_code = 'AXO'"));
+        assert!(sql.contains("ist.Symbol"));
+        assert!(sql.contains("ist.Chunk"));
+        assert!(sql.contains("soll.Node"));
+    }
+
+    #[test]
+    fn orphaned_count_and_prune_share_the_same_predicate() {
+        // Both must scope identically so the reported count matches the delete.
+        let c = orphaned_remnant_count_sql("AXO");
+        let d = orphaned_remnant_prune_sql("AXO");
+        for needle in ["ist.Symbol", "ist.Chunk", "soll.Node", "HAS_REMNANT"] {
+            assert!(c.contains(needle) && d.contains(needle), "missing {needle}");
+        }
+    }
+
+    #[test]
+    fn orphaned_prune_sql_escapes_project() {
+        let sql = orphaned_remnant_prune_sql("A'X");
+        assert!(sql.contains("'A''X'"));
+    }
 
     #[test]
     fn strip_comments_removes_line_markers() {
