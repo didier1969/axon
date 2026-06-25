@@ -14,6 +14,7 @@ use super::McpServer;
 
 mod question_analysis;
 mod retrieval_model;
+mod retrieval_routing;
 mod retrieval_scoring;
 mod util;
 use util::*;
@@ -1274,73 +1275,9 @@ impl McpServer {
         format!(" AND ({predicates})")
     }
 
-    fn term_match_sql(terms: &[String], column: &str) -> String {
-        if terms.is_empty() {
-            return "1=1".to_string();
-        }
-        terms
-            .iter()
-            .map(|term| format!("lower({column}) LIKE '%{}%'", Self::escape_sql(term)))
-            .collect::<Vec<_>>()
-            .join(" OR ")
-    }
-
-    fn path_match_sql(path_hints: &[String], column: &str) -> String {
-        if path_hints.is_empty() {
-            return "1=0".to_string();
-        }
-        path_hints
-            .iter()
-            .map(|hint| format!("lower({column}) LIKE '%{}%'", Self::escape_sql(hint)))
-            .collect::<Vec<_>>()
-            .join(" OR ")
-    }
-
-    fn has_rationale_language(question: &str) -> bool {
-        let lower = question.to_ascii_lowercase();
-        [
-            "why",
-            "rationale",
-            "decision",
-            "requirement",
-            "constraint",
-            "intent",
-            "designed this way",
-            "design choice",
-            "architectural intent",
-        ]
-        .iter()
-        .any(|needle| lower.contains(needle))
-    }
-
-    fn route_prefers_operational_code(route: RetrievalRoute) -> bool {
-        matches!(
-            route,
-            RetrievalRoute::ExactLookup | RetrievalRoute::Wiring | RetrievalRoute::Impact
-        )
-    }
-
-    fn prefer_project_intent(question: &str, mode: Option<&str>) -> bool {
-        if mode.is_some_and(|value| value.eq_ignore_ascii_case("intent")) {
-            return true;
-        }
-        let lower = question.to_ascii_lowercase();
-        [
-            "soll mutation",
-            "what soll mutation",
-            "implementation plan",
-            "concept foundation",
-            "must support",
-            "weekly plan",
-            "project intent",
-            "entrench",
-            "recipe creation",
-            "normalization",
-            "attachment",
-        ]
-        .iter()
-        .any(|needle| lower.contains(needle))
-    }
+    // REQ-AXO-219 — retrieval routing + SQL-fragment helpers (term_match_sql,
+    // path_match_sql, has_rationale_language, route_prefers_operational_code,
+    // prefer_project_intent) moved to the `retrieval_routing` submodule.
 
     // REQ-AXO-219 — retrieval URI/doc scoring helpers (project_intent_doc_weight,
     // canonical_project_doc_weight, workspace_noise_penalty, uri_penalty_reason,
@@ -5080,7 +5017,9 @@ impl McpServer {
     }
 
 
-    fn escape_sql(value: &str) -> String {
+    // REQ-AXO-219 — pub(super) so the extracted retrieval submodules
+    // (retrieval_routing) can reuse the same single-quote escaper.
+    pub(super) fn escape_sql(value: &str) -> String {
         value.replace('\'', "''")
     }
 }
