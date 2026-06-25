@@ -5,6 +5,10 @@ use serde_json::{json, Value};
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
 use crate::embedding_contract::GRAPH_MODEL_ID;
+use crate::ist_snapshot::structural_invariants::{
+    evaluate_all, InvariantMode, NodeMatcher, StructuralInvariant,
+};
+use crate::ist_snapshot::RelationType;
 
 impl McpServer {
     fn json_to_i64(value: &Value) -> Option<i64> {
@@ -1258,6 +1262,242 @@ impl McpServer {
             }
         }))
     }
+
+    /// REQ-AXO-157 (DEC-AXO-901649) — declarative structural-invariants
+    /// validator. Rules are a minimal SOLL-anchored predicate schema
+    /// (`{mode, source_layer/kind, target_layer/kind, relations[]}`), NOT a
+    /// graph-query DSL. They live in SOLL as `Guideline` nodes carrying a
+    /// `structural_invariant` metadata object (joinable to intent via `why`)
+    /// and/or are passed inline via `rules`. Each rule is evaluated against the
+    /// RAM IST snapshot via the same primitives as `architectural_drift`.
+    pub(crate) fn axon_structural_invariants(&self, args: &Value) -> Option<Value> {
+        let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("");
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .clamp(1, 1000) as usize;
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+        // 1) Assemble rules: inline `rules` first, then SOLL-stored rules.
+        let mut rules: Vec<StructuralInvariant> = Vec::new();
+        let mut inline_rule_count = 0usize;
+        if let Some(arr) = args.get("rules").and_then(|v| v.as_array()) {
+            for (i, rv) in arr.iter().enumerate() {
+                let raw_id = rv.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                let id = if raw_id.is_empty() {
+                    format!("inline-{i}")
+                } else {
+                    raw_id.to_string()
+                };
+                let title = rv
+                    .get("title")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("inline rule")
+                    .to_string();
+                if let Some(rule) = parse_structural_invariant(&id, &title, rv) {
+                    rules.push(rule);
+                    inline_rule_count += 1;
+                }
+            }
+        }
+        let mut soll_rule_count = 0usize;
+        {
+            let proj_filter = if project.is_empty() {
+                String::new()
+            } else {
+                format!(" AND project_code IN ('{}', 'PRO')", sanitize_project(project))
+            };
+            let sql = format!(
+                "SELECT id, title, (metadata->'structural_invariant')::text FROM {} \
+                 WHERE type='Guideline' AND metadata->'structural_invariant' IS NOT NULL{} ORDER BY id",
+                self.graph_store.soll_table("Node"),
+                proj_filter
+            );
+            if let Ok(raw) = self.graph_store.query_json(&sql) {
+                if let Ok(rows) = serde_json::from_str::<Vec<Vec<String>>>(&raw) {
+                    for row in rows {
+                        if row.len() < 3 {
+                            continue;
+                        }
+                        if let Ok(inv) = serde_json::from_str::<Value>(&row[2]) {
+                            if let Some(rule) = parse_structural_invariant(&row[0], &row[1], &inv) {
+                                rules.push(rule);
+                                soll_rule_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if rules.is_empty() {
+            let report = "🛠️ **No structural-invariant rules defined.**\n\nDefine rules as SOLL `Guideline` nodes carrying a `structural_invariant` metadata object, e.g.\n```json\n{\"structural_invariant\": {\"mode\": \"forbidden\", \"source_layer\": \"AXO::mcp/\", \"target_layer\": \"AXO::ist_snapshot/\", \"relations\": [\"CALLS\"]}}\n```\nor pass them inline via `rules=[{mode, source_layer|source_kind, target_layer|target_kind, relations[]}]`.".to_string();
+            return Some(json!({
+                "content": [{ "type": "text", "text": report }],
+                "data": {
+                    "status": "no_rules",
+                    "project": project,
+                    "rules_loaded": 0u64,
+                    "violations": [],
+                    "total_available": 0u64,
+                    "next_call_hint": {
+                        "params": { "tool": "soll_manager", "action": "create", "entity": "guideline" },
+                        "reason": "author a structural_invariant rule in SOLL, then re-run"
+                    }
+                }
+            }));
+        }
+
+        // 2) Warm RAM snapshot (same contract as architectural_drift).
+        let view = crate::ist_snapshot::process_view();
+        let ram_warm = !project.is_empty() && view.is_warm(project);
+        if !ram_warm {
+            let report = format!(
+                "🛠️ **structural_invariants requires a warm IstGraph snapshot for project `{project}`** ({} rule(s) loaded).\n\nLoad it via `ist_snapshot_warm project={project}` then retry.",
+                rules.len()
+            );
+            return Some(json!({
+                "content": [{ "type": "text", "text": report }],
+                "data": {
+                    "status": "warn_ram_cold",
+                    "project": project,
+                    "rules_loaded": rules.len() as u64,
+                    "surfaces_used": ["graph_ram_pending"],
+                    "surfaces_degraded": ["graph_ram_unavailable"],
+                    "total_available": 0u64,
+                    "next_call_hint": {
+                        "params": { "tool": "ist_snapshot_warm", "project": project },
+                        "reason": "warm the RAM snapshot before validating invariants"
+                    }
+                }
+            }));
+        }
+        let snap = match view.cache_handle().get(project) {
+            Some(s) => s,
+            None => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": "structural_invariants: snapshot race — RAM warm but absent at fetch; retry." }],
+                    "data": { "status": "internal_race", "surfaces_degraded": ["graph_ram_unavailable"] }
+                }));
+            }
+        };
+
+        // 3) Evaluate every rule, then sort + paginate deterministically.
+        let mut violations = evaluate_all(&snap, project, &rules);
+        violations.sort_by(|a, b| {
+            (a.rule_id.as_str(), a.source_id.as_str())
+                .cmp(&(b.rule_id.as_str(), b.source_id.as_str()))
+        });
+        let total_available = violations.len() as u64;
+        let display_rows: Vec<Vec<Value>> = violations
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|v| {
+                vec![
+                    Value::String(v.rule_id.clone()),
+                    Value::String(v.source_id.clone()),
+                    Value::String(
+                        v.target_id.clone().unwrap_or_else(|| "(missing target)".to_string()),
+                    ),
+                    Value::String(v.relation.map(|r| r.as_db().to_string()).unwrap_or_default()),
+                ]
+            })
+            .collect();
+        let returned = display_rows.len() as u64;
+        let has_more = (offset as u64).saturating_add(returned) < total_available;
+        let display_json = serde_json::to_string(&display_rows).unwrap_or_else(|_| "[]".to_string());
+
+        let report = if display_rows.is_empty() {
+            format!(
+                "✅ No structural-invariant violations in project `{project}` ({} rule(s) checked: {inline_rule_count} inline, {soll_rule_count} from SOLL).",
+                rules.len()
+            )
+        } else {
+            format!(
+                "### 🚨 Structural-invariant violations in `{project}` ({total_available} across {} rule(s))\n\n{}\n\nEach row's `Rule` is the governing SOLL node — run `why <rule>` for its intent.",
+                rules.len(),
+                format_table_from_json(&display_json, &["Rule", "Source", "Target", "Relation"])
+            )
+        };
+
+        let next_call_hint = if has_more {
+            json!({
+                "params": { "project": project, "limit": limit, "offset": offset + display_rows.len() },
+                "reason": "more violations available; bump offset to paginate"
+            })
+        } else if let Some(first) = violations.first() {
+            json!({
+                "params": { "tool": "why", "id": first.rule_id },
+                "reason": "inspect the intent that governs the first violated rule"
+            })
+        } else {
+            json!({
+                "params": { "follow_up": "architectural_drift for layer-only boundaries" },
+                "reason": "invariants clean ; cross-check layer drift"
+            })
+        };
+
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "status": if total_available == 0 { "ok" } else { "warn_invariants_violated" },
+                "project": project,
+                "rules_loaded": rules.len() as u64,
+                "rules_inline": inline_rule_count as u64,
+                "rules_from_soll": soll_rule_count as u64,
+                "violations": display_rows,
+                "total_available": total_available,
+                "returned": returned,
+                "has_more": has_more,
+                "surfaces_used": ["graph_ram", "soll_traceability"],
+                "next_call_hint": next_call_hint
+            }
+        }))
+    }
+}
+
+/// REQ-AXO-157 — sanitize a project code for inline SQL interpolation in the
+/// rule loader (project codes are `[A-Za-z0-9_-]`). Drops anything else so a
+/// malformed `project` arg can never inject SQL.
+fn sanitize_project(p: &str) -> String {
+    p.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
+}
+
+/// REQ-AXO-157 — parse one `structural_invariant` JSON object (from SOLL
+/// metadata or an inline `rules[]` entry) into a [`StructuralInvariant`].
+/// Returns `None` when `mode` is missing/unrecognised.
+fn parse_structural_invariant(id: &str, title: &str, v: &Value) -> Option<StructuralInvariant> {
+    let mode = InvariantMode::from_str_ci(v.get("mode")?.as_str()?)?;
+    let source = NodeMatcher::from_fields(
+        v.get("source_layer").and_then(|x| x.as_str()),
+        v.get("source_kind").and_then(|x| x.as_str()),
+    );
+    let target = NodeMatcher::from_fields(
+        v.get("target_layer").and_then(|x| x.as_str()),
+        v.get("target_kind").and_then(|x| x.as_str()),
+    );
+    let relations = v
+        .get("relations")
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.as_str())
+                .map(RelationType::from_db)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(StructuralInvariant {
+        id: id.to_string(),
+        title: title.to_string(),
+        mode,
+        source,
+        target,
+        relations,
+    })
 }
 
 /// REQ-AXO-212 — render one diagnose_indexing cause as a two-line

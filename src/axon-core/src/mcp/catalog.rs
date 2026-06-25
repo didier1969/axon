@@ -996,6 +996,20 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "structural_invariants",
+                "description": "[GOVERNANCE] REQ-AXO-157 — validate declarative structural invariants against the IST. A rule is {mode: forbidden|required, source_layer|source_kind, target_layer|target_kind, relations[]}. Rules live in SOLL as Guideline nodes carrying a `structural_invariant` metadata object (joinable to intent via `why`) and/or are passed inline via `rules`. RAM-first via IstGraphView.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": { "type": "string", "description": "Project code (required for the RAM snapshot lookup, e.g. 'AXO'). Also scopes which SOLL Guideline rules load (project + PRO)." },
+                        "rules":   { "type": "array", "description": "Optional inline rules. Each: {id?, title?, mode: 'forbidden'|'required', source_layer?, source_kind?, target_layer?, target_kind?, relations?: [\"CALLS\",\"IMPORTS\",...]}. Combined with SOLL-stored rules.", "items": { "type": "object" } },
+                        "limit":   { "type": "integer", "description": "Max violations returned (default 50, max 1000).", "default": 50 },
+                        "offset":  { "type": "integer", "description": "Pagination offset.", "default": 0 }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
                 "name": "bidi_trace",
                 "description": "[DX] Bidirectional trace: climbs to Entry Points (up) and lists deep calls (down).",
                 "inputSchema": {

@@ -176,6 +176,7 @@ impl McpServer {
             "audit" => &["health", "anomalies", "change_safety"],
             "health" => &["status", "audit", "project_status"],
             "architectural_drift" => &["conception_view", "anomalies", "why"],
+            "structural_invariants" => &["why", "architectural_drift", "impact"],
             "snapshot_history" => &["snapshot_diff", "project_status"],
             "snapshot_diff" => &["project_status", "anomalies"],
             "soll_query_context" => &["soll_work_plan", "soll_verify_requirements"],
@@ -273,6 +274,7 @@ impl McpServer {
             | "anomalies"
             | "conception_view"
             | "architectural_drift"
+            | "structural_invariants"
             | "audit"
             | "change_safety"
             | "snapshot_history"
@@ -326,6 +328,9 @@ impl McpServer {
             "health" => "establish operational health before deeper diagnosis",
             "architectural_drift" => {
                 "detect deviation between current structure and intended shape"
+            }
+            "structural_invariants" => {
+                "validate declarative forbidden/required edge invariants against the IST"
             }
             "soll_query_context" => "recover compact canonical intent",
             "soll_work_plan" => "turn intent into executable work ordering",
@@ -1513,6 +1518,7 @@ impl McpServer {
             "sql" => self.axon_sql(arguments),
             "semantic_clones" => self.axon_semantic_clones(arguments),
             "architectural_drift" => self.axon_architectural_drift(arguments),
+            "structural_invariants" => self.axon_structural_invariants(arguments),
             "bidi_trace" => self.axon_bidi_trace(arguments),
             "api_break_check" => self.axon_api_break_check(arguments),
             "simulate_mutation" => self.axon_simulate_mutation(arguments),
