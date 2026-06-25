@@ -67,11 +67,11 @@ impl GraphStore {
 
     pub fn execute(&self, query: &str) -> Result<()> {
         // REQ-AXO-901881 W2 — native deadpool execute (was the FFI exec_fn).
-        if self.pool.native.run_execute(query) {
-            Ok(())
-        } else {
-            Err(anyhow!("Writer Error: {query}"))
-        }
+        // REQ-AXO-902075 — surface the real PG error, not just the query text.
+        self.pool
+            .native
+            .run_execute(query)
+            .map_err(|e| anyhow!("Writer Error: {e} | query: {query}"))
     }
 
     pub fn execute_param(&self, query: &str, params: &serde_json::Value) -> Result<()> {
@@ -302,14 +302,9 @@ impl GraphStore {
         }
         combined.push_str("COMMIT;");
 
-        if self.pool.native.run_execute(&combined) {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "Batch Writer Error on batch (size={})",
-                queries.len()
-            ))
-        }
+        self.pool.native.run_execute(&combined).map_err(|e| {
+            anyhow!("Batch Writer Error (size={}): {e}", queries.len())
+        })
     }
 
     /// REQ-AXO-901881 W2 — native query dispatcher (was `query_on_ctx`, the
@@ -507,8 +502,8 @@ mod tests {
 
         let write = store
             .execute_raw_sql_gateway(
-                "INSERT INTO ist.IndexedFile (path, content_hash, last_seen_ms) \
-                 VALUES ('/tmp/sql_gateway.ex', 'hash-1', 1)",
+                "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) \
+                 VALUES ('/tmp/sql_gateway.ex', 'AXO', 'hash-1', 1)",
             )
             .unwrap();
         assert!(write.contains("\"ok\":true"), "{write}");

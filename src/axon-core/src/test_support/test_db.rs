@@ -373,7 +373,9 @@ fn apply_test_autoseed_triggers(pg_port: &str, dbname: &str) {
     const SQL: &str = "\
 CREATE OR REPLACE FUNCTION ist.test_autoseed_project() RETURNS TRIGGER AS $$\n\
 BEGIN\n\
-    INSERT INTO axon.Project (code) VALUES (NEW.project_code) ON CONFLICT (code) DO NOTHING;\n\
+    IF NEW.project_code IS NOT NULL THEN\n\
+        INSERT INTO axon.Project (code) VALUES (NEW.project_code) ON CONFLICT (code) DO NOTHING;\n\
+    END IF;\n\
     RETURN NEW;\n\
 END;\n\
 $$ LANGUAGE plpgsql;\n\
@@ -405,6 +407,9 @@ CREATE TRIGGER trg_test_autoseed_edge BEFORE INSERT ON ist.Edge\n\
 DROP TRIGGER IF EXISTS trg_test_autoseed_chunk ON ist.Chunk;\n\
 CREATE TRIGGER trg_test_autoseed_chunk BEFORE INSERT ON ist.Chunk\n\
     FOR EACH ROW EXECUTE FUNCTION ist.test_autoseed_chunk();\n\
+DROP TRIGGER IF EXISTS trg_test_autoseed_indexedfile ON ist.IndexedFile;\n\
+CREATE TRIGGER trg_test_autoseed_indexedfile BEFORE INSERT ON ist.IndexedFile\n\
+    FOR EACH ROW EXECUTE FUNCTION ist.test_autoseed_project();\n\
 DROP TRIGGER IF EXISTS trg_test_autoseed_gps ON ist.GraphProjectionState;\n\
 CREATE TRIGGER trg_test_autoseed_gps BEFORE INSERT ON ist.GraphProjectionState\n\
     FOR EACH ROW EXECUTE FUNCTION ist.test_autoseed_gps();\n\

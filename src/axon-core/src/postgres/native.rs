@@ -338,7 +338,11 @@ impl NativePgCtx {
 
     /// Execute a (possibly multi-statement) SQL string. Mirrors the plugin's
     /// `pg_execute`: returns `true` on success, `false` on any error.
-    pub fn run_execute(&self, sql: &str) -> bool {
+    /// REQ-AXO-902075 — returns the real PG error instead of a bare bool, so
+    /// callers (GraphStore::execute) can surface the underlying cause (FK
+    /// violation, NOT NULL, CHECK, …) to the LLM/operator rather than the opaque
+    /// "Writer Error: <query>" that hid every failure (PIL-AXO-002).
+    pub fn run_execute(&self, sql: &str) -> Result<(), String> {
         let pool = self.pool.clone();
         let schema = self.schema_search_path.clone();
         let sql = sql.to_string();
@@ -347,18 +351,31 @@ impl NativePgCtx {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!("native pg execute: pool acquire failed: {e}");
-                    return false;
+                    return Err(format!("pool acquire failed: {e}"));
                 }
             };
             if let Err(e) = apply_session_setup(&conn, &schema).await {
                 tracing::warn!("native pg execute: set search_path failed: {e}");
-                return false;
+                return Err(format!("set search_path failed: {e}"));
             }
             match conn.batch_execute(&sql).await {
-                Ok(_) => true,
+                Ok(_) => Ok(()),
                 Err(e) => {
-                    tracing::warn!("native pg execute: {e} | {sql}");
-                    false
+                    // tokio_postgres Display is terse ("db error"); the real
+                    // cause (SQLSTATE + message + constraint) lives in the
+                    // DbError. Surface it so callers see WHY (REQ-AXO-902075).
+                    let detail = e
+                        .as_db_error()
+                        .map(|db| {
+                            let mut s = format!("{}: {}", db.code().code(), db.message());
+                            if let Some(c) = db.constraint() {
+                                s.push_str(&format!(" [constraint={c}]"));
+                            }
+                            s
+                        })
+                        .unwrap_or_else(|| e.to_string());
+                    tracing::warn!("native pg execute: {detail} | {sql}");
+                    Err(detail)
                 }
             }
         })

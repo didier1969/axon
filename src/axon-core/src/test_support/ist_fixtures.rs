@@ -306,6 +306,30 @@ impl IstSeed {
         self.edges.push(fixture);
         self
     }
+
+    /// REQ-AXO-902075 — distinct project codes referenced by this seed. The
+    /// per-test PG is fresh, but the IST RAM snapshot cache is PROCESS-global:
+    /// a sibling test may have published a snapshot for one of these codes and
+    /// never evicted it, so a reader (inspect / path / resolve) would serve that
+    /// stale snapshot instead of this test's freshly-seeded PG. The harness
+    /// evicts these before handing back the server (test-isolation, REQ-901721
+    /// family).
+    pub fn project_codes(&self) -> std::collections::BTreeSet<String> {
+        let mut set = std::collections::BTreeSet::new();
+        for s in &self.symbols {
+            set.insert(s.project_code.clone());
+        }
+        for c in &self.calls {
+            set.insert(c.project_code.clone());
+        }
+        for n in &self.nodes {
+            set.insert(n.project_code.clone());
+        }
+        for e in &self.edges {
+            set.insert(e.project_code.clone());
+        }
+        set
+    }
 }
 
 /// Seed all fixtures in the bundle into `store`. Writes go through the PG
@@ -369,6 +393,13 @@ pub fn create_test_server_with_ist_seed(seed: IstSeed) -> Result<TestServerHarne
     let test_db = TestDb::create();
     let store = Arc::new(GraphStore::new_with_database(&db_root, &test_db.url())?);
     seed_ist(&store, &seed)?;
+    // REQ-AXO-902075 — drop any stale process-global RAM IST snapshot for the
+    // seeded projects so readers fall through to THIS test's PG (lazy-warmed),
+    // not a snapshot a sibling test left warm (fixes the order-dependent
+    // `test_axon_inspect` flake; test-isolation REQ-901721 family).
+    for code in seed.project_codes() {
+        crate::ist_snapshot::evict_process_snapshot(&code);
+    }
     let server = crate::mcp::McpServer::new(store.clone());
     Ok(TestServerHarness {
         server,

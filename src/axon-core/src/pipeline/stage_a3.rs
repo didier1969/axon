@@ -417,54 +417,11 @@ mod tests {
         assert_eq!(count, 1);
     }
 
-    /// REQ-AXO-901897 (DBQ slice 1) — (c) A3 stamps status='parsed' (A-graph
-    /// done), NOT the legacy 'indexed', and releases the claim lease.
-    ///
-    /// Exercises the standalone single-file A3 writer
-    /// `GraphStore::upsert_indexed_file` (the same UPSERT the batch path mirrors
-    /// in bulk_writer::copy_indexed_files_in_tx). This runs on the test store's
-    /// own connection — deterministic, independent of the bulk_writer global
-    /// pool used by the `a3_enroll` batch siblings.
-    #[tokio::test]
-    async fn upsert_indexed_file_advances_claim_to_parsed_and_clears_lease() {
-        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        // Pre-seed the row as a claimed 'parsing' file (as the claim feeder
-        // would leave it) so we prove A3's UPSERT advances it to 'parsed' and
-        // releases the lease.
-        store
-            .execute(
-                "INSERT INTO ist.IndexedFile \
-                    (path, project_code, content_hash, last_seen_ms, status, discovered_ms, retry_count, lease_until_ms) \
-                 VALUES ('/tmp/a3_parsed.rs','AXO','',1,'parsing',1,1,999999999999)",
-            )
-            .unwrap();
-
-        store
-            .upsert_indexed_file("/tmp/a3_parsed.rs", "hash-parsed", 1_700_000_000_000)
-            .unwrap();
-
-        let n_parsed = store
-            .query_count(
-                "SELECT count(*) FROM ist.IndexedFile \
-                 WHERE path = '/tmp/a3_parsed.rs' AND status = 'parsed' AND lease_until_ms = 0 \
-                   AND retry_count = 0 AND content_hash = 'hash-parsed'",
-            )
-            .unwrap();
-        assert_eq!(
-            n_parsed, 1,
-            "A3 must advance the row to status='parsed' with lease + retry cleared and the new hash recorded"
-        );
-
-        let n_indexed = store
-            .query_count(
-                "SELECT count(*) FROM ist.IndexedFile WHERE path = '/tmp/a3_parsed.rs' AND status = 'indexed'",
-            )
-            .unwrap();
-        assert_eq!(
-            n_indexed, 0,
-            "A3 must NOT write the legacy 'indexed' status"
-        );
-    }
+    // REQ-AXO-901897 — the `upsert_indexed_file_advances_claim_to_parsed_and_clears_lease`
+    // test was removed with the dead `GraphStore::upsert_indexed_file` helper it
+    // exercised (REQ-AXO-902075): no production caller + a project_code-less INSERT
+    // that violated the NOT NULL FK (REQ-AXO-901860). A3's "parsed not indexed"
+    // semantics stay covered by the bulk-path `a3_enroll_*` tests below.
 
     /// REQ-AXO-901916 (PIL-007 / CP5a) — the dedup cache hydrates by the
     /// `content_hash <> ''` "A-DONE" predicate, NOT a status column. The

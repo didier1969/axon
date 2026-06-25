@@ -668,39 +668,13 @@ impl GraphStore {
     // status='pending'/'indexing' phase ; chunks land directly in
     // ist.Chunk via A3.
 
-    /// REQ-AXO-289 S3c — UPSERT a row into the v2 watcher filter table
-    /// `IndexedFile(path, content_hash, last_seen_ms)`. Idempotent via
-    /// `ON CONFLICT (path) DO UPDATE`. Standalone helper for path-only
-    /// callers (e.g. cache reconstitution tests); the streaming A3 stage
-    /// goes through [`upsert_graph`] so the IndexedFile UPSERT lands
-    /// inside the same transaction as the Symbol + AGE relation inserts.
-    pub fn upsert_indexed_file(
-        &self,
-        path: &str,
-        content_hash: &str,
-        last_seen_ms: i64,
-    ) -> Result<()> {
-        let safe_path = Self::escape_sql(path);
-        let safe_hash = Self::escape_sql(content_hash);
-        // REQ-AXO-901897 (DBQ slice 1) — A3 stamps 'parsed' (A-graph done), not
-        // the legacy 'indexed'. 'parsed' is an A-DONE state → load_all_indexed_files
-        // hydrates the dedup cache from it, and the claimable index/feeder no
-        // longer see this row. lease_until_ms is cleared (claim released).
-        self.execute(&format!(
-            "INSERT INTO IndexedFile (path, content_hash, last_seen_ms, status, retry_count, last_attempt_ms, lease_until_ms) \
-             VALUES ('{path}', '{hash}', {ts}, 'parsed', 0, NULL, 0) \
-             ON CONFLICT (path) DO UPDATE SET \
-                 content_hash    = EXCLUDED.content_hash, \
-                 last_seen_ms    = EXCLUDED.last_seen_ms, \
-                 status          = 'parsed', \
-                 retry_count     = 0, \
-                 last_attempt_ms = NULL, \
-                 lease_until_ms  = 0;",
-            path = safe_path,
-            hash = safe_hash,
-            ts = last_seen_ms,
-        ))
-    }
+    // REQ-AXO-289 S3c — the standalone `upsert_indexed_file(path, content_hash,
+    // last_seen_ms)` helper was removed (REQ-AXO-902075): it had no production
+    // caller (the streaming A3 stage goes through `upsert_graph`), and its
+    // project_code-less INSERT could never satisfy the NOT NULL FK added in
+    // REQ-AXO-901860 — it only ever worked on the UPDATE branch of a pre-existing
+    // row. A3 "stamps parsed not indexed" semantics stay covered by the bulk-path
+    // `a3_enroll_*` tests.
 
     /// REQ-AXO-289 S3d+S4a (session 19 topology) — A3 atomic
     /// graph + chunks + FTS persistence. All artefacts a parsed file

@@ -281,15 +281,25 @@ impl IstGraph {
         &self.names[idx as usize]
     }
 
-    /// REQ-AXO-901970 — canonical ids whose short name (last `::` segment)
-    /// equals `name`. Linear scan ; used by `query_graph_r1_neighbors` to
-    /// resolve anchor names to ALL matching symbols (parity with the SQL
-    /// `WHERE name IN (...)`, which an overloaded name expands to >1 id).
+    /// REQ-AXO-901970 — canonical ids matching `name`, by the canonical `name`
+    /// field OR the id's last `::` segment. Linear scan ; used by
+    /// `query_graph_r1_neighbors` and `resolve_scoped_symbol_id_canonical` to
+    /// resolve anchor names to ALL matching symbols.
+    ///
+    /// REQ-AXO-902075 — must match the `name` field, not only the id-suffix:
+    /// the PG resolver this RAM lane mirrors is `WHERE name = $sym OR id = $sym`,
+    /// and REQ-AXO-901970 explicitly stores `name` because some symbols carry a
+    /// name that is NOT the last `::` segment of the id (TODO/secret/macro
+    /// targets). Matching only the suffix silently diverged the RAM mirror from
+    /// PG for those symbols (PIL-AXO-9002 requires the RAM mirror to agree).
     pub fn ids_with_short_name(&self, name: &str) -> Vec<&str> {
         self.ids
             .iter()
-            .filter(|id| id.rsplit("::").next() == Some(name))
-            .map(|s| s.as_str())
+            .enumerate()
+            .filter(|(i, id)| {
+                id.rsplit("::").next() == Some(name) || self.names[*i].as_str() == name
+            })
+            .map(|(_, s)| s.as_str())
             .collect()
     }
 
