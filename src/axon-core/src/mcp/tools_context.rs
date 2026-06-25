@@ -13,6 +13,7 @@ use super::format::{evidence_by_mode, format_standard_contract};
 use super::McpServer;
 
 mod evidence_classification;
+mod evidence_packet;
 mod question_analysis;
 mod rationale_quality;
 mod repo_literal;
@@ -3664,30 +3665,9 @@ impl McpServer {
         }))
     }
 
-    fn build_direct_evidence(&self, entry_candidates: &[EntryCandidate]) -> Vec<Value> {
-        entry_candidates
-            .iter()
-            .map(|candidate| {
-                let evidence_class = if candidate.kind == "file" {
-                    "canonical_file"
-                } else if candidate.kind == "repo_literal" {
-                    "repo_literal_file"
-                } else {
-                    "canonical_symbol"
-                };
-                json!({
-                    "symbol_id": candidate.id,
-                    "name": candidate.name,
-                    "kind": candidate.kind,
-                    "project_code": candidate.project_code,
-                    "uri": candidate.uri,
-                    "evidence_class": evidence_class,
-                    "score": candidate.score,
-                    "ranking_reasons": candidate.reasons,
-                })
-            })
-            .collect()
-    }
+    // REQ-AXO-219 — build_direct_evidence moved to the `evidence_packet`
+    // submodule (god-file split, &self method phase). `self.build_direct_evidence`
+    // call site unchanged.
 
     fn build_why_these_items(
         &self,
