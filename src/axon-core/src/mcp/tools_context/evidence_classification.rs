@@ -286,4 +286,33 @@ impl McpServer {
             })
             .collect()
     }
+
+    /// REQ-AXO-219 — merge `additions` into `base` SOLL-entity list, deduping by
+    /// `id` and unioning `ranking_reasons`. Pure list reconciliation.
+    pub(super) fn merge_soll_entities(base: &mut Vec<Value>, additions: Vec<Value>) {
+        for add in additions {
+            let Some(id) = add.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+                continue;
+            };
+            if let Some(found) = base
+                .iter_mut()
+                .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+            {
+                if let (Some(reasons), Some(add_reasons)) = (
+                    found
+                        .get_mut("ranking_reasons")
+                        .and_then(|v| v.as_array_mut()),
+                    add.get("ranking_reasons").and_then(|v| v.as_array()),
+                ) {
+                    for reason in add_reasons {
+                        if !reasons.contains(reason) {
+                            reasons.push(reason.clone());
+                        }
+                    }
+                }
+                continue;
+            }
+            base.push(add);
+        }
+    }
 }

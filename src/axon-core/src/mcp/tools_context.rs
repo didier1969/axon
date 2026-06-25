@@ -3854,32 +3854,8 @@ impl McpServer {
     /// `ranking_reason` so the dual signal is visible; genuinely new semantic
     /// nodes are appended. Traceability entities stay first (higher base score),
     /// so the downstream type-partitioned classification is unaffected for them.
-    fn merge_soll_entities(base: &mut Vec<Value>, additions: Vec<Value>) {
-        for add in additions {
-            let Some(id) = add.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
-                continue;
-            };
-            if let Some(found) = base
-                .iter_mut()
-                .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
-            {
-                if let (Some(reasons), Some(add_reasons)) = (
-                    found
-                        .get_mut("ranking_reasons")
-                        .and_then(|v| v.as_array_mut()),
-                    add.get("ranking_reasons").and_then(|v| v.as_array()),
-                ) {
-                    for reason in add_reasons {
-                        if !reasons.contains(reason) {
-                            reasons.push(reason.clone());
-                        }
-                    }
-                }
-                continue;
-            }
-            base.push(add);
-        }
-    }
+    // REQ-AXO-219 — merge_soll_entities moved to the `evidence_classification`
+    // submodule (god-file split). `Self::merge_soll_entities` call site unchanged.
 
     /// REQ-AXO-902018 slice A (tier A, DEC-AXO-901642) — fail-loud degradation
     /// REQ-AXO-902023 tier C.1 — does this pressure permit the corpus-wide
