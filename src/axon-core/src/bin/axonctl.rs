@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -198,6 +199,7 @@ Usage:
   axonctl <command> --project-root PATH --instance-kind dev|live --role brain|indexer|all [--json]
 
 Commands:
+  start         Start runtime — contract-honest thin shim → scripts/axon → process-compose
   stop          Orchestrated instance stop (kill processes, clean locks, verify)
   preflight     Pre-launch checks (PG accessible, binaries present, env hygiene)
   status        Health check for an instance
@@ -300,6 +302,7 @@ fn main() -> Result<()> {
             }
             result
         }
+        "start" => cmd_start(require_config(&args)?, &args.remaining, args.json),
         "supervise" => {
             eprintln!("axonctl supervise is retired — use process-compose (REQ-AXO-901735)");
             std::process::exit(1);
@@ -324,6 +327,58 @@ fn main() -> Result<()> {
         }
         other => Err(anyhow!("unknown command `{other}`\n{}", usage())),
     }
+}
+
+// ---------------------------------------------------------------------------
+// REQ-AXO-901847 (DEC-AXO-901651): axonctl start — contract-honest thin shim.
+// axonctl does NOT re-absorb the process-compose orchestration (that decision
+// was settled in REQ-AXO-901735: supervision retired). Instead `axonctl start`
+// validates the instance config and execs the canonical `scripts/axon` entry,
+// which sets up devenv/env/ports (LD_LIBRARY_PATH/ORT — the fragile WSL2/CUDA
+// bits) and execs start.sh (the process-compose DAG executor). This gives
+// axonctl a complete verb surface (start/stop/status/preflight) with zero
+// duplication of the shell env logic.
+// ---------------------------------------------------------------------------
+
+/// Build the argv for the start shim: delegate to `scripts/axon --instance
+/// <kind> start <extra...>`. Factored out so the contract is unit-testable
+/// without execing.
+fn start_argv(axon_entry: &Path, instance_label: &str, extra: &[String]) -> Vec<String> {
+    let mut argv = vec![
+        "bash".to_string(),
+        axon_entry.display().to_string(),
+        "--instance".to_string(),
+        instance_label.to_string(),
+        "start".to_string(),
+    ];
+    argv.extend(extra.iter().cloned());
+    argv
+}
+
+fn cmd_start(config: InstanceConfig, extra: &[String], json: bool) -> Result<()> {
+    let axon_entry = config.project_root.join("scripts").join("axon");
+    if !axon_entry.exists() {
+        return Err(anyhow!(
+            "canonical entry not found: {} (axonctl start delegates to scripts/axon)",
+            axon_entry.display()
+        ));
+    }
+    let argv = start_argv(&axon_entry, config.instance_kind.label(), extra);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "action": "start",
+                "instance": config.instance_kind.label(),
+                "delegates_to": axon_entry.display().to_string(),
+                "argv": argv,
+            })
+        );
+    }
+    // Replace this process so the operator's signals and the child's exit code
+    // pass through transparently (mirrors scripts/axon's `exec bash start.sh`).
+    let err = Command::new(&argv[0]).args(&argv[1..]).exec();
+    Err(anyhow!("failed to exec {}: {err}", axon_entry.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1428,6 +1483,33 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn start_argv_delegates_to_canonical_entry() {
+        // REQ-AXO-901847 — the shim must delegate to scripts/axon with the
+        // instance + verb + passthrough mode flags, never re-implement start.sh.
+        let entry = Path::new("/home/user/projects/axon/scripts/axon");
+        let argv = start_argv(entry, "dev", &["--indexer-full".to_string(), "full".to_string()]);
+        assert_eq!(
+            argv,
+            vec![
+                "bash".to_string(),
+                "/home/user/projects/axon/scripts/axon".to_string(),
+                "--instance".to_string(),
+                "dev".to_string(),
+                "start".to_string(),
+                "--indexer-full".to_string(),
+                "full".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn start_argv_live_no_extra() {
+        let entry = Path::new("/x/scripts/axon");
+        let argv = start_argv(entry, "live", &[]);
+        assert_eq!(argv, vec!["bash", "/x/scripts/axon", "--instance", "live", "start"]);
+    }
 
     #[test]
     fn instance_config_dev_brain() {
