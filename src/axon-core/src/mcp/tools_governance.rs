@@ -1456,6 +1456,188 @@ impl McpServer {
             }
         }))
     }
+
+    /// REQ-AXO-158 (DEC-AXO-901650) — architectural drift continuous monitoring.
+    /// `action=record` computes the current violation count for each monitored
+    /// layer-pair (explicit `layer_pairs`/`source_layer`+`target_layer`, else the
+    /// `forbidden` layer rules declared for REQ-AXO-157), updates the EWMA vs the
+    /// last persisted sample, flags alerts (`score > prev_ewma * k`), and appends
+    /// to `ist.drift_history`. `action=read` (default) returns recent history +
+    /// alerts (heatmap-ready). EWMA over Z-score per DEC-AXO-901650.
+    pub(crate) fn axon_drift_history(&self, args: &Value) -> Option<Value> {
+        use crate::ist_snapshot::drift_history as dh;
+        let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("");
+        if project.is_empty() {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "drift_history requires `project` (e.g. AXO)." }],
+                "data": { "status": "input_invalid", "missing": "project" }
+            }));
+        }
+        let p_esc = project.replace('\'', "''");
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("read");
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 1000);
+
+        if action == "record" {
+            let alpha = args.get("alpha").and_then(|v| v.as_f64()).unwrap_or(dh::DEFAULT_ALPHA);
+            let k = args.get("k").and_then(|v| v.as_f64()).unwrap_or(dh::DEFAULT_K);
+
+            // Resolve which layer-pairs to monitor.
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            if let Some(arr) = args.get("layer_pairs").and_then(|v| v.as_array()) {
+                for p in arr {
+                    if let (Some(s), Some(t)) = (
+                        p.get("source").and_then(|x| x.as_str()),
+                        p.get("target").and_then(|x| x.as_str()),
+                    ) {
+                        pairs.push((s.to_string(), t.to_string()));
+                    }
+                }
+            } else if let (Some(s), Some(t)) = (
+                args.get("source_layer").and_then(|x| x.as_str()),
+                args.get("target_layer").and_then(|x| x.as_str()),
+            ) {
+                pairs.push((s.to_string(), t.to_string()));
+            } else {
+                // Default: monitor every `forbidden` layer rule declared for 157.
+                let sql = format!(
+                    "SELECT metadata->'structural_invariant'->>'source_layer', \
+                     metadata->'structural_invariant'->>'target_layer' FROM {} \
+                     WHERE type='Guideline' \
+                     AND metadata->'structural_invariant'->>'mode' IN ('forbidden','forbid','deny') \
+                     AND metadata->'structural_invariant'->>'source_layer' IS NOT NULL \
+                     AND metadata->'structural_invariant'->>'target_layer' IS NOT NULL \
+                     AND project_code IN ('{}', 'PRO')",
+                    self.graph_store.soll_table("Node"),
+                    sanitize_project(project)
+                );
+                if let Ok(raw) = self.graph_store.query_json(&sql) {
+                    if let Ok(rows) = serde_json::from_str::<Vec<Vec<String>>>(&raw) {
+                        for r in rows {
+                            if r.len() >= 2 && !r[0].is_empty() && !r[1].is_empty() {
+                                pairs.push((r[0].clone(), r[1].clone()));
+                            }
+                        }
+                    }
+                }
+            }
+            if pairs.is_empty() {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": "drift_history record: no layer-pairs to monitor. Pass `layer_pairs=[{source,target}]` or define `forbidden` structural_invariant rules (REQ-AXO-157)." }],
+                    "data": { "status": "no_pairs", "project": project }
+                }));
+            }
+
+            // Warm RAM snapshot (same contract as architectural_drift).
+            let view = crate::ist_snapshot::process_view();
+            if !view.is_warm(project) {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("drift_history record requires a warm IstGraph snapshot for `{project}`. Run `ist_snapshot_warm project={project}` then retry.") }],
+                    "data": { "status": "warn_ram_cold", "project": project, "surfaces_degraded": ["graph_ram_unavailable"] }
+                }));
+            }
+            let snap = match view.cache_handle().get(project) {
+                Some(s) => s,
+                None => {
+                    return Some(json!({
+                        "content": [{ "type": "text", "text": "drift_history: snapshot race — RAM warm but absent at fetch; retry." }],
+                        "data": { "status": "internal_race" }
+                    }));
+                }
+            };
+
+            let mut recorded: Vec<Value> = Vec::new();
+            let mut alert_count = 0u64;
+            for (src, tgt) in &pairs {
+                let score = dh::drift_score(&snap, src, tgt) as f64;
+                let key = dh::layer_pair_key(src, tgt);
+                let key_esc = key.replace('\'', "''");
+                let prev_sql = format!(
+                    "SELECT ewma FROM ist.drift_history WHERE project_code='{p_esc}' AND layer_pair='{key_esc}' ORDER BY wave_ts DESC LIMIT 1"
+                );
+                let prev: Option<f64> = self
+                    .graph_store
+                    .query_json(&prev_sql)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                    .and_then(|rows| {
+                        rows.into_iter().next().and_then(|r| r.into_iter().next())
+                    })
+                    .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+                let ewma = dh::update_ewma(prev, score, alpha);
+                let alert = dh::is_alert(score, prev, k);
+                if alert {
+                    alert_count += 1;
+                }
+                let ins = format!(
+                    "INSERT INTO ist.drift_history (project_code, layer_pair, score, ewma, alert) VALUES ('{p_esc}','{key_esc}',{},{ewma},{alert})",
+                    score as i64
+                );
+                let persisted = self.graph_store.execute(&ins).is_ok();
+                recorded.push(json!({
+                    "layer_pair": key,
+                    "score": score as i64,
+                    "ewma": ewma,
+                    "alert": alert,
+                    "persisted": persisted
+                }));
+            }
+
+            let report = format!(
+                "### 📈 drift_history recorded — `{project}` ({} pair(s), {alert_count} alert(s))\n\nEWMA α={alpha}, alert band k={k}. Append-only history in `ist.drift_history`.",
+                recorded.len()
+            );
+            return Some(json!({
+                "content": [{ "type": "text", "text": report }],
+                "data": {
+                    "status": if alert_count == 0 { "ok" } else { "warn_drift_alert" },
+                    "action": "record",
+                    "project": project,
+                    "recorded": recorded,
+                    "alerts": alert_count,
+                    "surfaces_used": ["graph_ram", "ist_drift_history"]
+                }
+            }));
+        }
+
+        // action=read — recent history + alerts (heatmap-ready).
+        let lp_filter = args
+            .get("layer_pair")
+            .and_then(|v| v.as_str())
+            .map(|x| format!(" AND layer_pair='{}'", x.replace('\'', "''")))
+            .unwrap_or_default();
+        let sql = format!(
+            "SELECT layer_pair, wave_ts::text, score, ewma, alert FROM ist.drift_history \
+             WHERE project_code='{p_esc}'{lp_filter} ORDER BY wave_ts DESC LIMIT {limit}"
+        );
+        let raw = self.graph_store.query_json(&sql).unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let total = rows.len() as u64;
+        let alerts = rows
+            .iter()
+            .filter(|r| r.get(4).map(|v| v == &Value::Bool(true) || v.as_str() == Some("true")).unwrap_or(false))
+            .count() as u64;
+        let display_json = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
+        let report = if rows.is_empty() {
+            format!("ℹ️ No drift history for `{project}` yet. Run `drift_history action=record project={project}` (after warming the snapshot) to capture the first wave.")
+        } else {
+            format!(
+                "### 📈 drift_history — `{project}` ({total} sample(s), {alerts} alert(s))\n\n{}",
+                format_table_from_json(&display_json, &["Layer pair", "Wave", "Score", "EWMA", "Alert"])
+            )
+        };
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "status": if alerts == 0 { "ok" } else { "warn_drift_alert" },
+                "action": "read",
+                "project": project,
+                "samples": rows,
+                "total_available": total,
+                "alerts": alerts,
+                "surfaces_used": ["ist_drift_history"]
+            }
+        }))
+    }
 }
 
 /// REQ-AXO-157 — sanitize a project code for inline SQL interpolation in the

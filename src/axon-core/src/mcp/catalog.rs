@@ -1010,6 +1010,25 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "drift_history",
+                "description": "[GOVERNANCE] REQ-AXO-158 — architectural drift continuous monitoring. action=record computes per-layer-pair violation counts, updates an EWMA vs the last sample, flags alerts (score > prev_ewma*k), and appends to ist.drift_history; action=read (default) returns recent history + alerts (heatmap-ready). Layer-pairs default to the forbidden structural_invariant rules (REQ-AXO-157).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project":      { "type": "string", "description": "Project code (required, e.g. 'AXO')." },
+                        "action":       { "type": "string", "description": "'read' (default) or 'record'.", "default": "read" },
+                        "layer_pairs":  { "type": "array",  "description": "record: explicit pairs [{source, target}]. Omit to monitor the forbidden structural_invariant rules.", "items": { "type": "object" } },
+                        "source_layer": { "type": "string", "description": "record: single-pair source layer prefix (alternative to layer_pairs)." },
+                        "target_layer": { "type": "string", "description": "record: single-pair target layer prefix." },
+                        "alpha":        { "type": "number", "description": "record: EWMA smoothing factor (default 0.3).", "default": 0.3 },
+                        "k":            { "type": "number", "description": "record: alert band multiplier (default 1.5).", "default": 1.5 },
+                        "layer_pair":   { "type": "string", "description": "read: filter to one layer_pair key 'src->tgt'." },
+                        "limit":        { "type": "integer", "description": "read: max rows (default 50, max 1000).", "default": 50 }
+                    },
+                    "required": ["project"]
+                }
+            },
+            {
                 "name": "bidi_trace",
                 "description": "[DX] Bidirectional trace: climbs to Entry Points (up) and lists deep calls (down).",
                 "inputSchema": {

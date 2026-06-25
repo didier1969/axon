@@ -9,6 +9,7 @@
 pub mod algorithms;
 pub mod cache;
 pub mod code_smells;
+pub mod drift_history;
 pub mod loader;
 pub mod notify_listener;
 pub mod snapshot;

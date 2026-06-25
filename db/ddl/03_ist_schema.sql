@@ -425,3 +425,21 @@ LEFT JOIN (
 LEFT JOIN (
     SELECT project_code, count(*) AS edges FROM ist.Edge GROUP BY project_code
 ) e ON e.project_code = p.code;
+
+-- REQ-AXO-158 (DEC-AXO-901650) — architectural drift continuous monitoring.
+-- One row per (project, layer_pair) per recorded wave. `score` = violation
+-- count for that layer-pair at wave time; `ewma` = exponentially-weighted
+-- moving average of the score (smooths inter-wave noise without needing a
+-- stable variance estimate, unlike a Z-score on a young/volatile corpus);
+-- `alert` = score exceeded ewma * k. Append-only history → heatmap + trend.
+CREATE TABLE IF NOT EXISTS ist.drift_history (
+    id           BIGSERIAL PRIMARY KEY,
+    project_code TEXT        NOT NULL,
+    layer_pair   TEXT        NOT NULL,
+    wave_ts      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    score        INTEGER     NOT NULL,
+    ewma         DOUBLE PRECISION NOT NULL,
+    alert        BOOLEAN     NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS idx_drift_history_lookup
+    ON ist.drift_history (project_code, layer_pair, wave_ts DESC);
