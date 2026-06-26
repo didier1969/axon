@@ -45,20 +45,12 @@ docs/derived/
 .env.worktree
 .axon-dev/
 
-# Devenv transient state
-.devenv/bash-bash
-.devenv/gc/shell
-.devenv/gc/task-config-devenv-config-task-config
-.devenv/nix-eval-cache.db
-.devenv/nix-eval-cache.db-shm
-.devenv/nix-eval-cache.db-wal
-.devenv/profile
-.devenv/run
-.devenv/shell-*.sh
-.devenv/tasks.db
-.devenv/tasks.db-shm
-.devenv/tasks.db-wal
-.devenv/backup_soll.log
+# Devenv generated state (machine-specific: /nix/store paths, process scripts,
+# eval caches). Must NEVER be tracked — a tracked .devenv/ pins THIS host's
+# store paths into a fresh clone and breaks hermetic reproducibility
+# (GUI-PRO-012 IaC, REQ-AXO-902069). Blanket-ignore every .devenv/ (root +
+# nested e.g. src/dashboard/.devenv/); devenv regenerates it per machine.
+**/.devenv/
 
 # Generated native artifacts
 src/dashboard/priv/native/*.so
@@ -70,9 +62,6 @@ dev-probe-*.csv
 
 # Local scheduler / agent state
 .claude/scheduled_tasks.lock
-
-# Devenv runtime state (PostgreSQL data dir etc.)
-.devenv/state/
 
 # Note: docs/archive/plans/ historical snapshot is TRACKED (history preserved per git mv).
 #       CLAUDE.md mandates SOLL tools for active plans (CPT-AXO-024); markdown plans
