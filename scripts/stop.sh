@@ -473,6 +473,15 @@ if axon_supervisor_healthy "$_PC_PORT"; then
     fi
 fi
 
+# REQ-AXO-234 — single-GPU exclusion: once a dev GPU session's indexer is down,
+# resume the live indexer it had paused (DEC-AXO-067). Only on a real stop that
+# tears down the dev indexer (role all|indexer) — a brain-only dev stop leaves
+# the dev indexer holding the GPU, so we must NOT resume live yet. Idempotent
+# no-op when no pause marker exists.
+if [ "$VERIFY_ONLY" != "1" ] && { [ "$STOP_ROLE" = "all" ] || axon_role_is_indexer "$STOP_ROLE"; }; then
+    axon_resume_live_indexer_after_dev "$PROJECT_ROOT" "$_PC_BIN"
+fi
+
 if [ "$VERIFY_ONLY" = "1" ]; then
     PATTERNS=(
         "$ELIXIR_NODE_NAME"

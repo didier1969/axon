@@ -260,3 +260,72 @@ _axon_sup_warn() {
         printf '⚠️  %s\n' "$*" >&2
     fi
 }
+
+# ---------------------------------------------------------------------------
+# REQ-AXO-234 — single-GPU exclusion automation (DEC-AXO-067, PIL-AXO-004).
+#
+# On a single-GPU host the live indexer and a dev `--indexer-full`/`-vector`
+# session cannot share the device. These helpers automate the previously MANUAL
+# contract ("stop the live indexer before a dev GPU session"): a dev GPU start
+# pauses the live indexer and drops a marker; the dev stop resumes it and clears
+# the marker. Both are idempotent and best-effort — they never abort the caller.
+# ---------------------------------------------------------------------------
+
+# Marker recording that a dev GPU session paused the live indexer. Lives under
+# the LIVE state root so it is discoverable regardless of which dev invocation
+# clears it. Single source of truth for the path (both pause + resume call it).
+axon_live_pause_marker_path() {
+    local project_root="${1:?project root required}"
+    printf '%s\n' "$project_root/.axon/live-paused-by-dev"
+}
+
+# axon_auto_pause_live_indexer_for_dev <project_root> <pc_bin> <runtime_mode>
+# Pause the live indexer when a dev GPU session starts. No-op unless the current
+# instance is dev, the mode uses the GPU, and a live supervisor is up.
+axon_auto_pause_live_indexer_for_dev() {
+    local project_root="${1:?project root required}"
+    local pc_bin="${2:-}"
+    local runtime_mode="${3:-}"
+    [[ "${AXON_INSTANCE_KIND:-}" == "dev" ]] || return 0
+    [[ "$runtime_mode" == "indexer_full" || "$runtime_mode" == "indexer_vector" ]] || return 0
+
+    local live_pc_port marker
+    live_pc_port="$(axon_pc_port_for_instance live)"
+    marker="$(axon_live_pause_marker_path "$project_root")"
+
+    if axon_supervisor_healthy "$live_pc_port" && [[ -x "$pc_bin" ]]; then
+        _axon_sup_log "[auto-pause] dev GPU start → pausing live indexer (single-GPU exclusion DEC-AXO-067, REQ-AXO-234)"
+        "$pc_bin" process stop axon-indexer -p "$live_pc_port" 2>/dev/null || true
+        mkdir -p "$(dirname "$marker")"
+        printf 'paused_by=dev\npaused_at=%s\ndev_pid=%s\nlive_pc_port=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$live_pc_port" >"$marker"
+    else
+        # No live supervisor (or no pc binary) — nothing to pause. Drop any stale
+        # marker so a later dev stop does not spuriously resume a non-paused live.
+        rm -f "$marker" 2>/dev/null || true
+    fi
+}
+
+# axon_resume_live_indexer_after_dev <project_root> <pc_bin>
+# Resume the live indexer a prior dev GPU session paused. No-op unless the
+# current instance is dev and the marker is present. Idempotent: always clears
+# the marker, even when the live supervisor is down (it starts its own indexer
+# fresh next time).
+axon_resume_live_indexer_after_dev() {
+    local project_root="${1:?project root required}"
+    local pc_bin="${2:-}"
+    [[ "${AXON_INSTANCE_KIND:-}" == "dev" ]] || return 0
+
+    local marker live_pc_port
+    marker="$(axon_live_pause_marker_path "$project_root")"
+    [[ -f "$marker" ]] || return 0
+    live_pc_port="$(axon_pc_port_for_instance live)"
+
+    if axon_supervisor_healthy "$live_pc_port" && [[ -x "$pc_bin" ]]; then
+        _axon_sup_log "[auto-resume] dev stop → resuming live indexer paused for the GPU session (REQ-AXO-234)"
+        "$pc_bin" process start axon-indexer -p "$live_pc_port" 2>/dev/null || true
+    else
+        _axon_sup_warn "[auto-resume] live supervisor down — clearing pause marker without resume (live starts its own indexer)"
+    fi
+    rm -f "$marker" 2>/dev/null || true
+}

@@ -58,6 +58,10 @@ START_DASHBOARD=1
 RUN_MCP_TESTS=1
 
 FORCE_RELEASE=0
+# REQ-AXO-234 — dev GPU sessions auto-pause the live indexer (single-GPU
+# exclusion DEC-AXO-067). On by default; --no-auto-pause opts out (e.g. a
+# multi-GPU host, or when the operator manages exclusion manually).
+AUTO_PAUSE_LIVE=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -70,6 +74,7 @@ while [[ $# -gt 0 ]]; do
         --indexer-vector)  RUNTIME_MODE="indexer_vector" ;;
         --indexer-full)    RUNTIME_MODE="indexer_full" ;;
         --release)         FORCE_RELEASE=1 ;;
+        --no-auto-pause)   AUTO_PAUSE_LIVE=0 ;;
         --no-dashboard)    START_DASHBOARD=0 ;;
         --skip-mcp-tests)  RUN_MCP_TESTS=0 ;;
         --fast)            START_DASHBOARD=0; RUN_MCP_TESTS=0 ;;
@@ -86,6 +91,8 @@ Modes (positional aliases or long flags):
 
 Options:
   --release        Use release binaries (10× less RAM, 10× faster)
+  --no-auto-pause  Don't auto-pause the live indexer for a dev GPU session
+                   (single-GPU exclusion DEC-AXO-067; on by default)
   --no-dashboard   Disable dashboard
   --fast           No dashboard, no MCP tests
 EOF
@@ -388,6 +395,14 @@ fi
 if axon_supervisor_healthy "$PC_PORT" || ! axon_port_is_free "$PC_PORT"; then
     echo "❌ Cannot reclaim process-compose port :${PC_PORT}. Kill it manually (ss -ltnp | grep ${PC_PORT})."
     exit 1
+fi
+
+# REQ-AXO-234 — single-GPU exclusion: a dev GPU session pauses the live indexer
+# before bringing up its own GPU pipeline (DEC-AXO-067, PIL-AXO-004). No-op for
+# live, non-GPU modes, --no-auto-pause, or when no live supervisor is running.
+if [[ "$AUTO_PAUSE_LIVE" -eq 1 ]]; then
+    _axon_stage="auto_pause_live"
+    axon_auto_pause_live_indexer_for_dev "$PROJECT_ROOT" "$PC_BIN" "$RUNTIME_MODE"
 fi
 
 _axon_stage="pc_up"

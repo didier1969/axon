@@ -75,9 +75,11 @@ axon_default_background_budget_class() {
 axon_default_gpu_access_policy() {
     # Dev defaults to `preferred` so that local benchmarks (REQ-AXO-221)
     # measure the GPU path that production runs on. The single-GPU
-    # exclusion contract (DEC-AXO-067) is operator-managed: stop the
-    # live indexer before starting a dev `full` session.
-    # An automated pause-resume mechanism is tracked separately.
+    # exclusion contract (DEC-AXO-067) is now AUTOMATED (REQ-AXO-234): a dev
+    # `--indexer-full`/`-vector` start pauses the live indexer (marker
+    # .axon/live-paused-by-dev) and the dev stop resumes it — see
+    # axon_auto_pause_live_indexer_for_dev / axon_resume_live_indexer_after_dev
+    # in axon-supervisor.sh. Opt out with `--no-auto-pause`.
     case "${1:?instance kind required}" in
         live) printf 'preferred\n' ;;
         *) printf 'preferred\n' ;;
