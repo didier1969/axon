@@ -1,0 +1,22 @@
+{
+  "_doc": "REQ-AXO-902017 in-repo validation fixture for data-artifact IST ingestion. AXO is tenant zero (no native data lake), so this minimal normalized catalog lets `data_catalog action=index catalog_path=tests/fixtures/data_catalog/CATALOG.json` be exercised end-to-end against the dogfood project. Real data-centric tenants generate the catalog from their manifests.",
+  "artifacts": {
+    "axon_demo.csv": {
+      "name": "axon_demo.csv",
+      "kind": "fixture",
+      "bytes": 96,
+      "rows": 3,
+      "n_cols": 3,
+      "manifest": "axon_demo_manifest.json",
+      "source": "axon-self"
+    },
+    "axon_layers.csv": {
+      "name": "axon_layers.csv",
+      "kind": "lake",
+      "bytes": 72,
+      "rows": 4,
+      "n_cols": 2,
+      "source": "axon-self"
+    }
+  }
+}

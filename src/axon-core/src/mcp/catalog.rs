@@ -492,11 +492,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "data_catalog",
-                "description": "[DATA] REQ-AXO-902017 — inventory of a DATA-CENTRIC project's data artifacts (CSV lakes, fixtures, manifests) from its normalized pivot catalog `data/CATALOG.json`. Answers 'how many assets, what kinds, how many rows, which lack a manifest' in one call instead of a shell dredge (ls/head/wc). Read-only; code↔data cross-reference is a later slice.",
+                "description": "[DATA] REQ-AXO-902017 — inventory of a DATA-CENTRIC project's data artifacts (CSV lakes, fixtures, manifests) from its normalized pivot catalog `data/CATALOG.json`. `action=read` (default) answers 'how many assets, what kinds, how many rows, which lack a manifest' in one call instead of a shell dredge (ls/head/wc). `action=index` PERSISTS the catalog into the IST: each artifact becomes a `data_artifact` node (kind) + an ist.DataArtifact metadata row so it joins the structural graph (and code symbols gain READS_ARTIFACT edges). CSV column names are read from data/<name> when present.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Canonical project code (e.g. OPV). Default: AXO." },
+                        "action": { "type": "string", "enum": ["read", "index"], "description": "read (default) = summarize on demand; index = persist artifacts into the IST (ist.Symbol kind='data_artifact' + ist.DataArtifact)." },
                         "catalog_path": { "type": "string", "description": "Optional override for the catalog location (absolute, or relative to the project root). Default: data/CATALOG.json." }
                     },
                     "required": []

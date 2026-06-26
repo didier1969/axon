@@ -85,6 +85,9 @@ struct ArtifactRow {
     n_cols: Option<i64>,
     bytes: Option<i64>,
     has_manifest: bool,
+    /// Raw manifest path (REQ-AXO-902017 ingest persists it); `has_manifest` is
+    /// the derived "non-empty" flag the read summary surfaces.
+    manifest: Option<String>,
     date_range: Option<Value>,
     source: Option<String>,
 }
@@ -123,6 +126,7 @@ fn parse_data_catalog(raw: &str) -> anyhow::Result<DataCatalogSummary> {
             n_cols: a.n_cols,
             bytes: a.bytes,
             has_manifest,
+            manifest: a.manifest,
             date_range: a.date_range,
             source: a.source,
         });
@@ -218,6 +222,22 @@ impl McpServer {
             }
         };
 
+        // REQ-AXO-902017 — action=index persists the catalog into the IST
+        // (ist.Symbol kind='data_artifact' + ist.DataArtifact metadata) so
+        // artifacts join the structural graph; action=read (default) just
+        // summarizes on demand. Off the indexing hot-path (PIL-AXO-007).
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("read");
+        if action == "index" {
+            // CSV files (for header reads) resolve relative to the catalog's
+            // own directory, not a hardcoded project/data/ — so a fixture
+            // catalog anywhere stays self-contained.
+            let catalog_dir = catalog_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from(&project_path));
+            return Some(self.ingest_data_artifacts_into_ist(&project_code, &catalog_dir, &summary));
+        }
+
         let by_kind_text = summary
             .by_kind
             .iter()
@@ -284,6 +304,218 @@ impl McpServer {
             }
         }))
     }
+
+    /// REQ-AXO-902017 — persist the parsed catalog into the IST: every artifact
+    /// becomes an `ist.Symbol` node (kind='data_artifact') plus an
+    /// `ist.DataArtifact` metadata row keyed by the same id; stale
+    /// data_artifact nodes for this project (no longer in the catalog) are
+    /// pruned. Off the indexing hot-path — explicit `action=index` only
+    /// (PIL-AXO-007). The code pipeline never indexes `.csv`, so these nodes are
+    /// owned solely by this pass.
+    fn ingest_data_artifacts_into_ist(
+        &self,
+        project_code: &str,
+        catalog_dir: &std::path::Path,
+        summary: &DataCatalogSummary,
+    ) -> Value {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        let mut ids: Vec<String> = Vec::with_capacity(summary.artifacts.len());
+        let mut upserted = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+
+        for a in &summary.artifacts {
+            let id = data_artifact_node_id(project_code, &a.id);
+            ids.push(id.clone());
+            let name = a.name.clone().unwrap_or_else(|| a.id.clone());
+            // Slice "CSV headers": when the named file exists next to the
+            // catalog, read its header row for the real column names; else NULL.
+            let columns = read_csv_header_columns(catalog_dir, name.as_str());
+
+            let sym_sql = format!(
+                "INSERT INTO ist.Symbol (id, name, kind, project_code) \
+                 VALUES ('{id}','{name}','data_artifact','{proj}') \
+                 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, kind = 'data_artifact'",
+                id = sql_str(&id),
+                name = sql_str(&name),
+                proj = sql_str(project_code),
+            );
+            let art_sql = format!(
+                "INSERT INTO ist.DataArtifact \
+                 (id, project_code, name, artifact_kind, file_path, rows_count, cols_count, \
+                  bytes_size, manifest_path, source, columns, date_range, has_manifest, discovered_ms) \
+                 VALUES ('{id}','{proj}','{name}',{kind},{fpath},{rows},{cols},{bytes},{manifest},{source},{columns},{date_range},{has_manifest},{now}) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                   name = EXCLUDED.name, artifact_kind = EXCLUDED.artifact_kind, \
+                   file_path = EXCLUDED.file_path, rows_count = EXCLUDED.rows_count, \
+                   cols_count = EXCLUDED.cols_count, bytes_size = EXCLUDED.bytes_size, \
+                   manifest_path = EXCLUDED.manifest_path, source = EXCLUDED.source, \
+                   columns = EXCLUDED.columns, date_range = EXCLUDED.date_range, \
+                   has_manifest = EXCLUDED.has_manifest",
+                id = sql_str(&id),
+                proj = sql_str(project_code),
+                name = sql_str(&name),
+                kind = sql_opt_str(a.kind.as_deref()),
+                fpath = sql_opt_str(Some(name.as_str())),
+                rows = sql_opt_i64(a.rows),
+                cols = sql_opt_i64(a.n_cols),
+                bytes = sql_opt_i64(a.bytes),
+                manifest = sql_opt_str(a.manifest.as_deref().filter(|m| !m.trim().is_empty())),
+                source = sql_opt_str(a.source.as_deref()),
+                columns = sql_opt_jsonb(columns.as_ref().map(|c| json!(c))),
+                date_range = sql_opt_jsonb(a.date_range.clone()),
+                has_manifest = a.has_manifest,
+                now = now_ms,
+            );
+
+            if self.graph_store.execute(&sym_sql).is_ok()
+                && self.graph_store.execute(&art_sql).is_ok()
+            {
+                upserted += 1;
+            } else {
+                failed.push(id.clone());
+            }
+        }
+
+        // Prune stale data_artifact nodes (present in IST but gone from the
+        // catalog), scoped to this project + kind so code symbols are untouched.
+        let not_in = if ids.is_empty() {
+            "TRUE".to_string()
+        } else {
+            let list = ids
+                .iter()
+                .map(|i| format!("'{}'", sql_str(i)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("id NOT IN ({list})")
+        };
+        let _ = self.graph_store.execute(&format!(
+            "DELETE FROM ist.DataArtifact WHERE project_code = '{}' AND {}",
+            sql_str(project_code),
+            not_in
+        ));
+        let _ = self.graph_store.execute(&format!(
+            "DELETE FROM ist.Symbol WHERE project_code = '{}' AND kind = 'data_artifact' AND {}",
+            sql_str(project_code),
+            not_in
+        ));
+
+        // Cross-reference (slice 4): a code symbol whose indexed chunk content
+        // names an artifact's file READS_ARTIFACT it. Rebuilt from scratch each
+        // run (drop this project's READS_ARTIFACT edges, then re-derive) so the
+        // set always reflects the current code + catalog. Heuristic v1: a
+        // file-name substring match against ist.Chunk content.
+        let _ = self.graph_store.execute(&format!(
+            "DELETE FROM ist.Edge WHERE project_code = '{}' AND relation_type = 'READS_ARTIFACT'",
+            sql_str(project_code)
+        ));
+        let mut cross_refs = 0usize;
+        for a in &summary.artifacts {
+            let id = data_artifact_node_id(project_code, &a.id);
+            let needle = a.name.clone().unwrap_or_else(|| a.id.clone());
+            // Skip short names that would match unrelated code noise.
+            if needle.trim().len() < 4 {
+                continue;
+            }
+            let xref_sql = format!(
+                "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+                 SELECT DISTINCT c.source_id, '{tgt}', 'READS_ARTIFACT', '{proj}', {now} \
+                 FROM ist.Chunk c \
+                 WHERE c.project_code = '{proj}' AND c.source_type = 'symbol' \
+                   AND c.source_id <> '{tgt}' AND c.content LIKE '%{needle}%' \
+                 ON CONFLICT (source_id, target_id, relation_type, project_code) DO NOTHING",
+                tgt = sql_str(&id),
+                proj = sql_str(project_code),
+                now = now_ms,
+                needle = sql_str(&needle),
+            );
+            if self.graph_store.execute(&xref_sql).is_ok() {
+                cross_refs += 1;
+            }
+        }
+
+        let report = format!(
+            "## Data catalog indexed → IST — project {project_code}\n\n\
+             - Artifacts upserted as `data_artifact` nodes: **{upserted}** / {}\n\
+             - Stale nodes pruned outside the current catalog set\n\
+             - READS_ARTIFACT cross-reference rebuilt for {cross_refs} artifact(s) \
+               (code symbols whose chunks name the file)\n",
+            summary.artifacts.len(),
+        );
+        json!({
+            "content": [{ "type": "text", "text": report }],
+            "structuredContent": {
+                "status": if failed.is_empty() { "ok" } else { "partial" },
+                "action": "index",
+                "project_code": project_code,
+                "artifacts_total": summary.artifacts.len(),
+                "artifacts_upserted": upserted,
+                "cross_ref_artifacts": cross_refs,
+                "failed_ids": failed,
+                "surfaces_used": ["ist_symbol", "ist_data_artifact", "ist_edge"]
+            }
+        })
+    }
+}
+
+/// Stable IST node id for a catalog artifact key (deterministic so re-indexing
+/// upserts in place and READS_ARTIFACT edges resolve).
+fn data_artifact_node_id(project_code: &str, catalog_key: &str) -> String {
+    format!("{project_code}::artifact::{catalog_key}")
+}
+
+/// Single-quote escape for inline SQL string literals.
+fn sql_str(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// `'escaped'` or `NULL` for an optional text column.
+fn sql_opt_str(s: Option<&str>) -> String {
+    match s {
+        Some(v) => format!("'{}'", sql_str(v)),
+        None => "NULL".to_string(),
+    }
+}
+
+/// Numeric literal or `NULL` for an optional integer column.
+fn sql_opt_i64(n: Option<i64>) -> String {
+    match n {
+        Some(v) => v.to_string(),
+        None => "NULL".to_string(),
+    }
+}
+
+/// `'<json>'::jsonb` or `NULL` for an optional JSONB column.
+fn sql_opt_jsonb(v: Option<Value>) -> String {
+    match v {
+        Some(value) => format!("'{}'::jsonb", sql_str(&value.to_string())),
+        None => "NULL".to_string(),
+    }
+}
+
+/// Best-effort CSV header read: when `<catalog_dir>/<name>` exists and looks
+/// like a CSV, return its first-row column names. `None` on any failure
+/// (missing file, not a CSV, unreadable) — never fails the ingest.
+fn read_csv_header_columns(catalog_dir: &std::path::Path, name: &str) -> Option<Vec<String>> {
+    if !name.to_ascii_lowercase().ends_with(".csv") {
+        return None;
+    }
+    let path = catalog_dir.join(name);
+    let content = std::fs::read_to_string(&path).ok()?;
+    let header = content.lines().next()?;
+    let cols: Vec<String> = header
+        .split(',')
+        .map(|c| c.trim().trim_matches('"').to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if cols.is_empty() {
+        None
+    } else {
+        Some(cols)
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +538,61 @@ mod tests {
         assert_eq!(s.total_bytes, 563739 + 1200 + 900);
         assert_eq!(s.by_kind.get("lake"), Some(&2));
         assert_eq!(s.by_kind.get("fixture"), Some(&1));
+    }
+
+    // ── REQ-AXO-902017 ingest helpers (pure, IST persistence) ──────────────
+
+    #[test]
+    fn artifact_node_id_is_deterministic_and_scoped() {
+        assert_eq!(
+            data_artifact_node_id("AXO", "bis_lake.csv"),
+            "AXO::artifact::bis_lake.csv"
+        );
+    }
+
+    #[test]
+    fn parse_now_exposes_manifest_for_ingest() {
+        // The ingest path needs the raw manifest path, not just the has_manifest flag.
+        let s = parse_data_catalog(SAMPLE).expect("valid catalog");
+        let bis = s.artifacts.iter().find(|a| a.id == "bis_lake.csv").unwrap();
+        assert_eq!(bis.manifest.as_deref(), Some("data/lakes/bis_lake_manifest.json"));
+        assert!(bis.has_manifest);
+    }
+
+    #[test]
+    fn sql_helpers_escape_and_null_correctly() {
+        assert_eq!(sql_str("o'brien"), "o''brien");
+        assert_eq!(sql_opt_str(Some("lake")), "'lake'");
+        assert_eq!(sql_opt_str(None), "NULL");
+        assert_eq!(sql_opt_i64(Some(42)), "42");
+        assert_eq!(sql_opt_i64(None), "NULL");
+        assert_eq!(sql_opt_jsonb(None), "NULL");
+        assert_eq!(
+            sql_opt_jsonb(Some(json!(["a", "b"]))),
+            "'[\"a\",\"b\"]'::jsonb"
+        );
+        // A single quote inside JSON is doubled so the SQL literal stays valid.
+        assert_eq!(
+            sql_opt_jsonb(Some(json!(["o'x"]))),
+            "'[\"o''x\"]'::jsonb"
+        );
+    }
+
+    #[test]
+    fn csv_header_reader_ignores_non_csv() {
+        let dir = std::path::Path::new("/nonexistent");
+        assert_eq!(read_csv_header_columns(dir, "book.json"), None);
+        // Missing file degrades to None, never panics.
+        assert_eq!(read_csv_header_columns(dir, "x.csv"), None);
+    }
+
+    #[test]
+    fn csv_header_reader_returns_columns_for_real_fixture() {
+        // REQ-AXO-902017 — the in-repo validation fixture's header round-trips.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/data_catalog");
+        let cols = read_csv_header_columns(&dir, "axon_demo.csv").expect("fixture csv readable");
+        assert_eq!(cols, vec!["metric", "value", "unit"]);
     }
 
     #[test]

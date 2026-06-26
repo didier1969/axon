@@ -1,0 +1,6 @@
+{
+  "artifact": "axon_demo.csv",
+  "provenance": "REQ-AXO-902017 in-repo validation fixture",
+  "columns": ["metric", "value", "unit"],
+  "rows": 3
+}

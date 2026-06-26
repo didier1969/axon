@@ -403,6 +403,7 @@ fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Element => "element",
         NodeKind::ConfigKey => "config_key",
         NodeKind::Interface => "interface",
+        NodeKind::DataArtifact => "data_artifact",
         NodeKind::Other => "other",
     }
 }

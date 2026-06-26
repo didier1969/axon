@@ -28,6 +28,9 @@ pub enum RelationType {
     // REQ-AXO-901970 — Reads / Declares back the phantom-reference analytics.
     Reads = 6,
     Declares = 7,
+    // REQ-AXO-902017 — a code symbol READS a data artifact (CSV lake / manifest).
+    // Appended (not inserted) so existing CSR u8 encodings stay stable.
+    ReadsArtifact = 8,
     Other = 255,
 }
 
@@ -46,6 +49,7 @@ impl RelationType {
             "USES" => Self::Uses,
             "READS" => Self::Reads,
             "DECLARES" => Self::Declares,
+            "READS_ARTIFACT" => Self::ReadsArtifact,
             _ => Self::Other,
         }
     }
@@ -60,6 +64,7 @@ impl RelationType {
             Self::Uses => "USES",
             Self::Reads => "READS",
             Self::Declares => "DECLARES",
+            Self::ReadsArtifact => "READS_ARTIFACT",
             Self::Other => "OTHER",
         }
     }
@@ -85,6 +90,10 @@ pub enum NodeKind {
     ConfigKey = 11,
     // REQ-AXO-901970 — Interface kind backs the abstraction-detour analytic.
     Interface = 12,
+    // REQ-AXO-902017 — a data artifact (CSV lake / fixture / manifest) indexed
+    // as an IST node so data-centric projects answer "what data exists + who
+    // reads it" structurally. Appended (not inserted) for CSR u8 stability.
+    DataArtifact = 13,
     Other = 255,
 }
 
@@ -104,6 +113,7 @@ impl NodeKind {
             "element" => Self::Element,
             "config_key" => Self::ConfigKey,
             "interface" => Self::Interface,
+            "data_artifact" => Self::DataArtifact,
             _ => Self::Other,
         }
     }
@@ -123,6 +133,7 @@ impl NodeKind {
             10 => Self::Element,
             11 => Self::ConfigKey,
             12 => Self::Interface,
+            13 => Self::DataArtifact,
             _ => Self::Other,
         }
     }
@@ -145,6 +156,7 @@ impl NodeKind {
             Self::Element => "element",
             Self::ConfigKey => "config_key",
             Self::Interface => "interface",
+            Self::DataArtifact => "data_artifact",
             Self::Other => "",
         }
     }
@@ -937,6 +949,7 @@ fn relation_from_u8(value: u8) -> RelationType {
         5 => RelationType::Uses,
         6 => RelationType::Reads,
         7 => RelationType::Declares,
+        8 => RelationType::ReadsArtifact,
         _ => RelationType::Other,
     }
 }
@@ -1180,9 +1193,15 @@ mod tests {
             "IMPLEMENTS",
             "IMPORTS",
             "USES",
+            "READS",
+            "DECLARES",
+            "READS_ARTIFACT",
         ] {
             assert_eq!(RelationType::from_db(s).as_db(), s);
         }
+        // REQ-AXO-902017 — ReadsArtifact survives the CSR u8 round-trip (=8).
+        assert_eq!(relation_from_u8(8), RelationType::ReadsArtifact);
+        assert_eq!(RelationType::ReadsArtifact as u8, 8);
         assert_eq!(RelationType::from_db("UNKNOWN"), RelationType::Other);
     }
 
@@ -1587,6 +1606,12 @@ mod tests {
         assert_eq!(NodeKind::from_u8(2), NodeKind::Method);
         assert_eq!(NodeKind::from_u8(3), NodeKind::Class);
         assert_eq!(NodeKind::from_u8(11), NodeKind::ConfigKey);
+        assert_eq!(NodeKind::from_u8(12), NodeKind::Interface);
+        // REQ-AXO-902017 — DataArtifact round-trips through db + u8 (=13).
+        assert_eq!(NodeKind::from_u8(13), NodeKind::DataArtifact);
+        assert_eq!(NodeKind::DataArtifact as u8, 13);
+        assert_eq!(NodeKind::from_db("data_artifact"), NodeKind::DataArtifact);
+        assert_eq!(NodeKind::DataArtifact.as_db(), "data_artifact");
         assert_eq!(NodeKind::from_u8(42), NodeKind::Other);
         assert_eq!(NodeKind::from_u8(255), NodeKind::Other);
     }
