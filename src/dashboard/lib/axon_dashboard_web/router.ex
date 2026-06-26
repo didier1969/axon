@@ -20,6 +20,7 @@ defmodule AxonDashboardWeb.Router do
     live "/", PipelineLive, :index
     live "/cockpit", PipelineLive, :index
     live "/projects", ProjectsLive, :index
+    live "/drift", DriftHeatmapLive, :index
     live "/mcp", McpLive, :index
   end
 
