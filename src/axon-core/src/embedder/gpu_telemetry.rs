@@ -20,7 +20,6 @@ pub struct GpuUtilizationSnapshot {
 enum GpuTelemetryBackend {
     None,
     Nvml,
-    NvidiaSmi,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -50,19 +49,18 @@ pub(crate) fn clear_gpu_memory_snapshot_cache_for_tests() {
 }
 
 fn gpu_telemetry_backend() -> GpuTelemetryBackend {
-    // REQ-AXO-902037 — NVML (driver API) is the canonical GPU telemetry
-    // backend: precise, programmatic, WSL2-robust (per-process memory that
-    // `nvidia-smi --query-compute-apps` masks as `[N/A]`). `nvidia-smi` is now
-    // an EXPLICIT opt-in fallback only (`AXON_GPU_TELEMETRY_BACKEND=nvidia-smi`),
-    // never the silent default. Operator directive 2026-06-19: "nvidia-smi est
-    // trop peu précis, on utilise NVML".
+    // TMG-AXO-002 / REQ-AXO-902037 — NVML (driver API) is the ONLY GPU
+    // telemetry backend: precise, programmatic, WSL2-robust (per-process memory
+    // that `nvidia-smi --query-compute-apps` masks as `[N/A]`). The `nvidia-smi`
+    // CLI shell-out is RETIRED (operator directive s84: "nvidia-smi est trop peu
+    // précis, on utilise NVML" — never the CLI). When NVML is unavailable the
+    // probe degrades to `None`, never to an imprecise CLI fallback.
     match std::env::var("AXON_GPU_TELEMETRY_BACKEND")
         .ok()
         .map(|value| value.trim().to_ascii_lowercase())
         .as_deref()
     {
         Some("none") | Some("disabled") => GpuTelemetryBackend::None,
-        Some("nvidia-smi") | Some("nvidia_smi") | Some("smi") => GpuTelemetryBackend::NvidiaSmi,
         _ => GpuTelemetryBackend::Nvml,
     }
 }
@@ -71,16 +69,7 @@ pub(crate) fn gpu_telemetry_backend_name() -> &'static str {
     match gpu_telemetry_backend() {
         GpuTelemetryBackend::None => "none",
         GpuTelemetryBackend::Nvml => "nvml",
-        GpuTelemetryBackend::NvidiaSmi => "nvidia-smi",
     }
-}
-
-pub(crate) fn gpu_telemetry_command() -> String {
-    std::env::var("AXON_GPU_TELEMETRY_COMMAND")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "/usr/lib/wsl/lib/nvidia-smi".to_string())
 }
 
 pub(crate) fn nvml_library_path() -> String {
@@ -104,28 +93,6 @@ pub fn gpu_telemetry_cache_ttl_ms() -> u64 {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value >= 100)
         .unwrap_or(2_000)
-}
-
-pub(crate) fn parse_nvidia_smi_memory_csv(line: &str) -> Option<GpuMemorySnapshot> {
-    let mut parts = line.split(',').map(|part| part.trim().parse::<u64>().ok());
-    let total_mb = parts.next()??;
-    let used_mb = parts.next()??;
-    let free_mb = parts.next()??;
-    Some(GpuMemorySnapshot {
-        total_mb,
-        used_mb,
-        free_mb,
-    })
-}
-
-pub(crate) fn parse_nvidia_smi_utilization_csv(line: &str) -> Option<GpuUtilizationSnapshot> {
-    let mut parts = line.split(',').map(|part| part.trim().parse::<f64>().ok());
-    let gpu_utilization = parts.next()??;
-    let memory_utilization = parts.next()??;
-    Some(GpuUtilizationSnapshot {
-        gpu_utilization_ratio: (gpu_utilization / 100.0).clamp(0.0, 1.0),
-        memory_utilization_ratio: (memory_utilization / 100.0).clamp(0.0, 1.0),
-    })
 }
 
 #[repr(C)]
@@ -250,14 +217,13 @@ struct NvmlProcessInfoV3 {
     compute_instance_id: u32,
 }
 
-/// REQ-AXO-902037 — VRAM (MiB) held by `pid` per the NVML driver API
-/// (`nvmlDeviceGetComputeRunningProcesses_v3`). Replaces the
-/// `nvidia-smi --query-compute-apps` shell-out, which WSL2 masks as `[N/A]`
-/// / `[Not Found]`; NVML reports per-process memory correctly there. Returns
-/// `Some(mib)` when `pid` holds a compute context (`mib` may be 0 when the
-/// driver reports the size as unavailable), `None` when NVML is unavailable
-/// or `pid` is absent. Mirrors `parse_compute_apps_used_mib`'s contract so
-/// the caller's GPU/CPU verdict (`mib > 0`) is unchanged.
+/// REQ-AXO-902037 / TMG-AXO-002 — VRAM (MiB) held by `pid` per the NVML driver
+/// API (`nvmlDeviceGetComputeRunningProcesses_v3`). The sole per-process GPU
+/// memory source since the CLI shell-out was retired (WSL2 masked it as
+/// `[N/A]`/`[Not Found]`; NVML reports per-process memory correctly there).
+/// Returns `Some(mib)` when `pid` holds a compute context (`mib` may be 0 when
+/// the driver reports the size as unavailable), `None` when NVML is unavailable
+/// or `pid` is absent; the caller's GPU/CPU verdict is `mib > 0`.
 pub(crate) fn gpu_process_used_mib_via_nvml(pid: u32) -> Option<u64> {
     type NvmlInitV2 = unsafe extern "C" fn() -> i32;
     type NvmlShutdown = unsafe extern "C" fn() -> i32;
@@ -338,22 +304,6 @@ pub fn current_gpu_memory_snapshot() -> Option<GpuMemorySnapshot> {
     let snapshot = match gpu_telemetry_backend() {
         GpuTelemetryBackend::None => None,
         GpuTelemetryBackend::Nvml => current_gpu_memory_snapshot_via_nvml(),
-        GpuTelemetryBackend::NvidiaSmi => std::process::Command::new(gpu_telemetry_command())
-            .args([
-                "--query-gpu=memory.total,memory.used,memory.free",
-                "--format=csv,noheader,nounits",
-            ])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|stdout| {
-                stdout
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .map(str::to_string)
-            })
-            .and_then(|line| parse_nvidia_smi_memory_csv(&line)),
     };
 
     let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -368,21 +318,5 @@ pub fn current_gpu_utilization_snapshot() -> Option<GpuUtilizationSnapshot> {
     match gpu_telemetry_backend() {
         GpuTelemetryBackend::None => None,
         GpuTelemetryBackend::Nvml => current_gpu_utilization_snapshot_via_nvml(),
-        GpuTelemetryBackend::NvidiaSmi => std::process::Command::new(gpu_telemetry_command())
-            .args([
-                "--query-gpu=utilization.gpu,utilization.memory",
-                "--format=csv,noheader,nounits",
-            ])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|stdout| {
-                stdout
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .map(str::to_string)
-            })
-            .and_then(|line| parse_nvidia_smi_utilization_csv(&line)),
     }
 }

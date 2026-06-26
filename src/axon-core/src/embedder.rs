@@ -72,8 +72,7 @@ pub use gpu_telemetry::{
 #[allow(unused_imports)]
 pub(crate) use gpu_telemetry::{
     gpu_process_used_mib_via_nvml, gpu_telemetry_backend_name, gpu_telemetry_cache_ttl_ms,
-    gpu_telemetry_command, gpu_telemetry_device_index, nvml_library_path,
-    parse_nvidia_smi_memory_csv, parse_nvidia_smi_utilization_csv,
+    gpu_telemetry_device_index, nvml_library_path,
 };
 pub use provider_contract::{
     ProductionLane, ProviderResolution, ProviderStrategy, ProviderSupportRole,

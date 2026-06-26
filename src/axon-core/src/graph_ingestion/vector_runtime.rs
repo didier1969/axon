@@ -573,7 +573,7 @@ mod tests {
             pending_count: 12,
             heartbeat_ms: 1_700_000_005_000,
             compute: "GPU".to_string(),
-            compute_source: "nvidia_smi".to_string(),
+            compute_source: "device_vram".to_string(),
             build_id: Some("v0.8.0-795-gf1cdab19".to_string()),
             // REQ-AXO-902047 slice 1b — populated B3 health so the shape test
             // covers the cross-process error plumbing.
@@ -621,7 +621,7 @@ mod tests {
         assert!(sql.contains("1700000000000"));
         assert!(sql.contains("1700000005000"));
         assert!(sql.contains("'GPU'"));
-        assert!(sql.contains("'nvidia_smi'"));
+        assert!(sql.contains("'device_vram'"));
         assert!(sql.contains("'v0.8.0-795-gf1cdab19'"));
         // REQ-AXO-902047 slice 1b — the real PG error (root + SQLSTATE) must
         // reach the row verbatim, not the masked "stage merge".

@@ -818,14 +818,6 @@ fn test_cuda_memory_limit_bytes_defaults_to_soft_limit_policy() {
 }
 
 #[test]
-fn test_parse_nvidia_smi_memory_csv_parses_expected_format() {
-    let snapshot = super::parse_nvidia_smi_memory_csv("8192, 2242, 5779").unwrap();
-    assert_eq!(snapshot.total_mb, 8192);
-    assert_eq!(snapshot.used_mb, 2242);
-    assert_eq!(snapshot.free_mb, 5779);
-}
-
-#[test]
 fn test_gpu_memory_pressure_active_uses_soft_limit() {
     let _guard = lock_env_guard();
     unsafe {
@@ -848,13 +840,6 @@ fn test_gpu_memory_pressure_active_uses_soft_limit() {
     unsafe {
         std::env::remove_var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB");
     }
-}
-
-#[test]
-fn test_parse_nvidia_smi_utilization_csv_normalizes_percentages() {
-    let parsed = super::parse_nvidia_smi_utilization_csv("31, 2").expect("parsed");
-    assert!((parsed.gpu_utilization_ratio - 0.31).abs() < f64::EPSILON);
-    assert!((parsed.memory_utilization_ratio - 0.02).abs() < f64::EPSILON);
 }
 
 #[test]
