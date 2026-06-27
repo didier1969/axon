@@ -55,6 +55,11 @@ pub(super) struct WorkPlanNode {
     /// value is in [0.0, 1.0]; integrated into `score` as
     /// `+round(centrality * 100)` by `score_node`.
     pub(super) centrality: Option<f32>,
+    /// REQ-AXO-902079 — strategic breadcrumb of the leaf's parents
+    /// (`MIL ‹title› → DEC ‹title›`) so an actionable Requirement carries its
+    /// WHY-chain inline. `None` for non-leaf nodes / when no strategic parent
+    /// is on the schedulable graph. Populated by `build_actionable_leaves_wave`.
+    pub(super) breadcrumb: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -318,7 +323,8 @@ pub(super) fn wave_to_json(wave: &WorkPlanWave) -> Value {
                 "score": item.score,
                 "reasons": item.reasons,
                 "validation_gates": item.validation_gates,
-                "ist_signals": item.ist_signals
+                "ist_signals": item.ist_signals,
+                "breadcrumb": item.breadcrumb
             })
         }).collect::<Vec<_>>()
     })
@@ -416,10 +422,7 @@ mod tests {
             "superseded",
             "",
         ] {
-            assert!(
-                !is_blocked_status(status),
-                "`{status}` must NOT be blocked"
-            );
+            assert!(!is_blocked_status(status), "`{status}` must NOT be blocked");
         }
     }
 }

@@ -163,6 +163,11 @@ fn build_actionable_leaves_wave(
             continue;
         }
         let mut parent_score: Option<i64> = None;
+        // REQ-AXO-902079 — collect the highest-scoring Milestone and Decision
+        // parents (same incoming filiation walk as parent_score) to build the
+        // strategic breadcrumb MIL → DEC for this actionable leaf.
+        let mut best_mil: Option<(i64, String)> = None;
+        let mut best_dec: Option<(i64, String)> = None;
         if let Some(idx) = snapshot.node_index(id) {
             for e in snapshot.graph().edges_directed(idx, Direction::Incoming) {
                 if !is_descendant_relation(e.weight().as_str()) {
@@ -176,11 +181,34 @@ fn build_actionable_leaves_wave(
                     parent_score = Some(
                         parent_score.map_or(parent_node.score, |cur| cur.max(parent_node.score)),
                     );
+                    let label = format!("{} {}", parent_id, parent_node.title);
+                    let slot = match parent_node.entity_type {
+                        WorkPlanEntityType::Milestone => Some(&mut best_mil),
+                        WorkPlanEntityType::Decision => Some(&mut best_dec),
+                        WorkPlanEntityType::Requirement => None,
+                    };
+                    if let Some(slot) = slot {
+                        if slot.as_ref().is_none_or(|(s, _)| parent_node.score > *s) {
+                            *slot = Some((parent_node.score, label));
+                        }
+                    }
                 }
             }
         }
         let effective_parent_score = parent_score.unwrap_or(node.score);
+        let mut crumbs: Vec<String> = Vec::new();
+        if let Some((_, m)) = best_mil {
+            crumbs.push(m);
+        }
+        if let Some((_, d)) = best_dec {
+            crumbs.push(d);
+        }
         let mut leaf = node.clone();
+        leaf.breadcrumb = if crumbs.is_empty() {
+            None
+        } else {
+            Some(crumbs.join(" → "))
+        };
         leaf.reasons.insert(
             0,
             format!("actionable_leaf (parent_score={})", effective_parent_score),
@@ -807,6 +835,7 @@ impl McpServer {
                             ist_signals: Vec::new(),
                             updated_at_ms,
                             centrality: None,
+                            breadcrumb: None,
                         },
                     );
                 }
@@ -831,6 +860,7 @@ impl McpServer {
                             ist_signals: Vec::new(),
                             updated_at_ms,
                             centrality: None,
+                            breadcrumb: None,
                         },
                     );
                 }
@@ -856,6 +886,7 @@ impl McpServer {
                             ist_signals: Vec::new(),
                             updated_at_ms,
                             centrality: None,
+                            breadcrumb: None,
                         },
                     );
                 }
@@ -995,14 +1026,17 @@ impl McpServer {
             )
         };
         let cell = |row: &[Value], i: usize| -> String {
-            row.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string()
+            row.get(i)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
         };
 
         struct Agg {
             title: String,
             status: String,
-            reqs: HashMap<String, String>,    // req id -> status
-            pillars: HashMap<String, usize>,  // pillar title -> req count
+            reqs: HashMap<String, String>,   // req id -> status
+            pillars: HashMap<String, usize>, // pillar title -> req count
         }
         let mut by_milestone: HashMap<String, Agg> = HashMap::new();
         for row in &rows {
@@ -1110,7 +1144,10 @@ impl McpServer {
                     c.get("readiness").and_then(|v| v.as_str()).unwrap_or(""),
                     c.get("chapter").and_then(|v| v.as_str()).unwrap_or(""),
                     c.get("title").and_then(|v| v.as_str()).unwrap_or(""),
-                    c.get("reqs").and_then(|v| v.get("open")).and_then(|v| v.as_u64()).unwrap_or(0)
+                    c.get("reqs")
+                        .and_then(|v| v.get("open"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
                 )
             })
             .collect::<Vec<_>>()
@@ -1134,10 +1171,17 @@ impl McpServer {
 
     /// Run a single-column id SQL lane and return the ids in row order.
     fn rrf_lane_ids(&self, sql: &str) -> Vec<String> {
-        let raw = self.graph_store.query_json(sql).unwrap_or_else(|_| "[]".to_string());
+        let raw = self
+            .graph_store
+            .query_json(sql)
+            .unwrap_or_else(|_| "[]".to_string());
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         rows.into_iter()
-            .filter_map(|r| r.into_iter().next().and_then(|v| v.as_str().map(String::from)))
+            .filter_map(|r| {
+                r.into_iter()
+                    .next()
+                    .and_then(|v| v.as_str().map(String::from))
+            })
             .collect()
     }
 
@@ -1227,7 +1271,11 @@ impl McpServer {
 
         // RRF fusion (k=60).
         let mut score: HashMap<String, f64> = HashMap::new();
-        let lanes_present = [!ann_lane.is_empty(), !fts_lane.is_empty(), !graph_lane.is_empty()];
+        let lanes_present = [
+            !ann_lane.is_empty(),
+            !fts_lane.is_empty(),
+            !graph_lane.is_empty(),
+        ];
         for lane in [&ann_lane, &fts_lane, &graph_lane] {
             for (rank, id) in lane.iter().enumerate() {
                 *score.entry(id.clone()).or_insert(0.0) += 1.0 / (60.0 + (rank as f64) + 1.0);
@@ -1552,6 +1600,7 @@ mod tests {
                     ist_signals: Vec::new(),
                     updated_at_ms: None,
                     centrality: None,
+                    breadcrumb: None,
                 },
             );
         };
@@ -1681,6 +1730,7 @@ mod tests {
                 ist_signals: Vec::new(),
                 updated_at_ms: None,
                 centrality: None,
+                breadcrumb: None,
             },
         );
         let schedulable: HashSet<String> = ["REQ-AXO-99"].iter().map(|s| s.to_string()).collect();
