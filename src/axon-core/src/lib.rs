@@ -6,6 +6,7 @@ pub mod bench_pipeline_stages;
 pub mod bridge;
 pub mod code_chunker;
 pub mod config;
+pub mod contract;
 pub mod dashboard_state;
 pub mod embedder;
 pub mod embedding_contract;
