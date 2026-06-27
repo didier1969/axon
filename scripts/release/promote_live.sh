@@ -177,20 +177,37 @@ PY
     echo "in-place: process-compose restart axon-brain failed; full restart." >&2
     return 1
   fi
-  # Restart the indexer too when it is part of the live profile (its binary was
-  # swapped as well, and the post-check requires indexer_ready). Best-effort.
-  if pgrep -f 'bin/axon-indexer' >/dev/null 2>&1; then
-    "$pc" process restart axon-indexer -p "$pc_port" >/dev/null 2>&1 || true
+  # REQ-AXO-902109 — restart the indexer UNCONDITIONALLY (its binary was swapped
+  # and the post-check requires indexer_ready). The previous version gated this on
+  # `pgrep bin/axon-indexer` being already alive — so a dead indexer pre-restart
+  # (s91 promote: pid died before step 5) was NEVER restarted, and the caller's
+  # indexer_ready post-check then burned its whole 300s timeout before failing.
+  # `process restart` starts a stopped process; a non-zero exit means the indexer
+  # is NOT in this live profile (brain_only) — recorded so we don't demand it.
+  local indexer_in_profile=0
+  if "$pc" process restart axon-indexer -p "$pc_port" >/dev/null 2>&1; then
+    indexer_in_profile=1
   fi
   # Confirm the MCP port is actually serving (process restart already gated on
   # the readiness_probe; this verifies the real :44129/readyz).
-  if poll_until "brain readyz after in-place process restart" 60 0.2 \
+  if ! poll_until "brain readyz after in-place process restart" 60 0.2 \
        bash -c "curl -sf -m 2 http://127.0.0.1:44129/readyz >/dev/null 2>&1"; then
-    echo "✅ in-place restart: axon-brain restarted via process-compose (managed)." >&2
-    return 0
+    echo "in-place: brain did not return on /readyz within 60s; full restart." >&2
+    return 1
   fi
-  echo "in-place: brain did not return on /readyz within 60s; full restart." >&2
-  return 1
+  # REQ-AXO-902109 fail-fast — if the indexer belongs to this profile but did not
+  # come back up, fall back to a full restart NOW instead of letting the caller's
+  # indexer_ready post-check exhaust its (up to 300s) timeout on a doomed poll.
+  if [[ "$indexer_in_profile" -eq 1 ]] && ! pgrep -f 'bin/axon-indexer' >/dev/null 2>&1; then
+    echo "in-place: indexer in profile but not running after restart; full restart." >&2
+    return 1
+  fi
+  if [[ "$indexer_in_profile" -eq 1 ]]; then
+    echo "✅ in-place restart: axon-brain + axon-indexer restarted via process-compose (managed)." >&2
+  else
+    echo "✅ in-place restart: axon-brain restarted via process-compose (managed; brain_only profile)." >&2
+  fi
+  return 0
 }
 
 usage() {
