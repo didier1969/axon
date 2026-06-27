@@ -120,7 +120,31 @@ impl McpServer {
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let next = current + 1;
+        // REQ-AXO-902086 (feedback #26) : pour les révisions, le compteur Registry
+        // `last_rev` peut se désynchroniser de `soll.Revision` — des lignes
+        // `REV-{code}-NNN` migrées/seedées remplissent la table sans avancer le
+        // compteur, si bien que `current+1` collisionne sur `revision_pkey`
+        // (observé : compteur=1 alors que max=35 → ~34 retries). On ancre donc
+        // `next` sur le vrai max du suffixe numérique. L'ancre `^REV-{code}-([0-9]+)$`
+        // ne matche QUE les ids canoniques : les révisions `unlink-<ts>` (dont les
+        // chiffres de fin empoisonneraient MAX) sont exclues. Aligne sur le chemin
+        // soll_manager. L'UPDATE resynchronise le compteur du même coup.
+        let next = if kind == "revision" {
+            let reconcile = format!(
+                "SELECT COALESCE(MAX(CAST(substring(revision_id FROM '^REV-{code}-([0-9]+)$') AS INTEGER)), 0) \
+                 FROM soll.Revision WHERE project_code = '{code}'",
+                code = escape_sql(&canonical_code)
+            );
+            let max_existing = self
+                .query_single_column(&reconcile)?
+                .into_iter()
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            current.max(max_existing) + 1
+        } else {
+            current + 1
+        };
         self.graph_store.execute(&format!(
             "UPDATE soll.Registry SET {} = {} WHERE project_code = '{}'",
             reg_col,
