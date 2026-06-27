@@ -46,6 +46,34 @@ fn is_failure_mode(context: &str, practice: &str) -> bool {
     MARKERS.iter().any(|m| hay.contains(m))
 }
 
+/// REQ-AXO-902137 — cosine-distance threshold under which two practices count as
+/// near-duplicates and get fused. 0.07 ≈ cosine similarity > 0.93 (BGE-large 1024d).
+const FUSION_COSINE_EPS: f32 = 0.07;
+
+/// REQ-AXO-902137 — two practices are near-duplicates (fuse candidates) when their
+/// embedding cosine distance is below `eps`. Pure + unit-testable.
+fn should_fuse(dist: f32, eps: f32) -> bool {
+    dist < eps
+}
+
+/// REQ-AXO-902137 — fold the provenance (`source_project`) of a fused duplicate
+/// into the representative's: comma-separated union, insertion-order preserved,
+/// blanks dropped, no loss of contributing tenant. Pure + unit-testable.
+fn merge_provenance(existing: &str, incoming: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for tok in existing.split(',').chain(incoming.split(',')) {
+        let t = tok.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if seen.insert(t.to_string()) {
+            out.push(t.to_string());
+        }
+    }
+    out.join(",")
+}
+
 /// REQ-AXO-902136 — dense encoding is CALLER-PROVIDED (the brain has no embedded
 /// LLM to compact prose; the calling agent IS the compactor). The brain only
 /// VALIDATES + normalises: trims ; an empty dense → fall back to the prose
@@ -284,13 +312,101 @@ impl McpServer {
         }))
     }
 
+    /// REQ-AXO-902137 — semantic fusion of near-duplicate practices. Greedy per
+    /// representative (highest trust first): a practice within `FUSION_COSINE_EPS`
+    /// cosine distance of a stronger one is FUSED — its use/win counts + provenance
+    /// fold into the representative and it is marked `status='merged'` (never
+    /// DELETE, audit-preserving like 'pruned'). The brain has no LLM so it does NOT
+    /// synthesize new text; it keeps the strongest representative and aggregates
+    /// governance. `scope_filter` is the tick-style `AND scope = '…'` (or empty).
+    /// Returns the number of practices fused away.
+    fn fuse_near_duplicates(&self, scope_filter: &str) -> u32 {
+        let reps_sql = format!(
+            "SELECT id, use_count, win_count, source_project FROM axon.practice \
+             WHERE status='active' AND embedding IS NOT NULL {scope_filter} \
+             ORDER BY trust DESC, use_count DESC, id ASC"
+        );
+        let reps: Vec<Vec<Value>> = self
+            .graph_store
+            .query_json_writer(&reps_sql)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let i64c = |r: &Vec<Value>, i: usize| {
+            r.get(i)
+                .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(0)
+        };
+        let strc = |r: &Vec<Value>, i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let mut consumed: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut fused = 0u32;
+        for rep in &reps {
+            let rep_id = i64c(rep, 0);
+            if rep_id == 0 || consumed.contains(&rep_id) {
+                continue;
+            }
+            // Near-duplicates of rep: same scope, active, cosine dist < eps. The
+            // self-join compares embeddings in-DB (no vector round-trips to Rust).
+            let dup_sql = format!(
+                "SELECT b.id, b.use_count, b.win_count, b.source_project \
+                 FROM axon.practice a JOIN axon.practice b ON b.scope = a.scope \
+                 WHERE a.id = {rep_id} AND b.id <> a.id AND b.status='active' \
+                   AND b.embedding IS NOT NULL AND a.embedding IS NOT NULL \
+                   AND (a.embedding <=> b.embedding) < {eps}",
+                eps = FUSION_COSINE_EPS
+            );
+            let dups: Vec<Vec<Value>> = self
+                .graph_store
+                .query_json_writer(&dup_sql)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let (mut add_use, mut add_win) = (0i64, 0i64);
+            let mut prov = strc(rep, 3);
+            let mut merged_ids: Vec<i64> = Vec::new();
+            for d in &dups {
+                let did = i64c(d, 0);
+                if did == 0 || consumed.contains(&did) {
+                    continue;
+                }
+                consumed.insert(did);
+                merged_ids.push(did);
+                add_use += i64c(d, 1);
+                add_win += i64c(d, 2);
+                prov = merge_provenance(&prov, &strc(d, 3));
+            }
+            if merged_ids.is_empty() {
+                continue;
+            }
+            consumed.insert(rep_id);
+            let ids_list = merged_ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+            // Fold governance into the representative…
+            let _ = self.graph_store.execute(&format!(
+                "UPDATE axon.practice SET use_count = use_count + {add_use}, \
+                        win_count = win_count + {add_win}, source_project = '{}', updated_at = now() \
+                 WHERE id = {rep_id}",
+                esc(&prov)
+            ));
+            // …and tombstone the duplicates (never DELETE — audit).
+            let _ = self.graph_store.execute(&format!(
+                "UPDATE axon.practice SET status='merged', updated_at = now() WHERE id IN ({ids_list})"
+            ));
+            fused += merged_ids.len() as u32;
+        }
+        fused
+    }
+
     /// REQ-AXO-902131 — maintenance tick: FSRS decay of trust + prune of collapsed
     /// practices (status='pruned', never DELETE) + stagnation verdict.
+    /// REQ-AXO-902137 — also fuses near-duplicates first (cluster → strongest rep).
     pub(crate) fn axon_practice_tick(&self, args: &Value) -> Option<Value> {
         let scope_filter = match args.get("scope").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
             Some(s) => format!("AND scope = '{}'", esc(s)),
             None => String::new(),
         };
+        // REQ-AXO-902137 — fuse near-duplicates BEFORE decay so the decay/prune
+        // pass operates on the de-duplicated set.
+        let fused = self.fuse_near_duplicates(&scope_filter);
         let sql = format!(
             "SELECT id, trust, stability, use_count, \
                     EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since, \
@@ -329,10 +445,10 @@ impl McpServer {
         let stag = assess_stagnation(adds, prunes30, decayed as i32, mean_trust, mean_trust);
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_tick — decayed {decayed} · pruned {pruned} · mean_trust {:.2} · stagnation={}",
+                "### 🧠 practice_tick — fused {fused} · decayed {decayed} · pruned {pruned} · mean_trust {:.2} · stagnation={}",
                 mean_trust, stag.stagnating
             )}],
-            "data": {"status":"ok","decayed":decayed,"pruned":pruned,"mean_trust":mean_trust,
+            "data": {"status":"ok","fused":fused,"decayed":decayed,"pruned":pruned,"mean_trust":mean_trust,
                      "stagnation":{"stagnating":stag.stagnating,"churn":stag.churn,"reason":stag.reason}}
         }))
     }
@@ -373,7 +489,25 @@ impl McpServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_failure_mode, resolve_dense_form};
+    use super::{is_failure_mode, merge_provenance, resolve_dense_form, should_fuse, FUSION_COSINE_EPS};
+
+    #[test]
+    fn should_fuse_902137() {
+        // below eps → fuse ; at/above eps → keep distinct.
+        assert!(should_fuse(0.02, FUSION_COSINE_EPS));
+        assert!(!should_fuse(FUSION_COSINE_EPS, FUSION_COSINE_EPS));
+        assert!(!should_fuse(0.5, FUSION_COSINE_EPS));
+    }
+
+    #[test]
+    fn merge_provenance_902137() {
+        // union, insertion-order preserved, blanks dropped, dedup.
+        assert_eq!(merge_provenance("NEX", "AXO"), "NEX,AXO");
+        assert_eq!(merge_provenance("NEX,AXO", "AXO"), "NEX,AXO");
+        assert_eq!(merge_provenance("", "NEX"), "NEX");
+        assert_eq!(merge_provenance(" NEX , ", " AXO ,NEX"), "NEX,AXO");
+        assert_eq!(merge_provenance("", ""), "");
+    }
 
     #[test]
     fn resolve_dense_form_902136() {
