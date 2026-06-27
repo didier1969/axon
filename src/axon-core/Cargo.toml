@@ -191,3 +191,10 @@ tower = { version = "0.5.3", features = ["util"] }
 # MIL-AXO-015 P1: ephemeral PG instances for unit/integration tests.
 testcontainers = { version = "0.23", features = ["blocking"] }
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
+
+# REQ-AXO-902108 — release builds incremental so a small edit recompiles only the
+# changed codegen units of axon-core (promote step-1: ~189s → ~45-75s) instead of
+# the whole crate. opt-level/codegen are unchanged → identical optimized binary,
+# same preflight/qualify gates. Trades a larger target dir for build latency.
+[profile.release]
+incremental = true
