@@ -115,6 +115,28 @@ fn provenance_count(source_project: &str) -> usize {
         .count()
 }
 
+/// REQ-AXO-902141 — normalise a caller-supplied perishability class. `durable` is
+/// the default (a best-practice store is durable by nature) ; only `perishable` is
+/// accepted as the alternative (future news/context memory). Anything else →
+/// `durable` (fail-safe: never silently apply time-decay to a best practice).
+fn normalize_perishability(raw: &str) -> &'static str {
+    if raw.trim().eq_ignore_ascii_case("perishable") {
+        "perishable"
+    } else {
+        "durable"
+    }
+}
+
+/// REQ-AXO-902141 — does this perishability class decay BY TIME ? Only perishable
+/// knowledge (news, market state) goes stale with age (FSRS). Durable knowledge (a
+/// code/op best practice: "never force-push main") is timeless — it decays ONLY by
+/// supersession (upsert, same context) or contradiction (contradiction_check), never
+/// by the clock. Pure + unit-testable. THE core of the model fix: the symptom
+/// (trust 0.00 in 1 day on a durable practice) was a wrong CRITERION, not a tuning.
+fn perishability_decays_by_time(perishability: &str) -> bool {
+    normalize_perishability(perishability) == "perishable"
+}
+
 /// REQ-AXO-902136 — dense encoding is CALLER-PROVIDED (the brain has no embedded
 /// LLM to compact prose; the calling agent IS the compactor). The brain only
 /// VALIDATES + normalises: trims ; an empty dense → fall back to the prose
@@ -161,6 +183,10 @@ impl McpServer {
         }
         // REQ-AXO-902136 — caller-provided dense form (brain validates, no LLM here).
         let (dense, dense_advisory) = resolve_dense_form(dense_arg, practice);
+        // REQ-AXO-902141 — perishability class (durable by default: a best practice
+        // is timeless, it must NOT be time-decayed).
+        let perishability =
+            normalize_perishability(args.get("perishability").and_then(Value::as_str).unwrap_or(""));
 
         // --- WRITE-GATE: reject a practice that contradicts the scope's base. ---
         let gate_args = json!({
@@ -220,12 +246,13 @@ impl McpServer {
 
         // --- UPSERT idempotent: re-put refreshes evidence, keeps accrued governance. ---
         let sql = format!(
-            "INSERT INTO axon.practice (scope, context, practice, dense, evidence, embedding, source_project) \
-             VALUES ('{}', '{}', '{}', '{}', '{}', {}, '{}') \
+            "INSERT INTO axon.practice (scope, context, practice, dense, evidence, embedding, source_project, perishability) \
+             VALUES ('{}', '{}', '{}', '{}', '{}', {}, '{}', '{}') \
              ON CONFLICT (scope, md5(practice)) DO UPDATE \
                SET dense = EXCLUDED.dense, \
                    evidence = EXCLUDED.evidence, \
                    embedding = COALESCE(EXCLUDED.embedding, axon.practice.embedding), \
+                   perishability = EXCLUDED.perishability, \
                    updated_at = now() \
              RETURNING id, (xmax = 0) AS inserted",
             esc(&scope),
@@ -234,7 +261,8 @@ impl McpServer {
             esc(&dense),
             esc(evidence),
             embed_sql,
-            esc(source)
+            esc(source),
+            perishability
         );
         let rows: Vec<Vec<Value>> = match self.graph_store.query_json_writer(&sql) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
@@ -252,12 +280,12 @@ impl McpServer {
         let dense_state = if dense.is_empty() { "prose_fallback" } else { "dense" };
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_put — {} · scope=`{scope}` · gate={gate_label} · embed={embed_state} · encoding={dense_state} · id={id}{}",
+                "### 🧠 practice_put — {} · scope=`{scope}` · gate={gate_label} · embed={embed_state} · encoding={dense_state} · {perishability} · id={id}{}",
                 if inserted {"stored"} else {"updated"},
                 dense_advisory.map(|a| format!(" · ⚠️ {a}")).unwrap_or_default()
             )}],
             "data": {"status":"ok","id":id,"inserted":inserted,"scope":scope,"gate":gate_label,"embed":embed_state,
-                     "encoding":dense_state,"dense_advisory":dense_advisory}
+                     "encoding":dense_state,"dense_advisory":dense_advisory,"perishability":perishability}
         }))
     }
 
@@ -291,7 +319,7 @@ impl McpServer {
         let sql = format!(
             "SELECT id, scope, COALESCE(NULLIF(dense,''), practice) AS practice, evidence, trust, stability, \
                     EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since, \
-                    (embedding <=> {vec_lit}::vector) AS dist, tier \
+                    (embedding <=> {vec_lit}::vector) AS dist, tier, perishability \
              FROM axon.practice \
              WHERE status='active' AND embedding IS NOT NULL AND {scope_filter} \
              ORDER BY embedding <=> {vec_lit}::vector LIMIT {pool}"
@@ -326,6 +354,7 @@ impl McpServer {
                     "evidence": g(3),
                     "trust": trust,
                     "tier": g(8),
+                    "perishability": g(9),
                     "score": score
                 }))
             })
@@ -453,7 +482,7 @@ impl McpServer {
             "SELECT id, trust, stability, use_count, \
                     EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since, \
                     EXTRACT(EPOCH FROM (now() - created_at))/86400.0 AS age_days, \
-                    tier, source_project \
+                    tier, source_project, perishability \
              FROM axon.practice WHERE status='active' {scope_filter}"
         );
         let rows: Vec<Vec<Value>> = match self.graph_store.query_json_writer(&sql) {
@@ -461,7 +490,7 @@ impl McpServer {
             Err(e) => return Some(practice_err(&format!("tick load failed: {e}"), "degraded")),
         };
         let f = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0) as f32;
-        let (mut decayed, mut pruned, mut consolidated) = (0u32, 0u32, 0u32);
+        let (mut decayed, mut pruned, mut consolidated, mut preserved) = (0u32, 0u32, 0u32, 0u32);
         for r in &rows {
             let id = r.first().and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0);
             let trust = f(r.get(1).unwrap_or(&Value::Null));
@@ -471,14 +500,31 @@ impl McpServer {
             let age_days = f(r.get(5).unwrap_or(&Value::Null));
             let tier = r.get(6).and_then(|v| v.as_str()).unwrap_or("episode").to_string();
             let prov_n = provenance_count(r.get(7).and_then(|v| v.as_str()).unwrap_or(""));
+            let perishability = r.get(8).and_then(|v| v.as_str()).unwrap_or("durable");
             // REQ-AXO-902138 — promotion uses the PRE-decay trust (the accrued
-            // governance the record earned). effective_tier drives the prune guard.
+            // governance the record earned). Runs for durable + perishable alike.
             let promoted = consolidate_tier(&tier, trust, use_count as i64, prov_n);
+            if promoted.is_some() {
+                consolidated += 1;
+            }
+            // REQ-AXO-902141 — DURABLE knowledge (best practices) is timeless: the
+            // tick must NOT decay or age-prune it (the bug: trust 0.00 in 1 day).
+            // It only loses trust via supersession (upsert, same context) or
+            // contradiction (contradiction_check at put) — both OUTSIDE this loop.
+            // Time-decay + age-prune apply ONLY to perishable knowledge.
+            if !perishability_decays_by_time(perishability) {
+                preserved += 1;
+                if let Some(t) = promoted {
+                    let _ = self.graph_store.execute(&format!(
+                        "UPDATE axon.practice SET tier = '{t}', updated_at = now() WHERE id = {id}"
+                    ));
+                }
+                continue;
+            }
             let effective_tier = promoted.unwrap_or(tier.as_str());
             let r_ret = retrievability(days_since, stability);
             let new_trust = decay_trust(trust, r_ret);
-            // REQ-AXO-902138 — principles survive the decay-prune (transverse,
-            // earned across tenants); episodes/rules still prune normally.
+            // principles survive the decay-prune (transverse) ; episodes/rules prune.
             let prune = should_prune(new_trust, r_ret, use_count, age_days) && effective_tier != "principle";
             let status = if prune { "pruned" } else { "active" };
             let tier_set = promoted.map(|t| format!(", tier = '{t}'")).unwrap_or_default();
@@ -489,9 +535,6 @@ impl McpServer {
             if prune {
                 pruned += 1;
             }
-            if promoted.is_some() {
-                consolidated += 1;
-            }
         }
         // stagnation over the 30d window.
         let adds = self.graph_store.query_count(&format!("SELECT count(*) FROM axon.practice WHERE created_at > now() - interval '30 days' {scope_filter}")).unwrap_or(0) as i32;
@@ -500,10 +543,10 @@ impl McpServer {
         let stag = assess_stagnation(adds, prunes30, decayed as i32, mean_trust, mean_trust);
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_tick — fused {fused} · consolidated {consolidated} · decayed {decayed} · pruned {pruned} · mean_trust {:.2} · stagnation={}",
+                "### 🧠 practice_tick — fused {fused} · consolidated {consolidated} · preserved {preserved} (durable) · decayed {decayed} · pruned {pruned} · mean_trust {:.2} · stagnation={}",
                 mean_trust, stag.stagnating
             )}],
-            "data": {"status":"ok","fused":fused,"consolidated":consolidated,"decayed":decayed,"pruned":pruned,"mean_trust":mean_trust,
+            "data": {"status":"ok","fused":fused,"consolidated":consolidated,"preserved":preserved,"decayed":decayed,"pruned":pruned,"mean_trust":mean_trust,
                      "stagnation":{"stagnating":stag.stagnating,"churn":stag.churn,"reason":stag.reason}}
         }))
     }
@@ -545,9 +588,23 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        consolidate_tier, is_failure_mode, merge_provenance, provenance_count, resolve_dense_form,
-        should_fuse, FUSION_COSINE_EPS,
+        consolidate_tier, is_failure_mode, merge_provenance, normalize_perishability,
+        perishability_decays_by_time, provenance_count, resolve_dense_form, should_fuse,
+        FUSION_COSINE_EPS,
     };
+
+    #[test]
+    fn perishability_902141() {
+        // durable is the default + fail-safe ; only explicit "perishable" opts into time-decay.
+        assert_eq!(normalize_perishability(""), "durable");
+        assert_eq!(normalize_perishability("garbage"), "durable");
+        assert_eq!(normalize_perishability("DURABLE"), "durable");
+        assert_eq!(normalize_perishability(" Perishable "), "perishable");
+        // the core model fix: durable knowledge NEVER decays by time ; perishable does.
+        assert!(!perishability_decays_by_time("durable"));
+        assert!(!perishability_decays_by_time("")); // default durable → no time decay
+        assert!(perishability_decays_by_time("perishable"));
+    }
 
     #[test]
     fn consolidate_tier_902138() {

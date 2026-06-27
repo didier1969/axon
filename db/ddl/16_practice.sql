@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS axon.practice (
     source_project TEXT        NOT NULL DEFAULT '',  -- who contributed it (mailbox provenance)
     status         TEXT        NOT NULL DEFAULT 'active', -- active | pruned | merged (never DELETE — audit)
     tier           TEXT        NOT NULL DEFAULT 'episode', -- REQ-AXO-902138: episode → rule → principle (consolidation par maturité)
+    perishability  TEXT        NOT NULL DEFAULT 'durable', -- REQ-AXO-902141: durable (best-practice : pas de decay temps) | perishable (FSRS temporel)
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_used_at   TIMESTAMPTZ NOT NULL DEFAULT now(),  -- FSRS review anchor
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -37,6 +38,8 @@ CREATE TABLE IF NOT EXISTS axon.practice (
 ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS dense TEXT NOT NULL DEFAULT '';
 -- REQ-AXO-902138 — consolidation tier (episode → rule → principle).
 ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'episode';
+-- REQ-AXO-902141 — classe de périssabilité (durable = pas de decay temps).
+ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS perishability TEXT NOT NULL DEFAULT 'durable';
 
 -- PR-1 dedup: same scope + same practice text = idempotent (UPSERT reinforces, no dup).
 CREATE UNIQUE INDEX IF NOT EXISTS practice_scope_practice_idx
