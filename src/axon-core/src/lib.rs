@@ -26,6 +26,7 @@ mod main_background;
 mod main_services;
 mod main_telemetry;
 pub mod mailbox;
+pub mod practice_memory;
 pub mod mcp;
 pub mod mcp_http;
 pub mod nli;
