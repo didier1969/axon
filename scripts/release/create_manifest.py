@@ -116,9 +116,23 @@ def main() -> int:
     archived_artifact = artifacts_root / primary_bin_name
     archived_build_info = artifacts_root / f"{primary_bin_name}.build-info"
     artifacts_root.mkdir(parents=True, exist_ok=True)
-    if not archived_artifact.exists():
+    # REQ-AXO-902124 — re-copy when the archived artifact is MISSING, EMPTY, or its
+    # sha doesn't match: a crash mid-promote leaves a 0-byte archive at this exact
+    # sha-keyed path, and a blind skip-if-exists then never repairs it → the
+    # promote's step-5 checksum check fails forever ("Artifact checksum mismatch").
+    # The archive must ALWAYS equal the binary, so verify rather than trust existence.
+    def _archive_stale(path: pathlib.Path, expected_sha: str) -> bool:
+        return (
+            not path.exists()
+            or path.stat().st_size == 0
+            or sha256_file(path) != expected_sha
+        )
+
+    if _archive_stale(archived_artifact, artifact_sha):
         shutil.copy2(artifact, archived_artifact)
-    if build_info_path.exists() and not archived_build_info.exists():
+    if build_info_path.exists() and (
+        not archived_build_info.exists() or archived_build_info.stat().st_size == 0
+    ):
         shutil.copy2(build_info_path, archived_build_info)
 
     created_at = dt.datetime.now(dt.timezone.utc).isoformat()
