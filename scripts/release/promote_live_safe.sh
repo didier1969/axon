@@ -266,6 +266,17 @@ else
   }
   run_step 2 dev_restart restart_dev_with_candidate
   run_step 2b dev_gate validate_dev_healthy
+  # RCA promote 20260627 (REQ-AXO-902101) — tear down the dev instance NOW, before
+  # the live restart + post-check (steps 5/6). A lingering dev brain auto-pauses
+  # the live indexer (REQ-AXO-234 GPU-exclusion) → the live post-check's
+  # `indexer_ready` never becomes true → step 5 times out (600s) even though the
+  # binary swapped correctly (observed: live brain on candidate, indexer stale,
+  # manifest left pending). Stopping dev here lets the live indexer resume before
+  # the gate. The dev instance is no longer needed once dev_gate has validated it.
+  teardown_dev_after_validation() {
+    bash "$ROOT_DIR/scripts/axon-dev" stop 2>&1 || true
+  }
+  run_step 2c teardown_dev teardown_dev_after_validation
 fi
 
 # --- Step 3: preflight ---

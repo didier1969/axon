@@ -409,18 +409,23 @@ impl McpServer {
         {
             reserved_revision_id.to_string()
         } else {
-            let (_, project_code, _, next_revision) = match self
-                .next_server_numeric_id(project_code, "revision")
-            {
-                Ok(parts) => parts,
-                Err(e) => {
-                    return Some(json!({
-                        "content": [{"type":"text","text": format!("SOLL commit error (revision id): {}", e)}],
-                        "isError": true
-                    }))
-                }
-            };
-            format!("REV-{}-{:03}", project_code, next_revision)
+            // REQ-AXO-902086 (fix définitif) — revision_id timestamp+nonce,
+            // collision-free sous écritures concurrentes. L'ancien compteur
+            // `REV-{code}-{NNN}` (soll.Registry.last_rev) se désynchronisait de
+            // soll.Revision ET courait entre MAX() et INSERT : observé en prod
+            // (brain 1215) → duplicate_key répété sur REV-AXO-036/037 même après
+            // le patch max+1. Les révisions sont des lignes d'AUDIT (pas des nœuds
+            // canoniques, DEC-AXO-085 ne s'y applique pas) → le format numérique
+            // n'est pas requis. Aligne sur la voie soll_manager/unlink
+            // (`unlink-{ts}-{src}`), qui n'a jamais collisionné.
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static REV_NONCE: AtomicU64 = AtomicU64::new(0);
+            format!(
+                "REV-{}-{}-{}",
+                project_code,
+                now_unix_ms(),
+                REV_NONCE.fetch_add(1, Ordering::Relaxed)
+            )
         };
         let now = now_unix_ms();
         // REQ-AXO-254: deadpool serves a fresh connection per `pg_execute`,
