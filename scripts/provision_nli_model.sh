@@ -10,7 +10,18 @@ PY=.venv/bin/python
 PIP=.venv/bin/pip
 
 echo "== step 1: install ONNX export tooling =="
-"$PIP" install -q -U "optimum[onnxruntime]" "transformers>=4.48" onnx accelerate
+# The ONNX export runs on CPU — install CPU-only torch FIRST to avoid optimum
+# pulling the multi-GB CUDA wheels (nvidia-cublas/cudnn/torch ~3-4GB) that
+# timed out the network. Then optimum sees torch satisfied and skips them.
+export UV_HTTP_TIMEOUT=600
+PKGS=("optimum[onnxruntime]" "transformers>=4.48" onnx accelerate)
+if command -v uv >/dev/null 2>&1; then
+  uv pip install --python "$PY" torch --index-url https://download.pytorch.org/whl/cpu
+  uv pip install --python "$PY" "${PKGS[@]}"
+else
+  "$PIP" install --retries 8 --timeout 240 torch --index-url https://download.pytorch.org/whl/cpu
+  "$PIP" install --retries 8 --timeout 240 -U "${PKGS[@]}"
+fi
 
 echo "== step 2: export $MODEL -> $OUT (ONNX) =="
 mkdir -p "$OUT"

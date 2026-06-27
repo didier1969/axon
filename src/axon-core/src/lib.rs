@@ -27,6 +27,7 @@ mod main_services;
 mod main_telemetry;
 pub mod mcp;
 pub mod mcp_http;
+pub mod nli;
 pub mod observed_gpu;
 pub mod optimizer;
 pub mod parser;
