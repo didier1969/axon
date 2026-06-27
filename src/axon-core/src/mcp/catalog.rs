@@ -982,6 +982,56 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string", "description": "Room id." }, "project": { "type": "string", "description": "Joiner. Default: cwd-resolved." } }, "required": ["room_id"] }
             },
             {
+                "name": "practice_put",
+                "description": "[PRACTICE] REQ-AXO-902131 — store a GOVERNED best practice into the cross-tenant memory. WRITE-GATED by contradiction_check: a practice that CONTRADICTS the scope's indexed base is REJECTED (anti-poison). Idempotent on (scope, practice). scope='*' = global/cross-tenant (every project inherits it). Body is dense + pointer-bearing (evidence = SOLL ids / commit / metric).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scope": { "type": "string", "description": "Project code, or '*' for a global cross-tenant practice. Default: cwd-resolved." },
+                        "context": { "type": "string", "description": "The situation signature (embedded for recall) — when does this practice apply?" },
+                        "practice": { "type": "string", "description": "The advice / rule itself." },
+                        "evidence": { "type": "string", "description": "Pointer-bearing proof (SOLL ids, commit SHA, metric)." },
+                        "from": { "type": "string", "description": "Contributing project (provenance)." }
+                    },
+                    "required": ["context", "practice"]
+                }
+            },
+            {
+                "name": "practice_recall",
+                "description": "[PRACTICE] REQ-AXO-902131 — recall the most relevant governed practices for a query, scoped to the project + global ('*'). Re-ranked by governance (closeness × trust × FSRS retrievability); a recall lightly reinforces the surfaced practices (Physarum flux).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scope": { "type": "string", "description": "Project code. Default: cwd-resolved. Global ('*') practices are always included." },
+                        "query": { "type": "string", "description": "The situation to recall practices for." },
+                        "top_k": { "type": "integer", "description": "Max practices (1-50, default 5)." }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "practice_tick",
+                "description": "[PRACTICE] REQ-AXO-902131 — maintenance: FSRS decay of trust + prune of collapsed practices (status='pruned', never DELETE) + stagnation verdict. Run on demand (operator/cron).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scope": { "type": "string", "description": "Optional: restrict the tick to one scope. Default: all." }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "practice_card",
+                "description": "[PRACTICE] REQ-AXO-902131 — per-scope summary: active/pruned counts, mean trust, top practices by trust. KPI of the governed memory's health.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scope": { "type": "string", "description": "Project code. Default: cwd-resolved. Includes global ('*')." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "diagnose_indexing",
                 "description": "[SYSTEM] Day-1 indexing diagnostic per project: probable causes, dominant reasons, parser/runtime errors, and remediations.",
                 "inputSchema": {

@@ -26,6 +26,7 @@ mod tools_agent_card;
 mod tools_lease;
 mod tools_mailbox_pubsub;
 mod tools_mailbox_render;
+mod tools_practice;
 mod tools_nli;
 mod tools_release;
 mod tools_framework_anomalies;
@@ -1471,6 +1472,10 @@ impl McpServer {
             "mailbox_topic_unsubscribe" => self.axon_mailbox_topic_unsubscribe(arguments),
             "mailbox_room_create" => self.axon_mailbox_room_create(arguments),
             "mailbox_room_join" => self.axon_mailbox_room_join(arguments),
+            "practice_put" => self.axon_practice_put(arguments),
+            "practice_recall" => self.axon_practice_recall(arguments),
+            "practice_tick" => self.axon_practice_tick(arguments),
+            "practice_card" => self.axon_practice_card(arguments),
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
             "soll_validate" => self.axon_validate_soll(arguments),
