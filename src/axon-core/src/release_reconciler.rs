@@ -32,6 +32,12 @@ pub struct ReleaseFacts {
     pub pending_present: bool,
     /// `runtime_version.build_id` of `pending.json` when present.
     pub pending_build_id: Option<String>,
+    /// `runtime_contract` recorded in `current.json` (e.g. "brain_mcp_indexer_ist").
+    /// The presence of "indexer" in it = the live topology runs a SEPARATE indexer
+    /// process that must be alive (REQ-AXO-902111 liveness slice). This is the only
+    /// declarative source for "is an indexer expected" — the answering brain's own
+    /// runtime mode is `brain_only` and would lie.
+    pub runtime_contract: Option<String>,
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -65,6 +71,11 @@ impl ReleaseFacts {
                 .and_then(Value::as_str)
                 .map(|verdict| verdict.eq_ignore_ascii_case("ok"))
         });
+        let runtime_contract = current
+            .as_ref()
+            .and_then(|c| c.get("runtime_contract"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         ReleaseFacts {
             live_build_id,
             manifest_build_id,
@@ -72,8 +83,95 @@ impl ReleaseFacts {
             qualification_ok,
             pending_present: pending.is_some(),
             pending_build_id: pending.as_ref().and_then(extract_build_id),
+            runtime_contract,
         }
     }
+
+    /// The live topology runs a separate indexer process that must be alive.
+    /// Derived from `runtime_contract` (never from the answering process's own mode,
+    /// which is `brain_only` in the split deployment and would lie).
+    pub fn indexer_expected(&self) -> bool {
+        self.runtime_contract
+            .as_deref()
+            .is_some_and(|c| c.contains("indexer"))
+    }
+}
+
+/// Runtime liveness facts — populated by the tool wrapper (`tools_release.rs`, which
+/// holds `&self`/IO) from the SAME in-process sources the `status` tool trusts:
+/// `resolve_indexer_liveness(latest_lifecycle_heartbeat("indexer"))` for the indexer
+/// and a `SELECT 1` DB probe for the brain. Kept separate from `ReleaseFacts` so the
+/// gates stay pure, IO-free predicates (testable without a runtime).
+#[derive(Debug, Clone, Default)]
+pub struct LivenessFacts {
+    /// Brain answered a `SELECT 1` DB probe (process up AND DB reachable).
+    pub brain_serving: bool,
+    /// The live `runtime_contract` names a separate indexer (must be alive).
+    pub indexer_expected: bool,
+    /// Indexer heartbeat is fresh (`resolve_indexer_liveness(..).ready`).
+    pub indexer_ready: bool,
+    /// Lifecycle verdict: "healthy" | "crashed_or_abandoned" | "never_launched".
+    pub indexer_lifecycle: String,
+    /// Liveness source: "pg_heartbeat" | "pg_heartbeat_stale" | "no_heartbeat".
+    pub indexer_source: String,
+}
+
+/// Evaluate the runtime liveness gates (pure predicates over `LivenessFacts`).
+/// `brain_serving` is universal; `indexer_alive` is conditional on the profile
+/// (N/A when the `runtime_contract` has no separate indexer).
+pub fn evaluate_liveness_gates(l: &LivenessFacts) -> Vec<Gate> {
+    vec![
+        Gate {
+            name: "brain_serving",
+            pass: l.brain_serving,
+            detail: if l.brain_serving {
+                "brain DB probe SELECT 1 ok".to_string()
+            } else {
+                "brain not serving (db_probe_failed)".to_string()
+            },
+        },
+        Gate {
+            name: "indexer_alive",
+            pass: !l.indexer_expected || l.indexer_ready,
+            detail: if !l.indexer_expected {
+                "no separate indexer in runtime_contract — gate N/A".to_string()
+            } else if l.indexer_ready {
+                format!("indexer healthy ({})", l.indexer_source)
+            } else {
+                format!("indexer {} ({})", l.indexer_lifecycle, l.indexer_source)
+            },
+        },
+    ]
+}
+
+/// Liveness phase, taking precedence over the release-state phase when red.
+pub fn liveness_phase(l: &LivenessFacts) -> Option<&'static str> {
+    if !l.brain_serving {
+        Some("brain_down")
+    } else if l.indexer_expected && !l.indexer_ready {
+        Some("indexer_down")
+    } else {
+        None
+    }
+}
+
+/// The corrective action for a liveness failure, keyed on the lifecycle verdict so a
+/// stale heartbeat (restart) is distinguished from a never-launched indexer (start).
+pub fn liveness_next_action(l: &LivenessFacts) -> Option<String> {
+    if !l.brain_serving {
+        return Some(
+            "brain process up but DB probe (SELECT 1) failed — check Postgres reachability, then restart the brain."
+                .to_string(),
+        );
+    }
+    if l.indexer_expected && !l.indexer_ready {
+        return Some(match l.indexer_lifecycle.as_str() {
+            "crashed_or_abandoned" => "indexer heartbeat went stale — restart the indexer (`axonctl` / `promote-live --restart-live`) then re-check.".to_string(),
+            "never_launched" => "no indexer heartbeat — the split indexer was never started; start the full runtime (`./scripts/axon-live start full`).".to_string(),
+            _ => "indexer not ready — inspect the indexer process and its heartbeat.".to_string(),
+        });
+    }
+    None
 }
 
 /// A single declarative gate: a named predicate over the facts with a human detail.
@@ -169,7 +267,60 @@ mod tests {
             qualification_ok: Some(true),
             pending_present: pending,
             pending_build_id: if pending { Some("v0.0.0-staged".to_string()) } else { None },
+            runtime_contract: Some("brain_mcp_indexer_ist".to_string()),
         }
+    }
+
+    fn live(brain: bool, expected: bool, ready: bool, lifecycle: &str, source: &str) -> LivenessFacts {
+        LivenessFacts {
+            brain_serving: brain,
+            indexer_expected: expected,
+            indexer_ready: ready,
+            indexer_lifecycle: lifecycle.to_string(),
+            indexer_source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn indexer_expected_from_runtime_contract() {
+        let f = facts("v1", Some("v1"), false);
+        assert!(f.indexer_expected()); // "brain_mcp_indexer_ist" contains "indexer"
+        let mut g = f.clone();
+        g.runtime_contract = Some("brain_only".to_string());
+        assert!(!g.indexer_expected());
+    }
+
+    #[test]
+    fn liveness_clean_when_brain_serves_and_indexer_fresh() {
+        let l = live(true, true, true, "healthy", "pg_heartbeat");
+        assert!(evaluate_liveness_gates(&l).iter().all(|g| g.pass));
+        assert!(liveness_phase(&l).is_none());
+        assert!(liveness_next_action(&l).is_none());
+    }
+
+    #[test]
+    fn brain_down_takes_precedence() {
+        let l = live(false, true, true, "healthy", "pg_heartbeat");
+        assert_eq!(liveness_phase(&l), Some("brain_down"));
+        assert!(liveness_next_action(&l).unwrap().contains("DB probe"));
+        assert!(evaluate_liveness_gates(&l).iter().any(|g| g.name == "brain_serving" && !g.pass));
+    }
+
+    #[test]
+    fn indexer_stale_vs_never_launched_actions_differ() {
+        let stale = live(true, true, false, "crashed_or_abandoned", "pg_heartbeat_stale");
+        assert_eq!(liveness_phase(&stale), Some("indexer_down"));
+        assert!(liveness_next_action(&stale).unwrap().contains("restart"));
+        let never = live(true, true, false, "never_launched", "no_heartbeat");
+        assert!(liveness_next_action(&never).unwrap().contains("start the full runtime"));
+    }
+
+    #[test]
+    fn indexer_gate_na_when_not_expected() {
+        // brain-only contract: a missing indexer is not a failure.
+        let l = live(true, false, false, "never_launched", "no_heartbeat");
+        assert!(evaluate_liveness_gates(&l).iter().all(|g| g.pass));
+        assert!(liveness_phase(&l).is_none());
     }
 
     #[test]
