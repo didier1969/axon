@@ -136,6 +136,10 @@ sha2 = "0.10"
 # REQ-AXO-902113 (MAILBOX MBX-1) — HMAC-SHA256 envelope integrity (per-project
 # token derived from AXON_MAILBOX_SECRET; upgrades to keypairs at MBX-5).
 hmac = "0.12"
+# REQ-AXO-902111 / DEC-AXO-901662 (T2) — Datalog engine for the declarative
+# control-plane reconciler: the release/liveness/stop gates are re-expressed as
+# Ascent rules, with the typed Rust predicates kept as the equivalence oracle.
+ascent = "0.8.0"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 libc = "0.2"
 
