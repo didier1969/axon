@@ -796,10 +796,18 @@ impl McpServer {
     /// `veto.filter=true`, dropped. Rétro-compatible (no `veto` → chunks unchanged)
     /// and bounded (`VETO_MAX_JUDGEMENTS`) so latency stays usable. NLI unavailable
     /// → chunks left as-is (best-effort hardening, never blocks retrieval).
-    fn apply_entailment_veto(&self, chunks: Vec<Value>, args: &Value) -> Vec<Value> {
+    /// Returns the (possibly filtered) chunks plus, when the veto actually ran,
+    /// `Some((n_judged, n_flagged))` so the caller can surface the veto effect in
+    /// the human-facing text (Nexus #28 pt2) — `None` when no `veto` arg / no
+    /// question (veto did not run).
+    fn apply_entailment_veto(
+        &self,
+        chunks: Vec<Value>,
+        args: &Value,
+    ) -> (Vec<Value>, Option<(usize, usize)>) {
         const VETO_MAX_JUDGEMENTS: usize = 12;
         let Some(veto) = args.get("veto") else {
-            return chunks;
+            return (chunks, None);
         };
         let threshold = veto
             .get("entailment_threshold")
@@ -808,10 +816,11 @@ impl McpServer {
         let filter = veto.get("filter").and_then(Value::as_bool).unwrap_or(false);
         let question = args.get("question").and_then(Value::as_str).unwrap_or("");
         if question.is_empty() {
-            return chunks;
+            return (chunks, None);
         }
         let mut out: Vec<Value> = Vec::with_capacity(chunks.len());
         let mut judged = 0usize;
+        let mut flagged = 0usize;
         for mut chunk in chunks {
             let text = chunk
                 .get("content")
@@ -828,6 +837,9 @@ impl McpServer {
                 Ok(scores) => {
                     judged += 1;
                     let contradicts = scores.contradiction >= threshold;
+                    if contradicts {
+                        flagged += 1;
+                    }
                     if let Some(obj) = chunk.as_object_mut() {
                         obj.insert("contradiction_detected".to_string(), json!(contradicts));
                         obj.insert("entailment".to_string(), json!(scores.entailment));
@@ -841,7 +853,7 @@ impl McpServer {
                 Err(_) => out.push(chunk), // NLI unavailable → leave as-is
             }
         }
-        out
+        (out, Some((judged, flagged)))
     }
 
     pub(crate) fn axon_retrieve_context_layered(&self, args: &Value) -> Option<Value> {
@@ -952,7 +964,7 @@ impl McpServer {
         // REQ-AXO-902097 — opt-in entailment veto over the code band: flag (and
         // optionally drop) passages that CONTRADICT the question, via the NLI
         // cross-encoder. Rétro-compatible: no `veto` arg → chunks unchanged.
-        let code_chunks = self.apply_entailment_veto(code_chunks, args);
+        let (code_chunks, veto_stats) = self.apply_entailment_veto(code_chunks, args);
 
         // recent_band — REQ-AXO-264 A6 v1: populate via `git log --since=24h`
         // on the resolved project path. Each commit yields a {file, ts,
@@ -1034,14 +1046,23 @@ impl McpServer {
             "next_call_hint": "increase bands.<band>.max_tokens or call retrieve_context directly for unbudgeted view"
         });
 
+        // REQ-AXO-902097 / Nexus #28 pt2 — surface the veto effect in the text so it
+        // is visible without parsing `data` (n_flagged of n_judged code passages).
+        let veto_note = match veto_stats {
+            Some((judged, flagged)) => {
+                format!("\nveto: {flagged} flagged / {judged} judged")
+            }
+            None => String::new(),
+        };
         let summary = format!(
-            "### Layered Retrieval (Phase A v2)\n\nintent={} concepts/{} decisions/{} requirements (~{} tokens, overflow={})\ncode={} chunks (~{} tokens, overflow={})\nrecent={} entries (~{} tokens, overflow={})\nretrieval_path={} elapsed={}ms",
+            "### Layered Retrieval (Phase A v2)\n\nintent={} concepts/{} decisions/{} requirements (~{} tokens, overflow={})\ncode={} chunks (~{} tokens, overflow={})\nrecent={} entries (~{} tokens, overflow={})\nretrieval_path={} elapsed={}ms{}",
             intent_concepts_kept.len(), intent_decisions_kept.len(), intent_requirements_kept.len(),
             intent_tokens_post, intent_overflowed,
             code_chunks.len(), code_tokens_post, code_overflowed,
             recent_band.get("git_recent_edits").and_then(|v| v.as_array()).map_or(0, |a| a.len()),
             recent_tokens_post, recent_overflowed,
             retrieval_path, elapsed_ms,
+            veto_note,
         );
 
         Some(json!({
