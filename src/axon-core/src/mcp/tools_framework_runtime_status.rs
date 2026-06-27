@@ -1182,6 +1182,12 @@ impl McpServer {
                 "runtime_mode": runtime_mode.as_str(),
                 "runtime_profile": runtime_profile.as_str(),
                 "drain_state": drain_state,
+                // REQ-AXO-902114 (MBX-2) — unread mailbox count for the resolved
+                // project, so a waking session sees its inbox without an explicit
+                // read. 0 when the mailbox table is absent (older deploy).
+                "inbox_unread": self.mailbox_unread_count(
+                    self.auto_resolve_project_code_str().as_deref().unwrap_or("")
+                ),
                 "availability": {
                     // REQ-AXO-106 — `ist_projection_fresh` is the
                     // canonical name for this signal; the historical

@@ -1008,6 +1008,9 @@ impl McpServer {
             "active_handoff": active_handoff_alias,
             "in_progress_requirements": in_progress_requirements,
             "wave_1_unblockers": wave_1_unblockers,
+            // REQ-AXO-902114 (MBX-2) — unread mailbox at wake: a session onboarding
+            // sees pending inter-project messages alongside its SOLL backlog.
+            "inbox_unread": self.mailbox_unread_count(project_code),
             "recent_req_commits": recent_req_commits,
             "recent_soll_writes": recent_soll_writes,
             "bootstrap_required": bootstrap_required,
