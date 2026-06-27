@@ -841,7 +841,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "contradiction_check",
-                "description": "[NLI] REQ-AXO-902096 (demande Nexus) — anti-hallucination gate: does `candidate` CONTRADICT the project's indexed knowledge? Embeds the candidate, ANN-shortlists the scope's chunks, then a cross-encoder NLI (ModernBERT-base-nli) judges each passage → returns the contradicting ones. The verdict is NEVER inferred from cosine similarity (≠ entailment direction); returns `nli_unavailable` (never a silent pass) if the model isn't provisioned.",
+                "description": "[NLI] REQ-AXO-902096 (demande Nexus) — anti-hallucination gate: does `candidate` CONTRADICT the project's indexed knowledge? Embeds the candidate, ANN-shortlists the scope's chunks, then a cross-encoder NLI (ModernBERT-base-nli) judges each passage → returns the contradicting ones. The verdict is NEVER inferred from cosine similarity (≠ entailment direction); returns `nli_unavailable` (never a silent pass) if the model isn't provisioned. verdict ∈ {contradicts, neutral, inconclusive}: `inconclusive` (REQ-AXO-902107) when the shortlist was empty OR the per-call NLI budget (`AXON_NLI_BUDGET_MS`, default 20s, provider-agnostic timeout guard) truncated judging — a clean `neutral` is only returned when the WHOLE shortlist was judged. `data.scope` reports `passages_shortlisted`/`passages_judged`/`truncated`/`budget_ms` so a 0-judged answer is never ambiguous with a clean pass.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
