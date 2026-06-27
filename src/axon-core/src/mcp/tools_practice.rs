@@ -86,9 +86,11 @@ impl McpServer {
                 .and_then(|e| crate::postgres::vector::vector_literal(e).ok()),
             Err(_) => None,
         };
+        // vector_literal already returns a QUOTED literal ('[...]'); append the cast
+        // only — re-quoting doubles the quotes → SQL syntax error (caught by dev E2E).
         let embed_sql = embed_lit
             .as_deref()
-            .map(|lit| format!("'{lit}'::vector"))
+            .map(|lit| format!("{lit}::vector"))
             .unwrap_or_else(|| "NULL".to_string());
         let embed_state = if embed_lit.is_some() { "embedded" } else { "deferred" };
 
@@ -160,10 +162,10 @@ impl McpServer {
         let sql = format!(
             "SELECT id, scope, practice, evidence, trust, stability, \
                     EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since, \
-                    (embedding <=> '{vec_lit}'::vector) AS dist \
+                    (embedding <=> {vec_lit}::vector) AS dist \
              FROM axon.practice \
              WHERE status='active' AND embedding IS NOT NULL AND {scope_filter} \
-             ORDER BY embedding <=> '{vec_lit}'::vector LIMIT {pool}"
+             ORDER BY embedding <=> {vec_lit}::vector LIMIT {pool}"
         );
         let ann = if scope_count > 0 && scope_count <= EXACT_SCAN_MAX {
             self.graph_store.query_exact_scan_json(&sql)
