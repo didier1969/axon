@@ -84,6 +84,17 @@ fn default_relation_for_entity_to_pillar(entity_type: &str) -> &'static str {
     }
 }
 
+/// REQ-AXO-902081 — target-aware default relation. A Decision pointed at a
+/// Requirement resolves it (DEC→REQ SOLVES, the canonical pair); everything else
+/// falls back to the entity→Pillar default. Keeps an explicit `attach_to` from
+/// emitting a forbidden DEC→PIL `BELONGS_TO`.
+fn default_relation_for_target(entity_type: &str, target_id: &str) -> &'static str {
+    if entity_type == "decision" && target_id.starts_with("REQ-") {
+        return "SOLVES";
+    }
+    default_relation_for_entity_to_pillar(entity_type)
+}
+
 fn classify_intent(intent: &str, body: &str) -> (&'static str, &'static str) {
     let haystack = format!("{} {}", intent, body).to_ascii_lowercase();
     if REQUIREMENT_KEYWORDS.iter().any(|kw| haystack.contains(kw)) {
@@ -196,18 +207,23 @@ impl McpServer {
 
         let (attach_to, relation_type, attach_source) = match explicit_attach_to {
             Some(target) => {
+                // REQ-AXO-902081 — target-aware default so an explicit Decision→REQ
+                // gets SOLVES (the canonical pair), not BELONGS_TO (DEC→PIL only).
                 let rel = explicit_relation_type.unwrap_or_else(|| {
-                    default_relation_for_entity_to_pillar(entity_type).to_string()
+                    default_relation_for_target(entity_type, &target).to_string()
                 });
                 (target, rel, "explicit_argument")
             }
-            None => match self.default_project_pillar(&project_code) {
-                Some(pillar_id) => (
-                    pillar_id,
-                    explicit_relation_type.unwrap_or_else(|| {
-                        default_relation_for_entity_to_pillar(entity_type).to_string()
-                    }),
-                    "auto_inferred_project_pillar",
+            // REQ-AXO-902081 — type-aware parent inference: a Decision attaches to
+            // the Requirement it resolves (DEC→REQ SOLVES), NOT the project Pillar
+            // (DEC→PIL is a forbidden relation → the old default raised
+            // forbidden_relation_for_type). Structural types still default to the
+            // Pillar via BELONGS_TO.
+            None => match self.infer_anchor_for_entity(&project_code, entity_type) {
+                Some((anchor_id, rel)) => (
+                    anchor_id,
+                    explicit_relation_type.unwrap_or_else(|| rel.to_string()),
+                    "auto_inferred_anchor",
                 ),
                 None => {
                     // Acceptance criterion #3 — return a clear error message
@@ -350,6 +366,45 @@ impl McpServer {
             .filter(|s| !s.trim().is_empty())
     }
 
+    /// REQ-AXO-902081 — the anchor Requirement a Decision resolves (DEC→REQ SOLVES).
+    /// The most recent open Requirement in the project is the inferred default; the
+    /// LLM can override with an explicit `attach_to`.
+    fn default_decision_anchor(&self, project_code: &str) -> Option<String> {
+        let escaped = escape_sql(project_code);
+        let query = format!(
+            "SELECT id FROM soll.Node \
+             WHERE project_code = '{escaped}' \
+               AND type = 'Requirement' \
+               AND status IN ('planned', 'current') \
+             ORDER BY id DESC \
+             LIMIT 1"
+        );
+        self.query_single_column(&query)
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// REQ-AXO-902081 — type-aware parent inference so the default never emits a
+    /// forbidden pair. A Decision attaches to its anchor Requirement via SOLVES
+    /// (DEC→PIL has no policy); structural types attach to the project Pillar via
+    /// their canonical relation. Returns None when no anchor exists → the caller
+    /// surfaces the suggestion-bearing error instead of a forbidden relation.
+    fn infer_anchor_for_entity(
+        &self,
+        project_code: &str,
+        entity_type: &str,
+    ) -> Option<(String, &'static str)> {
+        match entity_type {
+            "decision" => self
+                .default_decision_anchor(project_code)
+                .map(|req| (req, "SOLVES")),
+            _ => self
+                .default_project_pillar(project_code)
+                .map(|pillar| (pillar, default_relation_for_entity_to_pillar(entity_type))),
+        }
+    }
+
     /// REQ-AXO-901615 — list a handful of plausible anchors so the LLM can
     /// retry document_intent with a canonical attach_to when auto-inference
     /// failed (no current Pillar in the project).
@@ -369,7 +424,20 @@ impl McpServer {
 
 #[cfg(test)]
 mod document_intent_classifier_tests {
-    use super::classify_intent;
+    use super::{classify_intent, default_relation_for_target};
+
+    #[test]
+    fn decision_to_requirement_defaults_to_solves_not_belongs_to() {
+        // REQ-AXO-902081 — DEC→REQ is SOLVES; DEC→PIL has no policy (would be
+        // rejected), so a Decision pointed at a Requirement must not default to
+        // BELONGS_TO.
+        assert_eq!(default_relation_for_target("decision", "REQ-AXO-902081"), "SOLVES");
+        // A Decision pointed at a Pillar keeps the (questionable) pillar default;
+        // structural types are always BELONGS_TO regardless of target.
+        assert_eq!(default_relation_for_target("decision", "PIL-AXO-001"), "BELONGS_TO");
+        assert_eq!(default_relation_for_target("requirement", "REQ-AXO-1"), "BELONGS_TO");
+        assert_eq!(default_relation_for_target("concept", "PIL-AXO-001"), "BELONGS_TO");
+    }
 
     #[test]
     fn classifies_requirement_when_body_describes_problem_or_gap() {
