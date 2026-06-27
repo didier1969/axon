@@ -854,6 +854,15 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "promote_status",
+                "description": "[RELEASE] REQ-AXO-902111 — declarative release reconciler (read-only): one call returns `{phase, observed, gates, failed_gates, next_action, recovery}` for the live release. phase ∈ {clean, staged, drift, uninitialized}. Reconciles the running build_id (AXON_BUILD_ID) against the promoted manifest (current.json) and any pending staging (pending.json) — so a manifest/runtime drift after a killed promote or a stranded pending.json reads as a one-line `next_action` instead of grepping the promote scripts. Never mutates state.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
                 "name": "diagnose_indexing",
                 "description": "[SYSTEM] Day-1 indexing diagnostic per project: probable causes, dominant reasons, parser/runtime errors, and remediations.",
                 "inputSchema": {

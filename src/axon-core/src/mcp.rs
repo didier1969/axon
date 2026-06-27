@@ -22,6 +22,7 @@ mod tools_data_catalog;
 mod tools_dx;
 mod tools_framework;
 mod tools_nli;
+mod tools_release;
 mod tools_framework_anomalies;
 mod tools_framework_anomaly_heuristics;
 mod tools_framework_change_safety;
@@ -1453,6 +1454,7 @@ impl McpServer {
         match normalized_name {
             "help" => self.axon_help(arguments),
             "contradiction_check" => self.axon_contradiction_check(arguments),
+            "promote_status" => self.axon_promote_status(arguments),
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
             "soll_validate" => self.axon_validate_soll(arguments),

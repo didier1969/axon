@@ -42,6 +42,7 @@ pub mod runtime_config;
 pub mod runtime_mode;
 pub mod runtime_observability;
 pub mod runtime_operational_profile;
+pub mod release_reconciler;
 pub mod runtime_capacity_profile;
 pub mod runtime_readiness;
 pub mod runtime_topology;
