@@ -25,6 +25,7 @@ pub mod ist_snapshot;
 mod main_background;
 mod main_services;
 mod main_telemetry;
+pub mod mailbox;
 pub mod mcp;
 pub mod mcp_http;
 pub mod nli;

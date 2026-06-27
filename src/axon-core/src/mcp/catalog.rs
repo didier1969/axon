@@ -863,6 +863,40 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "mcp_outbox_send",
+                "description": "[MAILBOX] REQ-AXO-902113 (MBX-1) — send an asynchronous message to ANOTHER project's inbox (Axon = central exchange). A2A v1.0-aligned envelope, HMAC-signed, idempotent. Body is DENSE + pointer-bearing (ref_soll_ids / symbols / artefact hashes — stigmergy, not inlined content). At-least-once + dedup: re-sending the same `idempotency_key` from the same sender is a no-op (`data.deduped=true`). The recipient relays at wake via `mcp_inbox_read` / `inbox_unread`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "to_project": { "type": "string", "description": "Recipient project code (e.g. \"NEX\")." },
+                        "from": { "type": "string", "description": "Sender project code. Default: cwd-resolved." },
+                        "idempotency_key": { "type": "string", "description": "Dedup anchor (required). Same key from same sender = no-op." },
+                        "subject": { "type": "string", "description": "Short subject line." },
+                        "body_dense": { "type": "string", "description": "Dense body: point at SOLL ids / symbols / hashes, don't inline recoverable content." },
+                        "ref_soll_ids": { "type": "array", "items": { "type": "string" }, "description": "SOLL ids referenced (stigmergic pointers)." },
+                        "context_id": { "type": "string", "description": "Conversation/thread id (A2A contextId). Default: new thread." },
+                        "in_reply_to": { "type": "string", "description": "messageId being replied to." },
+                        "kind": { "type": "string", "description": "A2A kind. Default \"message\"." },
+                        "priority": { "type": "string", "description": "normal|high|low. Default normal." }
+                    },
+                    "required": ["to_project", "idempotency_key"]
+                }
+            },
+            {
+                "name": "mcp_inbox_read",
+                "description": "[MAILBOX] REQ-AXO-902114 (MBX-1/2) — read THIS project's inbox. mode=unread (since the read cursor, ADVANCES it), since (since `since_id`, non-destructive), or all. Each message carries `signature_verified` (HMAC). Pair with `inbox_unread` in status/axon_init_project for the wake case.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": { "type": "string", "description": "Recipient project code. Default: cwd-resolved." },
+                        "mode": { "type": "string", "enum": ["unread", "since", "all"], "description": "Default unread." },
+                        "since_id": { "type": "integer", "description": "Floor id for mode=since." },
+                        "limit": { "type": "integer", "description": "Max messages (1-100, default 20)." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "diagnose_indexing",
                 "description": "[SYSTEM] Day-1 indexing diagnostic per project: probable causes, dominant reasons, parser/runtime errors, and remediations.",
                 "inputSchema": {

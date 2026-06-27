@@ -133,6 +133,9 @@ petgraph = "0.6"
 # usage explicit. SHA-256 is overkill for change detection but is the most
 # portable choice in the Rust ecosystem.
 sha2 = "0.10"
+# REQ-AXO-902113 (MAILBOX MBX-1) — HMAC-SHA256 envelope integrity (per-project
+# token derived from AXON_MAILBOX_SECRET; upgrades to keypairs at MBX-5).
+hmac = "0.12"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 libc = "0.2"
 
