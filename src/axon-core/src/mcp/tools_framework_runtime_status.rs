@@ -1524,21 +1524,20 @@ impl McpServer {
         if search_path.is_empty() {
             return None;
         }
+        // REQ-AXO-902128 — pick the MOST SPECIFIC (longest project_path) match, not
+        // None-on-multiple. Ancestor projects are legitimately registered (e.g.
+        // /home/dstadel, /home/dstadel/projects alongside /home/dstadel/projects/axon);
+        // the cwd is inside ALL of them, but it belongs to the deepest one. Bailing to
+        // None on that ambiguity silently broke every auto-resolved scope (inbox_unread
+        // counted the empty project → 0).
         let json_str = self.graph_store.query_json(&format!(
-            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND (project_path = '{}' OR starts_with('{}', project_path || '/'))",
+            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND (project_path = '{}' OR starts_with('{}', project_path || '/')) ORDER BY length(project_path) DESC LIMIT 1",
             search_path, search_path
         )).ok()?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&json_str).ok()?;
-        let codes: Vec<String> = rows
-            .into_iter()
+        rows.into_iter()
             .filter_map(|row| row.into_iter().next())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if codes.len() == 1 {
-            Some(codes.into_iter().next().unwrap())
-        } else {
-            None
-        }
+            .find(|s| !s.is_empty())
     }
 }
 
