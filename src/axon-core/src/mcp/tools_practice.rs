@@ -74,6 +74,47 @@ fn merge_provenance(existing: &str, incoming: &str) -> String {
     out.join(",")
 }
 
+// REQ-AXO-902138 — consolidation thresholds (episode → rule → principle). Driven
+// by the SAME trust/use signals as FSRS — no LLM, no new scoring.
+const RULE_TRUST: f32 = 0.70;
+const RULE_MIN_USES: i64 = 3;
+const PRINCIPLE_TRUST: f32 = 0.85;
+const PRINCIPLE_MIN_USES: i64 = 8;
+const PRINCIPLE_MIN_PROVENANCE: usize = 2;
+
+/// REQ-AXO-902138 — maturity-based tier promotion. A practice EARNS its tier from
+/// accrued governance: an episode that proves itself (trust + repeated use) becomes
+/// a `rule` ; a rule sustained at high trust across ≥2 tenants becomes a
+/// cross-cutting `principle`. Returns `Some(new_tier)` on promotion, else `None`
+/// (at ceiling or not yet mature). Pure + unit-testable.
+fn consolidate_tier(
+    tier: &str,
+    trust: f32,
+    use_count: i64,
+    provenance_count: usize,
+) -> Option<&'static str> {
+    match tier {
+        "episode" if trust >= RULE_TRUST && use_count >= RULE_MIN_USES => Some("rule"),
+        "rule"
+            if trust >= PRINCIPLE_TRUST
+                && use_count >= PRINCIPLE_MIN_USES
+                && provenance_count >= PRINCIPLE_MIN_PROVENANCE =>
+        {
+            Some("principle")
+        }
+        _ => None,
+    }
+}
+
+/// REQ-AXO-902138 — count distinct provenance tenants in a `source_project` cell
+/// (comma-separated, blanks dropped). Reuses [`merge_provenance`]'s dedup.
+fn provenance_count(source_project: &str) -> usize {
+    merge_provenance("", source_project)
+        .split(',')
+        .filter(|t| !t.trim().is_empty())
+        .count()
+}
+
 /// REQ-AXO-902136 — dense encoding is CALLER-PROVIDED (the brain has no embedded
 /// LLM to compact prose; the calling agent IS the compactor). The brain only
 /// VALIDATES + normalises: trims ; an empty dense → fall back to the prose
@@ -250,7 +291,7 @@ impl McpServer {
         let sql = format!(
             "SELECT id, scope, COALESCE(NULLIF(dense,''), practice) AS practice, evidence, trust, stability, \
                     EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since, \
-                    (embedding <=> {vec_lit}::vector) AS dist \
+                    (embedding <=> {vec_lit}::vector) AS dist, tier \
              FROM axon.practice \
              WHERE status='active' AND embedding IS NOT NULL AND {scope_filter} \
              ORDER BY embedding <=> {vec_lit}::vector LIMIT {pool}"
@@ -284,6 +325,7 @@ impl McpServer {
                     "practice": g(2),
                     "evidence": g(3),
                     "trust": trust,
+                    "tier": g(8),
                     "score": score
                 }))
             })
@@ -410,7 +452,8 @@ impl McpServer {
         let sql = format!(
             "SELECT id, trust, stability, use_count, \
                     EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since, \
-                    EXTRACT(EPOCH FROM (now() - created_at))/86400.0 AS age_days \
+                    EXTRACT(EPOCH FROM (now() - created_at))/86400.0 AS age_days, \
+                    tier, source_project \
              FROM axon.practice WHERE status='active' {scope_filter}"
         );
         let rows: Vec<Vec<Value>> = match self.graph_store.query_json_writer(&sql) {
@@ -418,7 +461,7 @@ impl McpServer {
             Err(e) => return Some(practice_err(&format!("tick load failed: {e}"), "degraded")),
         };
         let f = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0) as f32;
-        let (mut decayed, mut pruned) = (0u32, 0u32);
+        let (mut decayed, mut pruned, mut consolidated) = (0u32, 0u32, 0u32);
         for r in &rows {
             let id = r.first().and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0);
             let trust = f(r.get(1).unwrap_or(&Value::Null));
@@ -426,16 +469,28 @@ impl McpServer {
             let use_count = r.get(3).and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0) as i32;
             let days_since = f(r.get(4).unwrap_or(&Value::Null));
             let age_days = f(r.get(5).unwrap_or(&Value::Null));
+            let tier = r.get(6).and_then(|v| v.as_str()).unwrap_or("episode").to_string();
+            let prov_n = provenance_count(r.get(7).and_then(|v| v.as_str()).unwrap_or(""));
+            // REQ-AXO-902138 — promotion uses the PRE-decay trust (the accrued
+            // governance the record earned). effective_tier drives the prune guard.
+            let promoted = consolidate_tier(&tier, trust, use_count as i64, prov_n);
+            let effective_tier = promoted.unwrap_or(tier.as_str());
             let r_ret = retrievability(days_since, stability);
             let new_trust = decay_trust(trust, r_ret);
-            let prune = should_prune(new_trust, r_ret, use_count, age_days);
+            // REQ-AXO-902138 — principles survive the decay-prune (transverse,
+            // earned across tenants); episodes/rules still prune normally.
+            let prune = should_prune(new_trust, r_ret, use_count, age_days) && effective_tier != "principle";
             let status = if prune { "pruned" } else { "active" };
+            let tier_set = promoted.map(|t| format!(", tier = '{t}'")).unwrap_or_default();
             let _ = self.graph_store.execute(&format!(
-                "UPDATE axon.practice SET trust = {new_trust}, status = '{status}', updated_at = now() WHERE id = {id}"
+                "UPDATE axon.practice SET trust = {new_trust}, status = '{status}'{tier_set}, updated_at = now() WHERE id = {id}"
             ));
             decayed += 1;
             if prune {
                 pruned += 1;
+            }
+            if promoted.is_some() {
+                consolidated += 1;
             }
         }
         // stagnation over the 30d window.
@@ -445,10 +500,10 @@ impl McpServer {
         let stag = assess_stagnation(adds, prunes30, decayed as i32, mean_trust, mean_trust);
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_tick — fused {fused} · decayed {decayed} · pruned {pruned} · mean_trust {:.2} · stagnation={}",
+                "### 🧠 practice_tick — fused {fused} · consolidated {consolidated} · decayed {decayed} · pruned {pruned} · mean_trust {:.2} · stagnation={}",
                 mean_trust, stag.stagnating
             )}],
-            "data": {"status":"ok","fused":fused,"decayed":decayed,"pruned":pruned,"mean_trust":mean_trust,
+            "data": {"status":"ok","fused":fused,"consolidated":consolidated,"decayed":decayed,"pruned":pruned,"mean_trust":mean_trust,
                      "stagnation":{"stagnating":stag.stagnating,"churn":stag.churn,"reason":stag.reason}}
         }))
     }
@@ -489,7 +544,33 @@ impl McpServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_failure_mode, merge_provenance, resolve_dense_form, should_fuse, FUSION_COSINE_EPS};
+    use super::{
+        consolidate_tier, is_failure_mode, merge_provenance, provenance_count, resolve_dense_form,
+        should_fuse, FUSION_COSINE_EPS,
+    };
+
+    #[test]
+    fn consolidate_tier_902138() {
+        // episode → rule: needs trust ≥ 0.70 AND ≥ 3 uses.
+        assert_eq!(consolidate_tier("episode", 0.72, 3, 1), Some("rule"));
+        assert_eq!(consolidate_tier("episode", 0.69, 9, 3), None); // trust too low
+        assert_eq!(consolidate_tier("episode", 0.9, 2, 3), None); // not enough uses
+        // rule → principle: trust ≥ 0.85 AND ≥ 8 uses AND ≥ 2 tenants.
+        assert_eq!(consolidate_tier("rule", 0.86, 8, 2), Some("principle"));
+        assert_eq!(consolidate_tier("rule", 0.86, 8, 1), None); // single-tenant, not transverse
+        assert_eq!(consolidate_tier("rule", 0.84, 20, 5), None); // trust too low
+        // principle is the ceiling; episode never skips straight to principle.
+        assert_eq!(consolidate_tier("principle", 0.99, 100, 9), None);
+        assert_eq!(consolidate_tier("episode", 0.99, 100, 9), Some("rule"));
+    }
+
+    #[test]
+    fn provenance_count_902138() {
+        assert_eq!(provenance_count(""), 0);
+        assert_eq!(provenance_count("NEX"), 1);
+        assert_eq!(provenance_count("NEX,AXO"), 2);
+        assert_eq!(provenance_count(" NEX , AXO ,NEX"), 2); // dedup + trim
+    }
 
     #[test]
     fn should_fuse_902137() {

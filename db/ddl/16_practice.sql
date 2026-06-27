@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS axon.practice (
     use_count      INTEGER     NOT NULL DEFAULT 0,
     win_count      INTEGER     NOT NULL DEFAULT 0,   -- reinforcements with positive usefulness
     source_project TEXT        NOT NULL DEFAULT '',  -- who contributed it (mailbox provenance)
-    status         TEXT        NOT NULL DEFAULT 'active', -- active | pruned (never DELETE — audit)
+    status         TEXT        NOT NULL DEFAULT 'active', -- active | pruned | merged (never DELETE — audit)
+    tier           TEXT        NOT NULL DEFAULT 'episode', -- REQ-AXO-902138: episode → rule → principle (consolidation par maturité)
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_used_at   TIMESTAMPTZ NOT NULL DEFAULT now(),  -- FSRS review anchor
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -34,6 +35,8 @@ CREATE TABLE IF NOT EXISTS axon.practice (
 -- REQ-AXO-902136 — idempotent migration for ALREADY-EXISTING instances (the
 -- CREATE TABLE above is a no-op once the table exists; this back-fills `dense`).
 ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS dense TEXT NOT NULL DEFAULT '';
+-- REQ-AXO-902138 — consolidation tier (episode → rule → principle).
+ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'episode';
 
 -- PR-1 dedup: same scope + same practice text = idempotent (UPSERT reinforces, no dup).
 CREATE UNIQUE INDEX IF NOT EXISTS practice_scope_practice_idx
