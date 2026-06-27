@@ -50,6 +50,9 @@ fn materialize_symbol_rows(server: &super::McpServer, ids: &[String]) -> String 
 /// (GUI-AXO-1004 cognitive pagination). The full COUNT stays authoritative;
 /// only the materialized NAME list is bounded.
 const INSPECT_NAMED_CAP: usize = 50;
+/// REQ-AXO-902100 — caps for `inspect mode=source` (body lines + neighbour sigs).
+const INSPECT_SOURCE_LINE_CAP: usize = 160;
+const INSPECT_SIG_CAP: usize = 12;
 
 /// REQ-AXO-902059 — named caller/callee rows `{name,kind,project_code}` for
 /// `inspect`, capped to `cap`. Kills the round-trip where an LLM had only the
@@ -72,6 +75,20 @@ fn parse_named_symbol_rows(raw: &str) -> Vec<Value> {
             let project_code = r.get(2).and_then(Value::as_str).unwrap_or("").to_string();
             Some(json!({ "name": name, "kind": kind, "project_code": project_code }))
         })
+        .collect()
+}
+
+/// REQ-AXO-902100 — extract the first real code line (the signature) from an
+/// `ist.chunk.content`, which is prefixed by a `symbol:/kind:/part:` header, then
+/// a blank line, then the source. Pure (no I/O), unit-testable.
+fn extract_signature_from_chunk(content: &str) -> String {
+    let body = content.splitn(2, "\n\n").nth(1).unwrap_or(content);
+    body.lines()
+        .map(str::trim_start)
+        .find(|line| !line.is_empty() && *line != "context:")
+        .unwrap_or("")
+        .chars()
+        .take(160)
         .collect()
 }
 
@@ -1547,6 +1564,103 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902100 (feedback #18) — `inspect mode=source` body : the symbol's
+    /// source (from `ist.chunk.content`, no file I/O) + direct caller/callee
+    /// signatures, file:line anchored. Serves the prepare_edit case in one call.
+    fn inspect_source_block(
+        &self,
+        symbol_id: &str,
+        caller_ids: &[String],
+        callee_ids: &[String],
+    ) -> String {
+        use std::fmt::Write as _;
+        let sql_lit = |s: &str| s.replace('\'', "''");
+        let mut out = String::new();
+        let body_q = format!(
+            "SELECT file_path, start_line, end_line, content, chunk_part_index \
+             FROM ist.chunk WHERE source_type = 'symbol' AND source_id = '{}' \
+             ORDER BY chunk_part_index",
+            sql_lit(symbol_id)
+        );
+        if let Ok(res) = self.graph_store.query_json_param(&body_q, &json!({})) {
+            let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+            if let Some(first) = rows.first() {
+                let file_path = first.first().and_then(Value::as_str).unwrap_or("");
+                let start = first.get(1).and_then(Value::as_i64).unwrap_or(0);
+                let end = rows
+                    .last()
+                    .and_then(|r| r.get(2))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(start);
+                let mut body = String::new();
+                for r in &rows {
+                    if let Some(c) = r.get(3).and_then(Value::as_str) {
+                        body.push_str(c);
+                        body.push('\n');
+                    }
+                }
+                let total = body.lines().count();
+                let shown: Vec<&str> = body.lines().take(INSPECT_SOURCE_LINE_CAP).collect();
+                let cap_note = if total > INSPECT_SOURCE_LINE_CAP {
+                    format!(" (showing {} of {} lines)", INSPECT_SOURCE_LINE_CAP, total)
+                } else {
+                    String::new()
+                };
+                let _ = write!(
+                    out,
+                    "\n\n#### Source — `{}:{}`-`{}`{}\n```\n{}\n```\n",
+                    file_path,
+                    start,
+                    end,
+                    cap_note,
+                    shown.join("\n")
+                );
+            }
+        }
+        out.push_str(&self.neighbor_signature_section("Callers", caller_ids));
+        out.push_str(&self.neighbor_signature_section("Callees", callee_ids));
+        out
+    }
+
+    /// REQ-AXO-902100 — one-line signature + file:line per direct neighbour.
+    fn neighbor_signature_section(&self, label: &str, ids: &[String]) -> String {
+        use std::fmt::Write as _;
+        if ids.is_empty() {
+            return String::new();
+        }
+        let sql_lit = |s: &str| s.replace('\'', "''");
+        let in_list = ids
+            .iter()
+            .take(INSPECT_SIG_CAP)
+            .map(|id| format!("'{}'", sql_lit(id)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let q = format!(
+            "SELECT source_id, file_path, start_line, content FROM ist.chunk \
+             WHERE source_type = 'symbol' AND chunk_part_index = 0 AND source_id IN ({}) \
+             ORDER BY source_id",
+            in_list
+        );
+        let mut out = String::new();
+        let _ = write!(out, "\n**{} ({}) — signatures:**\n", label, ids.len());
+        if let Ok(res) = self.graph_store.query_json_param(&q, &json!({})) {
+            let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+            for r in &rows {
+                let sid = r.first().and_then(Value::as_str).unwrap_or("");
+                let fp = r.get(1).and_then(Value::as_str).unwrap_or("");
+                let ln = r.get(2).and_then(Value::as_i64).unwrap_or(0);
+                let sig =
+                    extract_signature_from_chunk(r.get(3).and_then(Value::as_str).unwrap_or(""));
+                let name = sid.rsplit("::").next().unwrap_or(sid);
+                let _ = write!(out, "- `{}` — {} (`{}:{}`)\n", sig, name, fp, ln);
+            }
+        }
+        if ids.len() > INSPECT_SIG_CAP {
+            let _ = write!(out, "- … +{} more\n", ids.len() - INSPECT_SIG_CAP);
+        }
+        out
+    }
+
     pub(crate) fn axon_inspect(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
@@ -1872,14 +1986,25 @@ impl McpServer {
                     degraded_note.clone().unwrap_or_default(),
                     table
                 );
-                let evidence = evidence_by_mode(
+                let mut evidence = evidence_by_mode(
                     &evidence,
-                    if super::tool_contracts::read_mode_is_verbose(mode) {
+                    if super::tool_contracts::read_mode_is_verbose(mode) || mode == Some("source") {
                         Some("verbose")
                     } else {
                         Some("brief")
                     },
                 );
+                // REQ-AXO-902100 (feedback #18) — mode=source appends the symbol's
+                // source body + direct-neighbour signatures (all from ist.chunk, no
+                // file I/O) so a single inspect serves the prepare_edit case without
+                // a full-file Read.
+                if mode == Some("source") {
+                    evidence.push_str(&self.inspect_source_block(
+                        &symbol_id,
+                        &caller_ids,
+                        &callee_ids,
+                    ));
+                }
                 let tested = rows
                     .first()
                     .and_then(|row| row.get(2))

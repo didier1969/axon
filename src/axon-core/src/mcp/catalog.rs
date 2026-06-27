@@ -820,13 +820,13 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "inspect",
-                "description": "[DX] Inspect symbol detail: source, callers, callees, stats. Use after query identifies target.",
+                "description": "[DX] Inspect symbol detail: callers, callees, stats. mode=source ALSO returns the symbol's source body + direct-neighbour signatures (file:line) — the prepare_edit one-call path (REQ-AXO-902100), no full-file Read needed. Use after query identifies target.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "symbol": { "type": "string" },
                         "project": { "type": "string" },
-                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                        "mode": { "type": "string", "enum": ["brief", "verbose", "source"], "description": "brief (default) / verbose (rich evidence) / source (REQ-AXO-902100: append the symbol's source body + direct caller/callee signatures, all from the IST — no file Read needed)." }
                     },
                     "required": ["symbol"]
                 }
