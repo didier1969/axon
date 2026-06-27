@@ -16,8 +16,9 @@ use serde_json::{json, Value};
 
 use super::McpServer;
 use crate::contract::store::{
-    contract_edges, contract_status_str, count_contracts, list_contracts, live_incoming_call_count,
-    load_contract, load_seal, reconcile_contract, retire_contract, ContractEdgeRow, DriftVerdict,
+    clear_seal, contract_edges, contract_status_str, count_contracts, list_contracts,
+    live_incoming_call_count, load_contract, load_seal, reconcile_contract, retire_contract,
+    ContractEdgeRow, DriftVerdict,
 };
 use crate::contract::ContractNode;
 
@@ -214,15 +215,66 @@ impl McpServer {
         };
         match action.as_str() {
             "obsolete" => self.contract_evolve_obsolete(id, &node),
-            "refactor" | "reorient" => Some(json!({
-                "content": [{"type":"text","text": format!(
-                    "### 📐 contract_evolve {id} — `{action}` pas encore implémenté (S8 slice 1 = obsolescence ; DEC-AXO-901658)"
-                )}],
-                "data": {"status":"not_implemented","action":action,
-                         "slice":"S8 slice 1 = obsolescence only","planned":["refactor","reorient"]}
-            })),
+            "refactor" => self.contract_evolve_refactor(id),
+            "reorient" => self.contract_evolve_reorient(id),
             _ => Some(contract_err("action must be one of obsolete|refactor|reorient", "input_invalid")),
         }
+    }
+
+    /// REQ-AXO-902095 (S8 refactor, DEC-AXO-901658 cas A) — VÉRIFIE qu'un changement
+    /// comportement-préservé a gardé la frontière intacte : le sceau de frontière
+    /// SURVIT si la forme IST-observée n'a pas dérivé de la baseline (reconcile =
+    /// Aligned/NoBaseline/Unbound). Transition de VÉRIFICATION (aucune mutation) :
+    /// si la frontière a dérivé, ce n'est pas un refactor → orienter vers reorient.
+    fn contract_evolve_refactor(&self, id: &str) -> Option<Value> {
+        let sealed = load_seal(&self.graph_store, id).ok().flatten().is_some();
+        let drift = reconcile_contract(&self.graph_store, id).ok();
+        let boundary_preserved = matches!(
+            drift,
+            Some(DriftVerdict::Aligned { .. })
+                | Some(DriftVerdict::NoBaseline { .. })
+                | Some(DriftVerdict::Unbound)
+        );
+        if boundary_preserved {
+            Some(json!({
+                "content": [{"type":"text","text": format!(
+                    "### 📐 {id} — refactor OK : frontière préservée, sceau {} survit",
+                    if sealed { "structurel" } else { "(non scellé)" }
+                )}],
+                "data": {"status":"ok","verdict":"boundary_preserved","id":id,"sealed":sealed,
+                         "drift": drift.as_ref().map(drift_json)}
+            }))
+        } else {
+            Some(json!({
+                "content": [{"type":"text","text": format!(
+                    "### 📐 {id} — PAS un refactor : la frontière a dérivé. Utilise `reorient` (intent-first) ou re_anchor si l'identité a bougé."
+                )}],
+                "data": {"status":"boundary_changed","verdict":"not_a_refactor","id":id,"sealed":sealed,
+                         "drift": drift.as_ref().map(drift_json),
+                         "next": {"tool":"contract_evolve","hint":"action=reorient si le changement d'intention est voulu"}}
+            }))
+        }
+    }
+
+    /// REQ-AXO-902095 (S8 reorient, DEC-AXO-901658 cas B) — intent-first : l'intention
+    /// a délibérément changé → INVALIDE le sceau (clear_seal) + expose le blast-radius
+    /// + exige une re-preuve. Le blast aval (contrat→contrat) est une slice future ;
+    /// ici le rayon immédiat = ce contrat.
+    fn contract_evolve_reorient(&self, id: &str) -> Option<Value> {
+        let was_sealed = load_seal(&self.graph_store, id).ok().flatten().is_some();
+        if let Err(e) = clear_seal(&self.graph_store, id) {
+            return Some(contract_err(&format!("reorient failed: {e}"), "degraded"));
+        }
+        Some(json!({
+            "content": [{"type":"text","text": format!(
+                "### 📐 {id} — REORIENTED : sceau {} invalidé, re-preuve requise",
+                if was_sealed { "structurel" } else { "(déjà absent)" }
+            )}],
+            "data": {"status":"ok","verdict":"reoriented","id":id,"seal_invalidated":was_sealed,
+                     "blast_radius":[id],"needs_reproof":true,
+                     "note":"re-sceller après re-preuve ; blast aval (contrat→contrat) = slice future",
+                     "next": {"tool":"contract_status","hint":"inspecter le drift puis re-sceller une fois re-prouvé"}}
+        }))
     }
 
     /// REQ-AXO-902095 (S8, DEC-AXO-901658 cas C) — obsolescence : tombstone

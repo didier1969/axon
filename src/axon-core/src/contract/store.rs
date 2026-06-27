@@ -487,6 +487,20 @@ pub fn contract_status_str(store: &GraphStore, id: &str) -> Result<Option<String
     Ok(rows.into_iter().next().and_then(|r| col_str(&r, 0)))
 }
 
+/// REQ-AXO-902095 (S8 reorient) — invalide le sceau structurel d'un contrat :
+/// l'intention a délibérément changé (réorientation), le sceau ne couvre plus la
+/// forme courante → re-preuve requise. Repli sur 'bound'/'planned' selon
+/// realized_by. JAMAIS DELETE du nœud (PIL-AXO-003).
+pub fn clear_seal(store: &GraphStore, id: &str) -> Result<()> {
+    store.execute_param(
+        "UPDATE soll.Contract SET seal_hash=NULL, adequacy_verdict=NULL, seal_revision=NULL, \
+            status = CASE WHEN realized_by IS NOT NULL THEN 'bound' ELSE 'planned' END, \
+            updated_at=(extract(epoch from now())*1000)::BIGINT WHERE id=$id",
+        &serde_json::json!({ "id": id }),
+    )?;
+    Ok(())
+}
+
 /// Tombstone d'un contrat (obsolescence terminale, DEC-AXO-901658). JAMAIS DELETE :
 /// `status='retired'` préserve l'intention + l'historique de sceau (PIL-AXO-003).
 pub fn retire_contract(store: &GraphStore, id: &str) -> Result<()> {

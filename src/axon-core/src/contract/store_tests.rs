@@ -289,6 +289,23 @@ fn contract_status_str_none_when_absent() {
 }
 
 #[test]
+fn clear_seal_invalidates_and_falls_back_to_bound() {
+    // REQ-AXO-902095 (reorient) — seal then clear → no seal, status back to bound.
+    let store = crate::tests::test_helpers::create_test_db().unwrap();
+    let node = anchor_node(Some("AXO::reoriented_fn"));
+    persist_contract(&store, "CON-AXO-31", &node).unwrap();
+    let seal = structural_seal(&node.shape_hash(), &node.proves_ref, true, &[]).unwrap();
+    persist_seal(&store, "CON-AXO-31", &seal, true).unwrap();
+    assert!(load_seal(&store, "CON-AXO-31").unwrap().is_some());
+    assert_eq!(contract_status_str(&store, "CON-AXO-31").unwrap().as_deref(), Some("sealed"));
+
+    clear_seal(&store, "CON-AXO-31").unwrap();
+    assert!(load_seal(&store, "CON-AXO-31").unwrap().is_none(), "sceau invalidé");
+    // realized_by présent → repli sur 'bound'.
+    assert_eq!(contract_status_str(&store, "CON-AXO-31").unwrap().as_deref(), Some("bound"));
+}
+
+#[test]
 fn contract_edges_partition_outgoing_governance_and_identity() {
     let store = crate::tests::test_helpers::create_test_db().unwrap();
     // anchor_node.why = "SOLVES REQ-AXO-262" + realized_by → 2 arêtes sortantes.
