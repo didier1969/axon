@@ -899,6 +899,26 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "mailbox_sweep",
+                "description": "[MAILBOX] REQ-AXO-902121 (MBX-9) — TTL/dead-letter sweep: soft-archive (archived_at) messages past their `ttl_at`. Returns the swept count. Run on demand (operator/cron). Archived messages drop out of inbox_read/unread.",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            },
+            {
+                "name": "mcp_agent_card",
+                "description": "[MAILBOX] REQ-AXO-902118 (MBX-6) — A2A capability discovery. A project publishes its A2A AgentCard, peers read it + discover by skill. action=set (OWNER publishes its own card — owner-write ACL, project resolved from `from`/cwd; signed via HMAC over a deterministic key-sorted canonicalisation), get (fetch one project's card + `signature_verified`), list (discover cards, optional `skill` tag filter via GIN containment on card->'skills'). A2A well-known path = /.well-known/agent-card.json. Signature reuses the internal mailbox HMAC for interop; true A2A integrity is JWS (deliberate MVP gap, sig column is forward-compatible).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["set", "get", "list"], "description": "Default get." },
+                        "from": { "type": "string", "description": "set: owner project publishing the card. Default: cwd-resolved." },
+                        "project": { "type": "string", "description": "get: project whose card to fetch (default cwd-resolved). set: optional self-target (must equal owner)." },
+                        "card": { "type": "object", "description": "set: A2A AgentCard { name, description, url, version, protocolVersion, capabilities{...}, defaultInputModes, defaultOutputModes, skills:[{id,name,description,tags}] }." },
+                        "skill": { "type": "string", "description": "list: filter to cards exposing a skill carrying this tag." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "diagnose_indexing",
                 "description": "[SYSTEM] Day-1 indexing diagnostic per project: probable causes, dominant reasons, parser/runtime errors, and remediations.",
                 "inputSchema": {

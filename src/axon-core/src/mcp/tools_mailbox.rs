@@ -208,18 +208,28 @@ impl McpServer {
         }
 
         // REQ-AXO-902121 (MBX-7) — priority-ordered read: `high` first, then
-        // `normal`, then everything else; ties (and the unknown bucket) break by
-        // id ASC. Cursor advancement is unchanged — it stays max(id) over the
-        // returned page (monotone), so `unread` semantics are untouched.
-        // Archived rows (TTL-swept, see axon.mailbox_sweep) are excluded from the
-        // live inbox view.
+        // `normal`, then everything else; ties break by id ASC. CURSOR SAFETY: when
+        // the read advances the cursor to max(id) of the page (`unread` mode), a
+        // priority reorder over a LIMITed page could skip lower-id lower-priority
+        // messages that fall below that max(id) → they would be marked read unseen.
+        // So priority-ordering is applied ONLY to non-cursor-advancing reads
+        // (all/since/thread/search views); `unread` stays strictly id-ordered so the
+        // monotone max(id) cursor never skips a message. Archived rows (TTL-swept,
+        // see axon.mailbox_sweep) are excluded from the live inbox view.
+        let cursor_advances = mode == "unread" && !view_only;
+        let order_clause = if cursor_advances {
+            "ORDER BY id ASC".to_string()
+        } else {
+            "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, id ASC"
+                .to_string()
+        };
         let sql = format!(
             "SELECT id, message_id, context_id, from_project, kind, idempotency_key, in_reply_to, subject, body_dense, sig, created_at \
-             FROM axon.mailbox_message WHERE to_project='{}' AND id > {} AND archived_at IS NULL{} \
-             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, id ASC LIMIT {}",
+             FROM axon.mailbox_message WHERE to_project='{}' AND id > {} AND archived_at IS NULL{} {} LIMIT {}",
             esc(&project),
             floor,
             filters,
+            order_clause,
             limit
         );
         let rows: Vec<Vec<Value>> = match self.graph_store.query_json(&sql) {

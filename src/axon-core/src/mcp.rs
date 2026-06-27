@@ -22,6 +22,7 @@ mod tools_data_catalog;
 mod tools_dx;
 mod tools_framework;
 mod tools_mailbox;
+mod tools_agent_card;
 mod tools_nli;
 mod tools_release;
 mod tools_framework_anomalies;
@@ -1458,6 +1459,8 @@ impl McpServer {
             "promote_status" => self.axon_promote_status(arguments),
             "mcp_outbox_send" => self.axon_mcp_outbox_send(arguments),
             "mcp_inbox_read" => self.axon_mcp_inbox_read(arguments),
+            "mailbox_sweep" => self.axon_mailbox_sweep(arguments),
+            "mcp_agent_card" => self.axon_mcp_agent_card(arguments),
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
             "soll_validate" => self.axon_validate_soll(arguments),
