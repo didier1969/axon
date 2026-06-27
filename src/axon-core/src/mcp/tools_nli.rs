@@ -92,6 +92,17 @@ impl McpServer {
         //    top_k so the NLI re-rank has candidates to filter).
         let proj = project.replace('\'', "''");
         let pool = (top_k * 3).clamp(top_k, 60);
+        // In-scope embedded-symbol count — decides the retrieval strategy (below) and
+        // distinguishes a truly empty scope from a non-finding in the report.
+        let scope_chunk_count = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.ChunkEmbedding ce \
+                 JOIN ist.Chunk c ON c.id = ce.chunk_id \
+                     AND c.project_code = '{proj}' AND c.source_type = 'symbol'",
+                proj = proj
+            ))
+            .unwrap_or(-1);
         let ann_sql = format!(
             "SELECT c.id, c.content, c.file_path, c.source_id \
              FROM ist.ChunkEmbedding ce \
@@ -102,31 +113,26 @@ impl McpServer {
             vec = vec_lit,
             pool = pool
         );
-        // REQ-AXO-902110 — route through the SAME shared ANN path the (working)
-        // code_band of retrieve_context_layered uses (`query_ann_json`). That path
-        // now sets `hnsw.iterative_scan = relaxed_order` (pgvector 0.8+), which is
-        // the real fix: it keeps scanning until enough IN-SCOPE rows survive the
-        // JOIN filter, regardless of how small the scope is vs the whole corpus.
-        // Before, the raw `query_json` used the default ef_search (40) HNSW scan →
-        // global neighbours → in-scope filter decimated them to ~0 ("shortlist
-        // empty" on a healthy 17k-chunk corpus). ef_search here is just first-pass
-        // breadth; iterative_scan handles the tail.
+        // REQ-AXO-902129 — for a BOUNDED scope, do an EXACT scan (brute-force cosine
+        // over the in-scope vectors, ~tens of ms for ≤50k), bypassing the HNSW index.
+        // This is correct-by-construction and IMMUNE to HNSW graph corruption — the
+        // root cause of the 0-passage / wrong-pocket bug (REQ-902126): a corrupt
+        // index returns a tiny arbitrary single-project pocket, so a candidate could
+        // land in a non-AXO pocket and retrieve 0 in-scope rows even though its true
+        // neighbourhood is AXO-rich. Exact scan over 17k vectors sidesteps that
+        // entirely. Only fall back to HNSW for a scope too large to scan exactly.
+        const EXACT_SCAN_MAX: i64 = 50_000;
         let ef_search = (pool as u32).max(40).min(1000);
-        let rows: Vec<Vec<Value>> = match self.graph_store.query_ann_json(&ann_sql, ef_search) {
+        let ann_result = if scope_chunk_count > 0 && scope_chunk_count <= EXACT_SCAN_MAX {
+            self.graph_store.query_exact_scan_json(&ann_sql)
+        } else {
+            self.graph_store.query_ann_json(&ann_sql, ef_search)
+        };
+        let exact_scan = scope_chunk_count > 0 && scope_chunk_count <= EXACT_SCAN_MAX;
+        let rows: Vec<Vec<Value>> = match ann_result {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(e) => return Some(err_json(format!("ANN shortlist failed: {e}"), "degraded")),
         };
-        // Instrumentation: in-scope embedded-symbol count, so "shortlist empty"
-        // distinguishes a truly empty scope from an over-filtered ANN (Nexus #29).
-        let scope_chunk_count = self
-            .graph_store
-            .query_count(&format!(
-                "SELECT count(*) FROM ist.ChunkEmbedding ce \
-                 JOIN ist.Chunk c ON c.id = ce.chunk_id \
-                     AND c.project_code = '{proj}' AND c.source_type = 'symbol'",
-                proj = proj
-            ))
-            .unwrap_or(-1);
 
         // 3. NLI re-rank: judge each passage (premise) vs the candidate (hypothesis).
         //    Bounded by a wall-clock budget so a slow provider (CPU ≈ 5s/pair) or
@@ -298,6 +304,7 @@ impl McpServer {
                     "candidate_embed_dim": embed_dim,
                     "candidate_embed_norm": embed_norm,
                     "ef_search": ef_search,
+                    "exact_scan": exact_scan,
                     "truncated": truncated,
                     "budget_ms": budget_ms,
                     "threshold": threshold,

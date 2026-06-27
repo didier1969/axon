@@ -327,6 +327,12 @@ impl GraphStore {
         Self::decode_native_envelope(self.pool.native.run_ann_query_json(query, ef_search))
     }
 
+    /// REQ-AXO-902129 — exact scoped vector scan (no HNSW), for bounded scopes where
+    /// a corrupt/unreachable HNSW graph would return a tiny arbitrary pocket.
+    pub(crate) fn query_exact_scan_json(&self, query: &str) -> Result<String> {
+        Self::decode_native_envelope(self.pool.native.run_exact_scan_query_json(query))
+    }
+
     /// REQ-AXO-129 envelope decoder shared by the native read paths.
     /// Legitimate results are a JSON array (`[`); error envelopes are a JSON
     /// object (`{`) carrying `_axon_plugin_error`. Surfaces the rich

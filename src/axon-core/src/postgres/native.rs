@@ -262,6 +262,56 @@ impl NativePgCtx {
         })
     }
 
+    /// REQ-AXO-902129 — EXACT scoped vector scan (no HNSW). Forces a brute-force
+    /// seq-scan + sort by disabling index/bitmap scans, so a corrupt or unreachable
+    /// HNSW graph cannot return a tiny arbitrary pocket. Correct-by-construction for
+    /// a bounded scope (≤ ~50k vectors ≈ tens of ms). Same envelope contract as
+    /// `run_ann_query_json`. Deliberately does NOT touch `enable_seqscan`.
+    pub fn run_exact_scan_query_json(&self, sql: &str) -> String {
+        let pool = self.pool.clone();
+        let schema = self.schema_search_path.clone();
+        let sql = sql.to_string();
+        run_blocking(async move {
+            let mut conn = match pool.get().await {
+                Ok(c) => c,
+                Err(e) => return error_envelope("acquire", &sql, &e.to_string()),
+            };
+            if let Err(e) = apply_session_setup(&conn, &schema).await {
+                return db_error_envelope("set_search_path", &sql, &e);
+            }
+            let tx = match conn.transaction().await {
+                Ok(tx) => tx,
+                Err(e) => return db_error_envelope("exact_begin", &sql, &e),
+            };
+            if let Err(e) = tx
+                .batch_execute(
+                    "SET LOCAL enable_indexscan = off; SET LOCAL enable_bitmapscan = off",
+                )
+                .await
+            {
+                return db_error_envelope("exact_set_local", &sql, &e);
+            }
+            let rendered = match tx.query(&sql, &[]).await {
+                Ok(rows) => {
+                    let mut out: Vec<Vec<String>> = Vec::with_capacity(rows.len());
+                    for row in &rows {
+                        let mut rendered = Vec::with_capacity(row.len());
+                        for col in 0..row.len() {
+                            rendered.push(render_pg_value(row, col));
+                        }
+                        out.push(rendered);
+                    }
+                    serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
+                }
+                Err(e) => return db_error_envelope("exact_query", &sql, &e),
+            };
+            if let Err(e) = tx.commit().await {
+                return db_error_envelope("exact_commit", &sql, &e);
+            }
+            rendered
+        })
+    }
+
     /// `SELECT count(*)`-style scalar count. Mirrors the plugin's
     /// `pg_query_count`: returns the first column of the first row as i64,
     /// or 0 on any error / empty result.
