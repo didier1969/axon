@@ -23,6 +23,9 @@ mod tools_dx;
 mod tools_framework;
 mod tools_mailbox;
 mod tools_agent_card;
+mod tools_lease;
+mod tools_mailbox_pubsub;
+mod tools_mailbox_render;
 mod tools_nli;
 mod tools_release;
 mod tools_framework_anomalies;
@@ -1461,6 +1464,13 @@ impl McpServer {
             "mcp_inbox_read" => self.axon_mcp_inbox_read(arguments),
             "mailbox_sweep" => self.axon_mailbox_sweep(arguments),
             "mcp_agent_card" => self.axon_mcp_agent_card(arguments),
+            "mailbox_lease" => self.axon_mailbox_lease(arguments),
+            "mailbox_render" => self.axon_mailbox_render(arguments),
+            "mailbox_tap" => self.axon_mailbox_tap(arguments),
+            "mailbox_topic_subscribe" => self.axon_mailbox_topic_subscribe(arguments),
+            "mailbox_topic_unsubscribe" => self.axon_mailbox_topic_unsubscribe(arguments),
+            "mailbox_room_create" => self.axon_mailbox_room_create(arguments),
+            "mailbox_room_join" => self.axon_mailbox_room_join(arguments),
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
             "soll_validate" => self.axon_validate_soll(arguments),

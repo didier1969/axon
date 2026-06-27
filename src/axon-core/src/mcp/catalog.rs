@@ -868,7 +868,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "to_project": { "type": "string", "description": "Recipient project code (e.g. \"NEX\")." },
+                        "to_project": { "type": "string", "description": "Recipient project code (e.g. \"NEX\"), or \"*\" to broadcast to every registered project (MBX-7 fan-out). Mutually exclusive with to_topic/to_room." },
+                        "to_topic": { "type": "string", "description": "MBX-7 — fan-out to every subscriber of this pub/sub topic (mutually exclusive with to_project/to_room)." },
+                        "to_room": { "type": "string", "description": "MBX-7 — fan-out to every member of this room (mutually exclusive with to_project/to_topic)." },
                         "from": { "type": "string", "description": "Sender project code. Default: cwd-resolved." },
                         "idempotency_key": { "type": "string", "description": "Dedup anchor (required). Same key from same sender = no-op." },
                         "subject": { "type": "string", "description": "Short subject line." },
@@ -879,7 +881,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "kind": { "type": "string", "description": "A2A kind. Default \"message\"." },
                         "priority": { "type": "string", "description": "normal|high|low. Default normal." }
                     },
-                    "required": ["to_project", "idempotency_key"]
+                    "required": ["idempotency_key"]
                 }
             },
             {
@@ -917,6 +919,67 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     },
                     "required": []
                 }
+            },
+            {
+                "name": "mailbox_lease",
+                "description": "[MAILBOX] REQ-AXO-902120 (MBX-8) — ADVISORY lease for cooperative anti-collision on concurrent multi-LLM edits. action=acquire (resource, ttl_s, intent — ALWAYS granted, but returns any live conflicting holders), release (lease_id|resource — own holds only), check (read-only list of live holders). Advisory = soft signal, never a hard lock; expiry is the only auto-release for a crashed holder. NOT pg_advisory_lock (session-scoped).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["acquire", "release", "check"], "description": "Default check." },
+                        "resource": { "type": "string", "description": "The resource path/key being coordinated (e.g. a file path)." },
+                        "ttl_s": { "type": "integer", "description": "acquire: lease lifetime seconds (default 900, max 86400)." },
+                        "intent": { "type": "string", "description": "acquire: human-readable reason for the hold." },
+                        "lease_id": { "type": "integer", "description": "release: the lease to drop (or pass `resource`)." },
+                        "from": { "type": "string", "description": "Holder project. Default: cwd-resolved." }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "mailbox_render",
+                "description": "[MAILBOX] REQ-AXO-902122 (MBX-10) — read-only HUMAN render of a message/thread: expands the dense body and resolves ref_soll_ids to SOLL titles into bounded human markdown. The dense form stays the wire format; render is the on-demand human expander.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "integer", "description": "Render one message by id." },
+                        "context_id": { "type": "string", "description": "Render a whole thread by context_id." }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "mailbox_tap",
+                "description": "[MAILBOX] REQ-AXO-902122 (MBX-10) — read-only observation tap: read a thread WITHOUT being a recipient and WITHOUT advancing any cursor (pure view, archived excluded, signatures verified). Requires at least one filter (no global dump). AXO-internal until MBX-5 ACL lands.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "context_id": { "type": "string", "description": "Thread to observe." },
+                        "from": { "type": "string", "description": "Filter by sender." },
+                        "to": { "type": "string", "description": "Filter by recipient." }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "mailbox_topic_subscribe",
+                "description": "[MAILBOX] REQ-AXO-902119 (MBX-7) — subscribe THIS project to a pub/sub topic. A broadcast to the topic (mcp_outbox_send to_topic=…) fans out one materialised message per subscriber, so inbox_read/unread/cursor are reused unchanged.",
+                "inputSchema": { "type": "object", "properties": { "topic": { "type": "string", "description": "Topic name." }, "project": { "type": "string", "description": "Subscriber. Default: cwd-resolved." } }, "required": ["topic"] }
+            },
+            {
+                "name": "mailbox_topic_unsubscribe",
+                "description": "[MAILBOX] REQ-AXO-902119 (MBX-7) — unsubscribe THIS project from a topic.",
+                "inputSchema": { "type": "object", "properties": { "topic": { "type": "string", "description": "Topic name." }, "project": { "type": "string", "description": "Subscriber. Default: cwd-resolved." } }, "required": ["topic"] }
+            },
+            {
+                "name": "mailbox_room_create",
+                "description": "[MAILBOX] REQ-AXO-902119 (MBX-7) — create a multi-party room with an initial member set. A message to_room=… fans out to all room members.",
+                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string", "description": "Room id." }, "members": { "type": "array", "items": { "type": "string" }, "description": "Initial member project codes." }, "from": { "type": "string", "description": "Creator. Default: cwd-resolved." } }, "required": ["room_id"] }
+            },
+            {
+                "name": "mailbox_room_join",
+                "description": "[MAILBOX] REQ-AXO-902119 (MBX-7) — join THIS project to an existing room.",
+                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string", "description": "Room id." }, "project": { "type": "string", "description": "Joiner. Default: cwd-resolved." } }, "required": ["room_id"] }
             },
             {
                 "name": "diagnose_indexing",
