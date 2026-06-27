@@ -13,7 +13,7 @@ fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-fn mbx_err(msg: &str, status: &str) -> Value {
+pub(crate) fn mbx_err(msg: &str, status: &str) -> Value {
     json!({
         "content": [{ "type": "text", "text": msg }],
         "isError": true,
@@ -21,13 +21,24 @@ fn mbx_err(msg: &str, status: &str) -> Value {
     })
 }
 
+/// Result of materialising a single mailbox row (one recipient).
+pub(crate) struct SentMessage {
+    pub message_id: String,
+    pub context_id: String,
+    pub deduped: bool,
+    pub sig: String,
+}
+
 impl McpServer {
     /// REQ-AXO-902113 (MBX-1) — send a message to another project's inbox.
+    ///
+    /// REQ-AXO-902119 (MBX-7) — also the fan-out entry point: when `to_topic`,
+    /// `to_room`, or `to_project='*'` is supplied (mutually exclusive with a
+    /// concrete `to_project`), the recipient set is resolved AT SEND and one
+    /// materialised row is delivered per recipient (see `outbox_fanout`). The
+    /// concrete-`to_project` path below is the default point-to-point case and is
+    /// preserved verbatim.
     pub(crate) fn axon_mcp_outbox_send(&self, args: &Value) -> Option<Value> {
-        let to = match args.get("to_project").and_then(Value::as_str) {
-            Some(t) if !t.trim().is_empty() => t.trim().to_string(),
-            _ => return Some(mbx_err("mcp_outbox_send requires `to_project`.", "input_invalid")),
-        };
         let from = args
             .get("from")
             .and_then(Value::as_str)
@@ -40,6 +51,26 @@ impl McpServer {
                 "input_invalid",
             ));
         }
+
+        // MBX-7 fan-out detection. `to_topic` / `to_room` are mutually exclusive with
+        // a concrete `to_project`; `to_project='*'` is a registry-wide broadcast.
+        let to_topic = args.get("to_topic").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+        let to_room = args.get("to_room").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+        let to_project_raw = args.get("to_project").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        if (to_topic.is_some() || to_room.is_some()) && to_project_raw.is_some() {
+            return Some(mbx_err(
+                "mcp_outbox_send: `to_topic`/`to_room` are exclusive of `to_project`.",
+                "input_invalid",
+            ));
+        }
+        if to_topic.is_some() || to_room.is_some() || to_project_raw == Some("*") {
+            return self.outbox_fanout(&from, to_topic, to_room, to_project_raw == Some("*"), args);
+        }
+
+        let to = match to_project_raw {
+            Some(t) => t.to_string(),
+            None => return Some(mbx_err("mcp_outbox_send requires `to_project` (or `to_topic`/`to_room`).", "input_invalid")),
+        };
         let idempotency_key = match args.get("idempotency_key").and_then(Value::as_str) {
             Some(k) if !k.trim().is_empty() => k.trim().to_string(),
             _ => {
@@ -67,30 +98,97 @@ impl McpServer {
             .unwrap_or("normal")
             .to_string();
         let ref_soll_ids = args.get("ref_soll_ids").cloned().unwrap_or_else(|| json!([]));
+        let context_in = args.get("context_id").and_then(Value::as_str).unwrap_or("");
 
-        let message_id = mailbox::message_id(&from, &to, &idempotency_key);
-        let context_id = args
-            .get("context_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| message_id.clone());
-
-        let canonical = mailbox::canonical(
+        let sent = match self.outbox_send_one(
             &from,
             &to,
-            &context_id,
-            &message_id,
-            &kind,
             &idempotency_key,
-            &in_reply_to,
             &subject,
             &body_dense,
+            &in_reply_to,
+            &kind,
+            &priority,
+            context_in,
+            &ref_soll_ids,
+            "",
+            "",
+        ) {
+            Ok(s) => s,
+            Err(e) => return Some(mbx_err(&format!("mailbox send failed: {e}"), "degraded")),
+        };
+
+        let report = format!(
+            "### 📤 mcp_outbox_send\n\n{} → `{}` · message_id=`{}` · context=`{}`{}",
+            from,
+            to,
+            sent.message_id,
+            sent.context_id,
+            if sent.deduped {
+                " · (idempotent no-op: already sent)"
+            } else {
+                " · delivered"
+            }
         );
-        let sig = mailbox::sign(&from, &canonical);
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "status": "ok",
+                "message_id": sent.message_id,
+                "context_id": sent.context_id,
+                "from": from,
+                "to": to,
+                "deduped": sent.deduped,
+                "sig": sent.sig,
+            }
+        }))
+    }
+
+    /// Materialise ONE mailbox row for a single recipient (build the A2A envelope,
+    /// HMAC-sign over the canonical form, idempotent UPSERT). Shared by the
+    /// point-to-point path and the MBX-7 fan-out path. `context_in` empty → the
+    /// message's own `message_id` becomes the thread id. `topic` / `room_id` empty
+    /// → stored NULL (point-to-point); otherwise stamps the fan-out provenance.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn outbox_send_one(
+        &self,
+        from: &str,
+        to: &str,
+        idempotency_key: &str,
+        subject: &str,
+        body_dense: &str,
+        in_reply_to: &str,
+        kind: &str,
+        priority: &str,
+        context_in: &str,
+        ref_soll_ids: &Value,
+        topic: &str,
+        room_id: &str,
+    ) -> Result<SentMessage, String> {
+        let message_id = mailbox::message_id(from, to, idempotency_key);
+        let context_id = if context_in.is_empty() {
+            message_id.clone()
+        } else {
+            context_in.to_string()
+        };
+
+        let canonical = mailbox::canonical(
+            from,
+            to,
+            &context_id,
+            &message_id,
+            kind,
+            idempotency_key,
+            in_reply_to,
+            subject,
+            body_dense,
+        );
+        let sig = mailbox::sign(from, &canonical);
 
         // A2A-aligned envelope (DEC-AXO-901663): the dense Axon body rides in a
-        // `data` part so A2A interop (Agent Cards, MBX-6) is free later.
+        // `data` part so A2A interop (Agent Cards, MBX-6) is free later. Fan-out
+        // provenance (topic/room_id) rides alongside but is OUT of the signed
+        // canonical form, so a recipient's signature check is unaffected.
         let envelope = json!({
             "messageId": message_id,
             "contextId": context_id,
@@ -105,57 +203,43 @@ impl McpServer {
             }}],
             "idempotencyKey": idempotency_key,
             "inReplyTo": in_reply_to,
+            "topic": if topic.is_empty() { Value::Null } else { json!(topic) },
+            "roomId": if room_id.is_empty() { Value::Null } else { json!(room_id) },
             "sig": sig,
         });
         let envelope_lit = esc(&serde_json::to_string(&envelope).unwrap_or_default());
 
         let sql = format!(
             "INSERT INTO axon.mailbox_message \
-             (message_id, context_id, from_project, to_project, kind, subject, body_dense, envelope, idempotency_key, in_reply_to, priority, sig) \
-             VALUES ('{mid}','{ctx}','{from}','{to}','{kind}','{subj}','{body}','{env}'::jsonb,'{idem}','{irt}','{prio}','{sig}') \
-             ON CONFLICT (from_project, idempotency_key) DO NOTHING RETURNING id",
+             (message_id, context_id, from_project, to_project, kind, subject, body_dense, envelope, idempotency_key, in_reply_to, priority, sig, topic, room_id) \
+             VALUES ('{mid}','{ctx}','{from}','{to}','{kind}','{subj}','{body}','{env}'::jsonb,'{idem}','{irt}','{prio}','{sig}',NULLIF('{topic}','')::text,NULLIF('{room}','')::text) \
+             ON CONFLICT (from_project, to_project, idempotency_key) DO NOTHING RETURNING id",
             mid = esc(&message_id),
             ctx = esc(&context_id),
-            from = esc(&from),
-            to = esc(&to),
-            kind = esc(&kind),
-            subj = esc(&subject),
-            body = esc(&body_dense),
+            from = esc(from),
+            to = esc(to),
+            kind = esc(kind),
+            subj = esc(subject),
+            body = esc(body_dense),
             env = envelope_lit,
-            idem = esc(&idempotency_key),
-            irt = esc(&in_reply_to),
-            prio = esc(&priority),
+            idem = esc(idempotency_key),
+            irt = esc(in_reply_to),
+            prio = esc(priority),
             sig = esc(&sig),
+            topic = esc(topic),
+            room = esc(room_id),
         );
-        let rows: Vec<Vec<Value>> = match self.graph_store.query_json_writer(&sql) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(e) => return Some(mbx_err(&format!("mailbox send failed: {e}"), "degraded")),
-        };
-        let deduped = rows.is_empty();
-        let report = format!(
-            "### 📤 mcp_outbox_send\n\n{} → `{}` · message_id=`{}` · context=`{}`{}",
-            from,
-            to,
+        let rows: Vec<Vec<Value>> = self
+            .graph_store
+            .query_json_writer(&sql)
+            .map(|s| serde_json::from_str(&s).unwrap_or_default())
+            .map_err(|e| e.to_string())?;
+        Ok(SentMessage {
             message_id,
             context_id,
-            if deduped {
-                " · (idempotent no-op: already sent)"
-            } else {
-                " · delivered"
-            }
-        );
-        Some(json!({
-            "content": [{ "type": "text", "text": report }],
-            "data": {
-                "status": "ok",
-                "message_id": message_id,
-                "context_id": context_id,
-                "from": from,
-                "to": to,
-                "deduped": deduped,
-                "sig": sig,
-            }
-        }))
+            deduped: rows.is_empty(),
+            sig,
+        })
     }
 
     /// REQ-AXO-902114 (MBX-1/2) — read a project's inbox: `unread` (since the read
