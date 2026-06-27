@@ -207,9 +207,16 @@ impl McpServer {
             ));
         }
 
+        // REQ-AXO-902121 (MBX-7) — priority-ordered read: `high` first, then
+        // `normal`, then everything else; ties (and the unknown bucket) break by
+        // id ASC. Cursor advancement is unchanged — it stays max(id) over the
+        // returned page (monotone), so `unread` semantics are untouched.
+        // Archived rows (TTL-swept, see axon.mailbox_sweep) are excluded from the
+        // live inbox view.
         let sql = format!(
             "SELECT id, message_id, context_id, from_project, kind, idempotency_key, in_reply_to, subject, body_dense, sig, created_at \
-             FROM axon.mailbox_message WHERE to_project='{}' AND id > {}{} ORDER BY id ASC LIMIT {}",
+             FROM axon.mailbox_message WHERE to_project='{}' AND id > {} AND archived_at IS NULL{} \
+             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, id ASC LIMIT {}",
             esc(&project),
             floor,
             filters,
@@ -294,11 +301,39 @@ impl McpServer {
             .query_single_i64_writer(&format!(
                 "SELECT count(*) FROM axon.mailbox_message m \
                  LEFT JOIN axon.mailbox_cursor c ON c.project_code = m.to_project \
-                 WHERE m.to_project='{p}' AND m.id > COALESCE(c.last_read_id, 0)",
+                 WHERE m.to_project='{p}' AND m.id > COALESCE(c.last_read_id, 0) \
+                 AND m.archived_at IS NULL",
                 p = esc(project)
             ))
             .ok()
             .flatten()
             .unwrap_or(0)
+    }
+
+    /// REQ-AXO-902119 (MBX-7) — TTL / dead-letter sweep. Soft-archives every
+    /// message whose retention horizon (`ttl_at`) has passed by stamping
+    /// `archived_at = now()` (the append-only log is preserved — archived rows
+    /// just drop out of the live inbox view). Idempotent: a second call within
+    /// the same window archives nothing. Returns the count swept this pass.
+    pub(crate) fn axon_mailbox_sweep(&self, _args: &Value) -> Option<Value> {
+        let rows: Vec<Vec<Value>> = match self.graph_store.query_json_writer("SELECT axon.mailbox_sweep()") {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Err(e) => return Some(mbx_err(&format!("mailbox sweep failed: {e}"), "degraded")),
+        };
+        let swept = rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .unwrap_or(0);
+        let report = format!(
+            "### 🧹 mailbox_sweep\n\n{swept} expired message(s) archived (ttl_at < now)."
+        );
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "status": "ok",
+                "swept": swept,
+            }
+        }))
     }
 }
