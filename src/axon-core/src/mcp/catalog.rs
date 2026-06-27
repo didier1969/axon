@@ -364,9 +364,21 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "entity_type": { "type": "string" },
-                        "entity_id": { "type": "string" },
-                        "artifacts": { "type": "array", "items": { "type": "object" } }
+                        "entity_type": { "type": "string", "description": "Lowercase SOLL entity kind: requirement|decision|concept|pillar|milestone|validation|vision|guideline|stakeholder." },
+                        "entity_id": { "type": "string", "description": "Canonical SOLL id, e.g. REQ-AXO-902089." },
+                        "artifacts": {
+                            "type": "array",
+                            "description": "REQ-AXO-902099 — evidence items. Each object = {artifact_type, artifact_ref}. Aliases accepted by the handler: kind/type for artifact_type; path/uri for artifact_ref.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "artifact_type": { "type": "string", "enum": ["document", "file", "symbol", "test", "metric", "validation", "rationale", "diff"], "description": "Kind of evidence (aliases: kind, type). Inferred from artifact_ref when omitted." },
+                                    "artifact_ref": { "type": "string", "description": "Pointer to the evidence: file path | symbol id `module::fn` | test path `module::tests::name` | `VAL-CODE-NNN` | metric name/URL | commit SHA. Aliases: path, uri." },
+                                    "note": { "type": "string", "description": "Optional human-readable note." }
+                                },
+                                "required": ["artifact_ref"]
+                            }
+                        }
                     },
                     "required": ["entity_type", "entity_id", "artifacts"]
                 }

@@ -602,7 +602,7 @@ impl McpServer {
                                 "status": "input_invalid",
                                 "operator_guidance": {
                                     "problem_class": "attach_required",
-                                    "follow_up_tools": ["soll_relation_schema", "soll_query_context"],
+                                    "follow_up_tools": ["soll_relation_schema", "soll_query_context", "document_intent"],
                                     "confidence": "high",
                                 },
                                 "parameter_repair": {
@@ -610,8 +610,8 @@ impl McpServer {
                                     "category": "attach_required",
                                     "invalid_field": format!("data.{}", missing_field),
                                     "required_fields": ["attach_to", "relation_type"],
-                                    "hint": "supply canonical parent id and the relation type (e.g. REQ→PIL=BELONGS_TO, CPT→REQ=EXPLAINS, DEC→REQ=SOLVES, MIL→REQ=TARGETS, VAL→REQ=VERIFIES, GUI→PIL=BELONGS_TO). Use soll_relation_schema source_id=<your_type>-... for the full table.",
-                                    "follow_up_tools": ["soll_relation_schema"],
+                                    "hint": "supply canonical parent id and the relation type (e.g. REQ→PIL=BELONGS_TO, CPT→REQ=EXPLAINS, DEC→REQ=SOLVES, MIL→REQ=TARGETS, VAL→REQ=VERIFIES, GUI→PIL=BELONGS_TO). Use soll_relation_schema source_id=<your_type>-... for the full table. REQ-AXO-902082 — if the parent is UNKNOWN, call `document_intent` instead: it auto-infers the project's pillar as fallback parent (REQ-AXO-901615) and classifies the entity for you.",
+                                    "follow_up_tools": ["soll_relation_schema", "document_intent"],
                                 },
                                 "canonical_source": "MIL-AXO-020",
                             },
