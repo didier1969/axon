@@ -125,6 +125,29 @@ impl NliClassifier {
     }
 }
 
+use std::sync::{Mutex, OnceLock};
+
+static NLI_GLOBAL: OnceLock<Mutex<Option<NliClassifier>>> = OnceLock::new();
+
+/// Lazy process-global NLI judge for `contradiction_check` (REQ-AXO-902096). The
+/// 599 MB model loads on first use (~seconds) then is reused; inference is
+/// serialised via the `Mutex` (the veto is low-volume — top-K re-rank per query).
+/// Returns an error if the model artifact is absent so the caller can degrade to
+/// an explicit `nli_unavailable` instead of pretending.
+pub fn judge_global(premise: &str, hypothesis: &str) -> Result<NliScores> {
+    let cell = NLI_GLOBAL.get_or_init(|| Mutex::new(None));
+    let mut guard = cell
+        .lock()
+        .map_err(|_| anyhow!("NLI global mutex poisoned"))?;
+    if guard.is_none() {
+        *guard = Some(NliClassifier::load(NLI_MODEL_DIR)?);
+    }
+    let classifier = guard
+        .as_mut()
+        .ok_or_else(|| anyhow!("NLI classifier not initialised"))?;
+    classifier.judge(premise, hypothesis)
+}
+
 fn softmax3(a: f32, b: f32, c: f32) -> NliScores {
     let m = a.max(b).max(c);
     let (ea, eb, ec) = ((a - m).exp(), (b - m).exp(), (c - m).exp());

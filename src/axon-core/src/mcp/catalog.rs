@@ -832,6 +832,20 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "contradiction_check",
+                "description": "[NLI] REQ-AXO-902096 (demande Nexus) — anti-hallucination gate: does `candidate` CONTRADICT the project's indexed knowledge? Embeds the candidate, ANN-shortlists the scope's chunks, then a cross-encoder NLI (ModernBERT-base-nli) judges each passage → returns the contradicting ones. The verdict is NEVER inferred from cosine similarity (≠ entailment direction); returns `nli_unavailable` (never a silent pass) if the model isn't provisioned.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "candidate": { "type": "string", "description": "The fact / passage / claim to check for contradiction against the indexed corpus." },
+                        "scope": { "type": "object", "description": "Search scope.", "properties": { "project": { "type": "string", "description": "Project code (default: cwd-resolved, else AXO)." } } },
+                        "threshold": { "type": "number", "description": "Min contradiction probability (0..1) to flag a passage. Default 0.5." },
+                        "top_k": { "type": "integer", "description": "Max conflicting passages returned. Default 8, max 50." }
+                    },
+                    "required": ["candidate"]
+                }
+            },
+            {
                 "name": "diagnose_indexing",
                 "description": "[SYSTEM] Day-1 indexing diagnostic per project: probable causes, dominant reasons, parser/runtime errors, and remediations.",
                 "inputSchema": {
