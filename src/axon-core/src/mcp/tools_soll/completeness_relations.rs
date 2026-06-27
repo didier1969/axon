@@ -115,7 +115,7 @@ impl McpServer {
             let normalized = relation_type.to_uppercase();
             if policy.allowed.iter().any(|allowed| *allowed == normalized) {
                 normalized
-            } else if policy.allowed.len() == 1 {
+            } else if policy.allowed.len() == 1 && policy.allowed[0] != "SUPERSEDES" {
                 // REQ-AXO-901939 — auto-canonize when the direction is
                 // UNAMBIGUOUS: the requested relation is not allowed for this
                 // pair, but the pair admits exactly ONE canonical relation, so
@@ -124,15 +124,33 @@ impl McpServer {
                 // substitution by comparing the requested vs the returned
                 // relation. Pairs with MULTIPLE allowed relations stay a reject
                 // (genuinely ambiguous — the caller must choose).
+                //
+                // REQ-AXO-902098 (feedback #16) — but NEVER auto-canonize to
+                // SUPERSEDES: it mutates the target to status='superseded'. A
+                // caller passing e.g. BLOCKED_BY for ordering would SILENTLY
+                // destroy the target (observed: 2 milestones superseded
+                // unknowingly). Pairs whose sole allowed relation is SUPERSEDES
+                // (same-type, e.g. MIL→MIL) therefore stay a reject — the caller
+                // must pass SUPERSEDES explicitly to opt into the destructive
+                // redirect.
                 policy.allowed[0].to_string()
             } else {
+                // REQ-AXO-902098 — flag the destructive nature so the LLM does
+                // not blindly retry with SUPERSEDES for a mere ordering intent.
+                let destructive_note = if policy.allowed.iter().any(|r| *r == "SUPERSEDES") {
+                    " — note: SUPERSEDES is DESTRUCTIVE (sets the target status='superseded'); \
+                     pass it explicitly ONLY for a deliberate redirect, never for ordering"
+                } else {
+                    ""
+                };
                 return Err(anyhow!(
-                    "Relation `{}` forbidden for {} -> {}. Allowed: {}. Default: {}",
+                    "Relation `{}` forbidden for {} -> {}. Allowed: {}. Default: {}{}",
                     normalized,
                     source_kind.label(),
                     target_kind.label(),
                     policy.allowed.join(", "),
-                    policy.default.unwrap_or("none")
+                    policy.default.unwrap_or("none"),
+                    destructive_note
                 ));
             }
         } else if let Some(default_relation) = policy.default {
