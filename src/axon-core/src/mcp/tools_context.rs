@@ -789,6 +789,61 @@ impl McpServer {
     // Backward compat invariant: the existing `retrieve_context` tool
     // and its response shape are NOT touched. This is a sibling tool
     // dispatched via `retrieve_context_layered`.
+    /// REQ-AXO-902097 (demande Nexus) — opt-in entailment veto over retrieved
+    /// passages. When `args.veto` is present, each code-band chunk is judged by the
+    /// NLI cross-encoder against the `question`; contradicting chunks are flagged
+    /// (`contradiction_detected` + `entailment` + `contradiction`) and, if
+    /// `veto.filter=true`, dropped. Rétro-compatible (no `veto` → chunks unchanged)
+    /// and bounded (`VETO_MAX_JUDGEMENTS`) so latency stays usable. NLI unavailable
+    /// → chunks left as-is (best-effort hardening, never blocks retrieval).
+    fn apply_entailment_veto(&self, chunks: Vec<Value>, args: &Value) -> Vec<Value> {
+        const VETO_MAX_JUDGEMENTS: usize = 12;
+        let Some(veto) = args.get("veto") else {
+            return chunks;
+        };
+        let threshold = veto
+            .get("entailment_threshold")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.5) as f32;
+        let filter = veto.get("filter").and_then(Value::as_bool).unwrap_or(false);
+        let question = args.get("question").and_then(Value::as_str).unwrap_or("");
+        if question.is_empty() {
+            return chunks;
+        }
+        let mut out: Vec<Value> = Vec::with_capacity(chunks.len());
+        let mut judged = 0usize;
+        for mut chunk in chunks {
+            let text = chunk
+                .get("content")
+                .or_else(|| chunk.get("text"))
+                .or_else(|| chunk.get("snippet"))
+                .or_else(|| chunk.get("summary"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if text.is_empty() || judged >= VETO_MAX_JUDGEMENTS {
+                out.push(chunk);
+                continue;
+            }
+            match crate::nli::judge_global(text, question) {
+                Ok(scores) => {
+                    judged += 1;
+                    let contradicts = scores.contradiction >= threshold;
+                    if let Some(obj) = chunk.as_object_mut() {
+                        obj.insert("contradiction_detected".to_string(), json!(contradicts));
+                        obj.insert("entailment".to_string(), json!(scores.entailment));
+                        obj.insert("contradiction".to_string(), json!(scores.contradiction));
+                    }
+                    if filter && contradicts {
+                        continue; // drop the contradicting passage
+                    }
+                    out.push(chunk);
+                }
+                Err(_) => out.push(chunk), // NLI unavailable → leave as-is
+            }
+        }
+        out
+    }
+
     pub(crate) fn axon_retrieve_context_layered(&self, args: &Value) -> Option<Value> {
         let started_at = Instant::now();
         // REQ-AXO-901927 — the layered tool's intent_band (SOLL concepts /
@@ -894,6 +949,10 @@ impl McpServer {
             estimate_tokens(&[&serde_json::to_string(&code_chunks_full).unwrap_or_default()]);
         let (code_chunks, code_tokens_post, code_overflowed) =
             Self::truncate_chunks_band(code_chunks_full, code_budget);
+        // REQ-AXO-902097 — opt-in entailment veto over the code band: flag (and
+        // optionally drop) passages that CONTRADICT the question, via the NLI
+        // cross-encoder. Rétro-compatible: no `veto` arg → chunks unchanged.
+        let code_chunks = self.apply_entailment_veto(code_chunks, args);
 
         // recent_band — REQ-AXO-264 A6 v1: populate via `git log --since=24h`
         // on the resolved project path. Each commit yields a {file, ts,

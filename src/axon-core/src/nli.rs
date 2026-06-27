@@ -71,14 +71,34 @@ impl NliClassifier {
         let dir = model_dir.as_ref();
         let model_path = dir.join("model.onnx");
         let tok_path = dir.join("tokenizer.json");
+        // REQ-AXO-902103 — run NLI on the GPU (CUDA EP, like the embedder). The
+        // CPU EP was measured at ~51s for a top-K (9-pair) re-rank — unusable for
+        // the per-read veto. CUDA EP (variable shapes, unlike TensorRT) + op-level
+        // CPU fallback for any unsupported op. `error_on_failure` surfaces a true
+        // GPU-absent situation as a load error → caller degrades to nli_unavailable.
         let session = Session::builder()
             .map_err(|e| anyhow!("ORT session builder: {e}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow!("ORT optimization level: {e}"))?
+            .with_execution_providers([
+                crate::embedder::gpu_backend::cuda_execution_provider_dispatch(),
+            ])
+            .map_err(|e| anyhow!("NLI CUDA execution provider: {e}"))?
             .commit_from_file(&model_path)
             .with_context(|| format!("loading NLI ONNX {}", model_path.display()))?;
-        let tokenizer = Tokenizer::from_file(&tok_path)
+        let mut tokenizer = Tokenizer::from_file(&tok_path)
             .map_err(|e| anyhow!("loading NLI tokenizer {}: {e}", tok_path.display()))?;
+        // REQ-AXO-902103 — cap pair length so each judgement is bounded (long SOLL
+        // chunks would otherwise blow up inference time). LongestFirst truncates the
+        // longer of (premise, hypothesis), preserving the short candidate.
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: 512,
+                strategy: tokenizers::TruncationStrategy::LongestFirst,
+                stride: 0,
+                direction: tokenizers::TruncationDirection::Right,
+            }))
+            .map_err(|e| anyhow!("NLI tokenizer truncation: {e}"))?;
         Ok(Self { session, tokenizer })
     }
 

@@ -806,6 +806,14 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                                 "code": { "type": "object" },
                                 "recent": { "type": "object" }
                             }
+                        },
+                        "veto": {
+                            "type": "object",
+                            "description": "REQ-AXO-902097 (demande Nexus) — opt-in entailment veto: each code-band passage is judged by the NLI cross-encoder vs the question; contradicting ones are flagged (`contradiction_detected`/`entailment`/`contradiction`). Rétro-compatible (absent = unchanged). Needs the NLI model provisioned (else left as-is).",
+                            "properties": {
+                                "entailment_threshold": { "type": "number", "description": "Min contradiction probability to flag a passage. Default 0.5." },
+                                "filter": { "type": "boolean", "description": "When true, DROP contradicting passages instead of only flagging them. Default false." }
+                            }
                         }
                     },
                     "required": ["question"]

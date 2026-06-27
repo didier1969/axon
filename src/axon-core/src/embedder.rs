@@ -33,7 +33,7 @@ use tracing::{error, info};
 #[path = "embedder/cpu_query_service.rs"]
 mod cpu_query_service;
 #[path = "embedder/gpu_backend.rs"]
-mod gpu_backend;
+pub(crate) mod gpu_backend; // REQ-AXO-902103 — expose CUDA EP dispatch for the NLI session
 #[path = "embedder/gpu_preflight.rs"]
 pub(crate) mod gpu_preflight;
 #[path = "embedder/gpu_policy.rs"]
