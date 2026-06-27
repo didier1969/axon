@@ -1,0 +1,233 @@
+//! REQ-AXO-902094 (S7) — surface MCP de consommation du squelette de contrats.
+//!
+//! `contract_status` rend les ContractNodes navigables comme l'IST (query / inspect
+//! / impact), en LECTURE SEULE :
+//! - sans `contract_id` → LISTE paginée des contrats du projet (forme désirée
+//!   minimale + cycle de vie + état du sceau) ;
+//! - avec `contract_id` → INSPECTION : forme désirée + sceau persisté + drift
+//!   IST↔contrat recalculé LIVE ([`reconcile_contract`]) + arêtes de gouvernance
+//!   (sortantes) et d'impact (entrantes).
+//!
+//! La couche persistante/réconciliation vit dans [`crate::contract::store`] (SRP) ;
+//! ce module ne fait que la projeter en réponse MCP terse-par-défaut (GUI-AXO-1026
+//! invariant 4 : verbose est opt-in via `mode`).
+
+use serde_json::{json, Value};
+
+use super::McpServer;
+use crate::contract::store::{
+    contract_edges, count_contracts, list_contracts, load_contract, load_seal, reconcile_contract,
+    ContractEdgeRow, DriftVerdict,
+};
+
+fn contract_err(msg: &str, status: &str) -> Value {
+    json!({
+        "content": [{"type":"text","text": format!("### 📐 contract_status — {msg}")}],
+        "isError": true,
+        "data": {"status": status, "error": msg}
+    })
+}
+
+/// Projette un [`DriftVerdict`] (S6) en JSON stable pour le LLM : un `verdict`
+/// nommé + `aligned` (true/false/null) + l'évidence-sol propre à la variante.
+fn drift_json(v: &DriftVerdict) -> Value {
+    match v {
+        DriftVerdict::Unbound => json!({"verdict": "unbound", "aligned": null,
+            "note": "realized_by absent — contrat planifié, binding S4 pas encore établi (pas un drift)"}),
+        DriftVerdict::SymbolMissing { symbol_id } => json!({"verdict": "symbol_missing",
+            "aligned": false, "symbol_id": symbol_id,
+            "note": "l'ancre d'identité pointe un symbole absent de l'IST — candidat rename / re-anchor"}),
+        DriftVerdict::KindMismatch { expected, observed_kind } => json!({"verdict": "kind_mismatch",
+            "aligned": false, "expected": expected.tag(), "observed_kind": observed_kind}),
+        DriftVerdict::ShapeDrift { baseline, observed } => json!({"verdict": "shape_drift",
+            "aligned": false, "baseline": baseline, "observed": observed}),
+        DriftVerdict::NoBaseline { observed } => json!({"verdict": "no_baseline", "aligned": null,
+            "observed": observed, "note": "première réconciliation — aucune baseline figée"}),
+        DriftVerdict::Aligned { observed } => json!({"verdict": "aligned", "aligned": true,
+            "observed": observed}),
+    }
+}
+
+fn edge_json(e: &ContractEdgeRow) -> Value {
+    json!({"source": e.source_id, "relation": e.relation_type, "target": e.target_id})
+}
+
+impl McpServer {
+    /// REQ-AXO-902094 — `contract_status` : liste OU inspection des ContractNodes.
+    pub(crate) fn axon_contract_status(&self, args: &Value) -> Option<Value> {
+        let verbose = args
+            .get("mode")
+            .and_then(Value::as_str)
+            .is_some_and(|m| m.eq_ignore_ascii_case("verbose") || m.eq_ignore_ascii_case("full"));
+
+        match args
+            .get("contract_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(id) => self.contract_status_inspect(id, verbose),
+            None => self.contract_status_list(args, verbose),
+        }
+    }
+
+    fn contract_status_list(&self, args: &Value, verbose: bool) -> Option<Value> {
+        let project = args
+            .get("project")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| self.auto_resolve_project_code_str())
+            .unwrap_or_else(|| "AXO".to_string());
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(25).clamp(1, 100) as i64;
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as i64;
+
+        let total = count_contracts(&self.graph_store, &project).unwrap_or(0);
+        let rows = match list_contracts(&self.graph_store, &project, limit, offset) {
+            Ok(r) => r,
+            Err(e) => return Some(contract_err(&format!("list failed: {e}"), "degraded")),
+        };
+        let contracts: Vec<Value> = rows
+            .iter()
+            .map(|c| {
+                let mut o = json!({
+                    "id": c.id,
+                    "kind": c.kind.tag(),
+                    "status": c.status,
+                    "sealed": c.sealed,
+                    "adequate": c.adequate,
+                });
+                if verbose {
+                    o["signature"] = json!(c.signature);
+                    o["realized_by"] = json!(c.realized_by);
+                    o["seal_revision"] = json!(c.seal_revision);
+                }
+                o
+            })
+            .collect();
+        let returned = contracts.len() as i64;
+        let next_offset = if offset + returned < total { Some(offset + returned) } else { None };
+        Some(json!({
+            "content": [{"type":"text","text": format!(
+                "### 📐 contract_status `{project}` — {returned}/{total} contrat(s){}",
+                next_offset.map(|n| format!(" · next offset={n}")).unwrap_or_default()
+            )}],
+            "data": {
+                "status": "ok",
+                "project": project,
+                "count": returned,
+                "contracts": contracts,
+                "pagination": {"limit": limit, "offset": offset, "total": total,
+                               "returned": returned, "next_offset": next_offset},
+                "next": {"tool": "contract_status",
+                         "hint": "pass contract_id=<id> to inspect (seal + live IST drift), mode=verbose for bodies"}
+            }
+        }))
+    }
+
+    fn contract_status_inspect(&self, id: &str, verbose: bool) -> Option<Value> {
+        let node = match load_contract(&self.graph_store, id) {
+            Ok(Some(n)) => n,
+            Ok(None) => return Some(contract_err(&format!("contrat introuvable: {id}"), "input_not_found")),
+            Err(e) => return Some(contract_err(&format!("load failed: {e}"), "degraded")),
+        };
+        let seal = load_seal(&self.graph_store, id).ok().flatten();
+        let drift = reconcile_contract(&self.graph_store, id).ok();
+        let (outgoing, incoming) = contract_edges(&self.graph_store, id).unwrap_or_default();
+
+        let lifecycle = if seal.is_some() {
+            "sealed"
+        } else if node.realized_by.is_some() {
+            "bound"
+        } else {
+            "planned"
+        };
+        let seal_json = seal.as_ref().map(|s| {
+            json!({"seal_hash": s.seal.0, "adequate": s.adequate, "revision": s.revision})
+        });
+
+        let mut data = json!({
+            "status": "ok",
+            "id": id,
+            "kind": node.kind.tag(),
+            "signature": node.signature,
+            "lifecycle": lifecycle,
+            "realized_by": node.realized_by,
+            "sealed": seal.is_some(),
+            "seal": seal_json,
+            "drift": drift.as_ref().map(drift_json),
+        });
+        if verbose {
+            data["why"] = json!(node.why);
+            data["proves_ref"] = json!(node.proves_ref);
+            data["post_conditions"] =
+                json!(node.post_conditions.iter().map(|p| &p.0).collect::<Vec<_>>());
+            // arêtes sortantes = gouvernance/identité que CE contrat porte (impact aval) ;
+            // entrantes = qui pointe vers lui (impact amont, symétrique IST).
+            data["governance_edges"] = json!(outgoing.iter().map(edge_json).collect::<Vec<_>>());
+            data["impact_edges"] = json!(incoming.iter().map(edge_json).collect::<Vec<_>>());
+        }
+
+        let drift_label = drift
+            .as_ref()
+            .map(|d| match d {
+                DriftVerdict::Aligned { .. } => "aligned",
+                DriftVerdict::Unbound => "unbound",
+                DriftVerdict::SymbolMissing { .. } => "symbol_missing",
+                DriftVerdict::KindMismatch { .. } => "kind_mismatch",
+                DriftVerdict::ShapeDrift { .. } => "shape_drift",
+                DriftVerdict::NoBaseline { .. } => "no_baseline",
+            })
+            .unwrap_or("unknown");
+
+        Some(json!({
+            "content": [{"type":"text","text": format!(
+                "### 📐 {id} — {} · {} · drift={}",
+                node.kind.tag(), lifecycle, drift_label
+            )}],
+            "data": data
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::ContractKind;
+
+    #[test]
+    fn drift_json_maps_every_verdict_with_aligned_flag() {
+        assert_eq!(drift_json(&DriftVerdict::Aligned { observed: "h".into() })["aligned"], json!(true));
+        assert_eq!(
+            drift_json(&DriftVerdict::ShapeDrift { baseline: "a".into(), observed: "b".into() })["aligned"],
+            json!(false)
+        );
+        // Unbound / NoBaseline ne sont PAS des drifts → aligned=null (ni vrai ni faux).
+        assert_eq!(drift_json(&DriftVerdict::Unbound)["aligned"], json!(null));
+        assert_eq!(
+            drift_json(&DriftVerdict::NoBaseline { observed: "h".into() })["aligned"],
+            json!(null)
+        );
+        // KindMismatch projette le tag canonique du kind attendu.
+        let km = drift_json(&DriftVerdict::KindMismatch {
+            expected: ContractKind::Function,
+            observed_kind: "struct".into(),
+        });
+        assert_eq!(km["verdict"], json!("kind_mismatch"));
+        assert_eq!(km["expected"], json!("function"));
+        assert_eq!(km["observed_kind"], json!("struct"));
+    }
+
+    #[test]
+    fn edge_json_shape_is_source_relation_target() {
+        let e = ContractEdgeRow {
+            source_id: "CON-AXO-1".into(),
+            relation_type: "SOLVES".into(),
+            target_id: "REQ-AXO-262".into(),
+        };
+        assert_eq!(
+            edge_json(&e),
+            json!({"source": "CON-AXO-1", "relation": "SOLVES", "target": "REQ-AXO-262"})
+        );
+    }
+}

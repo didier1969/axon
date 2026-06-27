@@ -150,8 +150,34 @@ pub(crate) struct SollManagerInput {
     pub data: SollManagerData,
 }
 
+/// `contract_status` — navigate the structural contract skeleton (S7,
+/// REQ-AXO-902094). Omit `contract_id` to LIST the project's contracts
+/// (paginated) ; pass it to INSPECT one (desired shape + seal + live IST drift +
+/// governance edges). READ-ONLY.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ContractStatusInput {
+    /// Canonical contract id (e.g. "CON-AXO-12"). Omit to LIST the project's
+    /// contracts instead of inspecting one.
+    #[serde(default)]
+    pub contract_id: Option<String>,
+    /// Project code scope for the LIST (e.g. "AXO"). Auto-resolved from cwd when
+    /// omitted. Ignored when `contract_id` is given.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Output verbosity (default brief). `verbose` ADDS the signature /
+    /// post-conditions / why / proves_ref / governance + impact edges.
+    #[serde(default)]
+    pub mode: Option<QueryMode>,
+    /// LIST pagination: max rows (1-100, default 25). Ignored on INSPECT.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// LIST pagination: row offset (default 0). Ignored on INSPECT.
+    #[serde(default)]
+    pub offset: Option<u32>,
+}
+
 /// Tools currently served by a derived schema (tracer-bullet set).
-pub(crate) const DERIVED_TOOLS: &[&str] = &["sql", "query", "soll_manager"];
+pub(crate) const DERIVED_TOOLS: &[&str] = &["sql", "query", "soll_manager", "contract_status"];
 
 /// REQ-AXO-901949 — single-source interaction-graph record for a tool.
 ///
@@ -203,6 +229,14 @@ pub(crate) fn tool_routing(name: &str) -> Option<ToolRouting> {
             token_hint:
                 "Follow the server-provided next step before composing additional exploratory calls.",
             use_when: "use when the next step is an exact canonical mutation",
+        },
+        "contract_status" => ToolRouting {
+            follow_ups: &["inspect", "why", "impact"],
+            goal: "navigate the structural contract skeleton (desired shape + seal + live IST drift)",
+            stage: "contract_consumption",
+            token_hint:
+                "List brief first to find a contract id, then inspect that id; pass mode=verbose only when you need bodies/edges.",
+            use_when: "use when you need a contract's seal status or whether its realization drifted from the sealed shape",
         },
         _ => return None,
     })
@@ -540,6 +574,7 @@ pub(crate) fn derived_input_schema(name: &str) -> Option<Value> {
         "sql" => generator().into_root_schema_for::<SqlInput>(),
         "query" => generator().into_root_schema_for::<QueryInput>(),
         "soll_manager" => generator().into_root_schema_for::<SollManagerInput>(),
+        "contract_status" => generator().into_root_schema_for::<ContractStatusInput>(),
         _ => return None,
     };
     let mut value = serde_json::to_value(schema).ok()?;

@@ -27,6 +27,7 @@ mod tools_lease;
 mod tools_mailbox_pubsub;
 mod tools_mailbox_render;
 mod tools_practice;
+mod tools_contract;
 mod tools_nli;
 mod tools_release;
 mod tools_framework_anomalies;
@@ -1476,6 +1477,8 @@ impl McpServer {
             "practice_recall" => self.axon_practice_recall(arguments),
             "practice_tick" => self.axon_practice_tick(arguments),
             "practice_card" => self.axon_practice_card(arguments),
+            // REQ-AXO-902094 (S7) — surface de consommation du squelette de contrats.
+            "contract_status" => self.axon_contract_status(arguments),
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
             "soll_validate" => self.axon_validate_soll(arguments),

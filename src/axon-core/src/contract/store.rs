@@ -329,6 +329,127 @@ fn ist_kind_matches(kind: ContractKind, ist_kind: &str) -> bool {
 }
 
 // ════════════════════════════════════════════════════════════════════════
+// S7 — surface de consommation (REQ-AXO-902094)
+// ════════════════════════════════════════════════════════════════════════
+
+/// Résumé dénormalisé d'un contrat pour la LISTE S7 — lu en un seul SELECT (pas de
+/// N+1) : forme désirée minimale + cycle de vie + état du sceau. `sealed`/`adequate`
+/// sont dérivés des colonnes `seal_hash`/`adequacy_verdict` (le sceau réel est
+/// chargé à l'inspection via [`load_seal`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractSummary {
+    pub id: String,
+    pub kind: ContractKind,
+    pub signature: String,
+    /// Cycle de vie stocké : `planned` | `bound` | `sealed`.
+    pub status: String,
+    pub realized_by: Option<String>,
+    /// `true` si `seal_hash` est présent (contrat scellé).
+    pub sealed: bool,
+    /// `Some(true/false)` = verdict d'adéquation du sceau ; `None` = non scellé.
+    pub adequate: Option<bool>,
+    pub seal_revision: Option<i64>,
+}
+
+/// Une arête du graphe de contrats (`soll.ContractEdge`) : gouvernance
+/// (`SOLVES`/`EXPLAINS` → soll.Node) ou identité (`REALIZED_BY` → ist.Symbol).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractEdgeRow {
+    pub source_id: String,
+    pub target_id: String,
+    pub relation_type: String,
+}
+
+/// Liste paginée des contrats d'un projet (S7). Ordre stable `id ASC` pour une
+/// pagination cognitive déterministe (GUI-AXO-1004). Une ligne au `kind` corrompu
+/// (tag inconnu) est SAUTÉE plutôt que de faire échouer toute la liste.
+pub fn list_contracts(
+    store: &GraphStore,
+    project_code: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<ContractSummary>> {
+    let raw = store.query_json_param(
+        "SELECT id, kind, signature, status, realized_by, seal_hash, adequacy_verdict, seal_revision
+           FROM soll.Contract
+          WHERE project_code = $project_code
+          ORDER BY id ASC
+          LIMIT $limit OFFSET $offset",
+        &serde_json::json!({
+            "project_code": project_code,
+            "limit": limit,
+            "offset": offset,
+        }),
+    )?;
+    let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some(id) = col_str(&row, 0) else { continue };
+        let Some(kind) = col_str(&row, 1).and_then(|t| ContractKind::from_tag(&t)) else {
+            continue; // kind corrompu : on saute, pas d'échec global
+        };
+        let seal_hash = col_str(&row, 5);
+        let sealed = seal_hash.is_some();
+        out.push(ContractSummary {
+            id,
+            kind,
+            signature: col_str(&row, 2).unwrap_or_default(),
+            status: col_str(&row, 3).unwrap_or_else(|| "planned".to_string()),
+            realized_by: col_str(&row, 4),
+            sealed,
+            adequate: if sealed {
+                Some(col_str(&row, 6).as_deref() == Some("adequate"))
+            } else {
+                None
+            },
+            seal_revision: col_i64(&row, 7),
+        });
+    }
+    Ok(out)
+}
+
+/// Total de contrats d'un projet (pour la pagination de [`list_contracts`]).
+pub fn count_contracts(store: &GraphStore, project_code: &str) -> Result<i64> {
+    store.query_count_param(
+        "SELECT count(*) FROM soll.Contract WHERE project_code = $project_code",
+        &serde_json::json!({ "project_code": project_code }),
+    )
+}
+
+/// Arêtes incidentes d'un contrat, partitionnées par direction relative à `id` :
+/// `(sortantes, entrantes)`. Sortantes = gouvernance + identité que CE contrat
+/// porte (`impact` aval, le squelette navigable) ; entrantes = qui pointe VERS lui
+/// (rare aujourd'hui — contrat→contrat non modélisé — mais surfacé pour l'`impact`
+/// amont, symétrique de l'IST).
+pub fn contract_edges(
+    store: &GraphStore,
+    id: &str,
+) -> Result<(Vec<ContractEdgeRow>, Vec<ContractEdgeRow>)> {
+    let raw = store.query_json_param(
+        "SELECT source_id, target_id, relation_type
+           FROM soll.ContractEdge
+          WHERE source_id = $id OR target_id = $id
+          ORDER BY relation_type, target_id",
+        &serde_json::json!({ "id": id }),
+    )?;
+    let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    let (mut outgoing, mut incoming) = (Vec::new(), Vec::new());
+    for row in rows {
+        let edge = ContractEdgeRow {
+            source_id: col_str(&row, 0).unwrap_or_default(),
+            target_id: col_str(&row, 1).unwrap_or_default(),
+            relation_type: col_str(&row, 2).unwrap_or_default(),
+        };
+        if edge.source_id == id {
+            outgoing.push(edge);
+        } else {
+            incoming.push(edge);
+        }
+    }
+    Ok((outgoing, incoming))
+}
+
+// ════════════════════════════════════════════════════════════════════════
 // helpers internes
 // ════════════════════════════════════════════════════════════════════════
 

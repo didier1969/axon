@@ -199,3 +199,63 @@ fn capture_baseline_none_when_unbound_or_missing() {
     persist_contract(&store, "CON-AXO-11", &anchor_node(Some("AXO::ghost"))).unwrap();
     assert!(capture_observed_baseline(&store, "CON-AXO-11").unwrap().is_none());
 }
+
+// ── S7 : surface de consommation (REQ-AXO-902094) ─────────────────────
+#[test]
+fn list_contracts_paginates_and_summarizes_lifecycle_and_seal() {
+    let store = crate::tests::test_helpers::create_test_db().unwrap();
+    // planned (sans realized_by) · bound (realized_by) · sealed (bound + sceau).
+    persist_contract(&store, "CON-AXO-20", &anchor_node(None)).unwrap();
+    persist_contract(&store, "CON-AXO-21", &anchor_node(Some("AXO::f21"))).unwrap();
+    let bound = anchor_node(Some("AXO::f22"));
+    persist_contract(&store, "CON-AXO-22", &bound).unwrap();
+    let seal = structural_seal(&bound.shape_hash(), &bound.proves_ref, true, &[]).unwrap();
+    persist_seal(&store, "CON-AXO-22", &seal, true).unwrap();
+
+    assert!(count_contracts(&store, "AXO").unwrap() >= 3);
+
+    let all = list_contracts(&store, "AXO", 100, 0).unwrap();
+    let by = |id: &str| all.iter().find(|c| c.id == id).cloned().expect("présent");
+
+    let planned = by("CON-AXO-20");
+    assert_eq!(planned.status, "planned");
+    assert!(!planned.sealed);
+    assert_eq!(planned.adequate, None);
+    assert_eq!(planned.kind, ContractKind::Function);
+
+    let bound_row = by("CON-AXO-21");
+    assert_eq!(bound_row.status, "bound");
+    assert_eq!(bound_row.realized_by.as_deref(), Some("AXO::f21"));
+    assert!(!bound_row.sealed);
+
+    let sealed_row = by("CON-AXO-22");
+    assert_eq!(sealed_row.status, "sealed");
+    assert!(sealed_row.sealed);
+    assert_eq!(sealed_row.adequate, Some(true));
+    assert!(sealed_row.seal_revision.is_some());
+
+    // pagination déterministe (id ASC).
+    let p0 = list_contracts(&store, "AXO", 1, 0).unwrap();
+    let p1 = list_contracts(&store, "AXO", 1, 1).unwrap();
+    assert_eq!(p0.len(), 1);
+    assert_eq!(p1.len(), 1);
+    assert!(p0[0].id < p1[0].id, "ordre id ASC stable entre pages");
+}
+
+#[test]
+fn contract_edges_partition_outgoing_governance_and_identity() {
+    let store = crate::tests::test_helpers::create_test_db().unwrap();
+    // anchor_node.why = "SOLVES REQ-AXO-262" + realized_by → 2 arêtes sortantes.
+    persist_contract(&store, "CON-AXO-23", &anchor_node(Some("AXO::f23"))).unwrap();
+    let (outgoing, incoming) = contract_edges(&store, "CON-AXO-23").unwrap();
+    assert!(incoming.is_empty(), "aucun contrat ne pointe vers lui");
+    let has = |r: &str| {
+        outgoing
+            .iter()
+            .any(|e| e.relation_type == r && e.source_id == "CON-AXO-23")
+    };
+    assert!(has("REALIZED_BY"), "arête d'identité → ist.Symbol");
+    assert!(has("SOLVES"), "arête de gouvernance dérivée du why");
+    assert!(outgoing.iter().any(|e| e.target_id == "AXO::f23"));
+    assert!(outgoing.iter().any(|e| e.target_id == "REQ-AXO-262"));
+}

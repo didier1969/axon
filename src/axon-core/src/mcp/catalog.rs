@@ -1032,6 +1032,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "contract_status",
+                "description": "[CONTRACT] REQ-AXO-902094 (S7) — navigate the structural contract skeleton (ContractNodes): desired typed shape + Merkle seal status + LIVE IST↔contract drift (reconciliation) + governance edges. READ-ONLY. Omit `contract_id` to LIST the project's contracts (paginated); pass it to INSPECT one. The skeleton becomes navigable like the IST (query/inspect/impact).",
+                "inputSchema": { "$comment": "derived from tool_contracts::ContractStatusInput — injected post-build" }
+            },
+            {
                 "name": "diagnose_indexing",
                 "description": "[SYSTEM] Day-1 indexing diagnostic per project: probable causes, dominant reasons, parser/runtime errors, and remediations.",
                 "inputSchema": {
