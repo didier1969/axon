@@ -471,13 +471,63 @@ impl GraphStore {
     }
 }
 
+/// Strip SQL line (`--`) and block (`/* */`) comments so the read-only guard sees
+/// the actual statement keywords (REQ-AXO-902077: a leading `-- comment` before a
+/// SELECT — or a `/* */` block — was wrongly rejected by the bare first-token match).
+fn strip_sql_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '-' if chars.peek() == Some(&'-') => {
+                // line comment: skip to end of line, keep the newline as a separator
+                for d in chars.by_ref() {
+                    if d == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next(); // consume '*'
+                let mut prev = ' ';
+                for d in chars.by_ref() {
+                    if prev == '*' && d == '/' {
+                        break;
+                    }
+                    prev = d;
+                }
+                out.push(' '); // separator so neighbouring tokens don't fuse
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// REQ-AXO-902077 — read-only guard by light parse, not a bare first-token match.
+/// Strips comments, checks the leading statement keyword, and rejects an injected
+/// mutation after a `;` (e.g. `SELECT 1; DROP TABLE t`). A `;` inside a string
+/// literal yields a fragment that doesn't start with a verb → still allowed (safe).
 pub(crate) fn is_read_only_sql(query: &str) -> bool {
-    let trimmed = query.trim_start();
-    let lowered = trimmed.to_ascii_lowercase();
-    matches!(
-        lowered.split_whitespace().next(),
+    let lowered = strip_sql_comments(query).to_ascii_lowercase();
+    let read_only_start = matches!(
+        lowered.trim_start().split_whitespace().next(),
         Some("select" | "with" | "pragma" | "show" | "describe" | "explain")
-    )
+    );
+    if !read_only_start {
+        return false;
+    }
+    const MUTATIONS: &[&str] = &[
+        "insert", "update", "delete", "drop", "alter", "create", "truncate", "grant",
+        "revoke", "copy", "merge", "vacuum", "reindex", "refresh", "call",
+    ];
+    lowered.split(';').skip(1).all(|frag| {
+        frag.trim_start()
+            .split_whitespace()
+            .next()
+            .map_or(true, |w| !MUTATIONS.contains(&w))
+    })
 }
 
 // REQ-AXO-091 placeholder-expansion tests live in a sibling file so the
@@ -490,6 +540,21 @@ mod expand_params_tests;
 #[cfg(test)]
 mod tests {
     use crate::graph::GraphStore;
+
+    #[test]
+    fn read_only_guard_strips_comments_and_blocks_injection() {
+        use super::is_read_only_sql;
+        // REQ-AXO-902077 — the real friction: a leading comment before a SELECT.
+        assert!(is_read_only_sql("-- a comment\nSELECT 1"));
+        assert!(is_read_only_sql("/* block */ SELECT 1"));
+        assert!(is_read_only_sql("WITH x AS (SELECT 1) SELECT * FROM x"));
+        assert!(is_read_only_sql("SELECT 'a;b' AS x")); // `;` in a string literal
+        // mutations + injection-after-semicolon stay rejected.
+        assert!(!is_read_only_sql("DELETE FROM t"));
+        assert!(!is_read_only_sql("-- x\nUPDATE t SET a=1"));
+        assert!(!is_read_only_sql("SELECT 1; DROP TABLE t"));
+        assert!(!is_read_only_sql("SELECT 1 ; truncate t"));
+    }
 
     #[test]
     fn execute_raw_sql_gateway_supports_read_only_and_mutating_queries() {
