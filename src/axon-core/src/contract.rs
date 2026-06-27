@@ -19,6 +19,7 @@
 pub mod adequacy;
 pub mod binding;
 pub mod certification;
+pub mod expand;
 pub mod seal;
 
 use std::fmt::Write as _;

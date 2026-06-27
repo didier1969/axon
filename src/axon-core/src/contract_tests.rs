@@ -7,6 +7,9 @@ use super::*;
 use crate::contract::adequacy::{assess, AdequacyThresholds};
 use crate::contract::binding::{bind, BindingSource};
 use crate::contract::certification::certify;
+use crate::contract::expand::{
+    derive_postconditions, next_pull, propose_from_observed, should_expand, ExpansionStatus,
+};
 use crate::contract::seal::{seal_node, structural_seal, EmpiricalAttestation, Verdict};
 
 type Impl = fn(Option<&str>) -> Vec<usize>;
@@ -265,6 +268,56 @@ fn certification_is_invalidated_by_code_change() {
     let cert = certify(true, true, "code_v1", "evidence").unwrap();
     assert!(cert.is_valid_for("code_v1"), "valide pour l'état de code prouvé");
     assert!(!cert.is_valid_for("code_v2"), "vert-périmé : code changé -> certif invalide");
+}
+
+// ===========================================================================
+// S5 (REQ-AXO-902092) — design_expand pull + auto-amorçage legacy.
+// ===========================================================================
+#[test]
+fn legacy_bootstrap_proposes_observed_contract_not_abduced() {
+    // Données réellement observées dans l'IST pour parse_seq_buckets (REQ-262).
+    let tests = [
+        "parse_seq_buckets_normalizes_input",
+        "parse_seq_buckets_skips_non_numeric_and_zero",
+        "parse_seq_buckets_defaults_to_canonical_list",
+        "parse_seq_buckets_explicit_disable_returns_empty",
+    ];
+    let node = propose_from_observed(
+        ContractKind::Function,
+        "parse_seq_buckets_from_env(raw: Option<&str>) -> Vec<usize>",
+        "SOLVES REQ-AXO-262",
+        "embedder::gpu_backend::parse_seq_buckets_from_env",
+        &tests,
+    );
+    // realized_by déjà rempli = OBSERVÉ (le code existe), pas abduit ex nihilo.
+    assert!(node.realized_by.is_some(), "contrat proposé depuis l'IST observé");
+    assert!(!node.post_conditions.is_empty(), "post-conditions dérivées des tests");
+    assert_eq!(node.validate(), Ok(()), "un contrat auto-amorcé est bien formé");
+}
+
+#[test]
+fn derive_postconditions_maps_test_names_and_dedups() {
+    let conds = derive_postconditions(&["x_normalizes_input", "y_sorts_then_normalizes"]);
+    // les deux mappent vers "normalized" -> dédupliqué
+    assert_eq!(conds, vec![PostCondition("normalized".into())]);
+}
+
+#[test]
+fn expansion_is_bounded_to_seams_pull_driven() {
+    use ContractKind::*;
+    use ExpansionStatus::*;
+    // coutures expansables
+    assert!(should_expand(Module, LeafPending));
+    assert!(should_expand(Interface, LeafPending));
+    // feuilles / déjà fait -> jamais (compilateur+tests = oracle des feuilles)
+    assert!(!should_expand(Function, LeafPending));
+    assert!(!should_expand(Module, Frozen));
+    assert!(!should_expand(Interface, Expanded));
+
+    // pull : prend la première couture expansable, None si tout figé/feuille
+    let frontier = [(Function, LeafPending), (Interface, LeafPending), (Module, LeafPending)];
+    assert_eq!(next_pull(&frontier), Some(1));
+    assert_eq!(next_pull(&[(Function, LeafPending), (Type, Frozen)]), None);
 }
 
 #[test]
