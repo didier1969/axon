@@ -562,6 +562,113 @@ impl McpServer {
             .filter(|s| !s.is_empty())
     }
 
+    /// REQ-AXO-902078 — init context economy. The kickoff bundle previously
+    /// risked diluting a cold-start LLM's context by leaving it to discover
+    /// macro intent through several follow-up reads. `soll_skeleton` applies a
+    /// PUSH/PULL split that keeps the bundle small while front-loading the
+    /// Phase-B-critical material (GUI-PRO-102):
+    ///   - Vision + Pillars are PUSHED with full bodies (few nodes, mandatory
+    ///     for Phase B reasoning) — descriptions read straight from soll.Node.
+    ///   - Decisions + Guidelines are INDEXED (id + title only, status=current)
+    ///     with a `pull_with` hint so the LLM fetches a body on demand via
+    ///     `soll_query_context`. Their bodies are deliberately NOT inlined —
+    ///     that bulk is the real dilution this split removes.
+    fn soll_skeleton(&self, project_code: &str) -> serde_json::Value {
+        let Ok(snapshot) = self.soll_cache().snapshot(project_code) else {
+            return serde_json::json!({
+                "status": "unavailable",
+                "note": "SOLL snapshot not resolvable for this project",
+            });
+        };
+
+        // PUSH: full bodies for the few, Phase-B-critical macro nodes.
+        let push_bodies = |entity_type: &str| -> serde_json::Value {
+            let mut ids: Vec<&String> = snapshot.node_ids_of_type(entity_type).iter().collect();
+            ids.sort();
+            serde_json::Value::Array(
+                ids.into_iter()
+                    .filter_map(|id| snapshot.nodes.get(id).map(|n| (id, n)))
+                    .map(|(id, n)| {
+                        serde_json::json!({
+                            "id": id,
+                            "title": n.title,
+                            "status": n.status,
+                            "body": self.read_soll_node_description(id),
+                        })
+                    })
+                    .collect(),
+            )
+        };
+
+        // PULL: id + title index only, restricted to status='current'.
+        let index_current = |entity_type: &str| -> serde_json::Value {
+            let mut ids: Vec<&String> = snapshot.node_ids_of_type(entity_type).iter().collect();
+            ids.sort();
+            serde_json::Value::Array(
+                ids.into_iter()
+                    .filter_map(|id| snapshot.nodes.get(id).map(|n| (id, n)))
+                    .filter(|(_, n)| n.status == "current")
+                    .map(|(id, n)| {
+                        serde_json::json!({
+                            "id": id,
+                            "title": n.title,
+                        })
+                    })
+                    .collect(),
+            )
+        };
+
+        serde_json::json!({
+            "vision": push_bodies("Vision"),
+            "pillars": push_bodies("Pillar"),
+            "decisions_index": index_current("Decision"),
+            "guidelines_index": index_current("Guideline"),
+            // Bodies for the indexed Decisions/Guidelines are intentionally
+            // omitted (PULL on demand) to keep the bundle lean.
+            "pull_with": "soll_query_context",
+            "pull_note": "decisions_index/guidelines_index list id+title only — fetch a body on demand via soll_query_context(question=<ID>) or sql SELECT description FROM soll.Node WHERE id='<ID>'.",
+        })
+    }
+
+    /// REQ-AXO-902078 — capabilities_map. Derived at RUNTIME from
+    /// `tools_catalog(false)['tools']` (name + first sentence of description)
+    /// so it can never drift from the live tool surface. Hard-coding it would
+    /// re-introduce the non-conformity this REQ closes: a stale list misleads
+    /// the cold-start LLM about which tools exist.
+    fn capabilities_map() -> serde_json::Value {
+        let catalog = crate::mcp::catalog::tools_catalog(false);
+        let tools = catalog
+            .get("tools")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        serde_json::Value::Array(
+            tools
+                .into_iter()
+                .filter_map(|tool| {
+                    let name = tool.get("name").and_then(|v| v.as_str())?.to_string();
+                    let summary = tool
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(Self::first_sentence)
+                        .unwrap_or_default();
+                    Some(serde_json::json!({ "name": name, "summary": summary }))
+                })
+                .collect(),
+        )
+    }
+
+    /// First sentence of a tool description (up to and including the first
+    /// `.`), trimmed. Falls back to the whole trimmed string when no period
+    /// is present.
+    fn first_sentence(description: &str) -> String {
+        let trimmed = description.trim();
+        match trimmed.find('.') {
+            Some(idx) => trimmed[..=idx].trim().to_string(),
+            None => trimmed.to_string(),
+        }
+    }
+
     fn cold_start_entry_points() -> serde_json::Value {
         serde_json::json!([
             { "step": 1, "kind": "file", "target": "~/.claude/CLAUDE.md", "purpose": "cross-project standing rules" },
@@ -998,6 +1105,13 @@ impl McpServer {
                 "signal": "Code-intel scope not resolvable for this project",
             }),
         };
+        // REQ-AXO-902078 — init context economy: PUSH macro bodies (Vision +
+        // Pillars), INDEX Decisions/Guidelines (id+title, pull-on-demand),
+        // expose a runtime-derived capabilities_map and a session_toolset_hint
+        // so the cold-start LLM provisions its tool surface in one move.
+        let soll_skeleton = self.soll_skeleton(project_code);
+        let capabilities_map = Self::capabilities_map();
+        let session_toolset_hint = "select:query,inspect,retrieve_context,impact,soll_query_context,soll_work_plan,soll_manager,document_intent,axon_pre_flight_check,axon_commit_work";
         serde_json::json!({
             "kickoff_prompt": kickoff_prompt,
             "kickoff_prompt_source": "soll://Node/DEC-PRO-001",
@@ -1016,6 +1130,11 @@ impl McpServer {
             "bootstrap_required": bootstrap_required,
             "input_documents": input_documents,
             "code_intel": code_intel,
+            // REQ-AXO-902078 — init context economy (PUSH/PULL skeleton +
+            // runtime capabilities map + toolset hint).
+            "soll_skeleton": soll_skeleton,
+            "capabilities_map": capabilities_map,
+            "session_toolset_hint": session_toolset_hint,
         })
     }
 
@@ -1460,7 +1579,7 @@ impl McpServer {
         // sees that the structured bundle is available in data.
         let bundle = self.axon_init_project_bundle(&project_code, project_path);
         response_text.push_str(
-            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes). Use it to onboard yourself or any future LLM session before doing project-specific work.",
+            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, soll_skeleton, capabilities_map, session_toolset_hint). soll_skeleton PUSHES Vision+Pillar bodies and INDEXES Decisions/Guidelines (id+title, pull via soll_query_context); capabilities_map lists the live tool surface; session_toolset_hint is a ready ToolSearch select. Use it to onboard yourself or any future LLM session before doing project-specific work.",
         );
 
         Some(serde_json::json!({
