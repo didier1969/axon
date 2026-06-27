@@ -5,6 +5,8 @@
 
 use super::*;
 use crate::contract::adequacy::{assess, AdequacyThresholds};
+use crate::contract::binding::{bind, BindingSource};
+use crate::contract::certification::certify;
 use crate::contract::seal::{seal_node, structural_seal, EmpiricalAttestation, Verdict};
 
 type Impl = fn(Option<&str>) -> Vec<usize>;
@@ -227,6 +229,42 @@ fn validate_rejects_malformed_contracts() {
     let mut node2 = anchor_contract();
     node2.post_conditions.clear();
     assert_eq!(node2.validate(), Err(ContractError::NoPostConditions));
+}
+
+// ===========================================================================
+// S4 (REQ-AXO-902091) — binding + certification (le keeper DEC-AXO-901656).
+// ===========================================================================
+#[test]
+fn binding_prefers_proof_witness_over_anchor() {
+    // Couverture ET ancre présentes -> le témoignage par la preuve prime.
+    let b = bind("CON-1", Some("sym::witnessed"), Some("sym::anchor")).unwrap();
+    assert_eq!(b.symbol_id, "sym::witnessed");
+    assert_eq!(b.source, BindingSource::ProofWitnessed);
+}
+
+#[test]
+fn binding_falls_back_to_anchor_then_none() {
+    let anchored = bind("CON-1", None, Some("sym::anchor")).unwrap();
+    assert_eq!(anchored.source, BindingSource::IdentityAnchor);
+    assert_eq!(anchored.symbol_id, "sym::anchor");
+
+    assert!(bind("CON-1", None, None).is_none(), "ni couverture ni ancre -> pas de binding");
+}
+
+#[test]
+fn certification_is_derived_never_declared() {
+    // Aucun chemin pour certifier sans (vert ET adéquat) : pas de preuve verte
+    // ou pas d'adéquation -> aucune Certification, quelle que soit la "déclaration".
+    assert!(certify(false, true, "code_v1", "evidence").is_none(), "non-vert -> pas de certif");
+    assert!(certify(true, false, "code_v1", "evidence").is_none(), "non-adéquat -> pas de certif");
+    assert!(certify(true, true, "code_v1", "evidence").is_some(), "vert + adéquat -> certif dérivée");
+}
+
+#[test]
+fn certification_is_invalidated_by_code_change() {
+    let cert = certify(true, true, "code_v1", "evidence").unwrap();
+    assert!(cert.is_valid_for("code_v1"), "valide pour l'état de code prouvé");
+    assert!(!cert.is_valid_for("code_v2"), "vert-périmé : code changé -> certif invalide");
 }
 
 #[test]

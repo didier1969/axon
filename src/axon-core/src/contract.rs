@@ -17,6 +17,8 @@
 //! ultérieures qui s'appuient sur ce cœur.
 
 pub mod adequacy;
+pub mod binding;
+pub mod certification;
 pub mod seal;
 
 use std::fmt::Write as _;
