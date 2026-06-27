@@ -66,6 +66,43 @@ pub fn canonical(
     )
 }
 
+/// REQ-AXO-902118 (MBX-6) — deterministic canonical string over a project's A2A
+/// AgentCard, for sign/verify. JSON object key order is unstable across
+/// serialisers, so we re-serialise the card through a recursively key-sorted
+/// representation (objects → BTreeMap) and prefix the owner project. Sign and
+/// verify build it identically, so a re-serialisation can never change the bytes
+/// that were signed.
+pub fn canonical_card(project: &str, card: &serde_json::Value) -> String {
+    format!("card-v1|{project}|{}", canonicalize_json(card))
+}
+
+/// Recursive deterministic JSON serialisation: object keys sorted (BTreeMap),
+/// arrays order-preserved, scalars verbatim. No whitespace.
+fn canonicalize_json(v: &serde_json::Value) -> String {
+    use std::collections::BTreeMap;
+    match v {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<&String, &serde_json::Value> = map.iter().collect();
+            let inner: Vec<String> = sorted
+                .iter()
+                .map(|(k, val)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        canonicalize_json(val)
+                    )
+                })
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        }
+        serde_json::Value::Array(items) => {
+            let inner: Vec<String> = items.iter().map(canonicalize_json).collect();
+            format!("[{}]", inner.join(","))
+        }
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
 /// HMAC-SHA256 signature of a canonical envelope under the sender's project token.
 pub fn sign(from_project: &str, canonical: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(&project_token(from_project)).expect("hmac key");
@@ -121,6 +158,27 @@ mod tests {
         assert!(!verify("AXO", &c, &sig));
         // garbage sig
         assert!(!verify("NEX", &c, "not-hex"));
+    }
+
+    #[test]
+    fn canonical_card_is_key_order_independent() {
+        // Same logical card, different key insertion order → identical canonical.
+        let a = serde_json::json!({ "name": "AXO", "version": "1.0.0", "skills": [{ "id": "s1", "tags": ["a", "b"] }] });
+        let b = serde_json::json!({ "skills": [{ "tags": ["a", "b"], "id": "s1" }], "version": "1.0.0", "name": "AXO" });
+        assert_eq!(canonical_card("AXO", &a), canonical_card("AXO", &b));
+        // Array order IS significant (skills order is meaningful).
+        let c = serde_json::json!({ "name": "AXO", "version": "1.0.0", "skills": [{ "id": "s1", "tags": ["b", "a"] }] });
+        assert_ne!(canonical_card("AXO", &a), canonical_card("AXO", &c));
+    }
+
+    #[test]
+    fn canonical_card_sign_verify_round_trip() {
+        let card = serde_json::json!({ "name": "AXO", "skills": [{ "id": "discover", "tags": ["a2a"] }] });
+        let c = canonical_card("AXO", &card);
+        let sig = sign("AXO", &c);
+        assert!(verify("AXO", &c, &sig));
+        // wrong owner token fails
+        assert!(!verify("NEX", &c, &sig));
     }
 
     #[test]
