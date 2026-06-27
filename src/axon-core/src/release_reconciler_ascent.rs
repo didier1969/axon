@@ -51,6 +51,40 @@ mod datalog {
     // indexer_alive: passes if no separate indexer is expected OR it is ready (union).
     gate_indexer_alive() <-- seed(), !indexer_expected_fact();
     gate_indexer_alive() <-- indexer_ready_fact();
+
+    // --- PHASE precedence: the ordered Rust if/else re-expressed as mutually
+    // exclusive derived relations via negative guards (stratified). ---
+    relation has_manifest();
+    relation manifest_ne_live();
+    // release phase (mirrors release_reconciler::phase)
+    relation rphase_staged();
+    relation rphase_uninitialized();
+    relation rphase_drift();
+    relation rphase_clean();
+    // liveness phase (mirrors release_reconciler::liveness_phase)
+    relation lphase_brain_down();
+    relation lphase_indexer_down();
+    // overall phase = liveness_phase.unwrap_or(release phase) — a single string.
+    relation overall_phase(String);
+
+    has_manifest() <-- manifest_build(_x);
+    manifest_ne_live() <-- live_build(l), manifest_build(m), if l != m;
+
+    rphase_staged() <-- pending_present();
+    rphase_uninitialized() <-- seed(), !pending_present(), !has_manifest();
+    rphase_drift() <-- seed(), !pending_present(), has_manifest(), manifest_ne_live();
+    rphase_clean() <-- seed(), !pending_present(), has_manifest(), !manifest_ne_live();
+
+    lphase_brain_down() <-- seed(), !brain_serving_fact();
+    lphase_indexer_down() <-- brain_serving_fact(), indexer_expected_fact(), !indexer_ready_fact();
+
+    // liveness phases take precedence over the release-state phase.
+    overall_phase("brain_down".to_string()) <-- lphase_brain_down();
+    overall_phase("indexer_down".to_string()) <-- lphase_indexer_down();
+    overall_phase("staged".to_string()) <-- rphase_staged(), !lphase_brain_down(), !lphase_indexer_down();
+    overall_phase("uninitialized".to_string()) <-- rphase_uninitialized(), !lphase_brain_down(), !lphase_indexer_down();
+    overall_phase("drift".to_string()) <-- rphase_drift(), !lphase_brain_down(), !lphase_indexer_down();
+    overall_phase("clean".to_string()) <-- rphase_clean(), !lphase_brain_down(), !lphase_indexer_down();
     }
 }
 
@@ -100,10 +134,84 @@ pub fn ascent_liveness_gates(l: &LivenessFacts) -> (bool, bool) {
     )
 }
 
+/// Derive the OVERALL phase (liveness precedence over release state) via Datalog,
+/// equivalent to `liveness_phase(l).unwrap_or_else(|| phase(f))` in Rust.
+pub fn ascent_overall_phase(f: &ReleaseFacts, l: &LivenessFacts) -> String {
+    let mut prog = AscentProgram::default();
+    prog.seed = vec![()];
+    prog.live_build = vec![(f.live_build_id.clone(),)];
+    if let Some(m) = &f.manifest_build_id {
+        prog.manifest_build = vec![(m.clone(),)];
+    }
+    if f.pending_present {
+        prog.pending_present = vec![()];
+    }
+    if f.qualification_ok == Some(false) {
+        prog.qualification_false = vec![()];
+    }
+    if l.brain_serving {
+        prog.brain_serving_fact = vec![()];
+    }
+    if l.indexer_expected {
+        prog.indexer_expected_fact = vec![()];
+    }
+    if l.indexer_ready {
+        prog.indexer_ready_fact = vec![()];
+    }
+    prog.run();
+    prog.overall_phase
+        .first()
+        .map(|(s,)| s.clone())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::release_reconciler::{evaluate_gates, evaluate_liveness_gates};
+    use crate::release_reconciler::{
+        evaluate_gates, evaluate_liveness_gates, liveness_phase, phase,
+    };
+
+    /// Exhaustive differential test for the OVERALL phase precedence (liveness over
+    /// release) over the full release × liveness fact grid.
+    #[test]
+    fn ascent_matches_rust_overall_phase_exhaustively() {
+        let builds = [("v1", Some("v1")), ("v1", Some("v2")), ("v1", None)];
+        for (live, manifest) in builds {
+            for pending in [false, true] {
+                for brain in [false, true] {
+                    for expected in [false, true] {
+                        for ready in [false, true] {
+                            let f = ReleaseFacts {
+                                live_build_id: live.to_string(),
+                                manifest_build_id: manifest.map(str::to_string),
+                                manifest_state: Some("promoted".to_string()),
+                                qualification_ok: Some(true),
+                                pending_present: pending,
+                                pending_build_id: None,
+                                runtime_contract: Some("brain_mcp_indexer_ist".to_string()),
+                            };
+                            let l = LivenessFacts {
+                                brain_serving: brain,
+                                indexer_expected: expected,
+                                indexer_ready: ready,
+                                indexer_lifecycle: "healthy".to_string(),
+                                indexer_source: "pg_heartbeat".to_string(),
+                            };
+                            let rust = liveness_phase(&l)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| phase(&f).to_string());
+                            assert_eq!(
+                                rust,
+                                ascent_overall_phase(&f, &l),
+                                "phase mismatch: live={live} manifest={manifest:?} pending={pending} brain={brain} expected={expected} ready={ready}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// Exhaustive differential test for the 2 liveness gates over the full grid
     /// (brain_serving × indexer_expected × indexer_ready).
