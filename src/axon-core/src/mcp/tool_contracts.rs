@@ -176,8 +176,32 @@ pub(crate) struct ContractStatusInput {
     pub offset: Option<u32>,
 }
 
+/// `contract_evolve` governed transition (S8, REQ-AXO-902095 / DEC-AXO-901658).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ContractEvolveAction {
+    /// deprecated→retired tombstone, HARD-gated on live incoming CALL edges (slice 1).
+    Obsolete,
+    /// behavior-preserving internal change; boundary seal survives (later slice).
+    Refactor,
+    /// intent-first revision; re-prove the broken seals (later slice).
+    Reorient,
+}
+
+/// `contract_evolve` — drive a governed evolution transition on a ContractNode
+/// (S8, REQ-AXO-902095). Slice 1 implements `obsolete` ; `refactor`/`reorient`
+/// are declared (later slices).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ContractEvolveInput {
+    /// Canonical contract id to evolve (e.g. "CON-AXO-12").
+    pub contract_id: String,
+    /// Governed transition to apply.
+    pub action: ContractEvolveAction,
+}
+
 /// Tools currently served by a derived schema (tracer-bullet set).
-pub(crate) const DERIVED_TOOLS: &[&str] = &["sql", "query", "soll_manager", "contract_status"];
+pub(crate) const DERIVED_TOOLS: &[&str] =
+    &["sql", "query", "soll_manager", "contract_status", "contract_evolve"];
 
 /// REQ-AXO-901949 — single-source interaction-graph record for a tool.
 ///
@@ -237,6 +261,14 @@ pub(crate) fn tool_routing(name: &str) -> Option<ToolRouting> {
             token_hint:
                 "List brief first to find a contract id, then inspect that id; pass mode=verbose only when you need bodies/edges.",
             use_when: "use when you need a contract's seal status or whether its realization drifted from the sealed shape",
+        },
+        "contract_evolve" => ToolRouting {
+            follow_ups: &["contract_status", "impact", "detect_remnants"],
+            goal: "apply a governed evolution transition to a ContractNode (obsolete/refactor/reorient)",
+            stage: "contract_evolution",
+            token_hint:
+                "Inspect with contract_status first; obsolete is hard-gated on live callers — if blocked, use impact to find and retire them.",
+            use_when: "use when a contract must be retired/refactored/reoriented under governance (not a raw status read)",
         },
         _ => return None,
     })
@@ -575,6 +607,7 @@ pub(crate) fn derived_input_schema(name: &str) -> Option<Value> {
         "query" => generator().into_root_schema_for::<QueryInput>(),
         "soll_manager" => generator().into_root_schema_for::<SollManagerInput>(),
         "contract_status" => generator().into_root_schema_for::<ContractStatusInput>(),
+        "contract_evolve" => generator().into_root_schema_for::<ContractEvolveInput>(),
         _ => return None,
     };
     let mut value = serde_json::to_value(schema).ok()?;

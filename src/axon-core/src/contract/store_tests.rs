@@ -34,6 +34,16 @@ fn seed_symbol(store: &GraphStore, id: &str, kind: &str, name: &str) {
         .expect("seed ist.Symbol");
 }
 
+fn seed_edge(store: &GraphStore, source: &str, target: &str, relation: &str) {
+    store
+        .execute_param(
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+             VALUES ($s, $t, $r, 'AXO', (extract(epoch from now())*1000)::BIGINT) ON CONFLICT DO NOTHING",
+            &serde_json::json!({ "s": source, "t": target, "r": relation }),
+        )
+        .expect("seed ist.Edge");
+}
+
 // ── S1 : round-trip persist / load ────────────────────────────────────
 #[test]
 fn round_trip_persist_load() {
@@ -240,6 +250,42 @@ fn list_contracts_paginates_and_summarizes_lifecycle_and_seal() {
     assert_eq!(p0.len(), 1);
     assert_eq!(p1.len(), 1);
     assert!(p0[0].id < p1[0].id, "ordre id ASC stable entre pages");
+}
+
+// ── S8 : obsolescence gouvernée (REQ-AXO-902095, DEC-AXO-901658 cas C) ──
+#[test]
+fn obsolescence_blocked_while_live_callers_then_retires_when_orphan() {
+    let store = crate::tests::test_helpers::create_test_db().unwrap();
+    let sym = "AXO::doomed_fn";
+    seed_symbol(&store, sym, "function", "doomed_fn");
+    seed_symbol(&store, "AXO::caller_a", "function", "caller_a");
+    seed_symbol(&store, "AXO::caller_b", "function", "caller_b");
+    persist_contract(&store, "CON-AXO-30", &anchor_node(Some(sym))).unwrap();
+
+    // bound (realized_by set) at first.
+    assert_eq!(contract_status_str(&store, "CON-AXO-30").unwrap().as_deref(), Some("bound"));
+
+    // two live callers → obsolescence HARD-blocked (gate).
+    seed_edge(&store, "AXO::caller_a", sym, "CALLS");
+    seed_edge(&store, "AXO::caller_b", sym, "CALLS");
+    let (live, sample) = live_incoming_call_count(&store, sym).unwrap();
+    assert_eq!(live, 2);
+    assert!(sample.contains(&"AXO::caller_a".to_string()));
+
+    // remove the callers (code redirected) → orphan → retire allowed.
+    store
+        .execute(&format!("DELETE FROM ist.Edge WHERE target_id = '{sym}'"))
+        .unwrap();
+    let (live_after, _) = live_incoming_call_count(&store, sym).unwrap();
+    assert_eq!(live_after, 0);
+    retire_contract(&store, "CON-AXO-30").unwrap();
+    assert_eq!(contract_status_str(&store, "CON-AXO-30").unwrap().as_deref(), Some("retired"));
+}
+
+#[test]
+fn contract_status_str_none_when_absent() {
+    let store = crate::tests::test_helpers::create_test_db().unwrap();
+    assert!(contract_status_str(&store, "CON-AXO-404").unwrap().is_none());
 }
 
 #[test]

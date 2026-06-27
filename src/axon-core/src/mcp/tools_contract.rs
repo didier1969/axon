@@ -16,9 +16,10 @@ use serde_json::{json, Value};
 
 use super::McpServer;
 use crate::contract::store::{
-    contract_edges, count_contracts, list_contracts, load_contract, load_seal, reconcile_contract,
-    ContractEdgeRow, DriftVerdict,
+    contract_edges, contract_status_str, count_contracts, list_contracts, live_incoming_call_count,
+    load_contract, load_seal, reconcile_contract, retire_contract, ContractEdgeRow, DriftVerdict,
 };
+use crate::contract::ContractNode;
 
 fn contract_err(msg: &str, status: &str) -> Value {
     json!({
@@ -186,6 +187,76 @@ impl McpServer {
                 node.kind.tag(), lifecycle, drift_label
             )}],
             "data": data
+        }))
+    }
+
+    /// REQ-AXO-902095 (S8) — `contract_evolve` : transition d'évolution gouvernée.
+    /// Slice 1 = `obsolete` ; `refactor`/`reorient` déclarés (slices ultérieures).
+    pub(crate) fn axon_contract_evolve(&self, args: &Value) -> Option<Value> {
+        let Some(id) = args
+            .get("contract_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Some(contract_err("contract_id is required", "input_invalid"));
+        };
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let node = match load_contract(&self.graph_store, id) {
+            Ok(Some(n)) => n,
+            Ok(None) => return Some(contract_err(&format!("contrat introuvable: {id}"), "input_not_found")),
+            Err(e) => return Some(contract_err(&format!("load failed: {e}"), "degraded")),
+        };
+        match action.as_str() {
+            "obsolete" => self.contract_evolve_obsolete(id, &node),
+            "refactor" | "reorient" => Some(json!({
+                "content": [{"type":"text","text": format!(
+                    "### 📐 contract_evolve {id} — `{action}` pas encore implémenté (S8 slice 1 = obsolescence ; DEC-AXO-901658)"
+                )}],
+                "data": {"status":"not_implemented","action":action,
+                         "slice":"S8 slice 1 = obsolescence only","planned":["refactor","reorient"]}
+            })),
+            _ => Some(contract_err("action must be one of obsolete|refactor|reorient", "input_invalid")),
+        }
+    }
+
+    /// REQ-AXO-902095 (S8, DEC-AXO-901658 cas C) — obsolescence : tombstone
+    /// `retired` (intent préservé), HARD-bloquée tant que des arêtes CALL entrantes
+    /// vivantes pointent vers `realized_by` (retirer du code encore appelé =
+    /// orphelins). No-op idempotent si déjà retired.
+    fn contract_evolve_obsolete(&self, id: &str, node: &ContractNode) -> Option<Value> {
+        if contract_status_str(&self.graph_store, id).ok().flatten().as_deref() == Some("retired") {
+            return Some(json!({
+                "content": [{"type":"text","text": format!("### 📐 {id} — déjà retired (no-op)")}],
+                "data": {"status":"ok","verdict":"already_retired","id":id}
+            }));
+        }
+        if let Some(sym) = &node.realized_by {
+            let (live, sample) = live_incoming_call_count(&self.graph_store, sym).unwrap_or((0, Vec::new()));
+            if live > 0 {
+                return Some(json!({
+                    "content": [{"type":"text","text": format!(
+                        "### 📐 {id} — obsolescence BLOQUÉE : {live} appelant(s) vivant(s) de `{sym}`. Retire/redirige les appels entrants d'abord (impact/detect_remnants)."
+                    )}],
+                    "data": {"status":"blocked","verdict":"blocked_by_live_callers","id":id,
+                             "symbol":sym,"live_callers":live,"sample_callers":sample,
+                             "next":{"tool":"impact","hint":"impact symbol=<appelant> pour tracer puis retirer les arêtes CALL entrantes"}}
+                }));
+            }
+        }
+        if let Err(e) = retire_contract(&self.graph_store, id) {
+            return Some(contract_err(&format!("retire failed: {e}"), "degraded"));
+        }
+        Some(json!({
+            "content": [{"type":"text","text": format!(
+                "### 📐 {id} — RETIRED (obsolescence ; tombstone, intention préservée)"
+            )}],
+            "data": {"status":"ok","verdict":"retired","id":id}
         }))
     }
 }

@@ -450,6 +450,55 @@ pub fn contract_edges(
 }
 
 // ════════════════════════════════════════════════════════════════════════
+// S8 — obsolescence gouvernée (REQ-AXO-902095, DEC-AXO-901658 cas C)
+// ════════════════════════════════════════════════════════════════════════
+
+/// Compte + échantillon (≤5) des arêtes CALL ENTRANTES vivantes vers un symbole IST
+/// (l'ancre `realized_by`). L'obsolescence est HARD-bloquée tant que des appelants
+/// existent (DEC-AXO-901658) : retirer un contrat dont le code est encore appelé
+/// orphelinerait les appelants. CALLS + CALLS_NIF (le call-graph canonique de l'IST).
+pub fn live_incoming_call_count(
+    store: &GraphStore,
+    symbol_id: &str,
+) -> Result<(i64, Vec<String>)> {
+    let raw = store.query_json_param(
+        "SELECT source_id FROM ist.Edge \
+           WHERE target_id = $sym AND relation_type IN ('CALLS','CALLS_NIF') \
+           ORDER BY source_id LIMIT 5",
+        &serde_json::json!({ "sym": symbol_id }),
+    )?;
+    let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    let sample: Vec<String> = rows.iter().filter_map(|r| col_str(r, 0)).collect();
+    let total = store.query_count_param(
+        "SELECT count(*) FROM ist.Edge \
+           WHERE target_id = $sym AND relation_type IN ('CALLS','CALLS_NIF')",
+        &serde_json::json!({ "sym": symbol_id }),
+    )?;
+    Ok((total, sample))
+}
+
+/// État de cycle de vie d'un contrat (`planned|bound|sealed|retired`). `None` si absent.
+pub fn contract_status_str(store: &GraphStore, id: &str) -> Result<Option<String>> {
+    let raw = store.query_json_param(
+        "SELECT status FROM soll.Contract WHERE id = $id",
+        &serde_json::json!({ "id": id }),
+    )?;
+    let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    Ok(rows.into_iter().next().and_then(|r| col_str(&r, 0)))
+}
+
+/// Tombstone d'un contrat (obsolescence terminale, DEC-AXO-901658). JAMAIS DELETE :
+/// `status='retired'` préserve l'intention + l'historique de sceau (PIL-AXO-003).
+pub fn retire_contract(store: &GraphStore, id: &str) -> Result<()> {
+    store.execute_param(
+        "UPDATE soll.Contract SET status='retired', \
+            updated_at=(extract(epoch from now())*1000)::BIGINT WHERE id=$id",
+        &serde_json::json!({ "id": id }),
+    )?;
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════════
 // helpers internes
 // ════════════════════════════════════════════════════════════════════════
 

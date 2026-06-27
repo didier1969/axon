@@ -1038,6 +1038,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": { "$comment": "derived from tool_contracts::ContractStatusInput — injected post-build" }
             },
             {
+                "name": "contract_evolve",
+                "description": "[CONTRACT] REQ-AXO-902095 (S8, DEC-AXO-901658) — drive a GOVERNED evolution transition on a ContractNode. Slice 1: `obsolete` (deprecated→retired tombstone, intent preserved, HARD-gated on live incoming CALL edges — refused while the realized code is still called). `refactor`/`reorient` are declared (later slices). Pair with `contract_status` (inspect) and `impact` (find live callers before retiring).",
+                "inputSchema": { "$comment": "derived from tool_contracts::ContractEvolveInput — injected post-build" }
+            },
+            {
                 "name": "diagnose_indexing",
                 "description": "[SYSTEM] Day-1 indexing diagnostic per project: probable causes, dominant reasons, parser/runtime errors, and remediations.",
                 "inputSchema": {

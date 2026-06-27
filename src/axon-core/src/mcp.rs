@@ -1479,6 +1479,8 @@ impl McpServer {
             "practice_card" => self.axon_practice_card(arguments),
             // REQ-AXO-902094 (S7) — surface de consommation du squelette de contrats.
             "contract_status" => self.axon_contract_status(arguments),
+            // REQ-AXO-902095 (S8) — transitions d'évolution gouvernées.
+            "contract_evolve" => self.axon_contract_evolve(arguments),
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
             "soll_validate" => self.axon_validate_soll(arguments),
