@@ -140,13 +140,17 @@ impl McpServer {
         // `contradicts` on ANY single passage crossing `threshold` gives systematic
         // false positives: a multi-language, mixed code/prose corpus always has a few
         // tangential/OOD passages that score contradiction even for a TRUE claim.
-        // The real discriminator is SUPPORT: a true claim has a passage that ENTAILS
-        // it (high max_entailment); a false claim has none. So we track both signals
-        // and only call `contradicts` when the corpus contradicts AND does not support.
-        let support_floor = std::env::var("AXON_NLI_SUPPORT_FLOOR")
+        // The real discriminator (measured live, REQ-AXO-902125): the NET MARGIN
+        // between the corpus's strongest contradiction and its strongest support.
+        // A TRUE claim has contradiction and support close (corpus both half-supports
+        // and half-noise-contradicts → ambiguous): 'uses PostgreSQL' → contra 0.788 /
+        // entail 0.378, margin 0.41. A FALSE claim has contradiction dominating with
+        // no support: 'uses MongoDB' → contra 0.896 / entail 0.038, margin 0.86. So we
+        // only call `contradicts` when contradiction clearly OUTWEIGHS support.
+        let net_margin = std::env::var("AXON_NLI_NET_MARGIN")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(0.5);
+            .unwrap_or(0.6);
         let started = Instant::now();
         let mut conflicts: Vec<Value> = Vec::new();
         let mut judged = 0usize;
@@ -214,27 +218,27 @@ impl McpServer {
                 .unwrap_or(Ordering::Equal)
         });
         conflicts.truncate(top_k);
-        // REQ-AXO-902125 — support-aware verdict.
+        // REQ-AXO-902125 — net-margin verdict (kills the Nexus #32 false positives).
         //   inconclusive: nothing judged (empty shortlist or budget-truncated) — never
         //                 a silent all-clear (CPT-AXO-90054 anti-théâtre).
-        //   neutral (supported): the corpus ENTAILS the claim (max_entailment ≥ floor)
-        //                 — a few noisy contradiction passages do NOT override real
-        //                 support. This is the fix for the Nexus #32 false positives.
-        //   contradicts: the corpus contradicts the claim AND does not support it.
-        //   neutral: neither strong support nor contradiction.
-        let supported = max_entailment >= support_floor;
-        let contradicted = !conflicts.is_empty() && max_contradiction >= threshold;
+        //   contradicts:  there is a real contradiction (max_contradiction ≥ threshold)
+        //                 AND it OUTWEIGHS support by ≥ net_margin. A true claim's few
+        //                 noisy contradiction passages can't win when the corpus also
+        //                 supports it (small margin) → not flagged.
+        //   neutral:      no net contradiction.
+        let margin = max_contradiction - max_entailment;
+        let contradicted =
+            !conflicts.is_empty() && max_contradiction >= threshold && margin >= net_margin;
         let verdict = if rows.is_empty() || truncated {
             "inconclusive"
-        } else if contradicted && !supported {
+        } else if contradicted {
             "contradicts"
         } else {
-            // supported OR no net contradiction → not a contradiction
             "neutral"
         };
-        // When the claim is supported, the contradiction passages are noise, not a
-        // finding — don't present them as conflicts.
-        if supported {
+        // Only present conflict passages when the verdict is actually `contradicts`;
+        // otherwise they are noise below the net-margin, not a finding.
+        if !contradicted {
             conflicts.clear();
         }
 
@@ -254,24 +258,26 @@ impl McpServer {
             } else {
                 String::new()
             };
-            let support_note = if supported {
+            let margin_note = if verdict == "neutral" && max_contradiction >= threshold {
                 format!(
-                    " The corpus SUPPORTS the claim (max_entailment={:.3} ≥ {:.2}) — contradiction passages are noise, not a finding.",
-                    max_entailment, support_floor
+                    " Contradiction does not outweigh support (margin {:.3} < {:.2}) — flagged passages are noise, not a finding.",
+                    margin, net_margin
                 )
             } else {
                 String::new()
             };
             format!(
-                "### 🧪 contradiction_check\n\nverdict=**{}** — {}/{} judged in scope `{}` · max_contradiction={:.3} max_entailment={:.3} · {} conflict(s).{}{}",
+                "### 🧪 contradiction_check\n\nverdict=**{}** — {}/{} judged in scope `{}` · max_contradiction={:.3} max_entailment={:.3} margin={:.3} (net_margin={:.2}) · {} conflict(s).{}{}",
                 verdict,
                 judged,
                 rows.len(),
                 project,
                 max_contradiction,
                 max_entailment,
+                margin,
+                net_margin,
                 conflicts.len(),
-                support_note,
+                margin_note,
                 trunc_note
             )
         };
@@ -295,10 +301,10 @@ impl McpServer {
                     "truncated": truncated,
                     "budget_ms": budget_ms,
                     "threshold": threshold,
-                    "support_floor": support_floor,
+                    "net_margin": net_margin,
                     "max_contradiction": max_contradiction,
                     "max_entailment": max_entailment,
-                    "supported": supported
+                    "margin": margin
                 },
                 "top_conflicts": conflicts
             }
