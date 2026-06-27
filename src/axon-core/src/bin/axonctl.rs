@@ -1,4 +1,7 @@
 use anyhow::{anyhow, Context, Result};
+use axon_core::release_reconciler::{
+    evaluate_stop_gates, stop_next_action, stop_phase, StopFacts,
+};
 use serde::Serialize;
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
@@ -392,6 +395,13 @@ struct StopReport {
     phases: Vec<StopPhase>,
     remaining_pids: Vec<i32>,
     status: String,
+    /// Stop-FSM verdict (REQ-AXO-902111): derived projection of the teardown state.
+    /// `phase` ∈ stopping|stopped|orphaned|partial; `failed_gates` lists the gate
+    /// names that did NOT pass; `next_action` is the single corrective step (or null
+    /// when the stop reached a terminal good state / is merely draining).
+    phase: String,
+    failed_gates: Vec<String>,
+    next_action: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -545,6 +555,42 @@ fn cmd_stop(config: InstanceConfig, hard: bool, timeout_ms: u64, json: bool) -> 
     // Step 8: Final verification
     let final_remaining = find_instance_all_pids(&config);
 
+    // Step 9: Stop-FSM verdict (REQ-AXO-902111). Project the teardown facts already
+    // computed above onto the declarative stop gates. We do NOT change the kill/cleanup
+    // logic — we only read the residual state and derive {phase, failed_gates,
+    // next_action} so an LLM/operator reads a one-line verdict instead of re-deriving it.
+    let stop_facts = StopFacts {
+        // Role we were asked to stop ("all" | "brain" | "indexer").
+        stop_role: config.role.label().to_string(),
+        // Survivors of the teardown = the canonical listeners still alive.
+        canonical_listeners: final_remaining.clone(),
+        // Any of this instance's canonical ports still in LISTEN (brain MCP included).
+        brain_port_bound: !find_port_listener_pids(&config).is_empty(),
+        // The process-compose supervisor for this instance is still alive.
+        supervisor_healthy: probe_supervisor_healthy(&config),
+        // Writer lock files still on disk (cleanup_stale_locks only reaps dead-owner
+        // locks; a lock held by a live survivor remains and is a real residual).
+        writer_locks_held: config
+            .writer_lock_paths
+            .iter()
+            .filter(|(_, path)| path.exists())
+            .map(|(target, _)| target.clone())
+            .collect(),
+        // Control sockets still present after the step-7 unlink (best-effort).
+        sockets_present: config.telemetry_sock.exists() || config.mcp_sock.exists(),
+        // Indexer heartbeat freshness is owned by the brain's in-process status source,
+        // not reachable from axonctl — best-effort false (never a false "draining").
+        indexer_heartbeat_fresh: false,
+    };
+    let stop_gates = evaluate_stop_gates(&stop_facts);
+    let failed_gates: Vec<String> = stop_gates
+        .iter()
+        .filter(|g| !g.pass)
+        .map(|g| g.name.to_string())
+        .collect();
+    let stop_phase_verdict = stop_phase(&stop_facts).to_string();
+    let stop_next = stop_next_action(&stop_facts);
+
     let report = StopReport {
         instance_kind: config.instance_kind.label().to_string(),
         role: config.role.label().to_string(),
@@ -555,20 +601,28 @@ fn cmd_stop(config: InstanceConfig, hard: bool, timeout_ms: u64, json: bool) -> 
             "remaining".to_string()
         },
         remaining_pids: final_remaining.clone(),
+        phase: stop_phase_verdict,
+        failed_gates,
+        next_action: stop_next,
     };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if final_remaining.is_empty() {
-        println!(
-            "axonctl stop: {} {} stopped cleanly",
-            report.instance_kind, report.role
-        );
     } else {
-        eprintln!(
-            "axonctl stop: {} {} has remaining pids: {:?}",
-            report.instance_kind, report.role, final_remaining
-        );
+        if final_remaining.is_empty() {
+            println!(
+                "axonctl stop: {} {} stopped cleanly (phase={})",
+                report.instance_kind, report.role, report.phase
+            );
+        } else {
+            eprintln!(
+                "axonctl stop: {} {} has remaining pids: {:?} (phase={})",
+                report.instance_kind, report.role, final_remaining, report.phase
+            );
+        }
+        if let Some(action) = &report.next_action {
+            eprintln!("axonctl stop: next action — {action}");
+        }
     }
 
     if final_remaining.is_empty() {
@@ -736,6 +790,25 @@ fn find_port_listener_pids(config: &InstanceConfig) -> Vec<i32> {
     pids.sort_unstable();
     pids.dedup();
     pids
+}
+
+/// REQ-AXO-902111 — best-effort probe of the process-compose supervisor for THIS
+/// instance. A live supervisor on a full teardown is an orphan (it will respawn the
+/// role just killed); on a role-scoped stop it is expected. Detection: a running
+/// `process-compose` process whose cmdline references this instance's project_root and
+/// does NOT belong to the opposite instance (dev↔live share a project_root). Returns
+/// `false` when `ps` is unavailable or no match is found (indeterminable → not healthy),
+/// which is the conservative default for the stop verdict.
+fn probe_supervisor_healthy(config: &InstanceConfig) -> bool {
+    let root = config.project_root.to_string_lossy().to_string();
+    proc_entries()
+        .unwrap_or_default()
+        .into_iter()
+        .any(|e| {
+            e.command.contains("process-compose")
+                && e.command.contains(&root)
+                && !cmdline_belongs_to_opposite_instance(&e.command, config)
+        })
 }
 
 fn kill_tmux_session(session: &str) -> bool {
