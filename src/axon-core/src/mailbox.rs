@@ -5,8 +5,15 @@
 //! the A2A-aligned envelope construction, the deterministic dedup id, and the
 //! HMAC-per-project signature. MVP integrity = a single server secret
 //! (`AXON_MAILBOX_SECRET`) from which each project's token is derived; MBX-5
-//! replaces the token source with a stored per-project keypair without touching
+//! replaces the token *source* with a stored per-project token without touching
 //! call sites.
+//!
+//! REQ-AXO-902117 (MBX-5) — the MECHANISM is here as the token-aware
+//! [`sign_with_token`] / [`verify_with_token`] pair: this module stays PURE (no
+//! DB/`&self`), and the per-project token is resolved DB-side in
+//! `mcp/tools_mailbox.rs` (stored `axon.project_secret` token, falling back to
+//! [`derived_project_token`] when absent). The HMAC scheme is unchanged — the
+//! confidentiality / H1 / JWS upgrade is the deferred POLICY, not this slice.
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -19,9 +26,12 @@ fn server_secret() -> Vec<u8> {
         .into_bytes()
 }
 
-/// Per-project token derived from the single server secret (MVP). Swappable for a
-/// stored keypair at MBX-5.
-fn project_token(project: &str) -> Vec<u8> {
+/// Per-project token derived from the single server secret (MVP fallback). MBX-5
+/// (REQ-AXO-902117) prefers a stored per-project token from `axon.project_secret`
+/// (resolved DB-side in `tools_mailbox`); this derivation is the retro-compatible
+/// fallback for any project without a stored token, so every message ever signed
+/// still verifies.
+pub fn derived_project_token(project: &str) -> Vec<u8> {
     let mut mac =
         HmacSha256::new_from_slice(&server_secret()).expect("hmac accepts any key length");
     mac.update(project.as_bytes());
@@ -34,6 +44,13 @@ fn to_hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+/// Decode a lowercase/uppercase hex string into bytes (`None` on odd length or
+/// any non-hex digit). Public so the MBX-5 token resolver in `tools_mailbox` can
+/// decode the `encode(token,'hex')` projection of the `BYTEA` stored secret.
+pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    from_hex(s)
 }
 
 fn from_hex(s: &str) -> Option<Vec<u8>> {
@@ -103,16 +120,19 @@ fn canonicalize_json(v: &serde_json::Value) -> String {
     }
 }
 
-/// HMAC-SHA256 signature of a canonical envelope under the sender's project token.
-pub fn sign(from_project: &str, canonical: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(&project_token(from_project)).expect("hmac key");
+/// HMAC-SHA256 signature of a canonical envelope under an EXPLICIT token (MBX-5
+/// mechanism). The caller resolves the token (stored per-project secret or the
+/// derived fallback); this keeps the module pure (no DB).
+pub fn sign_with_token(token: &[u8], canonical: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(token).expect("hmac accepts any key length");
     mac.update(canonical.as_bytes());
     to_hex(&mac.finalize().into_bytes())
 }
 
-/// Constant-time verify (delegates to the hmac crate's `verify_slice`).
-pub fn verify(from_project: &str, canonical: &str, sig: &str) -> bool {
-    let mut mac = match HmacSha256::new_from_slice(&project_token(from_project)) {
+/// Constant-time verify under an EXPLICIT token (MBX-5 mechanism; delegates to the
+/// hmac crate's `verify_slice`).
+pub fn verify_with_token(token: &[u8], canonical: &str, sig: &str) -> bool {
+    let mut mac = match HmacSha256::new_from_slice(token) {
         Ok(m) => m,
         Err(_) => return false,
     };
@@ -121,6 +141,17 @@ pub fn verify(from_project: &str, canonical: &str, sig: &str) -> bool {
         Some(raw) => mac.verify_slice(&raw).is_ok(),
         None => false,
     }
+}
+
+/// HMAC-SHA256 signature under the sender's DERIVED project token (MVP / fallback
+/// path). Equivalent to `sign_with_token(&derived_project_token(from), …)`.
+pub fn sign(from_project: &str, canonical: &str) -> String {
+    sign_with_token(&derived_project_token(from_project), canonical)
+}
+
+/// Constant-time verify under the sender's DERIVED project token (MVP / fallback).
+pub fn verify(from_project: &str, canonical: &str, sig: &str) -> bool {
+    verify_with_token(&derived_project_token(from_project), canonical, sig)
 }
 
 /// Stable, dedup-aligned message id: the same (from, to, idempotency_key) yields
@@ -179,6 +210,26 @@ mod tests {
         assert!(verify("AXO", &c, &sig));
         // wrong owner token fails
         assert!(!verify("NEX", &c, &sig));
+    }
+
+    #[test]
+    fn mbx5_stored_token_round_trip_and_distinct_from_derived() {
+        // REQ-AXO-902117 (MBX-5) — a stored per-project token signs and verifies
+        // independently of the derived fallback, and the two are NOT interchangeable.
+        let c = canonical("NEX", "AXO", "ctx-1", "msg-abc", "message", "idem-1", "", "subj", "body");
+        let stored = decode_hex("00112233445566778899aabbccddeeff").expect("valid hex");
+        let sig = sign_with_token(&stored, &c);
+        // round-trip under the same stored token
+        assert!(verify_with_token(&stored, &c, &sig));
+        // the derived token must NOT verify a stored-token signature (mechanism swap)
+        assert!(!verify(&"NEX", &c, &sig));
+        let derived = derived_project_token("NEX");
+        assert!(!verify_with_token(&derived, &c, &sig));
+        // and the legacy derived-sign path stays self-consistent (retro-compat)
+        let dsig = sign("NEX", &c);
+        assert!(verify("NEX", &c, &dsig));
+        assert!(verify_with_token(&derived, &c, &dsig));
+        assert_ne!(sig, dsig);
     }
 
     #[test]

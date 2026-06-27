@@ -222,7 +222,9 @@ impl McpServer {
             // Verify against the SENDER's HMAC; tap knows the true to_project per row.
             let canonical =
                 mailbox::canonical(from_p, to_p, ctx, message_id, kind, idem, irt, subject, body);
-            let verified = mailbox::verify(from_p, &canonical, sig);
+            // REQ-AXO-902117 (MBX-5) — resolve the sender's per-project stored
+            // token (else derived fallback) so stored-token signatures verify here.
+            let verified = self.mailbox_verify(from_p, &canonical, sig);
             messages.push(json!({
                 "id": id,
                 "message_id": message_id,

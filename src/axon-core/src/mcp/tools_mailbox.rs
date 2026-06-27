@@ -71,6 +71,22 @@ impl McpServer {
             Some(t) => t.to_string(),
             None => return Some(mbx_err("mcp_outbox_send requires `to_project` (or `to_topic`/`to_room`).", "input_invalid")),
         };
+
+        // REQ-AXO-902117 (MBX-5) — ACL gate (MECHANISM, default-open). A `deny`
+        // rule for (from → to) blocks the send ONLY when AXON_MAILBOX_ACL_ENFORCE
+        // is on; otherwise the deny is observe-only (logged) and the message is
+        // still delivered. Absence of a deny rule authorises (default-open). The
+        // POLICY (default open vs closed, who-may-write) stays operator-owned.
+        if self.mailbox_acl_denied(&from, &to) {
+            let enforce = acl_enforce_enabled();
+            if acl_should_block(enforce, true) {
+                return Some(mbx_err(
+                    &format!("mcp_outbox_send: ACL denies `{from}` → `{to}` (AXON_MAILBOX_ACL_ENFORCE=1)."),
+                    "acl_denied",
+                ));
+            }
+            eprintln!("[mbx5-acl] observe-only: deny rule for {from} → {to} (enforce off); delivering anyway.");
+        }
         let idempotency_key = match args.get("idempotency_key").and_then(Value::as_str) {
             Some(k) if !k.trim().is_empty() => k.trim().to_string(),
             _ => {
@@ -183,7 +199,12 @@ impl McpServer {
             subject,
             body_dense,
         );
-        let sig = mailbox::sign(from, &canonical);
+        // REQ-AXO-902117 (MBX-5) — provision a per-project signing token on first
+        // use, then sign under the RESOLVED token (stored secret, else derived
+        // fallback). Mechanism only — the HMAC scheme is unchanged.
+        self.ensure_project_secret(from);
+        let (token, _stored) = self.mailbox_signing_token(from);
+        let sig = mailbox::sign_with_token(&token, &canonical);
 
         // A2A-aligned envelope (DEC-AXO-901663): the dense Axon body rides in a
         // `data` part so A2A interop (Agent Cards, MBX-6) is free later. Fan-out
@@ -334,7 +355,7 @@ impl McpServer {
                 (g(1), g(2), g(3), g(4), g(5), g(6), g(7), g(8), g(9));
             let canonical =
                 mailbox::canonical(from, &project, context_id, message_id, kind, idem, irt, subject, body);
-            let verified = mailbox::verify(from, &canonical, sig);
+            let verified = self.mailbox_verify(from, &canonical, sig);
             messages.push(json!({
                 "id": id,
                 "message_id": message_id,
@@ -429,5 +450,122 @@ impl McpServer {
                 "swept": swept,
             }
         }))
+    }
+
+    // ===================================================================
+    // REQ-AXO-902117 (MBX-5) — per-project signing secret + ACL (MECHANISM).
+    // Token resolution is kept DB-side here so `crate::mailbox` stays pure;
+    // the HMAC scheme is unchanged (confidentiality/H1/JWS = deferred POLICY).
+    // ===================================================================
+
+    /// Provision a random 32-byte signing token for `project` on first use.
+    /// Idempotent (`ON CONFLICT DO NOTHING`): an existing secret is NEVER rotated
+    /// here. Best-effort — a provisioning failure leaves the derived-token
+    /// fallback intact, so sends keep working.
+    pub(crate) fn ensure_project_secret(&self, project: &str) {
+        use rand::RngCore;
+        let mut token = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut token);
+        let hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
+        let _ = self.graph_store.execute(&format!(
+            "INSERT INTO axon.project_secret (project_code, token) \
+             VALUES ('{p}', decode('{h}','hex')) ON CONFLICT (project_code) DO NOTHING",
+            p = esc(project),
+            h = hex
+        ));
+    }
+
+    /// Resolve the signing token for `project`: the stored per-project secret
+    /// (`axon.project_secret`, projected as `encode(token,'hex')` and decoded), or
+    /// the derived fallback when no row exists. Returns `(token, is_stored)`.
+    pub(crate) fn mailbox_signing_token(&self, project: &str) -> (Vec<u8>, bool) {
+        let stored = self
+            .graph_store
+            .query_json_writer(&format!(
+                "SELECT encode(token,'hex') FROM axon.project_secret WHERE project_code='{}'",
+                esc(project)
+            ))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<Vec<Value>>>(&s).ok())
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|row| row.into_iter().next())
+            .and_then(|v| v.as_str().map(str::to_string))
+            .and_then(|hex| mailbox::decode_hex(&hex));
+        match stored {
+            Some(tok) if !tok.is_empty() => (tok, true),
+            _ => (mailbox::derived_project_token(project), false),
+        }
+    }
+
+    /// Verify a sender's signature with retro-compat: try the resolved token
+    /// (stored or derived); if a STORED token exists and the check fails, also try
+    /// the derived token so messages signed BEFORE the project was provisioned
+    /// still verify.
+    pub(crate) fn mailbox_verify(&self, from: &str, canonical: &str, sig: &str) -> bool {
+        let (token, is_stored) = self.mailbox_signing_token(from);
+        if mailbox::verify_with_token(&token, canonical, sig) {
+            return true;
+        }
+        if is_stored {
+            return mailbox::verify_with_token(&mailbox::derived_project_token(from), canonical, sig);
+        }
+        false
+    }
+
+    /// Does a `deny` ACL rule exist for the (from → to) edge? Default-open: the
+    /// ABSENCE of a deny row authorises.
+    pub(crate) fn mailbox_acl_denied(&self, from: &str, to: &str) -> bool {
+        self.graph_store
+            .query_single_i64_writer(&format!(
+                "SELECT count(*) FROM axon.mailbox_acl \
+                 WHERE from_project='{f}' AND to_project='{t}' AND mode='deny'",
+                f = esc(from),
+                t = esc(to)
+            ))
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+            > 0
+    }
+}
+
+/// REQ-AXO-902117 (MBX-5) — pure ACL gate decision. A send is BLOCKED only when a
+/// deny rule exists AND enforcement is on. Observe-only (`enforce=false`) never
+/// blocks; default-open is the absence of a deny rule. POLICY (default open vs
+/// closed, who-may-write) stays operator-owned via the rules table + the
+/// `AXON_MAILBOX_ACL_ENFORCE` flag.
+pub(crate) fn acl_should_block(enforce: bool, deny_rule_exists: bool) -> bool {
+    enforce && deny_rule_exists
+}
+
+/// Read the MBX-5 ACL enforcement flag (`AXON_MAILBOX_ACL_ENFORCE`; default unset
+/// = observe-only). Truthy = `1`/`true`/`yes`/`on` (case-insensitive).
+fn acl_enforce_enabled() -> bool {
+    matches!(
+        std::env::var("AXON_MAILBOX_ACL_ENFORCE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+#[cfg(test)]
+mod mbx5_tests {
+    use super::acl_should_block;
+
+    #[test]
+    fn acl_default_open_passes() {
+        // No deny rule → never blocked, regardless of enforcement.
+        assert!(!acl_should_block(true, false));
+        assert!(!acl_should_block(false, false));
+    }
+
+    #[test]
+    fn acl_deny_blocks_only_when_enforced() {
+        // Deny rule present: blocks under enforce, observe-only when not.
+        assert!(acl_should_block(true, true));
+        assert!(!acl_should_block(false, true));
     }
 }
