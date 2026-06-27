@@ -210,4 +210,64 @@ mod tests {
             .expect("judge");
         assert_eq!(entail.verdict(), NliVerdict::Entailment, "{entail:?}");
     }
+
+    // REQ-AXO-902125 — golden discrimination on realistic Axon prose, BOTH
+    // polarities (the true-negative Nexus #32 proved was missing). Prints scores so
+    // a regression shows the distribution, not just the verdict.
+    #[test]
+    #[ignore = "needs ORT dylib + .axon/models/nli-modernbert-base artifact"]
+    fn nli_axon_claims_discriminate() {
+        let model_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.axon/models/nli-modernbert-base"
+        );
+        let mut nli = NliClassifier::load(model_dir).expect("load NLI model");
+        let premise = "Axon stores its canonical SOLL and IST data in PostgreSQL 17 \
+                       with the pgvector extension. DuckDB and MongoDB are not used.";
+        let true_claim = nli.judge(premise, "Axon uses PostgreSQL.").expect("judge");
+        let false_claim = nli
+            .judge(premise, "Axon stores its data in MongoDB.")
+            .expect("judge");
+        eprintln!("[golden] TRUE  claim 'uses PostgreSQL' -> {true_claim:?}");
+        eprintln!("[golden] FALSE claim 'uses MongoDB'    -> {false_claim:?}");
+        assert_ne!(
+            true_claim.verdict(),
+            NliVerdict::Contradiction,
+            "TRUE claim wrongly flagged contradiction: {true_claim:?}"
+        );
+        assert_eq!(
+            false_claim.verdict(),
+            NliVerdict::Contradiction,
+            "FALSE claim should be contradiction: {false_claim:?}"
+        );
+    }
+
+    // REQ-AXO-902125 — diagnostic: do the REAL corpus passages (code / config /
+    // headings, NOT natural-language assertions) discriminate, or are they OOD
+    // noise that the NLI flags as contradiction regardless of claim truth?
+    #[test]
+    #[ignore = "needs ORT dylib + model — diagnostic, prints scores"]
+    fn nli_real_corpus_passages_diagnostic() {
+        let model_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.axon/models/nli-modernbert-base"
+        );
+        let mut nli = NliClassifier::load(model_dir).expect("load NLI model");
+        let passages = [
+            ("config", "services:\n\n  postgres:"),
+            ("heading", "## 5. Que gagne-t-on vs Postgres + CTE récursives ?"),
+            (
+                "code",
+                "pub(crate) fn url(&self) -> String { format!(\"postgres://axon@127.0.0.1:{}/{}\", self.pg_port, self.db_name) }",
+            ),
+        ];
+        for (label, p) in passages {
+            let t = nli.judge(p, "Axon uses PostgreSQL.").expect("judge");
+            let f = nli
+                .judge(p, "Axon stores its data in MongoDB.")
+                .expect("judge");
+            eprintln!("[{label}] TRUE  'PostgreSQL' -> {:?} | {t:?}", t.verdict());
+            eprintln!("[{label}] FALSE 'MongoDB'    -> {:?} | {f:?}", f.verdict());
+        }
+    }
 }

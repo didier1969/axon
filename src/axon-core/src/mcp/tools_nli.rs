@@ -135,10 +135,24 @@ impl McpServer {
             .ok()
             .and_then(|v| v.parse::<u128>().ok())
             .unwrap_or(DEFAULT_NLI_BUDGET_MS);
+        // REQ-AXO-902125 — support-aware aggregation. The NLI is reliable PER passage
+        // (golden test: prose claim 0.978 entail / 0.995 contra), but flagging
+        // `contradicts` on ANY single passage crossing `threshold` gives systematic
+        // false positives: a multi-language, mixed code/prose corpus always has a few
+        // tangential/OOD passages that score contradiction even for a TRUE claim.
+        // The real discriminator is SUPPORT: a true claim has a passage that ENTAILS
+        // it (high max_entailment); a false claim has none. So we track both signals
+        // and only call `contradicts` when the corpus contradicts AND does not support.
+        let support_floor = std::env::var("AXON_NLI_SUPPORT_FLOOR")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.5);
         let started = Instant::now();
         let mut conflicts: Vec<Value> = Vec::new();
         let mut judged = 0usize;
         let mut truncated = false;
+        let mut max_contradiction = 0f32;
+        let mut max_entailment = 0f32;
         for row in &rows {
             if started.elapsed().as_millis() > budget_ms {
                 // Budget exhausted before judging the whole shortlist — stop and
@@ -159,7 +173,14 @@ impl McpServer {
             match crate::nli::judge_global(passage, candidate) {
                 Ok(scores) => {
                     judged += 1;
-                    if scores.contradiction >= threshold {
+                    max_contradiction = max_contradiction.max(scores.contradiction);
+                    max_entailment = max_entailment.max(scores.entailment);
+                    // A passage is a genuine conflict only if its ARGMAX verdict is
+                    // Contradiction (more robust than a bare prob threshold) AND the
+                    // probability clears `threshold`.
+                    if scores.verdict() == crate::nli::NliVerdict::Contradiction
+                        && scores.contradiction >= threshold
+                    {
                         conflicts.push(json!({
                             "id": symbol,
                             "file_path": file_path,
@@ -193,16 +214,29 @@ impl McpServer {
                 .unwrap_or(Ordering::Equal)
         });
         conflicts.truncate(top_k);
-        // Honest verdict (CPT-AXO-90054 anti-théâtre): a clean `neutral` is only
-        // legitimate when the WHOLE shortlist was actually judged. An empty shortlist
-        // or a budget-truncated run is `inconclusive`, never a silent all-clear.
-        let verdict = if !conflicts.is_empty() {
-            "contradicts"
-        } else if rows.is_empty() || truncated {
+        // REQ-AXO-902125 — support-aware verdict.
+        //   inconclusive: nothing judged (empty shortlist or budget-truncated) — never
+        //                 a silent all-clear (CPT-AXO-90054 anti-théâtre).
+        //   neutral (supported): the corpus ENTAILS the claim (max_entailment ≥ floor)
+        //                 — a few noisy contradiction passages do NOT override real
+        //                 support. This is the fix for the Nexus #32 false positives.
+        //   contradicts: the corpus contradicts the claim AND does not support it.
+        //   neutral: neither strong support nor contradiction.
+        let supported = max_entailment >= support_floor;
+        let contradicted = !conflicts.is_empty() && max_contradiction >= threshold;
+        let verdict = if rows.is_empty() || truncated {
             "inconclusive"
+        } else if contradicted && !supported {
+            "contradicts"
         } else {
+            // supported OR no net contradiction → not a contradiction
             "neutral"
         };
+        // When the claim is supported, the contradiction passages are noise, not a
+        // finding — don't present them as conflicts.
+        if supported {
+            conflicts.clear();
+        }
 
         let report = if rows.is_empty() {
             format!(
@@ -220,14 +254,24 @@ impl McpServer {
             } else {
                 String::new()
             };
+            let support_note = if supported {
+                format!(
+                    " The corpus SUPPORTS the claim (max_entailment={:.3} ≥ {:.2}) — contradiction passages are noise, not a finding.",
+                    max_entailment, support_floor
+                )
+            } else {
+                String::new()
+            };
             format!(
-                "### 🧪 contradiction_check\n\nverdict=**{}** — {}/{} shortlisted passage(s) judged in scope `{}`, {} conflict(s) ≥ {:.2}.{}",
+                "### 🧪 contradiction_check\n\nverdict=**{}** — {}/{} judged in scope `{}` · max_contradiction={:.3} max_entailment={:.3} · {} conflict(s).{}{}",
                 verdict,
                 judged,
                 rows.len(),
                 project,
+                max_contradiction,
+                max_entailment,
                 conflicts.len(),
-                threshold,
+                support_note,
                 trunc_note
             )
         };
@@ -250,7 +294,11 @@ impl McpServer {
                     "ef_search": ef_search,
                     "truncated": truncated,
                     "budget_ms": budget_ms,
-                    "threshold": threshold
+                    "threshold": threshold,
+                    "support_floor": support_floor,
+                    "max_contradiction": max_contradiction,
+                    "max_entailment": max_entailment,
+                    "supported": supported
                 },
                 "top_conflicts": conflicts
             }
