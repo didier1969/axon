@@ -231,6 +231,28 @@ except Exception:
   fi
 }
 
+# --- REQ-AXO-902104: auto-resume an interrupted promote ---
+# A prior run killed/interrupted mid-step-5 leaves the new binary live but the
+# manifest UNFINALIZED (pending.json present) and the runtime degraded (query-embed
+# down, indexer not ready). Stacking a fresh promote on top compounds the mess —
+# instead, detect the pending state and resume it (restart-live + finalize) first.
+# Set PROMOTE_SKIP_AUTORESUME=1 to bypass.
+pending_manifest="$ROOT_DIR/.axon/live-release/pending.json"
+if [[ -f "$pending_manifest" && "${PROMOTE_SKIP_AUTORESUME:-0}" != "1" ]]; then
+  pending_build="$(jq -r '.build_id // empty' "$pending_manifest" 2>/dev/null || true)"
+  promote_log "⚠️ Unfinalized pending promote detected (build_id=${pending_build:-?}) — auto-resuming before any fresh promote (REQ-AXO-902104)."
+  candidate_manifest="$(ls -1 "$ROOT_DIR"/.axon/releases/candidates/*"${pending_build}".json 2>/dev/null | head -1)"
+  if [[ -n "$candidate_manifest" && -f "$candidate_manifest" ]]; then
+    PROMOTE_LIVE_POSTCHECK_TIMEOUT_S="${PROMOTE_LIVE_POSTCHECK_TIMEOUT_S:-600}" \
+      "$ROOT_DIR/scripts/axon" promote-live --manifest "$candidate_manifest" --restart-live --resume
+    resume_rc=$?
+    promote_log "   auto-resume exit=$resume_rc (build_id=$pending_build)"
+    exit $resume_rc
+  fi
+  promote_log "   ⚠️ candidate manifest for $pending_build not found — aborting to avoid stacking; recover manually with promote-live --resume."
+  exit 1
+fi
+
 # --- Step 1: build ---
 # REQ-AXO-901763 — Build BEFORE dev-gate so the dev brain can be restarted
 # with the candidate binary. The previous ordering (dev_gate -> build) meant
@@ -326,7 +348,16 @@ if ! "$ROOT_DIR/scripts/axon" --instance live mcp-call call soll_export --args "
   promote_log "   ⚠️ soll_export failed (non-blocking — manifest is authoritative)"
 fi
 
-ensure_head_stable
+# REQ-AXO-902105 — step 7 is COSMETIC (SOLL export + status display). The
+# promotion is ALREADY correct at this point: gated by step 5 (atomic swap +
+# runtime-identity match) and step 6 (qualify-mcp verdict=ok). A concurrent commit
+# moving HEAD during finalize (observed s91: an operator commit during the run)
+# must NOT fail-close an already-good promote. Warn only — never exit 1 here. The
+# strict HEAD-stability guard stays on steps 3/5 where it protects the build/swap.
+current_head_finalize="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+if [[ "$current_head_finalize" != "$start_head" ]]; then
+  promote_log "   ⚠️ HEAD moved during finalize ($start_head → $current_head_finalize) — harmless: promotion already gated by steps 5+6."
+fi
 # REQ-AXO-901879 — step 7 is finalize (SOLL export + status DISPLAY).
 # Promotion correctness is already gated by step 5 (atomic binary swap +
 # runtime-identity match) and step 6 (qualify-mcp verdict=ok against the live
