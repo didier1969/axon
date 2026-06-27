@@ -372,7 +372,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "artifact_type": { "type": "string", "enum": ["document", "file", "symbol", "test", "metric", "validation", "rationale", "diff"], "description": "Kind of evidence (aliases: kind, type). Inferred from artifact_ref when omitted." },
+                                    "artifact_type": { "type": "string", "enum": ["document", "file", "symbol", "test", "metric", "validation", "rationale", "diff"], "description": "Kind of evidence (aliases: kind, type). Inferred from artifact_ref when omitted. REQ-AXO-902102 — accepted SET depends on entity_type (mirror of shared.rs::accepted_evidence_artifact_schema, the single source of truth): requirement → document/file/symbol/test/metric/validation (NOT diff/rationale); decision → document/file/symbol/rationale/diff (NOT test/metric); validation → +diff; concept → document/file/symbol/rationale; guideline → document/file/symbol/rationale/diff. The handler rejects an out-of-set type and returns the accepted list for that entity." },
                                     "artifact_ref": { "type": "string", "description": "Pointer to the evidence: file path | symbol id `module::fn` | test path `module::tests::name` | `VAL-CODE-NNN` | metric name/URL | commit SHA. Aliases: path, uri." },
                                     "note": { "type": "string", "description": "Optional human-readable note." }
                                 },

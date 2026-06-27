@@ -103,6 +103,17 @@ for name, entry in artifacts.items():
         missing.append(f"{name}={source}")
         continue
     shutil.copy2(source, target)
+    # REQ-AXO-902083 — restore the build-info ALONGSIDE the binary. The forward
+    # in-place swap writes bin/<name> + bin/<name>.build-info together; a rollback
+    # that only restored the binary left bin/<name>.build-info pinned to the FAILED
+    # generation → "Artifact checksum mismatch" on the next promote. Keep the pair
+    # coherent: restore the current build-info, or drop the stale one if absent.
+    target_bi = root / "bin" / f"{name}.build-info"
+    bi = entry.get("build_info_path")
+    if bi and pathlib.Path(bi).exists():
+        shutil.copy2(bi, target_bi)
+    elif target_bi.exists():
+        target_bi.unlink()
     restored.append(name)
 print(f"rollback_bin_to_current: restored bin/* = {restored}")
 if missing:
