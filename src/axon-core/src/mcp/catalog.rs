@@ -891,6 +891,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "project": { "type": "string", "description": "Recipient project code. Default: cwd-resolved." },
                         "mode": { "type": "string", "enum": ["unread", "since", "all"], "description": "Default unread." },
                         "since_id": { "type": "integer", "description": "Floor id for mode=since." },
+                        "context_id": { "type": "string", "description": "MBX-4 — filter to one thread (non-destructive view, cursor not advanced)." },
+                        "search": { "type": "string", "description": "MBX-4 — full-text search over subject+body (non-destructive view)." },
                         "limit": { "type": "integer", "description": "Max messages (1-100, default 20)." }
                     },
                     "required": []

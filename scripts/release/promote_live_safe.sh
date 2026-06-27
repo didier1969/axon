@@ -331,6 +331,15 @@ promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
 # step-6 qualify-mcp, not by an old-vs-new binary diff. (clean-win: removed the
 # false "md5 unchanged → copy may have failed" warning.)
 
+# --- Step 5b: apply canonical DDL to live (REQ-AXO-902127) ---
+# The in-place restart (step 5) does NOT re-run the canonical DDL bootstrap, so a
+# promote that ADDS/changes a db/ddl/*.sql file leaves axon_live without it (real
+# incident: MBX-1's axon.mailbox_message was missing post-promote, needed a manual
+# psql). The DDL files are idempotent (CREATE … IF NOT EXISTS) → applying every
+# promote is a few-ms no-op when warm, and guarantees the live DB matches db/ddl/.
+# Runs in devenv so psql resolves.
+run_step 5b apply_ddl_live bash -lc "cd '$ROOT_DIR' && devenv shell --no-reload --no-tui -- bash -lc 'source scripts/lib/ensure-runtime.sh && apply_canonical_ddl live'"
+
 # --- Step 6: qualify ---
 if [[ "$SKIP_QUALIFY" -ne 1 ]]; then
   ensure_head_stable

@@ -48,10 +48,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS mailbox_message_idem_idx
 CREATE INDEX IF NOT EXISTS mailbox_message_inbox_idx
     ON axon.mailbox_message (to_project, id);
 
--- MBX-4 — thread retrieval (conversation_id). FTS over subject+body is added with
--- the searchable-threads slice; the btree already serves exact-thread fetch.
+-- MBX-4 — thread retrieval (conversation_id) + FTS over subject+body for
+-- searchable threads. The btree serves exact-thread fetch; the GIN index serves
+-- `inbox_read(search=…)` full-text queries.
 CREATE INDEX IF NOT EXISTS mailbox_message_thread_idx
     ON axon.mailbox_message (context_id, id);
+CREATE INDEX IF NOT EXISTS mailbox_message_fts_idx
+    ON axon.mailbox_message USING gin (to_tsvector('simple', subject || ' ' || body_dense));
 
 -- MBX-2 — per-recipient read cursor. `unread` = messages to=project with
 -- id > last_read_id. Advanced (monotonically) when the recipient reads.

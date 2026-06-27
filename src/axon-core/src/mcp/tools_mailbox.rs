@@ -174,10 +174,17 @@ impl McpServer {
         let mode = args.get("mode").and_then(Value::as_str).unwrap_or("unread");
         let since = args.get("since_id").and_then(Value::as_i64);
 
-        let floor = if let Some(s) = since {
-            s
-        } else if mode == "all" {
+        // REQ-AXO-902116 (MBX-4) — searchable threads. `context_id` filters to one
+        // thread; `search` is FTS over subject+body. Both are NON-DESTRUCTIVE views
+        // across the whole inbox (ignore the cursor, never advance it).
+        let thread = args.get("context_id").and_then(Value::as_str).filter(|s| !s.is_empty());
+        let search = args.get("search").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+        let view_only = thread.is_some() || search.is_some();
+
+        let floor = if view_only || mode == "all" {
             -1
+        } else if let Some(s) = since {
+            s
         } else {
             self.graph_store
                 .query_single_i64_writer(&format!(
@@ -189,11 +196,23 @@ impl McpServer {
                 .unwrap_or(0)
         };
 
+        let mut filters = String::new();
+        if let Some(t) = thread {
+            filters.push_str(&format!(" AND context_id = '{}'", esc(t)));
+        }
+        if let Some(q) = search {
+            filters.push_str(&format!(
+                " AND to_tsvector('simple', subject || ' ' || body_dense) @@ plainto_tsquery('simple', '{}')",
+                esc(q)
+            ));
+        }
+
         let sql = format!(
             "SELECT id, message_id, context_id, from_project, kind, idempotency_key, in_reply_to, subject, body_dense, sig, created_at \
-             FROM axon.mailbox_message WHERE to_project='{}' AND id > {} ORDER BY id ASC LIMIT {}",
+             FROM axon.mailbox_message WHERE to_project='{}' AND id > {}{} ORDER BY id ASC LIMIT {}",
             esc(&project),
             floor,
+            filters,
             limit
         );
         let rows: Vec<Vec<Value>> = match self.graph_store.query_json(&sql) {
@@ -229,9 +248,9 @@ impl McpServer {
             }));
         }
 
-        // Advance the read cursor only in `unread` mode (so `since`/`all` are
-        // non-destructive views). UPSERT, monotonic.
-        if mode == "unread" && max_id > floor {
+        // Advance the read cursor only in `unread` mode (so `since`/`all`/search/
+        // thread are non-destructive views). UPSERT, monotonic.
+        if mode == "unread" && !view_only && max_id > floor {
             let _ = self.graph_store.execute(&format!(
                 "INSERT INTO axon.mailbox_cursor (project_code, last_read_id, updated_at) \
                  VALUES ('{p}', {mid}, now()) \
