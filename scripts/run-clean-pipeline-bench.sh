@@ -42,12 +42,33 @@ if pgrep -f "bin/axon-indexer" >/dev/null 2>&1; then
   exit 5
 fi
 
-echo "### PRE-FLIGHT 2 — GPU must be near-idle"
+echo "### PRE-FLIGHT 2 — GPU must be near-idle (NVML telemetry, REQ-AXO-902085)"
+# In-process NVML probe via scripts/lib/gpu_nvml.py (no nvidia-smi subprocess /
+# CLI parsing — feedback_nvml_not_nvidia_smi). Gate on AXON_OPT_MAX_VRAM_USED_MB
+# (default 800MiB). If NVML is unavailable we WARN and continue (a truly busy
+# GPU still surfaces downstream as a TensorRT contention failure).
 if [ "$MODE" = "--gpu" ]; then
-  gpu_mem=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | tr -d '[:space:]')
-  echo "    gpu_mem_used=${gpu_mem}MiB"
-  if [ "${gpu_mem:-9999}" -gt 800 ]; then
-    echo "ABORT: GPU not idle (${gpu_mem}MiB). Stop competing TensorRT engines."
+  MAX_VRAM_USED_MB="${AXON_OPT_MAX_VRAM_USED_MB:-800}"
+  python3 - "$ROOT" "$MAX_VRAM_USED_MB" <<'PY'
+import os, sys
+root, threshold = sys.argv[1], int(sys.argv[2])
+sys.path.insert(0, os.path.join(root, "scripts", "lib"))
+try:
+    from gpu_nvml import gpu_status
+except Exception as exc:  # noqa: BLE001
+    print("    gpu telemetry import failed (%s) — skipping idle gate" % type(exc).__name__)
+    sys.exit(2)
+st = gpu_status()
+if not st.get("available"):
+    print("    gpu telemetry unavailable (%s) — skipping idle gate" % st.get("error", "unknown"))
+    sys.exit(2)
+used = int(st.get("memory_used_mb") or 0)
+print("    gpu_mem_used=%dMiB threshold=%dMiB" % (used, threshold))
+sys.exit(4 if used > threshold else 0)
+PY
+  gpu_gate_rc=$?
+  if [ "$gpu_gate_rc" -eq 4 ]; then
+    echo "ABORT: GPU not idle (> ${MAX_VRAM_USED_MB}MiB used). Stop competing TensorRT engines."
     exit 4
   fi
 fi

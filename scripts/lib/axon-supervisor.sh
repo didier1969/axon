@@ -34,6 +34,17 @@ axon_pc_port_for_instance() {
     esac
 }
 
+# axon_brain_port_for_instance <instance_kind> — canonical axon-brain MCP/SQL
+# HTTP port. Mirrors AXON_BRAIN_PORT in axon-instance.sh. SINGLE SOURCE OF TRUTH
+# for the embed-provider auto-release (REQ-AXO-234 layer B).
+axon_brain_port_for_instance() {
+    case "${1:-live}" in
+        live) printf '44129\n' ;;
+        dev)  printf '44139\n' ;;
+        *)    printf '44129\n' ;;
+    esac
+}
+
 # axon_pc_config_path <project_root> <instance_kind> — absolute path to the
 # process-compose config for this instance. Used to scope pgrep matches so we
 # only ever touch a supervisor launched against THIS repo's config.
@@ -262,6 +273,51 @@ _axon_sup_warn() {
 }
 
 # ---------------------------------------------------------------------------
+# REQ-AXO-234 layer B — auto-release of the live brain's query-embed lane.
+#
+# Pausing the live indexer (layer A) stops the BATCH GPU lane, but the brain
+# keeps the CUDA EP warm for punctual query-embeds (`query`/`why`/
+# `retrieve_context`). On a single-GPU host that residual lane still contends
+# with a dev bench / dev-GPU session. These best-effort helpers flip the live
+# brain's query-embed provider to `cpu` on a dev GPU start (releasing the GPU)
+# and restore the previous override on the dev stop. The brain rebuilds its
+# query model lazily on the next request — no restart. Both calls are
+# best-effort: a DOWN brain only logs a warning, never aborts the caller.
+# ---------------------------------------------------------------------------
+
+# _axon_live_embed_provider_get <brain_port> — echo the brain's current
+# query-embed override (unset|cpu|gpu|auto). Empty stdout on any failure.
+_axon_live_embed_provider_get() {
+    local brain_port="${1:?brain port required}"
+    local resp
+    resp="$(curl -fsS --max-time 5 -X POST "http://127.0.0.1:${brain_port}/mcp" \
+        -H "Content-Type: application/json" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"embed_provider","arguments":{"action":"get"}}}' \
+        2>/dev/null)" || return 0
+    printf '%s' "$resp" | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    ov = doc.get("result", {}).get("data", {}).get("override")
+    if isinstance(ov, str) and ov:
+        print(ov)
+except Exception:
+    pass
+' 2>/dev/null || true
+}
+
+# _axon_live_embed_provider_set <brain_port> <cpu|gpu|auto> — best-effort flip
+# of the brain's query-embed provider override. rc 0 even on transport failure.
+_axon_live_embed_provider_set() {
+    local brain_port="${1:?brain port required}"
+    local provider="${2:?provider required}"
+    curl -fsS --max-time 5 -X POST "http://127.0.0.1:${brain_port}/mcp" \
+        -H "Content-Type: application/json" \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"embed_provider\",\"arguments\":{\"action\":\"set\",\"provider\":\"${provider}\"}}}" \
+        >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
 # REQ-AXO-234 — single-GPU exclusion automation (DEC-AXO-067, PIL-AXO-004).
 #
 # On a single-GPU host the live indexer and a dev `--indexer-full`/`-vector`
@@ -289,16 +345,30 @@ axon_auto_pause_live_indexer_for_dev() {
     [[ "${AXON_INSTANCE_KIND:-}" == "dev" ]] || return 0
     [[ "$runtime_mode" == "indexer_full" || "$runtime_mode" == "indexer_vector" ]] || return 0
 
-    local live_pc_port marker
+    local live_pc_port live_brain_port marker prev_provider
     live_pc_port="$(axon_pc_port_for_instance live)"
+    live_brain_port="$(axon_brain_port_for_instance live)"
     marker="$(axon_live_pause_marker_path "$project_root")"
 
     if axon_supervisor_healthy "$live_pc_port" && [[ -x "$pc_bin" ]]; then
         _axon_sup_log "[auto-pause] dev GPU start → pausing live indexer (single-GPU exclusion DEC-AXO-067, REQ-AXO-234)"
         "$pc_bin" process stop axon-indexer -p "$live_pc_port" 2>/dev/null || true
+
+        # REQ-AXO-234 layer B — also release the brain's punctual query-embed
+        # lane so it stops contending for the GPU. Record the PREVIOUS override
+        # for an exact restore on resume; flip to cpu (best-effort, brain rebuilds
+        # its query model lazily on the next request — no restart).
+        prev_provider="$(_axon_live_embed_provider_get "$live_brain_port")"
+        [[ -n "$prev_provider" ]] || prev_provider="unset"
+        if _axon_live_embed_provider_set "$live_brain_port" cpu; then
+            _axon_sup_log "[auto-pause] live query-embed lane → cpu (was \`$prev_provider\`), GPU released for dev (REQ-AXO-234 layer B)"
+        else
+            _axon_sup_warn "[auto-pause] could not flip live query-embed provider to cpu (brain unreachable) — indexer pause still in effect"
+        fi
+
         mkdir -p "$(dirname "$marker")"
-        printf 'paused_by=dev\npaused_at=%s\ndev_pid=%s\nlive_pc_port=%s\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$live_pc_port" >"$marker"
+        printf 'paused_by=dev\npaused_at=%s\ndev_pid=%s\nlive_pc_port=%s\nlive_brain_port=%s\nprev_embed_provider=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$live_pc_port" "$live_brain_port" "$prev_provider" >"$marker"
     else
         # No live supervisor (or no pc binary) — nothing to pause. Drop any stale
         # marker so a later dev stop does not spuriously resume a non-paused live.
@@ -316,14 +386,34 @@ axon_resume_live_indexer_after_dev() {
     local pc_bin="${2:-}"
     [[ "${AXON_INSTANCE_KIND:-}" == "dev" ]] || return 0
 
-    local marker live_pc_port
+    local marker live_pc_port live_brain_port prev_provider restore_provider
     marker="$(axon_live_pause_marker_path "$project_root")"
     [[ -f "$marker" ]] || return 0
     live_pc_port="$(axon_pc_port_for_instance live)"
 
+    # Recover the brain port + previous query-embed override recorded at pause
+    # time. Fall back to canonical defaults for markers written before layer B.
+    live_brain_port="$(sed -n 's/^live_brain_port=//p' "$marker" 2>/dev/null | head -n1)"
+    [[ -n "$live_brain_port" ]] || live_brain_port="$(axon_brain_port_for_instance live)"
+    prev_provider="$(sed -n 's/^prev_embed_provider=//p' "$marker" 2>/dev/null | head -n1)"
+
     if axon_supervisor_healthy "$live_pc_port" && [[ -x "$pc_bin" ]]; then
         _axon_sup_log "[auto-resume] dev stop → resuming live indexer paused for the GPU session (REQ-AXO-234)"
         "$pc_bin" process start axon-indexer -p "$live_pc_port" 2>/dev/null || true
+
+        # REQ-AXO-234 layer B — restore the brain's query-embed provider. `set`
+        # only accepts cpu|gpu|auto, so an `unset`/missing prior maps to `auto`
+        # (GPU-when-free), the closest restore of the no-override default.
+        if [[ -n "$prev_provider" && "$prev_provider" != "unset" ]]; then
+            restore_provider="$prev_provider"
+        else
+            restore_provider="auto"
+        fi
+        if _axon_live_embed_provider_set "$live_brain_port" "$restore_provider"; then
+            _axon_sup_log "[auto-resume] live query-embed lane restored → \`$restore_provider\` (REQ-AXO-234 layer B)"
+        else
+            _axon_sup_warn "[auto-resume] could not restore live query-embed provider to \`$restore_provider\` (brain unreachable)"
+        fi
     else
         _axon_sup_warn "[auto-resume] live supervisor down — clearing pause marker without resume (live starts its own indexer)"
     fi
