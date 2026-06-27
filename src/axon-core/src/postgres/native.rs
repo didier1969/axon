@@ -223,9 +223,19 @@ impl NativePgCtx {
             };
             // SET LOCAL only takes effect inside a transaction; it reverts at
             // COMMIT/ROLLBACK. ef_search is a literal in [10,1000] (no inject).
+            // REQ-AXO-902110 — `hnsw.iterative_scan = relaxed_order` (pgvector 0.8+)
+            // is THE state-of-the-art primitive for FILTERED vector search: it keeps
+            // scanning the index until enough rows pass the query's WHERE/JOIN filter,
+            // regardless of how small the in-scope subset is relative to the whole
+            // multi-project corpus. Without it, a scope that is a few % of the corpus
+            // is over-filtered to ~0 rows (reproduced on contradiction_check). Bounded
+            // by `max_scan_tuples` so a pathological filter can't scan the whole index.
             if let Err(e) = tx
                 .batch_execute(&format!(
-                    "SET LOCAL enable_seqscan = off; SET LOCAL hnsw.ef_search = {ef}"
+                    "SET LOCAL enable_seqscan = off; \
+                     SET LOCAL hnsw.ef_search = {ef}; \
+                     SET LOCAL hnsw.iterative_scan = relaxed_order; \
+                     SET LOCAL hnsw.max_scan_tuples = 20000"
                 ))
                 .await
             {
@@ -442,8 +452,14 @@ impl NativePgCtx {
             .transaction()
             .await
             .map_err(|e| PgError::from_tokio("ann_begin", sql, &e))?;
+        // REQ-AXO-902110 — iterative_scan for correct FILTERED vector search (see
+        // run_ann_query_json). Mirrors the sync path so every ANN caller is robust
+        // to a small in-scope fraction of the corpus.
         tx.batch_execute(&format!(
-            "SET LOCAL enable_seqscan = off; SET LOCAL hnsw.ef_search = {ef}"
+            "SET LOCAL enable_seqscan = off; \
+             SET LOCAL hnsw.ef_search = {ef}; \
+             SET LOCAL hnsw.iterative_scan = relaxed_order; \
+             SET LOCAL hnsw.max_scan_tuples = 20000"
         ))
         .await
         .map_err(|e| PgError::from_tokio("ann_set_local", sql, &e))?;

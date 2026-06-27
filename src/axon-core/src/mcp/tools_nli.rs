@@ -78,6 +78,11 @@ impl McpServer {
                 "degraded",
             ));
         };
+        // REQ-AXO-902110 instrumentation (Nexus #29): surface the candidate vector
+        // shape so a future "0 passage" is self-diagnosing (degenerate embed vs
+        // empty scope vs over-filtering).
+        let embed_dim = emb.len();
+        let embed_norm = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
         let vec_lit = match crate::postgres::vector::vector_literal(&emb) {
             Ok(s) => s,
             Err(e) => return Some(err_json(format!("vector literal: {e}"), "degraded")),
@@ -97,10 +102,31 @@ impl McpServer {
             vec = vec_lit,
             pool = pool
         );
-        let rows: Vec<Vec<Value>> = match self.graph_store.query_json(&ann_sql) {
+        // REQ-AXO-902110 — route through the SAME shared ANN path the (working)
+        // code_band of retrieve_context_layered uses (`query_ann_json`). That path
+        // now sets `hnsw.iterative_scan = relaxed_order` (pgvector 0.8+), which is
+        // the real fix: it keeps scanning until enough IN-SCOPE rows survive the
+        // JOIN filter, regardless of how small the scope is vs the whole corpus.
+        // Before, the raw `query_json` used the default ef_search (40) HNSW scan →
+        // global neighbours → in-scope filter decimated them to ~0 ("shortlist
+        // empty" on a healthy 17k-chunk corpus). ef_search here is just first-pass
+        // breadth; iterative_scan handles the tail.
+        let ef_search = (pool as u32).max(40).min(1000);
+        let rows: Vec<Vec<Value>> = match self.graph_store.query_ann_json(&ann_sql, ef_search) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(e) => return Some(err_json(format!("ANN shortlist failed: {e}"), "degraded")),
         };
+        // Instrumentation: in-scope embedded-symbol count, so "shortlist empty"
+        // distinguishes a truly empty scope from an over-filtered ANN (Nexus #29).
+        let scope_chunk_count = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.ChunkEmbedding ce \
+                 JOIN ist.Chunk c ON c.id = ce.chunk_id \
+                     AND c.project_code = '{proj}' AND c.source_type = 'symbol'",
+                proj = proj
+            ))
+            .unwrap_or(-1);
 
         // 3. NLI re-rank: judge each passage (premise) vs the candidate (hypothesis).
         //    Bounded by a wall-clock budget so a slow provider (CPU ≈ 5s/pair) or
@@ -180,8 +206,8 @@ impl McpServer {
 
         let report = if rows.is_empty() {
             format!(
-                "### 🧪 contradiction_check\n\nverdict=**inconclusive** — 0 passage retrieved from scope `{}` (ANN shortlist empty: the scope has no embedded chunks, or the candidate failed to embed). This is NOT a clean bill of health — nothing was checked.",
-                project
+                "### 🧪 contradiction_check\n\nverdict=**inconclusive** — 0 passage retrieved from scope `{}`. Diagnostic: {} embedded symbol-chunk(s) exist in scope, candidate embed dim={} norm={:.3}, ef_search={}. (count>0 + valid embed ⇒ ANN/over-filtering, not an empty scope or a failed embed.) NOT a clean bill of health — nothing was checked.",
+                project, scope_chunk_count, embed_dim, embed_norm, ef_search
             )
         } else {
             let trunc_note = if truncated {
@@ -213,10 +239,15 @@ impl McpServer {
                 "candidate_preview": candidate.chars().take(160).collect::<String>(),
                 "scope": {
                     "project": project,
+                    "project_resolved": project,
                     "passages_shortlisted": rows.len(),
                     "passages_judged": judged,
                     "shortlist_pool": rows.len(),
                     "judged": judged,
+                    "scope_chunk_count": scope_chunk_count,
+                    "candidate_embed_dim": embed_dim,
+                    "candidate_embed_norm": embed_norm,
+                    "ef_search": ef_search,
                     "truncated": truncated,
                     "budget_ms": budget_ms,
                     "threshold": threshold
