@@ -255,6 +255,166 @@ pub fn next_action(f: &ReleaseFacts) -> Option<String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stop FSM (REQ-AXO-902111 — stop-verdict slice).
+//
+// The stop verdict must live where it SURVIVES the thing being stopped: in
+// `axonctl` (the supervisor, which outlives the brain it tears down), NOT in an
+// MCP tool of the brain (which dies mid-answer the moment its own listener is
+// reaped). So the gates live here as pure predicates and `axonctl::cmd_stop`
+// populates `StopFacts` from `find_instance_all_pids` + a PC-daemon probe (the
+// wiring step is orchestrator-side; see WIRING.md). Same shape as the release
+// gates above: facts in, `Vec<Gate>` + derived `phase`/`next_action` out.
+// ---------------------------------------------------------------------------
+
+/// Facts about an in-flight stop, collected by `axonctl` AFTER it has emitted the
+/// teardown signals. All scoped to the role being stopped (`stop_role`): "all" for
+/// a full teardown, or a single role ("brain"/"indexer") for a role-scoped stop
+/// that intentionally preserves the other role (PIL-AXO-004 split deployment).
+#[derive(Debug, Clone, Default)]
+pub struct StopFacts {
+    /// Which role we asked to stop: "all" | "brain" | "indexer".
+    pub stop_role: String,
+    /// Live PIDs still bound to the canonical listeners for `stop_role` (post-SIGTERM).
+    /// A non-empty set means a process survived the teardown = orphaned.
+    pub canonical_listeners: Vec<i32>,
+    /// The brain MCP port is still bound (may be kernel TIME_WAIT draining even when
+    /// `canonical_listeners` is already empty).
+    pub brain_port_bound: bool,
+    /// The supervisor (PC-daemon / axonctl supervise loop) is still alive. For a full
+    /// teardown this is an orphan (it will respawn the role we killed); for a
+    /// role-scoped stop it is expected (it keeps the surviving role up).
+    pub supervisor_healthy: bool,
+    /// Writer locks still held on disk (e.g. IST writer lock files) for `stop_role`.
+    pub writer_locks_held: Vec<String>,
+    /// Control sockets (telemetry/mcp) still present on disk.
+    pub sockets_present: bool,
+    /// The indexer heartbeat is still fresh (draining indicator when the indexer is
+    /// the role being stopped).
+    pub indexer_heartbeat_fresh: bool,
+}
+
+impl StopFacts {
+    fn is_full_teardown(&self) -> bool {
+        self.stop_role.eq_ignore_ascii_case("all")
+    }
+}
+
+/// Evaluate the stop gates (pure predicates over `StopFacts`).
+/// `no_canonical_listeners` + `writer_locks_released` + `sockets_cleaned` are
+/// universal; `supervisor_quiesced` is N/A for a role-scoped stop (the supervisor
+/// stays up for the surviving role by design).
+pub fn evaluate_stop_gates(f: &StopFacts) -> Vec<Gate> {
+    let full = f.is_full_teardown();
+    vec![
+        Gate {
+            name: "no_canonical_listeners",
+            pass: f.canonical_listeners.is_empty(),
+            detail: if f.canonical_listeners.is_empty() {
+                format!("no canonical listeners left for role '{}'", f.stop_role)
+            } else {
+                format!(
+                    "listeners survived for role '{}' (pids={:?})",
+                    f.stop_role, f.canonical_listeners
+                )
+            },
+        },
+        Gate {
+            name: "supervisor_quiesced",
+            // N/A unless this is a full teardown: a role-scoped stop intentionally
+            // leaves the supervisor running for the surviving role (PIL-AXO-004).
+            pass: !full || !f.supervisor_healthy,
+            detail: if !full {
+                format!(
+                    "role-scoped stop ('{}') — supervisor stays up for the other role; gate N/A",
+                    f.stop_role
+                )
+            } else if f.supervisor_healthy {
+                "supervisor still healthy — it will respawn the role just killed".to_string()
+            } else {
+                "supervisor quiesced".to_string()
+            },
+        },
+        Gate {
+            name: "writer_locks_released",
+            pass: f.writer_locks_held.is_empty(),
+            detail: if f.writer_locks_held.is_empty() {
+                "no writer locks held".to_string()
+            } else {
+                format!("writer locks still held: {}", f.writer_locks_held.join(", "))
+            },
+        },
+        Gate {
+            name: "sockets_cleaned",
+            pass: !f.sockets_present,
+            detail: if f.sockets_present {
+                "control sockets still present on disk".to_string()
+            } else {
+                "control sockets cleaned".to_string()
+            },
+        },
+    ]
+}
+
+/// Derive the stop phase (the projection of the stop FSM state).
+///
+/// Precedence: orphaned (a live listener survived OR a full-teardown supervisor is
+/// still alive) > stopping (listeners gone but ports/heartbeat draining or cleanup
+/// pending) > partial (role-scoped success, the other role preserved by design) /
+/// stopped (full teardown, everything clean).
+pub fn stop_phase(f: &StopFacts) -> &'static str {
+    let full = f.is_full_teardown();
+    // Orphaned: a real listener PID survived the teardown, or — on a full teardown —
+    // the supervisor is still alive and will respawn what we just killed.
+    if !f.canonical_listeners.is_empty() || (full && f.supervisor_healthy) {
+        return "orphaned";
+    }
+    // Live listeners are gone. Still draining (kernel port TIME_WAIT / heartbeat TTL)
+    // or cleanup not yet done?
+    let draining = f.brain_port_bound
+        || f.indexer_heartbeat_fresh
+        || f.sockets_present
+        || !f.writer_locks_held.is_empty();
+    if draining {
+        return "stopping";
+    }
+    // Fully clean. A role-scoped stop that left the other role alive by design is a
+    // first-class success (PIL-AXO-004), reported distinctly from a full teardown.
+    if full {
+        "stopped"
+    } else {
+        "partial"
+    }
+}
+
+/// The corrective action that closes an orphaned stop, or `None` when the stop
+/// reached a terminal good state (stopped/partial) or is merely still draining.
+pub fn stop_next_action(f: &StopFacts) -> Option<String> {
+    if stop_phase(f) != "orphaned" {
+        return None;
+    }
+    // Supervisor first: killing the listeners is futile while a live supervisor will
+    // respawn them.
+    if f.is_full_teardown() && f.supervisor_healthy {
+        return Some(
+            "supervisor still alive — it will respawn the role you killed. Reap the supervisor and re-run the teardown with --hard (`axonctl stop --hard`).".to_string(),
+        );
+    }
+    if !f.canonical_listeners.is_empty() {
+        let pids = f
+            .canonical_listeners
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Some(format!(
+            "listeners survived SIGTERM for role '{}' — kill them by PID and re-verify: `kill -9 {}`.",
+            f.stop_role, pids
+        ));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +517,78 @@ mod tests {
         let gates = evaluate_gates(&f);
         assert!(gates.iter().any(|g| g.name == "qualification_passed" && !g.pass));
         assert!(gates.iter().any(|g| g.name == "manifest_runtime_match" && g.pass));
+    }
+
+    // --- Stop FSM ---------------------------------------------------------
+
+    /// A fully clean full teardown: nothing left to do.
+    fn stop_clean_all() -> StopFacts {
+        StopFacts {
+            stop_role: "all".to_string(),
+            canonical_listeners: vec![],
+            brain_port_bound: false,
+            supervisor_healthy: false,
+            writer_locks_held: vec![],
+            sockets_present: false,
+            indexer_heartbeat_fresh: false,
+        }
+    }
+
+    #[test]
+    fn stop_clean_full_teardown_is_stopped() {
+        let f = stop_clean_all();
+        assert_eq!(stop_phase(&f), "stopped");
+        assert!(evaluate_stop_gates(&f).iter().all(|g| g.pass));
+        assert!(stop_next_action(&f).is_none());
+    }
+
+    #[test]
+    fn stop_orphaned_when_supervisor_alive_on_full_teardown() {
+        let mut f = stop_clean_all();
+        f.supervisor_healthy = true;
+        assert_eq!(stop_phase(&f), "orphaned");
+        let gates = evaluate_stop_gates(&f);
+        assert!(gates.iter().any(|g| g.name == "supervisor_quiesced" && !g.pass));
+        // Supervisor takes priority: the action is reap + --hard, not kill-by-pid.
+        let action = stop_next_action(&f).unwrap();
+        assert!(action.contains("--hard"));
+        assert!(action.contains("supervisor"));
+    }
+
+    #[test]
+    fn stop_orphaned_when_listeners_survive() {
+        let mut f = stop_clean_all();
+        f.canonical_listeners = vec![4242, 4243];
+        assert_eq!(stop_phase(&f), "orphaned");
+        let gates = evaluate_stop_gates(&f);
+        assert!(gates.iter().any(|g| g.name == "no_canonical_listeners" && !g.pass));
+        let action = stop_next_action(&f).unwrap();
+        assert!(action.contains("kill -9 4242 4243"));
+    }
+
+    #[test]
+    fn stop_partial_when_role_scoped_supervisor_is_na() {
+        // Role-scoped stop of the indexer: the supervisor stays up for the brain by
+        // design (PIL-AXO-004), so supervisor_quiesced is N/A and the verdict is a
+        // first-class success (partial), NOT orphaned.
+        let mut f = stop_clean_all();
+        f.stop_role = "indexer".to_string();
+        f.supervisor_healthy = true;
+        assert_eq!(stop_phase(&f), "partial");
+        let gates = evaluate_stop_gates(&f);
+        assert!(gates.iter().any(|g| g.name == "supervisor_quiesced" && g.pass));
+        assert!(gates.iter().all(|g| g.pass));
+        assert!(stop_next_action(&f).is_none());
+    }
+
+    #[test]
+    fn stop_stopping_while_draining() {
+        // Listeners gone, but the kernel port is still in TIME_WAIT and sockets not
+        // yet unlinked — transient, no corrective action.
+        let mut f = stop_clean_all();
+        f.brain_port_bound = true;
+        f.sockets_present = true;
+        assert_eq!(stop_phase(&f), "stopping");
+        assert!(stop_next_action(&f).is_none());
     }
 }
