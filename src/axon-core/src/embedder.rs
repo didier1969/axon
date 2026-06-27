@@ -663,6 +663,12 @@ pub(crate) fn embed_texts_with_breakdown_ort(
 
 fn effective_provider_request_for_lane(lane: &str) -> String {
     let normalized_lane = lane.trim().to_ascii_lowercase();
+    // REQ-AXO-902134 — the CPU fallback query lane is pinned to CPU regardless of
+    // GPU presence / env / override, so the fallback worker never re-grabs the
+    // very GPU it exists to relieve.
+    if normalized_lane == "query_cpu_fallback" {
+        return "cpu".to_string();
+    }
     let runtime_mode = AxonRuntimeMode::from_env();
     let canonical_provider = canonical_embedding_provider_request_for_mode(
         runtime_mode,
@@ -811,9 +817,23 @@ impl SemanticWorkerPool {
     }
 
     pub(super) fn query_worker_loop(worker_idx: usize, query_rx: Receiver<QueryEmbeddingRequest>) {
+        Self::query_worker_loop_lane("query", worker_idx, query_rx);
+    }
+
+    /// REQ-AXO-902134 — `lane`-parametrized query worker loop. The primary lane
+    /// is `"query"` (GPU when available) ; the always-CPU fallback worker runs
+    /// the same loop pinned to `"query_cpu_fallback"`. Only the primary lane
+    /// drives the canonical Embedder readiness subsystem + the self-reported
+    /// query-worker compute label — the fallback must not clobber them.
+    pub(super) fn query_worker_loop_lane(
+        lane: &'static str,
+        worker_idx: usize,
+        query_rx: Receiver<QueryEmbeddingRequest>,
+    ) {
+        let is_primary_lane = lane == "query";
         info!(
-            "Semantic Query Worker [{}]: Initializing BGE-Large Model (1024d) in isolated thread...",
-            worker_idx
+            "Semantic Query Worker [{}] (lane={}): Initializing BGE-Large Model (1024d) in isolated thread...",
+            worker_idx, lane
         );
 
         // REQ-AXO-901945 — idle unload (long T_idle). The CPU query model
@@ -827,17 +847,20 @@ impl SemanticWorkerPool {
         // AXON_QUERY_EMBED_IDLE_SECS (default 1200 = 20 min). 0 disables.
         let idle_timeout = query_embed_idle_timeout();
 
-        let Some(model) = Self::build_text_embedding_model("query", worker_idx) else {
+        let Some(model) = Self::build_text_embedding_model(lane, worker_idx) else {
             // REQ-AXO-098 — model load failed. Flip the embedder
             // subsystem to Failed so the readiness contract reflects
             // the broken state instead of letting it remain whatever
-            // initial value the registry held.
-            crate::runtime_readiness::report_subsystem_state(
-                crate::runtime_readiness::Subsystem::Embedder,
-                crate::runtime_readiness::SubsystemState::Failed {
-                    reason: "model_load_failed".to_string(),
-                },
-            );
+            // initial value the registry held. Fallback lane stays
+            // silent — it must not flip the canonical readiness.
+            if is_primary_lane {
+                crate::runtime_readiness::report_subsystem_state(
+                    crate::runtime_readiness::Subsystem::Embedder,
+                    crate::runtime_readiness::SubsystemState::Failed {
+                        reason: "model_load_failed".to_string(),
+                    },
+                );
+            }
             return;
         };
 
@@ -847,10 +870,12 @@ impl SemanticWorkerPool {
         // batch_embed's existing error path, not through the
         // subsystem state. An idle-drop below stays Ready: it wakes
         // on demand, it is not a failure.
-        crate::runtime_readiness::report_subsystem_state(
-            crate::runtime_readiness::Subsystem::Embedder,
-            crate::runtime_readiness::SubsystemState::Ready,
-        );
+        if is_primary_lane {
+            crate::runtime_readiness::report_subsystem_state(
+                crate::runtime_readiness::Subsystem::Embedder,
+                crate::runtime_readiness::SubsystemState::Ready,
+            );
+        }
 
         let mut slot: Option<TextEmbedding> = Some(model);
         // REQ-AXO-901984 — track the provider-override reload generation so a
@@ -886,18 +911,20 @@ impl SemanticWorkerPool {
                             "Semantic Query Worker [{}]: waking — reloading BGE-Large model after idle drop",
                             worker_idx
                         );
-                        match Self::build_text_embedding_model("query", worker_idx) {
+                        match Self::build_text_embedding_model(lane, worker_idx) {
                             Some(m) => slot = Some(m),
                             None => {
                                 // Reload failed on wake — surface it and
                                 // bail so the request reply closes rather
                                 // than hanging on a dead worker.
-                                crate::runtime_readiness::report_subsystem_state(
-                                    crate::runtime_readiness::Subsystem::Embedder,
-                                    crate::runtime_readiness::SubsystemState::Failed {
-                                        reason: "model_reload_on_wake_failed".to_string(),
-                                    },
-                                );
+                                if is_primary_lane {
+                                    crate::runtime_readiness::report_subsystem_state(
+                                        crate::runtime_readiness::Subsystem::Embedder,
+                                        crate::runtime_readiness::SubsystemState::Failed {
+                                            reason: "model_reload_on_wake_failed".to_string(),
+                                        },
+                                    );
+                                }
                                 drop(request); // closes reply_rx → caller gets Disconnected
                                 return;
                             }
@@ -1035,6 +1062,46 @@ fn register_query_embedding_sender(sender: Sender<QueryEmbeddingRequest>) {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
     *slot = Some(sender);
+}
+
+/// REQ-AXO-902134 — bounded queue for the always-CPU fallback query worker.
+const CPU_FALLBACK_QUERY_QUEUE_DEPTH: usize = 8;
+static QUERY_EMBEDDING_FALLBACK_SENDER: OnceLock<Mutex<Option<Sender<QueryEmbeddingRequest>>>> =
+    OnceLock::new();
+static CPU_FALLBACK_WORKER_SPAWNED: std::sync::Once = std::sync::Once::new();
+
+fn cpu_fallback_query_sender_slot() -> &'static Mutex<Option<Sender<QueryEmbeddingRequest>>> {
+    QUERY_EMBEDDING_FALLBACK_SENDER.get_or_init(|| Mutex::new(None))
+}
+
+fn current_cpu_fallback_query_sender() -> Option<Sender<QueryEmbeddingRequest>> {
+    cpu_fallback_query_sender_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+}
+
+/// REQ-AXO-902134 — spawn (once) the always-CPU fallback query worker. It runs
+/// the same `query_worker_loop_lane` as the primary worker but pinned to the
+/// `query_cpu_fallback` lane (always CPU, never CUDA), so a punctual query embed
+/// can be served on the CPU while the indexer saturates the GPU. The model is
+/// idle-dropped like the primary worker, so the ~1.3 GB CPU model is only
+/// resident while queries actually arrive under GPU pressure — and never in the
+/// common case (GPU idle → primary lane serves everything).
+fn ensure_cpu_fallback_query_worker() {
+    CPU_FALLBACK_WORKER_SPAWNED.call_once(|| {
+        let (tx, rx) = bounded(CPU_FALLBACK_QUERY_QUEUE_DEPTH);
+        {
+            let mut slot = cpu_fallback_query_sender_slot()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            *slot = Some(tx);
+        }
+        thread::Builder::new()
+            .name("axon-cpu-query-embed-fallback".into())
+            .spawn(move || SemanticWorkerPool::query_worker_loop_lane("query_cpu_fallback", 0, rx))
+            .expect("failed to spawn CPU fallback query embedding worker (REQ-AXO-902134)");
+    });
 }
 
 pub(super) fn env_usize(name: &str, default: usize) -> usize {
@@ -1519,12 +1586,86 @@ impl GraphStore {
     }
 }
 
-fn query_embedding_allowed(service_pressure: ServicePressure) -> bool {
-    query_embedding_allowed_for(
-        service_pressure,
-        embedding_provider_requested_is_gpu(),
+/// REQ-AXO-902134 — routing decision for a punctual query embed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryEmbedRoute {
+    /// Serve on the primary worker (GPU when available, else the in-process CPU
+    /// worker registered at boot).
+    Primary,
+    /// Serve on the always-CPU fallback worker: the query lane would use the GPU
+    /// but the GPU is under memory pressure (the indexer is vectorizing on the
+    /// same card). CPU keeps query / why / retrieve_context / practice_recall /
+    /// contradiction_check answering instead of returning "embedding paused".
+    CpuFallback,
+    /// Pause: the CPU query lane competes with the brain for CPU and the brain is
+    /// under genuine service pressure. GPU pressure never reaches here — it routes
+    /// to CpuFallback above.
+    Paused,
+}
+
+/// Pure routing decision (env-free, unit-testable). `query_on_gpu` = the query
+/// lane resolves to the CUDA EP right now ; `gpu_pressure` = VRAM is over the
+/// soft limit ; `pressure` = brain CPU/SQL/MCP service pressure.
+fn resolve_query_embed_route(
+    query_on_gpu: bool,
+    gpu_pressure: bool,
+    pressure: ServicePressure,
+) -> QueryEmbedRoute {
+    if query_on_gpu && gpu_pressure {
+        // GPU contention with the indexer vectorization lane — fall back to CPU
+        // rather than pausing (REQ-AXO-902134). The old behaviour returned a hard
+        // "embedding paused under … service pressure" error here, which broke
+        // practice_recall / contradiction_check during every active indexing
+        // window (E2E live memory, REQ-AXO-902131).
+        return QueryEmbedRoute::CpuFallback;
+    }
+    // The query lane competes for CPU only when it is NOT GPU-backed ; feed
+    // `query_on_gpu` (not the batch-lane provider) so a GPU query embed is never
+    // paused by CPU/SQL pressure (REQ-AXO-901978).
+    if query_embedding_allowed_for(pressure, query_on_gpu, gpu_pressure) {
+        QueryEmbedRoute::Primary
+    } else {
+        QueryEmbedRoute::Paused
+    }
+}
+
+/// The query lane resolves to the CUDA EP right now (GPU present + provider lib +
+/// not overridden to `cpu`). Distinct from the batch-lane
+/// `embedding_provider_requested_is_gpu` — the query lane uses the GPU even in
+/// brain_only (REQ-AXO-901978 B1).
+fn query_lane_is_gpu() -> bool {
+    effective_provider_request_for_lane("query").eq_ignore_ascii_case("cuda")
+}
+
+/// REQ-AXO-902134 — pick the worker for a punctual query embed and apply the
+/// pause gate. Under GPU memory pressure the embed is served on the always-CPU
+/// fallback worker (spawned on first need) instead of failing.
+fn select_query_embedding_sender() -> anyhow::Result<Sender<QueryEmbeddingRequest>> {
+    let pressure = service_guard::current_pressure();
+    match resolve_query_embed_route(
+        query_lane_is_gpu(),
         current_gpu_memory_pressure_active(),
-    )
+        pressure,
+    ) {
+        QueryEmbedRoute::CpuFallback => {
+            ensure_cpu_fallback_query_worker();
+            current_cpu_fallback_query_sender().ok_or_else(|| {
+                anyhow!(
+                    "MCP real-time CPU fallback embedding worker unavailable. Use structural search."
+                )
+            })
+        }
+        QueryEmbedRoute::Primary => current_query_embedding_sender().ok_or_else(|| {
+            anyhow!(
+                "{}",
+                unavailable_embedding_reason(crate::runtime_mode::AxonRuntimeMode::from_env())
+            )
+        }),
+        QueryEmbedRoute::Paused => Err(anyhow!(
+            "MCP real-time embedding paused under {:?} service pressure. Use structural search.",
+            pressure
+        )),
+    }
 }
 
 /// Decide whether the punctual query embed may run, gated on the resource it
@@ -1595,13 +1736,6 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         return Ok(results.into_iter().map(|r| r.unwrap_or_default()).collect());
     }
 
-    let pressure = service_guard::current_pressure();
-    if !query_embedding_allowed(pressure) {
-        return Err(anyhow::anyhow!(
-            "MCP real-time embedding paused under {:?} service pressure. Use structural search.",
-            pressure
-        ));
-    }
     // BGE-Large-v1.5 query prefix for optimal retrieval quality (miss texts only).
     let prefixed: Vec<String> = miss_indices
         .iter()
@@ -1613,19 +1747,12 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         })
         .collect();
 
-    // REQ-AXO-128 — under brain_only / indexer_graph the registered
-    // sender belongs to the in-process query worker spawned at boot
-    // (see cpu_query_service::spawn_brain_query_worker_if_needed).
-    // Under indexer_vector / indexer_full the sender belongs to the
-    // SemanticWorkerPool's GPU-backed worker. Either way, the routing
-    // is uniform from this function's perspective.
-    let Some(sender) = current_query_embedding_sender() else {
-        return Err(anyhow::anyhow!(
-            "{}",
-            unavailable_embedding_reason(crate::runtime_mode::AxonRuntimeMode::from_env())
-        ));
-    };
-
+    // REQ-AXO-902134 / REQ-AXO-128 — pick the worker and apply the pause gate in
+    // one place. Under GPU memory pressure (indexer vectorizing on the same card)
+    // the embed is served on the always-CPU fallback worker instead of failing ;
+    // otherwise the primary lane (GPU when available, else the in-process CPU
+    // worker spawned at boot — see cpu_query_service).
+    let sender = select_query_embedding_sender()?;
     let embedded = request_query_embedding(&sender, prefixed)?;
     for (k, &idx) in miss_indices.iter().enumerate() {
         if let Some(vector) = embedded.get(k) {
@@ -1654,19 +1781,11 @@ pub fn batch_embed_passages(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>>
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    let pressure = service_guard::current_pressure();
-    if !query_embedding_allowed(pressure) {
-        return Err(anyhow::anyhow!(
-            "SOLL passage embedding paused under {:?} service pressure. Retry the sweep later.",
-            pressure
-        ));
-    }
-    let Some(sender) = current_query_embedding_sender() else {
-        return Err(anyhow::anyhow!(
-            "{}",
-            unavailable_embedding_reason(crate::runtime_mode::AxonRuntimeMode::from_env())
-        ));
-    };
+    // REQ-AXO-902134 — same routing as the query path: a CPU fallback under GPU
+    // memory pressure. SOLL passages are part of the same punctual-embed class,
+    // so the sweep no longer hard-fails with "passage embedding paused" while the
+    // indexer vectorizes.
+    let sender = select_query_embedding_sender()?;
     request_query_embedding(&sender, texts)
 }
 

@@ -1,9 +1,10 @@
 use super::{
     build_token_aware_micro_batches, configured_embedding_max_length,
     cuda_execution_provider_dispatch, current_runtime_tuning_snapshot,
-    current_runtime_tuning_state, embedding_lane_config_from_env, embedding_model_cache_dir,
-    gpu_memory_soft_limit_mb, query_embedding_allowed_for, request_query_embedding,
-    EmbeddingLaneConfig, QueryEmbeddingRequest,
+    current_runtime_tuning_state, effective_provider_request_for_lane, embedding_lane_config_from_env,
+    embedding_model_cache_dir, gpu_memory_soft_limit_mb, query_embedding_allowed_for,
+    request_query_embedding, resolve_query_embed_route, EmbeddingLaneConfig, QueryEmbedRoute,
+    QueryEmbeddingRequest,
 };
 use crate::embedding_contract::{fastembed_model, MAX_LENGTH};
 use crate::service_guard::{ServicePressure, VectorRuntimeMetrics};
@@ -272,6 +273,69 @@ fn test_query_embedding_gpu_lane_ignores_cpu_pressure() {
         true,
         true
     ));
+}
+
+#[test]
+fn test_query_embed_route_gpu_pressure_falls_back_to_cpu() {
+    // REQ-AXO-902134 — query lane on GPU + GPU memory pressure (indexer
+    // vectorizing on the same card) routes to the CPU fallback worker instead of
+    // pausing. Holds even when CPU service pressure is Critical: the punctual
+    // embed keeps practice_recall / contradiction_check / query answering.
+    assert_eq!(
+        resolve_query_embed_route(true, true, ServicePressure::Healthy),
+        QueryEmbedRoute::CpuFallback
+    );
+    assert_eq!(
+        resolve_query_embed_route(true, true, ServicePressure::Critical),
+        QueryEmbedRoute::CpuFallback
+    );
+}
+
+#[test]
+fn test_query_embed_route_gpu_no_pressure_uses_primary_ignoring_cpu() {
+    // GPU query lane, no VRAM pressure → primary GPU worker, independent of CPU
+    // service pressure (REQ-AXO-901978: a GPU embed never pauses on SQL/MCP lag).
+    assert_eq!(
+        resolve_query_embed_route(true, false, ServicePressure::Critical),
+        QueryEmbedRoute::Primary
+    );
+    assert_eq!(
+        resolve_query_embed_route(true, false, ServicePressure::Healthy),
+        QueryEmbedRoute::Primary
+    );
+}
+
+#[test]
+fn test_query_embed_route_cpu_lane_paused_under_cpu_pressure() {
+    // CPU query lane (no GPU) genuinely competes with the brain for CPU →
+    // primary when healthy, paused under Critical/Degraded CPU service pressure.
+    assert_eq!(
+        resolve_query_embed_route(false, false, ServicePressure::Healthy),
+        QueryEmbedRoute::Primary
+    );
+    assert_eq!(
+        resolve_query_embed_route(false, false, ServicePressure::Recovering),
+        QueryEmbedRoute::Primary
+    );
+    assert_eq!(
+        resolve_query_embed_route(false, false, ServicePressure::Critical),
+        QueryEmbedRoute::Paused
+    );
+}
+
+#[test]
+fn test_query_cpu_fallback_lane_always_resolves_cpu() {
+    // REQ-AXO-902134 — the fallback lane forces CPU regardless of GPU presence /
+    // env / runtime override, so the fallback worker never re-grabs the contended
+    // GPU. Early-returns before any env read, so it is deterministic.
+    assert_eq!(
+        effective_provider_request_for_lane("query_cpu_fallback"),
+        "cpu"
+    );
+    assert_eq!(
+        effective_provider_request_for_lane("QUERY_CPU_FALLBACK"),
+        "cpu"
+    );
 }
 
 #[test]
