@@ -46,6 +46,25 @@ fn is_failure_mode(context: &str, practice: &str) -> bool {
     MARKERS.iter().any(|m| hay.contains(m))
 }
 
+/// REQ-AXO-902136 — dense encoding is CALLER-PROVIDED (the brain has no embedded
+/// LLM to compact prose; the calling agent IS the compactor). The brain only
+/// VALIDATES + normalises: trims ; an empty dense → fall back to the prose
+/// `practice` (stored as `''`) ; a dense that is NOT shorter than the prose it
+/// densifies is kept but flagged advisory (the caller mis-used the field). Pure +
+/// unit-testable. Returns `(stored_dense, advisory_note)`.
+fn resolve_dense_form(dense: &str, practice: &str) -> (String, Option<&'static str>) {
+    let d = dense.trim();
+    if d.is_empty() {
+        return (String::new(), None);
+    }
+    let advisory = if d.chars().count() >= practice.chars().count() {
+        Some("dense_not_shorter_than_practice")
+    } else {
+        None
+    };
+    (d.to_string(), advisory)
+}
+
 impl McpServer {
     fn resolve_practice_scope(&self, args: &Value) -> String {
         args.get("scope")
@@ -67,9 +86,12 @@ impl McpServer {
         let practice = args.get("practice").and_then(Value::as_str).unwrap_or("").trim();
         let evidence = args.get("evidence").and_then(Value::as_str).unwrap_or("");
         let source = args.get("from").and_then(Value::as_str).unwrap_or("");
+        let dense_arg = args.get("dense").and_then(Value::as_str).unwrap_or("");
         if context.is_empty() || practice.is_empty() {
             return Some(practice_err("context and practice are required", "input_invalid"));
         }
+        // REQ-AXO-902136 — caller-provided dense form (brain validates, no LLM here).
+        let (dense, dense_advisory) = resolve_dense_form(dense_arg, practice);
 
         // --- WRITE-GATE: reject a practice that contradicts the scope's base. ---
         let gate_args = json!({
@@ -129,16 +151,18 @@ impl McpServer {
 
         // --- UPSERT idempotent: re-put refreshes evidence, keeps accrued governance. ---
         let sql = format!(
-            "INSERT INTO axon.practice (scope, context, practice, evidence, embedding, source_project) \
-             VALUES ('{}', '{}', '{}', '{}', {}, '{}') \
+            "INSERT INTO axon.practice (scope, context, practice, dense, evidence, embedding, source_project) \
+             VALUES ('{}', '{}', '{}', '{}', '{}', {}, '{}') \
              ON CONFLICT (scope, md5(practice)) DO UPDATE \
-               SET evidence = EXCLUDED.evidence, \
+               SET dense = EXCLUDED.dense, \
+                   evidence = EXCLUDED.evidence, \
                    embedding = COALESCE(EXCLUDED.embedding, axon.practice.embedding), \
                    updated_at = now() \
              RETURNING id, (xmax = 0) AS inserted",
             esc(&scope),
             esc(context),
             esc(practice),
+            esc(&dense),
             esc(evidence),
             embed_sql,
             esc(source)
@@ -156,12 +180,15 @@ impl McpServer {
             })
             .unwrap_or((0, false));
 
+        let dense_state = if dense.is_empty() { "prose_fallback" } else { "dense" };
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_put — {} · scope=`{scope}` · gate={gate_label} · embed={embed_state} · id={id}",
-                if inserted {"stored"} else {"updated"}
+                "### 🧠 practice_put — {} · scope=`{scope}` · gate={gate_label} · embed={embed_state} · encoding={dense_state} · id={id}{}",
+                if inserted {"stored"} else {"updated"},
+                dense_advisory.map(|a| format!(" · ⚠️ {a}")).unwrap_or_default()
             )}],
-            "data": {"status":"ok","id":id,"inserted":inserted,"scope":scope,"gate":gate_label,"embed":embed_state}
+            "data": {"status":"ok","id":id,"inserted":inserted,"scope":scope,"gate":gate_label,"embed":embed_state,
+                     "encoding":dense_state,"dense_advisory":dense_advisory}
         }))
     }
 
@@ -193,7 +220,7 @@ impl McpServer {
             .unwrap_or(-1);
         let pool = (top_k * 3).clamp(top_k, 60);
         let sql = format!(
-            "SELECT id, scope, practice, evidence, trust, stability, \
+            "SELECT id, scope, COALESCE(NULLIF(dense,''), practice) AS practice, evidence, trust, stability, \
                     EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since, \
                     (embedding <=> {vec_lit}::vector) AS dist \
              FROM axon.practice \
@@ -346,7 +373,22 @@ impl McpServer {
 
 #[cfg(test)]
 mod tests {
-    use super::is_failure_mode;
+    use super::{is_failure_mode, resolve_dense_form};
+
+    #[test]
+    fn resolve_dense_form_902136() {
+        // empty dense → prose fallback (stored ''), no advisory.
+        assert_eq!(resolve_dense_form("", "the full prose practice"), (String::new(), None));
+        assert_eq!(resolve_dense_form("   ", "prose"), (String::new(), None));
+        // a genuinely denser form → stored trimmed, no advisory.
+        let (d, adv) = resolve_dense_form("  use exact scan <=5k rows  ", "When the scope is small, prefer an exact scan over HNSW because it bypasses corruption.");
+        assert_eq!(d, "use exact scan <=5k rows");
+        assert_eq!(adv, None);
+        // a dense NOT shorter than the prose → kept but flagged advisory.
+        let (d2, adv2) = resolve_dense_form("this is actually longer than the source", "short");
+        assert_eq!(d2, "this is actually longer than the source");
+        assert_eq!(adv2, Some("dense_not_shorter_than_practice"));
+    }
 
     #[test]
     fn failure_mode_detection_902132() {

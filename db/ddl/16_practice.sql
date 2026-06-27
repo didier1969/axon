@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS axon.practice (
     id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     scope          TEXT        NOT NULL,             -- project code OR '*' (global/cross-tenant)
     context        TEXT        NOT NULL,             -- the situation signature (embedded for recall)
-    practice       TEXT        NOT NULL,             -- the advice/rule itself
+    practice       TEXT        NOT NULL,             -- the advice/rule itself (prose source)
+    dense          TEXT        NOT NULL DEFAULT '',  -- REQ-AXO-902136: caller-provided DENSE form (body_dense-style, pointer-bearing). '' = fall back to `practice`.
     evidence       TEXT        NOT NULL DEFAULT '',  -- pointer-bearing proof (SOLL ids / metric / commit)
     embedding      vector(1024),                     -- context embedding (NULL until embedded)
     -- governance: Physarum trust + FSRS decay state.
@@ -29,6 +30,10 @@ CREATE TABLE IF NOT EXISTS axon.practice (
     last_used_at   TIMESTAMPTZ NOT NULL DEFAULT now(),  -- FSRS review anchor
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- REQ-AXO-902136 — idempotent migration for ALREADY-EXISTING instances (the
+-- CREATE TABLE above is a no-op once the table exists; this back-fills `dense`).
+ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS dense TEXT NOT NULL DEFAULT '';
 
 -- PR-1 dedup: same scope + same practice text = idempotent (UPSERT reinforces, no dup).
 CREATE UNIQUE INDEX IF NOT EXISTS practice_scope_practice_idx

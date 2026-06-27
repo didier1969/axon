@@ -989,7 +989,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "properties": {
                         "scope": { "type": "string", "description": "Project code, or '*' for a global cross-tenant practice. Default: cwd-resolved." },
                         "context": { "type": "string", "description": "The situation signature (embedded for recall) — when does this practice apply?" },
-                        "practice": { "type": "string", "description": "The advice / rule itself." },
+                        "practice": { "type": "string", "description": "The advice / rule itself (prose source)." },
+                        "dense": { "type": "string", "description": "REQ-AXO-902136 — OPTIONAL dense, pointer-bearing form of the practice (you compact it; the brain has no LLM). When set, recall serves THIS instead of the prose. Should be shorter than `practice`." },
                         "evidence": { "type": "string", "description": "Pointer-bearing proof (SOLL ids, commit SHA, metric)." },
                         "from": { "type": "string", "description": "Contributing project (provenance)." }
                     },
