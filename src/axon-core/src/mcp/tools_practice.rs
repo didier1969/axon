@@ -25,6 +25,27 @@ fn practice_err(msg: &str, status: &str) -> Value {
     })
 }
 
+/// REQ-AXO-902132 — does the practice DESCRIBE a failure mode / lesson-learned?
+/// Such a practice ("a killed promote leaves query-embed dead") legitimately tensions
+/// with the healthy-state base, so a `contradicts` verdict from the write-gate is
+/// downgraded to advisory rather than a hard reject (the whole point of a lessons
+/// memory is to capture failures). Conservative keyword match over context+practice.
+fn is_failure_mode(context: &str, practice: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        // EN
+        "fail", "breaks", "broke", "crash", "bug", "leak", "regression", "race",
+        "deadlock", "oom", "panic", "stale", "timeout", "wedge", "corrupt", "dead",
+        "hang", "stall", "interrupted", "killed", "abort", "degraded", "pitfall",
+        "gotcha", "footgun", "anti-pattern", "antipattern", "when it goes wrong",
+        // FR
+        "échec", "échoue", "casse", "cassé", "plante", "fuite", "régression",
+        "interrompu", "tué", "corrompu", "bloqué", "mort", "panne", "piège",
+        "ne pas", "à éviter", "attention", "mode d'échec",
+    ];
+    let hay = format!("{context} {practice}").to_lowercase();
+    MARKERS.iter().any(|m| hay.contains(m))
+}
+
 impl McpServer {
     fn resolve_practice_scope(&self, args: &Value) -> String {
         args.get("scope")
@@ -63,21 +84,33 @@ impl McpServer {
             .and_then(|d| d.get("verdict"))
             .and_then(Value::as_str)
             .unwrap_or("ungated");
-        if verdict == "contradicts" {
-            let conflicts = gate
-                .as_ref()
-                .and_then(|g| g.get("data"))
-                .and_then(|d| d.get("conflicts").or_else(|| d.get("top_conflicts")))
-                .cloned()
-                .unwrap_or(Value::Null);
-            return Some(json!({
-                "content": [{"type":"text","text": format!(
-                    "### 🧠 practice_put — REJECTED (write-gate): the practice CONTRADICTS the indexed base of `{scope}`. Fix the practice or the base, then retry."
-                )}],
-                "isError": true,
-                "data": {"status": "write_gate_rejected", "verdict": verdict, "conflicts": conflicts}
-            }));
-        }
+        // REQ-AXO-902132 — a lessons-memory EXISTS to capture failure modes. A practice
+        // that DESCRIBES a failure ("a killed promote leaves query-embed dead") legitimately
+        // tensions with the healthy-state base, so a `contradicts` verdict is ADVISORY
+        // (store + warn) for failure-framed practices, and a HARD REJECT (anti-poison) only
+        // for a factual contradiction of the base (e.g. "Axon uses MongoDB").
+        let failure_framed = is_failure_mode(context, practice);
+        let gate_label: &str = if verdict == "contradicts" {
+            if failure_framed {
+                "advisory_failure_mode"
+            } else {
+                let conflicts = gate
+                    .as_ref()
+                    .and_then(|g| g.get("data"))
+                    .and_then(|d| d.get("conflicts").or_else(|| d.get("top_conflicts")))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                return Some(json!({
+                    "content": [{"type":"text","text": format!(
+                        "### 🧠 practice_put — REJECTED (write-gate): the practice CONTRADICTS the indexed base of `{scope}` (and is not framed as a failure-mode lesson). Fix the practice or the base, then retry."
+                    )}],
+                    "isError": true,
+                    "data": {"status": "write_gate_rejected", "verdict": verdict, "conflicts": conflicts}
+                }));
+            }
+        } else {
+            verdict
+        };
 
         // --- EMBED the context (recall signature). NULL-safe if the worker is down. ---
         let embed_lit = match crate::embedder::batch_embed(vec![context.to_string()]) {
@@ -125,10 +158,10 @@ impl McpServer {
 
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_put — {} · scope=`{scope}` · gate={verdict} · embed={embed_state} · id={id}",
+                "### 🧠 practice_put — {} · scope=`{scope}` · gate={gate_label} · embed={embed_state} · id={id}",
                 if inserted {"stored"} else {"updated"}
             )}],
-            "data": {"status":"ok","id":id,"inserted":inserted,"scope":scope,"gate":verdict,"embed":embed_state}
+            "data": {"status":"ok","id":id,"inserted":inserted,"scope":scope,"gate":gate_label,"embed":embed_state}
         }))
     }
 
@@ -308,5 +341,21 @@ impl McpServer {
             )}],
             "data": {"status":"ok","scope":scope,"active":active,"pruned":prunedc,"mean_trust":mean_trust,"top":top}
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_failure_mode;
+
+    #[test]
+    fn failure_mode_detection_902132() {
+        // failure-framed lessons → advisory (not rejected)
+        assert!(is_failure_mode("livraison promote", "un promote tué laisse query-embed mort"));
+        assert!(is_failure_mode("pipeline", "the indexer OOMs at full throughput"));
+        assert!(is_failure_mode("HNSW", "duplicate vectors corrupt the graph"));
+        // factual non-failure claims → NOT failure-framed (a contradiction stays a reject)
+        assert!(!is_failure_mode("database choice", "Axon uses MongoDB for everything"));
+        assert!(!is_failure_mode("vector search", "use exact scan for small scopes"));
     }
 }
