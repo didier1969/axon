@@ -11,8 +11,6 @@ This tool exists to make runtime qualification repeatable:
 from __future__ import annotations
 
 import argparse
-import ctypes
-import ctypes.util
 import json
 import os
 import re
@@ -29,6 +27,9 @@ from runtime_contracts import (
     mode_contract,
     runtime_authority_contract,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import gpu_nvml  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = PROJECT_ROOT / ".axon" / "qualification-runs"
@@ -1518,164 +1519,30 @@ def env_bool(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def nvidia_smi_binary() -> str | None:
-    candidates = ["nvidia-smi", "/usr/lib/wsl/lib/nvidia-smi"]
-    for candidate in candidates:
-        try:
-            subprocess.run(
-                [candidate, "-L"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=True,
-            )
-            return candidate
-        except (OSError, subprocess.CalledProcessError):
-            continue
-    return None
+def gpu_status() -> dict[str, Any]:
+    """NVML-only GPU telemetry (REQ-AXO-902085) via the shared helper.
 
-
-class NvmlMemoryInfo(ctypes.Structure):
-    _fields_ = [
-        ("total", ctypes.c_ulonglong),
-        ("free", ctypes.c_ulonglong),
-        ("used", ctypes.c_ulonglong),
-    ]
-
-
-class NvmlUtilizationInfo(ctypes.Structure):
-    _fields_ = [
-        ("gpu", ctypes.c_uint),
-        ("memory", ctypes.c_uint),
-    ]
-
-
-def nvml_library_candidates() -> list[str]:
-    configured = os.environ.get("AXON_NVML_LIBRARY_PATH", "").strip()
-    candidates = []
-    if configured:
-        candidates.append(configured)
-    discovered = ctypes.util.find_library("nvidia-ml")
-    if discovered:
-        candidates.append(discovered)
-    candidates.extend(
-        [
-            "/usr/lib/wsl/lib/libnvidia-ml.so.1",
-            "libnvidia-ml.so.1",
-        ]
-    )
-    return list(dict.fromkeys(candidates))
-
-
-def gpu_status_via_nvml() -> dict[str, Any]:
-    last_error = ""
-    for candidate in nvml_library_candidates():
-        try:
-            library = ctypes.CDLL(candidate)
-            nvml_init = library.nvmlInit_v2
-            nvml_init.restype = ctypes.c_int
-            nvml_shutdown = library.nvmlShutdown
-            nvml_shutdown.restype = ctypes.c_int
-            get_handle = library.nvmlDeviceGetHandleByIndex_v2
-            get_handle.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)]
-            get_handle.restype = ctypes.c_int
-            get_memory = library.nvmlDeviceGetMemoryInfo
-            get_memory.argtypes = [ctypes.c_void_p, ctypes.POINTER(NvmlMemoryInfo)]
-            get_memory.restype = ctypes.c_int
-            get_utilization = library.nvmlDeviceGetUtilizationRates
-            get_utilization.argtypes = [
-                ctypes.c_void_p,
-                ctypes.POINTER(NvmlUtilizationInfo),
-            ]
-            get_utilization.restype = ctypes.c_int
-
-            if nvml_init() != 0:
-                last_error = "nvml_init_failed"
-                continue
-            try:
-                device = ctypes.c_void_p()
-                device_index = env_int("AXON_GPU_TELEMETRY_DEVICE_INDEX") or 0
-                if get_handle(device_index, ctypes.byref(device)) != 0:
-                    last_error = "nvml_device_handle_failed"
-                    continue
-                memory = NvmlMemoryInfo()
-                if get_memory(device, ctypes.byref(memory)) != 0:
-                    last_error = "nvml_memory_info_failed"
-                    continue
-                utilization = NvmlUtilizationInfo()
-                util_available = get_utilization(device, ctypes.byref(utilization)) == 0
-                return {
-                    "available": True,
-                    "source": "nvml",
-                    "library": candidate,
-                    "memory_total_mb": int(memory.total // (1024 * 1024)),
-                    "memory_used_mb": int(memory.used // (1024 * 1024)),
-                    "memory_free_mb": int(memory.free // (1024 * 1024)),
-                    "utilization_gpu_percent": int(utilization.gpu) if util_available else None,
-                    "utilization_memory_percent": int(utilization.memory)
-                    if util_available
-                    else None,
-                }
-            finally:
-                nvml_shutdown()
-        except Exception as exc:
-            last_error = type(exc).__name__
-    return {"available": False, "source": "nvml", "error": last_error or "nvml_unavailable"}
-
-
-def gpu_status_via_nvidia_smi() -> dict[str, Any]:
-    binary = nvidia_smi_binary()
-    if binary is None:
-        return {"available": False, "source": "nvidia-smi"}
-    try:
-        proc = shell(
-            [
-                binary,
-                "--query-gpu=memory.total,memory.used,memory.free,utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            capture=True,
-        )
-    except subprocess.CalledProcessError as exc:
+    nvidia-smi has been fully retired; the shared ``gpu_nvml`` helper probes
+    libnvidia-ml directly and never raises. We re-map its canonical keys onto
+    the historical schema this script's run samples persist.
+    """
+    status = gpu_nvml.gpu_status()
+    if not status.get("available"):
         return {
             "available": False,
-            "source": "nvidia-smi",
-            "error": f"nvidia_smi_failed:{exc.returncode}",
-        }
-
-    line = proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else ""
-    parts = [part.strip() for part in line.split(",")]
-    if len(parts) != 4:
-        return {
-            "available": False,
-            "source": "nvidia-smi",
-            "error": "nvidia_smi_unexpected_output",
-        }
-    try:
-        total_mb, used_mb, free_mb, util_percent = (int(part) for part in parts)
-    except ValueError:
-        return {
-            "available": False,
-            "source": "nvidia-smi",
-            "error": "nvidia_smi_non_numeric_output",
-            "raw": line,
+            "source": "nvml",
+            "error": status.get("error", "nvml_unavailable"),
         }
     return {
         "available": True,
-        "source": "nvidia-smi",
-        "memory_total_mb": total_mb,
-        "memory_used_mb": used_mb,
-        "memory_free_mb": free_mb,
-        "utilization_gpu_percent": util_percent,
+        "source": "nvml",
+        "library": status.get("library"),
+        "memory_total_mb": status.get("memory_total_mb"),
+        "memory_used_mb": status.get("memory_used_mb"),
+        "memory_free_mb": status.get("memory_free_mb"),
+        "utilization_gpu_percent": status.get("utilization_gpu"),
+        "utilization_memory_percent": status.get("utilization_memory"),
     }
-
-
-def gpu_status() -> dict[str, Any]:
-    nvml_status = gpu_status_via_nvml()
-    if nvml_status.get("available"):
-        return nvml_status
-    fallback = gpu_status_via_nvidia_smi()
-    fallback["primary_error"] = nvml_status.get("error", "nvml_unavailable")
-    return fallback
 
 
 def gpu_memory_envelope_from_env() -> dict[str, Any]:
@@ -1692,7 +1559,7 @@ def gpu_memory_envelope_from_env() -> dict[str, Any]:
         "gpu_telemetry_cache_ttl_ms": env_int("AXON_GPU_TELEMETRY_CACHE_TTL_MS"),
         "gpu_telemetry_backend": os.environ.get("AXON_GPU_TELEMETRY_BACKEND", ""),
         "nvml_library_path": os.environ.get("AXON_NVML_LIBRARY_PATH", ""),
-        "measurement_contract": "nvml_primary_nvidia_smi_fallback",
+        "measurement_contract": "nvml_only",
         "overshoot_fail_mb": env_int("AXON_TENSORRT_OVERSHOOT_MB"),
         "stop_on_vram_overshoot": env_bool("AXON_QUALIFY_STOP_ON_VRAM_OVERSHOOT"),
         "gpu_service_recycle_every_batch": os.environ.get(

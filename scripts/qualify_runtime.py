@@ -23,9 +23,11 @@ from runtime_contracts import (
     runtime_authority_contract,
 )
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import gpu_nvml  # noqa: E402
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = PROJECT_ROOT / ".axon" / "qualification-suite-runs"
-NVIDIA_SMI = "/usr/lib/wsl/lib/nvidia-smi"
 MIN_RUNTIME_OBSERVATION_SEC = 8
 
 
@@ -1011,38 +1013,23 @@ def read_meminfo() -> dict[str, int]:
 
 
 def read_gpu_sample() -> dict[str, Any]:
-    if not Path(NVIDIA_SMI).exists():
-        return {"available": False, "reason": "nvidia_smi_missing"}
-    try:
-        proc = subprocess.run(
-            [
-                NVIDIA_SMI,
-                "--query-gpu=utilization.gpu,memory.used,memory.free,memory.total,temperature.gpu,power.draw,power.limit",
-                "--format=csv,noheader,nounits",
-            ],
-            cwd=PROJECT_ROOT,
-            text=True,
-            capture_output=True,
-            timeout=2,
-            check=True,
-        )
-    except Exception as exc:
-        return {"available": False, "reason": f"nvidia_smi_error:{type(exc).__name__}"}
-    line = (proc.stdout or "").strip().splitlines()
-    if not line:
-        return {"available": False, "reason": "nvidia_smi_empty"}
-    parts = [part.strip() for part in line[0].split(",")]
-    if len(parts) < 7:
-        return {"available": False, "reason": "nvidia_smi_parse"}
+    """NVML-only GPU sample (REQ-AXO-902085) via the shared helper.
+
+    Replaces the nvidia-smi subprocess probe; maps the canonical ``gpu_nvml``
+    keys onto this script's ``gpu_*`` sample schema. Never raises.
+    """
+    status = gpu_nvml.gpu_status()
+    if not status.get("available"):
+        return {"available": False, "reason": status.get("error", "nvml_unavailable")}
     return {
         "available": True,
-        "gpu_util_pct": parse_optional_float(parts[0]),
-        "gpu_mem_used_mb": parse_optional_float(parts[1]),
-        "gpu_mem_free_mb": parse_optional_float(parts[2]),
-        "gpu_mem_total_mb": parse_optional_float(parts[3]),
-        "gpu_temp_c": parse_optional_float(parts[4]),
-        "gpu_power_w": parse_optional_float(parts[5]),
-        "gpu_power_limit_w": parse_optional_float(parts[6]),
+        "gpu_util_pct": status.get("utilization_gpu"),
+        "gpu_mem_used_mb": status.get("memory_used_mb"),
+        "gpu_mem_free_mb": status.get("memory_free_mb"),
+        "gpu_mem_total_mb": status.get("memory_total_mb"),
+        "gpu_temp_c": status.get("temperature_c"),
+        "gpu_power_w": status.get("power_w"),
+        "gpu_power_limit_w": status.get("power_limit_w"),
     }
 
 

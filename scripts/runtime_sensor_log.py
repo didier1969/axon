@@ -11,13 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import gpu_nvml  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / ".axon" / "runtime-sensor-runs"
 DEFAULT_MCP_URL = os.environ.get("AXON_MCP_URL", "http://127.0.0.1:44129/mcp")
-DEFAULT_GPU_QUERY = (
-    "name,driver_version,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory"
-)
 
 
 def utc_now_iso() -> str:
@@ -114,32 +113,24 @@ def mcp_status(mcp_url: str) -> dict[str, Any]:
 
 
 def gpu_status() -> dict[str, Any]:
-    try:
-        proc = shell(
-            [
-                "/usr/lib/wsl/lib/nvidia-smi",
-                f"--query-gpu={DEFAULT_GPU_QUERY}",
-                "--format=csv,noheader,nounits",
-            ]
-        )
-        first = next((line.strip() for line in proc.stdout.splitlines() if line.strip()), "")
-        if not first:
-            return {"available": False}
-        parts = [part.strip() for part in first.split(",")]
-        if len(parts) < 7:
-            return {"available": False, "raw": first}
-        return {
-            "available": True,
-            "name": parts[0],
-            "driver_version": parts[1],
-            "memory_total_mb": int(parts[2]),
-            "memory_used_mb": int(parts[3]),
-            "memory_free_mb": int(parts[4]),
-            "utilization_gpu_percent": int(parts[5]),
-            "utilization_memory_percent": int(parts[6]),
-        }
-    except Exception as exc:
-        return {"available": False, "error": type(exc).__name__}
+    """NVML-only GPU telemetry (REQ-AXO-902085) via the shared helper.
+
+    nvidia-smi retired; maps the canonical ``gpu_nvml`` keys onto this script's
+    sensor-log schema. Never raises.
+    """
+    status = gpu_nvml.gpu_status()
+    if not status.get("available"):
+        return {"available": False, "error": status.get("error", "nvml_unavailable")}
+    return {
+        "available": True,
+        "name": status.get("name"),
+        "driver_version": status.get("driver_version"),
+        "memory_total_mb": status.get("memory_total_mb"),
+        "memory_used_mb": status.get("memory_used_mb"),
+        "memory_free_mb": status.get("memory_free_mb"),
+        "utilization_gpu_percent": status.get("utilization_gpu"),
+        "utilization_memory_percent": status.get("utilization_memory"),
+    }
 
 
 def status_script() -> dict[str, Any]:
