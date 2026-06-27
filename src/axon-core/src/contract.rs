@@ -21,6 +21,7 @@ pub mod binding;
 pub mod certification;
 pub mod expand;
 pub mod seal;
+pub mod store;
 
 use std::fmt::Write as _;
 
@@ -37,12 +38,26 @@ pub enum ContractKind {
 }
 
 impl ContractKind {
-    fn tag(self) -> &'static str {
+    /// Tag canonique stable (entre dans le `shape_hash` ET la persistance — voir
+    /// [`store`]). `pub(crate)` : le store le sérialise, [`Self::from_tag`] le relit.
+    pub(crate) fn tag(self) -> &'static str {
         match self {
             ContractKind::Module => "module",
             ContractKind::Interface => "interface",
             ContractKind::Function => "function",
             ContractKind::Type => "type",
+        }
+    }
+
+    /// Inverse de [`Self::tag`] — relit un `kind` persisté. `None` sur un tag
+    /// inconnu (donnée corrompue) plutôt qu'un défaut silencieux.
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "module" => Some(ContractKind::Module),
+            "interface" => Some(ContractKind::Interface),
+            "function" => Some(ContractKind::Function),
+            "type" => Some(ContractKind::Type),
+            _ => None,
         }
     }
 }
