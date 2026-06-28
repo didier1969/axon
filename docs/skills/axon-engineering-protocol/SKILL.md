@@ -32,6 +32,8 @@ Live 44127-44132 / dev 44137-44142. Brain = MCP + SOLL writer. Indexer = IST wri
 | Raw SQL (after `schema_overview`) | `sql` |
 | SOLL batch / single | `soll_apply_plan` (`dry_run=true`) / `soll_manager` |
 | Methodology surface (REQ-AXO-91580/81/82) | `skill_list` → `skill_invoke` ; `prompt_template_get` ; `re_anchor reason=<signal>` for single-call context refresh |
+| **Governed how-to-work memory (REQ-AXO-902131+)** — PRIMARY channel, USE IT | `practice_recall` (read, FIRST at init) → `practice_put` (write durable lessons ; `scope`/`role`/`model` partitioning, REQ-AXO-902149 ; failure-mode framing if write-gate over-rejects an operational directive, REQ-AXO-902154) ; `practice_tick`/`practice_card` consolidate. `feedback_*.md`+`MEMORY.md` = FALLBACK only (stale client registry → reconnect MCP). |
+| **Cross-project mailbox (REQ-AXO-902114+)** | `mcp_inbox_read` (mode=unread advances cursor / since / all — wake + handoff case) · `mcp_outbox_send to_project=<X>` (inter-agent handoff pointer). Pair with the `inbox_unread` banner in `status`/`axon_init_project`. |
 | MCP friction priorities (REQ-AXO-901957) | `mcp_friction_report` — top OPEN signatures by frequency = rollout priorities ; `mark_resolved={id,resolved_by_req,resolved_by_val}` closes the loop. Signature-only (no arg content). |
 | MCP usage + latency analytics (REQ-AXO-901961) | `mcp_telemetry_report` — per-tool call volume / error-rate / avg+max latency over `window_hours` (default 168), optional `project_code` filter. Projected from the `axon.mcp_call_stat` per-call rollup (every call, ok+error, signature-only). PG-native, no external tool. |
 
