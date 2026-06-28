@@ -987,11 +987,13 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "scope": { "type": "string", "description": "Project code, or '*' for a global cross-tenant practice. Default: cwd-resolved." },
+                        "scope": { "type": "string", "description": "Project code, or '*' for a global cross-tenant practice. REQ-AXO-902149: hierarchical via '/' (e.g. 'NEX/coder' ⊂ 'NEX' ⊂ '*') — descendants inherit ancestor practices. Default: cwd-resolved." },
                         "context": { "type": "string", "description": "The situation signature (embedded for recall) — when does this practice apply?" },
                         "practice": { "type": "string", "description": "The advice / rule itself (prose source)." },
                         "dense": { "type": "string", "description": "REQ-AXO-902136 — OPTIONAL dense, pointer-bearing form of the practice (you compact it; the brain has no LLM). When set, recall serves THIS instead of the prose. Should be shorter than `practice`." },
                         "perishability": { "type": "string", "enum": ["durable", "perishable"], "description": "REQ-AXO-902141 — `durable` (DEFAULT): a timeless best practice; NEVER time-decayed, only superseded/contradicted. `perishable`: news/market/context that goes stale with age (FSRS time-decay)." },
+                        "role": { "type": "string", "description": "REQ-AXO-902149 — agent/role this practice belongs to. DEFAULT '*' = shared across all agents (N1 stigmergy). A concrete role (e.g. 'coder') makes it role-private (opt-in)." },
+                        "model": { "type": "string", "description": "REQ-AXO-902149 — LLM this practice is specific to. DEFAULT '*' = model-agnostic. A concrete model id makes it model-specific (opt-in)." },
                         "evidence": { "type": "string", "description": "Pointer-bearing proof (SOLL ids, commit SHA, metric)." },
                         "from": { "type": "string", "description": "Contributing project (provenance)." }
                     },
@@ -1004,9 +1006,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "scope": { "type": "string", "description": "Project code. Default: cwd-resolved. Global ('*') practices are always included." },
+                        "scope": { "type": "string", "description": "Project code. Default: cwd-resolved. REQ-AXO-902149: hierarchical via '/' — a recall at 'NEX/coder' inherits 'NEX' and global '*'. Global ('*') practices are always included." },
                         "query": { "type": "string", "description": "The situation to recall practices for." },
-                        "top_k": { "type": "integer", "description": "Max practices (1-50, default 5)." }
+                        "top_k": { "type": "integer", "description": "Max practices (1-50, default 5)." },
+                        "role": { "type": "string", "description": "REQ-AXO-902149 — calling agent/role. Recalls shared ('*') practices PLUS this role's private ones. Omitted → shared only." },
+                        "model": { "type": "string", "description": "REQ-AXO-902149 — calling LLM. Recalls agnostic ('*') practices PLUS this model's specific ones. Omitted → agnostic only." }
                     },
                     "required": ["query"]
                 }

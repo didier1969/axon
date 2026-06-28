@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS axon.practice (
     status         TEXT        NOT NULL DEFAULT 'active', -- active | pruned | merged (never DELETE — audit)
     tier           TEXT        NOT NULL DEFAULT 'episode', -- REQ-AXO-902138: episode → rule → principle (consolidation par maturité)
     perishability  TEXT        NOT NULL DEFAULT 'durable', -- REQ-AXO-902141: durable (best-practice : pas de decay temps) | perishable (FSRS temporel)
+    role           TEXT        NOT NULL DEFAULT '*',     -- REQ-AXO-902149: agent/rôle ('*' = partagé entre tous les agents, défaut N1 stigmergie)
+    model          TEXT        NOT NULL DEFAULT '*',     -- REQ-AXO-902149: LLM ('*' = agnostique, défaut ; id-modèle = model-specific opt-in H1)
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_used_at   TIMESTAMPTZ NOT NULL DEFAULT now(),  -- FSRS review anchor
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -40,10 +42,17 @@ ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS dense TEXT NOT NULL DEFAULT '
 ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'episode';
 -- REQ-AXO-902141 — classe de périssabilité (durable = pas de decay temps).
 ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS perishability TEXT NOT NULL DEFAULT 'durable';
+-- REQ-AXO-902149 — axes de partitionnement multi-agent (rôle + modèle), '*' = partagé/agnostique.
+ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS role  TEXT NOT NULL DEFAULT '*';
+ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '*';
 
--- PR-1 dedup: same scope + same practice text = idempotent (UPSERT reinforces, no dup).
-CREATE UNIQUE INDEX IF NOT EXISTS practice_scope_practice_idx
-    ON axon.practice (scope, md5(practice));
+-- PR-1 dedup: same (scope, role, model) + same practice text = idempotent (UPSERT
+-- reinforces, no dup). REQ-AXO-902149 extended the key with role+model so the same
+-- prose can coexist across distinct agents/models without UPSERT collision; legacy
+-- puts default to ('*','*') so back-compat holds. The old scope-only index is dropped.
+DROP INDEX IF EXISTS axon.practice_scope_practice_idx;
+CREATE UNIQUE INDEX IF NOT EXISTS practice_scope_role_model_practice_idx
+    ON axon.practice (scope, role, model, md5(practice));
 
 -- recall: scoped ANN (same HNSW params as ist.ChunkEmbedding) + a partial index so a
 -- scoped exact-scan over active rows is cheap (exact scan bypasses HNSW corruption,
@@ -52,5 +61,8 @@ CREATE INDEX IF NOT EXISTS practice_embedding_hnsw_idx
     ON axon.practice USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 CREATE INDEX IF NOT EXISTS practice_scope_active_idx
     ON axon.practice (scope, status) WHERE status = 'active';
+-- REQ-AXO-902149 — partition filter (scope hierarchy ∩ role ∩ model) on active rows.
+CREATE INDEX IF NOT EXISTS practice_partition_idx
+    ON axon.practice (scope, role, model, status) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS practice_tick_idx
     ON axon.practice (status, last_used_at) WHERE status = 'active';

@@ -156,6 +156,50 @@ fn resolve_dense_form(dense: &str, practice: &str) -> (String, Option<&'static s
     (d.to_string(), advisory)
 }
 
+/// REQ-AXO-902149 — normalise a partitioning-axis tag (role / model). Blank → `'*'`
+/// (the shared/agnostic sentinel, reused from the scope-global convention) ; otherwise
+/// trimmed + lowercased to a stable token. Default = shared/agnostic (N1 stigmergy);
+/// a concrete tag is the private/model-specific opt-in (H1). Pure + unit-testable.
+fn normalize_axis_tag(raw: &str) -> String {
+    let t = raw.trim().to_lowercase();
+    if t.is_empty() {
+        "*".to_string()
+    } else {
+        t
+    }
+}
+
+/// REQ-AXO-902149 — covering scope set for hierarchical inheritance. A recall at
+/// `NEX/coder` inherits from its ancestors: `["NEX/coder","NEX","*"]` (most specific
+/// → global). `/` is the hierarchy delimiter (no existing project code contains it).
+/// A practice stored at an ancestor level is visible to all its descendants, never
+/// the inverse. Pure + unit-testable.
+fn covering_scopes(scope: &str) -> Vec<String> {
+    let parts: Vec<&str> = scope.split('/').filter(|p| !p.is_empty()).collect();
+    let mut out: Vec<String> = Vec::new();
+    for i in (1..=parts.len()).rev() {
+        out.push(parts[..i].join("/"));
+    }
+    if !out.iter().any(|s| s == "*") {
+        out.push("*".to_string());
+    }
+    out
+}
+
+/// REQ-AXO-902149 — recall set for a partitioning axis (role/model): always the
+/// shared/agnostic sentinel `'*'`, plus the caller's own value when set (≠ `'*'`).
+/// So an omitted axis recalls only the shared/agnostic practices (retro-compatible:
+/// every legacy row is `'*'`); a concrete value ALSO surfaces that partition's
+/// private practices. Pure + unit-testable.
+fn axis_recall_set(caller: &str) -> Vec<String> {
+    let mut v = vec!["*".to_string()];
+    let c = caller.trim().to_lowercase();
+    if !c.is_empty() && c != "*" {
+        v.push(c);
+    }
+    v
+}
+
 impl McpServer {
     fn resolve_practice_scope(&self, args: &Value) -> String {
         args.get("scope")
@@ -187,6 +231,9 @@ impl McpServer {
         // is timeless, it must NOT be time-decayed).
         let perishability =
             normalize_perishability(args.get("perishability").and_then(Value::as_str).unwrap_or(""));
+        // REQ-AXO-902149 — multi-agent partitioning axes (default '*' = shared/agnostic).
+        let role = normalize_axis_tag(args.get("role").and_then(Value::as_str).unwrap_or(""));
+        let model = normalize_axis_tag(args.get("model").and_then(Value::as_str).unwrap_or(""));
 
         // --- WRITE-GATE: reject a practice that contradicts the scope's base. ---
         let gate_args = json!({
@@ -246,9 +293,9 @@ impl McpServer {
 
         // --- UPSERT idempotent: re-put refreshes evidence, keeps accrued governance. ---
         let sql = format!(
-            "INSERT INTO axon.practice (scope, context, practice, dense, evidence, embedding, source_project, perishability) \
-             VALUES ('{}', '{}', '{}', '{}', '{}', {}, '{}', '{}') \
-             ON CONFLICT (scope, md5(practice)) DO UPDATE \
+            "INSERT INTO axon.practice (scope, context, practice, dense, evidence, embedding, source_project, perishability, role, model) \
+             VALUES ('{}', '{}', '{}', '{}', '{}', {}, '{}', '{}', '{}', '{}') \
+             ON CONFLICT (scope, role, model, md5(practice)) DO UPDATE \
                SET dense = EXCLUDED.dense, \
                    evidence = EXCLUDED.evidence, \
                    embedding = COALESCE(EXCLUDED.embedding, axon.practice.embedding), \
@@ -262,7 +309,9 @@ impl McpServer {
             esc(evidence),
             embed_sql,
             esc(source),
-            perishability
+            perishability,
+            esc(&role),
+            esc(&model)
         );
         let rows: Vec<Vec<Value>> = match self.graph_store.query_json_writer(&sql) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
@@ -308,7 +357,20 @@ impl McpServer {
             None => return Some(practice_err("query produced no embedding", "degraded")),
         };
 
-        let scope_filter = format!("scope IN ('{}', '*')", esc(&scope));
+        // REQ-AXO-902149 — partition: hierarchical scope inheritance × role × model.
+        // scope covers its ancestors (NEX/coder → NEX → '*'); role/model each recall
+        // the shared/agnostic '*' plus the caller's own value. Omitted axis → '*' only
+        // (retro-compatible: every legacy row is role='*' model='*'). Re-rank unchanged.
+        let role = args.get("role").and_then(Value::as_str).unwrap_or("");
+        let model = args.get("model").and_then(Value::as_str).unwrap_or("");
+        let in_list =
+            |vals: &[String]| vals.iter().map(|v| format!("'{}'", esc(v))).collect::<Vec<_>>().join(", ");
+        let scope_filter = format!(
+            "scope IN ({}) AND role IN ({}) AND model IN ({})",
+            in_list(&covering_scopes(&scope)),
+            in_list(&axis_recall_set(role)),
+            in_list(&axis_recall_set(model))
+        );
         let scope_count = self
             .graph_store
             .query_count(&format!(
@@ -319,7 +381,7 @@ impl McpServer {
         let sql = format!(
             "SELECT id, scope, COALESCE(NULLIF(dense,''), practice) AS practice, evidence, trust, stability, \
                     EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since, \
-                    (embedding <=> {vec_lit}::vector) AS dist, tier, perishability \
+                    (embedding <=> {vec_lit}::vector) AS dist, tier, perishability, role, model \
              FROM axon.practice \
              WHERE status='active' AND embedding IS NOT NULL AND {scope_filter} \
              ORDER BY embedding <=> {vec_lit}::vector LIMIT {pool}"
@@ -355,6 +417,8 @@ impl McpServer {
                     "trust": trust,
                     "tier": g(8),
                     "perishability": g(9),
+                    "role": g(10),
+                    "model": g(11),
                     "score": score
                 }))
             })
@@ -420,7 +484,8 @@ impl McpServer {
             // self-join compares embeddings in-DB (no vector round-trips to Rust).
             let dup_sql = format!(
                 "SELECT b.id, b.use_count, b.win_count, b.source_project \
-                 FROM axon.practice a JOIN axon.practice b ON b.scope = a.scope \
+                 FROM axon.practice a JOIN axon.practice b \
+                   ON b.scope = a.scope AND b.role = a.role AND b.model = a.model \
                  WHERE a.id = {rep_id} AND b.id <> a.id AND b.status='active' \
                    AND b.embedding IS NOT NULL AND a.embedding IS NOT NULL \
                    AND (a.embedding <=> b.embedding) < {eps}",
@@ -588,9 +653,9 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        consolidate_tier, is_failure_mode, merge_provenance, normalize_perishability,
-        perishability_decays_by_time, provenance_count, resolve_dense_form, should_fuse,
-        FUSION_COSINE_EPS,
+        axis_recall_set, consolidate_tier, covering_scopes, is_failure_mode, merge_provenance,
+        normalize_axis_tag, normalize_perishability, perishability_decays_by_time, provenance_count,
+        resolve_dense_form, should_fuse, FUSION_COSINE_EPS,
     };
 
     #[test]
@@ -604,6 +669,24 @@ mod tests {
         assert!(!perishability_decays_by_time("durable"));
         assert!(!perishability_decays_by_time("")); // default durable → no time decay
         assert!(perishability_decays_by_time("perishable"));
+    }
+
+    #[test]
+    fn partitioning_axes_902149() {
+        // normalize_axis_tag: blank → '*' (shared/agnostic sentinel) ; else trimmed+lowercased.
+        assert_eq!(normalize_axis_tag(""), "*");
+        assert_eq!(normalize_axis_tag("   "), "*");
+        assert_eq!(normalize_axis_tag(" Coder "), "coder");
+        assert_eq!(normalize_axis_tag("*"), "*");
+        // covering_scopes: hierarchical inheritance, most-specific → global, '*' always last.
+        assert_eq!(covering_scopes("NEX/coder"), vec!["NEX/coder", "NEX", "*"]);
+        assert_eq!(covering_scopes("AXO"), vec!["AXO", "*"]);
+        assert_eq!(covering_scopes("*"), vec!["*"]); // global stays a singleton, no dup
+        assert_eq!(covering_scopes("A/b/c"), vec!["A/b/c", "A/b", "A", "*"]);
+        // axis_recall_set: always the shared '*', plus the caller's own value (≠ '*').
+        assert_eq!(axis_recall_set(""), vec!["*"]); // omitted → shared only (retro-compatible)
+        assert_eq!(axis_recall_set("*"), vec!["*"]);
+        assert_eq!(axis_recall_set("Coder"), vec!["*", "coder"]);
     }
 
     #[test]
