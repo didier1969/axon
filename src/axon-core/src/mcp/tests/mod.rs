@@ -397,5 +397,6 @@ fn graph_embedding_sql(seed: &[f32]) -> String {
 mod context_and_analysis;
 mod guidance_contract;
 mod mailbox_conformance;
+mod mailbox_reactivity;
 mod runtime_surface;
 mod soll_and_guidelines;

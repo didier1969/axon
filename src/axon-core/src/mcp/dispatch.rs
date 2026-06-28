@@ -262,6 +262,12 @@ impl McpServer {
                 })
             }),
         );
+        // REQ-AXO-902143 (MBX réactivité niveau-2) — awareness piggyback: attach
+        // the unread mailbox signal to the envelope at this single chokepoint so
+        // an active session sees its mail on the next tool call. Targeted to the
+        // session's project, no-op when unread==0, signal-only.
+        let final_response =
+            self.attach_mailbox_unread_banner(normalized_name, arguments, final_response);
         // REQ-AXO-901957 — closed-loop friction capture at the single dispatch
         // chokepoint every tool response passes through. Best-effort, records
         // only the problem SHAPE (never arg content), only when the response

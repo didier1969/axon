@@ -425,6 +425,135 @@ impl McpServer {
             .unwrap_or(0)
     }
 
+    /// REQ-AXO-902143 (MBX réactivité niveau-2) — assemble the unread *signal*
+    /// for `project` in a single cheap query: count + distinct senders + the
+    /// newest message id (pointer). Returns `None` when there is nothing unread
+    /// — the no-op fast path that keeps the dispatch banner zero-cost on
+    /// sessions with no mail. SIGNAL ONLY: the message body is never returned;
+    /// the recipient pulls it with an explicit `mcp_inbox_read`.
+    pub(crate) fn mailbox_unread_banner(&self, project: &str) -> Option<Value> {
+        if project.is_empty() {
+            return None;
+        }
+        let sql = format!(
+            "SELECT count(*)::bigint, \
+                    COALESCE(string_agg(DISTINCT m.from_project, ','), ''), \
+                    COALESCE(max(m.id), 0)::bigint \
+             FROM axon.mailbox_message m \
+             LEFT JOIN axon.mailbox_cursor c ON c.project_code = m.to_project \
+             WHERE m.to_project='{p}' AND m.id > COALESCE(c.last_read_id, 0) \
+             AND m.archived_at IS NULL",
+            p = esc(project)
+        );
+        let json_str = self.graph_store.query_json(&sql).ok()?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&json_str).ok()?;
+        let row = rows.into_iter().next()?;
+        let as_i64 = |v: Option<&Value>| {
+            v.and_then(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(0)
+        };
+        let count = as_i64(row.first());
+        if count <= 0 {
+            return None;
+        }
+        let senders: Vec<&str> = row
+            .get(1)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .collect();
+        let latest_id = as_i64(row.get(2));
+        let from_label = if senders.is_empty() {
+            String::new()
+        } else {
+            format!(" de {}", senders.join(", "))
+        };
+        let banner = format!(
+            "📬 {count} message(s) non-lu(s){from_label} — relève avec `mcp_inbox_read project={project}` (signal seul, corps non inliné)."
+        );
+        Some(json!({
+            "unread": count,
+            "from": senders,
+            "latest_id": latest_id,
+            "pointer": { "tool": "mcp_inbox_read", "arguments": { "project": project } },
+            "banner": banner,
+        }))
+    }
+
+    /// REQ-AXO-902143 (MBX réactivité niveau-2) — awareness piggyback at the
+    /// central dispatch chokepoint. Attaches the unread mailbox signal to EVERY
+    /// tool envelope so an actively-working session learns it has mail on its
+    /// next tool call, instead of only at `status` / `axon_init_project`.
+    ///
+    /// Contract (decided with operator, REQ-AXO-902143):
+    /// - TARGETED: recipient = the session's project (explicit `project` /
+    ///   `project_code` arg wins, else cwd auto-resolution). A session never
+    ///   sees another project's mail → zero cross-project token cost.
+    /// - unread>0 ONLY: no mail → no-op, zero added tokens (the nominal case).
+    /// - SIGNAL ONLY: count + senders + pointer, never the body.
+    /// - PROJECT granularity: all sessions of the recipient project see it;
+    ///   double-processing is prevented by advisory leases (MBX-8), not here.
+    ///
+    /// Tools that already surface the inbox (`status` / wake) or that ARE the
+    /// mailbox surface skip the banner to avoid redundant noise.
+    pub(crate) fn attach_mailbox_unread_banner(
+        &self,
+        normalized_name: &str,
+        arguments: &Value,
+        mut response: Value,
+    ) -> Value {
+        const SKIP: &[&str] = &[
+            "status",
+            "axon_init_project",
+            "mcp_inbox_read",
+            "inbox_read",
+            "mailbox_sweep",
+            "mailbox_render",
+            "mailbox_tap",
+        ];
+        if SKIP.contains(&normalized_name) {
+            return response;
+        }
+        let project = arguments
+            .get("project")
+            .or_else(|| arguments.get("project_code"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| self.auto_resolve_project_code_str())
+            .unwrap_or_default();
+        let Some(banner) = self.mailbox_unread_banner(&project) else {
+            return response; // unread == 0 → no-op
+        };
+        let line = banner.get("banner").and_then(Value::as_str).map(str::to_string);
+        if let Some(obj) = response.as_object_mut() {
+            // Structured channel.
+            match obj.get_mut("data").and_then(Value::as_object_mut) {
+                Some(data) => {
+                    data.insert("mailbox".to_string(), banner);
+                }
+                None => {
+                    obj.insert("data".to_string(), json!({ "mailbox": banner }));
+                }
+            }
+            // Text channel — where the LLM (and HTTP/curl clients) read.
+            if let Some(line) = line {
+                if let Some(first) = obj
+                    .get_mut("content")
+                    .and_then(Value::as_array_mut)
+                    .and_then(|c| c.first_mut())
+                    .and_then(|c| c.as_object_mut())
+                {
+                    if let Some(text) = first.get("text").and_then(Value::as_str) {
+                        let merged = format!("{text}\n\n{line}");
+                        first.insert("text".to_string(), Value::String(merged));
+                    }
+                }
+            }
+        }
+        response
+    }
+
     /// REQ-AXO-902119 (MBX-7) — TTL / dead-letter sweep. Soft-archives every
     /// message whose retention horizon (`ttl_at`) has passed by stamping
     /// `archived_at = now()` (the append-only log is preserved — archived rows
