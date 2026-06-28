@@ -861,8 +861,13 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
         .graph_store
         .query_json(&format!("SELECT revision_id FROM soll.Revision WHERE project_code = '{code}' ORDER BY created_at DESC LIMIT 1"))
         .unwrap();
-    let expected_rev = format!("REV-{code}-001");
-    assert!(revision_rows.contains(&expected_rev), "{revision_rows}");
+    // REQ-AXO-902142 — the legacy sequential `REV-{code}-001` expectation is
+    // stale: soll_apply_plan now mints `REV-{code}-{ts}-{nonce}` deliberately
+    // (REQ-AXO-902086, collision-free under concurrent writes; revisions are
+    // audit rows, DEC-AXO-085 numeric format does not apply). Assert the live
+    // contract — a revision row for this project carrying the canonical prefix.
+    let expected_prefix = format!("REV-{code}-");
+    assert!(revision_rows.contains(&expected_prefix), "{revision_rows}");
     assert!(result["data"]["created"].is_array());
     assert!(result["data"]["updated"].is_array());
     assert!(result["data"]["linked"].is_array());
@@ -2502,6 +2507,12 @@ fn test_axon_init_project_rejects_non_canonical_project_code() {
 
 #[test]
 fn test_axon_apply_guidelines_rejects_non_canonical_project_code() {
+    // REQ-AXO-902142 — serialize env access + force the synchronous path. A
+    // sibling test (runtime_surface) sets AXON_MCP_MUTATION_JOBS=true; without
+    // the lock+guard this test races into the async-job envelope and the
+    // recovery-contract assertions fail under concurrent runs.
+    let _env = env_lock();
+    let _mj = crate::test_support::EnvVarGuard::unset("AXON_MCP_MUTATION_JOBS");
     let server = create_test_server();
 
     let req = serde_json::json!({
@@ -7754,6 +7765,11 @@ fn test_axon_init_project_rejects_client_project_code_when_it_differs_from_serve
 
 #[test]
 fn test_axon_apply_guidelines_creates_local_copies() {
+    // REQ-AXO-902142 — serialize env access + force the synchronous path (a
+    // sibling test sets AXON_MCP_MUTATION_JOBS=true; the async envelope has no
+    // `GUI-AXO-001` content line, breaking this test under concurrency).
+    let _env = env_lock();
+    let _mj = crate::test_support::EnvVarGuard::unset("AXON_MCP_MUTATION_JOBS");
     let server = create_test_server();
 
     // First init the project
@@ -7810,6 +7826,10 @@ fn test_axon_apply_guidelines_creates_local_copies() {
 
 #[test]
 fn test_axon_apply_guidelines_rejects_empty_accepted_list() {
+    // REQ-AXO-902142 — serialize env access + force the synchronous path so the
+    // empty-input recovery contract (isError=true) is asserted, not an async job.
+    let _env = env_lock();
+    let _mj = crate::test_support::EnvVarGuard::unset("AXON_MCP_MUTATION_JOBS");
     let server = create_test_server();
     let req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -7860,6 +7880,10 @@ fn test_axon_apply_guidelines_rejects_empty_accepted_list() {
 
 #[test]
 fn test_axon_apply_guidelines_rejects_all_unknown_rule_ids() {
+    // REQ-AXO-902142 — serialize env access + force the synchronous path so the
+    // all-unknown-ids recovery contract (isError=true) is asserted, not an async job.
+    let _env = env_lock();
+    let _mj = crate::test_support::EnvVarGuard::unset("AXON_MCP_MUTATION_JOBS");
     let server = create_test_server();
     let req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -7904,6 +7928,10 @@ fn test_axon_apply_guidelines_rejects_all_unknown_rule_ids() {
 
 #[test]
 fn test_axon_apply_guidelines_partial_success_surfaces_unknown() {
+    // REQ-AXO-902142 — serialize env access + force the synchronous path so the
+    // partial-success body (known_ids/unknown_ids) is present, not an async job.
+    let _env = env_lock();
+    let _mj = crate::test_support::EnvVarGuard::unset("AXON_MCP_MUTATION_JOBS");
     let server = create_test_server();
     let req = serde_json::json!({
         "jsonrpc": "2.0",
