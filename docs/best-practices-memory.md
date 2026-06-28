@@ -1,9 +1,14 @@
 # Mémoire de bonnes pratiques cross-tenant (gouvernée, auto-améliorante)
 
 > **SOLL :** `REQ-AXO-902131` (BELONGS_TO `PIL-AXO-002`).
-> **Statut :** design / spec. **Branche isolée** `feat/best-practices-memory`, aucun
-> touche aux fichiers chauds (`catalog.rs`/`dispatch.rs`/`tool_contracts.rs`), pas de promote.
-> **Origine :** convergence `DEC-NEX-008` — le prototype prouvé côté Nexus à généraliser.
+> **Statut :** ✅ **LIVRÉ et LIVE** (build ≥ `v0.8.0-1280`). Les tools `practice_recall` /
+> `practice_put` / `practice_tick` / `practice_card` sont câblés (`catalog.rs` / `dispatch.rs`)
+> et servis par le brain ; encodage dense (902136), fusion sémantique (902137), consolidation
+> épisode→règle→principe (902138), décroissance par périssabilité (902141) et partitionnement
+> multi-agent scope/role/model (902149) sont LIVRÉS. Migration des `feedback_*.md` → `practice_*`
+> faite (REQ-AXO-902146). **Source de vérité = `src/axon-core/src/mcp/tools_practice.rs` + le
+> schéma catalog ; ce doc = contexte/rationale, pas le contrat.**
+> **Origine :** convergence `DEC-NEX-008` — prototype Nexus généralisé (REQ-AXO-902131).
 
 ## 1. Thèse
 
@@ -23,9 +28,9 @@ centrale** (dogfood compris).
 | **Write-gate anti-poison** | `contradiction_check` (`REQ-AXO-902096`, scan EXACT `902129`) |
 | **Partage inter-projets** | mailbox A2A (`REQ-AXO-902112`) |
 | Annuaire des contributeurs | `project_registry` |
-| **Manque** (à porter de Nexus) | décroissance FSRS + trust/renforcement + méta-moniteur |
+| ✅ **Décroissance FSRS + trust/renforcement + méta-moniteur** | LIVRÉ (`practice_memory.rs` : `decay_trust`/`retrievability`/`should_prune`, renforcement Physarum au recall, `assess_stagnation`) — REQ-AXO-902141/138/137 |
 
-La surface **neuve** est donc petite : la majorité est une **composition** de l'existant.
+La surface neuve a été livrée par **composition** de l'existant (le « manque » Nexus est comblé).
 
 ## 3. Modèle de données (additif — nouvelle table, ne touche rien)
 
