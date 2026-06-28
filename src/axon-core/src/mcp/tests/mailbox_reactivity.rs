@@ -62,6 +62,17 @@ fn r1_r2_r3_banner_targets_recipient_signal_only() {
         Some("mcp_inbox_read"),
         "pointer routes to the explicit pull"
     );
+    // REQ-AXO-902145 — no dead-end (PIL-AXO-002) : the banner must carry the
+    // recovery for a stale client binding (the read tool missing from the
+    // session's catalogue) so "N non-lus" is never a terminal state.
+    assert!(
+        banner["on_tool_absent"].as_str().unwrap_or("").contains("reconnect"),
+        "banner must tell a stale client how to recover (reconnect MCP)"
+    );
+    assert!(
+        banner["banner"].as_str().unwrap_or("").contains("reconnecte"),
+        "human banner line must name the reconnect recovery"
+    );
     // SIGNAL ONLY — the body must never leak into the banner.
     let serialized = serde_json::to_string(&banner).unwrap();
     assert!(

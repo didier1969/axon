@@ -469,14 +469,21 @@ impl McpServer {
         } else {
             format!(" de {}", senders.join(", "))
         };
+        // REQ-AXO-902145 — no dead-end (PIL-AXO-002) : the banner names the exact
+        // read invocation AND the recovery when that tool is missing from a stale
+        // client binding (the tool IS advertised server-side in catalog.rs, but the
+        // session bound an older catalogue → reconnect re-fetches tools/list).
+        // Without this, a stale client sees "N non-lus" with no reachable way to
+        // read the bodies — exactly the reported friction.
         let banner = format!(
-            "📬 {count} message(s) non-lu(s){from_label} — relève avec `mcp_inbox_read project={project}` (signal seul, corps non inliné)."
+            "📬 {count} message(s) non-lu(s){from_label} — relève avec `mcp_inbox_read project={project}` (signal seul, corps non inliné). Si `mcp_inbox_read` est absent de ta session : reconnecte ton client MCP (binding de catalogue stale)."
         );
         Some(json!({
             "unread": count,
             "from": senders,
             "latest_id": latest_id,
             "pointer": { "tool": "mcp_inbox_read", "arguments": { "project": project } },
+            "on_tool_absent": "reconnect MCP client to refresh the tool catalogue (stale binding) — the read tool is advertised server-side (catalog.rs)",
             "banner": banner,
         }))
     }
