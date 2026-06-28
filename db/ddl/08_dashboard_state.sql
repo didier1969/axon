@@ -220,6 +220,19 @@ AS $func$
 DECLARE
     cfg JSONB;
 BEGIN
+    -- REQ-AXO-902152 (fix C) — the 1 Hz dashboard poll routes here on the WRITER
+    -- pool and is a READ-WRITE tx (dashboard_totals / dashboard_per_project_counts
+    -- write-back axon.dashboard_cache). It touches axon.project + ist.* in the
+    -- OPPOSITE lock order to the stage_a3 bulk writer → a deadlock cycle (40P01)
+    -- that abort-loops the indexer (TensorRT rebuild = OOM amplifier). Make the
+    -- DISPENSABLE side the guaranteed loser: a short lock_timeout (< deadlock_timeout
+    -- 1s) aborts the dashboard on lock contention BEFORE any cycle forms, so the
+    -- writer is NEVER chosen as victim. SET LOCAL covers the nested cache write-backs
+    -- (same tx). On abort the brain's read_dashboard_state_full returns the graceful
+    -- empty fallback — one dropped dashboard frame, never a killed indexer batch.
+    SET LOCAL lock_timeout = '250ms';
+    SET LOCAL statement_timeout = '2s';
+
     SELECT config
     INTO cfg
     FROM axon.runtime_config_snapshot

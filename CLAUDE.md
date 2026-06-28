@@ -44,6 +44,13 @@ Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (superv
 | Commit work | `axon_pre_flight_check` → `axon_commit_work` |
 | Hybrid retrieval (FTS+vector+graph) | `retrieve_context` / `retrieve_context_layered` |
 | Toggle query-embed provider (runtime) | `embed_provider` |
+| **Recall how-to-work memory** (PRIMARY, at init) | `practice_recall` |
+| **Save a learned practice** (governed, decaying) | `practice_put` (scope/role/model partitioning, REQ-AXO-902149) |
+| **Reinforce/consolidate practices** | `practice_tick` / `practice_card` |
+| **Read this project's inbox** (wake/handoff) | `mcp_inbox_read` |
+| **Send to another project** | `mcp_outbox_send` |
+
+> **New governed tools — USE THEM (don't fall back to files).** `practice_*` (REQ-AXO-902131+) is the PRIMARY "how to work" memory channel: `practice_recall` at init, `practice_put` for every durable lesson. `mcp_inbox_read`/`mcp_outbox_send` (REQ-AXO-902114+) are the cross-project mailbox. If your client registry predates them they may be missing — reconnect MCP to refresh (`mcp_surface_diagnostics` confirms server vs client). `feedback_*.md` + `MEMORY.md` are FALLBACK only.
 
 ## Query-embed provider (REQ-AXO-901978/901984)
 Query/`why`/`retrieve_context` embed the NL question. `start.sh` provisions the GPU ORT artifact whenever a GPU is detected — **including `brain_only`** — so the punctual query embed runs on the idle GPU (~ms vs ~s on CPU). `query`/`retrieve_context`/`_layered` accept `semantic=auto|lexical|semantic` (auto = single-token symbol → lexical/no-embed, NL → embed). Toggle the provider at RUNTIME without a restart via `embed_provider` (action=set, provider=cpu|gpu|auto) — use `cpu` to release the GPU for Axon Live / another service, `gpu` to re-grab it. `status`/`embedding_status` report the true worker compute (GPU/CPU).

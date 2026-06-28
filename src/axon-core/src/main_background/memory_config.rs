@@ -41,6 +41,19 @@ pub(super) fn memory_limit_bytes() -> u64 {
     gb * 1024 * 1024 * 1024
 }
 
+/// REQ-AXO-902152 — host-wide allocatable floor below which the watchdog declares CRITICAL
+/// aggregate VM pressure (the real OOM driver: WSL-cap saturation, not a mono-process leak).
+/// This is the implicit cross-process coordinator — brain + indexer both read host MemAvailable.
+/// Default 3 GiB; override via AXON_VM_MEMORY_FLOOR_GB (clamped to a sane ≥ 0.5 GiB).
+pub(super) fn vm_memory_floor_bytes() -> u64 {
+    let gb = std::env::var("AXON_VM_MEMORY_FLOOR_GB")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| *v >= 0.5)
+        .unwrap_or(3.0);
+    (gb * 1024.0 * 1024.0 * 1024.0) as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

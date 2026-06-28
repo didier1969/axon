@@ -31,7 +31,7 @@ mod memory_config;
 use host_pressure::sample_host_pressure;
 use memory_config::{
     current_rss_bytes, memory_limit_bytes, memory_reclaimer_enabled,
-    memory_reclaimer_min_anon_bytes, parse_rss_from_statm,
+    memory_reclaimer_min_anon_bytes, vm_memory_floor_bytes,
 };
 
 const MEMORY_RECLAIMER_POLL_INTERVAL_SECS: u64 = 15;
@@ -127,35 +127,67 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub utility_first_scheduler_hold_window_ms: u64,
 }
 
+/// REQ-AXO-902152 — ACTIVE memory watchdog (was purely observational: it set an
+/// `above_limit` flag consumed NOWHERE → dead-code false-safety). It now:
+///   1. classifies pressure from BOTH per-process RSS vs cap AND host-wide
+///      MemAvailable vs floor (the real OOM driver is aggregate WSL-cap saturation,
+///      which never trips a per-process cap — incident 2026-06-28);
+///   2. publishes the level so the pipeline-A intake throttles itself (good co-tenant);
+///   3. trims the allocator NOW under pressure (returns freed arenas to the OS),
+///      instead of logging and doing nothing;
+///   4. polls faster while under pressure so it reacts before a freeze.
+/// Axon is well-behaved (~3.4 GB); this is host-safety/cohabitation (PIL-AXO-007),
+/// not a fix for an Axon leak — it makes Axon recede when the SHARED VM is saturated.
 pub(crate) fn start_memory_watchdog() {
-    std::thread::spawn(|| {
-        let page_size = 4096;
+    use axon_core::runtime_observability::{
+        classify_memory_pressure, malloc_trim_system_allocator, mem_available_bytes,
+        set_memory_pressure, MemoryPressure,
+    };
+    std::thread::spawn(move || {
         let limit_bytes = memory_limit_bytes();
-        let mut above_limit = false;
+        let floor_bytes = vm_memory_floor_bytes();
+        let mut last_logged = MemoryPressure::Normal;
         loop {
-            if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
-                if let Some(rss_pages) = parse_rss_from_statm(&content) {
-                    let rss_bytes = rss_pages * page_size;
-                    if rss_bytes > limit_bytes {
-                        if !above_limit {
-                            error!(
-                            "CRITICAL: Memory threshold reached ({} GB). Holding runtime in degraded mode instead of suicide...",
-                            rss_bytes / 1024 / 1024 / 1024
-                            );
-                            above_limit = true;
-                        }
-                    } else if above_limit {
-                        warn!(
-                            "Memory watchdog: RSS returned below threshold ({} GB).",
-                            rss_bytes / 1024 / 1024 / 1024
-                        );
-                        above_limit = false;
-                    }
+            let rss_bytes = current_rss_bytes().unwrap_or(0);
+            let available = mem_available_bytes();
+            let level = classify_memory_pressure(rss_bytes, limit_bytes, available, floor_bytes);
+            set_memory_pressure(level);
+
+            if level != MemoryPressure::Normal {
+                // Active mitigation: trim the system allocator immediately (cheap; returns idle
+                // arenas to the OS so the aggregate VM recovers headroom). The pipeline-A intake
+                // reads the published level and backs off in parallel.
+                MEMORY_TRIM_ATTEMPTS_TOTAL.fetch_add(1, Ordering::Relaxed);
+                if malloc_trim_system_allocator() {
+                    MEMORY_TRIM_SUCCESSES_TOTAL.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            std::thread::sleep(Duration::from_millis(quiescent_scaled_interval_ms(
-                10_000, 10_000, 120_000,
-            )));
+
+            if level != last_logged {
+                let avail_mb = available.map(|b| b / 1024 / 1024).unwrap_or(0);
+                let rss_mb = rss_bytes / 1024 / 1024;
+                match level {
+                    MemoryPressure::Critical => error!(
+                        "CRITICAL memory pressure (rss={rss_mb} MB, host_available={avail_mb} MB, floor={} MB): trimming + throttling A1 intake — Axon backing off as co-tenant [REQ-AXO-902152]",
+                        floor_bytes / 1024 / 1024
+                    ),
+                    MemoryPressure::Elevated => warn!(
+                        "Elevated memory pressure (rss={rss_mb} MB, host_available={avail_mb} MB): trimming allocator [REQ-AXO-902152]"
+                    ),
+                    MemoryPressure::Normal => info!(
+                        "Memory pressure cleared (rss={rss_mb} MB, host_available={avail_mb} MB) [REQ-AXO-902152]"
+                    ),
+                }
+                last_logged = level;
+            }
+
+            // React fast under pressure; idle-scale otherwise.
+            let interval_ms = if level == MemoryPressure::Normal {
+                quiescent_scaled_interval_ms(10_000, 10_000, 120_000)
+            } else {
+                2_000
+            };
+            std::thread::sleep(Duration::from_millis(interval_ms));
         }
     });
 }
@@ -175,8 +207,14 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>) {
 
         let process_memory = process_memory_snapshot();
         let min_anon_bytes = memory_reclaimer_min_anon_bytes();
+        let pressure = axon_core::runtime_observability::current_memory_pressure();
 
-        if !should_attempt_memory_reclaim(queue.common_len(), process_memory, min_anon_bytes) {
+        if !should_attempt_memory_reclaim(
+            queue.common_len(),
+            process_memory,
+            min_anon_bytes,
+            pressure,
+        ) {
             continue;
         }
 
@@ -184,8 +222,9 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>) {
         if axon_core::runtime_observability::malloc_trim_system_allocator() {
             MEMORY_TRIM_SUCCESSES_TOTAL.fetch_add(1, Ordering::Relaxed);
             info!(
-                "Memory reclaimer trimmed system allocator after idle period (rss_anon={} MiB).",
-                process_memory.rss_anon_bytes / 1024 / 1024
+                "Memory reclaimer trimmed system allocator (rss_anon={} MiB, pressure={}).",
+                process_memory.rss_anon_bytes / 1024 / 1024,
+                pressure.as_str()
             );
         }
     });
@@ -469,10 +508,23 @@ fn should_attempt_memory_reclaim(
     queue_len: usize,
     process_memory: axon_core::runtime_observability::ProcessMemorySnapshot,
     min_anon_bytes: u64,
+    pressure: axon_core::runtime_observability::MemoryPressure,
 ) -> bool {
+    use axon_core::runtime_observability::MemoryPressure;
+
+    // REQ-AXO-902152 — under sustained aggregate VM pressure, trim even while the
+    // queue is BUSY: mid-indexing is exactly when anon RSS climbs and the old
+    // idle-only gate (REQ-AXO-901893) never fired. A lower floor applies so the
+    // trim actually fires for Axon's modest footprint (it never reaches the 4 GB
+    // idle floor). 256 MiB minimum keeps it from churning on a tiny process.
+    if pressure != MemoryPressure::Normal {
+        let pressure_floor = (min_anon_bytes / 8).max(256 * 1024 * 1024);
+        return process_memory.rss_anon_bytes >= pressure_floor;
+    }
+
     // REQ-AXO-901893 (LEGACY FEED PURGE) — the ingress_buffer backlog gate was
-    // ripped with the buffer. Reclaim only when the work queue is idle and the
-    // anonymous RSS is above the trim floor.
+    // ripped with the buffer. Otherwise reclaim only when the work queue is idle
+    // and the anonymous RSS is above the trim floor.
     if queue_len > 0 {
         return false;
     }
@@ -849,6 +901,7 @@ mod tests {
     /// is at/above the trim floor; it is suppressed while the queue is non-empty.
     #[test]
     fn test_memory_reclaim_gates_on_queue_idle_and_anon_floor() {
+        use axon_core::runtime_observability::MemoryPressure;
         let mem_over = axon_core::runtime_observability::ProcessMemorySnapshot {
             rss_bytes: 24 * 1024 * 1024 * 1024,
             rss_anon_bytes: 23 * 1024 * 1024 * 1024,
@@ -856,15 +909,70 @@ mod tests {
             rss_shmem_bytes: 0,
         };
         let floor = 4 * 1024 * 1024 * 1024;
-        // Idle queue + anon above floor → reclaim.
-        assert!(should_attempt_memory_reclaim(0, mem_over, floor));
-        // Non-empty queue → never reclaim (work in flight).
-        assert!(!should_attempt_memory_reclaim(7, mem_over, floor));
-        // Idle queue but anon below floor → no reclaim (nothing to gain).
+        // Normal pressure, idle queue + anon above floor → reclaim.
+        assert!(should_attempt_memory_reclaim(
+            0,
+            mem_over,
+            floor,
+            MemoryPressure::Normal
+        ));
+        // Normal pressure, non-empty queue → never reclaim (work in flight).
+        assert!(!should_attempt_memory_reclaim(
+            7,
+            mem_over,
+            floor,
+            MemoryPressure::Normal
+        ));
+        // Normal pressure, idle queue but anon below floor → no reclaim.
         let mem_under = axon_core::runtime_observability::ProcessMemorySnapshot {
             rss_anon_bytes: 1024 * 1024,
             ..mem_over
         };
-        assert!(!should_attempt_memory_reclaim(0, mem_under, floor));
+        assert!(!should_attempt_memory_reclaim(
+            0,
+            mem_under,
+            floor,
+            MemoryPressure::Normal
+        ));
+    }
+
+    /// REQ-AXO-902152 — under aggregate VM pressure the reclaimer trims even while
+    /// the queue is BUSY, against a LOWER floor (mid-indexing is when anon climbs).
+    #[test]
+    fn test_memory_reclaim_fires_under_pressure_even_when_busy() {
+        use axon_core::runtime_observability::MemoryPressure;
+        let floor = 4 * 1024 * 1024 * 1024; // 4 GiB idle floor → pressure floor = 512 MiB
+                                            // Axon-sized footprint: 2 GiB anon, queue BUSY.
+        let mem = axon_core::runtime_observability::ProcessMemorySnapshot {
+            rss_bytes: 2 * 1024 * 1024 * 1024,
+            rss_anon_bytes: 2 * 1024 * 1024 * 1024,
+            rss_file_bytes: 0,
+            rss_shmem_bytes: 0,
+        };
+        // Normal pressure + busy + below 4 GiB idle floor → no trim (old behaviour).
+        assert!(!should_attempt_memory_reclaim(
+            500,
+            mem,
+            floor,
+            MemoryPressure::Normal
+        ));
+        // Critical pressure + busy + above the 512 MiB pressure floor → trim.
+        assert!(should_attempt_memory_reclaim(
+            500,
+            mem,
+            floor,
+            MemoryPressure::Critical
+        ));
+        // Elevated pressure with tiny anon (below 256 MiB min) → no trim.
+        let tiny = axon_core::runtime_observability::ProcessMemorySnapshot {
+            rss_anon_bytes: 100 * 1024 * 1024,
+            ..mem
+        };
+        assert!(!should_attempt_memory_reclaim(
+            500,
+            tiny,
+            floor,
+            MemoryPressure::Elevated
+        ));
     }
 }

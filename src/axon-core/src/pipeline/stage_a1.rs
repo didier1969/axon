@@ -32,12 +32,42 @@ pub fn mtime_size_ms(metadata: &std::fs::Metadata) -> (i64, u64) {
     (mtime_ms, metadata.len())
 }
 
+/// REQ-AXO-902152 — upper bound (ms) on how long A1 pauses NEW intake under CRITICAL
+/// aggregate VM pressure before proceeding anyway (a memory dip must never WEDGE a file).
+/// Default 5 s; override via `AXON_A1_MEMORY_BACKOFF_CAP_MS` (clamped 0..=60 s).
+fn a1_memory_backoff_cap_ms() -> u64 {
+    std::env::var("AXON_A1_MEMORY_BACKOFF_CAP_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(5_000)
+        .clamp(0, 60_000)
+}
+
 /// Read `path`, compute its content hash, and return the prepared payload.
 ///
 /// This is the closure handed to [`super::spawn_stage_workers`] for stage A1.
 /// Errors are surfaced verbatim so the worker pool can record them in
 /// `StageMetrics::errors_total` without crashing the pipeline.
 pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
+    // REQ-AXO-902152 — host-safety co-tenant backoff. Under CRITICAL aggregate VM
+    // pressure (published by the memory watchdog from host MemAvailable), slow NEW
+    // A1 intake so in-flight content drains and the reclaimer can trim, instead of
+    // piling on toward a host freeze. Applied BEFORE the in-flight registry enter so
+    // a memory pause is never misread as an A1 stall (REQ-AXO-901919). Bounded: after
+    // the cap we proceed regardless — a memory dip must never WEDGE a file.
+    {
+        use crate::runtime_observability::{
+            current_memory_pressure, record_memory_backpressure_pause, MemoryPressure,
+        };
+        let mut waited_ms = 0u64;
+        let cap_ms = a1_memory_backoff_cap_ms();
+        while current_memory_pressure() == MemoryPressure::Critical && waited_ms < cap_ms {
+            record_memory_backpressure_pause();
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            waited_ms += 250;
+        }
+    }
+
     // REQ-AXO-901919 — register as in-flight for the whole stage so the
     // watchdog can name this file if A1 (metadata/read) ever stalls. Drops on
     // return OR cancellation.
