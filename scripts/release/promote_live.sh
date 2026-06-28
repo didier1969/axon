@@ -188,33 +188,39 @@ PY
     echo "in-place: process-compose restart axon-brain failed; full restart." >&2
     return 1
   fi
-  # REQ-AXO-902109 — restart the indexer UNCONDITIONALLY (its binary was swapped
-  # and the post-check requires indexer_ready). The previous version gated this on
-  # `pgrep bin/axon-indexer` being already alive — so a dead indexer pre-restart
-  # (s91 promote: pid died before step 5) was NEVER restarted, and the caller's
-  # indexer_ready post-check then burned its whole 300s timeout before failing.
-  # `process restart` starts a stopped process; a non-zero exit means the indexer
-  # is NOT in this live profile (brain_only) — recorded so we don't demand it.
-  local indexer_in_profile=0
-  if "$pc" process restart axon-indexer -p "$pc_port" >/dev/null 2>&1; then
-    indexer_in_profile=1
-  fi
-  # Confirm the MCP port is actually serving (process restart already gated on
-  # the readiness_probe; this verifies the real :44129/readyz).
+  # REQ-AXO-902148 — DÉCOUPLAGE brain↔indexer (PIL-AXO-007/008 : l'indexeur ne doit
+  # JAMAIS gater le brain MCP). Confirmer le /readyz du BRAIN D'ABORD, AVANT de
+  # toucher l'indexer : le brain est le service MCP (le downtime qui compte). Avant
+  # ce changement, le restart de l'indexer (lourd, GPU) tournait ENTRE le restart
+  # brain et ce poll, et sa charge de démarrage repoussait le /readyz brain au-delà
+  # de 60s → faux fallback vers un full restart de 136-304s (mesuré s93, 3 promotes).
+  # La fenêtre de downtime MCP se referme ICI = ~temps de restart brain seul (~2-6s).
   if ! poll_until "brain readyz after in-place process restart" 60 0.2 \
        bash -c "curl -sf -m 2 http://127.0.0.1:44129/readyz >/dev/null 2>&1"; then
     echo "in-place: brain did not return on /readyz within 60s; full restart." >&2
     return 1
   fi
-  # REQ-AXO-902109 fail-fast — if the indexer belongs to this profile but did not
-  # come back up, fall back to a full restart NOW instead of letting the caller's
-  # indexer_ready post-check exhaust its (up to 300s) timeout on a doomed poll.
+  # Brain SERVING — downtime MCP terminé. On restarte l'indexer SÉPARÉMENT (son
+  # binaire a été swappé ; le post-check exige indexer_ready). REQ-AXO-902109 :
+  # `process restart` démarre un process stoppé ; exit non-zéro = indexer hors profil
+  # (brain_only) → on ne l'exige pas. Un raté TRANSITOIRE obtient UN retry ciblé ;
+  # seul un indexer réellement mort retombe sur un full restart (rare) — le brain
+  # déjà up n'est plus l'otage de l'indexer.
+  local indexer_in_profile=0
+  if "$pc" process restart axon-indexer -p "$pc_port" >/dev/null 2>&1; then
+    indexer_in_profile=1
+  fi
   if [[ "$indexer_in_profile" -eq 1 ]] && ! pgrep -f 'bin/axon-indexer' >/dev/null 2>&1; then
-    echo "in-place: indexer in profile but not running after restart; full restart." >&2
-    return 1
+    # transitoire — un retry ciblé indexer avant de sacrifier le brain (déjà up).
+    "$pc" process restart axon-indexer -p "$pc_port" >/dev/null 2>&1 || true
+    if ! poll_until "indexer up after in-place retry" 30 0.5 \
+         bash -c "pgrep -f 'bin/axon-indexer' >/dev/null 2>&1"; then
+      echo "in-place: indexer in profile but not running after restart+retry; full restart." >&2
+      return 1
+    fi
   fi
   if [[ "$indexer_in_profile" -eq 1 ]]; then
-    echo "✅ in-place restart: axon-brain + axon-indexer restarted via process-compose (managed)." >&2
+    echo "✅ in-place restart: brain serving (fast path) + indexer restarted separately (managed)." >&2
   else
     echo "✅ in-place restart: axon-brain restarted via process-compose (managed; brain_only profile)." >&2
   fi
