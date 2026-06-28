@@ -138,9 +138,18 @@ fn r6_banner_clears_after_read_advances_cursor() {
     assert!(server.mailbox_unread_banner(TO).is_some(), "mail present before read");
 
     // Pull the inbox in `unread` mode → cursor advances past the message.
-    server
+    let read = server
         .execute_tool_direct("mcp_inbox_read", &json!({ "project": TO, "mode": "unread" }))
         .expect("inbox_read returns a result");
+
+    // REQ-AXO-902145 — the explicit pull MUST deliver bodies in the TEXT channel
+    // (content[0].text), not only structuredContent : LLM clients consume the text
+    // channel, so a count-only text was the real "messages sans corps" friction.
+    let text = read["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("ref SOLL-X"),
+        "inbox_read text channel must render the message body, got: {text}"
+    );
 
     assert!(
         server.mailbox_unread_banner(TO).is_none(),

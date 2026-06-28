@@ -343,6 +343,7 @@ impl McpServer {
         };
 
         let mut messages: Vec<Value> = Vec::with_capacity(rows.len());
+        let mut body_lines = String::new();
         let mut max_id = floor;
         for row in &rows {
             let id = row
@@ -368,6 +369,15 @@ impl McpServer {
                 "created_at": g(10),
                 "signature_verified": verified,
             }));
+            // REQ-AXO-902145 — render each body into the TEXT channel (content[0].text),
+            // not only structuredContent : LLM clients consume the text channel, so a
+            // count-only text reads as "messages sans corps" even on a successful read.
+            // The explicit pull is where the content is meant to land.
+            let sig_mark = if verified { "✓" } else { "✗ sig" };
+            let reply = if irt.is_empty() { String::new() } else { format!(" ↩ {irt}") };
+            body_lines.push_str(&format!(
+                "\n\n**[{id}] {from} → {subject}** ({kind}, {sig_mark}{reply})\n{body}"
+            ));
         }
 
         // Advance the read cursor only in `unread` mode (so `since`/`all`/search/
@@ -385,7 +395,7 @@ impl McpServer {
         }
 
         let report = format!(
-            "### 📥 mcp_inbox_read\n\n`{}` · mode={} · {} message(s){}",
+            "### 📥 mcp_inbox_read\n\n`{}` · mode={} · {} message(s){}{}",
             project,
             mode,
             messages.len(),
@@ -393,6 +403,11 @@ impl McpServer {
                 format!(" · cursor advanced to {max_id}")
             } else {
                 String::new()
+            },
+            if messages.is_empty() {
+                "\n\n(aucun message)".to_string()
+            } else {
+                body_lines
             }
         );
         Some(json!({
