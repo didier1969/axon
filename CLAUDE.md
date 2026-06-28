@@ -85,7 +85,7 @@ Full operator reference: `docs/skills/axon-engineering-protocol/SKILL.md`.
 - IST live: delete only on explicit user request; serves MCP clients.
 
 ## Session Hand Off (every session end)
-Procedure = **GUI-PRO-028** in SOLL (5 mandatory steps : session_pointer / SOLL cleanup+replan / boot-docs prune / SKILL.md consolidation / working-notes audit). Trigger : "Axon Hand Off" or context approaching 70%. Read body via `soll_query_context` or `retrieve_context question="GUI-PRO-028 body"`. NO content duplicated here.
+Procedure = **GUI-PRO-028** in SOLL (6 steps : practice_put apprentissages / session_pointer / SOLL cleanup+replan / boot-docs prune / SKILL consolidation / working-notes + handoff mailbox). Trigger : "Axon Hand Off" / "handoff" / `/clear` imminent / reprise par un autre LLM — **PAS sur le % de contexte** (unlimited-context). Mémoire « comment travailler » = `practice_*` PRIMAIRE (REQ-AXO-902131), `feedback_*.md` = fallback gracieux si registre client stale. Read body via `soll_query_context` or `retrieve_context question="GUI-PRO-028 body"`. NO content duplicated here.
 
 ## Deployment Pipeline
 - NEVER manual `cargo build --release` + copy to `bin/`. Use the pipeline.
