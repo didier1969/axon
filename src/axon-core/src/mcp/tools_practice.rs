@@ -91,13 +91,10 @@ fn is_imperative_directive(context: &str, practice: &str) -> bool {
 
 /// REQ-AXO-902137 — cosine-distance threshold under which two practices count as
 /// near-duplicates and get fused. 0.07 ≈ cosine similarity > 0.93 (BGE-large 1024d).
+/// Single source of truth for the fuse threshold ; applied IN-DB by
+/// [`Self::fuse_near_duplicates`] via the pgvector `<=>` self-join (no vector
+/// round-trip to Rust, PIL-AXO-9002), so the comparison lives in SQL, not a predicate.
 const FUSION_COSINE_EPS: f32 = 0.07;
-
-/// REQ-AXO-902137 — two practices are near-duplicates (fuse candidates) when their
-/// embedding cosine distance is below `eps`. Pure + unit-testable.
-fn should_fuse(dist: f32, eps: f32) -> bool {
-    dist < eps
-}
 
 /// REQ-AXO-902137 — fold the provenance (`source_project`) of a fused duplicate
 /// into the representative's: comma-separated union, insertion-order preserved,
@@ -706,8 +703,7 @@ mod tests {
     use super::{
         axis_recall_set, consolidate_tier, covering_scopes, is_failure_mode,
         is_imperative_directive, merge_provenance, normalize_axis_tag, normalize_perishability,
-        perishability_decays_by_time, provenance_count, resolve_dense_form, should_fuse,
-        FUSION_COSINE_EPS,
+        perishability_decays_by_time, provenance_count, resolve_dense_form,
     };
 
     #[test]
@@ -762,14 +758,6 @@ mod tests {
         assert_eq!(provenance_count("NEX"), 1);
         assert_eq!(provenance_count("NEX,AXO"), 2);
         assert_eq!(provenance_count(" NEX , AXO ,NEX"), 2); // dedup + trim
-    }
-
-    #[test]
-    fn should_fuse_902137() {
-        // below eps → fuse ; at/above eps → keep distinct.
-        assert!(should_fuse(0.02, FUSION_COSINE_EPS));
-        assert!(!should_fuse(FUSION_COSINE_EPS, FUSION_COSINE_EPS));
-        assert!(!should_fuse(0.5, FUSION_COSINE_EPS));
     }
 
     #[test]
