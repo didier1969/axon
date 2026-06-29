@@ -46,6 +46,49 @@ fn is_failure_mode(context: &str, practice: &str) -> bool {
     MARKERS.iter().any(|m| hay.contains(m))
 }
 
+/// REQ-AXO-902154 — does the practice read as an IMPERATIVE OPERATIONAL DIRECTIVE
+/// ("always include the dashboard", "never force-push main", "mix assets.build after a
+/// Tailwind class") rather than a declarative factual ASSERTION about what the code IS?
+/// `contradiction_check` is an NLI over factual claims; it conflates a normative directive
+/// with a claim contradicting the indexed base and wrongly rejects it (verdict 0.86–0.99
+/// on imperative AXO practices, observed in the REQ-AXO-902146 dogfood migration). A
+/// directive is not a falsifiable statement about the code, so a `contradicts` verdict on
+/// it is downgraded to advisory (store + warn; the tick/prune/trust loop still governs it),
+/// NOT a hard reject. The anti-poison hard reject is preserved for declarative factual
+/// contradictions ("Axon uses MongoDB") that are neither failure-framed nor imperative.
+/// Two conservative signals: a deontic marker anywhere, or a leading imperative verb on the
+/// practice itself. Sibling of [`is_failure_mode`]. Pure + unit-testable.
+fn is_imperative_directive(context: &str, practice: &str) -> bool {
+    const DEONTIC: &[&str] = &[
+        // EN normative / deontic register
+        "always", "never", "must", "mustn't", "shall", "should", "do not", "don't",
+        "ensure", "make sure", "avoid", "prefer", "require", "only use", "use only",
+        // FR
+        "toujours", "jamais", "ne pas", "pas de", "il faut", "veiller à", "éviter",
+        "préférer", "doit", "ne doit", "exiger", "n'oublie", "assure", "à éviter",
+    ];
+    let hay = format!("{context} {practice}").to_lowercase();
+    if DEONTIC.iter().any(|m| hay.contains(m)) {
+        return true;
+    }
+    // Leading imperative verb on the practice itself (e.g. "mix assets.build…",
+    // "use the promote script…", "garde le dashboard…").
+    const IMPERATIVE_LEAD: &[&str] = &[
+        "use", "run", "add", "keep", "set", "pass", "call", "check", "verify", "rebuild",
+        "mix", "include", "delete", "remove", "restart", "build", "ship", "commit",
+        "utilise", "lance", "ajoute", "garde", "vérifie", "relance", "passe", "inclus",
+        "supprime", "reconstruis", "livre",
+    ];
+    let first = practice
+        .trim_start()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    let first = first.trim_matches(|c: char| !c.is_alphanumeric());
+    IMPERATIVE_LEAD.iter().any(|v| first == *v)
+}
+
 /// REQ-AXO-902137 — cosine-distance threshold under which two practices count as
 /// near-duplicates and get fused. 0.07 ≈ cosine similarity > 0.93 (BGE-large 1024d).
 const FUSION_COSINE_EPS: f32 = 0.07;
@@ -253,10 +296,18 @@ impl McpServer {
         // tensions with the healthy-state base, so a `contradicts` verdict is ADVISORY
         // (store + warn) for failure-framed practices, and a HARD REJECT (anti-poison) only
         // for a factual contradiction of the base (e.g. "Axon uses MongoDB").
+        // REQ-AXO-902154 — likewise, an IMPERATIVE OPERATIONAL DIRECTIVE ("toujours inclure
+        // le dashboard", "never force-push main") is normative, not a falsifiable claim about
+        // the code; the NLI wrongly flags it as contradicting the indexed base. Downgrade it
+        // to advisory too. The hard reject survives only for a declarative factual
+        // contradiction that is neither failure-framed nor imperative.
         let failure_framed = is_failure_mode(context, practice);
+        let imperative_framed = is_imperative_directive(context, practice);
         let gate_label: &str = if verdict == "contradicts" {
             if failure_framed {
                 "advisory_failure_mode"
+            } else if imperative_framed {
+                "advisory_imperative_directive"
             } else {
                 let conflicts = gate
                     .as_ref()
@@ -653,9 +704,10 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        axis_recall_set, consolidate_tier, covering_scopes, is_failure_mode, merge_provenance,
-        normalize_axis_tag, normalize_perishability, perishability_decays_by_time, provenance_count,
-        resolve_dense_form, should_fuse, FUSION_COSINE_EPS,
+        axis_recall_set, consolidate_tier, covering_scopes, is_failure_mode,
+        is_imperative_directive, merge_provenance, normalize_axis_tag, normalize_perishability,
+        perishability_decays_by_time, provenance_count, resolve_dense_form, should_fuse,
+        FUSION_COSINE_EPS,
     };
 
     #[test]
@@ -754,5 +806,20 @@ mod tests {
         // factual non-failure claims → NOT failure-framed (a contradiction stays a reject)
         assert!(!is_failure_mode("database choice", "Axon uses MongoDB for everything"));
         assert!(!is_failure_mode("vector search", "use exact scan for small scopes"));
+    }
+
+    #[test]
+    fn imperative_directive_detection_902154() {
+        // deontic register → directive (downgraded to advisory, not rejected)
+        assert!(is_imperative_directive("dashboard", "toujours inclure le dashboard"));
+        assert!(is_imperative_directive("git", "never force-push main"));
+        assert!(is_imperative_directive("DDL", "pas de CHECK vocab au bootstrap DDL"));
+        assert!(is_imperative_directive("delivery", "you must run the promote script"));
+        // leading imperative verb (no explicit deontic marker)
+        assert!(is_imperative_directive("Tailwind", "mix assets.build after a new class"));
+        assert!(is_imperative_directive("runtime", "garde le brain et l'indexer séparés"));
+        // declarative factual assertions → NOT a directive (anti-poison reject preserved)
+        assert!(!is_imperative_directive("database choice", "Axon uses MongoDB for everything"));
+        assert!(!is_imperative_directive("storage", "the canonical store is PostgreSQL"));
     }
 }
