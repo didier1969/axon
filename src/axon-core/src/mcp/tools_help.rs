@@ -351,6 +351,59 @@ fn usage_examples_for_tool(tool_name: &str) -> Value {
                 }
             }
         ]),
+        // REQ-AXO-902153 — governed how-to-work memory (practice_*) examples so the
+        // PRIMARY memory channel is discoverable from help(), not just the catalog.
+        "practice_recall" => json!([
+            {
+                "purpose": "recall practices for the current situation (FIRST at init)",
+                "arguments": {
+                    "query": "starting a session, what's the working discipline here",
+                    "top_k": 8
+                }
+            }
+        ]),
+        "practice_put" => json!([
+            {
+                "purpose": "store a durable cross-tenant lesson",
+                "arguments": {
+                    "scope": "*",
+                    "context": "long op (>30s: build, bench, tests)",
+                    "practice": "run it in background + do useful parallel work; never idle-wait",
+                    "evidence": "feedback_never_block_on_long_ops",
+                    "perishability": "durable"
+                }
+            },
+            {
+                "purpose": "project + agent-role private practice (REQ-AXO-902149); failure-mode framing dodges write-gate over-reject (REQ-AXO-902154)",
+                "arguments": {
+                    "scope": "AXO",
+                    "role": "coder",
+                    "context": "SQL on soll.Node",
+                    "practice": "SELECT label breaks (42703) — the column is title; that's the failure to avoid"
+                }
+            }
+        ]),
+        // REQ-AXO-902153 — cross-project mailbox (REQ-AXO-902114) examples.
+        "mcp_inbox_read" => json!([
+            {
+                "purpose": "drain this project's unread inbox (advances the read cursor)",
+                "arguments": {
+                    "mode": "unread",
+                    "limit": 20
+                }
+            }
+        ]),
+        "mcp_outbox_send" => json!([
+            {
+                "purpose": "hand off to another project (dense, pointer-bearing body; idempotency_key dedups re-sends)",
+                "arguments": {
+                    "to_project": "OPV",
+                    "subject": "handoff: see CPT-AXO-052",
+                    "body_dense": "Resume from session_pointer CPT-AXO-052; 3 next-actions inside.",
+                    "idempotency_key": "handoff-axo-2026-06-29-s93"
+                }
+            }
+        ]),
         _ => json!([]),
     }
 }
