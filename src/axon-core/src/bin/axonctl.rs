@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use axon_core::release_reconciler::{
-    evaluate_stop_gates, stop_next_action, stop_phase, StopFacts,
+    evaluate_liveness_gates, evaluate_stop_gates, liveness_next_action, liveness_phase,
+    stop_next_action, stop_phase, LivenessFacts, StopFacts,
 };
 use serde::Serialize;
 use std::collections::{BTreeSet, VecDeque};
@@ -206,6 +207,7 @@ Commands:
   stop          Orchestrated instance stop (kill processes, clean locks, verify)
   preflight     Pre-launch checks (PG accessible, binaries present, env hygiene)
   status        Health check for an instance
+  liveness      Full runtime_contract liveness (brain+indexer /readyz); exit 0 iff healthy
 
 Options:
   --project-root PATH     Axon project root directory
@@ -288,6 +290,133 @@ fn require_config(args: &GlobalArgs) -> Result<InstanceConfig> {
     Ok(InstanceConfig::new(project_root, instance_kind, role))
 }
 
+/// Like `require_config` but role-agnostic: the liveness probe reads only ports +
+/// manifest, which depend on `instance_kind`, not `role`. Defaults role to `all`.
+fn require_config_any_role(args: &GlobalArgs) -> Result<InstanceConfig> {
+    let project_root = args
+        .project_root
+        .clone()
+        .ok_or_else(|| anyhow!("--project-root is required"))?;
+    let instance_kind = InstanceKind::parse(
+        args.instance_kind
+            .as_deref()
+            .ok_or_else(|| anyhow!("--instance-kind is required"))?,
+    )?;
+    let role = match args.role.as_deref() {
+        Some(r) => RuntimeRole::parse(r)?,
+        None => RuntimeRole::All,
+    };
+    Ok(InstanceConfig::new(project_root, instance_kind, role))
+}
+
+// ---------------------------------------------------------------------------
+// REQ-AXO-902166 (S5) / REQ-AXO-902165 (S3 health-gate) — full-runtime_contract
+// liveness probe over HTTP. axonctl has no PG client (uses pg_isready); the brain
+// and indexer each expose /readyz (REQ-AXO-901735), and the brain's /readyz does a
+// real SELECT 1 — so HTTP probes suffice. Reuses the reconciler's pure liveness gates.
+// ---------------------------------------------------------------------------
+
+/// GET `url`, true iff HTTP 2xx within `timeout_s`. Bounded so a hung endpoint never
+/// blocks the caller (curl -sf fails on 4xx/5xx; --max-time bounds the wait).
+fn http_ready(url: &str, timeout_s: u64) -> bool {
+    Command::new("curl")
+        .args(["-sf", "--max-time", &timeout_s.to_string(), url])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The indexer's dedicated health-probe port (REQ-AXO-901735). Env override, else the
+/// per-instance default (44130 live / 44149 dev), mirroring indexer_health_http.rs.
+fn indexer_health_port(kind: InstanceKind) -> u16 {
+    std::env::var("AXON_INDEXER_HEALTH_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(match kind {
+            InstanceKind::Live => 44130,
+            InstanceKind::Dev => 44149,
+        })
+}
+
+/// Pure: does a current.json body's `runtime_contract` name a separate indexer?
+/// Unreadable/absent → false (gate on the brain only — safe default). Unit-testable.
+fn runtime_contract_has_indexer(current_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(current_json)
+        .ok()
+        .and_then(|v| {
+            v.get("runtime_contract")
+                .and_then(|c| c.as_str())
+                .map(|c| c.contains("indexer"))
+        })
+        .unwrap_or(false)
+}
+
+/// Does the promoted manifest's `runtime_contract` name a separate indexer? Reads
+/// current.json next to the instance's graph_v2 dir.
+fn manifest_indexer_expected(config: &InstanceConfig) -> bool {
+    let Some(path) = config
+        .db_root
+        .parent()
+        .map(|d| d.join("live-release/current.json"))
+    else {
+        return false;
+    };
+    match fs::read_to_string(&path) {
+        Ok(text) => runtime_contract_has_indexer(&text),
+        Err(_) => false,
+    }
+}
+
+/// REQ-AXO-902166 (S5) — `axonctl liveness`: probe the FULL runtime_contract via HTTP
+/// /readyz (brain + indexer per the manifest) and report the liveness verdict, reusing
+/// the reconciler's pure gates. Exit 0 iff healthy — so a promote can gate its qualify
+/// step (never qualify a half-started runtime) and the cutover FSM can decide
+/// finalize-vs-auto-rollback on this verdict.
+fn cmd_liveness(config: InstanceConfig, json: bool) -> Result<()> {
+    let brain_url = format!("http://127.0.0.1:{}/readyz", config.hydra_http_port);
+    let indexer_url = format!(
+        "http://127.0.0.1:{}/readyz",
+        indexer_health_port(config.instance_kind)
+    );
+    let indexer_expected = manifest_indexer_expected(&config);
+    let brain_serving = http_ready(&brain_url, 3);
+    let indexer_ready = http_ready(&indexer_url, 3);
+    let l = LivenessFacts {
+        brain_serving,
+        indexer_expected,
+        indexer_ready,
+        indexer_lifecycle: if indexer_ready { "healthy" } else { "crashed_or_abandoned" }.to_string(),
+        indexer_source: if indexer_ready { "http_readyz" } else { "http_readyz_down" }.to_string(),
+    };
+    let gates = evaluate_liveness_gates(&l);
+    let all_pass = gates.iter().all(|g| g.pass);
+    let phase = liveness_phase(&l).unwrap_or("healthy");
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "healthy": all_pass,
+                "phase": phase,
+                "gates": gates.iter().map(|g| serde_json::json!({"name": g.name, "pass": g.pass, "detail": g.detail})).collect::<Vec<_>>(),
+                "next_action": liveness_next_action(&l),
+                "probed": {"brain": brain_url, "indexer": indexer_url, "indexer_expected": indexer_expected},
+            })
+        );
+    } else {
+        for g in &gates {
+            eprintln!("  [{}] {} — {}", if g.pass { "ok" } else { "FAIL" }, g.name, g.detail);
+        }
+        eprintln!("liveness: {}", if all_pass { "healthy" } else { phase });
+    }
+    if all_pass {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
 fn main() -> Result<()> {
     let all_args: Vec<String> = std::env::args().skip(1).collect();
     let (command, args) = parse_global_args(all_args)?;
@@ -324,6 +453,8 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        // REQ-AXO-902166 (S5) — full-runtime_contract liveness probe (HTTP /readyz).
+        "liveness" => cmd_liveness(require_config_any_role(&args)?, args.json),
         "help" | "--help" | "-h" => {
             print!("{}", usage());
             Ok(())
@@ -1741,6 +1872,26 @@ mod tests {
         fs::write(&tmp, "").unwrap();
         assert_eq!(parse_lock_file_pid(&tmp), None);
         let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn runtime_contract_indexer_detection() {
+        // REQ-AXO-902166 — gate on the indexer only when the contract names one.
+        assert!(runtime_contract_has_indexer(
+            r#"{"runtime_contract":"brain_mcp_indexer_ist"}"#
+        ));
+        assert!(!runtime_contract_has_indexer(
+            r#"{"runtime_contract":"brain_only"}"#
+        ));
+        assert!(!runtime_contract_has_indexer("not json"));
+        assert!(!runtime_contract_has_indexer(r#"{"other":"x"}"#));
+    }
+
+    #[test]
+    fn indexer_health_port_defaults() {
+        std::env::remove_var("AXON_INDEXER_HEALTH_PORT");
+        assert_eq!(indexer_health_port(InstanceKind::Live), 44130);
+        assert_eq!(indexer_health_port(InstanceKind::Dev), 44149);
     }
 
     #[test]
