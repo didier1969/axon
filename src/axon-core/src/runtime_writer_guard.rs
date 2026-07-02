@@ -138,6 +138,60 @@ impl Drop for WriterGuard {
     }
 }
 
+/// REQ-AXO-902157 — authoritative liveness of a writer guard. The guard is a
+/// `flock` (advisory lock the kernel releases on the owner's death, INCLUDING a
+/// zombie/`<defunct>` process). The ONLY truth is therefore "can it be re-acquired?".
+/// The `pid=` recorded in the lock-file metadata must NOT be trusted for liveness:
+/// the bash `verify_writer_guard_release` did exactly that (`[ -e /proc/$pid ]`,
+/// which reads TRUE for a zombie) and wrongly refused a live restart when a guard
+/// owner had become an orphaned zombie. This tests the flock itself — the same
+/// mechanism [`WriterGuard::acquire`] uses — so bash callers stop re-deriving a
+/// worse answer than the Rust truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardLiveness {
+    /// No live owner: lock file absent, or `flock` re-acquires cleanly (a prior
+    /// owner — even a zombie — has released it). Safe to (re)start / take over.
+    Free { recorded_owner: Option<String> },
+    /// A LIVE process holds the flock. `recorded_owner` is its self-declared id.
+    HeldByLiveProcess { recorded_owner: Option<String> },
+}
+
+/// REQ-AXO-902157 — probe [`GuardLiveness`] for the IST writer guard.
+pub fn guard_liveness_ist(db_root: &str) -> Result<GuardLiveness> {
+    guard_liveness(WriterTarget::Ist, db_root)
+}
+
+/// REQ-AXO-902157 — probe [`GuardLiveness`] for the SOLL writer guard.
+pub fn guard_liveness_soll(db_root: &str) -> Result<GuardLiveness> {
+    guard_liveness(WriterTarget::Soll, db_root)
+}
+
+fn guard_liveness(target: WriterTarget, db_root: &str) -> Result<GuardLiveness> {
+    let Some(lock_path) = target.lock_path(db_root) else {
+        return Ok(GuardLiveness::Free { recorded_owner: None });
+    };
+    if !lock_path.exists() {
+        return Ok(GuardLiveness::Free { recorded_owner: None });
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("Failed to open writer guard at {}", lock_path.display()))?;
+    let recorded_owner = read_lock_metadata(&mut file).ok().filter(|s| !s.is_empty());
+    // Try to grab the flock non-blocking. Success => no live holder (the kernel
+    // released it on the previous owner's death, zombie included); release it
+    // immediately so this probe never becomes the owner. EWOULDBLOCK => a live
+    // process holds it.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        Ok(GuardLiveness::Free { recorded_owner })
+    } else {
+        Ok(GuardLiveness::HeldByLiveProcess { recorded_owner })
+    }
+}
+
 fn runtime_owner_identity() -> String {
     let runtime_identity = std::env::var("AXON_RUNTIME_IDENTITY")
         .ok()
@@ -191,7 +245,7 @@ fn write_lock_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::WriterGuard;
+    use super::{guard_liveness_ist, guard_liveness_soll, GuardLiveness, WriterGuard};
     use std::fs;
     use std::process::Command;
     use std::thread;
@@ -310,5 +364,53 @@ mod tests {
             holder_status.success(),
             "holder process did not exit cleanly"
         );
+    }
+
+    // --- REQ-AXO-902157 — authoritative guard liveness (flock truth) ---
+
+    #[test]
+    fn guard_liveness_free_when_no_lock_file() {
+        let db_root = tempdir().unwrap();
+        let live = guard_liveness_soll(db_root.path().to_str().unwrap()).unwrap();
+        assert_eq!(live, GuardLiveness::Free { recorded_owner: None });
+    }
+
+    #[test]
+    fn guard_liveness_free_when_owner_pid_metadata_is_stale() {
+        // THE fix, encoded: a lock file that EXISTS with a recorded owner pid but
+        // that NO live process flock-holds (owner died — zombie or gone) must read
+        // Free. The bash `[ -e /proc/$pid ]` check wrongly reported this as held.
+        let db_root = tempdir().unwrap();
+        let lock_path = db_root.path().join(".axon-soll.writer.lock");
+        fs::write(
+            &lock_path,
+            "target=SOLL\nowner=axon-live-axon-brain;pid=999999\ndb_path=/x/soll.db\n",
+        )
+        .unwrap();
+        let live = guard_liveness_soll(db_root.path().to_str().unwrap()).unwrap();
+        match live {
+            GuardLiveness::Free { recorded_owner } => {
+                // metadata is surfaced (for diagnostics) but NOT trusted for liveness.
+                assert!(recorded_owner.unwrap().contains("pid=999999"));
+            }
+            other => panic!("stale-owner lock must read Free, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guard_liveness_held_while_live_owner_holds_flock_then_free_on_drop() {
+        let db_root = tempdir().unwrap();
+        let root = db_root.path().to_str().unwrap();
+        {
+            let _held = WriterGuard::acquire_ist(root).unwrap();
+            let live = guard_liveness_ist(root).unwrap();
+            assert!(
+                matches!(live, GuardLiveness::HeldByLiveProcess { .. }),
+                "a live flock holder must read HeldByLiveProcess, got {live:?}"
+            );
+        }
+        // holder dropped -> flock released -> Free.
+        let after = guard_liveness_ist(root).unwrap();
+        assert!(matches!(after, GuardLiveness::Free { .. }), "got {after:?}");
     }
 }
