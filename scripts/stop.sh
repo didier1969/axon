@@ -176,7 +176,20 @@ selected_writer_guards() {
 
 pid_exists() {
     local pid="$1"
-    [ -e "/proc/$pid" ]
+    [ -e "/proc/$pid" ] || return 1
+    # REQ-AXO-902164 — a zombie (<defunct>, state Z) is DEAD: it has already released
+    # every resource (fds, flock writer-guards) and only lingers as a process-table
+    # entry until reaped. The old bare `[ -e /proc/$pid ]` counted it as alive, so the
+    # hard-stop verify refused a live restart when a writer-guard owner had become an
+    # orphaned zombie (the s94 promote incident). Authoritative guard truth is the Rust
+    # flock probe (runtime_writer_guard::guard_liveness); this is the bash-side hardening
+    # until the verify is wired to it (S3). Field 3 of /proc/PID/stat is the state; the
+    # comm (field 2) can contain spaces/')' so read the char right after the last ')'.
+    local stat state
+    stat="$(cat "/proc/$pid/stat" 2>/dev/null)"
+    [ -n "$stat" ] || return 1
+    state="${stat##*) }"
+    [ "${state:0:1}" != "Z" ]
 }
 
 canonical_axon_processes_alive_pids() {
