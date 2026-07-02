@@ -904,53 +904,61 @@ impl McpServer {
         )
     }
 
-    fn read_recent_req_commits(project_path: &str, limit: usize) -> serde_json::Value {
-        // REQ-AXO-287 — bound the git shell-out so a slow repo (large
-        // pack, lock contention, fs latency) can't trip the MCP
-        // gateway 30-s timeout on `axon_init_project`. 2-second budget
-        // is generous for a `--max-count=20` filtered log on any
-        // reasonable repo ; over-budget = return empty so the rest of
-        // the kickoff bundle still completes.
-        let child = match std::process::Command::new("git")
-            .arg("-C")
-            .arg(project_path)
-            .arg("log")
-            .arg("--oneline")
-            .arg(format!("--max-count={}", limit * 4))
-            .arg("-E")
-            .arg("--grep=REQ-[A-Z]+-[0-9]+")
+    /// REQ-AXO-287 / REQ-AXO-902160 — run a `git` command bounded by a wall-clock
+    /// timeout so a slow repo (large pack, lock contention, fs latency) can't trip
+    /// the MCP gateway 30-s timeout on `axon_init_project`. Over-budget or failure →
+    /// `None` so the caller degrades gracefully (empty bundle field). Single source
+    /// of the spawn+timeout+kill dance, shared by `read_recent_req_commits` and
+    /// `read_git_head`.
+    fn bounded_git_stdout(
+        project_path: &str,
+        args: &[&str],
+        timeout: std::time::Duration,
+    ) -> Option<String> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(project_path);
+        for a in args {
+            cmd.arg(a);
+        }
+        let child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return serde_json::json!([]),
-        };
-
+            .ok()?;
         let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<std::process::Output>>();
-        // Move `child` into the wait thread ; if the timeout fires we
-        // kill the process via a separate handle obtained before the
-        // move. `Child::id()` gives us the pid for a signal-based kill.
+        // Move `child` into the wait thread ; if the timeout fires we kill the
+        // process via its pid (captured before the move) for a signal-based kill.
         let pid = child.id();
         std::thread::spawn(move || {
             let _ = tx.send(child.wait_with_output());
         });
-
-        let output = match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(Ok(o)) if o.status.success() => o,
-            Ok(_) => return serde_json::json!([]),
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(o)) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+            Ok(_) => None,
             Err(_) => {
-                // Timed out — best-effort kill via shell. The dangling
-                // thread will eventually exit when `git log` finishes
-                // or the kill takes effect.
+                // Timed out — best-effort kill ; the dangling thread exits when
+                // `git` finishes or the kill takes effect.
                 let _ = std::process::Command::new("kill")
                     .arg("-9")
                     .arg(pid.to_string())
                     .output();
-                return serde_json::json!([]);
+                None
             }
+        }
+    }
+
+    fn read_recent_req_commits(project_path: &str, limit: usize) -> serde_json::Value {
+        // REQ-AXO-287 — 2-second budget is generous for a `--max-count` filtered
+        // log ; over-budget = empty so the rest of the kickoff bundle completes.
+        let max = format!("--max-count={}", limit * 4);
+        let stdout = match Self::bounded_git_stdout(
+            project_path,
+            &["log", "--oneline", &max, "-E", "--grep=REQ-[A-Z]+-[0-9]+"],
+            std::time::Duration::from_secs(2),
+        ) {
+            Some(s) => s,
+            None => return serde_json::json!([]),
         };
-        let stdout = String::from_utf8_lossy(&output.stdout);
         serde_json::Value::Array(
             stdout
                 .lines()
@@ -966,6 +974,137 @@ impl McpServer {
                 })
                 .collect(),
         )
+    }
+
+    /// REQ-AXO-902160 — current git HEAD as a tab-joined `"<short-sha>\t<refnames>\t<subject>"`
+    /// line (`%h\t%D\t%s`), bounded like the commit read. `None` on an absent repo or
+    /// timeout. Parsed by [`Self::derive_session_pointer`] (kept pure).
+    fn read_git_head(project_path: &str) -> Option<String> {
+        let out = Self::bounded_git_stdout(
+            project_path,
+            &["log", "-1", "--format=%h\t%D\t%s"],
+            std::time::Duration::from_secs(2),
+        )?;
+        let line = out.lines().next()?.trim();
+        if line.is_empty() {
+            None
+        } else {
+            Some(line.to_string())
+        }
+    }
+
+    /// REQ-AXO-902160 — auto-derive a compact session-orientation pointer from
+    /// signals the kickoff bundle ALREADY computes (git HEAD line `"sha\trefs\tsubject"`,
+    /// in-progress REQs, recent REQ commits). A fresh session gets oriented WITHOUT
+    /// anyone hand-writing a ~2500-char session_pointer node (the OPV friction,
+    /// REQ-AXO-902160). COMPLEMENTS an explicit operator-set pointer (surfaced under
+    /// `explicit`), never replaces it. Pure + unit-testable (bounded git I/O stays in
+    /// the caller per the REQ-AXO-287 pattern).
+    fn derive_session_pointer(
+        head_line: Option<&str>,
+        in_progress: &serde_json::Value,
+        recent_commits: &serde_json::Value,
+        explicit: &serde_json::Value,
+    ) -> serde_json::Value {
+        // git HEAD line: "sha\trefs\tsubject" ; refs like "HEAD -> main, origin/main".
+        let (head_sha, head_branch, head_subject) = match head_line {
+            Some(l) => {
+                let mut p = l.splitn(3, '\t');
+                let sha = p.next().unwrap_or("").trim().to_string();
+                let refs = p.next().unwrap_or("").trim().to_string();
+                let subject = p.next().unwrap_or("").trim().to_string();
+                let branch = refs
+                    .split(',')
+                    .map(str::trim)
+                    .find_map(|r| r.strip_prefix("HEAD -> "))
+                    .unwrap_or("")
+                    .to_string();
+                (sha, branch, subject)
+            }
+            None => (String::new(), String::new(), String::new()),
+        };
+
+        let ip = in_progress.as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let ip_brief: Vec<String> = ip
+            .iter()
+            .take(3)
+            .map(|r| {
+                let id = r.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let prio = r
+                    .get("priority")
+                    .and_then(|v| v.as_str())
+                    .map(|p| format!(" ({p})"))
+                    .unwrap_or_default();
+                let title: String = r
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .take(48)
+                    .collect();
+                format!("{id}{prio} {title}")
+            })
+            .collect();
+
+        let commits = recent_commits.as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let commit_brief: Vec<String> = commits
+            .iter()
+            .take(3)
+            .filter_map(|c| {
+                let sha = c.get("sha").and_then(|v| v.as_str())?;
+                let subj: String = c
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .take(40)
+                    .collect();
+                Some(format!("{sha} {subj}"))
+            })
+            .collect();
+
+        let explicit_ref = match explicit.get("kind").and_then(|v| v.as_str()) {
+            Some("none") | None => serde_json::Value::Null,
+            Some(_) => explicit.clone(),
+        };
+
+        let mut summary = String::from("Auto-derived orientation (git+SOLL) — ");
+        if head_sha.is_empty() {
+            summary.push_str("no git HEAD");
+        } else {
+            summary.push_str(&format!("HEAD {head_sha}"));
+            if !head_branch.is_empty() {
+                summary.push_str(&format!(" ({head_branch})"));
+            }
+            if !head_subject.is_empty() {
+                let s: String = head_subject.chars().take(52).collect();
+                summary.push_str(&format!(" {s}"));
+            }
+        }
+        if ip_brief.is_empty() {
+            summary.push_str(" · no REQ in progress");
+        } else {
+            summary.push_str(&format!(" · {} REQ in progress: {}", ip.len(), ip_brief.join("; ")));
+        }
+        if !commit_brief.is_empty() {
+            summary.push_str(&format!(" · recent REQ commits: {}", commit_brief.join(", ")));
+        }
+        if let Some(id) = explicit_ref.get("value").and_then(|v| v.as_str()) {
+            summary.push_str(&format!(" · explicit pointer: {id}"));
+        }
+
+        serde_json::json!({
+            "summary": summary,
+            "head": if head_sha.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!({"sha": head_sha, "branch": head_branch, "subject": head_subject})
+            },
+            "in_progress_count": ip.len(),
+            "explicit": explicit_ref,
+            "sources": ["git_head", "in_progress_requirements", "recent_req_commits"],
+            "note": "Derived automatically from live signals (REQ-AXO-902160); no hand-write. `explicit` is the operator-set session_pointer when present.",
+        })
     }
 
     fn read_wave_1_unblockers(&self, project_code: &str) -> serde_json::Value {
@@ -1072,6 +1211,15 @@ impl McpServer {
         let in_progress_requirements = self.read_in_progress_requirements(project_code, 10);
         let wave_1_unblockers = self.read_wave_1_unblockers(project_code);
         let recent_req_commits = Self::read_recent_req_commits(project_path, 5);
+        // REQ-AXO-902160 — auto-derive a session-orientation pointer from the live
+        // signals above (git HEAD + in-progress REQs + recent REQ commits) so a fresh
+        // session is oriented without anyone hand-writing a session_pointer node.
+        let derived_session_pointer = Self::derive_session_pointer(
+            Self::read_git_head(project_path).as_deref(),
+            &in_progress_requirements,
+            &recent_req_commits,
+            &session_pointer,
+        );
         let recent_soll_writes = self.read_recent_soll_writes(project_code, 8);
         // REQ-AXO-278 — Bootstrap-vs-Continuation phase detection (GUI-PRO-026).
         // When VIS-{project_code}-001 is absent, a Vision-less project is in
@@ -1119,6 +1267,7 @@ impl McpServer {
             "methodology_summary_source": "soll://Node/CPT-AXO-019",
             "entry_points": Self::cold_start_entry_points(),
             "session_pointer": session_pointer,
+            "derived_session_pointer": derived_session_pointer,
             "active_handoff": active_handoff_alias,
             "in_progress_requirements": in_progress_requirements,
             "wave_1_unblockers": wave_1_unblockers,
@@ -1579,7 +1728,7 @@ impl McpServer {
         // sees that the structured bundle is available in data.
         let bundle = self.axon_init_project_bundle(&project_code, project_path);
         response_text.push_str(
-            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, soll_skeleton, capabilities_map, session_toolset_hint). soll_skeleton PUSHES Vision+Pillar bodies and INDEXES Decisions/Guidelines (id+title, pull via soll_query_context); capabilities_map lists the live tool surface; session_toolset_hint is a ready ToolSearch select. Use it to onboard yourself or any future LLM session before doing project-specific work.",
+            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, derived_session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, soll_skeleton, capabilities_map, session_toolset_hint). derived_session_pointer (REQ-AXO-902160) auto-orients a fresh session from git HEAD + in-progress REQs + recent REQ commits — no hand-write ; `.explicit` carries the operator-set session_pointer when present. soll_skeleton PUSHES Vision+Pillar bodies and INDEXES Decisions/Guidelines (id+title, pull via soll_query_context); capabilities_map lists the live tool surface; session_toolset_hint is a ready ToolSearch select. Use it to onboard yourself or any future LLM session before doing project-specific work.",
         );
 
         Some(serde_json::json!({
@@ -1955,6 +2104,58 @@ mod guideline_digest_tests {
     fn embedded_newlines_in_short_body_are_flattened() {
         let digest = guideline_digest("line one\nline two");
         assert_eq!(digest, "line one line two");
+    }
+}
+
+#[cfg(test)]
+mod derive_session_pointer_tests {
+    //! REQ-AXO-902160 — auto-derived session pointer: pure assembly from git HEAD +
+    //! in-progress REQs + recent REQ commits, complementing (not replacing) an
+    //! explicit operator-set pointer.
+    use super::McpServer;
+    use serde_json::json;
+
+    #[test]
+    fn full_signals_produce_oriented_summary() {
+        let head = "65c69de\tHEAD -> main, origin/main\trefactor(practice): supprime le prédicat";
+        let in_progress = json!([
+            {"id": "REQ-AXO-902160", "title": "session_pointer auto-derive", "priority": "P1"},
+            {"id": "REQ-AXO-902161", "title": "SOLL patch/append", "priority": "P1"},
+        ]);
+        let commits = json!([
+            {"sha": "65c69de", "subject": "refactor(practice): should_fuse"},
+            {"sha": "d2f5e6c", "subject": "fix(practice): write-gate"},
+        ]);
+        let explicit = json!({"kind": "soll_node", "value": "CPT-AXO-052"});
+        let d = McpServer::derive_session_pointer(Some(head), &in_progress, &commits, &explicit);
+
+        let summary = d.get("summary").and_then(|v| v.as_str()).unwrap();
+        assert!(summary.contains("HEAD 65c69de"), "summary: {summary}");
+        assert!(summary.contains("(main)"), "branch extracted: {summary}");
+        assert!(summary.contains("2 REQ in progress"), "in-progress count: {summary}");
+        assert!(summary.contains("REQ-AXO-902160"), "first REQ id: {summary}");
+        assert!(summary.contains("recent REQ commits"), "commits: {summary}");
+        assert!(summary.contains("explicit pointer: CPT-AXO-052"), "explicit: {summary}");
+        assert_eq!(d["head"]["branch"], "main");
+        assert_eq!(d["in_progress_count"], 2);
+        assert_eq!(d["explicit"]["value"], "CPT-AXO-052");
+    }
+
+    #[test]
+    fn absent_signals_degrade_gracefully() {
+        // No git HEAD, no open REQ, explicit pointer declared absent (kind=none).
+        let d = McpServer::derive_session_pointer(
+            None,
+            &json!([]),
+            &json!([]),
+            &json!({"kind": "none"}),
+        );
+        let summary = d.get("summary").and_then(|v| v.as_str()).unwrap();
+        assert!(summary.contains("no git HEAD"), "summary: {summary}");
+        assert!(summary.contains("no REQ in progress"), "summary: {summary}");
+        assert!(d["head"].is_null());
+        assert!(d["explicit"].is_null());
+        assert_eq!(d["in_progress_count"], 0);
     }
 }
 
