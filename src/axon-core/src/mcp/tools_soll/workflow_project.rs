@@ -1107,6 +1107,87 @@ impl McpServer {
         })
     }
 
+    /// REQ-AXO-902172 — render the essential Continuation block for `content.text`.
+    /// The kickoff bundle is rich but lived ONLY in `data.kickoff_bundle`; an LLM client
+    /// reading content alone saw the pointer sentence, never the orientation itself
+    /// (mcp_feedback #41, LLL 2026-07-02). Renders the operator/derived session pointer,
+    /// the wave-1 unblockers, and the 3 most recent REQ commits — bounded, token-safe.
+    /// Pure over the already-assembled bundle (no I/O, no timeout risk).
+    fn render_continuation_block(bundle: &serde_json::Value) -> String {
+        let mut out = String::from("## 🧭 Continuation — orientation immédiate\n");
+
+        // Session pointer: explicit operator-set wins; else fall back to the derived summary.
+        let sp = bundle.get("session_pointer");
+        let sp_kind = sp
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("none");
+        if sp_kind != "none" {
+            let val = sp.and_then(|v| v.get("value")).and_then(|v| v.as_str()).unwrap_or("");
+            let label = sp.and_then(|v| v.get("label")).and_then(|v| v.as_str()).unwrap_or("");
+            let label = if label.is_empty() { String::new() } else { format!(" — {label}") };
+            out.push_str(&format!("**Session pointer** (`{sp_kind}`): `{val}`{label}\n"));
+        }
+        if let Some(summary) = bundle
+            .get("derived_session_pointer")
+            .and_then(|v| v.get("summary"))
+            .and_then(|v| v.as_str())
+        {
+            out.push_str(&format!("**Auto-orienté:** {summary}\n"));
+        }
+
+        // Wave-1 unblockers (id — priority — title), the 3 kickoff fast-path leaves.
+        if let Some(wave) = bundle.get("wave_1_unblockers").and_then(|v| v.as_array()) {
+            let items: Vec<String> = wave
+                .iter()
+                .take(3)
+                .map(|w| {
+                    let id = w.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                    let prio = w
+                        .get("priority")
+                        .and_then(|v| v.as_str())
+                        .map(|p| format!(" [{p}]"))
+                        .unwrap_or_default();
+                    let title: String = w
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .chars()
+                        .take(64)
+                        .collect();
+                    format!("{id}{prio} {title}")
+                })
+                .collect();
+            if !items.is_empty() {
+                out.push_str(&format!("**Wave-1 (déblocages):** {}\n", items.join(" · ")));
+            }
+        }
+
+        // 3 most recent REQ commits (already bounded by read_recent_req_commits).
+        if let Some(commits) = bundle.get("recent_req_commits").and_then(|v| v.as_array()) {
+            let items: Vec<String> = commits
+                .iter()
+                .take(3)
+                .filter_map(|c| {
+                    let sha = c.get("sha").and_then(|v| v.as_str())?;
+                    let subj: String = c
+                        .get("subject")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .chars()
+                        .take(56)
+                        .collect();
+                    Some(format!("`{sha}` {subj}"))
+                })
+                .collect();
+            if !items.is_empty() {
+                out.push_str(&format!("**Derniers commits REQ:** {}\n", items.join(" · ")));
+            }
+        }
+
+        out
+    }
+
     fn read_wave_1_unblockers(&self, project_code: &str) -> serde_json::Value {
         // DEC-AXO-091 / REQ-AXO-322 (v3) — cold-start fast path is now
         // entirely snapshot-driven. Original SQL ordered by priority
@@ -1731,6 +1812,12 @@ impl McpServer {
             "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, derived_session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, soll_skeleton, capabilities_map, session_toolset_hint). derived_session_pointer (REQ-AXO-902160) auto-orients a fresh session from git HEAD + in-progress REQs + recent REQ commits — no hand-write ; `.explicit` carries the operator-set session_pointer when present. soll_skeleton PUSHES Vision+Pillar bodies and INDEXES Decisions/Guidelines (id+title, pull via soll_query_context); capabilities_map lists the live tool surface; session_toolset_hint is a ready ToolSearch select. Use it to onboard yourself or any future LLM session before doing project-specific work.",
         );
 
+        // REQ-AXO-902172 — lead with the essential Continuation block INLINE so a client
+        // reading content.text alone is oriented without cracking data.kickoff_bundle
+        // (mcp_feedback #41). The rich bundle stays in `data` for programmatic use.
+        let continuation = Self::render_continuation_block(&bundle);
+        let response_text = format!("{continuation}\n---\n\n{response_text}");
+
         Some(serde_json::json!({
             "content": [{ "type": "text", "text": response_text }],
             "data": {
@@ -2156,6 +2243,50 @@ mod derive_session_pointer_tests {
         assert!(d["head"].is_null());
         assert!(d["explicit"].is_null());
         assert_eq!(d["in_progress_count"], 0);
+    }
+}
+
+#[cfg(test)]
+mod continuation_block_tests {
+    //! REQ-AXO-902172 — the Continuation block must surface the orientation essentials
+    //! INLINE in content.text (mcp_feedback #41: bundle lived only in data).
+    use super::McpServer;
+    use serde_json::json;
+
+    #[test]
+    fn renders_pointer_wave_and_commits() {
+        let bundle = json!({
+            "session_pointer": {"kind": "soll_node", "value": "CPT-AXO-052", "label": "active pointer"},
+            "derived_session_pointer": {"summary": "HEAD 78145526 (main) feat cutover"},
+            "wave_1_unblockers": [
+                {"id": "REQ-AXO-902165", "title": "cutover in-place", "priority": "P1"},
+                {"id": "REQ-AXO-902170", "title": "process_exists zombie", "priority": "P2"},
+            ],
+            "recent_req_commits": [
+                {"sha": "78145526", "subject": "feat(reconciler): run_cutover_loop"},
+                {"sha": "44b992e9", "subject": "feat(axonctl): liveness"},
+            ],
+        });
+        let b = McpServer::render_continuation_block(&bundle);
+        assert!(b.contains("Continuation"), "header: {b}");
+        assert!(b.contains("CPT-AXO-052"), "explicit pointer: {b}");
+        assert!(b.contains("active pointer"), "pointer label: {b}");
+        assert!(b.contains("HEAD 78145526"), "derived summary: {b}");
+        assert!(b.contains("REQ-AXO-902165") && b.contains("[P1]"), "wave-1 + priority: {b}");
+        assert!(b.contains("`78145526`"), "recent commit sha: {b}");
+    }
+
+    #[test]
+    fn degrades_without_explicit_pointer() {
+        // kind=none → no explicit line, but the derived summary + header still render.
+        let bundle = json!({
+            "session_pointer": {"kind": "none"},
+            "derived_session_pointer": {"summary": "no git HEAD · no REQ in progress"},
+        });
+        let b = McpServer::render_continuation_block(&bundle);
+        assert!(b.contains("Continuation"), "header present: {b}");
+        assert!(!b.contains("Session pointer** (`none`"), "no explicit pointer line: {b}");
+        assert!(b.contains("no git HEAD"), "derived summary shown: {b}");
     }
 }
 
