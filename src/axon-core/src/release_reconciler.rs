@@ -256,6 +256,91 @@ pub fn next_action(f: &ReleaseFacts) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Cutover FSM (REQ-AXO-902165 — health-gated cutover + auto-rollback).
+//
+// True blue-green is INFEASIBLE here: the SOLL/IST writer guards are EXCLUSIVE and
+// acquired at boot (runtime_boot.rs — a second writer instance is refused startup),
+// so the new and old runtimes cannot coexist. The cutover is therefore in-place
+// (stop old → start new) with a health-gate + AUTO-ROLLBACK: the new runtime must
+// prove the FULL runtime_contract healthy within a deadline, otherwise the previous
+// release is restored — turning a failed promote from a stranded outage (the s94
+// incident) into a brief blip + auto-recovery. Pure predicates, same shape as the
+// release/stop FSMs: facts in, `Vec<Gate>` + derived `phase`/`next_action` out.
+// ---------------------------------------------------------------------------
+
+/// Facts about an in-flight in-place cutover, sampled after the new runtime is started.
+#[derive(Debug, Clone, Default)]
+pub struct CutoverFacts {
+    /// Liveness of the NEW (candidate) runtime.
+    pub new_liveness: LivenessFacts,
+    /// Qualify verdict on the new runtime (`None` = not run / not yet).
+    pub new_qualify_ok: Option<bool>,
+    /// The health-gate deadline elapsed without the new runtime going healthy.
+    pub deadline_exceeded: bool,
+    /// Auto-rollback finished: the previous binary + manifest are restored & serving.
+    pub old_restored: bool,
+}
+
+impl CutoverFacts {
+    /// The new runtime is fully healthy: brain serving + indexer alive (per the
+    /// runtime_contract) AND qualify not-failed. Reuses the liveness gates as the
+    /// single source of truth (an absent qualify verdict is not a failure).
+    pub fn new_healthy(&self) -> bool {
+        evaluate_liveness_gates(&self.new_liveness)
+            .iter()
+            .all(|g| g.pass)
+            && self.new_qualify_ok != Some(false)
+    }
+}
+
+/// Evaluate the cutover gate (pure predicate over `CutoverFacts`).
+pub fn evaluate_cutover_gates(f: &CutoverFacts) -> Vec<Gate> {
+    vec![Gate {
+        name: "new_runtime_healthy",
+        pass: f.new_healthy(),
+        detail: if f.new_healthy() {
+            "new runtime healthy (full runtime_contract + qualify)".to_string()
+        } else if f.deadline_exceeded {
+            "new runtime NOT healthy within the deadline → auto-rollback".to_string()
+        } else {
+            "new runtime not yet healthy → awaiting".to_string()
+        },
+    }]
+}
+
+/// Derive the cutover phase (projection of the cutover FSM state). A `healthy` new
+/// runtime wins even at the deadline; otherwise a passed deadline triggers rollback.
+pub fn cutover_phase(f: &CutoverFacts) -> &'static str {
+    if f.new_healthy() {
+        "healthy"
+    } else if f.old_restored {
+        "rolled_back"
+    } else if f.deadline_exceeded {
+        "rolling_back"
+    } else {
+        "awaiting_health"
+    }
+}
+
+/// The single corrective action that advances the cutover, or `None` when the new
+/// runtime is healthy (the promote finalizes).
+pub fn cutover_next_action(f: &CutoverFacts) -> Option<String> {
+    match cutover_phase(f) {
+        "healthy" => None,
+        "awaiting_health" => Some(
+            "new runtime started — poll its liveness (brain_serving + indexer_alive) until healthy or the deadline elapses.".to_string(),
+        ),
+        "rolling_back" => Some(
+            "new runtime failed the health-gate within the deadline — AUTO-ROLLBACK: restore the previous binary + manifest and restart the old release.".to_string(),
+        ),
+        "rolled_back" => Some(
+            "auto-rollback complete: the previous release is serving again; the promote did NOT apply. Investigate the candidate before retrying.".to_string(),
+        ),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stop FSM (REQ-AXO-902111 — stop-verdict slice).
 //
 // The stop verdict must live where it SURVIVES the thing being stopped: in
@@ -517,6 +602,90 @@ mod tests {
         let gates = evaluate_gates(&f);
         assert!(gates.iter().any(|g| g.name == "qualification_passed" && !g.pass));
         assert!(gates.iter().any(|g| g.name == "manifest_runtime_match" && g.pass));
+    }
+
+    // --- Cutover FSM ------------------------------------------------------
+
+    #[test]
+    fn cutover_healthy_new_finalizes() {
+        let f = CutoverFacts {
+            new_liveness: live(true, true, true, "healthy", "pg_heartbeat"),
+            new_qualify_ok: Some(true),
+            deadline_exceeded: false,
+            old_restored: false,
+        };
+        assert!(f.new_healthy());
+        assert_eq!(cutover_phase(&f), "healthy");
+        assert!(evaluate_cutover_gates(&f).iter().all(|g| g.pass));
+        assert!(cutover_next_action(&f).is_none());
+    }
+
+    #[test]
+    fn cutover_awaits_while_new_converging() {
+        let f = CutoverFacts {
+            new_liveness: live(true, true, false, "never_launched", "no_heartbeat"),
+            new_qualify_ok: None,
+            deadline_exceeded: false,
+            old_restored: false,
+        };
+        assert_eq!(cutover_phase(&f), "awaiting_health");
+        assert!(cutover_next_action(&f).unwrap().contains("poll"));
+    }
+
+    #[test]
+    fn cutover_rolls_back_when_deadline_exceeded_unhealthy() {
+        // THE s94 failure mode: the new runtime never becomes healthy. Must AUTO-ROLLBACK,
+        // never strand the live in an outage with a half-finalized manifest.
+        let f = CutoverFacts {
+            new_liveness: live(false, true, false, "crashed_or_abandoned", "no_heartbeat"),
+            new_qualify_ok: None,
+            deadline_exceeded: true,
+            old_restored: false,
+        };
+        assert_eq!(cutover_phase(&f), "rolling_back");
+        assert!(evaluate_cutover_gates(&f)
+            .iter()
+            .any(|g| g.name == "new_runtime_healthy" && !g.pass));
+        assert!(cutover_next_action(&f).unwrap().contains("AUTO-ROLLBACK"));
+    }
+
+    #[test]
+    fn cutover_rolled_back_after_restore() {
+        let f = CutoverFacts {
+            new_liveness: live(false, true, false, "crashed_or_abandoned", "no_heartbeat"),
+            new_qualify_ok: None,
+            deadline_exceeded: true,
+            old_restored: true,
+        };
+        assert_eq!(cutover_phase(&f), "rolled_back");
+        assert!(cutover_next_action(&f)
+            .unwrap()
+            .contains("previous release is serving"));
+    }
+
+    #[test]
+    fn cutover_healthy_wins_even_at_deadline() {
+        // Went healthy right as the deadline passed → finalize, do NOT roll back.
+        let f = CutoverFacts {
+            new_liveness: live(true, true, true, "healthy", "pg_heartbeat"),
+            new_qualify_ok: Some(true),
+            deadline_exceeded: true,
+            old_restored: false,
+        };
+        assert_eq!(cutover_phase(&f), "healthy");
+    }
+
+    #[test]
+    fn cutover_failed_qualify_blocks_health_even_when_live() {
+        // brain+indexer live but qualify FAILED → not healthy → rollback on deadline.
+        let f = CutoverFacts {
+            new_liveness: live(true, true, true, "healthy", "pg_heartbeat"),
+            new_qualify_ok: Some(false),
+            deadline_exceeded: true,
+            old_restored: false,
+        };
+        assert!(!f.new_healthy());
+        assert_eq!(cutover_phase(&f), "rolling_back");
     }
 
     // --- Stop FSM ---------------------------------------------------------
