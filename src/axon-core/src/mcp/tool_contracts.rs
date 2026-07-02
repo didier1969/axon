@@ -65,6 +65,10 @@ pub(crate) struct QueryInput {
 pub(crate) enum SollAction {
     Create,
     Update,
+    /// REQ-AXO-902161 — append a section to a node body without re-sending the
+    /// whole description (token-efficient update).
+    #[serde(rename = "append_section")]
+    AppendSection,
     Link,
     Unlink,
 }
@@ -121,6 +125,15 @@ pub(crate) struct SollManagerData {
     /// Body / description (canonical column).
     #[serde(default)]
     pub description: Option<String>,
+    /// REQ-AXO-902161 — `append_section` only: the text to APPEND to the node body
+    /// (the caller sends just this, never the full description). Ignored by other
+    /// actions.
+    #[serde(default)]
+    pub section: Option<String>,
+    /// REQ-AXO-902161 — `append_section` only: optional header for the appended
+    /// section (rendered as `## <section_title>`); omit for a bare append.
+    #[serde(default)]
+    pub section_title: Option<String>,
     /// Lifecycle status (e.g. "planned", "current", "delivered").
     #[serde(default)]
     pub status: Option<String>,
@@ -648,7 +661,10 @@ fn soll_manager_conditional_clauses() -> Value {
         { "if": { "properties": { "action": { "const": "unlink" } } },
           "then": { "properties": { "data": { "required": ["source_id", "target_id", "relation_type"] } } } },
         { "if": { "properties": { "action": { "const": "update" } } },
-          "then": { "properties": { "data": { "required": ["id"] } } } }
+          "then": { "properties": { "data": { "required": ["id"] } } } },
+        // REQ-AXO-902161 — append_section needs the target id + the section text.
+        { "if": { "properties": { "action": { "const": "append_section" } } },
+          "then": { "properties": { "data": { "required": ["id", "section"] } } } }
     ])
 }
 
@@ -715,6 +731,27 @@ mod tests {
         ] {
             assert!(rendered.contains(field), "data schema must mention {field}");
         }
+    }
+
+    #[test]
+    fn soll_manager_exposes_append_section_action_and_fields() {
+        // REQ-AXO-902161 — append_section is a first-class action with its own
+        // token-efficient fields, and its per-action requiredness is enforced.
+        let rendered = serde_json::to_string(&derived_input_schema("soll_manager").unwrap()).unwrap();
+        assert!(rendered.contains("append_section"), "action enum must list append_section: {rendered}");
+        for field in ["section", "section_title"] {
+            assert!(rendered.contains(field), "data schema must mention {field}");
+        }
+        // Conditional clause: append_section requires data.id + data.section.
+        let clauses = super::soll_manager_conditional_clauses();
+        let has = clauses.as_array().unwrap().iter().any(|c| {
+            c["if"]["properties"]["action"]["const"] == "append_section"
+                && c["then"]["properties"]["data"]["required"]
+                    .as_array()
+                    .map(|r| r.iter().any(|v| v == "id") && r.iter().any(|v| v == "section"))
+                    .unwrap_or(false)
+        });
+        assert!(has, "append_section must require id + section: {clauses}");
     }
 
     #[test]

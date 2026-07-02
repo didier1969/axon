@@ -79,7 +79,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_manager",
-                "description": "[SOLL] Create/update/link/unlink intent entities. Server assigns canonical IDs. Requires: action, entity, data. MIL-AXO-020: `id` is DB-allocated for action=create — supplying `data.id` or `reserved_id` is rejected with `id_field_forbidden`. Vision creation forbidden outside `axon_init_project`. REQ-AXO-91592: action=unlink removes one SOLL edge with audit (soll.Revision + soll.RevisionChange) — symmetric to action=link.",
+                "description": "[SOLL] Create/update/append_section/link/unlink intent entities. Server assigns canonical IDs. Requires: action, entity, data. MIL-AXO-020: `id` is DB-allocated for action=create — supplying `data.id` or `reserved_id` is rejected with `id_field_forbidden`. Vision creation forbidden outside `axon_init_project`. REQ-AXO-902161: action=append_section appends `data.section` (optionally under `## data.section_title`) to an existing node body WITHOUT re-sending the full description — token-efficient update, same audit/status-validation as action=update; requires data.id + data.section. REQ-AXO-91592: action=unlink removes one SOLL edge with audit (soll.Revision + soll.RevisionChange) — symmetric to action=link.",
                 // REQ-AXO-901949 — inputSchema derived from
                 // tool_contracts::SollManagerInput (single source); the override
                 // pass injects it post-build. The per-action field-routing

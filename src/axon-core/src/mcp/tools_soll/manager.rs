@@ -200,6 +200,89 @@ impl McpServer {
         format!("Link error: {}", raw)
     }
 
+    /// REQ-AXO-902161 — append a delimited section to a node's description WITHOUT the
+    /// caller re-sending the whole body (the OPV token friction: action=update echoes
+    /// the full description every time). Reads the current body, appends `data.section`
+    /// (optionally under a `## data.section_title` header), then DELEGATES to
+    /// action=update — so the audit (soll.Revision), status validation, and
+    /// mutation_feedback are byte-for-byte identical to a normal update. The token win
+    /// is on the INPUT: the caller sends only the short new section, never the 2500-char
+    /// body. Response is terse (append-specific, no body echo).
+    fn soll_append_section(&self, entity: &str, data: &Value) -> Option<Value> {
+        let id = data.get("id")?.as_str()?;
+        let section = data
+            .get("section")
+            .or_else(|| data.get("description"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(section) = section else {
+            return Some(json!({
+                "content": [{"type":"text","text": "append_section requires a non-empty `section` (the text to append)."}],
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "parameter_repair": {
+                        "tool": "soll_manager",
+                        "category": "section",
+                        "invalid_field": "data.section",
+                        "hint": "pass data.section = the new text to append to the node body",
+                    },
+                },
+            }));
+        };
+        // Read the current body ; unknown id → clear not-found envelope.
+        let current = match self.query_named_row(
+            &format!("SELECT description FROM soll.Node WHERE id = '{}'", escape_sql(id)),
+            1,
+        ) {
+            Ok(rows) if !rows.is_empty() => rows[0].clone(),
+            _ => {
+                return Some(json!({
+                    "content": [{"type":"text","text": format!("append_section: node `{id}` not found. Use action=create for a new node.")}],
+                    "isError": true,
+                    "data": {"status": "input_not_found", "id": id},
+                }));
+            }
+        };
+        let header = data
+            .get("section_title")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let appended = match header {
+            Some(h) => format!("\n\n## {h}\n{section}"),
+            None => format!("\n\n{section}"),
+        };
+        let new_description = format!("{current}{appended}");
+        // Delegate to action=update with the merged body ; identical audit path.
+        let mut merged = data.clone();
+        if let Some(obj) = merged.as_object_mut() {
+            obj.insert("description".to_string(), json!(new_description));
+            obj.remove("section");
+            obj.remove("section_title");
+        }
+        let mut result = self.axon_soll_manager(&json!({
+            "action": "update",
+            "entity": entity,
+            "data": merged,
+        }))?;
+        // Terse append-specific confirmation (never echo the full body).
+        if result.get("isError").and_then(|v| v.as_bool()) != Some(true) {
+            let added = appended.chars().count();
+            let total = new_description.chars().count();
+            result["content"] = json!([{
+                "type": "text",
+                "text": format!("Appended {added} chars to `{id}` (body now {total} chars) — no full-body re-send (REQ-AXO-902161)."),
+            }]);
+            if let Some(obj) = result.get_mut("data").and_then(|d| d.as_object_mut()) {
+                obj.insert("appended_chars".to_string(), json!(added));
+                obj.insert("body_chars".to_string(), json!(total));
+            }
+        }
+        Some(result)
+    }
+
     pub(crate) fn axon_soll_manager(&self, args: &Value) -> Option<Value> {
         let action = args.get("action")?.as_str()?;
         let entity = args.get("entity")?.as_str()?;
@@ -1069,6 +1152,10 @@ impl McpServer {
                     Err(e) => Some(Self::normalized_soll_writer_error("update", e)),
                 }
             }
+            // REQ-AXO-902161 — append a section to a node body WITHOUT the caller
+            // re-sending the whole description. Delegates to action=update so audit +
+            // status validation + mutation_feedback are identical.
+            "append_section" => self.soll_append_section(entity, data),
             "link" => {
                 let src = data.get("source_id")?.as_str()?;
                 let tgt = data.get("target_id")?.as_str()?;
