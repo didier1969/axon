@@ -2,7 +2,9 @@
 
 > Handoff produit **sans Axon** (MCP down, runtime mort). Fallback markdown sanctionné (CLAUDE.md : markdown seulement si MCP irrécupérable). À reprendre par le prochain LLM / moi après reset WSL.
 
-## ⛔ BLOQUEUR CRITIQUE — à lire en premier
+> **✅ RÉSOLU (fin s94)** : `wsl --terminate Ubuntu` a récupéré le GPU → promote frais **clean 1289** (HEAD `79a485c3`, poussé). Les 2 causes de l'incident sont corrigées (S2 detect_gpu→NVML `17b53b38` ; S4 pid_exists zombie-aware `79a485c3`). Refactor = `MIL-AXO-051`/`DEC-AXO-901666`. Pointer canonique à jour = SOLL `CPT-AXO-052`. Le bloc ci-dessous est l'HISTORIQUE de l'incident (audit).
+
+## ⛔ BLOQUEUR CRITIQUE — à lire en premier (HISTORIQUE, résolu)
 Le **driver GPU WSL2 est planté**. 5 process en état `D` (uninterruptible, unkillable) — 4× `nvidia-smi` + `axon-indexer` — le plus vieux à 1h28. Ils tiennent des ressources/guards. **Tout `start`/`stop`/`promote` hang dessus** (chaque `nvidia-smi` appelé repart en `D` ; `stop --hard` hang à reaper le `D`). Le runtime live est **irrécupérable par logiciel**.
 
 **SEULE reprise possible** (opérateur, depuis Windows) :
