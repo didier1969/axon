@@ -340,6 +340,34 @@ pub fn cutover_next_action(f: &CutoverFacts) -> Option<String> {
     }
 }
 
+/// REQ-AXO-902165 — the cutover DRIVER: poll the new runtime's health up to `max_polls`
+/// times, returning `Promoted` the instant it is healthy, or `RolledBack` once the polls
+/// are exhausted (the deadline). Both effects — the health probe and the inter-poll wait
+/// — are INJECTED, so the finalize-vs-rollback decision flow is unit-testable without a
+/// runtime or a real clock. The caller (`axonctl cutover`) supplies the real probe
+/// (`axonctl liveness`) + the wait (sleep) and performs finalize/rollback on the outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CutoverOutcome {
+    /// New runtime went healthy within the deadline → finalize the promote.
+    Promoted,
+    /// New runtime never healthy within the deadline → restore the previous release.
+    RolledBack,
+}
+
+pub fn run_cutover_loop(
+    mut probe_healthy: impl FnMut() -> bool,
+    max_polls: usize,
+    mut wait_between_polls: impl FnMut(),
+) -> CutoverOutcome {
+    for _ in 0..max_polls.max(1) {
+        if probe_healthy() {
+            return CutoverOutcome::Promoted;
+        }
+        wait_between_polls();
+    }
+    CutoverOutcome::RolledBack
+}
+
 // ---------------------------------------------------------------------------
 // Stop FSM (REQ-AXO-902111 — stop-verdict slice).
 //
@@ -686,6 +714,46 @@ mod tests {
         };
         assert!(!f.new_healthy());
         assert_eq!(cutover_phase(&f), "rolling_back");
+    }
+
+    #[test]
+    fn cutover_loop_promotes_on_first_healthy_poll() {
+        let mut polls = 0;
+        let out = run_cutover_loop(
+            || {
+                polls += 1;
+                true
+            },
+            10,
+            || {},
+        );
+        assert_eq!(out, CutoverOutcome::Promoted);
+        assert_eq!(polls, 1, "should stop probing the instant it is healthy");
+    }
+
+    #[test]
+    fn cutover_loop_rolls_back_when_never_healthy() {
+        // THE incident guard: an unhealthy new runtime must roll back after the deadline,
+        // never hang or strand.
+        let mut waits = 0;
+        let out = run_cutover_loop(|| false, 5, || waits += 1);
+        assert_eq!(out, CutoverOutcome::RolledBack);
+        assert_eq!(waits, 5);
+    }
+
+    #[test]
+    fn cutover_loop_promotes_when_healthy_on_third_poll() {
+        let mut n = 0;
+        let out = run_cutover_loop(
+            || {
+                n += 1;
+                n >= 3
+            },
+            10,
+            || {},
+        );
+        assert_eq!(out, CutoverOutcome::Promoted);
+        assert_eq!(n, 3);
     }
 
     // --- Stop FSM ---------------------------------------------------------
