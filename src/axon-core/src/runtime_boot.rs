@@ -425,10 +425,12 @@ impl crate::ist_snapshot::loader::JsonSqlStore for IstLoaderSqlStore {
     }
 }
 
-/// REQ-AXO-901869 A1 — distinct project codes carrying IST symbols, parsed
-/// from the `query_json` 2-D array. Pure, so the parse is unit-tested
-/// without a live GraphStore.
-fn parse_boot_warm_project_codes(raw: &str) -> Vec<String> {
+/// REQ-AXO-901869 A1 / REQ-AXO-902177 — distinct project codes from a
+/// `SELECT DISTINCT project_code ...` 2-D `query_json` array (first column,
+/// non-empty). Pure, so the parse is unit-tested without a live GraphStore.
+/// Shared by the IST boot-warm (this file) and the SOLL boot-warm
+/// (`McpServer::warm_all_soll_snapshots`) so both enumerate identically.
+pub(crate) fn parse_boot_warm_project_codes(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<Vec<serde_json::Value>>>(raw)
         .unwrap_or_default()
         .into_iter()

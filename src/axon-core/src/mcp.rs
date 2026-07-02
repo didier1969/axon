@@ -1364,6 +1364,39 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902177 — warm the RAM SOLL snapshot for EVERY SOLL-bearing project at
+    /// boot, symmetric to `warm_all_ist_snapshots_at_boot`. `prewarm_observer_caches`
+    /// warms only the single startup project, so a multi-project brain left the other
+    /// projects' SOLL snapshots cold until their first read (asymmetric with IST,
+    /// which enumerates all projects). Best-effort per project: a failure logs and
+    /// leaves that project on the PG fallback path. Enumerates via the same 2-D array
+    /// parser as the IST twin (`parse_boot_warm_project_codes`, DRY).
+    pub(crate) fn warm_all_soll_snapshots(&self) {
+        let raw = match self.graph_store.query_json(
+            "SELECT DISTINCT project_code FROM soll.Node \
+             WHERE project_code IS NOT NULL ORDER BY project_code",
+        ) {
+            Ok(raw) => raw,
+            Err(err) => {
+                tracing::warn!(error = %err, "REQ-AXO-902177: boot SOLL warm enumeration failed");
+                return;
+            }
+        };
+        for project in crate::runtime_boot::parse_boot_warm_project_codes(&raw) {
+            match self.soll_cache().snapshot(&project) {
+                Ok(_) => tracing::info!(
+                    project = %project,
+                    "REQ-AXO-902177: warmed SOLL snapshot at boot"
+                ),
+                Err(err) => tracing::warn!(
+                    project = %project,
+                    error = %err,
+                    "REQ-AXO-902177: SOLL boot warm failed (PG fallback remains)"
+                ),
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub async fn run_stdio(&self) -> Result<()> {
         let mut stdin = BufReader::new(tokio::io::stdin());

@@ -102,6 +102,11 @@ pub(crate) fn start_runtime_services(
             ),
         }
         McpServer::startup_prewarm(mcp_server.clone());
+        // REQ-AXO-902177 — warm EVERY project's RAM SOLL snapshot at boot (symmetric
+        // to warm_all_ist_snapshots_at_boot); startup_prewarm above only warms the
+        // single startup project. Off the async runtime (spawn_blocking); best-effort.
+        let soll_warm_server = mcp_server.clone();
+        tokio::task::spawn_blocking(move || soll_warm_server.warm_all_soll_snapshots());
         let app = axon_core::mcp_http::app_router(mcp_server);
         let http_port = std::env::var("AXON_BRAIN_PORT").unwrap_or_else(|_| "44129".to_string());
         let bind_addr = format!("0.0.0.0:{}", http_port);

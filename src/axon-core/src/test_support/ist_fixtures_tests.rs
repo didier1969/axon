@@ -64,6 +64,39 @@ fn call_fixture_canonical_and_synthetic_both_persist() {
     );
 }
 
+// REQ-AXO-902177 — warm_all_soll_snapshots warms EVERY SOLL-bearing project's RAM
+// snapshot at boot, not just the startup project (symmetric to the IST boot-warm).
+#[test]
+fn warm_all_soll_snapshots_warms_every_project_902177() {
+    let harness = create_test_server_with_ist_seed(
+        IstSeed::new().node(
+            SollNodeFixture::new("VIS-ZZZ-001", "Vision", "ZZZ", "warm-all sanity")
+                .status("current"),
+        ),
+    )
+    .unwrap();
+    assert!(
+        !harness
+            .server
+            .soll_cache()
+            .cached_projects()
+            .contains(&"ZZZ".to_string()),
+        "cold before warm"
+    );
+
+    harness.server.warm_all_soll_snapshots();
+
+    assert!(
+        harness
+            .server
+            .soll_cache()
+            .cached_projects()
+            .contains(&"ZZZ".to_string()),
+        "ZZZ SOLL snapshot must be warmed at boot; cached={:?}",
+        harness.server.soll_cache().cached_projects()
+    );
+}
+
 #[test]
 fn soll_node_fixture_round_trips() {
     let harness = create_test_server_with_ist_seed(
