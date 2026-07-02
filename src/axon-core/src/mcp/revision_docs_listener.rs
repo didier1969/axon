@@ -1,12 +1,16 @@
 //! REQ-AXO-309 (DEC-AXO-901640) — SOLL revision-committed journal subscriber.
 //!
 //! Opens a dedicated `tokio_postgres` connection, `LISTEN soll_revision_committed`,
-//! and regenerates the derived autodoc site for the affected project on each
-//! commit — debounced so a burst of mutations triggers one render. ONE emitter
-//! (the `trg_soll_revision_notify` trigger on `soll.Revision`, `db/ddl/13_*.sql`),
-//! N fire-and-forget subscribers (this one today, the SOLL-embedding sweep next),
-//! replacing the per-tool derived-docs hooks (dependency inversion — `soll_manager`
-//! no longer needs to know its consumers).
+//! and on each commit (debounced so a burst triggers one pass) performs TWO duties
+//! for the affected project:
+//!   1. REQ-AXO-902176 — invalidate the RAM `SollSnapshotCache` so the next hot read
+//!      reloads fresh from PG. Journal-driven (trigger-reliable, cross-process),
+//!      unlike the per-tool in-process hook which misses cross-process writes.
+//!   2. Regenerate the derived autodoc site.
+//! ONE emitter (the `trg_soll_revision_notify` trigger on `soll.Revision`,
+//! `db/ddl/13_*.sql`), N fire-and-forget subscribers (this one; the SOLL-embedding
+//! sweep next), replacing the per-tool derived-docs hooks (dependency inversion —
+//! `soll_manager` no longer needs to know its consumers).
 //!
 //! The render reuses `McpServer::regenerate_derived_docs_for` →
 //! `schedule_background_derived_docs_refresh`, so it shares the SAME
@@ -124,6 +128,11 @@ async fn listen_once(server: &Arc<McpServer>, database_url: &str) -> Result<()> 
                 None => break,
             }
         }
+        // REQ-AXO-902176 — freshness FIRST: drop the RAM SOLL snapshot for every
+        // affected project BEFORE the (heavier, debounced) autodoc regen, so a
+        // concurrent hot read reloads fresh from PG immediately.
+        invalidate_soll_snapshots(server, &projects);
+
         // REQ-AXO-902053 P2 — feed the viz-freshness signal so `status`/`health`
         // and the dashboard event (`compose_dashboard_state_v1`) surface "when
         // did SOLL last change" without a shell. Fire-and-forget alongside the
@@ -137,6 +146,21 @@ async fn listen_once(server: &Arc<McpServer>, database_url: &str) -> Result<()> 
     drop(client);
     let _ = driver.await;
     Ok(())
+}
+
+/// REQ-AXO-902176 — drop the RAM SOLL snapshot for every project touched by a
+/// committed revision. The `trg_soll_revision_notify` trigger fires on EVERY commit
+/// (in-process OR cross-process), so this journal-driven invalidation makes RAM
+/// freshness reliable *independently* of the per-tool in-process hook
+/// (`attach_derived_docs_refresh_metadata`), which misses cross-process writes AND
+/// any mutation whose `project_code` derivation fails (root of the stale
+/// `soll_acyclic_audit` + `soll_work_plan`-evidence desync, mcp_feedback #38/#39/#40).
+/// Invalidate (not eager reload): the next hot read lazily reloads the project from
+/// PG, matching the cache's demand-driven design.
+fn invalidate_soll_snapshots(server: &Arc<McpServer>, projects: &HashSet<String>) {
+    for project in projects {
+        server.soll_cache().invalidate(project);
+    }
 }
 
 fn push_payload(raw: &str, out: &mut HashSet<String>) {
@@ -182,6 +206,34 @@ mod tests {
         push_payload("{}", &mut set);
         push_payload("null", &mut set);
         assert!(set.is_empty());
+    }
+
+    // REQ-AXO-902176 — the journal-driven freshness duty: a committed revision must
+    // drop the affected project's RAM snapshot so the next read reloads from PG.
+    // Zero mock I/O (GUI-PRO-004): real ephemeral PG + real McpServer + real cache.
+    #[test]
+    fn invalidate_soll_snapshots_drops_warm_cache_902176() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = Arc::new(McpServer::new(store));
+        // Warm AXO: first read = PG load, second = RAM hit.
+        let _ = server.soll_cache().snapshot("AXO").expect("warm");
+        let _ = server.soll_cache().snapshot("AXO").expect("ram hit");
+        let (ram_before, pg_before) = server.soll_cache().read_stats();
+        assert!(ram_before >= 1, "second read should be a RAM hit: {ram_before}");
+
+        // Journal duty: invalidate every project touched by the revision burst.
+        let mut projects = HashSet::new();
+        projects.insert("AXO".to_string());
+        invalidate_soll_snapshots(&server, &projects);
+
+        // Next read must reload from PG — one additional PG load proves the drop.
+        let _ = server.soll_cache().snapshot("AXO").expect("reload");
+        let (_ram_after, pg_after) = server.soll_cache().read_stats();
+        assert_eq!(
+            pg_after,
+            pg_before + 1,
+            "post-invalidation read must reload from PG"
+        );
     }
 
     // REQ-AXO-309 E2E — real PG round-trip (zero mock I/O): a soll.Revision
