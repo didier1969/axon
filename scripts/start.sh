@@ -45,6 +45,9 @@ source "$PROJECT_ROOT/scripts/lib/ensure-runtime.sh"
 source "$PROJECT_ROOT/scripts/lib/axon-os-limits.sh"
 # shellcheck source=scripts/lib/axon-supervisor.sh
 source "$PROJECT_ROOT/scripts/lib/axon-supervisor.sh"
+# REQ-AXO-902163 — detect_gpu() extracted here: NVML-based, non-blocking (never wedges).
+# shellcheck source=scripts/lib/axon-gpu-detect.sh
+source "$PROJECT_ROOT/scripts/lib/axon-gpu-detect.sh"
 cd "$PROJECT_ROOT"
 
 axon_load_worktree_env "$PROJECT_ROOT"
@@ -105,11 +108,9 @@ done
 export AXON_RUNTIME_MODE="$RUNTIME_MODE"
 
 # --- GPU detection (auto TensorRT when GPU present + mode uses vectors) ---
-detect_gpu() {
-    command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1 && return 0
-    [[ -x /usr/lib/wsl/lib/nvidia-smi ]] && /usr/lib/wsl/lib/nvidia-smi -L >/dev/null 2>&1 && return 0
-    return 1
-}
+# REQ-AXO-902163 — detect_gpu() now lives in scripts/lib/axon-gpu-detect.sh (sourced
+# above): NVML via gpu_nvml.py, probed as a bounded/abandonable background job so a
+# wedged WSL2 GPU driver can never hang the start (the old inline `nvidia-smi -L` did).
 
 # REQ-AXO-902021 — honour an operator-pinned AXON_EMBEDDING_PROVIDER. The disk
 # corruption RCA (corrupted libnvinfer in the nix-store) crash-looped the
