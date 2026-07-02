@@ -124,28 +124,18 @@ impl SollCompletenessSnapshot {
     }
 }
 
-pub(super) fn requirement_state_from(
-    status: &str,
-    criteria: &str,
-    evidence_count: usize,
-    broken_file_evidence_count: usize,
-) -> &'static str {
-    // REQ-AXO-136: terminal-status requirements are done by definition.
-    // status=`completed` means the work was delivered; status=`delivered` is
-    // the Decision-side equivalent that a Requirement may inherit. No
-    // metadata cross-check is required for the terminal path — closing a
-    // REQ via `soll_manager update status=completed` is the canonical "I'm
-    // done" signal an LLM emits, and the verifier must mirror it.
-    //
-    // MIL-AXO-016 wave 9 closure pass: the LLM-driven triage emits
-    // `closed` (work shipped + evidence in acceptance_criteria),
-    // `archived` (no longer relevant, irreversible), `superseded`
-    // (replaced by another REQ), `done`, `complete`,
-    // `partially_closed` (REQ-AXO-248 shape: writers shipped, readers
-    // tracked separately). All of these are terminal — the verifier
-    // mirrors the closure semantics so soll_verify_requirements
-    // tracks the operator-visible decline of partial/missing counts.
-    if matches!(
+/// REQ-AXO-136 / REQ-AXO-902173 — canonical terminal-status set for the requirement
+/// verifier. "Terminal" = the requirement needs no further work, whether it was
+/// DELIVERED (completed / delivered / closed / done / complete / partially_closed) or
+/// CLOSED-WITHOUT-DELIVERY (archived / superseded / rejected / cancelled / wont_do /
+/// obsolete). BOTH classes must drop out of the partial/gap count — a rejected REQ is
+/// as finished, work-wise, as a delivered one (mcp_feedback #37: a `status='rejected'`
+/// REQ carrying criteria was mis-counted as a `partial` gap, keeping the verifier
+/// inflated forever). Single source of truth shared by `requirement_state_from` and
+/// `requirement_missing_dimensions` so the two lists can never drift (GUI-PRO-013).
+/// `deferred` is deliberately NOT terminal (work postponed, still owed).
+pub(super) fn is_terminal_requirement_status(status: &str) -> bool {
+    matches!(
         status,
         "completed"
             | "delivered"
@@ -155,7 +145,25 @@ pub(super) fn requirement_state_from(
             | "done"
             | "complete"
             | "partially_closed"
-    ) {
+            | "rejected"
+            | "cancelled"
+            | "wont_do"
+            | "obsolete"
+    )
+}
+
+pub(super) fn requirement_state_from(
+    status: &str,
+    criteria: &str,
+    evidence_count: usize,
+    broken_file_evidence_count: usize,
+) -> &'static str {
+    // Terminal-status requirements are done by definition (see
+    // is_terminal_requirement_status): no metadata cross-check is required — closing a
+    // REQ (completed/delivered) OR terminating it without delivery (rejected/superseded/
+    // archived/…) is the canonical "no more work here" signal the verifier must mirror,
+    // so soll_verify_requirements tracks the operator-visible decline of partial/missing.
+    if is_terminal_requirement_status(status) {
         return "done";
     }
     let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
@@ -180,25 +188,11 @@ pub(super) fn requirement_missing_dimensions(
     broken_file_evidence_count: usize,
 ) -> Vec<String> {
     let mut missing = Vec::new();
-    // REQ-AXO-136: terminal statuses count as the strongest "status" signal,
-    // not as a missing-status gap. Active statuses (current/accepted) also
-    // pass; everything else flags the status dimension.
-    // MIL-AXO-016 wave 9: closed / archived / superseded / done / complete /
-    // partially_closed are terminal from the verifier's contract (mirror of
-    // requirement_state_from above).
-    if !matches!(
-        status,
-        "current"
-            | "accepted"
-            | "completed"
-            | "delivered"
-            | "closed"
-            | "archived"
-            | "superseded"
-            | "done"
-            | "complete"
-            | "partially_closed"
-    ) {
+    // REQ-AXO-136 / REQ-AXO-902173: a terminal status (is_terminal_requirement_status)
+    // OR an active one (current/accepted) is the strongest "status" signal, not a
+    // missing-status gap. Everything else (planned, proposed, deferred, …) flags it.
+    // Shares the terminal set with requirement_state_from so the two never drift.
+    if !is_terminal_requirement_status(status) && !matches!(status, "current" | "accepted") {
         missing.push("status".to_string());
     }
     if !has_criteria {
@@ -468,12 +462,11 @@ pub(crate) fn scoped_query_filter(project_code: Option<&str>, column_prefix: &st
 mod requirement_state_tests {
     use super::{requirement_missing_dimensions, requirement_state_from};
 
-    /// MIL-AXO-016 wave 9: every status emitted by the closure pass
-    /// (closed / archived / superseded / partially_closed / done /
-    /// complete) must short-circuit the verifier into the terminal
-    /// "done" state, mirroring the historical `completed` / `delivered`
-    /// path. Otherwise soll_verify_requirements stays inflated long
-    /// after the operator has finished closing work.
+    /// MIL-AXO-016 wave 9 + REQ-AXO-902173: every terminal status must short-circuit
+    /// the verifier into "done", whether DELIVERED (closed / archived / superseded /
+    /// partially_closed / done / complete) or CLOSED-WITHOUT-DELIVERY (rejected /
+    /// cancelled / wont_do / obsolete). Otherwise soll_verify_requirements stays
+    /// inflated long after the operator has finished (or abandoned) the work.
     #[test]
     fn terminal_statuses_count_as_done() {
         for status in [
@@ -485,6 +478,11 @@ mod requirement_state_tests {
             "done",
             "complete",
             "partially_closed",
+            // REQ-AXO-902173 — terminal-without-delivery (mcp_feedback #37).
+            "rejected",
+            "cancelled",
+            "wont_do",
+            "obsolete",
         ] {
             assert_eq!(
                 requirement_state_from(status, "", 0, 0),
@@ -492,6 +490,16 @@ mod requirement_state_tests {
                 "status={status} should map to done"
             );
         }
+    }
+
+    /// REQ-AXO-902173 — the exact mcp_feedback #37 shape: a `rejected` REQ that still
+    /// carries acceptance criteria + evidence must NOT be counted as a `partial` gap.
+    #[test]
+    fn rejected_requirement_with_signals_is_not_a_gap_902173() {
+        assert_eq!(requirement_state_from("rejected", "AC1: foo", 1, 0), "done");
+        assert_eq!(requirement_state_from("rejected", "AC1: foo", 0, 0), "done");
+        // deferred is NOT terminal — postponed work is still owed, stays a gap.
+        assert_ne!(requirement_state_from("deferred", "AC1: foo", 0, 0), "done");
     }
 
     /// Active statuses still need evidence + criteria + zero broken
@@ -527,6 +535,10 @@ mod requirement_state_tests {
             "done",
             "complete",
             "partially_closed",
+            "rejected",
+            "cancelled",
+            "wont_do",
+            "obsolete",
             "current",
             "accepted",
         ] {
