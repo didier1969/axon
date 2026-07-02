@@ -25,6 +25,38 @@ fn practice_err(msg: &str, status: &str) -> Value {
     })
 }
 
+/// REQ-AXO-902171 — render a recalled practice list into the human/LLM `content.text`
+/// body. Each row surfaces the fields the client asked for (mcp_feedback #36): id,
+/// scope, tier, trust, score, and the practice text itself (bounded so one long entry
+/// can't blow the token budget — GUI-PRO-100). Empty list → an explicit hint, never a
+/// bare header.
+fn render_practice_list(practices: &[Value]) -> String {
+    if practices.is_empty() {
+        return "_(aucune pratique — élargis la requête ou vérifie le scope)_".to_string();
+    }
+    practices
+        .iter()
+        .map(|p| {
+            let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            let n = |k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+            let id = p.get("id").and_then(Value::as_i64).unwrap_or(0);
+            let mut text = s("practice");
+            if text.chars().count() > 400 {
+                text = format!("{}…", text.chars().take(400).collect::<String>());
+            }
+            let tier = s("tier");
+            let tier = if tier.is_empty() { String::new() } else { format!(" · {tier}") };
+            format!(
+                "- **[{id}]** `{}`{tier} · trust {:.2} · score {:.2}\n  {text}",
+                s("scope"),
+                n("trust"),
+                n("score"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// REQ-AXO-902132 — does the practice DESCRIBE a failure mode / lesson-learned?
 /// Such a practice ("a killed promote leaves query-embed dead") legitimately tensions
 /// with the healthy-state base, so a `contradicts` verdict from the write-gate is
@@ -487,9 +519,15 @@ impl McpServer {
             ));
         }
         let practices: Vec<Value> = scored.into_iter().map(|(_, _, v)| v).collect();
+        // REQ-AXO-902171 — render the recalled list INLINE in content.text. LLM clients
+        // read content.text; shipping the payload only in data.practices left the header
+        // ("N practice(s)") with an empty body, so the PRIMARY how-to-work memory channel
+        // looked silently empty at every init (mcp_feedback #36, OPV 2026-07-01).
+        let body = render_practice_list(&practices);
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_recall — {} practice(s) · scope=`{scope}` (+global)", practices.len()
+                "### 🧠 practice_recall — {} practice(s) · scope=`{scope}` (+global)\n\n{body}",
+                practices.len()
             )}],
             "data": {"status":"ok","scope":scope,"count":practices.len(),"practices":practices}
         }))
@@ -703,8 +741,37 @@ mod tests {
     use super::{
         axis_recall_set, consolidate_tier, covering_scopes, is_failure_mode,
         is_imperative_directive, merge_provenance, normalize_axis_tag, normalize_perishability,
-        perishability_decays_by_time, provenance_count, resolve_dense_form,
+        perishability_decays_by_time, provenance_count, render_practice_list, resolve_dense_form,
     };
+    use serde_json::json;
+
+    #[test]
+    fn render_practice_list_inlines_bodies_902171() {
+        // Empty recall must yield an explicit hint, never a bare/blank body.
+        assert!(render_practice_list(&[]).contains("aucune pratique"));
+        // A populated recall must surface id, scope, trust, score AND the practice text
+        // in content.text (mcp_feedback #36: header-only body left the channel empty).
+        let practices = vec![json!({
+            "id": 42,
+            "scope": "AXO",
+            "practice": "toujours passer par promote_live_safe.sh, jamais cargo build --release manuel",
+            "trust": 0.73,
+            "tier": "rule",
+            "score": 0.61,
+        })];
+        let body = render_practice_list(&practices);
+        assert!(body.contains("[42]"), "id must appear: {body}");
+        assert!(body.contains("AXO"), "scope must appear: {body}");
+        assert!(body.contains("0.73"), "trust must appear: {body}");
+        assert!(body.contains("0.61"), "score must appear: {body}");
+        assert!(body.contains("promote_live_safe.sh"), "practice text must appear: {body}");
+        // A pathological long body is bounded (token safety, GUI-PRO-100).
+        let long = "x".repeat(1000);
+        let big = vec![json!({"id": 1, "scope": "AXO", "practice": long, "trust": 0.5, "score": 0.5})];
+        let out = render_practice_list(&big);
+        assert!(out.contains('…'), "over-long practice must be truncated: {out}");
+        assert!(out.chars().count() < 600, "bounded length: {}", out.chars().count());
+    }
 
     #[test]
     fn perishability_902141() {
