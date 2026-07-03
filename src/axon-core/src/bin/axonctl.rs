@@ -512,8 +512,17 @@ fn copy_manifest_artifacts_to_bin(manifest: &serde_json::Value, bin_dir: &Path) 
             return Err(anyhow!("artifact source missing: {}", source.display()));
         }
         let target = bin_dir.join(&name);
-        fs::copy(source, &target)
-            .with_context(|| format!("copy {} -> {}", source.display(), target.display()))?;
+        // Atomic swap via temp + rename: a straight `fs::copy` onto `target` fails with
+        // ETXTBSY when target is a CURRENTLY-EXECUTING binary — and the cutover swaps
+        // `bin/axonctl`, which is the very process running this code. rename() over a
+        // running executable is safe (the live process keeps the old inode; the next
+        // exec opens the new one), mirroring promote_live.sh's `os.replace` in-place
+        // swap. `fs::copy` preserves the source's exec bit, so the temp is already +x.
+        let tmp = bin_dir.join(format!(".{name}.cutover-tmp"));
+        fs::copy(source, &tmp)
+            .with_context(|| format!("copy {} -> {}", source.display(), tmp.display()))?;
+        fs::rename(&tmp, &target)
+            .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
         // build-info alongside (best-effort — matches promote_live.sh's paired swap).
         if let Some(bi) = entry.get("build_info_path").and_then(|b| b.as_str()) {
             let bi = Path::new(bi);
@@ -604,7 +613,6 @@ struct RealCutoverIo {
     candidate_manifest: PathBuf,
     release_dir: PathBuf,
     bin_dir: PathBuf,
-    stop_timeout_ms: u64,
 }
 
 impl RealCutoverIo {
@@ -612,12 +620,29 @@ impl RealCutoverIo {
         InstanceConfig::new(self.config.project_root.clone(), self.config.instance_kind, role)
     }
 
-    /// Stop brain+indexer and verify the canonical listeners are gone (the writer guard
-    /// MUST be free before a new brain can boot — runtime_boot.rs exclusivity).
+    /// Stop the instance via the CANONICAL `scripts/axon … stop --hard`, then verify no
+    /// canonical listener survives. The canonical stop is mandatory (not a raw
+    /// `cmd_stop`) because the live runtime is supervised by process-compose: killing
+    /// only the child processes leaves the process-compose daemon alive to RESPAWN
+    /// brain/indexer (`scripts/stop.sh` runs `process-compose down` for exactly this
+    /// reason). A raw child-kill would let the supervisor race the cutover's swap+start
+    /// — the REQ-AXO-902157 degradation class. The writer guard MUST be free before the
+    /// new brain can boot (runtime_boot.rs exclusivity), which the canonical stop
+    /// guarantees (process-compose down + writer-guard release + residual reap).
     fn stop_instance(&self) -> Result<()> {
-        for role in [RuntimeRole::Brain, RuntimeRole::Indexer] {
-            let _ = cmd_stop(self.role_config(role), true, self.stop_timeout_ms, false);
+        let axon_entry = self.config.project_root.join("scripts").join("axon");
+        if !axon_entry.exists() {
+            return Err(anyhow!("scripts/axon not found at {}", axon_entry.display()));
         }
+        let _ = Command::new("bash")
+            .arg(&axon_entry)
+            .args(["--instance", self.config.instance_kind.label(), "stop", "--hard"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("run scripts/axon stop --hard")?;
+        // `stop.sh` is best-effort on residuals, so verify canonically: no live listener
+        // for either role means the writer guard is releasable and the swap can proceed.
         let remaining: Vec<i32> = [RuntimeRole::Brain, RuntimeRole::Indexer]
             .iter()
             .flat_map(|r| find_instance_all_pids(&self.role_config(*r)))
@@ -744,7 +769,6 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
         candidate_manifest: cargs.manifest.clone(),
         release_dir: release_dir.clone(),
         bin_dir,
-        stop_timeout_ms: 15_000,
         config,
     };
 

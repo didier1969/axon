@@ -13,6 +13,12 @@ SKIP_BUILD=0
 SKIP_QUALIFY=0
 DRY_RUN=0
 SKIP_DEV_VALIDATION=0
+# REQ-AXO-902165 / DEC-AXO-901666 — opt-in: run step 5 via `axonctl cutover` (the Rust
+# health-gated cutover with NATIVE auto-rollback) instead of `promote-live --in-place`.
+# Default 0 keeps the proven in-place + step-6c-failclosed path until cutover is
+# validated on live (self-cutover). The cutover does a full stop→swap→start→liveness-gate
+# →finalize|rollback in one executor, restoring the PREVIOUS build on a bad candidate.
+USE_CUTOVER=0
 
 usage() {
   cat <<'EOF'
@@ -34,6 +40,11 @@ Flags:
                          only when dev environment is intentionally
                          unavailable (e.g. fresh-clone bootstrap before
                          dev has ever been started). Logs the bypass.
+  --cutover              Run step 5 via `axonctl cutover` (Rust health-gated
+                         cutover + NATIVE auto-rollback to the previous build)
+                         instead of `promote-live --in-place`. Full restart
+                         (slower than in-place) but true rollback on a bad
+                         candidate. Default: in-place + step-6c fail-closed.
 EOF
 }
 
@@ -43,6 +54,7 @@ while [[ $# -gt 0 ]]; do
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-qualify) SKIP_QUALIFY=1; shift ;;
     --skip-dev-validation) SKIP_DEV_VALIDATION=1; shift ;;
+    --cutover) USE_CUTOVER=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -322,7 +334,25 @@ promote_log "   ✅ step 4 (manifest) done — $manifest_path"
 # --- Step 5: promote (copy + restart) ---
 ensure_head_stable
 old_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
-run_step 5 promote_copy_restart "$ROOT_DIR/scripts/axon" promote-live --manifest "$manifest_path" --restart-live --in-place
+if [[ "$USE_CUTOVER" -eq 1 ]]; then
+  # REQ-AXO-902165 / DEC-AXO-901666 — health-gated cutover with NATIVE auto-rollback
+  # (the Rust control-plane executor). One command: snapshot (current.json = rollback
+  # target) → stage (candidate bin/*) → full restart (re-bootstraps DDL, unlike in-place
+  # → step 5b becomes a redundant idempotent no-op) → `axonctl liveness` gate (FULL
+  # runtime_contract: brain + indexer /readyz) → finalize (pending→current) OR
+  # auto-rollback (restore the PREVIOUS build + restart). A bad candidate is reverted to
+  # the last-good build, not just restarted. bin/axonctl was rebuilt by step 1, so it
+  # carries the current cutover logic. On failure it exits non-zero → run_step fails the
+  # promote (the ERR trap logs it; no half-finalized manifest — cutover rolled back).
+  # --max-polls 120 × 2000ms = 240s health-gate budget: covers the new indexer's
+  # BGE-Large GPU cold-start (can exceed the 60s default under load) so a slow-but-fine
+  # indexer is NOT falsely rolled back.
+  run_step 5 cutover "$ROOT_DIR/bin/axonctl" cutover \
+    --project-root "$ROOT_DIR" --instance-kind live --manifest "$manifest_path" \
+    --max-polls 120 --poll-interval-ms 2000 --json
+else
+  run_step 5 promote_copy_restart "$ROOT_DIR/scripts/axon" promote-live --manifest "$manifest_path" --restart-live --in-place
+fi
 new_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
 promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
 # NOTE: an UNCHANGED md5 is NOT a failure — re-promoting an identical build
