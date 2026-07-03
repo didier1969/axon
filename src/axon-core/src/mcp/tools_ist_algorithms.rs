@@ -13,7 +13,7 @@ use crate::ist_snapshot::algorithms::{
 use crate::ist_snapshot::{process_view, IstSnapshotCache};
 use crate::mcp::McpServer;
 use crate::structural_health::{
-    acyclicity_score, resilience_score, StructuralHealthIndex, SubScore,
+    acyclicity_score, resilience_score, weighted_coverage_score, StructuralHealthIndex, SubScore,
 };
 
 impl McpServer {
@@ -168,6 +168,27 @@ impl McpServer {
         // Resilience: articulation points whose removal would disconnect the graph.
         let (_bridges, articulation) = bridges_and_articulation(&snapshot);
 
+        // Centrality-weighted coverage: Σ(pagerank of TESTED nodes) / Σ(pagerank). Weighting
+        // by PageRank asks the load-bearing question — are the HUBS tested? — not the flat
+        // symbol ratio. The `tested` flag is read from the RAM NodeFlags (REQ-AXO-91485), so
+        // this stays RAM-native. top = node_count → the full ranking (no truncation).
+        let ranked = pagerank_top(&snapshot, 0.85, 50, total_nodes.max(1));
+        let mut tested_pr = 0.0_f64;
+        let mut total_pr = 0.0_f64;
+        let mut tested_hub_count = 0usize;
+        for (id, score) in &ranked {
+            let s = *score as f64;
+            total_pr += s;
+            let tested = snapshot
+                .index_of(id)
+                .map(|idx| snapshot.node_meta(idx).2.tested())
+                .unwrap_or(false);
+            if tested {
+                tested_pr += s;
+                tested_hub_count += 1;
+            }
+        }
+
         let index = StructuralHealthIndex::compute(vec![
             SubScore::new(
                 "acyclicity",
@@ -190,6 +211,17 @@ impl McpServer {
                     "{} articulation point(s) (SPOF) / {} total",
                     articulation.len(),
                     total_nodes
+                ),
+            ),
+            SubScore::new(
+                "weighted_coverage",
+                weighted_coverage_score(tested_pr, total_pr),
+                1.0,
+                0.80,
+                format!(
+                    "{} tested node(s) carry {:.1}% of the PageRank mass (are the hubs tested?)",
+                    tested_hub_count,
+                    if total_pr > 0.0 { 100.0 * tested_pr / total_pr } else { 100.0 }
                 ),
             ),
         ]);
@@ -223,8 +255,8 @@ impl McpServer {
                 "below_target": below,
                 "node_count": total_nodes,
                 "edge_count": snapshot.edge_count(),
-                "dimensions_wired": 2,
-                "note": "slice 2a: acyclicity + resilience; more dimensions via REQ-AXO-902185"
+                "dimensions_wired": 3,
+                "note": "slice 2b: acyclicity + resilience + coverage×centrality; more (Martin-D, duplication rate, intent alignment) via REQ-AXO-902185"
             }
         }))
     }
