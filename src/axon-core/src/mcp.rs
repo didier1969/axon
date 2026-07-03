@@ -1523,6 +1523,7 @@ impl McpServer {
             "ist_structural_sccs" => self.axon_ist_structural_sccs(arguments),
             "structural_health_index" => self.axon_structural_health_index(arguments),
             "structural_health_worklist" => self.axon_structural_health_worklist(arguments),
+            "wiring" => self.axon_wiring(arguments),
             "ist_shortest_path" => self.axon_ist_shortest_path(arguments),
             "infer_soll_mutation" => self.axon_infer_soll_mutation(arguments),
             "entrench_nuance" => self.axon_entrench_nuance(arguments),

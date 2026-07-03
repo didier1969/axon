@@ -599,6 +599,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "wiring",
+                "description": "[GOVERNANCE] REQ-AXO-902192 (volet 1a, CPT-AXO-90056) — WIRING orphans: defined callables (function/method, INCLUDING public — the gap anomalies/orphan_code skips) that NO production caller reaches via CALLS. `test_only` = reached ONLY by #[test]s = delivered + green test but never wired into prod (the recurring OPV cost: a module that passes its own tests yet nothing in the app calls it). `isolated` = no caller at all (advisory: may be an undetected entry point). Mirror of the `covered` flag (reachable FROM a test). Requires `ist_snapshot_warm`. Slice 1b = a fail-closed gate in axon_pre_flight_check on deliverable-tagged orphans.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." },
+                        "top": { "type": "integer", "description": "Max orphans returned (default 20, max 200)." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
                 "name": "ist_shortest_path",
                 "description": "[IST] REQ-AXO-91488 — bidirectional BFS shortest path between two canonical IST ids. Requires `ist_snapshot_warm`. Max radius default 20.",
                 "inputSchema": {

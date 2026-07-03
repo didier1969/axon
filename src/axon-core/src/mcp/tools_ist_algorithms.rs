@@ -381,6 +381,56 @@ impl McpServer {
         }))
     }
 
+    /// REQ-AXO-902192 (volet 1a, CPT-AXO-90056) — WIRING orphans: defined callables that no
+    /// PRODUCTION caller reaches via CALLS (only `#[test]`s, or nothing). `test_only` =
+    /// delivered + green test but never wired into prod — the recurring OPV cost. Mirror of
+    /// `covered` (REQ-AXO-902187): reachable ONLY from a `#[test]`. Requires `ist_snapshot_warm`.
+    pub(crate) fn axon_wiring(&self, args: &Value) -> Option<Value> {
+        let project = match self.ist_resolve_project(args, "wiring") {
+            Ok(p) => p,
+            Err(e) => return Some(e),
+        };
+        let view = process_view();
+        if !view.is_warm(&project) {
+            return Some(ist_cache_miss_error("wiring", &project));
+        }
+        let snapshot = match view.cache_handle().get(&project) {
+            Some(s) => s,
+            None => return Some(ist_cache_miss_error("wiring", &project)),
+        };
+        let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(20).clamp(1, 200) as usize;
+        let orphans = crate::ist_snapshot::code_smells::wiring_orphans(&snapshot, &project, top);
+        let test_only = orphans.iter().filter(|o| o.category == "test_only").count();
+        let isolated = orphans.iter().filter(|o| o.category == "isolated").count();
+        let items: Vec<Value> = orphans
+            .iter()
+            .map(|o| {
+                json!({
+                    "id": o.id,
+                    "name": o.name,
+                    "kind": o.kind,
+                    "test_callers": o.test_callers,
+                    "category": o.category
+                })
+            })
+            .collect();
+        let summary = format!(
+            "wiring {} : {} orphan(s) — {} test_only (delivered+tested but NO prod caller — the OPV class) + {} isolated (no caller at all, advisory). A test_only symbol tagged deliverable = must be wired before delivery (gate S3, axon_pre_flight_check).",
+            project, orphans.len(), test_only, isolated
+        );
+        Some(json!({
+            "content": [{ "type": "text", "text": summary }],
+            "data": {
+                "status": "ok",
+                "project_code": project,
+                "orphans": items,
+                "test_only_count": test_only,
+                "isolated_count": isolated,
+                "note": "REQ-AXO-902192 volet 1a — test_only = high-confidence unwired deliverable (0 prod caller, ≥1 test); isolated = advisory (may be an undetected entry). Gate in axon_pre_flight_check = slice S3."
+            }
+        }))
+    }
+
     /// REQ-AXO-902186 / CPT-AXO-90055 — Structural Health WORKLIST: turns the below-target
     /// SHI axes into CONCRETE ranked remediation targets. Slice 1 surfaces the two most
     /// actionable: the untested HUBS (top PageRank nodes with tested=false — the load-bearing

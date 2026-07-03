@@ -934,6 +934,95 @@ pub fn symbols_in_matching_files(
     out
 }
 
+/// A defined callable that no PRODUCTION caller reaches (REQ-AXO-902192, volet 1a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WiringOrphan {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    /// How many `#[test]`/fixture callers reach it (0 = fully isolated).
+    pub test_callers: usize,
+    /// `"test_only"` (reached solely by tests — the delivered-but-unwired class) or
+    /// `"isolated"` (no caller at all — advisory: also catches undetected entries).
+    pub category: &'static str,
+}
+
+/// Names legitimately caller-less in the CALLS graph — process/framework entry points
+/// (main, handlers, NIF exports). Mirrors the parser's `is_entry` heuristic
+/// (parser/rust.rs) so wiring doesn't flag them as orphans.
+fn is_inferred_entry(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("main") || n.contains("handler") || n.contains("nif_")
+}
+
+/// REQ-AXO-902192 (volet 1a, CPT-AXO-90056) — wiring orphans: DEFINED callables
+/// (function/method, INCLUDING public — the gap `orphan_code_symbols` skips) that no
+/// PRODUCTION caller reaches via CALLS/CALLS_NIF; only tests reach them, or nothing.
+/// Mirror image of the `covered` propagation (REQ-AXO-902187): `covered` = reachable FROM
+/// a `#[test]`; a wiring orphan is reachable ONLY from a `#[test]` (`test_only`) or not at
+/// all (`isolated`). `test_only` is the high-confidence "delivered + green test but never
+/// wired into prod" class (OPV proof: finance::rebalance_book & co). Inferred entries
+/// (main/handler/nif) are skipped — they legitimately carry no in-graph caller.
+pub fn wiring_orphans(graph: &IstGraph, project: &str, limit: usize) -> Vec<WiringOrphan> {
+    let file_map = build_file_path_map(graph);
+    let mut out: Vec<WiringOrphan> = Vec::new();
+    for idx in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, idx, project) {
+            continue;
+        }
+        let (kind_byte, _, flags) = graph.node_meta(idx);
+        if !is_callable(kind_byte) {
+            continue;
+        }
+        // A `#[test]`/fixture fn is not a deliverable — skip (same class orphan_code skips).
+        if NodeFlags(flags.0).tested() {
+            continue;
+        }
+        let empty = String::new();
+        let path = file_map.get(&idx).unwrap_or(&empty);
+        if !path.is_empty() && is_test_path(path) {
+            continue;
+        }
+        let name = name_from_id(graph.id_of(idx));
+        if is_inferred_entry(name) {
+            continue;
+        }
+        let mut prod_callers = 0usize;
+        let mut test_callers = 0usize;
+        for (src, rel) in graph.reverse_neighbors(idx) {
+            if !matches!(rel, RelationType::Calls | RelationType::CallsNif) {
+                continue;
+            }
+            let (_, _, sflags) = graph.node_meta(src);
+            if NodeFlags(sflags.0).tested() {
+                test_callers += 1;
+            } else {
+                prod_callers += 1;
+            }
+        }
+        if prod_callers > 0 {
+            continue; // wired in prod — not an orphan
+        }
+        let category = if test_callers > 0 { "test_only" } else { "isolated" };
+        out.push(WiringOrphan {
+            id: graph.id_of(idx).to_string(),
+            name: name.to_string(),
+            kind: NodeKind::from_u8(kind_byte).as_db().to_string(),
+            test_callers,
+            category,
+        });
+    }
+    // test_only first (highest confidence), then most-nearly-wired (test_callers desc).
+    out.sort_by(|a, b| {
+        (a.category == "isolated")
+            .cmp(&(b.category == "isolated"))
+            .then(b.test_callers.cmp(&a.test_callers))
+            .then(a.id.cmp(&b.id))
+    });
+    out.truncate(limit.max(1).min(ANALYTICS_LIMIT));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,6 +1056,58 @@ mod tests {
             target: t.to_string(),
             rel,
         }
+    }
+
+    #[test]
+    fn wiring_orphans_flags_test_only_and_isolated_not_wired_or_entries() {
+        // REQ-AXO-902192 — the OPV case: a PUBLIC callable with a green test but no prod
+        // caller. `orphan_code_symbols` skips publics; `wiring_orphans` catches them.
+        let a_test = NodeRecord {
+            id: "AXO::app.rs::a_test".to_string(),
+            name: "a_test".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(true, false, false, false), // tested = #[test]
+        };
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true), // inferred entry (contains "main")
+            func("AXO::app.rs::prod_fn", true),  // wired: called by the entry
+            func("AXO::app.rs::opv_case", true), // public, called ONLY by a test
+            func("AXO::app.rs::isolated_pub", true), // public, no caller at all
+            a_test,
+        ];
+        let edges = vec![
+            edge(
+                "AXO::app.rs::run_main",
+                "AXO::app.rs::prod_fn",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::app.rs::a_test",
+                "AXO::app.rs::opv_case",
+                RelationType::Calls,
+            ),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let orphans = wiring_orphans(&g, "AXO", 10);
+        let names: Vec<&str> = orphans.iter().map(|o| o.name.as_str()).collect();
+        assert!(!names.contains(&"prod_fn"), "prod_fn has a prod caller → wired");
+        assert!(!names.contains(&"run_main"), "inferred entry skipped");
+        assert!(!names.contains(&"a_test"), "a #[test] is not a deliverable");
+        let opv = orphans
+            .iter()
+            .find(|o| o.name == "opv_case")
+            .expect("opv_case must be flagged");
+        assert_eq!(opv.category, "test_only");
+        assert_eq!(opv.test_callers, 1);
+        let iso = orphans
+            .iter()
+            .find(|o| o.name == "isolated_pub")
+            .expect("isolated_pub must be flagged");
+        assert_eq!(iso.category, "isolated");
+        assert_eq!(iso.test_callers, 0);
+        // test_only outranks isolated in the ordering.
+        assert_eq!(orphans[0].name, "opv_case");
     }
 
     #[test]
