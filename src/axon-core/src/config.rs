@@ -75,6 +75,11 @@ fn default_supported_extensions() -> Vec<String> {
         "conf".to_string(),
         "html".to_string(),
         "css".to_string(),
+        // llmlang: a `.lll` file is parsed by the shell-out bridge (parser/lll.rs
+        // → `lll export-ist`), which yields semantic symbols (content-hash,
+        // purity, contracts). Without this the scanner excludes it pre-parse
+        // (ignored_by_extension) — REQ-LLL-021.
+        "lll".to_string(),
     ]
 }
 
