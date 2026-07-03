@@ -245,12 +245,27 @@ fn write_lock_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::{guard_liveness_ist, guard_liveness_soll, GuardLiveness, WriterGuard};
+    use super::{
+        guard_liveness, guard_liveness_ist, guard_liveness_soll, GuardLiveness, WriterGuard,
+        WriterTarget,
+    };
     use std::fs;
     use std::process::Command;
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    // REQ-AXO-902190 — guard_liveness is the private core of the zombie-safe writer probe
+    // (a top uncovered hub; existing tests only reach the guard_liveness_ist/soll wrappers).
+    // Called DIRECTLY: no lock file (or :memory: root) ⇒ Free with no owner — the safe default
+    // that lets a restart take over a dead owner's slot. No real flock touched.
+    #[test]
+    fn guard_liveness_free_when_lock_absent_or_memory_root() {
+        let mem = guard_liveness(WriterTarget::Ist, ":memory:").unwrap();
+        assert!(matches!(mem, GuardLiveness::Free { recorded_owner: None }));
+        let missing = guard_liveness(WriterTarget::Soll, "/nonexistent-axon-dir-902190").unwrap();
+        assert!(matches!(missing, GuardLiveness::Free { recorded_owner: None }));
+    }
 
     fn wait_for_ready_file(path: &std::path::Path) {
         let deadline = Instant::now() + Duration::from_secs(5);
