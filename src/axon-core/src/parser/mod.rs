@@ -264,6 +264,15 @@ mod wasm_grammar_health_tests {
     // Empty = every shipped grammar must extract ≥1 symbol.
     const KNOWN_BROKEN: &[&str] = &[];
 
+    // REQ-AXO-902190 — the "safe" contract of the 17-caller wasm chokepoint: garbage bytes
+    // must yield None, NEVER panic (catch_unwind). Calls parse_with_wasm_safe directly so the
+    // covered flag flips (the grammar-health test reaches it only through wrappers).
+    #[test]
+    fn parse_with_wasm_safe_returns_none_on_garbage_wasm_without_panic() {
+        let tree = parse_with_wasm_safe("bogus_lang", b"\x00\x01\x02 not wasm", "let x = 1;");
+        assert!(tree.is_none());
+    }
+
     #[test]
     fn shipped_wasm_grammars_extract_symbols_except_known_broken() {
         // (file extension, minimal valid snippet expected to yield ≥1 symbol)

@@ -94,3 +94,34 @@ pub(crate) fn evidence_by_mode(evidence: &str, mode: Option<&str>) -> String {
     clipped.push_str("\n\n[truncated=true, mode=brief, max_chars=4000]");
     clipped
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // REQ-AXO-902190 — format_standard_contract is the shared MCP output contract (24 callers,
+    // a top uncovered hub). Cover its two branches: full render + the empty-actions "- none".
+    #[test]
+    fn format_standard_contract_renders_all_sections() {
+        let out = format_standard_contract(
+            "ok",
+            "did the thing",
+            "project:AXO",
+            "commit abc123",
+            &["run tests", "ship it"],
+            "high",
+        );
+        assert!(out.contains("**Status:** ok"));
+        assert!(out.contains("**Summary:** did the thing"));
+        assert!(out.contains("**Scope:** project:AXO"));
+        assert!(out.contains("**Confidence:** high"));
+        assert!(out.contains("### Evidence\ncommit abc123"));
+        assert!(out.contains("- run tests\n- ship it"));
+    }
+
+    #[test]
+    fn format_standard_contract_empty_actions_renders_none() {
+        let out = format_standard_contract("ok", "s", "sc", "e", &[], "low");
+        assert!(out.contains("### Next actions\n- none"));
+    }
+}
