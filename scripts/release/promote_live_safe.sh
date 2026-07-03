@@ -346,21 +346,29 @@ if [[ "$SKIP_QUALIFY" -ne 1 ]]; then
   run_step 6 qualify_mcp "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE"
 fi
 
-# --- Step 6c: reconcile (REQ-AXO-902111) — dogfood promote_status as the post-swap
-# verdict. WARN-only for now: a freshly-restarted live indexer needs ~seconds to
-# publish its first heartbeat, so indexer_down right after the swap is expected and
-# must not break the promote. We poll (bounded) for a clean phase, then surface the
-# verdict; a persistent drift/staged/brain_down is logged loudly for the operator.
-# Fail-closed escalation is a follow-up once warmup polling is proven robust. ---
+# --- Step 6c: reconcile + FAIL-CLOSED health-gate (REQ-AXO-902111 / REQ-AXO-902157) ---
+# Dogfood promote_status as the post-swap verdict over the FULL runtime_contract
+# (brain_serving + indexer_alive). The in-place restart (step 5) can leave the live
+# indexer down/crash-looping — the s95 incident (promote 1306): the promote reported
+# COMPLETE on a DEGRADED runtime because this gate was warn-only AND step-6 qualify
+# tests only the brain (surface=core). Fix (the follow-up this block long promised):
+# poll the verdict on an extended GPU-cold-start budget; on a persistent non-clean
+# phase, AUTO-RECOVER via the proven full restart (stop --hard + start full), re-verify,
+# and FAIL CLOSED if still not clean — a promote must NEVER silently report success on
+# a half-up runtime_contract.
 CURRENT_STEP=6c; CURRENT_STEP_NAME="reconcile"
 promote_log ""
-promote_log "== step 6c: reconcile (promote_status) =="
+promote_log "== step 6c: reconcile + health-gate (promote_status) =="
+
 recon_phase=""; recon_failed=""
-for _attempt in 1 2 3 4 5 6; do
-  recon_json="$(curl -s -m 8 "http://127.0.0.1:${AXON_BRAIN_PORT:-44129}/mcp" \
-    -H 'content-type: application/json' \
-    -d '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"promote_status","arguments":{}}}' 2>/dev/null)"
-  recon_eval="$(printf '%s' "$recon_json" | python3 -c "import sys,json
+_poll_promote_clean() {  # $1 = max attempts (×5s); sets recon_phase / recon_failed; 0 iff clean
+  local attempts="$1" _a recon_json recon_eval
+  recon_phase=""; recon_failed=""
+  for _a in $(seq 1 "$attempts"); do
+    recon_json="$(curl -s -m 8 "http://127.0.0.1:${AXON_BRAIN_PORT:-44129}/mcp" \
+      -H 'content-type: application/json' \
+      -d '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"promote_status","arguments":{}}}' 2>/dev/null || true)"
+    recon_eval="$(printf '%s' "$recon_json" | python3 -c "import sys,json
 ph=''; fg=''
 for l in sys.stdin.read().splitlines():
     l=l.strip()
@@ -370,19 +378,32 @@ for l in sys.stdin.read().splitlines():
         d=json.loads(l).get('result',{}).get('data') or {}
         if d.get('phase'): ph=d['phase']; fg=','.join(d.get('failed_gates') or [])
     except: pass
-print(f'{ph}|{fg}')" 2>/dev/null)"
-  recon_phase="${recon_eval%%|*}"; recon_failed="${recon_eval##*|}"
-  [[ "$recon_phase" == "clean" ]] && break
-  sleep 5
-done
+print(f'{ph}|{fg}')" 2>/dev/null || true)"
+    recon_phase="${recon_eval%%|*}"; recon_failed="${recon_eval##*|}"
+    [[ "$recon_phase" == "clean" ]] && return 0
+    sleep 5
+  done
+  return 1
+}
+
+# First gate: extended warmup (~120s) — a fresh live indexer's BGE-Large GPU cold-start
+# can take minutes to publish its first heartbeat.
+_poll_promote_clean 24 || true
+
+if [[ "$recon_phase" != "clean" ]]; then
+  promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) after warmup — AUTO-RECOVERY: full restart (stop --hard + start full)."
+  set +e
+  bash "$ROOT_DIR/scripts/axon-live" stop --hard >> "$PROMOTE_LOG" 2>&1
+  bash "$ROOT_DIR/scripts/axon-live" start full  >> "$PROMOTE_LOG" 2>&1
+  set -e
+  _poll_promote_clean 36 || true   # re-verify on a fuller cold-start budget (~180s)
+fi
+
 if [[ "$recon_phase" == "clean" ]]; then
-  promote_log "   ✅ step 6c reconcile: phase=clean (manifest↔runtime↔liveness all green)"
-elif [[ "$recon_phase" == "indexer_down" ]]; then
-  promote_log "   ⚠️ step 6c reconcile: phase=indexer_down after warmup poll — indexer may still be starting (failed_gates: ${recon_failed:-none}). Non-fatal; verify with promote_status."
-elif [[ -n "$recon_phase" ]]; then
-  promote_log "   ⚠️ step 6c reconcile: phase=${recon_phase} (failed_gates: ${recon_failed:-none}) — INVESTIGATE: a drift/staged/brain_down after a fresh promote is abnormal. Non-fatal (warn-only) but check promote_status."
+  promote_log "   ✅ step 6c: phase=clean (manifest↔runtime↔FULL-contract liveness all green)"
 else
-  promote_log "   ⚠️ step 6c reconcile: promote_status unreachable — skipped (non-fatal)."
+  promote_log "   ❌ step 6c: phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) persists after auto-recovery — FAILING the promote: the runtime_contract is degraded (indexer not alive). Do NOT trust a 'COMPLETE'; investigate the indexer."
+  exit 1
 fi
 
 # --- Step 7: finalize (SOLL export + status) ---
