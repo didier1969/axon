@@ -2453,6 +2453,147 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // REQ-AXO-902165 E2E (fault injection) — the auto-rollback proven against REAL
+    // processes + a REAL HTTP /readyz probe, not just the FakeIo decision flow. A
+    // BROKEN candidate (a binary that never serves) must fail the health-gate; the
+    // auto-rollback must restore the GOOD binary, which then serves again. Exercises
+    // drive_cutover + the real file steps + real spawn/kill + real probe end-to-end;
+    // only RealCutoverIo's scripts/axon-devenv wiring is out of scope (that seam needs
+    // a full dev/live runtime). #[ignore] — spawns processes + binds a port; run
+    // explicitly: `cargo test --bin axonctl -- --ignored cutover_e2e`.
+    struct TestProcCutoverIo {
+        release_dir: PathBuf,
+        bin_dir: PathBuf,
+        candidate: PathBuf,
+        port: u16,
+        child: Option<std::process::Child>,
+    }
+
+    impl TestProcCutoverIo {
+        fn kill_child(&mut self) {
+            if let Some(mut c) = self.child.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        /// Launch whatever binary currently sits at bin/axon-brain (good OR broken).
+        fn spawn_swapped(&mut self) {
+            let bin = self.bin_dir.join("axon-brain");
+            self.child = Command::new("bash")
+                .arg(&bin)
+                .arg(self.port.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok();
+        }
+    }
+
+    impl CutoverIo for TestProcCutoverIo {
+        fn snapshot_current(&mut self) -> Result<(), String> {
+            cutover_snapshot(&self.release_dir).map(|_| ()).map_err(|e| e.to_string())
+        }
+        fn stage_candidate(&mut self) -> Result<(), String> {
+            cutover_stage_files(&self.candidate, &self.release_dir, &self.bin_dir)
+                .map_err(|e| e.to_string())
+        }
+        fn restart_runtime(&mut self) -> Result<(), String> {
+            self.kill_child();
+            self.spawn_swapped();
+            Ok(())
+        }
+        fn finalize(&mut self) -> Result<(), String> {
+            cutover_finalize_files(&self.release_dir).map_err(|e| e.to_string())
+        }
+        fn rollback(&mut self) -> Result<(), String> {
+            cutover_rollback_files(&self.release_dir, &self.bin_dir).map_err(|e| e.to_string())?;
+            self.kill_child();
+            self.spawn_swapped(); // bin/axon-brain is the GOOD binary again
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn cutover_e2e_broken_candidate_auto_rolls_back_to_serving_old() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, release, bin, archive) = cutover_tmp("e2e");
+        let port = 47231u16;
+
+        // GOOD binary: a bash script that serves HTTP 200 on any path (stand-in /readyz).
+        // BROKEN binary: exits immediately → the health-gate can never pass.
+        let good = archive.join("axon-brain-good");
+        let good_script = "#!/usr/bin/env bash\nexec python3 -c \"import http.server as h; port=int('__PORT__'); s=h.HTTPServer(('127.0.0.1',port), type('H',(h.BaseHTTPRequestHandler,),{'do_GET':lambda self:(self.send_response(200),self.end_headers()),'log_message':lambda *a:None})); s.serve_forever()\"\n".replace("__PORT__", "$1");
+        fs::write(&good, good_script).unwrap();
+        let broken = archive.join("axon-brain-broken");
+        fs::write(&broken, "#!/usr/bin/env bash\nexit 1\n").unwrap();
+        for p in [&good, &broken] {
+            let mut perm = fs::metadata(p).unwrap().permissions();
+            perm.set_mode(0o755);
+            fs::set_permissions(p, perm).unwrap();
+        }
+
+        write_json_file(
+            &release.join("current.json"),
+            &serde_json::json!({
+                "state": "promoted",
+                "runtime_version": {"install_generation": "old-gen"},
+                "artifacts": {"axon-brain": {"path": good.to_string_lossy()}}
+            }),
+        )
+        .unwrap();
+        let candidate = root.join("candidate.json");
+        write_json_file(
+            &candidate,
+            &serde_json::json!({
+                "state": "qualified",
+                "runtime_version": {"install_generation": "new-gen"},
+                "artifacts": {"axon-brain": {"path": broken.to_string_lossy()}}
+            }),
+        )
+        .unwrap();
+
+        let mut io = TestProcCutoverIo {
+            release_dir: release.clone(),
+            bin_dir: bin.clone(),
+            candidate,
+            port,
+            child: None,
+        };
+        let url = format!("http://127.0.0.1:{port}/readyz");
+        let probe = || http_ready(&url, 1);
+        let wait = || thread::sleep(Duration::from_millis(300));
+
+        let verdict = drive_cutover(&mut io, probe, 3, wait);
+
+        // The broken candidate never served → auto-rollback (never finalize).
+        assert!(
+            matches!(
+                verdict,
+                CutoverVerdict::RolledBack { failed_step: "health_gate", rollback_ok: true, .. }
+            ),
+            "expected auto-rollback on a broken candidate, got {verdict:?}"
+        );
+        // bin/axon-brain restored to the GOOD binary.
+        assert_eq!(
+            fs::read(bin.join("axon-brain")).unwrap(),
+            fs::read(&good).unwrap(),
+            "rollback must restore the GOOD binary in bin/"
+        );
+        // The GOOD runtime serves /readyz again after rollback (poll up to ~3s).
+        let mut served = false;
+        for _ in 0..30 {
+            if http_ready(&url, 1) {
+                served = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        io.kill_child();
+        let _ = fs::remove_dir_all(&root);
+        assert!(served, "old GOOD runtime must serve /readyz again after auto-rollback");
+    }
+
     #[test]
     fn descendant_tree_finds_self() {
         let my_pid = std::process::id() as i32;
