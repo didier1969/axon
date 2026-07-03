@@ -286,6 +286,30 @@ impl McpServer {
             }));
         }
 
+        // REQ-AXO-902169 — refuse an EMPTY diff_paths for a REAL commit. The staging
+        // below is `git add -A -- <diff_paths...>`; with no pathspec, `git add -A --`
+        // stages the ENTIRE working tree, so a caller that passes `diff_paths:[]`
+        // (observed s94: a qualify smoke calling `{diff_paths:[], message:"x"}`) would
+        // sweep arbitrary untracked/modified files into a junk commit (6df4b383).
+        // A commit must NAME what it commits; a qualification run must never mutate git.
+        // dry_run above still validates an empty diff_paths without touching git.
+        if diff_paths.is_empty() {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text":
+                    "axon_commit_work refuses an empty `diff_paths` for a real commit: `git add -A --` with no pathspec would stage the entire working tree. List the modified/created files this commit should contain (pre-stage deletions via `git rm`), or pass `dry_run:true` to validate only." }],
+                "isError": true,
+                "structuredContent": {
+                    "status": "input_invalid",
+                    "operator_guidance": {
+                        "tool": "axon_commit_work",
+                        "problem_class": "empty_diff_paths_refused",
+                        "invalid_field": "diff_paths",
+                        "hint": "list the files this commit should contain; use dry_run=true to validate without committing"
+                    }
+                }
+            }));
+        }
+
         // REQ-AXO-126 — SOLL export no longer auto-fires on every commit.
         // The release-promotion pipeline owns the snapshot moment now.
         // See scripts/release/promote_live_safe.sh for the canonical
