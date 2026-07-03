@@ -79,6 +79,45 @@ promote_log() {
   echo "$*"
 }
 
+# --- REQ-AXO-902194: best-effort cross-project MCP-disruption broadcast ---
+# The step-5 brain restart drops every connected LLM's MCP for a few seconds. A
+# broadcast (to_project='*') leaves an explanatory trace so peers find "planned
+# promote, not a crash" on reconnect instead of burning tokens on a false RCA.
+# STRICTLY best-effort: a missing/slow mailbox must NEVER fail a promote.
+broadcast_promote() {
+  local subject="$1" body="$2" key="$3" args
+  args="$(python3 -c "
+import json, sys
+print(json.dumps({
+    'to_project': '*', 'from': '${PROJECT_CODE}',
+    'subject': sys.argv[1], 'body_dense': sys.argv[2],
+    'idempotency_key': sys.argv[3], 'priority': 'high',
+}))" "$subject" "$body" "$key" 2>/dev/null || true)"
+  [[ -z "$args" ]] && return 0
+  timeout 20 "$ROOT_DIR/scripts/axon" --instance live mcp-call call mcp_outbox_send \
+    --args "$args" --format text >> "$PROMOTE_LOG" 2>&1 || true
+}
+
+# All-clear on ANY exit (success OR the step-6 cold-start false-fail where the script
+# exits non-zero but the brain IS back). Fires only if (a) the pre-notice went out and
+# (b) the live brain answers /readyz — so we never claim "back" while it is still down.
+BROADCAST_PREFLIGHT_SENT=0
+on_promote_exit() {
+  local rc=$?
+  [[ "$BROADCAST_PREFLIGHT_SENT" -eq 1 ]] || return 0
+  curl -fsS --max-time 5 "http://127.0.0.1:44129/readyz" >/dev/null 2>&1 || return 0
+  if [[ "$rc" -eq 0 ]]; then
+    broadcast_promote "✅ Promote ${PROJECT_CODE} terminé — MCP rétabli" \
+      "build_id=${final_build_id:-?} live. Si ton MCP est tombé depuis ${PROMOTE_TIMESTAMP} c'était CE promote (restart brain), pas un incident. Reconnecte via /mcp si ton binding de catalogue est stale. Tout est de nouveau disponible." \
+      "promote-clear-${PROMOTE_TIMESTAMP}"
+  else
+    broadcast_promote "⚠️ Promote ${PROJECT_CODE} sorti (rc=${rc}) — brain UP" \
+      "Le brain live RÉPOND (/readyz ok). Si ton MCP est tombé c'était le restart de CE promote (${PROMOTE_TIMESTAMP}), PAS un incident à diagnostiquer. Reconnecte via /mcp. (Le promote a pu false-fail au qualify cold-start ; l'opérateur AXO vérifie.)" \
+      "promote-clear-${PROMOTE_TIMESTAMP}"
+  fi
+}
+trap on_promote_exit EXIT
+
 on_promote_failure() {
   local exit_code=$?
   promote_log ""
@@ -264,6 +303,13 @@ if [[ -f "$pending_manifest" && "${PROMOTE_SKIP_AUTORESUME:-0}" != "1" ]]; then
   promote_log "   ⚠️ candidate manifest for $pending_build not found — aborting to avoid stacking; recover manually with promote-live --resume."
   exit 1
 fi
+
+# --- REQ-AXO-902194: pre-notice (brain still up) — warn peers the step-5 restart
+# will drop MCP briefly. Async, so mostly read on reconnect; harmless to send early. ---
+broadcast_promote "🔧 Promote ${PROJECT_CODE} en cours — coupure MCP brève à venir" \
+  "Un promote AXO démarre (${PROMOTE_TIMESTAMP}). Au restart du brain (dans ~1-3 min) le MCP tombera quelques secondes pour TOUS les clients connectés. C'est PLANIFIÉ — ne diagnostique pas cette coupure comme un incident. Un all-clear suivra dès que le brain répond. Si ton binding reste stale, reconnecte via /mcp." \
+  "promote-notice-${PROMOTE_TIMESTAMP}"
+BROADCAST_PREFLIGHT_SENT=1
 
 # --- Step 1: build ---
 # REQ-AXO-901763 — Build BEFORE dev-gate so the dev brain can be restarted
