@@ -1521,6 +1521,7 @@ impl McpServer {
             "ist_snapshot_warm" => self.axon_ist_snapshot_warm(arguments),
             "ist_centrality_pagerank" => self.axon_ist_centrality_pagerank(arguments),
             "ist_structural_sccs" => self.axon_ist_structural_sccs(arguments),
+            "structural_health_index" => self.axon_structural_health_index(arguments),
             "ist_shortest_path" => self.axon_ist_shortest_path(arguments),
             "infer_soll_mutation" => self.axon_infer_soll_mutation(arguments),
             "entrench_nuance" => self.axon_entrench_nuance(arguments),

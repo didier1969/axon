@@ -7,9 +7,14 @@
 
 use serde_json::{json, Value};
 
-use crate::ist_snapshot::algorithms::{pagerank_top, shortest_path, structural_sccs};
+use crate::ist_snapshot::algorithms::{
+    bridges_and_articulation, pagerank_top, shortest_path, structural_sccs,
+};
 use crate::ist_snapshot::{process_view, IstSnapshotCache};
 use crate::mcp::McpServer;
+use crate::structural_health::{
+    acyclicity_score, resilience_score, StructuralHealthIndex, SubScore,
+};
 
 impl McpServer {
     pub(crate) fn axon_ist_centrality_pagerank(&self, args: &Value) -> Option<Value> {
@@ -129,6 +134,97 @@ impl McpServer {
                 "edge_count": snapshot.edge_count(),
                 "scc_count": sccs.len(),
                 "sccs": payload
+            }
+        }))
+    }
+
+    /// REQ-AXO-902184 / CPT-AXO-90055 — Structural Health Index: a RAM-native aggregate
+    /// of normalized structural-quality sub-scores over the warm IST snapshot. Slice 2a
+    /// wires the two zero-config graph dimensions — acyclicity (Tarjan SCC) + resilience
+    /// (articulation points = single points of failure) — into the pure GEOMETRIC
+    /// aggregate (`structural_health`), so one rotten axis drags the index down (a
+    /// brilliant axis can't mask a broken one). More dimensions (Martin distance,
+    /// coverage×centrality, duplication rate, intent alignment) land via REQ-AXO-902185.
+    /// Sub-scores are ALWAYS returned individually (anti-Goodhart); the aggregate is a
+    /// compass. Supersedes the unweighted `health` aggregate.
+    pub(crate) fn axon_structural_health_index(&self, args: &Value) -> Option<Value> {
+        let project = match self.ist_resolve_project(args, "structural_health_index") {
+            Ok(p) => p,
+            Err(e) => return Some(e),
+        };
+        let view = process_view();
+        if !view.is_warm(&project) {
+            return Some(ist_cache_miss_error("structural_health_index", &project));
+        }
+        let snapshot = match view.cache_handle().get(&project) {
+            Some(s) => s,
+            None => return Some(ist_cache_miss_error("structural_health_index", &project)),
+        };
+
+        let total_nodes = snapshot.node_count();
+        // Acyclicity: Σ sizes of SCCs with size>1 = the nodes trapped in a cycle.
+        let sccs = structural_sccs(&snapshot);
+        let nodes_in_cycles: usize = sccs.iter().map(|c| c.len()).sum();
+        // Resilience: articulation points whose removal would disconnect the graph.
+        let (_bridges, articulation) = bridges_and_articulation(&snapshot);
+
+        let index = StructuralHealthIndex::compute(vec![
+            SubScore::new(
+                "acyclicity",
+                acyclicity_score(nodes_in_cycles, total_nodes),
+                1.0,
+                0.99,
+                format!(
+                    "{} node(s) in {} cycle(s) / {} total",
+                    nodes_in_cycles,
+                    sccs.len(),
+                    total_nodes
+                ),
+            ),
+            SubScore::new(
+                "resilience",
+                resilience_score(articulation.len(), total_nodes),
+                1.0,
+                0.95,
+                format!(
+                    "{} articulation point(s) (SPOF) / {} total",
+                    articulation.len(),
+                    total_nodes
+                ),
+            ),
+        ]);
+
+        let below: Vec<Value> = index
+            .below_target()
+            .iter()
+            .map(|s| json!({"name": s.name, "value": s.value, "target": s.target, "detail": s.detail}))
+            .collect();
+        let summary = format!(
+            "structural_health_index {} : SHI={:.4} ({} dimension(s), {} below target)",
+            project,
+            index.aggregate,
+            index.sub_scores.len(),
+            below.len()
+        );
+        Some(json!({
+            "content": [{ "type": "text", "text": summary }],
+            "data": {
+                "status": "ok",
+                "project_code": project,
+                "aggregate": index.aggregate,
+                "sub_scores": index.sub_scores.iter().map(|s| json!({
+                    "name": s.name,
+                    "value": s.value,
+                    "weight": s.weight,
+                    "target": s.target,
+                    "meets_target": s.meets_target(),
+                    "detail": s.detail
+                })).collect::<Vec<_>>(),
+                "below_target": below,
+                "node_count": total_nodes,
+                "edge_count": snapshot.edge_count(),
+                "dimensions_wired": 2,
+                "note": "slice 2a: acyclicity + resilience; more dimensions via REQ-AXO-902185"
             }
         }))
     }

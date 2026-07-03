@@ -163,6 +163,15 @@ pub fn weighted_coverage_score(tested_pagerank_sum: f64, total_pagerank_sum: f64
     clamp01(tested_pagerank_sum / total_pagerank_sum)
 }
 
+/// Resilience: `1 - articulation_points / total_nodes`. An articulation point is a node
+/// whose removal disconnects the graph — a single point of failure. 1.0 = no SPOF.
+pub fn resilience_score(articulation_points: usize, total_nodes: usize) -> f64 {
+    if total_nodes == 0 {
+        return 1.0;
+    }
+    clamp01(1.0 - (articulation_points as f64) / (total_nodes as f64))
+}
+
 /// Migration completeness: the mean `migrated_fraction` across ACTIVE tech migrations
 /// (from `tech_debt_inventory`). 1.0 = no incomplete migration residue.
 pub fn migration_completeness_score(migrated_fractions: &[f64]) -> f64 {
@@ -276,6 +285,13 @@ mod tests {
         // 14% flat coverage but the hubs (high pagerank) are tested → high weighted score.
         assert!((weighted_coverage_score(9.0, 10.0) - 0.9).abs() < 1e-9);
         assert_eq!(weighted_coverage_score(0.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn resilience_score_penalizes_articulation_points() {
+        assert_eq!(resilience_score(0, 100), 1.0);
+        assert!((resilience_score(5, 100) - 0.95).abs() < 1e-9);
+        assert_eq!(resilience_score(3, 0), 1.0);
     }
 
     #[test]

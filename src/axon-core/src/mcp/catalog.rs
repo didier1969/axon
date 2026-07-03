@@ -576,6 +576,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "structural_health_index",
+                "description": "[GOVERNANCE] REQ-AXO-902184 / CPT-AXO-90055 — Structural Health Index: RAM-native aggregate of normalized structural-quality sub-scores over the warm IST snapshot. Returns per-dimension sub-scores (always) + their weighted GEOMETRIC aggregate (one rotten axis drags the index down — anti-Goodhart) + the below-target axes (worst-first, the remediation worklist seed). Slice 2a wires acyclicity + resilience; more dimensions via REQ-AXO-902185. Requires `ist_snapshot_warm` first. Supersedes the unweighted `health` aggregate.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
                 "name": "ist_shortest_path",
                 "description": "[IST] REQ-AXO-91488 — bidirectional BFS shortest path between two canonical IST ids. Requires `ist_snapshot_warm`. Max radius default 20.",
                 "inputSchema": {
