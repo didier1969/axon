@@ -39,6 +39,18 @@ fn module_of(id: &str) -> &str {
     }
 }
 
+/// REQ-AXO-902185 — is this id a REAL source-code symbol (a definition in a file), as
+/// opposed to an external CALL-TARGET node the IST records for a std/library/macro call
+/// (e.g. `AXO::unwrap`, `AXO::body.encode`, `AXO::json.loads`)? Real symbols embed a file
+/// component: some `::`-segment BEFORE the last one carries a `.` (`…mailbox.rs::message_id`).
+/// External call-targets don't (`AXO::unwrap`) — they carry high PageRank (everything calls
+/// them) + tested=false, and WITHOUT this filter they pollute weighted_coverage down to a
+/// misleading ~0.05 and fill the worklist with untestable targets (discovered s95).
+fn is_real_source_symbol(id: &str) -> bool {
+    let parts: Vec<&str> = id.split("::").collect();
+    parts.len() >= 2 && parts[..parts.len() - 1].iter().any(|p| p.contains('.'))
+}
+
 impl McpServer {
     pub(crate) fn axon_ist_centrality_pagerank(&self, args: &Value) -> Option<Value> {
         let project = match self.ist_resolve_project(args, "ist_centrality_pagerank") {
@@ -200,6 +212,11 @@ impl McpServer {
         let mut total_pr = 0.0_f64;
         let mut tested_hub_count = 0usize;
         for (id, score) in &ranked {
+            // Exclude external call-target nodes (std/macro/library) — they carry huge
+            // PageRank but aren't AXO code to test (would drag coverage to a false ~0.05).
+            if !is_real_source_symbol(id) {
+                continue;
+            }
             let s = *score as f64;
             total_pr += s;
             let tested = snapshot
@@ -380,6 +397,11 @@ impl McpServer {
         for (id, score) in &ranked {
             if untested_hubs.len() >= top {
                 break;
+            }
+            // Only REAL AXO code is a testable target — skip external call-targets
+            // (std/macro nodes that carry PageRank but can't be tested here).
+            if !is_real_source_symbol(id) {
+                continue;
             }
             let tested = snapshot
                 .index_of(id)
@@ -585,4 +607,38 @@ fn ist_cache_miss_error(tool: &str, project: &str) -> Value {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod structural_health_helpers_tests {
+    use super::{is_real_source_symbol, module_of};
+
+    #[test]
+    fn module_of_extracts_file_from_canonical_id() {
+        assert_eq!(
+            module_of("AXO::axon::src::axon-core::src::release_reconciler.rs::run_cutover_loop"),
+            "AXO::axon::src::axon-core::src::release_reconciler.rs"
+        );
+        // Nested symbol (impl method) still maps to the file.
+        assert_eq!(
+            module_of("AXO::a::b::snapshot.rs::IstGraph::node_meta"),
+            "AXO::a::b::snapshot.rs"
+        );
+        // No file-like component → strip the last segment.
+        assert_eq!(module_of("AXO::unwrap"), "AXO");
+    }
+
+    #[test]
+    fn is_real_source_symbol_excludes_external_call_targets() {
+        // REQ-AXO-902185 pollution fix: real defs carry a file segment; external
+        // call-targets (std/macro/library) do not.
+        assert!(is_real_source_symbol("AXO::a::b::mailbox.rs::message_id"));
+        assert!(is_real_source_symbol("AXO::x::parser::elixir.rs::new"));
+        // External call-targets — no file segment before the last part.
+        assert!(!is_real_source_symbol("AXO::unwrap"));
+        assert!(!is_real_source_symbol("AXO::Some"));
+        assert!(!is_real_source_symbol("AXO::body.encode")); // '.' only in the LAST segment
+        assert!(!is_real_source_symbol("AXO::json.loads"));
+        assert!(!is_real_source_symbol("bare"));
+    }
 }
