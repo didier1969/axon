@@ -118,6 +118,11 @@ processes:
       # fix lands. Host has the cores; A3 chunking is CPU-bound + idempotent.
       - "AXON_A3_WORKERS=16"
       - "AXON_A2_WORKERS=12"
+      # REQ-LLL-021/023 (mailbox [19]) — the .lll parser (parser/lll.rs) shells out to
+      # `lll export-ist`; point it at the built llmlang release binary so extraction is
+      # non-empty. Absent/unreachable → graceful-empty (indexing never fails, lll.rs:49).
+      # Overridable via the shell env.
+      - "LLL_BIN=${LLL_BIN:-/home/dstadel/projects/llmlang/target/release/lll}"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"
