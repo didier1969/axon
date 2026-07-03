@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::ist_snapshot::algorithms::{
     bridges_and_articulation, pagerank_top, shortest_path, structural_sccs,
 };
-use crate::ist_snapshot::{process_view, IstSnapshotCache};
+use crate::ist_snapshot::{process_view, IstSnapshotCache, NodeKind};
 use crate::mcp::McpServer;
 use std::collections::{HashMap, HashSet};
 
@@ -49,6 +49,17 @@ fn module_of(id: &str) -> &str {
 fn is_real_source_symbol(id: &str) -> bool {
     let parts: Vec<&str> = id.split("::").collect();
     parts.len() >= 2 && parts[..parts.len() - 1].iter().any(|p| p.contains('.'))
+}
+
+/// REQ-AXO-902193 — is this id a TESTABLE symbol = a real source definition
+/// (`is_real_source_symbol`) AND a function/method (the only kinds a test exercises via a
+/// CALLS edge)? The id-only filter is necessary but NOT sufficient: `…embedder.rs::assert_eq!`
+/// embeds a file component so `is_real_source_symbol` accepts it, yet it is a `NodeKind::Other`
+/// macro/keyword CALL-TARGET, never a definition. Gating on kind removes the
+/// `assert_eq!`/`Ok`/`Some`/`vec!`/`format!` noise from the worklist and stops them from
+/// understating weighted_coverage (they were counted as uncovered denominator mass).
+fn is_testable_symbol(id: &str, kind: Option<NodeKind>) -> bool {
+    is_real_source_symbol(id) && matches!(kind, Some(NodeKind::Function) | Some(NodeKind::Method))
 }
 
 impl McpServer {
@@ -214,9 +225,11 @@ impl McpServer {
         let mut total_pr = 0.0_f64;
         let mut covered_hub_count = 0usize;
         for (id, score) in &ranked {
-            // Exclude external call-target nodes (std/macro/library) — they carry huge
-            // PageRank but aren't AXO code to test (would drag coverage to a false ~0.05).
-            if !is_real_source_symbol(id) {
+            // Exclude non-testable nodes: external call-targets (std/macro/library) AND
+            // macro/keyword call-targets attributed to a file (`…embedder.rs::assert_eq!`,
+            // `Ok`, `Some`, `vec!`) — they carry huge PageRank but aren't function/method
+            // definitions a test can cover (REQ-AXO-902193). Otherwise they understate coverage.
+            if !is_testable_symbol(id, snapshot.node_kind(id)) {
                 continue;
             }
             let s = *score as f64;
@@ -403,9 +416,10 @@ impl McpServer {
             if untested_hubs.len() >= top {
                 break;
             }
-            // Only REAL AXO code is a testable target — skip external call-targets
-            // (std/macro nodes that carry PageRank but can't be tested here).
-            if !is_real_source_symbol(id) {
+            // Only a testable definition (function/method) is a real target — skip external
+            // call-targets AND macro/keyword targets like `…embedder.rs::assert_eq!` / `Ok` /
+            // `vec!` that carry PageRank but aren't definitions (REQ-AXO-902193).
+            if !is_testable_symbol(id, snapshot.node_kind(id)) {
                 continue;
             }
             let covered = snapshot
@@ -616,7 +630,7 @@ fn ist_cache_miss_error(tool: &str, project: &str) -> Value {
 
 #[cfg(test)]
 mod structural_health_helpers_tests {
-    use super::{is_real_source_symbol, module_of};
+    use super::{is_real_source_symbol, is_testable_symbol, module_of, NodeKind};
 
     #[test]
     fn module_of_extracts_file_from_canonical_id() {
@@ -645,5 +659,32 @@ mod structural_health_helpers_tests {
         assert!(!is_real_source_symbol("AXO::body.encode")); // '.' only in the LAST segment
         assert!(!is_real_source_symbol("AXO::json.loads"));
         assert!(!is_real_source_symbol("bare"));
+    }
+
+    #[test]
+    fn is_testable_symbol_gates_macro_targets_and_non_callables_by_kind() {
+        // REQ-AXO-902193: a real definition that IS a function/method passes.
+        assert!(is_testable_symbol(
+            "AXO::x::embedder.rs::warm",
+            Some(NodeKind::Method)
+        ));
+        assert!(is_testable_symbol(
+            "AXO::x::parser.rs::parse",
+            Some(NodeKind::Function)
+        ));
+        // Macro/keyword call-target attributed to a file: is_real_source_symbol accepts it
+        // (file segment present) but kind Other/None gates it out — the s96 worklist noise.
+        assert!(!is_testable_symbol(
+            "AXO::x::embedder.rs::assert_eq!",
+            Some(NodeKind::Other)
+        ));
+        assert!(!is_testable_symbol("AXO::x::graph_ingestion.rs::Ok", None));
+        // Trait/struct definitions aren't execution-coverage targets.
+        assert!(!is_testable_symbol(
+            "AXO::x::pipeline.rs::B2Embedder",
+            Some(NodeKind::Trait)
+        ));
+        // External call-target (no file segment) excluded regardless of kind.
+        assert!(!is_testable_symbol("AXO::unwrap", Some(NodeKind::Function)));
     }
 }
