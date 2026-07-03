@@ -369,6 +369,130 @@ pub fn run_cutover_loop(
 }
 
 // ---------------------------------------------------------------------------
+// Cutover CHOREOGRAPHY (REQ-AXO-902165 — the I/O executor's decision layer).
+//
+// `drive_cutover` sequences the side-effecting steps of an in-place cutover
+// (snapshot → stage → restart → poll-health → finalize|rollback) around the
+// already-tested `run_cutover_loop` driver. Every effect is behind the injected
+// `CutoverIo` trait + a separate health probe/wait, so the WHOLE finalize-vs-
+// rollback decision flow — including the s94 incident guard (an unhealthy
+// candidate must ALWAYS restore the old release, never strand a half-finalized
+// manifest) — is unit-testable without a runtime, a clock, or disk (practice 128:
+// the decision + driver are pure/injected; only the real `CutoverIo` impl in
+// `axonctl` touches bin/*, manifests, and processes, and that is gated on an E2E
+// DEV fault-injection run before it may drive a live promote).
+// ---------------------------------------------------------------------------
+
+/// The side-effecting steps of an in-place cutover, injected so the choreography is
+/// testable without a runtime. The real impl (`axonctl`'s `RealCutoverIo`) replicates
+/// promote_live.sh's manifest/bin I/O; a fake records the call order + scripted errors.
+///
+/// Invariant every impl must uphold: after `rollback()` returns `Ok`, the PREVIOUS
+/// release (captured by `snapshot_current`) is restored on disk and restarting.
+pub trait CutoverIo {
+    /// Capture the currently-serving release (bin/* + current.json) as the rollback
+    /// target. Runs BEFORE anything is mutated; `Err` aborts with nothing touched.
+    fn snapshot_current(&mut self) -> Result<(), String>;
+    /// Stage the candidate: write pending.json (state=staged) + swap the candidate
+    /// bin/* into place. `Err` → the old release is restored (bin/* may be partial).
+    fn stage_candidate(&mut self) -> Result<(), String>;
+    /// Restart the runtime onto the swapped binaries (stop old → start new).
+    fn restart_runtime(&mut self) -> Result<(), String>;
+    /// Finalize the promote: archive current→history, pending→current (state=promoted).
+    fn finalize(&mut self) -> Result<(), String>;
+    /// AUTO-ROLLBACK: restore bin/* from the snapshot (current.json), drop pending,
+    /// restart the previous release. Must leave the OLD release serving.
+    fn rollback(&mut self) -> Result<(), String>;
+}
+
+/// The terminal verdict of a cutover: either the candidate went healthy and was
+/// finalized, or it failed (at a named step) and the old release was restored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CutoverVerdict {
+    /// New runtime healthy within the deadline → promote finalized.
+    Promoted,
+    /// Candidate failed at `failed_step`; the old release was restored. `rollback_ok`
+    /// is the result of the restore itself — `false` means the rollback ALSO failed
+    /// (a genuine outage requiring operator action, surfaced distinctly).
+    RolledBack {
+        failed_step: &'static str,
+        rollback_ok: bool,
+        detail: Option<String>,
+    },
+}
+
+impl CutoverVerdict {
+    pub fn is_promoted(&self) -> bool {
+        matches!(self, CutoverVerdict::Promoted)
+    }
+}
+
+/// REQ-AXO-902165 — the in-place cutover choreography. Composes the tested cutover
+/// driver (`run_cutover_loop`) with the injected I/O steps + a health probe/wait
+/// (kept separate from `io` so the poll never double-borrows the effects object).
+///
+/// Failure handling (the incident guard): a failure of `stage_candidate`,
+/// `restart_runtime`, OR the health-gate all funnel into `rollback()` and return
+/// `RolledBack` — so a bad candidate is a blip + auto-recovery, never a stranded
+/// outage. A `snapshot_current` failure aborts BEFORE any mutation (old release
+/// untouched, so no rollback is attempted — nothing was changed).
+pub fn drive_cutover<Io, Probe, Wait>(
+    io: &mut Io,
+    mut probe_healthy: Probe,
+    max_polls: usize,
+    wait_between_polls: Wait,
+) -> CutoverVerdict
+where
+    Io: CutoverIo,
+    Probe: FnMut() -> bool,
+    Wait: FnMut(),
+{
+    // Snapshot first. If we cannot even capture a rollback target, do NOT touch the
+    // running release — abort with everything intact (no rollback needed/possible).
+    if let Err(e) = io.snapshot_current() {
+        return CutoverVerdict::RolledBack {
+            failed_step: "snapshot_current",
+            rollback_ok: true, // nothing was mutated; the old release still serves.
+            detail: Some(e),
+        };
+    }
+    // From here on, any failure restores the snapshot.
+    if let Err(e) = io.stage_candidate() {
+        return rolled_back(io, "stage_candidate", e);
+    }
+    if let Err(e) = io.restart_runtime() {
+        return rolled_back(io, "restart_runtime", e);
+    }
+    // Health-gate the new runtime. `run_cutover_loop` returns the instant it is
+    // healthy, or `RolledBack` once the deadline (max_polls) is exhausted.
+    match run_cutover_loop(&mut probe_healthy, max_polls, wait_between_polls) {
+        CutoverOutcome::Promoted => match io.finalize() {
+            Ok(()) => CutoverVerdict::Promoted,
+            // Candidate was healthy but the manifest finalize failed: the new runtime
+            // IS serving, but current.json wasn't advanced. Roll back to the coherent
+            // old release rather than leave bin/* ↔ manifest drift (the s91 failure).
+            Err(e) => rolled_back(io, "finalize", e),
+        },
+        CutoverOutcome::RolledBack => rolled_back(
+            io,
+            "health_gate",
+            "new runtime never healthy within the deadline".to_string(),
+        ),
+    }
+}
+
+/// Restore the old release and build the `RolledBack` verdict, recording whether the
+/// restore itself succeeded (a failed rollback = a real outage, surfaced distinctly).
+fn rolled_back<Io: CutoverIo>(io: &mut Io, failed_step: &'static str, detail: String) -> CutoverVerdict {
+    let rollback_ok = io.rollback().is_ok();
+    CutoverVerdict::RolledBack {
+        failed_step,
+        rollback_ok,
+        detail: Some(detail),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stop FSM (REQ-AXO-902111 — stop-verdict slice).
 //
 // The stop verdict must live where it SURVIVES the thing being stopped: in
@@ -754,6 +878,205 @@ mod tests {
         );
         assert_eq!(out, CutoverOutcome::Promoted);
         assert_eq!(n, 3);
+    }
+
+    // --- Cutover CHOREOGRAPHY (drive_cutover) -----------------------------
+
+    /// Records the ordered I/O steps a cutover performed, with a scripted failure at a
+    /// chosen step, so `drive_cutover`'s sequencing + rollback decisions are asserted
+    /// without a runtime. `fail_at` names the step whose call returns `Err`.
+    #[derive(Default)]
+    struct FakeIo {
+        calls: Vec<&'static str>,
+        fail_at: Option<&'static str>,
+        rollback_fails: bool,
+    }
+
+    impl FakeIo {
+        fn failing(step: &'static str) -> Self {
+            FakeIo {
+                fail_at: Some(step),
+                ..Default::default()
+            }
+        }
+        fn step(&mut self, name: &'static str) -> Result<(), String> {
+            self.calls.push(name);
+            if self.fail_at == Some(name) {
+                Err(format!("scripted failure at {name}"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl CutoverIo for FakeIo {
+        fn snapshot_current(&mut self) -> Result<(), String> {
+            self.step("snapshot_current")
+        }
+        fn stage_candidate(&mut self) -> Result<(), String> {
+            self.step("stage_candidate")
+        }
+        fn restart_runtime(&mut self) -> Result<(), String> {
+            self.step("restart_runtime")
+        }
+        fn finalize(&mut self) -> Result<(), String> {
+            self.step("finalize")
+        }
+        fn rollback(&mut self) -> Result<(), String> {
+            self.calls.push("rollback");
+            if self.rollback_fails {
+                Err("scripted rollback failure".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn cutover_healthy_candidate_finalizes_never_rolls_back() {
+        let mut io = FakeIo::default();
+        let verdict = drive_cutover(&mut io, || true, 5, || {});
+        assert_eq!(verdict, CutoverVerdict::Promoted);
+        // The happy path: snapshot → stage → restart → finalize, and NO rollback.
+        assert_eq!(
+            io.calls,
+            vec![
+                "snapshot_current",
+                "stage_candidate",
+                "restart_runtime",
+                "finalize"
+            ]
+        );
+        assert!(!io.calls.contains(&"rollback"));
+    }
+
+    #[test]
+    fn cutover_unhealthy_candidate_auto_rolls_back() {
+        // THE s94 incident guard: a candidate that never goes healthy MUST restore the
+        // old release (rollback) and NEVER finalize a half-promoted manifest.
+        let mut io = FakeIo::default();
+        let verdict = drive_cutover(&mut io, || false, 3, || {});
+        assert_eq!(
+            verdict,
+            CutoverVerdict::RolledBack {
+                failed_step: "health_gate",
+                rollback_ok: true,
+                detail: Some("new runtime never healthy within the deadline".to_string()),
+            }
+        );
+        assert_eq!(
+            io.calls,
+            vec![
+                "snapshot_current",
+                "stage_candidate",
+                "restart_runtime",
+                "rollback"
+            ]
+        );
+        assert!(!io.calls.contains(&"finalize"), "must NOT finalize a bad candidate");
+    }
+
+    #[test]
+    fn cutover_snapshot_failure_aborts_before_touching_anything() {
+        // Cannot capture a rollback target → do NOT stage/restart. Old release intact,
+        // no rollback attempted (nothing was mutated).
+        let mut io = FakeIo::failing("snapshot_current");
+        let verdict = drive_cutover(&mut io, || true, 5, || {});
+        match verdict {
+            CutoverVerdict::RolledBack { failed_step, rollback_ok, .. } => {
+                assert_eq!(failed_step, "snapshot_current");
+                assert!(rollback_ok, "nothing mutated → old release still serves");
+            }
+            other => panic!("expected RolledBack, got {other:?}"),
+        }
+        assert_eq!(io.calls, vec!["snapshot_current"]);
+        assert!(!io.calls.contains(&"stage_candidate"));
+        assert!(!io.calls.contains(&"rollback"));
+    }
+
+    #[test]
+    fn cutover_stage_failure_rolls_back_without_restart() {
+        let mut io = FakeIo::failing("stage_candidate");
+        let verdict = drive_cutover(&mut io, || true, 5, || {});
+        assert!(matches!(
+            verdict,
+            CutoverVerdict::RolledBack { failed_step: "stage_candidate", rollback_ok: true, .. }
+        ));
+        assert_eq!(
+            io.calls,
+            vec!["snapshot_current", "stage_candidate", "rollback"]
+        );
+        assert!(!io.calls.contains(&"restart_runtime"));
+    }
+
+    #[test]
+    fn cutover_restart_failure_rolls_back() {
+        let mut io = FakeIo::failing("restart_runtime");
+        let verdict = drive_cutover(&mut io, || true, 5, || {});
+        assert!(matches!(
+            verdict,
+            CutoverVerdict::RolledBack { failed_step: "restart_runtime", .. }
+        ));
+        assert_eq!(
+            io.calls,
+            vec!["snapshot_current", "stage_candidate", "restart_runtime", "rollback"]
+        );
+    }
+
+    #[test]
+    fn cutover_finalize_failure_rolls_back_to_coherent_old_release() {
+        // Healthy candidate but the manifest finalize failed: roll back rather than
+        // leave bin/* ↔ current.json drift (the s91 stranded-pending class).
+        let mut io = FakeIo::failing("finalize");
+        let verdict = drive_cutover(&mut io, || true, 5, || {});
+        assert!(matches!(
+            verdict,
+            CutoverVerdict::RolledBack { failed_step: "finalize", .. }
+        ));
+        assert_eq!(
+            io.calls,
+            vec![
+                "snapshot_current",
+                "stage_candidate",
+                "restart_runtime",
+                "finalize",
+                "rollback"
+            ]
+        );
+    }
+
+    #[test]
+    fn cutover_failed_rollback_is_surfaced_distinctly() {
+        // A rollback that ALSO fails = a genuine outage; `rollback_ok:false` lets the
+        // caller escalate (operator action) instead of reporting a clean auto-recovery.
+        let mut io = FakeIo {
+            rollback_fails: true,
+            ..Default::default()
+        };
+        let verdict = drive_cutover(&mut io, || false, 2, || {});
+        assert!(matches!(
+            verdict,
+            CutoverVerdict::RolledBack { failed_step: "health_gate", rollback_ok: false, .. }
+        ));
+    }
+
+    #[test]
+    fn cutover_healthy_on_second_poll_finalizes() {
+        let mut n = 0;
+        let mut waits = 0;
+        let mut io = FakeIo::default();
+        let verdict = drive_cutover(
+            &mut io,
+            || {
+                n += 1;
+                n >= 2
+            },
+            5,
+            || waits += 1,
+        );
+        assert_eq!(verdict, CutoverVerdict::Promoted);
+        assert_eq!(n, 2);
+        assert_eq!(waits, 1, "one wait between the failed first poll and the healthy second");
     }
 
     // --- Stop FSM ---------------------------------------------------------
