@@ -633,6 +633,11 @@ impl RustParser {
                             properties: props,
                         });
                     }
+                    // REQ-AXO-902195 — the receiver may itself be a call (`foo(...).bar()`).
+                    // The walk_for_calls(skip_first=true) below drops child(0) (this whole
+                    // field_expression), losing the inner call. Walk the receiver here to
+                    // recover it (skip_first=false; the field_identifier is not a call node).
+                    self.walk_for_calls(func_node, source, result, false, current_function);
                 }
                 "scoped_identifier" => {
                     let full = func_node.utf8_text(source).unwrap_or("").to_string();
@@ -854,6 +859,33 @@ mod tests {
         let targets: Vec<&str> = cs.iter().map(|c| c.to.as_str()).collect();
         assert!(targets.contains(&"bar"));
         assert!(targets.contains(&"baz"));
+    }
+
+    #[test]
+    fn chained_call_on_call_result_captures_inner_call() {
+        // REQ-AXO-902195 — `foo(...).unwrap()` must yield a CALLS edge to `foo`, not only to
+        // `unwrap`. Regression for walk_for_calls(skip_first) dropping the field_expression
+        // receiver (the inner call), which silently under-counted callers → false covered/wiring.
+        let p = parser();
+        let result = p.parse("fn f() { let _ = g(1).unwrap(); }");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let targets: Vec<&str> = calls(&result.relations)
+            .iter()
+            .map(|c| c.to.as_str())
+            .collect();
+        assert!(
+            targets.contains(&"g"),
+            "inner call `g` must be captured, got {:?}",
+            targets
+        );
+        assert!(
+            targets.contains(&"unwrap"),
+            "chained `unwrap` also captured, got {:?}",
+            targets
+        );
     }
 
     #[test]
