@@ -40,6 +40,8 @@ Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (superv
 | Why it exists | `why` |
 | Dependency flow | `path` |
 | Structural risks | `anomalies` |
+| **Structural Health Index** (aggregate, RAM-native) | `structural_health_index` (CPT-AXO-90055 ; supersedes `health` ; needs `ist_snapshot_warm`) |
+| **Remediation worklist** (ranked debt targets) | `structural_health_worklist` (untested hubs + worst-coupled modules) |
 | SOLL intent | `soll_query_context` |
 | Commit work | `axon_pre_flight_check` → `axon_commit_work` |
 | Hybrid retrieval (FTS+vector+graph) | `retrieve_context` / `retrieve_context_layered` |
