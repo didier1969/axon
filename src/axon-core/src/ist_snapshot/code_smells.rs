@@ -15,7 +15,7 @@
 // orphan_code definition (no callers AND no soll.Traceability link) must
 // keep the PG path.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ist_snapshot::snapshot::{IstGraph, NodeFlags, NodeKind, RelationType};
 
@@ -963,7 +963,12 @@ fn is_inferred_entry(name: &str) -> bool {
 /// all (`isolated`). `test_only` is the high-confidence "delivered + green test but never
 /// wired into prod" class (OPV proof: finance::rebalance_book & co). Inferred entries
 /// (main/handler/nif) are skipped — they legitimately carry no in-graph caller.
-pub fn wiring_orphans(graph: &IstGraph, project: &str, limit: usize) -> Vec<WiringOrphan> {
+pub fn wiring_orphans(
+    graph: &IstGraph,
+    project: &str,
+    declared: &HashSet<String>,
+    limit: usize,
+) -> Vec<WiringOrphan> {
     let file_map = build_file_path_map(graph);
     let mut out: Vec<WiringOrphan> = Vec::new();
     for idx in 0..(graph.node_count() as u32) {
@@ -993,6 +998,13 @@ pub fn wiring_orphans(graph: &IstGraph, project: &str, limit: usize) -> Vec<Wiri
         }
         let name = name_from_id(graph.id_of(idx));
         if is_inferred_entry(name) {
+            continue;
+        }
+        // REQ-AXO-902192 S2 — a symbol wired to intent in the SOLL (a traceability edge) is
+        // DECLARED, not an accidental orphan: this exempts hooks / lazy-imports / wrapper-
+        // dispatched callables the static CALLS graph can't reach (the OPV blind spots). The set
+        // is built by the caller from the SOLL snapshot, so this fn stays free of SOLL coupling.
+        if declared.contains(&name.to_ascii_lowercase()) {
             continue;
         }
         let mut prod_callers = 0usize;
@@ -1083,6 +1095,7 @@ mod tests {
             func("AXO::app.rs::opv_case", true), // public, called ONLY by a test
             func("AXO::app.rs::isolated_pub", true), // public, no caller at all
             func("AXO::app.rs::test_helper", false), // PRIVATE helper called only by a test
+            func("AXO::app.rs::declared_hook", true), // public, no caller BUT declared in SOLL
             a_test,
         ];
         let edges = vec![
@@ -1103,7 +1116,10 @@ mod tests {
             ),
         ];
         let g = IstGraph::build(nodes, edges);
-        let orphans = wiring_orphans(&g, "AXO", 10);
+        // REQ-AXO-902192 S2 — declared_hook is wired to intent in the SOLL (dispatch-dynamic
+        // entry, OPV blind spot) → must be exempt even with 0 static caller.
+        let declared: HashSet<String> = ["declared_hook".to_string()].into_iter().collect();
+        let orphans = wiring_orphans(&g, "AXO", &declared, 10);
         let names: Vec<&str> = orphans.iter().map(|o| o.name.as_str()).collect();
         assert!(!names.contains(&"prod_fn"), "prod_fn has a prod caller → wired");
         assert!(!names.contains(&"run_main"), "inferred entry skipped");
@@ -1111,6 +1127,10 @@ mod tests {
         assert!(
             !names.contains(&"test_helper"),
             "a PRIVATE test helper is test infra, not an unwired deliverable"
+        );
+        assert!(
+            !names.contains(&"declared_hook"),
+            "a SOLL-declared symbol is exempt (dispatch-dynamic entry)"
         );
         let opv = orphans
             .iter()

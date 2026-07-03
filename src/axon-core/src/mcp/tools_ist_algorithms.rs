@@ -399,7 +399,23 @@ impl McpServer {
             None => return Some(ist_cache_miss_error("wiring", &project)),
         };
         let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(20).clamp(1, 200) as usize;
-        let orphans = crate::ist_snapshot::code_smells::wiring_orphans(&snapshot, &project, top);
+        // REQ-AXO-902192 S2 — SOLL-declared symbols are exempt: a traceability edge means the
+        // symbol is wired to INTENT, so a dispatch-dynamic / lazy-import / hook entry the static
+        // CALLS graph can't reach is not an orphan (the OPV blind spots). RAM-first via the SOLL
+        // snapshot (PIL-AXO-9002); cold snapshot → empty set → no exemption (safe default).
+        let declared: std::collections::HashSet<String> = self
+            .soll_cache()
+            .snapshot(&project)
+            .map(|snap| {
+                snap.traceability
+                    .iter()
+                    .filter(|t| t.artifact_type == "Symbol")
+                    .map(|t| t.artifact_ref.to_ascii_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let orphans =
+            crate::ist_snapshot::code_smells::wiring_orphans(&snapshot, &project, &declared, top);
         let test_only = orphans.iter().filter(|o| o.category == "test_only").count();
         let isolated = orphans.iter().filter(|o| o.category == "isolated").count();
         let items: Vec<Value> = orphans
@@ -426,7 +442,8 @@ impl McpServer {
                 "orphans": items,
                 "test_only_count": test_only,
                 "isolated_count": isolated,
-                "note": "REQ-AXO-902192 volet 1a — test_only = high-confidence unwired deliverable (0 prod caller, ≥1 test); isolated = advisory (may be an undetected entry). Gate in axon_pre_flight_check = slice S3."
+                "soll_declared_symbols": declared.len(),
+                "note": "REQ-AXO-902192 volet 1a+S2 — test_only = high-confidence unwired deliverable (0 prod caller, ≥1 test); isolated = advisory (may be an undetected entry). Symbols with a SOLL traceability edge are EXEMPT (declared intent — covers dispatch-dynamic/lazy-import/hook entries the static CALLS graph misses). Gate in axon_pre_flight_check = slice S3."
             }
         }))
     }
