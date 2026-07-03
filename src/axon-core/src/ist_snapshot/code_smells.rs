@@ -978,6 +978,14 @@ pub fn wiring_orphans(graph: &IstGraph, project: &str, limit: usize) -> Vec<Wiri
         if NodeFlags(flags.0).tested() {
             continue;
         }
+        // Only PUBLIC callables are deliverables. A PRIVATE fn reached only from tests is test
+        // infrastructure (helpers in an inline `mod tests` — `node`/`edge`/`mk_node`…), NOT an
+        // unwired deliverable. This is the exact COMPLEMENT of orphan_code_symbols, which flags
+        // the PRIVATE uncalled ones; wiring flags the PUBLIC ones no prod caller reaches (the OPV
+        // case: a public API with a green test but nothing in the app calls it).
+        if !NodeFlags(flags.0).public() {
+            continue;
+        }
         let empty = String::new();
         let path = file_map.get(&idx).unwrap_or(&empty);
         if !path.is_empty() && is_test_path(path) {
@@ -1074,6 +1082,7 @@ mod tests {
             func("AXO::app.rs::prod_fn", true),  // wired: called by the entry
             func("AXO::app.rs::opv_case", true), // public, called ONLY by a test
             func("AXO::app.rs::isolated_pub", true), // public, no caller at all
+            func("AXO::app.rs::test_helper", false), // PRIVATE helper called only by a test
             a_test,
         ];
         let edges = vec![
@@ -1087,6 +1096,11 @@ mod tests {
                 "AXO::app.rs::opv_case",
                 RelationType::Calls,
             ),
+            edge(
+                "AXO::app.rs::a_test",
+                "AXO::app.rs::test_helper",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let orphans = wiring_orphans(&g, "AXO", 10);
@@ -1094,6 +1108,10 @@ mod tests {
         assert!(!names.contains(&"prod_fn"), "prod_fn has a prod caller → wired");
         assert!(!names.contains(&"run_main"), "inferred entry skipped");
         assert!(!names.contains(&"a_test"), "a #[test] is not a deliverable");
+        assert!(
+            !names.contains(&"test_helper"),
+            "a PRIVATE test helper is test infra, not an unwired deliverable"
+        );
         let opv = orphans
             .iter()
             .find(|o| o.name == "opv_case")
