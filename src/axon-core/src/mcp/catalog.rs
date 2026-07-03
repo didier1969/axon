@@ -588,7 +588,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "structural_health_worklist",
-                "description": "[GOVERNANCE] REQ-AXO-902186 / CPT-AXO-90055 — turns the below-target Structural Health Index axes into CONCRETE ranked remediation targets: the untested HUBS (top PageRank nodes with tested=false — the load-bearing code dragging weighted_coverage) + the worst-COUPLED modules (top Martin distance D). Ranked highest-leverage first (ROI seed). Requires `ist_snapshot_warm`. After fixing, re-run `structural_health_index` — the ΔSHI is the verdict.",
+                "description": "[GOVERNANCE] REQ-AXO-902186 / CPT-AXO-90055 — turns the below-target Structural Health Index axes into CONCRETE ranked remediation targets: the uncovered HUBS (top PageRank nodes with covered=false — load-bearing code no #[test] reaches via CALLS, dragging weighted_coverage) + the worst-COUPLED modules (top Martin distance D). Ranked highest-leverage first (ROI seed). Requires `ist_snapshot_warm`. After fixing, re-run `structural_health_index` — the ΔSHI is the verdict.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
