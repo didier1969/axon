@@ -554,14 +554,45 @@ fn cutover_snapshot(release_dir: &Path) -> Result<serde_json::Value> {
     Ok(manifest)
 }
 
+/// Write `active-identity.env` (the promote-authoritative runtime identity) from a
+/// manifest's `runtime_version`, so the restarted brain REPORTS the promoted build_id
+/// instead of its intrinsic (compiled/build-info) one. Without this a promote drifts
+/// whenever the binary's embedded build_id lags the manifest — e.g. an unchanged
+/// axon-brain source across commits yields a byte-identical binary carrying the OLD
+/// build_id, so `promote_status` sees `manifest_runtime_match` fail (observed s95 A3).
+/// Mirrors promote_live.sh:546. Atomic (tmp + rename). Path matches
+/// AXON_ACTIVE_IDENTITY_FILE in process-compose.live.yaml.
+fn write_active_identity(manifest: &serde_json::Value, release_dir: &Path) -> Result<()> {
+    let rv = manifest.get("runtime_version").and_then(|v| v.as_object());
+    let field = |k: &str| -> &str {
+        rv.and_then(|m| m.get(k)).and_then(|v| v.as_str()).unwrap_or("")
+    };
+    let content = format!(
+        "AXON_BUILD_ID={}\nAXON_RELEASE_VERSION={}\nAXON_PACKAGE_VERSION={}\nAXON_INSTALL_GENERATION={}\n",
+        field("build_id"),
+        field("release_version"),
+        field("package_version"),
+        field("install_generation"),
+    );
+    fs::create_dir_all(release_dir).ok();
+    let target = release_dir.join("active-identity.env");
+    let tmp = release_dir.join(".active-identity.env.cutover-tmp");
+    fs::write(&tmp, content).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, &target).with_context(|| format!("rename active-identity -> {}", target.display()))?;
+    Ok(())
+}
+
 /// stage: write pending.json (state=staged) from the candidate manifest + swap the
-/// candidate binaries into `bin_dir`. current.json is left untouched (the rollback source).
+/// candidate binaries into `bin_dir` + write active-identity.env (promoted build_id).
+/// current.json is left untouched (the rollback source).
 fn cutover_stage_files(candidate_manifest_path: &Path, release_dir: &Path, bin_dir: &Path) -> Result<()> {
     let mut candidate = read_json_file(candidate_manifest_path)?;
     verify_manifest_artifacts_present(&candidate).context("candidate manifest artifacts missing")?;
     candidate["state"] = serde_json::json!("staged");
     write_json_file(&release_dir.join("pending.json"), &candidate)?;
     copy_manifest_artifacts_to_bin(&candidate, bin_dir)?;
+    // The restarted runtime must report the PROMOTED build_id (else a false drift).
+    write_active_identity(&candidate, release_dir)?;
     Ok(())
 }
 
@@ -602,6 +633,9 @@ fn cutover_finalize_files(release_dir: &Path) -> Result<()> {
 fn cutover_rollback_files(release_dir: &Path, bin_dir: &Path) -> Result<()> {
     let current = read_json_file(&release_dir.join("current.json")).context("rollback needs current.json")?;
     copy_manifest_artifacts_to_bin(&current, bin_dir)?;
+    // Restore the PREVIOUS build's authoritative identity too, so the restarted old
+    // runtime reports the rolled-back build_id (symmetry with stage).
+    write_active_identity(&current, release_dir)?;
     fs::remove_file(release_dir.join("pending.json")).ok();
     Ok(())
 }
@@ -2358,6 +2392,11 @@ mod tests {
         assert_eq!(fs::read(bin.join("axon-brain")).unwrap(), b"NEW-BRAIN");
         // current.json is NOT touched by stage (it stays the rollback source).
         assert!(!release.join("current.json").exists());
+        // REQ-AXO-902165 A1c — active-identity.env carries the PROMOTED build_id so the
+        // restarted runtime reports it (else promote_status drifts on a byte-identical
+        // binary carrying an older embedded build_id).
+        let ident = fs::read_to_string(release.join("active-identity.env")).unwrap();
+        assert!(ident.contains("AXON_BUILD_ID=v-new"), "active-identity.env must carry the candidate build_id; got:\n{ident}");
         let _ = fs::remove_dir_all(&root);
     }
 
