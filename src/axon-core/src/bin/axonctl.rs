@@ -2031,8 +2031,22 @@ fn descendant_tree(root_pid: i32) -> Result<BTreeSet<i32>> {
     Ok(seen)
 }
 
+/// True iff `pid` names a LIVE process. Zombie-aware (REQ-AXO-902170, same class as the
+/// S4 `pid_exists` fix REQ-AXO-902164): a reaped-pending zombie still has a `/proc/<pid>`
+/// entry but has already exited, so the old `exists()` check reported it alive and
+/// `wait_for_gone` burned the full SIGTERM/SIGKILL timeout on a corpse. The state char
+/// follows the `(comm)` field in `/proc/<pid>/stat`; `Z` = zombie = gone.
 fn process_exists(pid: i32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(s) => s,
+        Err(_) => return false, // no /proc entry → truly gone.
+    };
+    // Format: "pid (comm) state …". `comm` can contain ')' and spaces, so split on the
+    // LAST ')' and read the first non-space char after it as the process state.
+    match stat.rsplit_once(')') {
+        Some((_, rest)) => !matches!(rest.trim_start().chars().next(), Some('Z')),
+        None => true, // malformed but a /proc entry exists → assume alive (conservative).
+    }
 }
 
 fn live_pids(pids: &[i32]) -> Vec<i32> {
@@ -2592,6 +2606,55 @@ mod tests {
         io.kill_child();
         let _ = fs::remove_dir_all(&root);
         assert!(served, "old GOOD runtime must serve /readyz again after auto-rollback");
+    }
+
+    #[test]
+    fn process_exists_true_for_live_then_gone_after_reap_902170() {
+        let mut child = Command::new("sleep").arg("30").spawn().expect("spawn sleep");
+        let pid = child.id() as i32;
+        assert!(process_exists(pid), "a running process must be reported alive");
+        let _ = child.kill();
+        let _ = child.wait(); // reap → /proc entry gone
+        assert!(!process_exists(pid), "a reaped, killed process must be reported gone");
+    }
+
+    #[test]
+    fn process_exists_false_for_zombie_902170() {
+        // A child that exited but is not yet reaped is a zombie: /proc/<pid> exists but
+        // the process is dead. process_exists must report it gone so wait_for_gone does
+        // not burn the full teardown timeout on a corpse.
+        let mut child = Command::new("bash")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        // Poll /proc/<pid>/stat until the state is 'Z' (exited, unreaped) or a deadline.
+        // The test process is the parent and does NOT wait() yet, so the zombie persists.
+        let mut observed_zombie = false;
+        for _ in 0..100 {
+            match fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(stat) => {
+                    if stat
+                        .rsplit_once(')')
+                        .and_then(|(_, rest)| rest.trim_start().chars().next())
+                        == Some('Z')
+                    {
+                        observed_zombie = true;
+                        break;
+                    }
+                }
+                Err(_) => break, // already reaped by something else → skip the assertion.
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if observed_zombie {
+            assert!(
+                !process_exists(pid),
+                "a zombie (exited, unreaped) must be reported as gone"
+            );
+        }
+        let _ = child.wait(); // reap the zombie
     }
 
     #[test]
