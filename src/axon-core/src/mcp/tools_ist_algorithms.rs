@@ -12,9 +12,32 @@ use crate::ist_snapshot::algorithms::{
 };
 use crate::ist_snapshot::{process_view, IstSnapshotCache};
 use crate::mcp::McpServer;
+use std::collections::{HashMap, HashSet};
+
 use crate::structural_health::{
-    acyclicity_score, resilience_score, weighted_coverage_score, StructuralHealthIndex, SubScore,
+    acyclicity_score, martin_distance, main_sequence_score, resilience_score,
+    weighted_coverage_score, StructuralHealthIndex, SubScore,
 };
+
+/// The MODULE (file) a canonical IST id belongs to. The id embeds the path:
+/// `PROJ::path::to::file.rs::Symbol[::method]`. The module is the file — everything up to
+/// and INCLUDING the first path component that carries an extension (`.rs`, `.ex`, …), so
+/// nested symbols (`file.rs::Type::method`) still map to their file. Ids with no
+/// file-like component fall back to stripping the last `::`-component (the symbol name).
+fn module_of(id: &str) -> &str {
+    let mut offset = 0usize;
+    for part in id.split("::") {
+        let end = offset + part.len();
+        if part.contains('.') {
+            return &id[..end];
+        }
+        offset = end + 2; // skip the "::" separator
+    }
+    match id.rfind("::") {
+        Some(p) => &id[..p],
+        None => id,
+    }
+}
 
 impl McpServer {
     pub(crate) fn axon_ist_centrality_pagerank(&self, args: &Value) -> Option<Value> {
@@ -189,6 +212,57 @@ impl McpServer {
             }
         }
 
+        // Coupling health — Martin's distance from the main sequence per MODULE (file):
+        // I = Ce/(Ca+Ce), A = traits/types, D = |A+I−1|. Modules with no coupling are
+        // excluded (Martin's metric is defined on the coupling graph). All RAM: module from
+        // the id, kind from node_kind, coupling from the CSR edges.
+        let mut mod_types: HashMap<String, (usize, usize)> = HashMap::new(); // module → (traits, types)
+        let mut efferent: HashMap<String, HashSet<String>> = HashMap::new(); // module → dep-on modules
+        let mut afferent: HashMap<String, HashSet<String>> = HashMap::new(); // module → depended-on-by
+        for i in 0..total_nodes as u32 {
+            let id = snapshot.id_of(i);
+            let m = module_of(id).to_string();
+            let entry = mod_types.entry(m.clone()).or_insert((0, 0));
+            if let Some(kind) = snapshot.node_kind(id) {
+                match kind.as_db() {
+                    "trait" => {
+                        entry.0 += 1;
+                        entry.1 += 1;
+                    }
+                    "struct" | "enum" => entry.1 += 1,
+                    _ => {}
+                }
+            }
+            for (t, _rel) in snapshot.forward_neighbors(i) {
+                let tm = module_of(snapshot.id_of(t)).to_string();
+                if tm != m {
+                    efferent.entry(m.clone()).or_default().insert(tm.clone());
+                    afferent.entry(tm).or_default().insert(m.clone());
+                }
+            }
+        }
+        let mut d_sum = 0.0_f64;
+        let mut d_count = 0usize;
+        let mut worst_module = String::new();
+        let mut worst_d = -1.0_f64;
+        for m in mod_types.keys() {
+            let ca = afferent.get(m).map(|s| s.len()).unwrap_or(0);
+            let ce = efferent.get(m).map(|s| s.len()).unwrap_or(0);
+            if ca + ce == 0 {
+                continue; // isolated module — not on the coupling graph.
+            }
+            let (traits, types) = mod_types.get(m).copied().unwrap_or((0, 0));
+            let abstractness = if types == 0 { 0.0 } else { traits as f64 / types as f64 };
+            let d = martin_distance(ca, ce, abstractness);
+            d_sum += d;
+            d_count += 1;
+            if d > worst_d {
+                worst_d = d;
+                worst_module = m.clone();
+            }
+        }
+        let mean_distance = if d_count == 0 { 0.0 } else { d_sum / d_count as f64 };
+
         let index = StructuralHealthIndex::compute(vec![
             SubScore::new(
                 "acyclicity",
@@ -224,6 +298,19 @@ impl McpServer {
                     if total_pr > 0.0 { 100.0 * tested_pr / total_pr } else { 100.0 }
                 ),
             ),
+            SubScore::new(
+                "main_sequence",
+                main_sequence_score(mean_distance),
+                1.0,
+                0.75,
+                format!(
+                    "mean Martin distance D={:.3} over {} coupled module(s); worst: {} (D={:.2})",
+                    mean_distance,
+                    d_count,
+                    if worst_module.is_empty() { "—" } else { worst_module.as_str() },
+                    worst_d.max(0.0)
+                ),
+            ),
         ]);
 
         let below: Vec<Value> = index
@@ -255,8 +342,9 @@ impl McpServer {
                 "below_target": below,
                 "node_count": total_nodes,
                 "edge_count": snapshot.edge_count(),
-                "dimensions_wired": 3,
-                "note": "slice 2b: acyclicity + resilience + coverage×centrality; more (Martin-D, duplication rate, intent alignment) via REQ-AXO-902185"
+                "dimensions_wired": 4,
+                "coupled_modules": d_count,
+                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D); remaining (duplication rate, intent alignment) via REQ-AXO-902185"
             }
         }))
     }

@@ -163,6 +163,21 @@ pub fn weighted_coverage_score(tested_pagerank_sum: f64, total_pagerank_sum: f64
     clamp01(tested_pagerank_sum / total_pagerank_sum)
 }
 
+/// Martin's distance from the main sequence for ONE module: `D = |A + I − 1|`, where the
+/// instability `I = Ce / (Ca + Ce)` (0 when the module has no coupling). D=0 = balanced
+/// (on the sequence); D→1 = the "zone of pain" (concrete + stable → rigid) or the "zone of
+/// uselessness" (abstract + unstable). `abstractness` A ∈ [0,1] = abstract types / total
+/// types. The SHI sub-score is `main_sequence_score(mean_D)` over the modules.
+pub fn martin_distance(afferent: usize, efferent: usize, abstractness: f64) -> f64 {
+    let coupling = afferent + efferent;
+    let instability = if coupling == 0 {
+        0.0
+    } else {
+        efferent as f64 / coupling as f64
+    };
+    ((clamp01(abstractness) + instability - 1.0).abs()).min(1.0)
+}
+
 /// Resilience: `1 - articulation_points / total_nodes`. An articulation point is a node
 /// whose removal disconnects the graph — a single point of failure. 1.0 = no SPOF.
 pub fn resilience_score(articulation_points: usize, total_nodes: usize) -> f64 {
@@ -285,6 +300,21 @@ mod tests {
         // 14% flat coverage but the hubs (high pagerank) are tested → high weighted score.
         assert!((weighted_coverage_score(9.0, 10.0) - 0.9).abs() < 1e-9);
         assert_eq!(weighted_coverage_score(0.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn martin_distance_zones() {
+        // On the main sequence (D=0): unstable+concrete (I=1,A=0) OR stable+abstract (I=0,A=1).
+        assert!((martin_distance(0, 5, 0.0)).abs() < 1e-9); // I=1, A=0 → |0+1-1|=0
+        assert!((martin_distance(5, 0, 1.0)).abs() < 1e-9); // I=0, A=1 → |1+0-1|=0
+        // Zone of pain (D=1): concrete + stable (many depend on it, it depends on nothing).
+        assert!((martin_distance(5, 0, 0.0) - 1.0).abs() < 1e-9); // I=0, A=0 → |0+0-1|=1
+        // Zone of uselessness (D=1): abstract + unstable.
+        assert!((martin_distance(0, 5, 1.0) - 1.0).abs() < 1e-9); // I=1, A=1 → |1+1-1|=1
+        // No coupling → I=0; concrete isolated module sits at D=1 (dead weight).
+        assert!((martin_distance(0, 0, 0.0) - 1.0).abs() < 1e-9);
+        // Balanced middle.
+        assert!((martin_distance(1, 1, 0.0) - 0.5).abs() < 1e-9); // I=0.5, A=0 → 0.5
     }
 
     #[test]
