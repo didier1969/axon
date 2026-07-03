@@ -748,6 +748,52 @@ mod tests {
     }
 
     #[test]
+    fn release_facts_collect_reads_current_and_pending() {
+        // REQ-AXO-902190 — cover ReleaseFacts::collect, a top untested HUB surfaced by
+        // structural_health_worklist (449 callers, tested=false). It reads current.json +
+        // pending.json from the release dir. Tempdir, no runtime — the SHI remediation loop
+        // in action: worklist named it → test it → the indexer flips `tested` → ΔSHI.
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("axon-relfacts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("current.json"),
+            r#"{"runtime_version":{"build_id":"v-old"},"state":"promoted","qualification":{"verdict":"ok"},"runtime_contract":"brain_mcp_indexer_ist"}"#,
+        )
+        .unwrap();
+
+        let f = ReleaseFacts::collect(&dir, "v-running".to_string());
+        assert_eq!(f.live_build_id, "v-running");
+        assert_eq!(f.manifest_build_id.as_deref(), Some("v-old"));
+        assert_eq!(f.manifest_state.as_deref(), Some("promoted"));
+        assert_eq!(f.qualification_ok, Some(true));
+        assert!(!f.pending_present);
+        assert!(f.indexer_expected()); // "brain_mcp_indexer_ist" names an indexer
+
+        // A stranded/mid-flight staging: pending.json present with its own build_id.
+        fs::write(
+            dir.join("pending.json"),
+            r#"{"runtime_version":{"build_id":"v-staged"}}"#,
+        )
+        .unwrap();
+        let f2 = ReleaseFacts::collect(&dir, "v-running".to_string());
+        assert!(f2.pending_present);
+        assert_eq!(f2.pending_build_id.as_deref(), Some("v-staged"));
+
+        // Absent manifest → all-None, indexer not expected (safe default).
+        let empty = std::env::temp_dir().join(format!("axon-relfacts-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&empty);
+        fs::create_dir_all(&empty).unwrap();
+        let f3 = ReleaseFacts::collect(&empty, "v-x".to_string());
+        assert_eq!(f3.manifest_build_id, None);
+        assert!(!f3.indexer_expected());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty);
+    }
+
+    #[test]
     fn failed_qualification_fails_only_that_gate() {
         let mut f = facts("v1-gabc", Some("v1-gabc"), false);
         f.qualification_ok = Some(false);
