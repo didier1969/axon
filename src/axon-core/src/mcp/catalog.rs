@@ -587,6 +587,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "structural_health_worklist",
+                "description": "[GOVERNANCE] REQ-AXO-902186 / CPT-AXO-90055 — turns the below-target Structural Health Index axes into CONCRETE ranked remediation targets: the untested HUBS (top PageRank nodes with tested=false — the load-bearing code dragging weighted_coverage) + the worst-COUPLED modules (top Martin distance D). Ranked highest-leverage first (ROI seed). Requires `ist_snapshot_warm`. After fixing, re-run `structural_health_index` — the ΔSHI is the verdict.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." },
+                        "top": { "type": "integer", "description": "Max items per list (default 15, max 200)." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
                 "name": "ist_shortest_path",
                 "description": "[IST] REQ-AXO-91488 — bidirectional BFS shortest path between two canonical IST ids. Requires `ist_snapshot_warm`. Max radius default 20.",
                 "inputSchema": {

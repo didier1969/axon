@@ -349,6 +349,112 @@ impl McpServer {
         }))
     }
 
+    /// REQ-AXO-902186 / CPT-AXO-90055 — Structural Health WORKLIST: turns the below-target
+    /// SHI axes into CONCRETE ranked remediation targets. Slice 1 surfaces the two most
+    /// actionable: the untested HUBS (top PageRank nodes with tested=false — the load-bearing
+    /// code that drags weighted_coverage to 0.05) and the worst-COUPLED modules (top Martin
+    /// distance D — the debt behind main_sequence). Ranked by centrality / D so the highest-
+    /// leverage fix is first (the ROI seed). Requires `ist_snapshot_warm`. Pair with
+    /// `structural_health_index`: after fixing, re-run the index — the ΔSHI is the verdict
+    /// (REQ-AXO-902187), not the LLM's judgment.
+    pub(crate) fn axon_structural_health_worklist(&self, args: &Value) -> Option<Value> {
+        let project = match self.ist_resolve_project(args, "structural_health_worklist") {
+            Ok(p) => p,
+            Err(e) => return Some(e),
+        };
+        let view = process_view();
+        if !view.is_warm(&project) {
+            return Some(ist_cache_miss_error("structural_health_worklist", &project));
+        }
+        let snapshot = match view.cache_handle().get(&project) {
+            Some(s) => s,
+            None => return Some(ist_cache_miss_error("structural_health_worklist", &project)),
+        };
+        let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(15).clamp(1, 200) as usize;
+        let total_nodes = snapshot.node_count();
+
+        // Untested hubs: full PageRank (sorted desc), keep the tested=false ones = the
+        // load-bearing code that isn't covered — the highest-ROI remediation for coverage.
+        let ranked = pagerank_top(&snapshot, 0.85, 50, total_nodes.max(1));
+        let mut untested_hubs: Vec<Value> = Vec::new();
+        for (id, score) in &ranked {
+            if untested_hubs.len() >= top {
+                break;
+            }
+            let tested = snapshot
+                .index_of(id)
+                .map(|idx| snapshot.node_meta(idx).2.tested())
+                .unwrap_or(false);
+            if !tested {
+                let kind = snapshot.node_kind(id).map(|k| k.as_db()).unwrap_or("");
+                untested_hubs.push(json!({"id": id, "pagerank": score, "kind": kind}));
+            }
+        }
+
+        // Worst-coupled modules: Martin distance D per module (same extraction as the index).
+        let mut mod_types: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut efferent: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut afferent: HashMap<String, HashSet<String>> = HashMap::new();
+        for i in 0..total_nodes as u32 {
+            let id = snapshot.id_of(i);
+            let m = module_of(id).to_string();
+            let entry = mod_types.entry(m.clone()).or_insert((0, 0));
+            if let Some(kind) = snapshot.node_kind(id) {
+                match kind.as_db() {
+                    "trait" => {
+                        entry.0 += 1;
+                        entry.1 += 1;
+                    }
+                    "struct" | "enum" => entry.1 += 1,
+                    _ => {}
+                }
+            }
+            for (t, _rel) in snapshot.forward_neighbors(i) {
+                let tm = module_of(snapshot.id_of(t)).to_string();
+                if tm != m {
+                    efferent.entry(m.clone()).or_default().insert(tm.clone());
+                    afferent.entry(tm).or_default().insert(m.clone());
+                }
+            }
+        }
+        let mut coupled: Vec<(String, f64, usize, usize, f64)> = Vec::new();
+        for m in mod_types.keys() {
+            let ca = afferent.get(m).map(|s| s.len()).unwrap_or(0);
+            let ce = efferent.get(m).map(|s| s.len()).unwrap_or(0);
+            if ca + ce == 0 {
+                continue;
+            }
+            let (traits, types) = mod_types.get(m).copied().unwrap_or((0, 0));
+            let a = if types == 0 { 0.0 } else { traits as f64 / types as f64 };
+            coupled.push((m.clone(), martin_distance(ca, ce, a), ca, ce, a));
+        }
+        coupled.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+        let worst_modules: Vec<Value> = coupled
+            .iter()
+            .take(top)
+            .map(|(m, d, ca, ce, a)| {
+                json!({"module": m, "martin_distance": d, "afferent": ca, "efferent": ce, "abstractness": a})
+            })
+            .collect();
+
+        let summary = format!(
+            "structural_health_worklist {} : {} untested hub(s) + {} coupled module(s) ranked — attack the top first, then re-run structural_health_index to verify ΔSHI",
+            project,
+            untested_hubs.len(),
+            worst_modules.len()
+        );
+        Some(json!({
+            "content": [{ "type": "text", "text": summary }],
+            "data": {
+                "status": "ok",
+                "project_code": project,
+                "untested_hubs": untested_hubs,
+                "worst_coupled_modules": worst_modules,
+                "note": "slice 1 (REQ-AXO-902186): coverage + coupling offenders ranked. After fixing, re-run structural_health_index — ΔSHI is the verdict (REQ-AXO-902187)."
+            }
+        }))
+    }
+
     pub(crate) fn axon_ist_shortest_path(&self, args: &Value) -> Option<Value> {
         let project = match self.ist_resolve_project(args, "ist_shortest_path") {
             Ok(p) => p,
