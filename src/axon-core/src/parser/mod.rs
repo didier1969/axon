@@ -171,6 +171,7 @@ pub mod go;
 pub mod html;
 pub mod java;
 pub mod kotlin;
+pub mod lll;
 pub mod markdown;
 pub mod php;
 pub mod python;
@@ -229,6 +230,7 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "sql" => Some(Box::new(sql::SqlParser::new())),
         "tql" | "typeql" => Some(Box::new(typeql::TypeQLParser::new())),
         "dl" | "datalog" => Some(Box::new(datalog::DatalogParser::new())),
+        "lll" => Some(Box::new(lll::LllParser::new())),
         // NEXUS v7.5: Fallback to TextParser for Knowledge capturing
         "txt" | "conf" | "ini" => Some(Box::new(text::TextParser::new())),
         _ => None,
