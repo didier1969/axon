@@ -6,7 +6,7 @@
 // O(deg). NodePack carries one byte per categorical attribute (kind / project
 // / flags) to keep cache lines warm during BFS-style traversals.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// REQ-AXO-902028 — max implementors expanded from a single contract node in the
 /// dynamic-dispatch bridge, bounding path-search fan-out at high-fan-in traits
@@ -163,7 +163,8 @@ impl NodeKind {
 }
 
 /// Bitfield matching ist.symbol bool columns (tested / is_public / is_nif
-/// / is_unsafe). Stored as a single u8 ; 4 bits free for future flags.
+/// / is_unsafe) plus the RAM-derived `covered` bit. Stored as a single u8 ;
+/// 3 bits free for future flags.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeFlags(pub u8);
 
@@ -172,6 +173,12 @@ impl NodeFlags {
     pub const PUBLIC: u8 = 1 << 1;
     pub const NIF: u8 = 1 << 2;
     pub const UNSAFE: u8 = 1 << 3;
+    /// REQ-AXO-902187 — RAM-DERIVED (not a DB column): the node is reachable via
+    /// CALLS/CALLS_NIF forward-edges from a `#[test]` node. `tested` is the
+    /// syntactic parse fact ("carries #[test]") ; `covered` is the wiring fact
+    /// ("exercised by a test") the SHI weighted_coverage actually needs. Set by
+    /// [`IstGraph::build`]'s propagation pass, never by the parser/loader.
+    pub const COVERED: u8 = 1 << 4;
 
     pub fn new(tested: bool, public: bool, nif: bool, unsafe_: bool) -> Self {
         let mut bits: u8 = 0;
@@ -192,6 +199,11 @@ impl NodeFlags {
 
     pub fn tested(self) -> bool {
         self.0 & Self::TESTED != 0
+    }
+    /// REQ-AXO-902187 — reachable from a `#[test]` via CALLS forward-edges
+    /// (derived at build time). Distinct from [`tested`](Self::tested).
+    pub fn covered(self) -> bool {
+        self.0 & Self::COVERED != 0
     }
     pub fn public(self) -> bool {
         self.0 & Self::PUBLIC != 0
@@ -571,6 +583,48 @@ impl IstGraph {
         let node_count = ids.len();
         let (fwd_offsets, fwd_targets, fwd_rel) = build_csr(node_count, &sources, &targets, &rels);
         let (rev_offsets, rev_sources, rev_rel) = build_csr(node_count, &targets, &sources, &rels);
+
+        // REQ-AXO-902187 — derive the `covered` flag: a node is COVERED iff it is
+        // reachable via CALLS/CALLS_NIF forward-edges from a `#[test]` node (the
+        // `tested` bit). The parser/DB `tested` flag NEVER propagated (RCA s96:
+        // `tested` = syntactic "#[test]", weighted_coverage wrongly summed test
+        // PageRank ≈ 6%). Doing it here — once per build — makes it RAM-native and
+        // recomputed on EVERY snapshot warm, so a freshly-committed test flips its
+        // production callees `covered` with ZERO delta lag. Multi-source forward
+        // BFS over the just-built forward CSR ; O(V+E). Seeds (the tests) are
+        // covered by definition (they are exercised by the runner).
+        {
+            let calls = RelationType::Calls as u8;
+            let calls_nif = RelationType::CallsNif as u8;
+            let mut covered = vec![false; node_count];
+            let mut queue: VecDeque<u32> = VecDeque::new();
+            for (i, &f) in flags.iter().enumerate() {
+                if NodeFlags(f).tested() {
+                    covered[i] = true;
+                    queue.push_back(i as u32);
+                }
+            }
+            while let Some(n) = queue.pop_front() {
+                let start = fwd_offsets[n as usize] as usize;
+                let end = fwd_offsets[n as usize + 1] as usize;
+                for slot in start..end {
+                    let rel = fwd_rel[slot];
+                    if rel != calls && rel != calls_nif {
+                        continue;
+                    }
+                    let t = fwd_targets[slot];
+                    if !covered[t as usize] {
+                        covered[t as usize] = true;
+                        queue.push_back(t);
+                    }
+                }
+            }
+            for (i, &c) in covered.iter().enumerate() {
+                if c {
+                    flags[i] |= NodeFlags::COVERED;
+                }
+            }
+        }
 
         Self {
             ids,
@@ -997,6 +1051,46 @@ mod tests {
         assert_eq!(kind_a, NodeKind::File as u8);
         let (kind_b, _, _) = g.node_meta(1);
         assert_eq!(kind_b, NodeKind::Other as u8);
+    }
+
+    // REQ-AXO-902187 — the `covered` propagation: a #[test] node covers itself and
+    // everything reachable via CALLS forward-edges (transitively). Non-CALLS edges
+    // (Contains) and unreachable nodes stay uncovered. Proves weighted_coverage now
+    // measures wiring ("are the hubs exercised by a test?"), not the raw #[test] bit.
+    #[test]
+    fn covered_propagates_forward_from_tests_via_calls_only() {
+        let test_fn = NodeRecord {
+            id: "AXO::m::a_test".to_string(),
+            name: "a_test".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(true, false, false, false), // tested = carries #[test]
+        };
+        let nodes = vec![
+            test_fn,
+            node("AXO::m::hub", "AXO", NodeKind::Function), // called by the test
+            node("AXO::m::deep", "AXO", NodeKind::Function), // called by hub (transitive)
+            node("AXO::m::isolated", "AXO", NodeKind::Function), // only reached via Contains
+            node("AXO::m::file", "AXO", NodeKind::File),   // not reached from any test
+        ];
+        let edges = vec![
+            edge("AXO::m::a_test", "AXO::m::hub", RelationType::Calls),
+            edge("AXO::m::hub", "AXO::m::deep", RelationType::Calls),
+            edge("AXO::m::file", "AXO::m::isolated", RelationType::Contains),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let covered = |id: &str| g.node_meta(g.index_of(id).unwrap()).2.covered();
+        assert!(covered("AXO::m::a_test"), "a #[test] seeds itself as covered");
+        assert!(covered("AXO::m::hub"), "direct CALLS callee is covered");
+        assert!(covered("AXO::m::deep"), "transitive CALLS callee is covered");
+        assert!(
+            !covered("AXO::m::isolated"),
+            "reached only via Contains → not covered"
+        );
+        assert!(
+            !covered("AXO::m::file"),
+            "not reachable from any test → not covered"
+        );
     }
 
     fn nif_node(id: &str) -> NodeRecord {

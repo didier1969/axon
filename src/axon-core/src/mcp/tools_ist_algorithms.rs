@@ -203,14 +203,16 @@ impl McpServer {
         // Resilience: articulation points whose removal would disconnect the graph.
         let (_bridges, articulation) = bridges_and_articulation(&snapshot);
 
-        // Centrality-weighted coverage: Σ(pagerank of TESTED nodes) / Σ(pagerank). Weighting
-        // by PageRank asks the load-bearing question — are the HUBS tested? — not the flat
-        // symbol ratio. The `tested` flag is read from the RAM NodeFlags (REQ-AXO-91485), so
-        // this stays RAM-native. top = node_count → the full ranking (no truncation).
+        // Centrality-weighted coverage: Σ(pagerank of COVERED nodes) / Σ(pagerank). Weighting
+        // by PageRank asks the load-bearing question — are the HUBS exercised by a test? — not
+        // the flat symbol ratio. REQ-AXO-902187: read the RAM-derived `covered` flag (reachable
+        // from a #[test] via CALLS), NOT the raw `tested` bit (= "carries #[test]", a leaf with
+        // ≈0 PageRank → a structurally false ~0.06). Stays RAM-native. top = node_count → the
+        // full ranking (no truncation).
         let ranked = pagerank_top(&snapshot, 0.85, 50, total_nodes.max(1));
-        let mut tested_pr = 0.0_f64;
+        let mut covered_pr = 0.0_f64;
         let mut total_pr = 0.0_f64;
-        let mut tested_hub_count = 0usize;
+        let mut covered_hub_count = 0usize;
         for (id, score) in &ranked {
             // Exclude external call-target nodes (std/macro/library) — they carry huge
             // PageRank but aren't AXO code to test (would drag coverage to a false ~0.05).
@@ -219,13 +221,13 @@ impl McpServer {
             }
             let s = *score as f64;
             total_pr += s;
-            let tested = snapshot
+            let covered = snapshot
                 .index_of(id)
-                .map(|idx| snapshot.node_meta(idx).2.tested())
+                .map(|idx| snapshot.node_meta(idx).2.covered())
                 .unwrap_or(false);
-            if tested {
-                tested_pr += s;
-                tested_hub_count += 1;
+            if covered {
+                covered_pr += s;
+                covered_hub_count += 1;
             }
         }
 
@@ -306,13 +308,13 @@ impl McpServer {
             ),
             SubScore::new(
                 "weighted_coverage",
-                weighted_coverage_score(tested_pr, total_pr),
+                weighted_coverage_score(covered_pr, total_pr),
                 1.0,
                 0.80,
                 format!(
-                    "{} tested node(s) carry {:.1}% of the PageRank mass (are the hubs tested?)",
-                    tested_hub_count,
-                    if total_pr > 0.0 { 100.0 * tested_pr / total_pr } else { 100.0 }
+                    "{} covered node(s) carry {:.1}% of the PageRank mass (are the hubs exercised by a test?)",
+                    covered_hub_count,
+                    if total_pr > 0.0 { 100.0 * covered_pr / total_pr } else { 100.0 }
                 ),
             ),
             SubScore::new(
@@ -390,8 +392,11 @@ impl McpServer {
         let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(15).clamp(1, 200) as usize;
         let total_nodes = snapshot.node_count();
 
-        // Untested hubs: full PageRank (sorted desc), keep the tested=false ones = the
-        // load-bearing code that isn't covered — the highest-ROI remediation for coverage.
+        // Uncovered hubs: full PageRank (sorted desc), keep the covered=false ones = the
+        // load-bearing code no test reaches — the highest-ROI remediation for coverage.
+        // REQ-AXO-902187: gate on the RAM-derived `covered` flag (reachable from a #[test]
+        // via CALLS), NOT the raw `tested` bit — a prod hub NEVER carries #[test], so the old
+        // `tested=false` filter surfaced EVERY hub regardless of whether a test exercised it.
         let ranked = pagerank_top(&snapshot, 0.85, 50, total_nodes.max(1));
         let mut untested_hubs: Vec<Value> = Vec::new();
         for (id, score) in &ranked {
@@ -403,11 +408,11 @@ impl McpServer {
             if !is_real_source_symbol(id) {
                 continue;
             }
-            let tested = snapshot
+            let covered = snapshot
                 .index_of(id)
-                .map(|idx| snapshot.node_meta(idx).2.tested())
+                .map(|idx| snapshot.node_meta(idx).2.covered())
                 .unwrap_or(false);
-            if !tested {
+            if !covered {
                 let kind = snapshot.node_kind(id).map(|k| k.as_db()).unwrap_or("");
                 untested_hubs.push(json!({"id": id, "pagerank": score, "kind": kind}));
             }
