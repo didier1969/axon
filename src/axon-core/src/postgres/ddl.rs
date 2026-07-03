@@ -131,6 +131,14 @@ pub fn load_canonical_ddl_files() -> Vec<String> {
             "13_soll_revision_notify.sql",
             include_str!("../../../../db/ddl/13_soll_revision_notify.sql"),
         ),
+        // REQ-AXO-902178 — evidence-changed NOTIFY on soll.Traceability (reuses the
+        // 'soll_revision_committed' channel so the RAM snapshot invalidates on an
+        // attach/remove that writes no soll.Revision). Ordered after 01 (table) + 13
+        // (channel semantics); the other 14..22 files are unrelated (IST/mailbox/etc.).
+        (
+            "23_soll_traceability_notify.sql",
+            include_str!("../../../../db/ddl/23_soll_traceability_notify.sql"),
+        ),
     ];
     let mut stmts = Vec::new();
     for (_name, body) in FILES {

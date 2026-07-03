@@ -282,4 +282,72 @@ mod tests {
         );
         driver.abort();
     }
+
+    // REQ-AXO-902178 E2E — an evidence write to soll.Traceability (attach/remove)
+    // must fire the SAME 'soll_revision_committed' channel so the RAM snapshot
+    // invalidates cross-process, even though no soll.Revision is written. Covers
+    // BOTH trigger branches (INSERT → NEW, DELETE → OLD). Zero mock I/O: real
+    // ephemeral PG applies 23_soll_traceability_notify.sql via the dir loader.
+    #[tokio::test]
+    async fn traceability_insert_and_delete_fire_notify_902178() {
+        let test_db = crate::test_support::test_db::TestDb::create();
+        let url = test_db.url();
+        let (client, mut connection) = tokio_postgres::connect(&url, NoTls)
+            .await
+            .expect("connect to ephemeral test db");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<tokio_postgres::Notification>(16);
+        let driver = tokio::spawn(async move {
+            let stream = futures_util::stream::poll_fn(move |cx| connection.poll_message(cx));
+            tokio::pin!(stream);
+            while let Some(msg) = stream.next().await {
+                if let Ok(AsyncMessage::Notification(n)) = msg {
+                    let _ = tx.send(n).await;
+                }
+            }
+        });
+        client
+            .batch_execute("LISTEN soll_revision_committed")
+            .await
+            .expect("LISTEN");
+
+        // INSERT (attach evidence) → NOTIFY with project_code derived from the id.
+        client
+            .batch_execute(
+                "INSERT INTO soll.Traceability \
+                 (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref) \
+                 VALUES ('TRC-TST-902178', 'requirement', 'REQ-AXO-902178', 'file', \
+                 'db/ddl/23_soll_traceability_notify.sql')",
+            )
+            .await
+            .expect("insert traceability");
+        let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a NOTIFY within 5s on INSERT")
+            .expect("a notification");
+        let mut projects = HashSet::new();
+        push_payload(&got.payload(), &mut projects);
+        assert!(
+            projects.contains("AXO"),
+            "INSERT trigger must emit project_code from soll_entity_id; payload was {}",
+            got.payload()
+        );
+
+        // DELETE (remove evidence) → NOTIFY too (OLD branch).
+        client
+            .batch_execute("DELETE FROM soll.Traceability WHERE id = 'TRC-TST-902178'")
+            .await
+            .expect("delete traceability");
+        let got_del = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a NOTIFY within 5s on DELETE")
+            .expect("a notification");
+        let mut projects_del = HashSet::new();
+        push_payload(&got_del.payload(), &mut projects_del);
+        assert!(
+            projects_del.contains("AXO"),
+            "DELETE trigger must emit project_code from OLD.soll_entity_id; payload was {}",
+            got_del.payload()
+        );
+        driver.abort();
+    }
 }
