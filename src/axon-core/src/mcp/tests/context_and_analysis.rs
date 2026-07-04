@@ -4545,3 +4545,87 @@ fn test_retrieve_context_layered_truncates_code_band_under_budget() {
         kept.len(), overflowed
     );
 }
+
+// REQ-AXO-902187 — closed-loop wiring test: structural_health_index persists a Δ
+// snapshot per call and re-surfaces below-target axes that did not improve. First
+// call on a fresh project must report no delta (nothing to compare against yet);
+// the second call over UNCHANGED data must report a zero aggregate delta and flag
+// every still-below-target axis as re_surfaced (the anti-Goodhart verdict: an axis
+// that failed to improve resurfaces instead of silently dropping off the radar).
+#[test]
+fn test_structural_health_index_persists_delta_and_re_surfaces_stagnant_axes() {
+    let _guard = env_lock();
+    let history_dir = tempdir().unwrap();
+    std::env::set_var(
+        "AXON_STRUCTURAL_HISTORY_DIR",
+        history_dir.path().to_string_lossy().to_string(),
+    );
+    let server = create_test_server();
+    let code = "TST".to_string();
+    let (target, wrapper, lib) = (
+        format!("{code}::target"),
+        format!("{code}::wrapper"),
+        format!("{code}/lib.rs"),
+    );
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-{code}-lib', 'symbol', '{wrapper}', '{code}', '{lib}', 'hash-{lib}')",
+        ))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{target}', 'target_fn', 'function', false, true, false, '{code}')"))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{wrapper}', 'wrapper_fn', 'function', false, false, false, '{code}')"))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{lib}', '{wrapper}', 'CONTAINS', '{code}', 0)",
+        ))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{wrapper}', '{target}', 'CALLS', '{code}', 0)"))
+        .unwrap();
+    assert!(server.ensure_ram_snapshot_warm(&code));
+
+    let call = |id: i64| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "structural_health_index",
+                    "arguments": { "project_code": code }
+                })),
+                id: Some(json!(id)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    let first = call(90218701);
+    assert_eq!(first["data"]["delta_vs_previous"], Value::Null, "no prior snapshot yet: {first:?}");
+
+    let second = call(90218702);
+    let delta = &second["data"]["delta_vs_previous"];
+    assert!(!delta.is_null(), "second call must diff against the first snapshot: {second:?}");
+    assert_eq!(
+        delta["aggregate_delta"].as_f64().unwrap_or(f64::NAN),
+        0.0,
+        "unchanged snapshot data must yield a zero aggregate delta: {delta:?}"
+    );
+    let below = second["data"]["below_target"].as_array().cloned().unwrap_or_default();
+    assert!(!below.is_empty(), "weighted_coverage (0 covered nodes) must be below its 0.80 target: {second:?}");
+    assert!(
+        below.iter().all(|b| b["re_surfaced"].as_bool() == Some(true)),
+        "every below-target axis stagnated (delta=0) between the two calls, all must re-surface: {below:?}"
+    );
+
+    std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
+}

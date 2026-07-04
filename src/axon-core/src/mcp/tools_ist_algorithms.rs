@@ -11,6 +11,7 @@ use crate::ist_snapshot::algorithms::{
     bridges_and_articulation, pagerank_top, shortest_path, structural_sccs,
 };
 use crate::ist_snapshot::{process_view, IstSnapshotCache, NodeKind};
+use crate::mcp::tools_framework_support::{diff_shi_snapshots, load_shi_snapshots, persist_shi_snapshot};
 use crate::mcp::McpServer;
 use std::collections::{HashMap, HashSet};
 
@@ -425,17 +426,70 @@ impl McpServer {
             ),
         ]);
 
+        // REQ-AXO-902187 — closed loop: persist this measurement + diff against the
+        // PREVIOUS one (loaded BEFORE the append) so the tool's own response carries the
+        // verdict — a below-target axis whose delta is <= 0 (no improvement / regression)
+        // RE-SURFACES explicitly instead of silently accepting an LLM's unverified "fixed
+        // it" claim. Snapshot id = AXON_BUILD_ID (already the authoritative release
+        // identity, REQ-AXO-902205/902064) — reused rather than shelling out to git.
+        let build_id = std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| "unknown".to_string());
+        let sub_scores_map: serde_json::Map<String, Value> = index
+            .sub_scores
+            .iter()
+            .map(|s| (s.name.to_string(), json!(s.value)))
+            .collect();
+        let shi_snapshot = json!({
+            "snapshot_id": build_id,
+            "aggregate": index.aggregate,
+            "sub_scores": sub_scores_map,
+        });
+        let previous_snapshots = load_shi_snapshots(&project);
+        let delta_vs_previous =
+            previous_snapshots.last().map(|prev| diff_shi_snapshots(&shi_snapshot, prev));
+        if let Err(err) = persist_shi_snapshot(&project, &shi_snapshot) {
+            tracing::warn!(error = %err, project = %project, "REQ-AXO-902187: failed to persist SHI snapshot (non-fatal, index still returned)");
+        }
+        let per_dimension_delta = delta_vs_previous
+            .as_ref()
+            .and_then(|d| d.get("per_dimension_delta"))
+            .cloned();
+        let dimension_delta = |name: &str| -> Option<f64> {
+            per_dimension_delta.as_ref()?.get(name)?.as_f64()
+        };
+
         let below: Vec<Value> = index
             .below_target()
             .iter()
-            .map(|s| json!({"name": s.name, "value": s.value, "target": s.target, "detail": s.detail}))
+            .map(|s| {
+                let delta = dimension_delta(s.name);
+                json!({
+                    "name": s.name,
+                    "value": s.value,
+                    "target": s.target,
+                    "detail": s.detail,
+                    "delta_vs_previous": delta,
+                    // re_surfaced = still below target AND did not improve since the last
+                    // measurement (delta absent on first-ever measurement → not flagged,
+                    // there is nothing to have regressed against yet).
+                    "re_surfaced": delta.is_some_and(|d| d <= 0.0)
+                })
+            })
             .collect();
+        let re_surfaced_count = below
+            .iter()
+            .filter(|b| b.get("re_surfaced").and_then(|v| v.as_bool()).unwrap_or(false))
+            .count();
         let summary = format!(
-            "structural_health_index {} : SHI={:.4} ({} dimension(s), {} below target)",
+            "structural_health_index {} : SHI={:.4} ({} dimension(s), {} below target{})",
             project,
             index.aggregate,
             index.sub_scores.len(),
-            below.len()
+            below.len(),
+            if re_surfaced_count > 0 {
+                format!(", {re_surfaced_count} RE-SURFACED (no improvement since last measurement)")
+            } else {
+                String::new()
+            }
         );
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
@@ -458,7 +512,10 @@ impl McpServer {
                 "coupled_modules": d_count,
                 "orphan_intent": orphan_intent,
                 "total_intent_nodes": total_intent,
-                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D) + intent_alignment (intent→code half); remaining (duplication rate via pgvector, code→intent orphan half) via REQ-AXO-902185"
+                "snapshot_id": build_id,
+                "delta_vs_previous": delta_vs_previous,
+                "history_depth": previous_snapshots.len() + 1,
+                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D) + intent_alignment (intent→code half); remaining (duplication rate via pgvector, code→intent orphan half) via REQ-AXO-902185. Δ per-call persisted (REQ-AXO-902187) — re_surfaced=true means a below-target axis did not improve since the last measurement."
             }
         }))
     }
