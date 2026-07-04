@@ -192,6 +192,22 @@ impl GraphStore {
         }
     }
 
+    /// REQ-AXO-902203 — canonical id for a CALLS/CALLS_NIF edge SOURCE (the caller). The
+    /// caller is ALWAYS the enclosing symbol, DEFINED in the current file. The Rust parser
+    /// qualifies impl-method callers as `Class::method` (collision disambiguation), but symbol
+    /// DEFINITIONS are stored with the SHORT name + file path (`file.rs::method`; verified: 0
+    /// qualified defs in the corpus). `symbol_id` misreads the `::` in `Class::method` as a
+    /// global module path and DROPS the file path → a phantom `project::Class::method` that
+    /// matches no Symbol — 37% of CALLS edges carried such orphan sources, fragmenting the call
+    /// graph THROUGH every impl method (covered propagation, impact, bidi_trace, path all blind
+    /// through it; weighted_coverage systematically undercounted). Reconcile by scoping the
+    /// SHORT method name to the caller's own file, reconstructing its definition id. Unlike a
+    /// callee, the source is never external, so no name_index lookup is needed.
+    fn resolve_call_source_id(project_code: &str, caller_path: &str, caller_name: &str) -> String {
+        let short = caller_name.rsplit("::").next().unwrap_or(caller_name);
+        Self::symbol_id(project_code, caller_path, short)
+    }
+
     fn relation_table(rel_type: &str) -> Option<&'static str> {
         match rel_type.to_lowercase().as_str() {
             "calls" | "calls_otp" => Some("CALLS"),
@@ -1263,7 +1279,16 @@ impl GraphStore {
                 let Some(table) = Self::relation_table(&relation.rel_type) else {
                     continue;
                 };
-                let source_id = Self::symbol_id(project_code, &path_str, &relation.from);
+                // REQ-AXO-902203 — CALLS/CALLS_NIF SOURCE (caller) is the enclosing symbol,
+                // defined in THIS file; reconcile the parser's qualified `Class::method` to the
+                // file-local definition id (symbol_id would otherwise phantom it — 37% of edges).
+                // Other edge kinds keep the file-local source (co-located with their file).
+                let source_id = match table {
+                    "CALLS" | "CALLS_NIF" => {
+                        Self::resolve_call_source_id(project_code, &path_str, &relation.from)
+                    }
+                    _ => Self::symbol_id(project_code, &path_str, &relation.from),
+                };
                 // REQ-AXO-140 — call edges resolve the callee to its canonical
                 // defining-file id when unambiguous in the batch; every other
                 // edge kind keeps the file-local id (source/containment edges are
@@ -1870,6 +1895,37 @@ mod req_axo_140_call_resolution {
             GraphStore::symbol_id("PRJ", "prj/a.rs", "dup"),
             "ambiguous name (2 defs) must stay synthetic, never guess"
         );
+    }
+
+    #[test]
+    fn call_source_reconciles_qualified_caller_to_file_local_definition() {
+        // REQ-AXO-902203 — the parser qualifies an impl-method caller as `Class::method`.
+        // The enclosing method is DEFINED in the caller's own file with the SHORT name, so the
+        // edge SOURCE must reconcile to that file-local definition id — NOT the phantom
+        // `PRJ::Class::method` that symbol_id() produces (it misreads the `::` as a global path
+        // and drops the file). This phantom fragmented 37% of CALLS edges.
+        let def_id = GraphStore::symbol_id("PRJ", "prj/view.rs", "forward_at_radius");
+        let resolved = GraphStore::resolve_call_source_id(
+            "PRJ",
+            "prj/view.rs",
+            "IstGraphView::forward_at_radius",
+        );
+        assert_eq!(
+            resolved, def_id,
+            "qualified caller must reconcile to its file-local short-name definition"
+        );
+        assert_ne!(
+            resolved,
+            GraphStore::symbol_id("PRJ", "prj/view.rs", "IstGraphView::forward_at_radius"),
+            "must NOT keep the phantom PRJ::Class::method id"
+        );
+    }
+
+    #[test]
+    fn call_source_leaves_free_function_caller_unchanged() {
+        // A free-function caller is already short → the file-local id is unchanged.
+        let resolved = GraphStore::resolve_call_source_id("PRJ", "prj/a.rs", "free_fn");
+        assert_eq!(resolved, GraphStore::symbol_id("PRJ", "prj/a.rs", "free_fn"));
     }
 
     #[test]
