@@ -68,6 +68,19 @@ fn is_testable_symbol(id: &str, kind: Option<NodeKind>) -> bool {
 /// that claims to be implemented but points at nothing. Mirrors the validated
 /// `get_orphan_intent_nodes` / anomalies definition. Pure over the SOLL snapshot so the
 /// counting logic unit-tests without a live cache. Returns `(orphan, total)`.
+/// REQ-AXO-902201 — concise, disambiguating label for a canonical symbol id in a text
+/// summary: `file::name` (the module-file tail + the symbol short name), e.g.
+/// `nli.rs::load`. Falls back to the bare name when there is no distinct file segment.
+fn short_symbol_label(id: &str) -> String {
+    let name = id.rsplit("::").next().unwrap_or(id);
+    let file = module_of(id).rsplit("::").next().unwrap_or("");
+    if file.is_empty() || file == name {
+        name.to_string()
+    } else {
+        format!("{file}::{name}")
+    }
+}
+
 fn orphan_intent_over_snapshot(snap: &crate::soll_snapshot::SollSnapshot) -> (usize, usize) {
     let mut orphan = 0usize;
     let mut total = 0usize;
@@ -131,9 +144,16 @@ impl McpServer {
         let summary = if pairs.is_empty() {
             format!("ist_centrality_pagerank {} : empty snapshot", project)
         } else {
+            // REQ-AXO-902201 — list the ranked ids (concise file::name) in the TEXT, not
+            // just the top-1, so an LLM client can act on the full ranking.
+            let ranked_list = pairs
+                .iter()
+                .map(|(id, _)| short_symbol_label(id))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!(
-                "ist_centrality_pagerank {} top {} (damping={}, iter={}) — top: {}",
-                project, top, damping, iterations, pairs[0].0
+                "ist_centrality_pagerank {} top {} (damping={}, iter={}) — ranked: {}",
+                project, top, damping, iterations, ranked_list
             )
         };
         Some(json!({
@@ -598,11 +618,27 @@ impl McpServer {
             })
             .collect();
 
+        // REQ-AXO-902201 — surface the ranked ids IN THE TEXT so an LLM client can act
+        // ("attack the top first" is useless if the top isn't readable).
+        let hub_list = untested_hubs
+            .iter()
+            .filter_map(|h| h.get("id").and_then(|v| v.as_str()))
+            .map(short_symbol_label)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mod_list = worst_modules
+            .iter()
+            .filter_map(|m| m.get("module").and_then(|v| v.as_str()))
+            .map(|m| m.rsplit("::").next().unwrap_or(m).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         let summary = format!(
-            "structural_health_worklist {} : {} untested hub(s) + {} coupled module(s) ranked — attack the top first, then re-run structural_health_index to verify ΔSHI",
+            "structural_health_worklist {} : {} untested hub(s) + {} coupled module(s) ranked — attack the top first, then re-run structural_health_index to verify ΔSHI.\nUntested hubs (write a test that exercises each, highest PageRank first): {}\nWorst-coupled modules (Martin-D): {}",
             project,
             untested_hubs.len(),
-            worst_modules.len()
+            worst_modules.len(),
+            if hub_list.is_empty() { "—".to_string() } else { hub_list },
+            if mod_list.is_empty() { "—".to_string() } else { mod_list }
         );
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
