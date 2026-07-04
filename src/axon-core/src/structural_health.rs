@@ -197,6 +197,30 @@ pub fn migration_completeness_score(migrated_fractions: &[f64]) -> f64 {
     clamp01(sum / migrated_fractions.len() as f64)
 }
 
+/// Module depth (REQ-AXO-902185, APoSD/GUI-PRO-018): `interface(nb pub) / impl(taille
+/// corps)` per module, averaged across coupled modules. A LOW ratio = a small public
+/// interface hiding a large implementation (a "deep" module — healthy, per APoSD's
+/// thesis that deep modules with simple interfaces beat shallow ones). A HIGH ratio =
+/// most of the module's symbols are public relative to its total size — internals
+/// leaking out as surface area (shallow — unhealthy). Score inverts the mean ratio so
+/// 1.0 = deep/healthy, 0.0 = every symbol in every module is public (maximally shallow).
+pub fn module_depth_score(mean_public_ratio: f64) -> f64 {
+    clamp01(1.0 - mean_public_ratio)
+}
+
+/// Impact radius (REQ-AXO-902185): normalizes the tail (p95) blast radius — the count of
+/// transitive dependents reached by a bounded reverse BFS from a symbol — against the
+/// total node count. A change whose ripple reaches a LARGE fraction of the graph is
+/// structurally risky (poor modularity / too many transitive dependents); one contained
+/// to a small slice is healthy. 1.0 = p95 radius is a negligible slice of the graph,
+/// 0.0 = it covers (nearly) the whole graph.
+pub fn impact_radius_score(p95_radius: usize, total_nodes: usize) -> f64 {
+    if total_nodes == 0 {
+        return 1.0;
+    }
+    clamp01(1.0 - (p95_radius as f64 / total_nodes as f64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +352,21 @@ mod tests {
     fn migration_completeness_is_mean_migrated() {
         assert!((migration_completeness_score(&[1.0, 0.78, 0.0]) - 0.5933333).abs() < 1e-6);
         assert_eq!(migration_completeness_score(&[]), 1.0);
+    }
+
+    #[test]
+    fn module_depth_inverts_public_ratio() {
+        assert_eq!(module_depth_score(0.0), 1.0); // nothing public — maximally deep
+        assert_eq!(module_depth_score(1.0), 0.0); // everything public — maximally shallow
+        assert!((module_depth_score(0.2) - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn impact_radius_score_penalizes_wide_ripple() {
+        assert_eq!(impact_radius_score(0, 100), 1.0);
+        assert!((impact_radius_score(20, 100) - 0.8).abs() < 1e-9);
+        assert_eq!(impact_radius_score(100, 100), 0.0);
+        assert_eq!(impact_radius_score(5, 0), 1.0);
     }
 
     #[test]

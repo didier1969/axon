@@ -4797,7 +4797,7 @@ fn test_duplication_score_reads_similar_to_edges_from_ram() {
         dup["detail"].as_str().unwrap_or("").contains("1 near-duplicate pair"),
         "expected exactly 1 clone pair counted: {dup:?}"
     );
-    assert_eq!(response["data"]["dimensions_wired"].as_u64(), Some(6));
+    assert_eq!(response["data"]["dimensions_wired"].as_u64(), Some(8));
 
     std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
 }
@@ -4871,4 +4871,87 @@ fn test_reconcile_duplication_edges_persists_similar_to_and_replaces_stale() {
     // Idempotent re-run: same inputs, same edge set (no duplicate rows, no drift).
     let report2 = server.graph_store.reconcile_duplication_edges(&code).unwrap();
     assert_eq!(report2.pairs_found, 1, "re-run with unchanged embeddings must reproduce the same pair count");
+}
+
+// REQ-AXO-902185 — module_depth (interface/impl ratio, APoSD) + impact_radius (bounded
+// reverse-BFS p95) both read RAM-native from the warm CSR snapshot, no PG per call.
+// Fixture: `hub` is public and called by `caller1`+`caller2` (reverse BFS from hub finds
+// 2 dependents); `alone` is public with no CALLS edges at all (radius 0). 2/4 symbols are
+// public → mean_public_ratio=0.5 → module_depth_score=0.5. Radii sorted [0,0,0,2] →
+// median=0, p95=2 → impact_radius_score = 1 - 2/4 = 0.5.
+#[test]
+fn test_module_depth_and_impact_radius_scores_wire_from_ram() {
+    let _guard = env_lock();
+    let history_dir = tempdir().unwrap();
+    std::env::set_var(
+        "AXON_STRUCTURAL_HISTORY_DIR",
+        history_dir.path().to_string_lossy().to_string(),
+    );
+    let server = create_test_server();
+    let code = "TST".to_string();
+    let module = format!("{code}::src/lib.rs");
+    let (hub, caller1, caller2, alone) = (
+        format!("{module}::hub"),
+        format!("{module}::caller1"),
+        format!("{module}::caller2"),
+        format!("{module}::alone"),
+    );
+    for (id, name, is_public) in [
+        (&hub, "hub", true),
+        (&caller1, "caller1", false),
+        (&caller2, "caller2", false),
+        (&alone, "alone", true),
+    ] {
+        server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{id}', '{name}', 'function', false, {is_public}, false, '{code}')")).unwrap();
+    }
+    for (src, tgt) in [(&caller1, &hub), (&caller2, &hub)] {
+        server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{src}', '{tgt}', 'CALLS', '{code}', 0)")).unwrap();
+    }
+    crate::ist_snapshot::evict_process_snapshot(&code);
+    assert!(server.ensure_ram_snapshot_warm(&code));
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "structural_health_index",
+                "arguments": { "project_code": code }
+            })),
+            id: Some(json!(90218705)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let sub_scores = response["data"]["sub_scores"].as_array().cloned().unwrap_or_default();
+    let find = |name: &str| -> Value {
+        sub_scores
+            .iter()
+            .find(|s| s["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} sub-score missing: {response:?}"))
+    };
+
+    let depth = find("module_depth");
+    assert!(
+        (depth["value"].as_f64().unwrap() - 0.5).abs() < 1e-6,
+        "2/4 public symbols → depth score 0.5: {depth:?}"
+    );
+    assert!(depth["detail"].as_str().unwrap_or("").contains("ratio=0.500"), "{depth:?}");
+
+    let radius = find("impact_radius");
+    assert!(
+        (radius["value"].as_f64().unwrap() - 0.5).abs() < 1e-6,
+        "p95=2 / total_nodes=4 → 1-2/4=0.5: {radius:?}"
+    );
+    assert!(
+        radius["detail"].as_str().unwrap_or("").contains("median impact radius=0")
+            && radius["detail"].as_str().unwrap_or("").contains("p95=2"),
+        "{radius:?}"
+    );
+
+    assert_eq!(response["data"]["dimensions_wired"].as_u64(), Some(8));
+
+    std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
 }

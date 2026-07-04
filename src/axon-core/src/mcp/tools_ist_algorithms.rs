@@ -16,9 +16,29 @@ use crate::mcp::McpServer;
 use std::collections::{HashMap, HashSet};
 
 use crate::structural_health::{
-    acyclicity_score, duplication_score, geometric_aggregate, martin_distance, main_sequence_score,
-    resilience_score, weighted_coverage_score, StructuralHealthIndex, SubScore,
+    acyclicity_score, duplication_score, geometric_aggregate, impact_radius_score, martin_distance,
+    main_sequence_score, module_depth_score, resilience_score, weighted_coverage_score,
+    StructuralHealthIndex, SubScore,
 };
+
+/// REQ-AXO-902185 (impact radius) — bounded reverse-BFS depth: how many hops of "who
+/// depends on this" we walk before stopping. 3 matches the existing `impact` tool's
+/// convention (blast radius display depth).
+const IMPACT_RADIUS_MAX_DEPTH: u32 = 3;
+/// REQ-AXO-902185 (impact radius) — per-symbol cap on the reverse-BFS frontier so one
+/// extreme hub can't blow up the whole-corpus scan cost; the count saturates at this cap
+/// for genuine super-hubs, which is fine for a percentile (they land in the tail either way).
+const IMPACT_RADIUS_MAX_NEIGHBORS: usize = 200;
+
+/// REQ-AXO-902185 (impact radius) — nearest-rank percentile over an already-sorted slice.
+fn percentile(sorted: &[usize], pct: f64) -> usize {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = ((pct / 100.0) * sorted.len() as f64).ceil() as usize;
+    let idx = rank.saturating_sub(1).min(sorted.len() - 1);
+    sorted[idx]
+}
 
 /// The MODULE (file) a canonical IST id belongs to. The id embeds the path:
 /// `PROJ::path::to::file.rs::Symbol[::method]`. The module is the file — everything up to
@@ -130,6 +150,18 @@ struct ShiRawMetrics {
     /// this is a plain CSR relation-type count, zero PG cost per call.
     clone_pairs: usize,
     total_testable_symbols: usize,
+    /// REQ-AXO-902185 (module depth) — mean `public/total` symbol ratio across modules
+    /// that have at least one real source symbol. See `module_depth_score`.
+    mean_public_ratio: f64,
+    /// Count of modules contributing to `mean_public_ratio` (NOT the same set as
+    /// `d_count` — this includes every module with ≥1 real source symbol, whether or
+    /// not it has cross-module coupling).
+    mod_pub_total_count: usize,
+    /// REQ-AXO-902185 (impact radius) — median + p95 bounded blast radius (reverse BFS,
+    /// depth `IMPACT_RADIUS_MAX_DEPTH`, cap `IMPACT_RADIUS_MAX_NEIGHBORS`) over testable
+    /// symbols. See `impact_radius_score`.
+    median_impact_radius: usize,
+    p95_impact_radius: usize,
 }
 
 fn compute_shi_raw_metrics(
@@ -145,6 +177,9 @@ fn compute_shi_raw_metrics(
     let mut covered_pr = 0.0_f64;
     let mut total_pr = 0.0_f64;
     let mut total_testable_symbols = 0usize;
+    // REQ-AXO-902185 (impact radius) — bounded reverse-BFS blast radius per testable
+    // symbol, collected alongside the coverage pass (same filter, one iteration).
+    let mut impact_radii: Vec<usize> = Vec::new();
     for (id, score) in &ranked {
         if !is_testable_symbol(id, snapshot.node_kind(id)) {
             continue;
@@ -159,7 +194,14 @@ fn compute_shi_raw_metrics(
         if covered {
             covered_pr += s;
         }
+        let radius = snapshot
+            .bfs_reverse(id, IMPACT_RADIUS_MAX_DEPTH, IMPACT_RADIUS_MAX_NEIGHBORS, &[])
+            .len();
+        impact_radii.push(radius);
     }
+    impact_radii.sort_unstable();
+    let median_impact_radius = percentile(&impact_radii, 50.0);
+    let p95_impact_radius = percentile(&impact_radii, 95.0);
 
     // REQ-AXO-902185 — near-duplicate pairs, RAM-native via SIMILAR_TO edges. These
     // are NEVER computed here (would reintroduce the PG-per-call cost this whole
@@ -180,6 +222,11 @@ fn compute_shi_raw_metrics(
     // traits/structs/enums — excluded by `is_testable_symbol` — are exactly what feed the
     // abstractness (A) side of Martin's distance.
     let mut mod_types: HashMap<String, (usize, usize)> = HashMap::new();
+    // REQ-AXO-902185 (module depth) — (public_count, total_count) per module over ALL
+    // real source symbols (any kind), the "interface(nb pub)/impl(taille corps)" ratio's
+    // raw inputs. Kept separate from `mod_types` (trait/struct/enum only, feeds
+    // abstractness) since depth is about the whole module surface, not just its types.
+    let mut mod_pub_total: HashMap<String, (usize, usize)> = HashMap::new();
     let mut efferent: HashMap<String, HashSet<String>> = HashMap::new();
     let mut afferent: HashMap<String, HashSet<String>> = HashMap::new();
     for i in 0..total_nodes as u32 {
@@ -198,6 +245,11 @@ fn compute_shi_raw_metrics(
                 "struct" | "enum" => entry.1 += 1,
                 _ => {}
             }
+        }
+        let pub_total = mod_pub_total.entry(m.clone()).or_insert((0, 0));
+        pub_total.1 += 1;
+        if snapshot.node_meta(i).2.public() {
+            pub_total.0 += 1;
         }
         for (t, _rel) in snapshot.forward_neighbors(i) {
             let target_id = snapshot.id_of(t);
@@ -229,6 +281,20 @@ fn compute_shi_raw_metrics(
     }
     let mean_distance = if d_count == 0 { 0.0 } else { d_sum / d_count as f64 };
 
+    // REQ-AXO-902185 (module depth) — mean public/total ratio over modules that carry at
+    // least one real source symbol (empty modules can't happen here since mod_pub_total
+    // is only populated inside the is_real_source_symbol-gated loop above).
+    let mod_pub_total_count = mod_pub_total.len();
+    let mean_public_ratio = if mod_pub_total.is_empty() {
+        0.0
+    } else {
+        let sum: f64 = mod_pub_total
+            .values()
+            .map(|(pub_count, total)| if *total == 0 { 0.0 } else { *pub_count as f64 / *total as f64 })
+            .sum();
+        sum / mod_pub_total_count as f64
+    };
+
     ShiRawMetrics {
         total_nodes,
         sccs,
@@ -242,6 +308,10 @@ fn compute_shi_raw_metrics(
         total_intent,
         clone_pairs,
         total_testable_symbols,
+        mean_public_ratio,
+        mod_pub_total_count,
+        median_impact_radius,
+        p95_impact_radius,
     }
 }
 
@@ -314,6 +384,27 @@ fn build_sub_scores(raw: &ShiRawMetrics) -> Vec<SubScore> {
             format!(
                 "{} near-duplicate pair(s) / {} testable symbol(s) (SIMILAR_TO edges, pgvector HNSW, threshold<0.10)",
                 raw.clone_pairs, raw.total_testable_symbols
+            ),
+        ),
+        SubScore::new(
+            "module_depth",
+            module_depth_score(raw.mean_public_ratio),
+            1.0,
+            0.70,
+            format!(
+                "mean public/total symbol ratio={:.3} across {} module(s) (interface/impl, APoSD)",
+                raw.mean_public_ratio,
+                raw.mod_pub_total_count
+            ),
+        ),
+        SubScore::new(
+            "impact_radius",
+            impact_radius_score(raw.p95_impact_radius, raw.total_nodes),
+            1.0,
+            0.85,
+            format!(
+                "median impact radius={} / p95={} / {} total node(s) (bounded reverse BFS, depth {})",
+                raw.median_impact_radius, raw.p95_impact_radius, raw.total_nodes, IMPACT_RADIUS_MAX_DEPTH
             ),
         ),
     ]
@@ -566,14 +657,14 @@ impl McpServer {
                 "below_target": below,
                 "node_count": total_nodes,
                 "edge_count": snapshot.edge_count(),
-                "dimensions_wired": 6,
+                "dimensions_wired": 8,
                 "coupled_modules": d_count,
                 "orphan_intent": orphan_intent,
                 "total_intent_nodes": total_intent,
                 "snapshot_id": build_id,
                 "delta_vs_previous": delta_vs_previous,
                 "history_depth": previous_snapshots.len() + 1,
-                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D) + intent_alignment (intent→code half) + duplication (SIMILAR_TO edges, pgvector HNSW scan — see reconcile_duplication_edges, run out-of-band, NOT per-call); remaining (code→intent orphan half, god-objects, module depth) via REQ-AXO-902185. Δ per-call persisted (REQ-AXO-902187) — re_surfaced=true means a below-target axis did not improve since the last measurement."
+                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D) + intent_alignment (intent→code half) + duplication (SIMILAR_TO edges, pgvector HNSW scan — see reconcile_duplication_edges, run out-of-band, NOT per-call) + module_depth (interface/impl ratio, APoSD) + impact_radius (bounded reverse-BFS p95); remaining (code→intent orphan half, god-objects) via REQ-AXO-902185. Δ per-call persisted (REQ-AXO-902187) — re_surfaced=true means a below-target axis did not improve since the last measurement."
             }
         }))
     }
