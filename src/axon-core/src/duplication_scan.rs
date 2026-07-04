@@ -44,6 +44,11 @@ pub const DUPLICATION_CLONE_THRESHOLD: f64 = 0.10;
 /// neighbors aren't crowded out by a busy multi-project instance.
 const OVERFETCH_K: i64 = 30;
 
+/// Statement-local timeout override for the reconcile INSERT (ms). Generous
+/// margin above the ~1m16s measured for AXO's ~9300 symbols — this is a batch
+/// job, not the RAM hot path, so headroom matters more than tightness here.
+const RECONCILE_STATEMENT_TIMEOUT_MS: u64 = 300_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicationScanReport {
     pub symbols_scanned: usize,
@@ -116,8 +121,18 @@ impl GraphStore {
         // is misclassified as read-only. Logged as REQ-AXO-902207 (latent
         // gateway gap, no current caller exercises it) rather than fixed here
         // — out of scope for this slice.
+        //
+        // `SET statement_timeout` prefix: the connection-wide default is 30s
+        // (AXON_PG_STATEMENT_TIMEOUT_MS, REQ-AXO-91494) — far below the
+        // ~1m10-1m16s measured for a ~9300-symbol project. `apply_session_setup`
+        // re-applies the 30s default at the START of every `run_execute` call
+        // (before ours runs), so this override is scoped to THIS call only —
+        // the next `execute()` on any connection resets it automatically.
+        // Discovered via a real dev-test failure (`57014: canceling statement
+        // due to statement timeout` on AXO/CDV), not invented speculatively.
         self.execute(&format!(
-            "WITH reps AS ( \
+            "SET statement_timeout = '{RECONCILE_STATEMENT_TIMEOUT_MS}'; \
+             WITH reps AS ( \
                  SELECT c.source_id AS id, ce.chunk_id AS chunk_id \
                  FROM ist.chunk c JOIN ist.chunkembedding ce ON ce.chunk_id = c.id \
                  WHERE c.source_type = 'symbol' AND c.chunk_part_index = 1 AND c.project_code = '{proj}' \
