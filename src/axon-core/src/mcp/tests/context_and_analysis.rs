@@ -4550,8 +4550,10 @@ fn test_retrieve_context_layered_truncates_code_band_under_budget() {
 // snapshot per call and re-surfaces below-target axes that did not improve. First
 // call on a fresh project must report no delta (nothing to compare against yet);
 // the second call over UNCHANGED data must report a zero aggregate delta and flag
-// every still-below-target axis as re_surfaced (the anti-Goodhart verdict: an axis
-// that failed to improve resurfaces instead of silently dropping off the radar).
+// the still-below-target weighted_coverage axis as re_surfaced (the anti-Goodhart
+// verdict: an axis that failed to improve resurfaces instead of silently dropping
+// off the radar); the third call, after `target` becomes covered, must show a
+// POSITIVE weighted_coverage delta with re_surfaced flipped to false.
 #[test]
 fn test_structural_health_index_persists_delta_and_re_surfaces_stagnant_axes() {
     let _guard = env_lock();
@@ -4562,35 +4564,18 @@ fn test_structural_health_index_persists_delta_and_re_surfaces_stagnant_axes() {
     );
     let server = create_test_server();
     let code = "TST".to_string();
-    let (target, wrapper, lib) = (
-        format!("{code}::target"),
-        format!("{code}::wrapper"),
-        format!("{code}/lib.rs"),
-    );
-    server
-        .graph_store
-        .execute(&format!(
-            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-{code}-lib', 'symbol', '{wrapper}', '{code}', '{lib}', 'hash-{lib}')",
-        ))
-        .unwrap();
-    server
-        .graph_store
-        .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{target}', 'target_fn', 'function', false, true, false, '{code}')"))
-        .unwrap();
-    server
-        .graph_store
-        .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{wrapper}', 'wrapper_fn', 'function', false, false, false, '{code}')"))
-        .unwrap();
-    server
-        .graph_store
-        .execute(&format!(
-            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{lib}', '{wrapper}', 'CONTAINS', '{code}', 0)",
-        ))
-        .unwrap();
-    server
-        .graph_store
-        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{wrapper}', '{target}', 'CALLS', '{code}', 0)"))
-        .unwrap();
+    // REQ-AXO-902193 — `is_testable_symbol` requires a real file component (`.rs`) in the
+    // id, else the symbol is an external call-target and excluded from weighted_coverage's
+    // pagerank sum entirely (silently reads as the vacuous 1.0, not below target — the
+    // earlier version of this test asserted on a below-target axis without checking WHICH
+    // one, which happened to be main_sequence from an unrelated module-split artifact).
+    let module = format!("{code}::src/lib.rs");
+    let (target, wrapper) = (format!("{module}::target"), format!("{module}::wrapper"));
+    server.graph_store.execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-{code}-lib', 'symbol', '{wrapper}', '{code}', 'src/lib.rs', 'hash-{code}-lib')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{target}', 'target_fn', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{wrapper}', 'wrapper_fn', 'function', false, false, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{module}', '{wrapper}', 'CONTAINS', '{code}', 0)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{wrapper}', '{target}', 'CALLS', '{code}', 0)")).unwrap();
     assert!(server.ensure_ram_snapshot_warm(&code));
 
     let call = |id: i64| {
@@ -4611,6 +4596,13 @@ fn test_structural_health_index_persists_delta_and_re_surfaces_stagnant_axes() {
 
     let first = call(90218701);
     assert_eq!(first["data"]["delta_vs_previous"], Value::Null, "no prior snapshot yet: {first:?}");
+    let coverage_of = |resp: &Value| -> Value {
+        resp["data"]["below_target"]
+            .as_array()
+            .and_then(|a| a.iter().find(|b| b["name"] == "weighted_coverage").cloned())
+            .unwrap_or(Value::Null)
+    };
+    assert!(!coverage_of(&first).is_null(), "weighted_coverage (0 covered, nonzero pagerank) must start below its 0.80 target: {first:?}");
 
     let second = call(90218702);
     let delta = &second["data"]["delta_vs_previous"];
@@ -4620,12 +4612,28 @@ fn test_structural_health_index_persists_delta_and_re_surfaces_stagnant_axes() {
         0.0,
         "unchanged snapshot data must yield a zero aggregate delta: {delta:?}"
     );
-    let below = second["data"]["below_target"].as_array().cloned().unwrap_or_default();
-    assert!(!below.is_empty(), "weighted_coverage (0 covered nodes) must be below its 0.80 target: {second:?}");
+    let cov2 = coverage_of(&second);
+    assert!(!cov2.is_null(), "weighted_coverage must still be below target: {second:?}");
+    assert_eq!(cov2["re_surfaced"].as_bool(), Some(true), "stagnant (delta=0) axis must re-surface: {cov2:?}");
+
+    // Now cover `target` via a #[test] fn reachable through CALLS, re-warm, and re-measure.
+    let test_fn = format!("{module}::covers_target");
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{test_fn}', 'covers_target', 'function', true, false, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{test_fn}', '{target}', 'CALLS', '{code}', 0)")).unwrap();
+    crate::ist_snapshot::evict_process_snapshot(&code);
+    assert!(server.ensure_ram_snapshot_warm(&code));
+
+    let third = call(90218703);
+    let delta3 = &third["data"]["delta_vs_previous"];
+    let dims = delta3["per_dimension_delta"].clone();
     assert!(
-        below.iter().all(|b| b["re_surfaced"].as_bool() == Some(true)),
-        "every below-target axis stagnated (delta=0) between the two calls, all must re-surface: {below:?}"
+        dims["weighted_coverage"].as_f64().unwrap_or(0.0) > 0.0,
+        "target became covered: weighted_coverage delta must be positive: {delta3:?}"
     );
+    let cov3 = coverage_of(&third);
+    if !cov3.is_null() {
+        assert_eq!(cov3["re_surfaced"].as_bool(), Some(false), "improving axis must NOT re-surface: {cov3:?}");
+    }
 
     std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
 }
