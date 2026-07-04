@@ -59,7 +59,18 @@ Après dev-test complet (config + logique + fix pollution, tous validés sur don
 
 ## Non fait / backlog restant (ROI décroissant)
 
-1. 902162 — mesurer le lag fraîcheur edit→reindex (TOC discipline, pas commencé).
-2. 902185 reste — duplication-taux (scan clones pgvector) + god-objects (complexité cyclomatique) + profondeur module.
-3. 902190 reste — ~45 hubs non couverts (méthode établie ; angle mort parser découvert s96 sur les imports nommés, non bloquant).
-4. 902192 S3 — gate anti-orphelin fail-closed, **EN ATTENTE validation opérateur explicite** (faux-positifs connus).
+1. 902185 reste — duplication-taux (scan clones pgvector) + god-objects (complexité cyclomatique) + profondeur module.
+2. 902190 reste — ~45 hubs non couverts (méthode établie ; angle mort parser découvert s96 sur les imports nommés, non bloquant).
+3. 902192 S3 — gate anti-orphelin fail-closed, **EN ATTENTE validation opérateur explicite** (faux-positifs connus).
+
+## Addendum — 902162 re-vérifié sur le bon proxy (revue `advisor`)
+
+La première mesure (`ist.indexedfile.mtime_ms` vs `last_seen_ms`) prouvait la fraîcheur du *bookkeeping fichier* en PG, pas celle du symptôme réellement rapporté par OPV : « `inspect` montre l'ancien corps du symbole ». `advisor` a relevé l'écart de proxy — corrigé par un test direct sur le vrai chemin de lecture du corps.
+
+**Test réel** : injection d'un marqueur unique (`PROBE-902162-STALENESS-CHECK-7f3a91`) dans le corps de `clamp01` (structural_health.rs), sondage de `retrieve_context` en boucle (24× / 5s, 141s max) — le marqueur n'apparaissait pas dans le *snippet* retourné pour une requête générique. Investigation :
+- `inspect` (mode=verbose) ne montre AUCUN corps de symbole — seulement métadonnées structurelles (kind/tested/callers/callees). Le symptôme original ne peut donc pas viser `inspect` tel qu'il existe aujourd'hui (l'outil a changé depuis le message OPV originel, ou OPV visait `retrieve_context`).
+- `retrieve_context` est le vrai porteur de corps (`packet.supporting_chunks[].snippet`, dérivé de `ist.chunk.content`).
+- Requête PG directe sur `ist.chunk` : le contenu du chunk fusionné `fused_L33_76_0` (qui embarque `clamp01`) contenait déjà le marqueur au moment du contrôle — la table est bien à jour.
+- Le snippet ne l'affichait pas car c'est un aperçu tronqué (début du chunk), pas une extraction centrée sur le terme recherché — **bruit de rendu/ranking, pas de staleness**. Preuve : une requête `retrieve_context` avec le marqueur EXACT comme question retrouve le chunk fusionné en position 2 (le contenu EST indexé et cherchable).
+
+**Conclusion confirmée** (sur le bon proxy cette fois) : le corps est réindexé en quelques secondes dans le cas courant — cohérent avec la mesure PG initiale (148ms sur ce fichier précis pendant ce test). Le vrai risque de « corps périmé » reste la fenêtre pause dev/live GPU (déjà identifiée), pas un défaut du chemin d'écriture chunk. Marqueur de sonde retiré du code après vérification (aucune trace résiduelle).
