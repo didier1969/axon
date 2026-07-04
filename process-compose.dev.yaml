@@ -94,6 +94,11 @@ processes:
       - "AXON_RUNTIME_IDENTITY=axon-dev-axon-indexer"
       - "AXON_RUNTIME_SHADOW_ROLE=indexer"
       - "AXON_RUNTIME_STATE_FILE=.axon-dev/run-indexer/runtime.env"
+      # REQ-AXO-902205 — symmetric to the brain (line ~46) and to the live
+      # indexer block: without this, resource_release_identity() (runtime_boot.rs:573)
+      # no-ops and the indexer's PG heartbeat reports the frozen process-compose-launch
+      # AXON_BUILD_ID instead of the binary it actually runs.
+      - "AXON_ACTIVE_IDENTITY_FILE=.axon-dev/active-identity.env"
       - "AXON_RUN_ROOT=.axon-dev/run-indexer"
       # REQ-AXO-901835 — see brain block. Explicit indexer-named sockets
       # prevent collision with brain's listener.
