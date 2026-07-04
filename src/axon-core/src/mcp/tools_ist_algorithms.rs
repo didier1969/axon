@@ -10,13 +10,13 @@ use serde_json::{json, Value};
 use crate::ist_snapshot::algorithms::{
     bridges_and_articulation, pagerank_top, shortest_path, structural_sccs,
 };
-use crate::ist_snapshot::{process_view, IstSnapshotCache, NodeKind};
+use crate::ist_snapshot::{process_view, IstGraph, IstSnapshotCache, NodeKind};
 use crate::mcp::tools_framework_support::{diff_shi_snapshots, load_shi_snapshots, persist_shi_snapshot};
 use crate::mcp::McpServer;
 use std::collections::{HashMap, HashSet};
 
 use crate::structural_health::{
-    acyclicity_score, martin_distance, main_sequence_score, resilience_score,
+    acyclicity_score, geometric_aggregate, martin_distance, main_sequence_score, resilience_score,
     weighted_coverage_score, StructuralHealthIndex, SubScore,
 };
 
@@ -104,6 +104,174 @@ fn orphan_intent_over_snapshot(snap: &crate::soll_snapshot::SollSnapshot) -> (us
         }
     }
     (orphan, total)
+}
+
+/// REQ-AXO-902186 — the raw structural measurements behind the 5 SHI sub-scores,
+/// extracted ONCE so `structural_health_index` (final index) and
+/// `structural_health_worklist` (per-candidate "what if I fix just THIS one" deltas)
+/// compute against the IDENTICAL baseline. Before this, the worklist re-derived its own
+/// copy of the Martin-distance-per-module pass — a DRY fork that could silently diverge
+/// from the index's numbers (GUI-PRO-013).
+struct ShiRawMetrics {
+    total_nodes: usize,
+    sccs: Vec<Vec<String>>,
+    articulation: Vec<String>,
+    covered_pr: f64,
+    total_pr: f64,
+    /// module → (Martin distance D, afferent count, efferent count).
+    mod_d: HashMap<String, (f64, usize, usize)>,
+    mean_distance: f64,
+    d_count: usize,
+    orphan_intent: usize,
+    total_intent: usize,
+}
+
+fn compute_shi_raw_metrics(
+    snapshot: &IstGraph,
+    orphan_intent: usize,
+    total_intent: usize,
+) -> ShiRawMetrics {
+    let total_nodes = snapshot.node_count();
+    let sccs = structural_sccs(snapshot);
+    let (_bridges, articulation) = bridges_and_articulation(snapshot);
+
+    let ranked = pagerank_top(snapshot, 0.85, 50, total_nodes.max(1));
+    let mut covered_pr = 0.0_f64;
+    let mut total_pr = 0.0_f64;
+    for (id, score) in &ranked {
+        if !is_testable_symbol(id, snapshot.node_kind(id)) {
+            continue;
+        }
+        let s = *score as f64;
+        total_pr += s;
+        let covered = snapshot
+            .index_of(id)
+            .map(|idx| snapshot.node_meta(idx).2.covered())
+            .unwrap_or(false);
+        if covered {
+            covered_pr += s;
+        }
+    }
+
+    let mut mod_types: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut efferent: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut afferent: HashMap<String, HashSet<String>> = HashMap::new();
+    for i in 0..total_nodes as u32 {
+        let id = snapshot.id_of(i);
+        let m = module_of(id).to_string();
+        let entry = mod_types.entry(m.clone()).or_insert((0, 0));
+        if let Some(kind) = snapshot.node_kind(id) {
+            match kind.as_db() {
+                "trait" => {
+                    entry.0 += 1;
+                    entry.1 += 1;
+                }
+                "struct" | "enum" => entry.1 += 1,
+                _ => {}
+            }
+        }
+        for (t, _rel) in snapshot.forward_neighbors(i) {
+            let tm = module_of(snapshot.id_of(t)).to_string();
+            if tm != m {
+                efferent.entry(m.clone()).or_default().insert(tm.clone());
+                afferent.entry(tm).or_default().insert(m.clone());
+            }
+        }
+    }
+    let mut mod_d: HashMap<String, (f64, usize, usize)> = HashMap::new();
+    let mut d_sum = 0.0_f64;
+    let mut d_count = 0usize;
+    for m in mod_types.keys() {
+        let ca = afferent.get(m).map(|s| s.len()).unwrap_or(0);
+        let ce = efferent.get(m).map(|s| s.len()).unwrap_or(0);
+        if ca + ce == 0 {
+            continue;
+        }
+        let (traits, types) = mod_types.get(m).copied().unwrap_or((0, 0));
+        let abstractness = if types == 0 { 0.0 } else { traits as f64 / types as f64 };
+        let d = martin_distance(ca, ce, abstractness);
+        d_sum += d;
+        d_count += 1;
+        mod_d.insert(m.clone(), (d, ca, ce));
+    }
+    let mean_distance = if d_count == 0 { 0.0 } else { d_sum / d_count as f64 };
+
+    ShiRawMetrics {
+        total_nodes,
+        sccs,
+        articulation,
+        covered_pr,
+        total_pr,
+        mod_d,
+        mean_distance,
+        d_count,
+        orphan_intent,
+        total_intent,
+    }
+}
+
+fn build_sub_scores(raw: &ShiRawMetrics) -> Vec<SubScore> {
+    let nodes_in_cycles: usize = raw.sccs.iter().map(|c| c.len()).sum();
+    let orphan_intent_frac = if raw.total_intent == 0 {
+        0.0
+    } else {
+        raw.orphan_intent as f64 / raw.total_intent as f64
+    };
+    vec![
+        SubScore::new(
+            "acyclicity",
+            acyclicity_score(nodes_in_cycles, raw.total_nodes),
+            1.0,
+            0.99,
+            format!(
+                "{} node(s) in {} cycle(s) / {} total",
+                nodes_in_cycles,
+                raw.sccs.len(),
+                raw.total_nodes
+            ),
+        ),
+        SubScore::new(
+            "resilience",
+            resilience_score(raw.articulation.len(), raw.total_nodes),
+            1.0,
+            0.95,
+            format!(
+                "{} articulation point(s) (SPOF) / {} total",
+                raw.articulation.len(),
+                raw.total_nodes
+            ),
+        ),
+        SubScore::new(
+            "weighted_coverage",
+            weighted_coverage_score(raw.covered_pr, raw.total_pr),
+            1.0,
+            0.80,
+            format!(
+                "{:.1}% of the PageRank mass is covered (are the hubs exercised by a test?)",
+                if raw.total_pr > 0.0 { 100.0 * raw.covered_pr / raw.total_pr } else { 100.0 }
+            ),
+        ),
+        SubScore::new(
+            "main_sequence",
+            main_sequence_score(raw.mean_distance),
+            1.0,
+            0.75,
+            format!(
+                "mean Martin distance D={:.3} over {} coupled module(s)",
+                raw.mean_distance, raw.d_count
+            ),
+        ),
+        SubScore::new(
+            "intent_alignment",
+            1.0 - orphan_intent_frac,
+            1.0,
+            0.85,
+            format!(
+                "{}/{} governed SOLL node(s) orphaned — no code trace",
+                raw.orphan_intent, raw.total_intent
+            ),
+        ),
+    ]
 }
 
 impl McpServer {
@@ -259,172 +427,17 @@ impl McpServer {
         };
 
         let total_nodes = snapshot.node_count();
-        // Acyclicity: Σ sizes of SCCs with size>1 = the nodes trapped in a cycle.
-        let sccs = structural_sccs(&snapshot);
-        let nodes_in_cycles: usize = sccs.iter().map(|c| c.len()).sum();
-        // Resilience: articulation points whose removal would disconnect the graph.
-        let (_bridges, articulation) = bridges_and_articulation(&snapshot);
-
-        // Centrality-weighted coverage: Σ(pagerank of COVERED nodes) / Σ(pagerank). Weighting
-        // by PageRank asks the load-bearing question — are the HUBS exercised by a test? — not
-        // the flat symbol ratio. REQ-AXO-902187: read the RAM-derived `covered` flag (reachable
-        // from a #[test] via CALLS), NOT the raw `tested` bit (= "carries #[test]", a leaf with
-        // ≈0 PageRank → a structurally false ~0.06). Stays RAM-native. top = node_count → the
-        // full ranking (no truncation).
-        let ranked = pagerank_top(&snapshot, 0.85, 50, total_nodes.max(1));
-        let mut covered_pr = 0.0_f64;
-        let mut total_pr = 0.0_f64;
-        let mut covered_hub_count = 0usize;
-        for (id, score) in &ranked {
-            // Exclude non-testable nodes: external call-targets (std/macro/library) AND
-            // macro/keyword call-targets attributed to a file (`…embedder.rs::assert_eq!`,
-            // `Ok`, `Some`, `vec!`) — they carry huge PageRank but aren't function/method
-            // definitions a test can cover (REQ-AXO-902193). Otherwise they understate coverage.
-            if !is_testable_symbol(id, snapshot.node_kind(id)) {
-                continue;
-            }
-            let s = *score as f64;
-            total_pr += s;
-            let covered = snapshot
-                .index_of(id)
-                .map(|idx| snapshot.node_meta(idx).2.covered())
-                .unwrap_or(false);
-            if covered {
-                covered_pr += s;
-                covered_hub_count += 1;
-            }
-        }
-
-        // Coupling health — Martin's distance from the main sequence per MODULE (file):
-        // I = Ce/(Ca+Ce), A = traits/types, D = |A+I−1|. Modules with no coupling are
-        // excluded (Martin's metric is defined on the coupling graph). All RAM: module from
-        // the id, kind from node_kind, coupling from the CSR edges.
-        let mut mod_types: HashMap<String, (usize, usize)> = HashMap::new(); // module → (traits, types)
-        let mut efferent: HashMap<String, HashSet<String>> = HashMap::new(); // module → dep-on modules
-        let mut afferent: HashMap<String, HashSet<String>> = HashMap::new(); // module → depended-on-by
-        for i in 0..total_nodes as u32 {
-            let id = snapshot.id_of(i);
-            let m = module_of(id).to_string();
-            let entry = mod_types.entry(m.clone()).or_insert((0, 0));
-            if let Some(kind) = snapshot.node_kind(id) {
-                match kind.as_db() {
-                    "trait" => {
-                        entry.0 += 1;
-                        entry.1 += 1;
-                    }
-                    "struct" | "enum" => entry.1 += 1,
-                    _ => {}
-                }
-            }
-            for (t, _rel) in snapshot.forward_neighbors(i) {
-                let tm = module_of(snapshot.id_of(t)).to_string();
-                if tm != m {
-                    efferent.entry(m.clone()).or_default().insert(tm.clone());
-                    afferent.entry(tm).or_default().insert(m.clone());
-                }
-            }
-        }
-        let mut d_sum = 0.0_f64;
-        let mut d_count = 0usize;
-        let mut worst_module = String::new();
-        let mut worst_d = -1.0_f64;
-        for m in mod_types.keys() {
-            let ca = afferent.get(m).map(|s| s.len()).unwrap_or(0);
-            let ce = efferent.get(m).map(|s| s.len()).unwrap_or(0);
-            if ca + ce == 0 {
-                continue; // isolated module — not on the coupling graph.
-            }
-            let (traits, types) = mod_types.get(m).copied().unwrap_or((0, 0));
-            let abstractness = if types == 0 { 0.0 } else { traits as f64 / types as f64 };
-            let d = martin_distance(ca, ce, abstractness);
-            d_sum += d;
-            d_count += 1;
-            if d > worst_d {
-                worst_d = d;
-                worst_module = m.clone();
-            }
-        }
-        let mean_distance = if d_count == 0 { 0.0 } else { d_sum / d_count as f64 };
-
-        // Intent↔code alignment (REQ-AXO-902185, dimension 5 — intent→code half). orphan_intent
-        // = governed SOLL nodes (Requirement/Decision/Concept/Validation) with NO code
-        // traceability row: intent that claims to be implemented but points at nothing. Matches
-        // the validated `get_orphan_intent_nodes` / anomalies definition. RAM-native via the SOLL
-        // snapshot (PIL-AXO-9002); a cold snapshot → frac 0 (vacuously aligned — never penalise on
-        // a cold cache, same posture as the other dimensions). The code→intent half (orphan_code)
-        // is DEFERRED: Axon's SOLL is sparse-BY-DESIGN at symbol grain (~115 declared entrypoints
-        // total, the REQ-AXO-902192 dispatch-dynamic exemption set), so a naive per-symbol
-        // orphan_code is a Goodhart artifact of the same class as the pre-902193 coverage
-        // pollution — a separate slice, like duplication. The score is therefore the HONEST
-        // one-sided `1 − orphan_intent_frac`, NOT the halved bidirectional `intent_alignment_score`
-        // (which would under-report by masking the measured intent debt behind a fake-perfect half).
+        // REQ-AXO-902186 — raw metrics extracted via the SHARED helper (also used by
+        // `structural_health_worklist` for its per-candidate "what if" deltas), so the
+        // index and the worklist can never silently diverge on the same baseline.
         let (orphan_intent, total_intent) = self
             .soll_cache()
             .snapshot(&project)
             .map(|snap| orphan_intent_over_snapshot(&snap))
             .unwrap_or((0, 0));
-        let orphan_intent_frac =
-            if total_intent == 0 { 0.0 } else { orphan_intent as f64 / total_intent as f64 };
-
-        let index = StructuralHealthIndex::compute(vec![
-            SubScore::new(
-                "acyclicity",
-                acyclicity_score(nodes_in_cycles, total_nodes),
-                1.0,
-                0.99,
-                format!(
-                    "{} node(s) in {} cycle(s) / {} total",
-                    nodes_in_cycles,
-                    sccs.len(),
-                    total_nodes
-                ),
-            ),
-            SubScore::new(
-                "resilience",
-                resilience_score(articulation.len(), total_nodes),
-                1.0,
-                0.95,
-                format!(
-                    "{} articulation point(s) (SPOF) / {} total",
-                    articulation.len(),
-                    total_nodes
-                ),
-            ),
-            SubScore::new(
-                "weighted_coverage",
-                weighted_coverage_score(covered_pr, total_pr),
-                1.0,
-                0.80,
-                format!(
-                    "{} covered node(s) carry {:.1}% of the PageRank mass (are the hubs exercised by a test?)",
-                    covered_hub_count,
-                    if total_pr > 0.0 { 100.0 * covered_pr / total_pr } else { 100.0 }
-                ),
-            ),
-            SubScore::new(
-                "main_sequence",
-                main_sequence_score(mean_distance),
-                1.0,
-                0.75,
-                format!(
-                    "mean Martin distance D={:.3} over {} coupled module(s); worst: {} (D={:.2})",
-                    mean_distance,
-                    d_count,
-                    if worst_module.is_empty() { "—" } else { worst_module.as_str() },
-                    worst_d.max(0.0)
-                ),
-            ),
-            SubScore::new(
-                "intent_alignment",
-                1.0 - orphan_intent_frac,
-                1.0,
-                0.85,
-                format!(
-                    "{}/{} governed SOLL node(s) (Req/Dec/Concept/Validation) orphaned — no code trace (intent→code half; code→intent deferred: SOLL symbol-grain sparse by design)",
-                    orphan_intent, total_intent
-                ),
-            ),
-        ]);
+        let raw = compute_shi_raw_metrics(&snapshot, orphan_intent, total_intent);
+        let d_count = raw.d_count;
+        let index = StructuralHealthIndex::compute(build_sub_scores(&raw));
 
         // REQ-AXO-902187 — closed loop: persist this measurement + diff against the
         // PREVIOUS one (loaded BEFORE the append) so the tool's own response carries the
@@ -587,14 +600,19 @@ impl McpServer {
         }))
     }
 
-    /// REQ-AXO-902186 / CPT-AXO-90055 — Structural Health WORKLIST: turns the below-target
-    /// SHI axes into CONCRETE ranked remediation targets. Slice 1 surfaces the two most
-    /// actionable: the untested HUBS (top PageRank nodes with tested=false — the load-bearing
-    /// code that drags weighted_coverage to 0.05) and the worst-COUPLED modules (top Martin
-    /// distance D — the debt behind main_sequence). Ranked by centrality / D so the highest-
-    /// leverage fix is first (the ROI seed). Requires `ist_snapshot_warm`. Pair with
-    /// `structural_health_index`: after fixing, re-run the index — the ΔSHI is the verdict
-    /// (REQ-AXO-902187), not the LLM's judgment.
+    /// REQ-AXO-902186 slice 2 — Structural Health WORKLIST: turns EVERY below-target-capable
+    /// SHI axis into concrete remediation candidates, ranked by TRUE ROI = expected ΔSHI ÷
+    /// blast-radius (not "worst first" — a catastrophic but cheap-to-fix offender beats a
+    /// mild one buried under 200 callers). Four categories, one unified ranking: coverage
+    /// (untested hubs), coupling (worst Martin-D modules), resilience (articulation
+    /// points/SPOF), acyclicity (cycles/SCCs). `expected_delta_shi` simulates "if ONLY this
+    /// one candidate were fixed" by swapping that axis's value in the SAME baseline
+    /// (`compute_shi_raw_metrics`/`build_sub_scores`, shared with `structural_health_index` —
+    /// no divergent duplicate math) and re-running the pure `geometric_aggregate`.
+    /// `blast_radius` is a direct-dependency proxy (callers / module coupling degree / SCC
+    /// size) — cheap and RAM-native, not a full multi-hop impact simulation. Requires
+    /// `ist_snapshot_warm`. Pair with `structural_health_index`: after fixing, re-run the
+    /// index — the ΔSHI it reports is the verdict (REQ-AXO-902187), never the LLM's claim.
     pub(crate) fn axon_structural_health_worklist(&self, args: &Value) -> Option<Value> {
         let project = match self.ist_resolve_project(args, "structural_health_worklist") {
             Ok(p) => p,
@@ -611,20 +629,52 @@ impl McpServer {
         let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(15).clamp(1, 200) as usize;
         let total_nodes = snapshot.node_count();
 
-        // Uncovered hubs: full PageRank (sorted desc), keep the covered=false ones = the
-        // load-bearing code no test reaches — the highest-ROI remediation for coverage.
-        // REQ-AXO-902187: gate on the RAM-derived `covered` flag (reachable from a #[test]
-        // via CALLS), NOT the raw `tested` bit — a prod hub NEVER carries #[test], so the old
-        // `tested=false` filter surfaced EVERY hub regardless of whether a test exercised it.
+        let (orphan_intent, total_intent) = self
+            .soll_cache()
+            .snapshot(&project)
+            .map(|snap| orphan_intent_over_snapshot(&snap))
+            .unwrap_or((0, 0));
+        let raw = compute_shi_raw_metrics(&snapshot, orphan_intent, total_intent);
+        let base_scores = build_sub_scores(&raw);
+        let base_aggregate = geometric_aggregate(&base_scores);
+
+        // Direct-caller count — the blast-radius proxy: more callers = riskier/costlier to
+        // touch. O(V+E), computed once and reused across every candidate category.
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        for i in 0..total_nodes as u32 {
+            for (t, _rel) in snapshot.forward_neighbors(i) {
+                *in_degree.entry(snapshot.id_of(t)).or_insert(0) += 1;
+            }
+        }
+
+        // "If only THIS one candidate were fixed" — swap one named axis's value into a CLONE
+        // of the baseline sub-scores and re-run the pure geometric aggregate. The delta is
+        // this candidate's isolated contribution, holding every other axis fixed.
+        let delta_for = |name: &str, new_value: f64| -> f64 {
+            let mut scores = base_scores.clone();
+            if let Some(s) = scores.iter_mut().find(|s| s.name == name) {
+                s.value = new_value.clamp(0.0, 1.0);
+            }
+            geometric_aggregate(&scores) - base_aggregate
+        };
+
+        struct Candidate {
+            category: &'static str,
+            target: Value,
+            expected_delta_shi: f64,
+            blast_radius: usize,
+        }
+        let scan_cap = top.saturating_mul(3).max(top);
+        let mut candidates: Vec<Candidate> = Vec::new();
+
+        // 1) Coverage — untested hubs (REQ-AXO-902187: gate on `covered`, not raw `tested` —
+        // a prod hub never carries #[test]).
         let ranked = pagerank_top(&snapshot, 0.85, 50, total_nodes.max(1));
-        let mut untested_hubs: Vec<Value> = Vec::new();
+        let mut hub_scanned = 0usize;
         for (id, score) in &ranked {
-            if untested_hubs.len() >= top {
+            if hub_scanned >= scan_cap {
                 break;
             }
-            // Only a testable definition (function/method) is a real target — skip external
-            // call-targets AND macro/keyword targets like `…embedder.rs::assert_eq!` / `Ok` /
-            // `vec!` that carry PageRank but aren't definitions (REQ-AXO-902193).
             if !is_testable_symbol(id, snapshot.node_kind(id)) {
                 continue;
             }
@@ -632,88 +682,131 @@ impl McpServer {
                 .index_of(id)
                 .map(|idx| snapshot.node_meta(idx).2.covered())
                 .unwrap_or(false);
-            if !covered {
-                let kind = snapshot.node_kind(id).map(|k| k.as_db()).unwrap_or("");
-                untested_hubs.push(json!({"id": id, "pagerank": score, "kind": kind}));
-            }
-        }
-
-        // Worst-coupled modules: Martin distance D per module (same extraction as the index).
-        let mut mod_types: HashMap<String, (usize, usize)> = HashMap::new();
-        let mut efferent: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut afferent: HashMap<String, HashSet<String>> = HashMap::new();
-        for i in 0..total_nodes as u32 {
-            let id = snapshot.id_of(i);
-            let m = module_of(id).to_string();
-            let entry = mod_types.entry(m.clone()).or_insert((0, 0));
-            if let Some(kind) = snapshot.node_kind(id) {
-                match kind.as_db() {
-                    "trait" => {
-                        entry.0 += 1;
-                        entry.1 += 1;
-                    }
-                    "struct" | "enum" => entry.1 += 1,
-                    _ => {}
-                }
-            }
-            for (t, _rel) in snapshot.forward_neighbors(i) {
-                let tm = module_of(snapshot.id_of(t)).to_string();
-                if tm != m {
-                    efferent.entry(m.clone()).or_default().insert(tm.clone());
-                    afferent.entry(tm).or_default().insert(m.clone());
-                }
-            }
-        }
-        let mut coupled: Vec<(String, f64, usize, usize, f64)> = Vec::new();
-        for m in mod_types.keys() {
-            let ca = afferent.get(m).map(|s| s.len()).unwrap_or(0);
-            let ce = efferent.get(m).map(|s| s.len()).unwrap_or(0);
-            if ca + ce == 0 {
+            if covered {
                 continue;
             }
-            let (traits, types) = mod_types.get(m).copied().unwrap_or((0, 0));
-            let a = if types == 0 { 0.0 } else { traits as f64 / types as f64 };
-            coupled.push((m.clone(), martin_distance(ca, ce, a), ca, ce, a));
+            hub_scanned += 1;
+            let s = *score as f64;
+            let new_value = weighted_coverage_score(raw.covered_pr + s, raw.total_pr);
+            let blast = in_degree.get(id.as_str()).copied().unwrap_or(0).max(1);
+            candidates.push(Candidate {
+                category: "coverage",
+                target: json!({
+                    "id": id,
+                    "label": short_symbol_label(id),
+                    "pagerank": score,
+                    "kind": snapshot.node_kind(id).map(|k| k.as_db()).unwrap_or("")
+                }),
+                expected_delta_shi: delta_for("weighted_coverage", new_value),
+                blast_radius: blast,
+            });
         }
-        coupled.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
-        let worst_modules: Vec<Value> = coupled
+
+        // 2) Coupling — worst modules by Martin distance D.
+        let mut coupled: Vec<(&String, &(f64, usize, usize))> = raw.mod_d.iter().collect();
+        coupled.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
+        for (m, (d, ca, ce)) in coupled.into_iter().take(scan_cap) {
+            // Simulate this ONE module fixed to D=0 (perfectly on the main sequence).
+            let new_mean = if raw.d_count == 0 {
+                0.0
+            } else {
+                ((raw.mean_distance * raw.d_count as f64) - d) / raw.d_count as f64
+            };
+            candidates.push(Candidate {
+                category: "coupling",
+                target: json!({"module": m, "martin_distance": d, "afferent": ca, "efferent": ce}),
+                expected_delta_shi: delta_for("main_sequence", main_sequence_score(new_mean)),
+                blast_radius: (ca + ce).max(1),
+            });
+        }
+
+        // 3) Resilience — articulation points (single points of failure).
+        let nodes_in_cycles: usize = raw.sccs.iter().map(|c| c.len()).sum();
+        for node_id in raw.articulation.iter().take(scan_cap) {
+            let new_value =
+                resilience_score(raw.articulation.len().saturating_sub(1), raw.total_nodes);
+            let degree = in_degree.get(node_id.as_str()).copied().unwrap_or(0)
+                + snapshot
+                    .index_of(node_id)
+                    .map(|i| snapshot.forward_neighbors(i).count())
+                    .unwrap_or(0);
+            candidates.push(Candidate {
+                category: "resilience",
+                target: json!({
+                    "id": node_id,
+                    "label": short_symbol_label(node_id),
+                    "kind": snapshot.node_kind(node_id).map(|k| k.as_db()).unwrap_or("")
+                }),
+                expected_delta_shi: delta_for("resilience", new_value),
+                blast_radius: degree.max(1),
+            });
+        }
+
+        // 4) Acyclicity — cycles (SCC size > 1), largest first.
+        let mut sccs_sorted = raw.sccs.clone();
+        sccs_sorted.sort_by(|a, b| b.len().cmp(&a.len()));
+        for scc in sccs_sorted.iter().take(scan_cap) {
+            let new_value =
+                acyclicity_score(nodes_in_cycles.saturating_sub(scc.len()), raw.total_nodes);
+            candidates.push(Candidate {
+                category: "acyclicity",
+                target: json!({"cycle_nodes": scc, "size": scc.len()}),
+                expected_delta_shi: delta_for("acyclicity", new_value),
+                blast_radius: scc.len().max(1),
+            });
+        }
+
+        candidates.sort_by(|a, b| {
+            let roi_a = a.expected_delta_shi / a.blast_radius as f64;
+            let roi_b = b.expected_delta_shi / b.blast_radius as f64;
+            roi_b.partial_cmp(&roi_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let ranked_candidates: Vec<Value> = candidates
             .iter()
             .take(top)
-            .map(|(m, d, ca, ce, a)| {
-                json!({"module": m, "martin_distance": d, "afferent": ca, "efferent": ce, "abstractness": a})
+            .map(|c| {
+                json!({
+                    "category": c.category,
+                    "target": c.target,
+                    "expected_delta_shi": c.expected_delta_shi,
+                    "blast_radius": c.blast_radius,
+                    "roi": c.expected_delta_shi / c.blast_radius as f64
+                })
             })
             .collect();
+        let count_of = |cat: &str| ranked_candidates.iter().filter(|c| c["category"] == cat).count();
 
-        // REQ-AXO-902201 — surface the ranked ids IN THE TEXT so an LLM client can act
-        // ("attack the top first" is useless if the top isn't readable).
-        let hub_list = untested_hubs
+        // REQ-AXO-902201 — surface the ranked targets IN THE TEXT so an LLM client can act.
+        let target_list = ranked_candidates
             .iter()
-            .filter_map(|h| h.get("id").and_then(|v| v.as_str()))
-            .map(short_symbol_label)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mod_list = worst_modules
-            .iter()
-            .filter_map(|m| m.get("module").and_then(|v| v.as_str()))
-            .map(|m| m.rsplit("::").next().unwrap_or(m).to_string())
+            .filter_map(|c| {
+                let cat = c["category"].as_str()?;
+                let label = c["target"]["label"]
+                    .as_str()
+                    .or_else(|| c["target"]["module"].as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{}-node cycle", c["target"]["size"]));
+                Some(format!("{cat}:{label}"))
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let summary = format!(
-            "structural_health_worklist {} : {} untested hub(s) + {} coupled module(s) ranked — attack the top first, then re-run structural_health_index to verify ΔSHI.\nUntested hubs (write a test that exercises each, highest PageRank first): {}\nWorst-coupled modules (Martin-D): {}",
+            "structural_health_worklist {} : {} target(s) ranked by ROI (ΔSHI÷blast-radius) — {} coverage, {} coupling, {} resilience, {} acyclicity. Fix the top first, then re-run structural_health_index — ΔSHI confirms (REQ-AXO-902187).\nRanked: {}",
             project,
-            untested_hubs.len(),
-            worst_modules.len(),
-            if hub_list.is_empty() { "—".to_string() } else { hub_list },
-            if mod_list.is_empty() { "—".to_string() } else { mod_list }
+            ranked_candidates.len(),
+            count_of("coverage"),
+            count_of("coupling"),
+            count_of("resilience"),
+            count_of("acyclicity"),
+            if target_list.is_empty() { "—".to_string() } else { target_list }
         );
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
             "data": {
                 "status": "ok",
                 "project_code": project,
-                "untested_hubs": untested_hubs,
-                "worst_coupled_modules": worst_modules,
-                "note": "slice 1 (REQ-AXO-902186): coverage + coupling offenders ranked. After fixing, re-run structural_health_index — ΔSHI is the verdict (REQ-AXO-902187)."
+                "worklist": ranked_candidates,
+                "note": "REQ-AXO-902186 slice 2: unified ranking by ROI = expected ΔSHI ÷ blast-radius across coverage/coupling/resilience/acyclicity (not 'worst-first'). blast_radius proxy = direct callers (coverage/resilience) or coupling degree (coupling) or SCC size (acyclicity). Re-run structural_health_index after fixing — ΔSHI is the verdict (REQ-AXO-902187)."
             }
         }))
     }

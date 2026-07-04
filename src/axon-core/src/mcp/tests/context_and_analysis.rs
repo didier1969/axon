@@ -4629,3 +4629,92 @@ fn test_structural_health_index_persists_delta_and_re_surfaces_stagnant_axes() {
 
     std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
 }
+
+// REQ-AXO-902186 slice 2 — the worklist must surface candidates from ALL FOUR categories
+// (coverage/coupling/resilience/acyclicity) when the graph has an instance of each, and
+// rank them by TRUE ROI (expected ΔSHI ÷ blast-radius), not raw severity or centrality.
+#[test]
+fn test_structural_health_worklist_ranks_all_categories_by_roi() {
+    let _guard = env_lock();
+    let history_dir = tempdir().unwrap();
+    std::env::set_var(
+        "AXON_STRUCTURAL_HISTORY_DIR",
+        history_dir.path().to_string_lossy().to_string(),
+    );
+    let server = create_test_server();
+    let code = "TST".to_string();
+    // REQ-AXO-902193 — `is_testable_symbol` requires a REAL file component (a `::`-segment
+    // ending `.rs`) in the id, else the symbol is treated as an external call-target and
+    // excluded from the coverage/pagerank candidate scan. Every symbol id below embeds
+    // `src/lib.rs` for exactly this reason (a bare `{code}::name` id, as used by OTHER
+    // tests that only exercise anomaly counts, would silently vanish from this worklist).
+    let module = format!("{code}::src/lib.rs");
+
+    // Coverage: an untested hub with a caller.
+    let (target, wrapper) = (format!("{module}::target"), format!("{module}::wrapper"));
+    server.graph_store.execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-{code}-lib', 'symbol', '{wrapper}', '{code}', 'src/lib.rs', 'hash-{code}-lib')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{target}', 'target_fn', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{wrapper}', 'wrapper_fn', 'function', false, false, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{module}', '{wrapper}', 'CONTAINS', '{code}', 0)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{wrapper}', '{target}', 'CALLS', '{code}', 0)")).unwrap();
+
+    // Acyclicity: a mutual-call cycle cyc_a <-> cyc_b.
+    let (cyc_a, cyc_b) = (format!("{module}::cyc_a"), format!("{module}::cyc_b"));
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{cyc_a}', 'cyc_a', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{cyc_b}', 'cyc_b', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{cyc_a}', '{cyc_b}', 'CALLS', '{code}', 0)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{cyc_b}', '{cyc_a}', 'CALLS', '{code}', 0)")).unwrap();
+
+    // Resilience: a path art_a - art_b - art_c (undirected articulation at art_b).
+    let (art_a, art_b, art_c) = (
+        format!("{module}::art_a"),
+        format!("{module}::art_b"),
+        format!("{module}::art_c"),
+    );
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{art_a}', 'art_a', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{art_b}', 'art_b', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{art_c}', 'art_c', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{art_a}', '{art_b}', 'CALLS', '{code}', 0)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{art_b}', '{art_c}', 'CALLS', '{code}', 0)")).unwrap();
+
+    assert!(server.ensure_ram_snapshot_warm(&code));
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "structural_health_worklist",
+                "arguments": { "project_code": code, "top": 50 }
+            })),
+            id: Some(json!(90218703)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let worklist = response["data"]["worklist"].as_array().cloned().unwrap_or_default();
+    assert!(!worklist.is_empty(), "worklist must not be empty: {response:?}");
+
+    let categories: std::collections::HashSet<&str> =
+        worklist.iter().filter_map(|c| c["category"].as_str()).collect();
+    assert!(categories.contains("coverage"), "expected a coverage candidate: {worklist:?}");
+    assert!(categories.contains("acyclicity"), "expected an acyclicity candidate (cyc_a<->cyc_b): {worklist:?}");
+    assert!(categories.contains("resilience"), "expected a resilience candidate (art_b is an articulation point): {worklist:?}");
+
+    for c in &worklist {
+        assert!(c["blast_radius"].as_u64().unwrap_or(0) >= 1, "blast_radius must be >= 1: {c:?}");
+        let roi = c["roi"].as_f64().unwrap();
+        let delta = c["expected_delta_shi"].as_f64().unwrap();
+        let blast = c["blast_radius"].as_u64().unwrap() as f64;
+        assert!((roi - delta / blast).abs() < 1e-9, "roi must equal expected_delta_shi/blast_radius: {c:?}");
+    }
+    // Ranked strictly non-increasing by ROI.
+    for pair in worklist.windows(2) {
+        let a = pair[0]["roi"].as_f64().unwrap();
+        let b = pair[1]["roi"].as_f64().unwrap();
+        assert!(a >= b, "worklist must be ranked by descending ROI: {a} then {b} in {worklist:?}");
+    }
+
+    std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
+}
