@@ -62,6 +62,27 @@ fn is_testable_symbol(id: &str, kind: Option<NodeKind>) -> bool {
     is_real_source_symbol(id) && matches!(kind, Some(NodeKind::Function) | Some(NodeKind::Method))
 }
 
+/// REQ-AXO-902185 (dimension 5, intent→code half) — count the ORPHAN-INTENT governed SOLL
+/// nodes over their total. A governed node = Requirement/Decision/Concept/Validation; it is
+/// orphaned when it carries NO traceability row (no code/test/file/symbol artifact) — intent
+/// that claims to be implemented but points at nothing. Mirrors the validated
+/// `get_orphan_intent_nodes` / anomalies definition. Pure over the SOLL snapshot so the
+/// counting logic unit-tests without a live cache. Returns `(orphan, total)`.
+fn orphan_intent_over_snapshot(snap: &crate::soll_snapshot::SollSnapshot) -> (usize, usize) {
+    let mut orphan = 0usize;
+    let mut total = 0usize;
+    for ty in ["Requirement", "Decision", "Concept", "Validation"] {
+        let lower = ty.to_ascii_lowercase();
+        for id in snap.node_ids_of_type(ty) {
+            total += 1;
+            if snap.traceability_count_for(&lower, id) == 0 {
+                orphan += 1;
+            }
+        }
+    }
+    (orphan, total)
+}
+
 impl McpServer {
     pub(crate) fn axon_ist_centrality_pagerank(&self, args: &Value) -> Option<Value> {
         let project = match self.ist_resolve_project(args, "ist_centrality_pagerank") {
@@ -295,6 +316,26 @@ impl McpServer {
         }
         let mean_distance = if d_count == 0 { 0.0 } else { d_sum / d_count as f64 };
 
+        // Intent↔code alignment (REQ-AXO-902185, dimension 5 — intent→code half). orphan_intent
+        // = governed SOLL nodes (Requirement/Decision/Concept/Validation) with NO code
+        // traceability row: intent that claims to be implemented but points at nothing. Matches
+        // the validated `get_orphan_intent_nodes` / anomalies definition. RAM-native via the SOLL
+        // snapshot (PIL-AXO-9002); a cold snapshot → frac 0 (vacuously aligned — never penalise on
+        // a cold cache, same posture as the other dimensions). The code→intent half (orphan_code)
+        // is DEFERRED: Axon's SOLL is sparse-BY-DESIGN at symbol grain (~115 declared entrypoints
+        // total, the REQ-AXO-902192 dispatch-dynamic exemption set), so a naive per-symbol
+        // orphan_code is a Goodhart artifact of the same class as the pre-902193 coverage
+        // pollution — a separate slice, like duplication. The score is therefore the HONEST
+        // one-sided `1 − orphan_intent_frac`, NOT the halved bidirectional `intent_alignment_score`
+        // (which would under-report by masking the measured intent debt behind a fake-perfect half).
+        let (orphan_intent, total_intent) = self
+            .soll_cache()
+            .snapshot(&project)
+            .map(|snap| orphan_intent_over_snapshot(&snap))
+            .unwrap_or((0, 0));
+        let orphan_intent_frac =
+            if total_intent == 0 { 0.0 } else { orphan_intent as f64 / total_intent as f64 };
+
         let index = StructuralHealthIndex::compute(vec![
             SubScore::new(
                 "acyclicity",
@@ -343,6 +384,16 @@ impl McpServer {
                     worst_d.max(0.0)
                 ),
             ),
+            SubScore::new(
+                "intent_alignment",
+                1.0 - orphan_intent_frac,
+                1.0,
+                0.85,
+                format!(
+                    "{}/{} governed SOLL node(s) (Req/Dec/Concept/Validation) orphaned — no code trace (intent→code half; code→intent deferred: SOLL symbol-grain sparse by design)",
+                    orphan_intent, total_intent
+                ),
+            ),
         ]);
 
         let below: Vec<Value> = index
@@ -374,9 +425,11 @@ impl McpServer {
                 "below_target": below,
                 "node_count": total_nodes,
                 "edge_count": snapshot.edge_count(),
-                "dimensions_wired": 4,
+                "dimensions_wired": 5,
                 "coupled_modules": d_count,
-                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D); remaining (duplication rate, intent alignment) via REQ-AXO-902185"
+                "orphan_intent": orphan_intent,
+                "total_intent_nodes": total_intent,
+                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D) + intent_alignment (intent→code half); remaining (duplication rate via pgvector, code→intent orphan half) via REQ-AXO-902185"
             }
         }))
     }
@@ -753,5 +806,46 @@ mod structural_health_helpers_tests {
         ));
         // External call-target (no file segment) excluded regardless of kind.
         assert!(!is_testable_symbol("AXO::unwrap", Some(NodeKind::Function)));
+    }
+
+    #[test]
+    fn orphan_intent_counts_governed_nodes_without_a_code_trace() {
+        use crate::soll_snapshot::{SnapshotNode, SnapshotTraceability, SollSnapshot};
+        use std::collections::HashMap;
+
+        let node = |id: &str, ty: &str| SnapshotNode {
+            id: id.to_string(),
+            entity_type: ty.to_string(),
+            title: String::new(),
+            status: "current".to_string(),
+            metadata_raw: String::new(),
+        };
+        let trace = |ty: &str, entity: &str| SnapshotTraceability {
+            id: format!("t-{entity}"),
+            soll_entity_type: ty.to_string(),
+            soll_entity_id: entity.to_string(),
+            artifact_type: "Symbol".to_string(),
+            artifact_ref: "AXO::x::y.rs::f".to_string(),
+            artifact_status: "current".to_string(),
+        };
+
+        let mut nodes: HashMap<String, SnapshotNode> = HashMap::new();
+        for (id, ty) in [
+            ("REQ-1", "Requirement"), // traced
+            ("REQ-2", "Requirement"), // orphan
+            ("DEC-1", "Decision"),    // orphan
+            ("CPT-1", "Concept"),     // traced
+            ("VAL-1", "Validation"),  // orphan
+            ("PIL-1", "Pillar"),      // NOT a governed type — ignored even if orphan
+        ] {
+            nodes.insert(id.to_string(), node(id, ty));
+        }
+        // Only REQ-1 and CPT-1 carry a traceability row.
+        let traceability = vec![trace("Requirement", "REQ-1"), trace("Concept", "CPT-1")];
+
+        let snap = SollSnapshot::build("AXO", 1, nodes, Vec::new(), traceability);
+        // total = 2 Req + 1 Dec + 1 Concept + 1 Validation = 5 (Pillar excluded);
+        // orphan = REQ-2 + DEC-1 + VAL-1 = 3.
+        assert_eq!(super::orphan_intent_over_snapshot(&snap), (3, 5));
     }
 }
