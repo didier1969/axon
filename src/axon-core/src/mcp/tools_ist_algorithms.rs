@@ -59,7 +59,16 @@ fn is_real_source_symbol(id: &str) -> bool {
 /// `assert_eq!`/`Ok`/`Some`/`vec!`/`format!` noise from the worklist and stops them from
 /// understating weighted_coverage (they were counted as uncovered denominator mass).
 fn is_testable_symbol(id: &str, kind: Option<NodeKind>) -> bool {
-    is_real_source_symbol(id) && matches!(kind, Some(NodeKind::Function) | Some(NodeKind::Method))
+    is_real_source_symbol(id)
+        && matches!(kind, Some(NodeKind::Function) | Some(NodeKind::Method))
+        // REQ-AXO-902202 — only Rust carries a coverage model (#[test] → `covered`
+        // propagation). A `.py` ops script (`runtime_contracts.py::mode_contract`,
+        // `qualify_ingestion_run.py::…`) is a function in a file, so it passes the two
+        // gates above, yet it can NEVER be `#[test]`-covered — counting it understates
+        // weighted_coverage (the denominator) AND pollutes the worklist with
+        // un-actionable targets (the cross-tenant LLL finding: distinguish
+        // "not-tested" from "not-MEASURABLE"). Gate on the file being `.rs`.
+        && module_of(id).ends_with(".rs")
 }
 
 /// REQ-AXO-902185 (dimension 5, intent→code half) — count the ORPHAN-INTENT governed SOLL
@@ -842,6 +851,18 @@ mod structural_health_helpers_tests {
         ));
         // External call-target (no file segment) excluded regardless of kind.
         assert!(!is_testable_symbol("AXO::unwrap", Some(NodeKind::Function)));
+        // REQ-AXO-902202 — a function in a NON-Rust file has no #[test] coverage model:
+        // excluded from both the worklist and the weighted_coverage denominator.
+        assert!(!is_testable_symbol(
+            "AXO::x::runtime_contracts.py::mode_contract",
+            Some(NodeKind::Function)
+        ));
+        assert!(!is_testable_symbol(
+            "AXO::x::qualify_ingestion_run.py::current_graph_root",
+            Some(NodeKind::Method)
+        ));
+        // Rust file still passes.
+        assert!(is_testable_symbol("AXO::x::view.rs::try_snapshot", Some(NodeKind::Method)));
     }
 
     #[test]
