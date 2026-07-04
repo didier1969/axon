@@ -765,6 +765,20 @@ async fn copy_symbols_in_tx(
     Ok(())
 }
 
+/// REQ-AXO-902197 — PostgreSQL `text` columns reject NUL (`0x00`) with
+/// "invalid byte sequence for encoding UTF8". A single chunk carrying a `0x00`
+/// (a parser artifact or a fused-chunk boundary) makes the WHOLE `COPY … BINARY`
+/// batch abort at `finish()`, which freezes the indexer drain — files never
+/// leave `discovered`. Strip NULs so one bad chunk can't poison the batch.
+/// Cheap: borrows the input unchanged (no allocation) when it is clean (the norm).
+fn strip_nul(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.as_bytes().contains(&0) {
+        std::borrow::Cow::Owned(s.replace('\0', ""))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
 async fn copy_chunks_in_tx(
     tx: &deadpool_postgres::Transaction<'_>,
     rows: &[ChunkRow],
@@ -818,22 +832,31 @@ async fn copy_chunks_in_tx(
     pin_mut!(writer);
     for row in rows {
         let tc: Option<i32> = row.token_count.map(|v| v as i32);
+        // REQ-AXO-902197 — strip NUL from every free-text field before the COPY;
+        // PG rejects 0x00 and a single bad chunk aborts the whole batch (drain freeze).
+        let chunk_id = strip_nul(&row.chunk_id);
+        let source_id = strip_nul(&row.source_id);
+        let file_path = strip_nul(&row.file_path);
+        let kind = strip_nul(&row.kind);
+        let content = strip_nul(&row.content);
+        let content_hash = strip_nul(&row.content_hash);
+        let chunk_path = strip_nul(&row.chunk_path);
         writer
             .as_mut()
             .write(&[
-                &row.chunk_id as &(dyn tokio_postgres::types::ToSql + Sync),
+                &chunk_id as &(dyn tokio_postgres::types::ToSql + Sync),
                 &row.source_type,
-                &row.source_id,
+                &source_id,
                 &row.project_code,
-                &row.file_path,
-                &row.kind,
-                &row.content,
-                &row.content_hash,
+                &file_path,
+                &kind,
+                &content,
+                &content_hash,
                 &row.start_line,
                 &row.end_line,
                 &row.part_index,
                 &row.part_count,
-                &row.chunk_path,
+                &chunk_path,
                 &tc,
             ])
             .await
@@ -1081,6 +1104,17 @@ mod tests {
         // OnceLock pool. Mirrors flush_chunk_embeddings's contract.
         let res = flush_symbols(&[]);
         assert!(res.is_ok(), "empty Symbol flush must not touch the DB");
+    }
+
+    #[test]
+    fn strip_nul_removes_nul_bytes_and_borrows_when_clean() {
+        // REQ-AXO-902197 — clean text is borrowed (no alloc); NULs are stripped so
+        // the COPY batch never aborts on 0x00 (the frozen-drain incident).
+        assert!(matches!(strip_nul("clean body"), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(strip_nul("clean body"), "clean body");
+        assert!(matches!(strip_nul("a\0b\0c"), std::borrow::Cow::Owned(_)));
+        assert_eq!(strip_nul("a\0b\0c"), "abc");
+        assert_eq!(strip_nul("\0"), "");
     }
 
     #[test]
