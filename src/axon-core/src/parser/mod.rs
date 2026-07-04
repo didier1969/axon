@@ -319,3 +319,57 @@ mod wasm_grammar_health_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod chained_call_class_regression {
+    use super::*;
+    use std::path::Path;
+
+    /// REQ-AXO-902200 (class-level regression for the REQ-AXO-902195 family) —
+    /// a function call whose result is immediately method-chained
+    /// (`g(...).h()`) must still yield a CALLS edge to the INNER call `g`, not
+    /// only the outer method. The Rust parser lost it (walk_for_calls dropped
+    /// the receiver, 902195); Go lost it the same way (skip_first=true, 902200);
+    /// ruby/kotlin/cpp/c_sharp/php/c re-walk the whole node and were already
+    /// correct. This test locks the whole CLASS across every live grammar so a
+    /// future receiver-skip optimisation can't silently re-open it (which would
+    /// under-count callers → wrong `covered`/`wiring`). Positive-control-derived
+    /// snippets (each verified to yield the inner `g`).
+    #[test]
+    fn chained_call_captures_inner_call_all_langs() {
+        // (file ext, snippet, inner-call target that MUST appear)
+        let cases: &[(&str, &str, &str)] = &[
+            ("demo.rs", "fn f() { let _ = g(1).unwrap(); }\n", "g"),
+            ("demo.go", "package m\nfunc F() { g(1).H() }\n", "g"),
+            ("demo.rb", "def f\n  g(1).h\nend\n", "g"),
+            ("demo.kt", "fun f() { g(1).h() }\n", "g"),
+            ("demo.cpp", "void f() { g(1).h(); }\n", "g"),
+            ("demo.cs", "class A { void M() { g(1).H(); } }\n", "g"),
+            ("demo.php", "<?php\nfunction f() { g(1)->h(); }\n", "g"),
+            // C has no method chaining; the analogous inner-call case is a call
+            // nested in an argument (`g(h())`), which the same walk must reach.
+            ("demo.c", "int f(void) { return g(h()); }\n", "h"),
+        ];
+        for (file, snippet, inner) in cases {
+            let parser = get_parser_for_file(Path::new(file)).unwrap();
+            let r = parser.parse(snippet);
+            if r.symbols.is_empty() {
+                // Grammar wasm unavailable in this build — skip, the dedicated
+                // grammar-health test owns that failure mode.
+                eprintln!("{file}: grammar unavailable, skipping");
+                continue;
+            }
+            let targets: Vec<&str> = r
+                .relations
+                .iter()
+                .filter(|rel| rel.rel_type == "calls")
+                .map(|rel| rel.to.as_str())
+                .collect();
+            assert!(
+                targets.contains(inner),
+                "{file}: inner call `{inner}` must be captured (REQ-AXO-902200 \
+                 class regression), got {targets:?}"
+            );
+        }
+    }
+}

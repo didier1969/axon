@@ -330,6 +330,12 @@ impl GoParser {
                 if let Some(operand) = f_node.named_child(0) {
                     receiver = operand.utf8_text(source_bytes).unwrap_or("").to_string();
                 }
+                // REQ-AXO-902200 — the receiver may itself be a call (`g(1).h()`).
+                // The walk_for_calls(skip_first=true) below drops child(0) (this
+                // whole selector_expression), losing the inner call. Walk the
+                // selector here so the operand call_expression is recovered
+                // (recursively handles `g().h().i()`). Mirrors the Rust fix (902195).
+                Self::walk_for_calls(f_node, source_bytes, result, false, caller);
             }
 
             if !name.is_empty() {
