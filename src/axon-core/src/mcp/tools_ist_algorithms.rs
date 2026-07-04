@@ -153,11 +153,25 @@ fn compute_shi_raw_metrics(
         }
     }
 
+    // REQ-AXO-902186 (dogfood finding, dev-tested against real AXO data) — restrict
+    // module-coupling attribution to REAL source symbols. Without this gate, a documentary
+    // or external-reference id with no file component (a markdown heading like `AXO::Risque
+    // 3. Nettoyer…`, a CSS selector `AXO::.stack-title`, a stdlib call-target
+    // `AXO::shutil.which`) falls back to a bogus single-node "module" via `module_of`'s
+    // rfind-`::` fallback, which trivially scores Martin-D=1.0 (a single incidental edge) and
+    // dominated the worklist's top-ROI slot with un-actionable noise. Same anti-pollution
+    // principle already applied to weighted_coverage (REQ-AXO-902193's `is_testable_symbol`);
+    // here the kind restriction is dropped (`is_real_source_symbol` only) because
+    // traits/structs/enums — excluded by `is_testable_symbol` — are exactly what feed the
+    // abstractness (A) side of Martin's distance.
     let mut mod_types: HashMap<String, (usize, usize)> = HashMap::new();
     let mut efferent: HashMap<String, HashSet<String>> = HashMap::new();
     let mut afferent: HashMap<String, HashSet<String>> = HashMap::new();
     for i in 0..total_nodes as u32 {
         let id = snapshot.id_of(i);
+        if !is_real_source_symbol(id) {
+            continue;
+        }
         let m = module_of(id).to_string();
         let entry = mod_types.entry(m.clone()).or_insert((0, 0));
         if let Some(kind) = snapshot.node_kind(id) {
@@ -171,7 +185,11 @@ fn compute_shi_raw_metrics(
             }
         }
         for (t, _rel) in snapshot.forward_neighbors(i) {
-            let tm = module_of(snapshot.id_of(t)).to_string();
+            let target_id = snapshot.id_of(t);
+            if !is_real_source_symbol(target_id) {
+                continue;
+            }
+            let tm = module_of(target_id).to_string();
             if tm != m {
                 efferent.entry(m.clone()).or_default().insert(tm.clone());
                 afferent.entry(tm).or_default().insert(m.clone());

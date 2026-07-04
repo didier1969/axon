@@ -4685,6 +4685,15 @@ fn test_structural_health_worklist_ranks_all_categories_by_roi() {
     server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{art_a}', '{art_b}', 'CALLS', '{code}', 0)")).unwrap();
     server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{art_b}', '{art_c}', 'CALLS', '{code}', 0)")).unwrap();
 
+    // Pollution regression (dogfood finding on real AXO data): a node with NO file
+    // component (a markdown heading / CSS selector / stdlib call-target, none of which
+    // embed `::path::file.rs::`) must never be attributed a bogus single-node "module" in
+    // the coupling candidates — `module_of`'s rfind-`::` fallback used to produce exactly
+    // that, and it dominated the worklist with un-actionable noise.
+    let noise = format!("{code}::not_a_real_source_symbol");
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{noise}', 'not_a_real_source_symbol', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{noise}', '{art_a}', 'CALLS', '{code}', 0)")).unwrap();
+
     assert!(server.ensure_ram_snapshot_warm(&code));
 
     let response = server
@@ -4709,6 +4718,10 @@ fn test_structural_health_worklist_ranks_all_categories_by_roi() {
     assert!(categories.contains("coverage"), "expected a coverage candidate: {worklist:?}");
     assert!(categories.contains("acyclicity"), "expected an acyclicity candidate (cyc_a<->cyc_b): {worklist:?}");
     assert!(categories.contains("resilience"), "expected a resilience candidate (art_b is an articulation point): {worklist:?}");
+    assert!(
+        worklist.iter().all(|c| c["target"]["module"].as_str() != Some(code.as_str())),
+        "the bare project-code fallback module (from a non-source id) must never surface as a coupling candidate: {worklist:?}"
+    );
 
     for c in &worklist {
         assert!(c["blast_radius"].as_u64().unwrap_or(0) >= 1, "blast_radius must be >= 1: {c:?}");
