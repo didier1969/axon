@@ -408,16 +408,160 @@ pub fn flush_chunks(rows: &[ChunkRow]) -> Result<()> {
     })
 }
 
-async fn flush_chunks_async(
-    client: &mut deadpool_postgres::Client,
-    rows: &[ChunkRow],
-) -> Result<()> {
+// ── REQ-AXO-902198 — poison-pill bisection (pure decision core) ───────────────
+// Generalises the 902197 NUL-strip: instead of sanitising ONE known class (0x00),
+// isolate ANY poison row so a single bad chunk can never freeze the whole COPY batch
+// (the frozen-drain incident). Split into a PURE decision core (classification +
+// bisection planner — unit-tested without a live DB, practice-128 decision/driver
+// split) and a thin async I/O driver. The core is the generic chokepoint the REQ
+// mandates; this slice wires it into the STANDALONE per-table chunk flush
+// (`flush_chunks_async`, own-tx, chunks-only → FK-safe). Routing the LIVE cross-table
+// drain (`flush_batch_async`, one tx over Project→IndexedFile→Symbol→Chunk→Edge with
+// intra-tx FKs) through a resilient fallback needs the FK-ordering + tx-model decision
+// and an E2E fault-injection test (practice-128) — the documented next slice.
+
+/// How a failed COPY should be reacted to, derived from the PG SQLSTATE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyErrorClass {
+    /// Serialization / deadlock / lock-timeout / connection — the DATA is fine; retry.
+    Transient,
+    /// The row itself is bad (bad byte, constraint) — bisect to isolate the poison.
+    Data,
+    /// Anything else (syntax, permission, …) — not a poison row; propagate unchanged.
+    Other,
+}
+
+/// Classify a PG SQLSTATE for the bisection. Frozen list (REQ-AXO-902198):
+/// transient = 40001/40P01 (serialization/deadlock), 55P03 (lock_not_available),
+/// 57014 (query_canceled/statement_timeout), 08xxx (connection); data = the 22xxx
+/// (data exception, incl. 22021 invalid byte / 22P02 text-repr / COPY errors) and
+/// 23xxx (integrity constraint: FK/unique/check/not-null) families.
+fn classify_copy_error(sqlstate: &str) -> CopyErrorClass {
+    match sqlstate {
+        "40001" | "40P01" | "55P03" | "57014" => CopyErrorClass::Transient,
+        s if s.starts_with("08") => CopyErrorClass::Transient,
+        s if s.starts_with("22") || s.starts_with("23") => CopyErrorClass::Data,
+        _ => CopyErrorClass::Other,
+    }
+}
+
+/// Extract the PG SQLSTATE from an anyhow error chain (the tokio_postgres::Error is
+/// wrapped via `.context(...)`), if any.
+fn pg_sqlstate(err: &anyhow::Error) -> Option<String> {
+    err.chain()
+        .find_map(|e| e.downcast_ref::<tokio_postgres::Error>())
+        .and_then(|e| e.code())
+        .map(|c| c.code().to_string())
+}
+
+/// Pure bisection planner: a work-stack of row ranges to probe + the isolated poison
+/// indices. The async driver pops a range (`next`), probes that slice's COPY in its own
+/// tx, and reports a DATA failure (`on_data`, which splits or records a singleton poison)
+/// or does nothing on success. O(k·log n) probes for k poison rows in n; the happy path
+/// (probe(0..n)==Ok) is a single probe with zero drops.
+#[derive(Debug)]
+struct BisectPlanner {
+    stack: Vec<std::ops::Range<usize>>,
+    poison: Vec<usize>,
+}
+
+impl BisectPlanner {
+    fn new(total: usize) -> Self {
+        BisectPlanner {
+            stack: if total == 0 { Vec::new() } else { vec![0..total] },
+            poison: Vec::new(),
+        }
+    }
+
+    fn next(&mut self) -> Option<std::ops::Range<usize>> {
+        self.stack.pop()
+    }
+
+    /// The COPY of `range` failed with a DATA error: a singleton IS the poison row;
+    /// otherwise split in half (push hi then lo so lo is probed first — deterministic).
+    fn on_data(&mut self, range: std::ops::Range<usize>) {
+        if range.len() <= 1 {
+            if range.len() == 1 {
+                self.poison.push(range.start);
+            }
+            return;
+        }
+        let mid = range.start + range.len() / 2;
+        self.stack.push(mid..range.end);
+        self.stack.push(range.start..mid);
+    }
+
+    fn into_poison(mut self) -> Vec<usize> {
+        self.poison.sort_unstable();
+        self.poison
+    }
+}
+
+/// One chunk COPY attempt in its OWN transaction (rollback-isolated) — the bisection probe.
+async fn copy_chunks_tx(client: &mut deadpool_postgres::Client, rows: &[ChunkRow]) -> Result<()> {
     let tx = client
         .transaction()
         .await
         .context("bulk_writer Chunk begin tx")?;
     copy_chunks_in_tx(&tx, rows).await?;
     tx.commit().await.context("bulk_writer Chunk commit")?;
+    Ok(())
+}
+
+/// Max same-slice retries on a TRANSIENT fault before propagating (a persistent
+/// lock/deadlock is NOT a poison row — never silently drop it).
+const BISECT_MAX_TRANSIENT_RETRIES: u32 = 3;
+
+async fn flush_chunks_async(
+    client: &mut deadpool_postgres::Client,
+    rows: &[ChunkRow],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    // Happy path: the whole batch in one tx (unchanged cost — one probe).
+    match copy_chunks_tx(client, rows).await {
+        Ok(()) => return Ok(()),
+        Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+            // Not a poison row (syntax/permission/unknown) → propagate unchanged.
+            Some(CopyErrorClass::Other) | None => return Err(e),
+            // Transient or Data → fall through to the resilient bisection loop.
+            Some(CopyErrorClass::Transient) | Some(CopyErrorClass::Data) => {}
+        },
+    }
+    // Resilient path (REQ-AXO-902198): isolate poison rows by bisection; each
+    // (sub-)batch in its own tx; transient faults retry the same slice.
+    let mut planner = BisectPlanner::new(rows.len());
+    while let Some(range) = planner.next() {
+        let mut tries = 0u32;
+        loop {
+            match copy_chunks_tx(client, &rows[range.clone()]).await {
+                Ok(()) => break, // this slice landed
+                Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+                    Some(CopyErrorClass::Transient) if tries < BISECT_MAX_TRANSIENT_RETRIES => {
+                        tries += 1;
+                        continue;
+                    }
+                    Some(CopyErrorClass::Data) => {
+                        planner.on_data(range.clone());
+                        break;
+                    }
+                    // Other, or a transient that outlasted the retries → propagate
+                    // (never silently drop a row that isn't provably poison).
+                    _ => return Err(e),
+                },
+            }
+        }
+    }
+    let poison = planner.into_poison();
+    if !poison.is_empty() {
+        let dropped: Vec<&str> = poison.iter().map(|&i| rows[i].chunk_id.as_str()).collect();
+        log::warn!(
+            "flush_chunks: dropped {} poison chunk row(s) via bisection so the batch could land (REQ-AXO-902198): {:?}",
+            poison.len(),
+            dropped
+        );
+    }
     Ok(())
 }
 
@@ -1115,6 +1259,51 @@ mod tests {
         assert!(matches!(strip_nul("a\0b\0c"), std::borrow::Cow::Owned(_)));
         assert_eq!(strip_nul("a\0b\0c"), "abc");
         assert_eq!(strip_nul("\0"), "");
+    }
+
+    #[test]
+    fn classify_copy_error_maps_sqlstate_families() {
+        // REQ-AXO-902198 — Transient: the data is fine, retry the batch.
+        assert_eq!(classify_copy_error("40001"), CopyErrorClass::Transient); // serialization
+        assert_eq!(classify_copy_error("40P01"), CopyErrorClass::Transient); // deadlock
+        assert_eq!(classify_copy_error("55P03"), CopyErrorClass::Transient); // lock_not_available
+        assert_eq!(classify_copy_error("57014"), CopyErrorClass::Transient); // statement_timeout
+        assert_eq!(classify_copy_error("08006"), CopyErrorClass::Transient); // connection_failure
+        // Data: the row is poison → bisect to isolate it.
+        assert_eq!(classify_copy_error("22021"), CopyErrorClass::Data); // invalid byte (the 0x00 class)
+        assert_eq!(classify_copy_error("22P02"), CopyErrorClass::Data); // invalid text representation
+        assert_eq!(classify_copy_error("23505"), CopyErrorClass::Data); // unique_violation
+        assert_eq!(classify_copy_error("23503"), CopyErrorClass::Data); // foreign_key_violation
+        assert_eq!(classify_copy_error("23502"), CopyErrorClass::Data); // not_null_violation
+        assert_eq!(classify_copy_error("23514"), CopyErrorClass::Data); // check_violation
+        // Other: not a poison row → propagate unchanged.
+        assert_eq!(classify_copy_error("42601"), CopyErrorClass::Other); // syntax_error
+        assert_eq!(classify_copy_error("42501"), CopyErrorClass::Other); // insufficient_privilege
+    }
+
+    /// Drive the pure `BisectPlanner` with a known poison set: a probed slice "fails DATA"
+    /// iff it contains a poison index (else it lands). The resilient flush relies on this
+    /// isolating EXACTLY the poison indices while every clean row lands.
+    fn run_planner(total: usize, poison_set: &[usize]) -> Vec<usize> {
+        let mut pl = BisectPlanner::new(total);
+        while let Some(r) = pl.next() {
+            if poison_set.iter().any(|p| r.contains(p)) {
+                pl.on_data(r);
+            }
+        }
+        pl.into_poison()
+    }
+
+    #[test]
+    fn bisect_planner_isolates_exactly_the_poison_rows() {
+        // Happy path: no poison → one probe, zero drops.
+        assert_eq!(run_planner(8, &[]), Vec::<usize>::new());
+        assert_eq!(run_planner(8, &[3]), vec![3]); // single, middle
+        assert_eq!(run_planner(8, &[0, 7]), vec![0, 7]); // both ends
+        assert_eq!(run_planner(10, &[2, 3, 8]), vec![2, 3, 8]); // several, non-power-of-two
+        assert_eq!(run_planner(1, &[0]), vec![0]); // singleton poison
+        assert_eq!(run_planner(0, &[]), Vec::<usize>::new()); // empty
+        assert_eq!(run_planner(4, &[0, 1, 2, 3]), vec![0, 1, 2, 3]); // all poison
     }
 
     #[test]
