@@ -560,6 +560,78 @@ pub fn spawn_pipeline_indexer(
         });
     }
 
+    // REQ-AXO-902185 slice 2 — periodic duplication-edge reconcile, gated on
+    // `duplication_scan_due` (pending_chunks == 0). Mirrors the reconciliation
+    // walk above (tick → work → sleep), but the work only runs when the
+    // vectorization pipeline has nothing queued, so it never competes with
+    // live embedding for GPU/DB throughput (measured cost: ~1-2min/project via
+    // the pgvector HNSW index, REQ-AXO-902185 slice 1 body). Every registered
+    // project is reconciled per tick — no per-project change-detection yet
+    // (deferred: a full reconcile is cheap enough at today's corpus sizes;
+    // revisit if project count/size growth makes it not so).
+    {
+        let dup_sweep_secs: u64 = std::env::var("AXON_DUPLICATION_SWEEP_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v >= 60)
+            .unwrap_or(1200);
+        let store_for_dup = store.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(dup_sweep_secs)).await;
+                let store_for_check = store_for_dup.clone();
+                let pending = tokio::task::spawn_blocking(move || store_for_check.pending_embed_chunk_count())
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                let pending = match pending {
+                    Ok(n) => n,
+                    Err(e) => {
+                        warn!(error = %e, "duplication sweep: pending-chunk count failed (skipping this tick)");
+                        continue;
+                    }
+                };
+                if !crate::duplication_scan::duplication_scan_due(pending) {
+                    info!(pending, "duplication sweep: pipeline busy, skipping this tick");
+                    continue;
+                }
+                let store_for_registry = store_for_dup.clone();
+                let projects = match tokio::task::spawn_blocking(move || {
+                    crate::project_meta::registered_project_identities(&store_for_registry)
+                })
+                .await
+                {
+                    Ok(Ok(ids)) => ids,
+                    Ok(Err(e)) => {
+                        warn!(error = %e, "duplication sweep: project registry read failed (skipping this tick)");
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "duplication sweep: project registry task panicked (skipping this tick)");
+                        continue;
+                    }
+                };
+                for id in projects {
+                    let store_for_scan = store_for_dup.clone();
+                    let code = id.code.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        store_for_scan.reconcile_duplication_edges(&code)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(report)) => info!(
+                            project_code = %id.code,
+                            symbols_scanned = report.symbols_scanned,
+                            pairs_found = report.pairs_found,
+                            "duplication sweep: reconciled"
+                        ),
+                        Ok(Err(e)) => warn!(project_code = %id.code, error = %e, "duplication sweep: reconcile failed (non-fatal, next tick retries)"),
+                        Err(e) => warn!(project_code = %id.code, error = %e, "duplication sweep: reconcile task panicked"),
+                    }
+                }
+            }
+        });
+    }
+
     Ok(())
 }
 

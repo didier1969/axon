@@ -53,7 +53,7 @@ pub struct DuplicationScanReport {
 // `query_json` renders every column as a JSON string (confirmed empirically: a
 // bigint `count(*)` comes back as `"3"`, not `3`) — `.as_i64()` alone silently
 // reads that as `None`/0. Accept both forms.
-fn scalar_count(raw: &str) -> usize {
+pub(crate) fn scalar_count(raw: &str) -> usize {
     let rows: Vec<Vec<Value>> = serde_json::from_str(raw).unwrap_or_default();
     rows.first()
         .and_then(|row| row.first())
@@ -61,7 +61,28 @@ fn scalar_count(raw: &str) -> usize {
         .unwrap_or(0) as usize
 }
 
+/// REQ-AXO-902185 slice 2 — pure decision: is the vectorization pipeline idle
+/// enough to run a duplication reconcile without competing with live embedding
+/// work? `pending_chunks` = count of `ist.chunk` rows not yet embedded
+/// (`embed_status != 'done'`) across the whole instance, the same "is there
+/// still work queued" signal `embedding_status` already surfaces. Zero
+/// pending = safe to spend the ~1-2min/project HNSW scan cost.
+pub fn duplication_scan_due(pending_chunks: usize) -> bool {
+    pending_chunks == 0
+}
+
 impl GraphStore {
+    /// REQ-AXO-902185 slice 2 — instance-wide count of chunks still queued for
+    /// embedding (`embed_status = 'pending'`; terminal states are `embedded`
+    /// and `failed`, mirroring the drain queries in `graph_ingestion.rs`).
+    /// Feeds `duplication_scan_due`.
+    pub fn pending_embed_chunk_count(&self) -> Result<usize, String> {
+        let raw = self
+            .query_json("SELECT count(*) FROM ist.chunk WHERE embed_status = 'pending'")
+            .map_err(|e| e.to_string())?;
+        Ok(scalar_count(&raw))
+    }
+
     /// Rescans `project_code` for near-duplicate symbol pairs and replaces its
     /// entire `SIMILAR_TO` edge set with the fresh result (full reconcile —
     /// see module docs for why this must not be incremental). Returns how many
@@ -129,5 +150,25 @@ impl GraphStore {
         let pairs_found = scalar_count(&pairs_raw);
 
         Ok(DuplicationScanReport { symbols_scanned, pairs_found })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scalar_count_reads_number_and_string_encoded_forms() {
+        assert_eq!(scalar_count("[[3]]"), 3);
+        assert_eq!(scalar_count(r#"[["3"]]"#), 3);
+        assert_eq!(scalar_count("[]"), 0);
+        assert_eq!(scalar_count("not json"), 0);
+    }
+
+    #[test]
+    fn duplication_scan_due_only_when_no_pending_embeds() {
+        assert!(duplication_scan_due(0));
+        assert!(!duplication_scan_due(1));
+        assert!(!duplication_scan_due(4_000));
     }
 }
