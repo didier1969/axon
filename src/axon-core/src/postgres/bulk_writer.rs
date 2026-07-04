@@ -829,6 +829,20 @@ async fn purge_reindexed_files_in_tx(
         )
         .await
         .context("purge_reindexed: Symbol")?;
+        // REQ-AXO-902204 — also purge the OUTBOUND calls of THIS file's symbols. A CALLS edge
+        // is sourced from the CALLER's symbol id (`…file.rs::method`), NOT the file path, so the
+        // `source_id = path` delete below never reached them: a call REMOVED from the code left a
+        // stale edge surviving every re-index. Delete edges sourced from any symbol this file
+        // CONTAINS (the CONTAINS edges still exist here — the path-sourced delete runs next), so
+        // re-parse re-writes a fresh outbound call set. Inbound edges (owned by caller files) stay.
+        tx.execute(
+            "DELETE FROM ist.Edge WHERE source_id IN \
+                 (SELECT target_id FROM ist.Edge WHERE source_id = $1 \
+                  AND relation_type = 'CONTAINS')",
+            &path_params,
+        )
+        .await
+        .context("purge_reindexed: outbound edges of file's symbols (REQ-AXO-902204)")?;
         tx.execute(
             "DELETE FROM ist.Edge WHERE source_id = $1",
             &path_params,
