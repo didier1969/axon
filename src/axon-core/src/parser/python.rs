@@ -15,6 +15,34 @@ impl PythonParser {
             .collect()
     }
 
+    // REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity, base 1 +
+    // one per decision point. Nested `function_definition`/`lambda` skipped:
+    // they get their own count when `walk` visits them separately, so a
+    // nested closure's branches must never inflate the enclosing function's.
+    fn count_branches(&self, node: Node) -> i32 {
+        let mut count = 0i32;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if matches!(child.kind(), "function_definition" | "lambda") {
+                continue;
+            }
+            if matches!(
+                child.kind(),
+                "if_statement"
+                    | "elif_clause"
+                    | "for_statement"
+                    | "while_statement"
+                    | "except_clause"
+                    | "case_clause"
+                    | "conditional_expression"
+            ) {
+                count += 1;
+            }
+            count += self.count_branches(child);
+        }
+        count
+    }
+
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -183,6 +211,11 @@ impl PythonParser {
                         .join(","),
                 );
             }
+            let complexity = 1 + self.count_branches(body);
+            props.insert(
+                "cyclomatic_complexity".to_string(),
+                complexity.to_string(),
+            );
         }
 
         // --- UNSAFE DETECTION ---
@@ -305,5 +338,92 @@ impl Parser for PythonParser {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! REQ-AXO-902185 (god-objects) — cyclomatic complexity regression tests,
+    //! mirroring the Rust parser's coverage (parser/rust.rs) for the second
+    //! language in the operator-chosen "all languages" scope.
+    use super::*;
+    use crate::parser::Parser;
+
+    fn parser() -> PythonParser {
+        PythonParser::new()
+    }
+
+    #[test]
+    fn simple_function_has_complexity_one() {
+        let p = parser();
+        let result = p.parse("def f():\n    x = 1\n    y = x + 1\n");
+        if result.symbols.is_empty() {
+            eprintln!("python wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn branching_function_counts_each_decision_point() {
+        let p = parser();
+        // 1 (base) + if + elif + while + for + except = 6.
+        let result = p.parse(
+            "def f(x):\n\
+             \x20   if x > 0:\n\
+             \x20       pass\n\
+             \x20   elif x < 0:\n\
+             \x20       pass\n\
+             \x20   while x > 0:\n\
+             \x20       break\n\
+             \x20   for i in range(x):\n\
+             \x20       pass\n\
+             \x20   try:\n\
+             \x20       pass\n\
+             \x20   except ValueError:\n\
+             \x20       pass\n",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("python wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("6"),
+            "props: {:?}",
+            f.properties
+        );
+    }
+
+    #[test]
+    fn nested_function_branch_does_not_inflate_enclosing_complexity() {
+        let p = parser();
+        // outer: base 1 + 1 if = 2. The Python parser does not currently
+        // extract nested `def` as its own Symbol (pre-existing gap, out of
+        // scope here) — but `count_branches` must still exclude the nested
+        // `function_definition` subtree, so its `if` does not leak into
+        // outer's count.
+        let result = p.parse(
+            "def outer(x):\n\
+             \x20   if x > 0:\n\
+             \x20       pass\n\
+             \x20   def inner(y):\n\
+             \x20       if y > 0:\n\
+             \x20           pass\n",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("python wasm grammar unavailable, skipping");
+            return;
+        }
+        let outer = result.symbols.iter().find(|s| s.name == "outer").unwrap();
+        assert_eq!(
+            outer.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("2")
+        );
     }
 }

@@ -27,6 +27,34 @@ impl GoParser {
         }
     }
 
+    // REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity, base 1 +
+    // one per decision point. `default_case`/wildcard included (mirrors the
+    // Rust parser counting every `match_arm` including `_`). Go func literals
+    // are not extracted as separate symbols (no nested-fn exclusion needed
+    // here, same reasoning as Elixir anonymous fns): their branches simply
+    // fold into the enclosing named function/method, matching how their
+    // calls already fold in via walk_for_calls.
+    const BRANCHING_KINDS: &[&str] = &[
+        "if_statement",
+        "for_statement",
+        "expression_case",
+        "type_case",
+        "communication_case",
+        "default_case",
+    ];
+
+    fn count_branches(node: Node) -> i32 {
+        let mut count = 0i32;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if Self::BRANCHING_KINDS.contains(&child.kind()) {
+                count += 1;
+            }
+            count += Self::count_branches(child);
+        }
+        count
+    }
+
     fn walk<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
@@ -85,6 +113,8 @@ impl GoParser {
                 if node_content.contains("unsafe.") {
                     is_unsafe = true;
                 }
+                let complexity = 1 + Self::count_branches(body);
+                properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
                 // REQ-AXO-91506 — body calls carry the function name as caller.
                 Self::walk_for_calls(body, source_bytes, result, false, &name);
             }
@@ -171,6 +201,8 @@ impl GoParser {
                 if node_content.contains("unsafe.") {
                     is_unsafe = true;
                 }
+                let complexity = 1 + Self::count_branches(body);
+                properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
                 // REQ-AXO-91506 — methods carry Type::method as caller.
                 let caller = if let Some(rt) = properties.get("class_name") {
                     format!("{}::{}", rt, name)
@@ -400,5 +432,88 @@ impl Parser for GoParser {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! REQ-AXO-902185 (god-objects) — cyclomatic complexity regression tests.
+    use super::*;
+
+    fn parser() -> GoParser {
+        GoParser::new()
+    }
+
+    #[test]
+    fn simple_function_has_complexity_one() {
+        let p = parser();
+        let result = p.parse("package main\nfunc f() int {\n\treturn 1\n}\n");
+        if result.symbols.is_empty() {
+            eprintln!("go wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn branching_function_counts_each_decision_point() {
+        let p = parser();
+        // 1 (base) + if + for + 2 switch cases (incl. default) = 5.
+        let result = p.parse(
+            "package main\n\
+             func f(x int) int {\n\
+             \tif x > 0 {\n\
+             \t\treturn 1\n\
+             \t}\n\
+             \tfor i := 0; i < x; i++ {\n\
+             \t}\n\
+             \tswitch x {\n\
+             \tcase 0:\n\
+             \t\treturn 0\n\
+             \tdefault:\n\
+             \t\treturn -1\n\
+             \t}\n\
+             \treturn x\n\
+             }\n",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("go wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("5"),
+            "props: {:?}",
+            f.properties
+        );
+    }
+
+    #[test]
+    fn method_gets_its_own_complexity() {
+        let p = parser();
+        let result = p.parse(
+            "package main\n\
+             type T struct{}\n\
+             func (t *T) M(x int) int {\n\
+             \tif x > 0 {\n\
+             \t\treturn 1\n\
+             \t}\n\
+             \treturn 0\n\
+             }\n",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("go wasm grammar unavailable, skipping");
+            return;
+        }
+        let m = result.symbols.iter().find(|s| s.name == "M").unwrap();
+        assert_eq!(
+            m.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("2")
+        );
     }
 }

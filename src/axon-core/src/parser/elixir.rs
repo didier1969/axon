@@ -295,6 +295,8 @@ impl ElixirParser {
                         .join(","),
                 );
             }
+            let complexity = 1 + Self::count_branches(do_block, source_bytes);
+            properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
         }
 
         let node_content = node.utf8_text(source_bytes).unwrap_or("");
@@ -418,6 +420,42 @@ impl ElixirParser {
                 properties: HashMap::new(),
             });
         }
+    }
+
+    // REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity, base 1 +
+    // one per branching special form encountered while walking the do_block.
+    // Elixir control flow is macro/call-based (case/cond/with/if/unless/for
+    // parse as `call` nodes, same as CONTROL_FLOW_FORMS above) rather than
+    // dedicated statement kinds, so this mirrors extract_calls_from_block's
+    // traversal shape instead of matching tree-sitter node kinds directly.
+    // `try` and `receive` are deliberately excluded: unlike case/cond/with
+    // whose whole purpose is branching, they are less clearly single decision
+    // points in this grammar and are left for a follow-up once measured
+    // against real code (same "don't guess a threshold" discipline as the
+    // god_objects AND-classification and the GOD_OBJECT_* constants).
+    const BRANCHING_FORMS: &[&str] = &["case", "cond", "with", "if", "unless", "for"];
+
+    fn count_branches<'a>(node: Node<'a>, source_bytes: &[u8]) -> i32 {
+        let mut count = 0i32;
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "call" {
+                if let Some(ident) = Self::call_identifier(child, source_bytes) {
+                    if Self::BRANCHING_FORMS.contains(&ident.as_str()) {
+                        count += 1;
+                    }
+                    // A nested `def`/`defp`/`defmacro`/`defmacrop` gets its own
+                    // complexity count when `walk` visits it separately (same
+                    // discipline as Rust's nested `function_item` exclusion) —
+                    // never inflate the enclosing function's count with it.
+                    if matches!(ident.as_str(), "def" | "defp" | "defmacro" | "defmacrop") {
+                        continue;
+                    }
+                }
+            }
+            count += Self::count_branches(child, source_bytes);
+        }
+        count
     }
 
     fn extract_calls_from_block<'a>(
@@ -975,6 +1013,100 @@ mod tests {
                 .iter()
                 .any(|s| s.name == "MyApp.Native.add" && s.is_nif),
             "is_nif flag missing on the NIF stub symbol"
+        );
+    }
+
+    #[test]
+    fn test_elixir_parser_simple_function_has_complexity_one() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Axon.Sample do
+          def f(x) do
+            x + 1
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+        let f = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Axon.Sample.f")
+            .expect("f symbol");
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn test_elixir_parser_branching_function_counts_each_decision_point() {
+        let parser = ElixirParser::new();
+        // 1 (base) + case + if + for = 4.
+        let content = r#"
+        defmodule Axon.Sample do
+          def f(x) do
+            case x do
+              :a -> :ok
+              _ -> :err
+            end
+            if x > 0 do
+              :pos
+            end
+            for i <- x, do: i
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+        let f = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Axon.Sample.f")
+            .expect("f symbol");
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("4"),
+            "props: {:?}",
+            f.properties
+        );
+    }
+
+    #[test]
+    fn test_elixir_parser_nested_def_gets_its_own_complexity_not_added_to_parent() {
+        let parser = ElixirParser::new();
+        // outer: base 1 + 1 if = 2. inner (nested defp): base 1 + 1 if = 2.
+        let content = r#"
+        defmodule Axon.Sample do
+          def outer(x) do
+            if x > 0 do
+              :pos
+            end
+          end
+
+          defp inner(y) do
+            if y > 0 do
+              :pos
+            end
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+        let outer = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Axon.Sample.outer")
+            .expect("outer symbol");
+        let inner = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Axon.Sample.inner")
+            .expect("inner symbol");
+        assert_eq!(
+            outer.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            inner.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("2")
         );
     }
 

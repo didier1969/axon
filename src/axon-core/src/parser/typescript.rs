@@ -179,6 +179,46 @@ impl TypeScriptParser {
         }
     }
 
+    // REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity, base 1 +
+    // one per decision point. Nested function/method/arrow/class bodies are
+    // excluded from the walk: the query cursor in `parse` already captures
+    // them as their own symbols with their own body, so counting their
+    // branches here too would double them into the enclosing declaration
+    // (same discipline as the Rust `function_item` exclusion).
+    const BRANCHING_KINDS: &[&str] = &[
+        "if_statement",
+        "for_statement",
+        "for_in_statement",
+        "while_statement",
+        "do_statement",
+        "switch_case",
+        "switch_default",
+        "catch_clause",
+        "ternary_expression",
+    ];
+
+    fn count_branches(&self, node: Node) -> i32 {
+        let mut count = 0i32;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if matches!(
+                child.kind(),
+                "function_declaration"
+                    | "method_definition"
+                    | "function_expression"
+                    | "arrow_function"
+                    | "class_declaration"
+            ) {
+                continue;
+            }
+            if Self::BRANCHING_KINDS.contains(&child.kind()) {
+                count += 1;
+            }
+            count += self.count_branches(child);
+        }
+        count
+    }
+
     fn structural_properties_for_declaration<'a>(
         &self,
         declaration: Node<'a>,
@@ -213,6 +253,8 @@ impl TypeScriptParser {
                         .join(","),
                 );
             }
+            let complexity = 1 + self.count_branches(body);
+            properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
         }
         properties
     }
@@ -568,6 +610,86 @@ class Batcher {
         assert_eq!(
             method_symbol.properties.get("body_start_line"),
             Some(&"16".to_string())
+        );
+    }
+
+    #[test]
+    fn simple_function_has_complexity_one() {
+        let parser = TypeScriptParser::new();
+        let result = parser.parse("function f() { return 1; }");
+        let f = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "f")
+            .expect("f symbol");
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn branching_function_counts_each_decision_point() {
+        let parser = TypeScriptParser::new();
+        // 1 (base) + if + while + for + switch_case + switch_default + ternary = 7.
+        let result = parser.parse(
+            r#"
+function f(x) {
+  if (x > 0) { return 1; }
+  while (x > 0) { x--; }
+  for (let i = 0; i < x; i++) {}
+  switch (x) {
+    case 0: return 0;
+    default: return -1;
+  }
+  return x > 0 ? 1 : 0;
+}
+"#,
+        );
+        let f = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "f")
+            .expect("f symbol");
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("7"),
+            "props: {:?}",
+            f.properties
+        );
+    }
+
+    #[test]
+    fn nested_function_gets_its_own_complexity_not_added_to_parent() {
+        let parser = TypeScriptParser::new();
+        // outer: base 1 + 1 if = 2. inner (nested function_declaration): base 1 + 1 if = 2.
+        let result = parser.parse(
+            r#"
+function outer(x) {
+  if (x > 0) {}
+  function inner(y) {
+    if (y > 0) {}
+  }
+}
+"#,
+        );
+        let outer = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "outer")
+            .expect("outer symbol");
+        let inner = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "inner")
+            .expect("inner symbol");
+        assert_eq!(
+            outer.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            inner.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("2")
         );
     }
 }
