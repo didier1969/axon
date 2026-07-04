@@ -18,6 +18,31 @@ use super::tools_framework::{STATUS_CACHE_TTL_MS, STATUS_FULL_CACHE_TTL_MS};
 use super::tools_framework_support::{cache_read, cache_write};
 use super::McpServer;
 
+/// REQ-AXO-902196 — in a SPLIT live deployment the MCP brain runs in
+/// `brain_only` mode BY DESIGN while a SEPARATE `axon-indexer` process owns
+/// ingestion. `status` labelled "Runtime mode: brain_only" with no hint the
+/// indexer was alive, so operators/LLMs read it as "indexing is off" and
+/// distrusted IST reads (documented lie — MEMORY s96: "status/embedding_status
+/// mentent en brain_only"). When this brain is `brain_only` AND a peer indexer
+/// heartbeat is fresh (canonical PG liveness), surface the SYSTEM-level truth
+/// explicitly. Pure so it unit-tests without a live runtime.
+fn system_indexer_topology_note(
+    process_role: &str,
+    brain_is_brain_only: bool,
+    peer_indexer_ready: bool,
+) -> Option<String> {
+    if process_role == "brain" && brain_is_brain_only && peer_indexer_ready {
+        Some(
+            "**Indexeur (système) :** vivant — heartbeat PG frais ; le système tourne en `indexer_full`. \
+Ce process brain est `brain_only` PAR DESIGN (déploiement live split : brain MCP + indexeur séparé) — \
+le label « Runtime mode: brain_only » ci-dessus est le rôle de CE process, PAS un arrêt de l'indexation.\n"
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 impl McpServer {
     pub(super) fn axon_status_status_impl(&self, args: &Value) -> Option<Value> {
         let mode = args.get("mode").and_then(|value| value.as_str());
@@ -406,6 +431,23 @@ impl McpServer {
             .get("process_role")
             .and_then(|value| value.as_str())
             .unwrap_or("unknown");
+        // REQ-AXO-902196 — canonical peer-indexer liveness (the SAME PG-heartbeat
+        // authority `promote_status` / `runtime_topology_snapshot` trust,
+        // PIL-AXO-001). Lets `status` surface that a split live deployment's
+        // separate indexer is alive even though THIS brain process is brain_only.
+        let peer_indexer_ready = {
+            let hb = self
+                .graph_store
+                .latest_lifecycle_heartbeat("indexer")
+                .ok()
+                .flatten();
+            super::runtime_topology_support::resolve_indexer_liveness(
+                now_ms,
+                hb.as_ref().map(|row| row.heartbeat_ms),
+                super::runtime_topology_support::EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+            )
+            .ready
+        };
         let indexed_projection_fresh = indexer_feed_state == "fresh"
             && indexer_feed_reason.is_none()
             && runtime_authority_converged;
@@ -484,6 +526,15 @@ impl McpServer {
             utility_scheduler.reason,
             drain_state,
         );
+        // REQ-AXO-902196 — kill the "brain_only ⇒ indexing off" misread: when a
+        // peer indexer heartbeat is fresh, say so right under the mode line.
+        if let Some(note) = system_indexer_topology_note(
+            process_role,
+            runtime_mode == AxonRuntimeMode::BrainOnly,
+            peer_indexer_ready,
+        ) {
+            evidence.push_str(&note);
+        }
         // REQ-AXO-042 — surface the LLM-actionable signals in the brief
         // text rendering, not just inside `data.truth_cockpit`. Without
         // this, an LLM reading the markdown text has to compute the next
@@ -1911,5 +1962,30 @@ mod tests {
             Some("full")
         );
         assert!(hint.is_null());
+    }
+
+    // --- REQ-AXO-902196 : split-live brain must not read as "indexing off" ----
+    #[test]
+    fn system_indexer_note_surfaces_when_brain_only_with_live_peer() {
+        // The exact production case: this brain runs brain_only, a SEPARATE
+        // indexer heartbeat is fresh → we must announce the system is indexer_full.
+        let note = system_indexer_topology_note("brain", true, true).expect("note expected");
+        assert!(note.contains("indexer_full"));
+        assert!(note.contains("PAR DESIGN"));
+    }
+
+    #[test]
+    fn system_indexer_note_silent_when_no_live_peer() {
+        // brain_only AND no fresh peer heartbeat = genuinely standalone → no note
+        // (the plain "brain_only" line is then the whole truth).
+        assert!(system_indexer_topology_note("brain", true, false).is_none());
+    }
+
+    #[test]
+    fn system_indexer_note_silent_when_not_brain_only_or_not_brain() {
+        // A unified/indexer process is not the split-live case → never annotate.
+        assert!(system_indexer_topology_note("brain", false, true).is_none());
+        assert!(system_indexer_topology_note("indexer", true, true).is_none());
+        assert!(system_indexer_topology_note("unknown", true, true).is_none());
     }
 }
