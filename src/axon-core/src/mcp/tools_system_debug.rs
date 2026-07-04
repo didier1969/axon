@@ -883,3 +883,36 @@ pub(crate) fn axon_debug_with_args(server: &McpServer, args: &Value) -> Option<V
         }
     }))
 }
+
+/// REQ-AXO-902190 lot 3 — `parse_scalar_count_row` is the sole decoder between
+/// `execute_raw_sql_gateway`'s two possible DuckDB-CLI-era row shapes (tabular
+/// `[[n]]` vs object `[{"count(*)": n}]`) and the `i64` callers actually use;
+/// a silent regression here makes every `canonical_count`/`snapshot_count`
+/// closure in `axon_debug_with_args` fall back to 0 without any error surfaced.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_scalar_count_row_reads_tabular_form() {
+        assert_eq!(parse_scalar_count_row("[[3]]"), Some(3));
+    }
+
+    #[test]
+    fn parse_scalar_count_row_reads_object_form_alternate_keys() {
+        assert_eq!(parse_scalar_count_row(r#"[{"count(*)": 5}]"#), Some(5));
+        assert_eq!(parse_scalar_count_row(r#"[{"count_star()": 7}]"#), Some(7));
+        assert_eq!(parse_scalar_count_row(r#"[{"count": 9}]"#), Some(9));
+    }
+
+    #[test]
+    fn parse_scalar_count_row_falls_back_to_first_value_when_no_known_key() {
+        assert_eq!(parse_scalar_count_row(r#"[{"total": 42}]"#), Some(42));
+    }
+
+    #[test]
+    fn parse_scalar_count_row_none_on_malformed_or_empty_input() {
+        assert_eq!(parse_scalar_count_row("not json"), None);
+        assert_eq!(parse_scalar_count_row("[]"), None);
+    }
+}

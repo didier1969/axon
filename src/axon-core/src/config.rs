@@ -139,3 +139,70 @@ fn load_config() -> anyhow::Result<Config> {
     }
     anyhow::bail!("Config not found")
 }
+
+/// REQ-AXO-902190 lot 3 — coverage for the `serde(default = "...")` value
+/// providers. Trivial in isolation, but each IS the load-bearing fallback
+/// when `.axon/capabilities.toml` omits a field; a silent value change here
+/// changes indexing behavior repo-wide without any config diff to review.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_supported_extensions_covers_core_languages_and_lll() {
+        let exts = default_supported_extensions();
+        for expected in ["rs", "py", "ex", "md", "lll"] {
+            assert!(
+                exts.iter().any(|e| e == expected),
+                "expected {expected} in {exts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_ignored_directory_segments_excludes_fastembed_cache() {
+        assert_eq!(default_ignored_directory_segments(), vec![".fastembed_cache"]);
+    }
+
+    #[test]
+    fn default_blocked_subtree_hint_segments_excludes_pg_wal() {
+        let segments = default_blocked_subtree_hint_segments();
+        assert!(segments.contains(&"pg_wal".to_string()));
+        assert!(segments.contains(&"_bmad".to_string()));
+    }
+
+    #[test]
+    fn default_soft_excluded_directory_segments_allowlist_is_empty() {
+        assert!(default_soft_excluded_directory_segments_allowlist().is_empty());
+    }
+
+    #[test]
+    fn default_subtree_hint_cooldown_ms_is_15_seconds() {
+        assert_eq!(default_subtree_hint_cooldown_ms(), 15_000);
+    }
+
+    #[test]
+    fn default_subtree_hint_retry_budget_is_3() {
+        assert_eq!(default_subtree_hint_retry_budget(), 3);
+    }
+
+    #[test]
+    fn default_use_git_global_ignore_is_false() {
+        assert!(!default_use_git_global_ignore());
+    }
+
+    #[test]
+    fn default_legacy_axonignore_additive_is_true() {
+        assert!(default_legacy_axonignore_additive());
+    }
+
+    #[test]
+    fn default_ignore_reconcile_enabled_is_true() {
+        assert!(default_ignore_reconcile_enabled());
+    }
+
+    #[test]
+    fn default_ignore_reconcile_dry_run_is_true() {
+        assert!(default_ignore_reconcile_dry_run());
+    }
+}
