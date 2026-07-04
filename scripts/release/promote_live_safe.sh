@@ -321,6 +321,19 @@ if [[ "$SKIP_BUILD" -ne 1 ]]; then
   run_step 1 build "$ROOT_DIR/scripts/axon" setup --artifact-only
 fi
 
+# --- Step 4 (manifest) launched EARLY, in background (REQ-AXO-902188) ---
+# The manifest (sha + archive of bin/*) depends ONLY on the build (step 1), NOT on the
+# dev_gate (step 2, read-only on bin/*) nor preflight (step 3). Run it CONCURRENTLY with
+# the dev_gate to take ~10-30s off the critical path; joined at step 4 below (before the
+# step-5 swap, which needs manifest_path). Both sides are read-only on bin/* → no write
+# race. If HEAD moves meanwhile, the ensure_head_stable guards at steps 3/5 fail-close
+# before the (now-stale) manifest is ever used.
+manifest_bg_out="$(mktemp)"
+manifest_bg_pid=""
+( "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified ) > "$manifest_bg_out" 2>&1 &
+manifest_bg_pid=$!
+promote_log "== step 4: manifest launched in background (∥ step 2 dev_gate — REQ-AXO-902188) pid=${manifest_bg_pid} =="
+
 # --- Step 2: dev gate ---
 # After building, restart dev with the new binary so validate_dev_healthy
 # can verify the correct build_id. The restart is cheap (~5s) and ensures
@@ -364,12 +377,25 @@ ensure_head_stable
 run_step 3 preflight "$ROOT_DIR/scripts/axon" release-preflight
 ensure_head_stable
 
-# --- Step 4: manifest ---
+# --- Step 4: manifest (JOIN the background job launched before step 2, REQ-AXO-902188) ---
 CURRENT_STEP=4; CURRENT_STEP_NAME="manifest"
 promote_log ""
-promote_log "== step 4: manifest =="
-manifest_output="$("$ROOT_DIR/scripts/axon" create-release-manifest --state qualified 2>&1 | tee -a "$PROMOTE_LOG")"
-manifest_path="$(echo "$manifest_output" | tail -n 1)"
+promote_log "== step 4: manifest (join background pid=${manifest_bg_pid:-none}) =="
+if [[ -n "$manifest_bg_pid" ]]; then
+  if ! wait "$manifest_bg_pid"; then
+    cat "$manifest_bg_out" | tee -a "$PROMOTE_LOG"
+    rm -f "$manifest_bg_out"
+    promote_log "❌ background manifest job (pid=${manifest_bg_pid}) failed"
+    exit 1
+  fi
+else
+  # Fallback: background launch was skipped — build the manifest synchronously now.
+  "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified > "$manifest_bg_out" 2>&1 \
+    || { cat "$manifest_bg_out" | tee -a "$PROMOTE_LOG"; rm -f "$manifest_bg_out"; exit 1; }
+fi
+cat "$manifest_bg_out" | tee -a "$PROMOTE_LOG"
+manifest_path="$(tail -n 1 "$manifest_bg_out")"
+rm -f "$manifest_bg_out"
 if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
   promote_log "Failed to capture manifest path from create-release-manifest output"
   exit 1
@@ -416,26 +442,9 @@ promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
 # Runs in devenv so psql resolves.
 run_step 5b apply_ddl_live bash -lc "cd '$ROOT_DIR' && devenv shell --no-reload --no-tui -- bash -lc 'source scripts/lib/ensure-runtime.sh && apply_canonical_ddl live'"
 
-# --- Step 6: qualify ---
-if [[ "$SKIP_QUALIFY" -ne 1 ]]; then
-  ensure_head_stable
-  run_step 6 qualify_mcp "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE"
-fi
-
-# --- Step 6c: reconcile + FAIL-CLOSED health-gate (REQ-AXO-902111 / REQ-AXO-902157) ---
-# Dogfood promote_status as the post-swap verdict over the FULL runtime_contract
-# (brain_serving + indexer_alive). The in-place restart (step 5) can leave the live
-# indexer down/crash-looping — the s95 incident (promote 1306): the promote reported
-# COMPLETE on a DEGRADED runtime because this gate was warn-only AND step-6 qualify
-# tests only the brain (surface=core). Fix (the follow-up this block long promised):
-# poll the verdict on an extended GPU-cold-start budget; on a persistent non-clean
-# phase, AUTO-RECOVER via the proven full restart (stop --hard + start full), re-verify,
-# and FAIL CLOSED if still not clean — a promote must NEVER silently report success on
-# a half-up runtime_contract.
-CURRENT_STEP=6c; CURRENT_STEP_NAME="reconcile"
-promote_log ""
-promote_log "== step 6c: reconcile + health-gate (promote_status) =="
-
+# --- promote_status full-contract poll (shared by step 6 pre-gate + step 6c) ---
+# REQ-AXO-902189 — hoisted above step 6 so the qualify pre-gate and the 6c health-gate
+# reuse ONE definition. Sets recon_phase / recon_failed; returns 0 iff phase==clean.
 recon_phase=""; recon_failed=""
 _poll_promote_clean() {  # $1 = max attempts (×5s); sets recon_phase / recon_failed; 0 iff clean
   local attempts="$1" _a recon_json recon_eval
@@ -461,6 +470,42 @@ print(f'{ph}|{fg}')" 2>/dev/null || true)"
   done
   return 1
 }
+
+# --- Step 6: qualify ---
+# REQ-AXO-902189 (incident promote 1316) — GATE qualify on the FULL runtime_contract
+# liveness FIRST. A fresh live indexer's BGE-Large GPU cold-start can take minutes; if
+# qualify (surface=core, brain-only latency/quality) runs while the indexer is still
+# cold, quality=fail → run_step exits non-zero → the promote FAILS at step 6 and the
+# step-6c fail-closed recovery gate NEVER runs (it is PREEMPTED), leaving a live runtime
+# that actually deployed fine reported as FAILED. Poll promote_status (brain_serving +
+# indexer_alive) up to ~120s; only run the qualify scenarios once clean. If the runtime
+# never reaches clean within budget, SKIP qualify and DEFER to step 6c — which owns the
+# auto-recovery + authoritative fail-closed verdict — so cold-start can never preempt it.
+if [[ "$SKIP_QUALIFY" -ne 1 ]]; then
+  ensure_head_stable
+  if _poll_promote_clean 24; then
+    run_step 6 qualify_mcp "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE"
+  else
+    promote_log "   ⚠️ step 6: runtime not clean after ~120s warmup (phase=${recon_phase:-unreachable}) — SKIP qualify, DEFER to step 6c recovery gate (REQ-AXO-902189: cold-start must not preempt the fail-closed verdict)."
+  fi
+fi
+
+# --- Step 6c: reconcile + FAIL-CLOSED health-gate (REQ-AXO-902111 / REQ-AXO-902157) ---
+# Dogfood promote_status as the post-swap verdict over the FULL runtime_contract
+# (brain_serving + indexer_alive). The in-place restart (step 5) can leave the live
+# indexer down/crash-looping — the s95 incident (promote 1306): the promote reported
+# COMPLETE on a DEGRADED runtime because this gate was warn-only AND step-6 qualify
+# tests only the brain (surface=core). Fix (the follow-up this block long promised):
+# poll the verdict on an extended GPU-cold-start budget; on a persistent non-clean
+# phase, AUTO-RECOVER via the proven full restart (stop --hard + start full), re-verify,
+# and FAIL CLOSED if still not clean — a promote must NEVER silently report success on
+# a half-up runtime_contract.
+CURRENT_STEP=6c; CURRENT_STEP_NAME="reconcile"
+promote_log ""
+promote_log "== step 6c: reconcile + health-gate (promote_status) =="
+
+# _poll_promote_clean is defined above step 6 (REQ-AXO-902189) — reused here as the
+# authoritative post-swap health-gate. The step-6 pre-gate never preempts this block.
 
 # First gate: extended warmup (~120s) — a fresh live indexer's BGE-Large GPU cold-start
 # can take minutes to publish its first heartbeat.
