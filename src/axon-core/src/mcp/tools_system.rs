@@ -815,6 +815,12 @@ impl McpServer {
                 "compute": observed_compute,
                 "compute_source": observed_compute_source,
                 "indexer_build_id": indexer_build_id,
+                // REQ-AXO-902198 residual — process-global count of rows dropped by the
+                // bulk-writer's poison-row bisection (chunks/symbols/edges/indexed_files/
+                // chunk_embeddings) since process start. A drop is a SILENT recovery (the
+                // batch lands, the drain never freezes) — this is the operator-visible
+                // counterpart to the `log::warn!` line each bisection emits.
+                "poison_rows_dropped": crate::postgres::bulk_writer::poison_rows_dropped_count(),
                 // REQ-AXO-901893 (LEGACY FEED PURGE) — `pipeline_drain` +
                 // `periodic_sweep` telemetry blocks were ripped with the
                 // ingress_buffer. The Watchman file source feeds pipeline A

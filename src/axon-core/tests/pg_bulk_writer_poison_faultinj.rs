@@ -138,6 +138,172 @@ fn resilient_flush_isolates_fk_poison_chunk_instead_of_freezing() {
     });
 }
 
+/// REQ-AXO-902198 residual — Symbol counterpart of the chunk fault-injection above.
+/// Poison = a Symbol whose `project_code` has NO axon.Project parent → FK violation
+/// (23503) on the Symbol merge. Before this residual slice, `copy_symbols_in_tx` had
+/// only a NUL pre-filter and NO bisection — this poison would have aborted the whole
+/// atomic flush AND the (then all-or-nothing) structural-core retry identically,
+/// dropping the entire batch instead of isolating the one bad row.
+#[test]
+#[ignore = "requires AXON_DEV_DATABASE_URL (real dev PG); run with -- --ignored"]
+fn resilient_flush_isolates_fk_poison_symbol_instead_of_freezing() {
+    let url = std::env::var("AXON_DEV_DATABASE_URL")
+        .expect("AXON_DEV_DATABASE_URL must point at the dev PG");
+    std::env::set_var("AXON_DB_BACKEND", "postgres");
+    std::env::set_var("DATABASE_URL", &url);
+    std::env::set_var("AXON_BULK_WRITER_ENABLED", "1");
+    std::env::remove_var("AXON_LIVE_DATABASE_URL");
+
+    let tag = "faultinj_902198_sym";
+    let valid_sym = format!("AXO::{tag}::valid");
+    let poison_sym = format!("AXO::{tag}::poison");
+    let file = format!("/tmp/{tag}.rs");
+
+    let mut poison = sym(&poison_sym);
+    poison.project_code = "ZZZFAULTINJ_NEVER_ENROLLED".to_string(); // no axon.Project row → FK 23503
+
+    let before = bulk_writer::poison_rows_dropped_count();
+
+    let batch = PgBulkBatch {
+        symbols: vec![sym(&valid_sym), poison],
+        chunks: vec![chunk(&format!("AXO::{tag}::chunk"), &file)],
+        indexed_files: vec![(file.clone(), format!("h-{tag}"), 0, 0, 0)],
+        project_code: P.to_string(),
+        ..Default::default()
+    };
+
+    bulk_writer::flush_batch(&batch)
+        .expect("resilient flush must NOT freeze/err on an FK-poison symbol (REQ-AXO-902198)");
+
+    assert!(
+        bulk_writer::poison_rows_dropped_count() >= before + 1,
+        "poison_rows_dropped must count the isolated symbol"
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (client, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("connect dev PG");
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let valid_present: i64 = client
+            .query_one("SELECT count(*) FROM ist.symbol WHERE id = $1", &[&valid_sym])
+            .await
+            .unwrap()
+            .get(0);
+        let poison_present: i64 = client
+            .query_one("SELECT count(*) FROM ist.symbol WHERE id = $1", &[&poison_sym])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(valid_present, 1, "the clean symbol must land");
+        assert_eq!(poison_present, 0, "the FK-poison symbol must be isolated/dropped");
+
+        // Cleanup.
+        for id in [&valid_sym, &poison_sym] {
+            let _ = client.execute("DELETE FROM ist.symbol WHERE id = $1", &[id]).await;
+        }
+        let _ = client
+            .execute("DELETE FROM ist.chunk WHERE id = $1", &[&format!("AXO::{tag}::chunk")])
+            .await;
+        let _ = client.execute("DELETE FROM ist.indexedfile WHERE path = $1", &[&file]).await;
+    });
+}
+
+/// REQ-AXO-902198 residual — Edge counterpart. Poison = an edge row whose
+/// `project_code` has no `axon.Project` parent → FK violation (23503) isolated by
+/// `flush_edges_resilient_async`; the valid edge lands, only the poison edge drops.
+#[test]
+#[ignore = "requires AXON_DEV_DATABASE_URL (real dev PG); run with -- --ignored"]
+fn resilient_flush_isolates_fk_poison_edge_instead_of_freezing() {
+    let url = std::env::var("AXON_DEV_DATABASE_URL")
+        .expect("AXON_DEV_DATABASE_URL must point at the dev PG");
+    std::env::set_var("AXON_DB_BACKEND", "postgres");
+    std::env::set_var("DATABASE_URL", &url);
+    std::env::set_var("AXON_BULK_WRITER_ENABLED", "1");
+    std::env::remove_var("AXON_LIVE_DATABASE_URL");
+
+    let tag = "faultinj_902198_edge";
+    let caller = format!("AXO::{tag}::caller");
+    let callee_valid = format!("AXO::{tag}::callee_valid");
+    let callee_poison = format!("AXO::{tag}::callee_poison");
+    let file = format!("/tmp/{tag}.rs");
+
+    let valid_edge = BulkWriterRelationRow {
+        source_id: caller.clone(),
+        target_id: callee_valid.clone(),
+        project_code: P.to_string(),
+    };
+    let poison_edge = BulkWriterRelationRow {
+        source_id: caller.clone(),
+        target_id: callee_poison.clone(),
+        project_code: "ZZZFAULTINJ_NEVER_ENROLLED".to_string(), // FK 23503
+    };
+
+    let before = bulk_writer::poison_rows_dropped_count();
+
+    let batch = PgBulkBatch {
+        symbols: vec![sym(&caller)],
+        chunks: vec![chunk(&format!("AXO::{tag}::chunk"), &file)],
+        calls: vec![valid_edge, poison_edge],
+        indexed_files: vec![(file.clone(), format!("h-{tag}"), 0, 0, 0)],
+        project_code: P.to_string(),
+        ..Default::default()
+    };
+
+    bulk_writer::flush_batch(&batch)
+        .expect("resilient flush must NOT freeze/err on an FK-poison edge (REQ-AXO-902198)");
+
+    assert!(
+        bulk_writer::poison_rows_dropped_count() >= before + 1,
+        "poison_rows_dropped must count the isolated edge"
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (client, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("connect dev PG");
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let valid_present: i64 = client
+            .query_one(
+                "SELECT count(*) FROM ist.edge WHERE source_id=$1 AND target_id=$2 AND relation_type='CALLS'",
+                &[&caller, &callee_valid],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        let poison_present: i64 = client
+            .query_one(
+                "SELECT count(*) FROM ist.edge WHERE source_id=$1 AND target_id=$2 AND relation_type='CALLS'",
+                &[&caller, &callee_poison],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(valid_present, 1, "the clean edge must land");
+        assert_eq!(poison_present, 0, "the FK-poison edge must be isolated/dropped");
+
+        // Cleanup.
+        let _ = client.execute("DELETE FROM ist.edge WHERE source_id=$1", &[&caller]).await;
+        let _ = client.execute("DELETE FROM ist.symbol WHERE id=$1", &[&caller]).await;
+        let _ = client
+            .execute("DELETE FROM ist.chunk WHERE id=$1", &[&format!("AXO::{tag}::chunk")])
+            .await;
+        let _ = client.execute("DELETE FROM ist.indexedfile WHERE path=$1", &[&file]).await;
+    });
+}
+
 #[test]
 #[ignore = "requires AXON_DEV_DATABASE_URL (real dev PG); run with -- --ignored"]
 fn reindex_purges_stale_outbound_call_edge() {

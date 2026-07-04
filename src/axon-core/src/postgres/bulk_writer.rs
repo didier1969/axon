@@ -61,6 +61,19 @@ static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static POOL: OnceLock<Pool> = OnceLock::new();
 static VECTOR_TYPE: OnceLock<Type> = OnceLock::new();
 
+/// REQ-AXO-902198 residual — process-global count of rows dropped by ANY of the
+/// bisection paths below (chunks / symbols / edges / indexed_files / chunk_embeddings)
+/// since process start. Surfaced read-only via `poison_rows_dropped_count` so an MCP
+/// tool (`embedding_status`) can expose it — a bisection drop is silent recovery
+/// (the batch lands, the drain never freezes), which is exactly the kind of fact an
+/// operator needs visibility into, not just a `log::warn!` line.
+static POISON_ROWS_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Total rows dropped via poison-row bisection since process start (REQ-AXO-902198).
+pub fn poison_rows_dropped_count() -> u64 {
+    POISON_ROWS_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Tri-state override of the adaptive COPY dispatch (REQ-AXO-901881 W3 #34,
 /// VAL-AXO-067). `Some(true)` = force COPY BINARY for every flush (bench /
 /// explicit opt-in); `Some(false)` = force per-row INSERT for every flush;
@@ -207,10 +220,14 @@ pub(crate) async fn flush_chunk_embeddings_async(
     rows: &[ChunkEmbeddingPersistRow],
     embedded_at_ms: i64,
 ) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
     // Idempotent guard: ensure pgvector's `vector` type is reachable
     // for this session. The bulk_writer pool is independent from the
     // FFI plugin pool. We run CREATE EXTENSION + the type lookup +
-    // the search_path adjustment OUTSIDE the bulk transaction.
+    // the search_path adjustment OUTSIDE the bulk transaction, ONCE for
+    // the whole call (not repeated per bisection probe below).
     client
         .batch_execute("CREATE EXTENSION IF NOT EXISTS vector")
         .await
@@ -242,7 +259,70 @@ pub(crate) async fn flush_chunk_embeddings_async(
     }
 
     let vec_type = vector_type(client).await?;
-    let vec_schema = vec_type.schema();
+
+    // REQ-AXO-902198 residual — happy path: the whole batch in one tx (unchanged
+    // cost). On a DATA poison, bisect so one bad embedding row can't freeze the
+    // whole batch (this was the most exposed of the 5 original COPY sites: it had
+    // neither a NUL pre-filter nor bisection before this residual slice).
+    match copy_chunk_embeddings_tx(client, project_code, model_id, rows, embedded_at_ms, vec_type.clone()).await {
+        Ok(()) => return Ok(()),
+        Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+            Some(CopyErrorClass::Other) | None => return Err(e),
+            Some(CopyErrorClass::Transient) | Some(CopyErrorClass::Data) => {}
+        },
+    }
+    let mut planner = BisectPlanner::new(rows.len());
+    while let Some(range) = planner.next() {
+        let mut tries = 0u32;
+        loop {
+            match copy_chunk_embeddings_tx(
+                client,
+                project_code,
+                model_id,
+                &rows[range.clone()],
+                embedded_at_ms,
+                vec_type.clone(),
+            )
+            .await
+            {
+                Ok(()) => break,
+                Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+                    Some(CopyErrorClass::Transient) if tries < BISECT_MAX_TRANSIENT_RETRIES => {
+                        tries += 1;
+                        continue;
+                    }
+                    Some(CopyErrorClass::Data) => {
+                        planner.on_data(range.clone());
+                        break;
+                    }
+                    _ => return Err(e),
+                },
+            }
+        }
+    }
+    let poison = planner.into_poison();
+    if !poison.is_empty() {
+        let dropped: Vec<&str> = poison.iter().map(|&i| rows[i].chunk_id.as_str()).collect();
+        log::warn!(
+            "flush_chunk_embeddings: dropped {} poison embedding row(s) via bisection so the batch could land (REQ-AXO-902198): {:?}",
+            poison.len(),
+            dropped
+        );
+        POISON_ROWS_DROPPED.fetch_add(poison.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// One ChunkEmbedding COPY attempt in its OWN transaction — the bisection probe.
+async fn copy_chunk_embeddings_tx(
+    client: &mut deadpool_postgres::Client,
+    project_code: &str,
+    model_id: &str,
+    rows: &[ChunkEmbeddingPersistRow],
+    embedded_at_ms: i64,
+    vec_type: Type,
+) -> Result<()> {
+    let vec_schema = vec_type.schema().to_string();
 
     // Stage in a TEMP table mirroring ist.ChunkEmbedding so we can
     // ON CONFLICT-merge after COPY BINARY. COPY itself doesn't accept
@@ -298,13 +378,20 @@ pub(crate) async fn flush_chunk_embeddings_async(
 
     for row in rows {
         let v = Vector::from(row.embedding.clone());
+        // REQ-AXO-902198 residual (pre-filter) — strip NUL like the other 4 COPY
+        // sites; a 0x00 in an id/hash field would abort the whole batch at
+        // finish() before bisection even gets a chance to isolate it.
+        let chunk_id = strip_nul(&row.chunk_id);
+        let model_id_s = strip_nul(model_id);
+        let pcode = strip_nul(project_code);
+        let source_hash = strip_nul(&row.source_hash);
         writer
             .as_mut()
             .write(&[
-                &row.chunk_id,
-                &model_id,
-                &project_code,
-                &row.source_hash,
+                &chunk_id as &(dyn tokio_postgres::types::ToSql + Sync),
+                &model_id_s,
+                &pcode,
+                &source_hash,
                 &v,
                 &embedded_at_ms,
             ])
@@ -410,15 +497,25 @@ pub fn flush_chunks(rows: &[ChunkRow]) -> Result<()> {
 
 // ── REQ-AXO-902198 — poison-pill bisection (pure decision core) ───────────────
 // Generalises the 902197 NUL-strip: instead of sanitising ONE known class (0x00),
-// isolate ANY poison row so a single bad chunk can never freeze the whole COPY batch
+// isolate ANY poison row so a single bad row can never freeze the whole COPY batch
 // (the frozen-drain incident). Split into a PURE decision core (classification +
 // bisection planner — unit-tested without a live DB, practice-128 decision/driver
-// split) and a thin async I/O driver. The core is the generic chokepoint the REQ
-// mandates; this slice wires it into the STANDALONE per-table chunk flush
-// (`flush_chunks_async`, own-tx, chunks-only → FK-safe). Routing the LIVE cross-table
-// drain (`flush_batch_async`, one tx over Project→IndexedFile→Symbol→Chunk→Edge with
-// intra-tx FKs) through a resilient fallback needs the FK-ordering + tx-model decision
-// and an E2E fault-injection test (practice-128) — the documented next slice.
+// split) and a thin async I/O driver per table. `BisectPlanner`/`classify_copy_error`
+// are the one chokepoint every resilient flush below drives (`flush_chunks_async`,
+// `flush_symbols_resilient_async`, `flush_edges_resilient_async`,
+// `flush_indexed_files_resilient_async`, `flush_chunk_embeddings_async`) — a fully
+// generic combinator over an async closure was considered (the true DRY endpoint,
+// per the operator's "5 near-identical COPY sites" observation) but rejected: each
+// table's happy-path fn already opens its OWN transaction and captures different
+// borrowed state (vec_type, project_code for the FK-ordered purge), and threading
+// that through a generic `Fn(&mut Client, &[T]) -> BoxFuture<Result<()>>` adds real
+// async-lifetime/boxing complexity for a 5-call-site win — the decision CORE is
+// already shared (no duplicated classification/bisection logic), only the thin
+// per-table I/O driver repeats, which mirrors how flush_chunks_async was already
+// built. Cross-table drain (`flush_batch_async`) routes the Data-failure fallback
+// through IndexedFile(+purge) → Symbol → Chunk → Edge, in FK-parent-first order,
+// instead of retrying the whole structural core atomically (which only helped when
+// the poison happened to be in chunks).
 
 /// How a failed COPY should be reacted to, derived from the PG SQLSTATE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,6 +658,7 @@ async fn flush_chunks_async(
             poison.len(),
             dropped
         );
+        POISON_ROWS_DROPPED.fetch_add(poison.len() as u64, std::sync::atomic::Ordering::Relaxed);
     }
     Ok(())
 }
@@ -673,22 +771,62 @@ pub(crate) async fn flush_batch_async(
     client: &mut deadpool_postgres::Client,
     batch: &PgBulkBatch,
 ) -> Result<()> {
-    match flush_batch_tx(client, batch, false).await {
+    match flush_batch_tx(client, batch).await {
         Ok(()) => Ok(()),
         Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
             Some(CopyErrorClass::Data) => {
                 log::warn!(
-                    "bulk_writer batch atomic flush hit a DATA poison ({e:#}); retrying in resilient mode (structural core + bisected chunks) so one bad row can't freeze the drain (REQ-AXO-902198)"
+                    "bulk_writer batch atomic flush hit a DATA poison ({e:#}); retrying table-by-table with bisection so one bad row can't freeze the drain (REQ-AXO-902198)"
                 );
-                // Structural core (Project + IndexedFile + Symbol + Edge) atomically WITHOUT
-                // chunks — FK parents (IndexedFile) commit here so the chunk children can then
-                // land in their own txs. Their id fields are NUL-pre-filtered; a residual DATA
-                // poison here is rare and propagates (FVQ retries).
-                flush_batch_tx(client, batch, true).await?;
-                // Chunks (the free-text poison class) — own txs, bisected: the poison chunk is
-                // isolated and dropped, every clean chunk lands.
+                // REQ-AXO-902198 residual — the atomic structural-core retry (a second
+                // all-or-nothing IndexedFile+Symbol+Edge attempt) only ever helped when the
+                // poison happened to live in `chunks` (the one table it excluded); a poison
+                // Symbol/Edge/IndexedFile row would fail identically the second time and
+                // propagate with the whole batch dropped. Route each table through its OWN
+                // bisected resilient flush instead, in FK-parent-first order: IndexedFile
+                // (Chunk's FK parent) → Symbol → Chunk → Edge (last, since edges reference
+                // symbol/file ids). Every clean row across every table lands; only the
+                // provably-poisoned ones are dropped (and counted, see poison_rows_dropped).
+                if !batch.project_code.is_empty() {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    client
+                        .execute(
+                            "INSERT INTO axon.Project (code, enrolled_at_ms) VALUES ($1, $2) \
+                             ON CONFLICT (code) DO NOTHING",
+                            &[&batch.project_code, &now_ms],
+                        )
+                        .await
+                        .context("bulk_writer resilient ensure axon.Project FK parent")?;
+                }
+                if !batch.indexed_files.is_empty() {
+                    flush_indexed_files_resilient_async(client, &batch.indexed_files, &batch.project_code).await?;
+                }
+                if !batch.symbols.is_empty() {
+                    let vec_type = vector_type(client).await?;
+                    flush_symbols_resilient_async(client, &batch.symbols, vec_type).await?;
+                }
                 if !batch.chunks.is_empty() {
                     flush_chunks_async(client, &batch.chunks).await?;
+                }
+                let has_edges = !batch.contains.is_empty()
+                    || !batch.calls.is_empty()
+                    || !batch.calls_nif.is_empty()
+                    || !batch.other_edges.is_empty();
+                if has_edges {
+                    let mut edge_rows: Vec<(&str, &RelationRow)> = Vec::new();
+                    for r in &batch.contains {
+                        edge_rows.push(("CONTAINS", r));
+                    }
+                    for r in &batch.calls {
+                        edge_rows.push(("CALLS", r));
+                    }
+                    for r in &batch.calls_nif {
+                        edge_rows.push(("CALLS_NIF", r));
+                    }
+                    for (rel, r) in &batch.other_edges {
+                        edge_rows.push((rel.as_str(), r));
+                    }
+                    flush_edges_resilient_async(client, &edge_rows).await?;
                 }
                 Ok(())
             }
@@ -698,13 +836,12 @@ pub(crate) async fn flush_batch_async(
     }
 }
 
-/// The batch flush transaction. `skip_chunks` omits the chunk COPY so the caller can land the
-/// structural core (with the FK parents) first and then drive chunks through the resilient
-/// bisection path (REQ-AXO-902198).
+/// The batch flush transaction — the happy path, everything in one atomic tx. On a
+/// DATA-poison failure, `flush_batch_async` falls back to the table-by-table resilient
+/// flushes below instead of retrying this function (REQ-AXO-902198 residual).
 async fn flush_batch_tx(
     client: &mut deadpool_postgres::Client,
     batch: &PgBulkBatch,
-    skip_chunks: bool,
 ) -> Result<()> {
     // Pre-tx: ensure pgvector extension + cache the runtime-assigned
     // OID once. Both are idempotent and stay outside the bulk tx so a
@@ -759,7 +896,7 @@ async fn flush_batch_tx(
             .clone();
         copy_symbols_in_tx(&tx, &batch.symbols, vec_type).await?;
     }
-    if !skip_chunks && !batch.chunks.is_empty() {
+    if !batch.chunks.is_empty() {
         copy_chunks_in_tx(&tx, &batch.chunks).await?;
     }
     // REQ-AXO-901747 — unified Edge table (post-MIL-AXO-017).
@@ -970,6 +1107,72 @@ async fn copy_symbols_in_tx(
     Ok(())
 }
 
+/// One Symbol COPY attempt in its OWN transaction — the bisection probe.
+async fn copy_symbols_tx(
+    client: &mut deadpool_postgres::Client,
+    rows: &[SymbolRow],
+    vec_type: Type,
+) -> Result<()> {
+    let tx = client
+        .transaction()
+        .await
+        .context("bulk_writer Symbol begin tx (resilient)")?;
+    copy_symbols_in_tx(&tx, rows, vec_type).await?;
+    tx.commit().await.context("bulk_writer Symbol commit (resilient)")?;
+    Ok(())
+}
+
+/// REQ-AXO-902198 residual — Symbol counterpart of `flush_chunks_async`: try the
+/// whole batch in one tx (happy path, zero overhead); on a DATA poison, bisect to
+/// isolate and drop exactly the poisoned row(s) so every clean symbol still lands.
+async fn flush_symbols_resilient_async(
+    client: &mut deadpool_postgres::Client,
+    rows: &[SymbolRow],
+    vec_type: Type,
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    match copy_symbols_tx(client, rows, vec_type.clone()).await {
+        Ok(()) => return Ok(()),
+        Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+            Some(CopyErrorClass::Other) | None => return Err(e),
+            Some(CopyErrorClass::Transient) | Some(CopyErrorClass::Data) => {}
+        },
+    }
+    let mut planner = BisectPlanner::new(rows.len());
+    while let Some(range) = planner.next() {
+        let mut tries = 0u32;
+        loop {
+            match copy_symbols_tx(client, &rows[range.clone()], vec_type.clone()).await {
+                Ok(()) => break,
+                Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+                    Some(CopyErrorClass::Transient) if tries < BISECT_MAX_TRANSIENT_RETRIES => {
+                        tries += 1;
+                        continue;
+                    }
+                    Some(CopyErrorClass::Data) => {
+                        planner.on_data(range.clone());
+                        break;
+                    }
+                    _ => return Err(e),
+                },
+            }
+        }
+    }
+    let poison = planner.into_poison();
+    if !poison.is_empty() {
+        let dropped: Vec<&str> = poison.iter().map(|&i| rows[i].symbol_id.as_str()).collect();
+        log::warn!(
+            "flush_symbols: dropped {} poison symbol row(s) via bisection so the batch could land (REQ-AXO-902198): {:?}",
+            poison.len(),
+            dropped
+        );
+        POISON_ROWS_DROPPED.fetch_add(poison.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+}
+
 /// REQ-AXO-902197 — PostgreSQL `text` columns reject NUL (`0x00`) with
 /// "invalid byte sequence for encoding UTF8". A single chunk carrying a `0x00`
 /// (a parser artifact or a fused-chunk boundary) makes the WHOLE `COPY … BINARY`
@@ -1164,6 +1367,76 @@ async fn copy_edges_in_tx(
     Ok(())
 }
 
+/// One Edge COPY attempt in its OWN transaction — the bisection probe.
+async fn copy_edges_tx(
+    client: &mut deadpool_postgres::Client,
+    rows: &[(&str, &RelationRow)],
+) -> Result<()> {
+    let tx = client
+        .transaction()
+        .await
+        .context("bulk_writer edge begin tx (resilient)")?;
+    copy_edges_in_tx(&tx, rows).await?;
+    tx.commit().await.context("bulk_writer edge commit (resilient)")?;
+    Ok(())
+}
+
+/// REQ-AXO-902198 residual — Edge counterpart of `flush_chunks_async`. Edges carry no
+/// FK to Symbol/IndexedFile (a dangling edge is tolerated — see `copy_edges_in_tx`'s
+/// `ON CONFLICT DO NOTHING`), so bisecting them independently of Symbol/IndexedFile is
+/// safe; the only ordering requirement (edges land AFTER their endpoints exist so a
+/// fresh IST read sees a consistent graph) is preserved by `flush_batch_async` calling
+/// this LAST.
+async fn flush_edges_resilient_async(
+    client: &mut deadpool_postgres::Client,
+    rows: &[(&str, &RelationRow)],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    match copy_edges_tx(client, rows).await {
+        Ok(()) => return Ok(()),
+        Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+            Some(CopyErrorClass::Other) | None => return Err(e),
+            Some(CopyErrorClass::Transient) | Some(CopyErrorClass::Data) => {}
+        },
+    }
+    let mut planner = BisectPlanner::new(rows.len());
+    while let Some(range) = planner.next() {
+        let mut tries = 0u32;
+        loop {
+            match copy_edges_tx(client, &rows[range.clone()]).await {
+                Ok(()) => break,
+                Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+                    Some(CopyErrorClass::Transient) if tries < BISECT_MAX_TRANSIENT_RETRIES => {
+                        tries += 1;
+                        continue;
+                    }
+                    Some(CopyErrorClass::Data) => {
+                        planner.on_data(range.clone());
+                        break;
+                    }
+                    _ => return Err(e),
+                },
+            }
+        }
+    }
+    let poison = planner.into_poison();
+    if !poison.is_empty() {
+        let dropped: Vec<String> = poison
+            .iter()
+            .map(|&i| format!("{}->{}", rows[i].1.source_id, rows[i].1.target_id))
+            .collect();
+        log::warn!(
+            "flush_edges: dropped {} poison edge row(s) via bisection so the batch could land (REQ-AXO-902198): {:?}",
+            poison.len(),
+            dropped
+        );
+        POISON_ROWS_DROPPED.fetch_add(poison.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+}
+
 /// REQ-AXO-901747 — COPY BINARY for IndexedFile rows.
 async fn copy_indexed_files_in_tx(
     tx: &deadpool_postgres::Transaction<'_>,
@@ -1245,6 +1518,76 @@ async fn copy_indexed_files_in_tx(
     tx.execute(merge_sql, &[&project_code])
         .await
         .context("bulk_writer indexedfile stage merge")?;
+    Ok(())
+}
+
+/// One (purge + IndexedFile COPY) attempt in its OWN transaction — the bisection
+/// probe. Purge and copy MUST stay paired per slice: `purge_reindexed_files_in_tx`
+/// deletes THIS slice's owned Chunk/Symbol/Edge rows before its IndexedFile row is
+/// re-upserted, exactly like the original single-tx `flush_batch_tx` did for the
+/// whole batch.
+async fn copy_indexed_files_tx(
+    client: &mut deadpool_postgres::Client,
+    rows: &[(String, String, i64, i64, i64)],
+    project_code: &str,
+) -> Result<()> {
+    let tx = client
+        .transaction()
+        .await
+        .context("bulk_writer indexedfile begin tx (resilient)")?;
+    purge_reindexed_files_in_tx(&tx, rows, project_code).await?;
+    copy_indexed_files_in_tx(&tx, rows, project_code).await?;
+    tx.commit().await.context("bulk_writer indexedfile commit (resilient)")?;
+    Ok(())
+}
+
+/// REQ-AXO-902198 residual — IndexedFile counterpart of `flush_chunks_async`. Lands
+/// FIRST in `flush_batch_async`'s resilient fallback (FK parent for Chunk).
+async fn flush_indexed_files_resilient_async(
+    client: &mut deadpool_postgres::Client,
+    rows: &[(String, String, i64, i64, i64)],
+    project_code: &str,
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    match copy_indexed_files_tx(client, rows, project_code).await {
+        Ok(()) => return Ok(()),
+        Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+            Some(CopyErrorClass::Other) | None => return Err(e),
+            Some(CopyErrorClass::Transient) | Some(CopyErrorClass::Data) => {}
+        },
+    }
+    let mut planner = BisectPlanner::new(rows.len());
+    while let Some(range) = planner.next() {
+        let mut tries = 0u32;
+        loop {
+            match copy_indexed_files_tx(client, &rows[range.clone()], project_code).await {
+                Ok(()) => break,
+                Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+                    Some(CopyErrorClass::Transient) if tries < BISECT_MAX_TRANSIENT_RETRIES => {
+                        tries += 1;
+                        continue;
+                    }
+                    Some(CopyErrorClass::Data) => {
+                        planner.on_data(range.clone());
+                        break;
+                    }
+                    _ => return Err(e),
+                },
+            }
+        }
+    }
+    let poison = planner.into_poison();
+    if !poison.is_empty() {
+        let dropped: Vec<&str> = poison.iter().map(|&i| rows[i].0.as_str()).collect();
+        log::warn!(
+            "flush_indexed_files: dropped {} poison indexed-file row(s) via bisection so the batch could land (REQ-AXO-902198): {:?}",
+            poison.len(),
+            dropped
+        );
+        POISON_ROWS_DROPPED.fetch_add(poison.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
     Ok(())
 }
 
