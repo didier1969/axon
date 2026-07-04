@@ -109,6 +109,13 @@ processes:
       - "AXON_INDEXER_HEALTH_PORT=44130"
       # REQ-AXO-901821 — explicit identity, symmetric to brain block above.
       - "AXON_RUNTIME_IDENTITY=axon-live-axon-indexer"
+      # REQ-AXO-902205 — symmetric to the brain (line ~54): without this the
+      # indexer's resource_release_identity() (runtime_boot.rs:573) no-ops, so its
+      # PG heartbeat reports the FROZEN process-compose-launch AXON_BUILD_ID instead
+      # of the promoted binary it actually runs (observed: heartbeat 1338 while the
+      # md5-confirmed binary was 1343). The active-identity file carries the manifest
+      # build_id, authoritative for both full and in-place restarts.
+      - "AXON_ACTIVE_IDENTITY_FILE=.axon/live-release/active-identity.env"
       - "AXON_RUN_ROOT=.axon/run-indexer"
       # REQ-AXO-901835 — explicit per-process sockets (cf. brain block).
       - "AXON_TELEMETRY_SOCK=/tmp/axon-live-indexer-telemetry.sock"
