@@ -16,8 +16,8 @@ use crate::mcp::McpServer;
 use std::collections::{HashMap, HashSet};
 
 use crate::structural_health::{
-    acyclicity_score, geometric_aggregate, martin_distance, main_sequence_score, resilience_score,
-    weighted_coverage_score, StructuralHealthIndex, SubScore,
+    acyclicity_score, duplication_score, geometric_aggregate, martin_distance, main_sequence_score,
+    resilience_score, weighted_coverage_score, StructuralHealthIndex, SubScore,
 };
 
 /// The MODULE (file) a canonical IST id belongs to. The id embeds the path:
@@ -124,6 +124,12 @@ struct ShiRawMetrics {
     d_count: usize,
     orphan_intent: usize,
     total_intent: usize,
+    /// REQ-AXO-902185 — near-duplicate (semantic clone) pairs, RAM-native via
+    /// `SIMILAR_TO` edges persisted out-of-band by `reconcile_duplication_edges`
+    /// (pgvector HNSW scan, never inline — see that fn's docs for why). Reading
+    /// this is a plain CSR relation-type count, zero PG cost per call.
+    clone_pairs: usize,
+    total_testable_symbols: usize,
 }
 
 fn compute_shi_raw_metrics(
@@ -138,10 +144,12 @@ fn compute_shi_raw_metrics(
     let ranked = pagerank_top(snapshot, 0.85, 50, total_nodes.max(1));
     let mut covered_pr = 0.0_f64;
     let mut total_pr = 0.0_f64;
+    let mut total_testable_symbols = 0usize;
     for (id, score) in &ranked {
         if !is_testable_symbol(id, snapshot.node_kind(id)) {
             continue;
         }
+        total_testable_symbols += 1;
         let s = *score as f64;
         total_pr += s;
         let covered = snapshot
@@ -152,6 +160,13 @@ fn compute_shi_raw_metrics(
             covered_pr += s;
         }
     }
+
+    // REQ-AXO-902185 — near-duplicate pairs, RAM-native via SIMILAR_TO edges. These
+    // are NEVER computed here (would reintroduce the PG-per-call cost this whole
+    // struct exists to avoid) — `reconcile_duplication_edges` persists them
+    // out-of-band via a pgvector HNSW scan, and `ist_snapshot_warm` loads them into
+    // the CSR exactly like CALLS/CONTAINS. A plain relation-type count is O(E).
+    let clone_pairs = snapshot.count_edges_with_relation(&[crate::ist_snapshot::RelationType::SimilarTo]);
 
     // REQ-AXO-902186 (dogfood finding, dev-tested against real AXO data) — restrict
     // module-coupling attribution to REAL source symbols. Without this gate, a documentary
@@ -225,6 +240,8 @@ fn compute_shi_raw_metrics(
         d_count,
         orphan_intent,
         total_intent,
+        clone_pairs,
+        total_testable_symbols,
     }
 }
 
@@ -287,6 +304,16 @@ fn build_sub_scores(raw: &ShiRawMetrics) -> Vec<SubScore> {
             format!(
                 "{}/{} governed SOLL node(s) orphaned — no code trace",
                 raw.orphan_intent, raw.total_intent
+            ),
+        ),
+        SubScore::new(
+            "duplication",
+            duplication_score(raw.clone_pairs, raw.total_testable_symbols),
+            1.0,
+            0.90,
+            format!(
+                "{} near-duplicate pair(s) / {} testable symbol(s) (SIMILAR_TO edges, pgvector HNSW, threshold<0.10)",
+                raw.clone_pairs, raw.total_testable_symbols
             ),
         ),
     ]
@@ -539,14 +566,14 @@ impl McpServer {
                 "below_target": below,
                 "node_count": total_nodes,
                 "edge_count": snapshot.edge_count(),
-                "dimensions_wired": 5,
+                "dimensions_wired": 6,
                 "coupled_modules": d_count,
                 "orphan_intent": orphan_intent,
                 "total_intent_nodes": total_intent,
                 "snapshot_id": build_id,
                 "delta_vs_previous": delta_vs_previous,
                 "history_depth": previous_snapshots.len() + 1,
-                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D) + intent_alignment (intent→code half); remaining (duplication rate via pgvector, code→intent orphan half) via REQ-AXO-902185. Δ per-call persisted (REQ-AXO-902187) — re_surfaced=true means a below-target axis did not improve since the last measurement."
+                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D) + intent_alignment (intent→code half) + duplication (SIMILAR_TO edges, pgvector HNSW scan — see reconcile_duplication_edges, run out-of-band, NOT per-call); remaining (code→intent orphan half, god-objects, module depth) via REQ-AXO-902185. Δ per-call persisted (REQ-AXO-902187) — re_surfaced=true means a below-target axis did not improve since the last measurement."
             }
         }))
     }

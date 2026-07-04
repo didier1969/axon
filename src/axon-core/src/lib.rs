@@ -8,6 +8,7 @@ pub mod code_chunker;
 pub mod config;
 pub mod contract;
 pub mod dashboard_state;
+pub mod duplication_scan;
 pub mod embedder;
 pub mod embedding_contract;
 pub mod embedding_profile;

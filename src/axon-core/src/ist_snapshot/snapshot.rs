@@ -31,6 +31,10 @@ pub enum RelationType {
     // REQ-AXO-902017 — a code symbol READS a data artifact (CSV lake / manifest).
     // Appended (not inserted) so existing CSR u8 encodings stay stable.
     ReadsArtifact = 8,
+    // REQ-AXO-902185 — near-duplicate (semantic clone) pair, persisted out-of-band
+    // by a periodic pgvector HNSW scan (never by the parser). Appended (not
+    // inserted) so existing CSR u8 encodings stay stable.
+    SimilarTo = 9,
     Other = 255,
 }
 
@@ -50,6 +54,7 @@ impl RelationType {
             "READS" => Self::Reads,
             "DECLARES" => Self::Declares,
             "READS_ARTIFACT" => Self::ReadsArtifact,
+            "SIMILAR_TO" => Self::SimilarTo,
             _ => Self::Other,
         }
     }
@@ -65,6 +70,7 @@ impl RelationType {
             Self::Reads => "READS",
             Self::Declares => "DECLARES",
             Self::ReadsArtifact => "READS_ARTIFACT",
+            Self::SimilarTo => "SIMILAR_TO",
             Self::Other => "OTHER",
         }
     }
@@ -1004,6 +1010,7 @@ fn relation_from_u8(value: u8) -> RelationType {
         6 => RelationType::Reads,
         7 => RelationType::Declares,
         8 => RelationType::ReadsArtifact,
+        9 => RelationType::SimilarTo,
         _ => RelationType::Other,
     }
 }
@@ -1290,12 +1297,16 @@ mod tests {
             "READS",
             "DECLARES",
             "READS_ARTIFACT",
+            "SIMILAR_TO",
         ] {
             assert_eq!(RelationType::from_db(s).as_db(), s);
         }
         // REQ-AXO-902017 — ReadsArtifact survives the CSR u8 round-trip (=8).
         assert_eq!(relation_from_u8(8), RelationType::ReadsArtifact);
         assert_eq!(RelationType::ReadsArtifact as u8, 8);
+        // REQ-AXO-902185 — SimilarTo survives the CSR u8 round-trip (=9).
+        assert_eq!(relation_from_u8(9), RelationType::SimilarTo);
+        assert_eq!(RelationType::SimilarTo as u8, 9);
         assert_eq!(RelationType::from_db("UNKNOWN"), RelationType::Other);
     }
 

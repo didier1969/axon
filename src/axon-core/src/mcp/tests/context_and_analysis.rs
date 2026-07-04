@@ -4739,3 +4739,136 @@ fn test_structural_health_worklist_ranks_all_categories_by_roi() {
 
     std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
 }
+
+// REQ-AXO-902185 slice 1 — the `duplication` sub-score must read `SIMILAR_TO` edges
+// straight from the warm RAM CSR (a plain relation-type count), exactly like the other
+// 5 axes never round-trip PG per call. This test seeds the edge directly (bypassing
+// `reconcile_duplication_edges`, which has its own dedicated test below) to isolate the
+// RAM-counting half of the wiring from the pgvector-scan half.
+#[test]
+fn test_duplication_score_reads_similar_to_edges_from_ram() {
+    let _guard = env_lock();
+    let history_dir = tempdir().unwrap();
+    std::env::set_var(
+        "AXON_STRUCTURAL_HISTORY_DIR",
+        history_dir.path().to_string_lossy().to_string(),
+    );
+    let server = create_test_server();
+    let code = "TST".to_string();
+    let module = format!("{code}::src/lib.rs");
+    let (dup_a, dup_b, lone) = (
+        format!("{module}::dup_a"),
+        format!("{module}::dup_b"),
+        format!("{module}::lone"),
+    );
+    for (id, name) in [(&dup_a, "dup_a"), (&dup_b, "dup_b"), (&lone, "lone")] {
+        server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{id}', '{name}', 'function', false, true, false, '{code}')")).unwrap();
+    }
+    // Only ONE SIMILAR_TO edge: dup_a <-> dup_b. `lone` carries none.
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{dup_a}', '{dup_b}', 'SIMILAR_TO', '{code}', 0)")).unwrap();
+    // `ist_snapshot::process_view()` is a process-global cache keyed by project_code alone —
+    // shared across every test in this binary, not scoped to this test's ephemeral DB. Without
+    // an explicit evict, a DIFFERENT test that already warmed "TST" (with different symbols,
+    // no SIMILAR_TO edge) would make `ensure_ram_snapshot_warm` below a no-op serving stale data.
+    crate::ist_snapshot::evict_process_snapshot(&code);
+    assert!(server.ensure_ram_snapshot_warm(&code));
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "structural_health_index",
+                "arguments": { "project_code": code }
+            })),
+            id: Some(json!(90218704)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let sub_scores = response["data"]["sub_scores"].as_array().cloned().unwrap_or_default();
+    let dup = sub_scores
+        .iter()
+        .find(|s| s["name"] == "duplication")
+        .cloned()
+        .unwrap_or_else(|| panic!("duplication sub-score missing: {response:?}"));
+    assert!(
+        dup["detail"].as_str().unwrap_or("").contains("1 near-duplicate pair"),
+        "expected exactly 1 clone pair counted: {dup:?}"
+    );
+    assert_eq!(response["data"]["dimensions_wired"].as_u64(), Some(6));
+
+    std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
+}
+
+// REQ-AXO-902185 slice 1 — `reconcile_duplication_edges` end-to-end against REAL
+// pgvector embeddings: dup_a/dup_b carry near-parallel vectors (cosine distance well
+// under the 0.10 threshold), `unrelated` carries an orthogonal vector. Also proves the
+// FULL-RECONCILE invalidation strategy: a pre-existing stale SIMILAR_TO edge (simulating
+// a leftover from a run before one side changed) must NOT survive a re-scan — the exact
+// phantom-edge class already fixed once this month for CALLS (REQ-AXO-902203).
+#[test]
+fn test_reconcile_duplication_edges_persists_similar_to_and_replaces_stale() {
+    let server = create_test_server();
+    let code = "TST".to_string();
+    let module = format!("{code}::src/lib.rs");
+    let (dup_a, dup_b, unrelated) = (
+        format!("{module}::dup_a"),
+        format!("{module}::dup_b"),
+        format!("{module}::unrelated"),
+    );
+
+    // 1024-dim pgvector literal: mostly zeros with a couple of nonzero entries at `at`.
+    let vector_literal = |at: &[(usize, f64)]| -> String {
+        let mut v = vec![0.0_f64; 1024];
+        for &(idx, val) in at {
+            v[idx] = val;
+        }
+        format!(
+            "[{}]",
+            v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+        )
+    };
+    let vec_a = vector_literal(&[(0, 1.0), (1, 0.001)]);
+    let vec_b = vector_literal(&[(0, 0.999), (1, 0.002)]); // near-parallel to vec_a
+    let vec_u = vector_literal(&[(1, 1.0)]); // orthogonal to vec_a/vec_b's dominant axis
+
+    for (id, name, file, vector) in [
+        (&dup_a, "dup_a", "src/lib.rs", &vec_a),
+        (&dup_b, "dup_b", "src/lib.rs", &vec_b),
+        (&unrelated, "unrelated", "src/lib.rs", &vec_u),
+    ] {
+        server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{id}', '{name}', 'function', false, true, false, '{code}')")).unwrap();
+        let chunk_id = format!("chunk-{code}-{name}");
+        server.graph_store.execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash, chunk_part_index) VALUES ('{chunk_id}', 'symbol', '{id}', '{code}', '{file}', 'hash-{name}', 1)")).unwrap();
+        server.graph_store.execute(&format!(
+            "INSERT INTO ist.ChunkEmbedding (chunk_id, model_id, project_code, source_hash, embedding, embedded_at_ms) VALUES ('{chunk_id}', 'test-model', '{code}', 'hash-{name}', '{vector}', 0)"
+        )).unwrap();
+    }
+
+    // A stale edge that must NOT survive the reconcile (simulates a leftover from a run
+    // before `unrelated`'s embedding existed/changed — full-reconcile, not incremental,
+    // is what guarantees this gets cleaned up).
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{dup_a}', '{unrelated}', 'SIMILAR_TO', '{code}', 0)")).unwrap();
+
+    let report = server.graph_store.reconcile_duplication_edges(&code).unwrap();
+    assert_eq!(report.symbols_scanned, 3, "must scan all 3 representative-chunk symbols");
+    assert_eq!(report.pairs_found, 1, "only dup_a<->dup_b are within threshold: {report:?}");
+
+    let rows = server
+        .graph_store
+        .query_json(&format!(
+            "SELECT source_id, target_id FROM ist.Edge WHERE relation_type = 'SIMILAR_TO' AND project_code = '{code}'"
+        ))
+        .unwrap();
+    let edges: Vec<Vec<Value>> = serde_json::from_str(&rows).unwrap();
+    assert_eq!(edges.len(), 1, "stale dup_a<->unrelated edge must be gone: {edges:?}");
+    let pair = [edges[0][0].as_str().unwrap(), edges[0][1].as_str().unwrap()];
+    assert!(pair.contains(&dup_a.as_str()) && pair.contains(&dup_b.as_str()), "surviving edge must be dup_a<->dup_b: {edges:?}");
+    assert!(!pair.contains(&unrelated.as_str()), "unrelated must not appear: {edges:?}");
+
+    // Idempotent re-run: same inputs, same edge set (no duplicate rows, no drift).
+    let report2 = server.graph_store.reconcile_duplication_edges(&code).unwrap();
+    assert_eq!(report2.pairs_found, 1, "re-run with unchanged embeddings must reproduce the same pair count");
+}
