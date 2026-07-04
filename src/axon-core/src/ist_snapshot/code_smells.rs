@@ -1103,6 +1103,7 @@ mod tests {
             project_code: "AXO".to_string(),
             kind: NodeKind::Function,
             flags: NodeFlags::new(false, public, false, false),
+            complexity: None,
         }
     }
 
@@ -1113,6 +1114,7 @@ mod tests {
             project_code: "AXO".to_string(),
             kind: NodeKind::File,
             flags: NodeFlags::default(),
+            complexity: None,
         }
     }
 
@@ -1134,6 +1136,7 @@ mod tests {
             project_code: "AXO".to_string(),
             kind: NodeKind::Function,
             flags: NodeFlags::new(true, false, false, false), // tested = #[test]
+            complexity: None,
         };
         let nodes = vec![
             func("AXO::app.rs::run_main", true), // inferred entry (contains "main")
@@ -1561,6 +1564,7 @@ mod tests {
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
+                complexity: None,
             },
             NodeRecord {
                 id: "OPT::src/b.rs::foo".to_string(),
@@ -1568,6 +1572,7 @@ mod tests {
                 project_code: "OPT".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
+                complexity: None,
             },
         ];
         let edges = vec![
@@ -1605,6 +1610,7 @@ mod tests {
             project_code: "AXO".to_string(),
             kind: NodeKind::Function,
             flags: NodeFlags::new(false, public, false, unsafe_),
+            complexity: None,
         }
     }
 
@@ -1680,6 +1686,7 @@ mod tests {
             project_code: "AXO".to_string(),
             kind,
             flags: NodeFlags::default(),
+            complexity: None,
         }
     }
 
@@ -1845,6 +1852,7 @@ mod tests {
             project_code: "AXO".to_string(),
             kind,
             flags: NodeFlags::new(false, true, false, false),
+            complexity: None,
         }
     }
 

@@ -187,6 +187,7 @@ mod tests {
             project_code: project.to_string(),
             kind,
             flags: NodeFlags::default(),
+            complexity: None,
         }
     }
 

@@ -247,6 +247,12 @@ pub struct NodeRecord {
     pub project_code: String,
     pub kind: NodeKind,
     pub flags: NodeFlags,
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity computed by
+    /// the parser at index time (`ist.symbol.cyclomatic_complexity`). `None` =
+    /// not yet measured (pre-migration row, or a language whose counting slice
+    /// hasn't landed) — the SHI classifier treats this as "not a god-object",
+    /// never as complexity 0 (which would be a false "simple" reading).
+    pub complexity: Option<i32>,
 }
 
 /// In-memory CSR snapshot of one or more projects' IST. Build once via
@@ -264,6 +270,10 @@ pub struct IstGraph {
     project_codes: Vec<String>,
     kinds: Vec<u8>,
     flags: Vec<u8>,
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity, index-aligned
+    /// with `ids`. Sentinel `-1` = unmeasured (see `NodeRecord::complexity`);
+    /// real values are always >= 1 (a function has at least one path).
+    complexity: Vec<i32>,
     fwd_offsets: Vec<u32>,
     fwd_targets: Vec<u32>,
     fwd_rel: Vec<u8>,
@@ -350,6 +360,15 @@ impl IstGraph {
         )
     }
 
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity for a node,
+    /// `None` if unmeasured (sentinel `-1` — see `NodeRecord::complexity`).
+    pub fn complexity_of(&self, idx: u32) -> Option<i32> {
+        match self.complexity[idx as usize] {
+            n if n < 0 => None,
+            n => Some(n),
+        }
+    }
+
     /// Forward neighbors of `idx` as `(target_idx, relation_type)` pairs.
     /// O(out-degree) ; no allocation.
     pub fn forward_neighbors(&self, idx: u32) -> impl Iterator<Item = (u32, RelationType)> + '_ {
@@ -404,6 +423,7 @@ impl IstGraph {
                 project_code: project.to_string(),
                 kind: NodeKind::from_u8(kind_byte),
                 flags,
+                complexity: self.complexity_of(idx),
             });
         }
 
@@ -435,6 +455,7 @@ impl IstGraph {
         let mut id_to_idx: HashMap<String, u32> = HashMap::with_capacity(nodes.len());
         let mut kinds: Vec<u8> = Vec::with_capacity(nodes.len());
         let mut flags: Vec<u8> = Vec::with_capacity(nodes.len());
+        let mut complexity: Vec<i32> = Vec::with_capacity(nodes.len());
         let mut project_indices: Vec<u8> = Vec::with_capacity(nodes.len());
         let mut project_codes: Vec<String> = Vec::new();
         let mut project_to_idx: HashMap<String, u8> = HashMap::new();
@@ -489,6 +510,7 @@ impl IstGraph {
             names.push(record.name);
             kinds.push(record.kind as u8);
             flags.push(record.flags.0);
+            complexity.push(record.complexity.unwrap_or(-1));
             project_indices.push(proj_idx);
         }
 
@@ -516,6 +538,7 @@ impl IstGraph {
                     names.push(phantom_name);
                     kinds.push(NodeKind::Other as u8);
                     flags.push(0);
+                    complexity.push(-1);
                     project_indices.push(intern_project(
                         String::new(),
                         &mut project_codes,
@@ -568,6 +591,7 @@ impl IstGraph {
                             names.push(phantom_name);
                             kinds.push(NodeKind::Other as u8);
                             flags.push(0);
+                            complexity.push(-1);
                             project_indices.push(intern_project(
                                 String::new(),
                                 &mut project_codes,
@@ -640,6 +664,7 @@ impl IstGraph {
             project_codes,
             kinds,
             flags,
+            complexity,
             fwd_offsets,
             fwd_targets,
             fwd_rel,
@@ -1026,6 +1051,7 @@ mod tests {
             project_code: project.to_string(),
             kind,
             flags: NodeFlags::default(),
+            complexity: None,
         }
     }
 
@@ -1072,6 +1098,7 @@ mod tests {
             project_code: "AXO".to_string(),
             kind: NodeKind::Function,
             flags: NodeFlags::new(true, false, false, false), // tested = carries #[test]
+            complexity: None,
         };
         let nodes = vec![
             test_fn,
@@ -1108,6 +1135,7 @@ mod tests {
             kind: NodeKind::Function,
             // tested=false, public=true, nif=true, unsafe=false
             flags: NodeFlags::new(false, true, true, false),
+            complexity: None,
         }
     }
 

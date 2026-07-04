@@ -1006,7 +1006,8 @@ async fn copy_symbols_in_tx(
             is_nif BOOLEAN NOT NULL,\
             is_unsafe BOOLEAN NOT NULL,\
             project_code TEXT NOT NULL,\
-            embedding {schema}.vector({dim})\
+            embedding {schema}.vector({dim}),\
+            cyclomatic_complexity INTEGER\
          ) ON COMMIT DROP",
         schema = vec_schema,
         dim = crate::embedding_contract::DIMENSION,
@@ -1018,7 +1019,7 @@ async fn copy_symbols_in_tx(
     let copy_sink = tx
         .copy_in(
             "COPY _bulk_symbol_stage \
-                  (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) \
+                  (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding, cyclomatic_complexity) \
                   FROM STDIN BINARY",
         )
         .await
@@ -1033,6 +1034,7 @@ async fn copy_symbols_in_tx(
         Type::BOOL,
         Type::TEXT,
         vec_type,
+        Type::INT4,
     ];
     let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
     pin_mut!(writer);
@@ -1072,6 +1074,7 @@ async fn copy_symbols_in_tx(
                 &row.is_unsafe,
                 &pcode,
                 &embed_opt,
+                &row.cyclomatic_complexity,
             ])
             .await
             .context("bulk_writer Symbol copy row write (batch)")?;
@@ -1087,9 +1090,9 @@ async fn copy_symbols_in_tx(
     // identical, so any winner is correct.
     tx.batch_execute(
         "INSERT INTO ist.Symbol \
-            (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) \
+            (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding, cyclomatic_complexity) \
          SELECT DISTINCT ON (id) \
-                id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding \
+                id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding, cyclomatic_complexity \
          FROM _bulk_symbol_stage \
          ORDER BY id \
          ON CONFLICT (id) DO UPDATE SET \
@@ -1100,7 +1103,8 @@ async fn copy_symbols_in_tx(
             is_nif = EXCLUDED.is_nif, \
             is_unsafe = EXCLUDED.is_unsafe, \
             project_code = EXCLUDED.project_code, \
-            embedding = EXCLUDED.embedding",
+            embedding = EXCLUDED.embedding, \
+            cyclomatic_complexity = EXCLUDED.cyclomatic_complexity",
     )
     .await
     .context("bulk_writer Symbol stage merge (batch)")?;
@@ -1746,6 +1750,7 @@ mod tests {
                 is_unsafe: false,
                 project_code: "AXO".to_string(),
                 embedding: None,
+                cyclomatic_complexity: None,
             }],
             chunks: vec![ChunkRow {
                 chunk_id: "c1".to_string(),

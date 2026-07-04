@@ -19,6 +19,12 @@ pub struct SymbolRow {
     pub is_unsafe: bool,
     pub project_code: String,
     pub embedding: Option<Vec<f32>>,
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity (branch-point
+    /// count) computed by the parser during its body walk. `None` when the
+    /// symbol's language hasn't landed complexity-counting yet, or for non-
+    /// function/method kinds that don't carry a body — never coerced to 0
+    /// (0 would falsely read as "simple", not "unmeasured").
+    pub cyclomatic_complexity: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

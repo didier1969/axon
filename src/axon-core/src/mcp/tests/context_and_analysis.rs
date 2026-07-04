@@ -1181,6 +1181,7 @@ fn test_path_uses_ram_snapshot_when_warm() {
             project_code: "RAM".into(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
+            complexity: None,
         },
         NodeRecord {
             id: "ram::mid".into(),
@@ -1188,6 +1189,7 @@ fn test_path_uses_ram_snapshot_when_warm() {
             project_code: "RAM".into(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
+            complexity: None,
         },
         NodeRecord {
             id: "ram::sink".into(),
@@ -1195,6 +1197,7 @@ fn test_path_uses_ram_snapshot_when_warm() {
             project_code: "RAM".into(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
+            complexity: None,
         },
     ];
     let edges = vec![
@@ -2294,6 +2297,7 @@ fn test_axon_architectural_drift() {
             project_code: "PRJ".into(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
+            complexity: None,
         },
         NodeRecord {
             id: "db/repo.rs".into(),
@@ -2301,6 +2305,7 @@ fn test_axon_architectural_drift() {
             project_code: "PRJ".into(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
+            complexity: None,
         },
     ];
     let edges = vec![EdgeTriple {
@@ -2502,6 +2507,7 @@ fn query_graph_r1_neighbors_ram_excludes_files_and_anchor() {
         project_code: code.to_string(),
         kind: NodeKind::Function,
         flags: NodeFlags::default(),
+        complexity: None,
     };
     let nodes = vec![mk(&target), mk(&caller)];
     let edges = vec![
@@ -4797,7 +4803,7 @@ fn test_duplication_score_reads_similar_to_edges_from_ram() {
         dup["detail"].as_str().unwrap_or("").contains("1 near-duplicate pair"),
         "expected exactly 1 clone pair counted: {dup:?}"
     );
-    assert_eq!(response["data"]["dimensions_wired"].as_u64(), Some(8));
+    assert_eq!(response["data"]["dimensions_wired"].as_u64(), Some(9));
 
     std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
 }
@@ -4951,7 +4957,76 @@ fn test_module_depth_and_impact_radius_scores_wire_from_ram() {
         "{radius:?}"
     );
 
-    assert_eq!(response["data"]["dimensions_wired"].as_u64(), Some(8));
+    assert_eq!(response["data"]["dimensions_wired"].as_u64(), Some(9));
+
+    std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
+}
+
+// REQ-AXO-902185 — god_objects (complexity AND fan-out both over threshold, McCabe>10
+// AND fan-out>10) reads cyclomatic_complexity from RAM (ist.symbol column, loaded via
+// NodeRecord::complexity) + fan-out from forward_neighbors — no PG per call after warm.
+// `god` (complexity=15, 11 distinct CALLS targets) is classified; `normal` (complexity=5,
+// 2 targets) and `unmeasured` (complexity=NULL despite fan-out=20) are NOT — proving
+// unmeasured never counts as a false-clean 0 NOR a false-positive god-object.
+#[test]
+fn test_god_objects_score_reads_complexity_and_fanout_from_ram() {
+    let _guard = env_lock();
+    let history_dir = tempdir().unwrap();
+    std::env::set_var(
+        "AXON_STRUCTURAL_HISTORY_DIR",
+        history_dir.path().to_string_lossy().to_string(),
+    );
+    let server = create_test_server();
+    let code = "TST".to_string();
+    let module = format!("{code}::src/lib.rs");
+    let (god, normal, unmeasured) = (
+        format!("{module}::god"),
+        format!("{module}::normal"),
+        format!("{module}::unmeasured"),
+    );
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code, cyclomatic_complexity) VALUES ('{god}', 'god', 'function', false, true, false, '{code}', 15)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code, cyclomatic_complexity) VALUES ('{normal}', 'normal', 'function', false, true, false, '{code}', 5)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{unmeasured}', 'unmeasured', 'function', false, true, false, '{code}')")).unwrap();
+    for i in 0..11 {
+        server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{god}', '{module}::target_g{i}', 'CALLS', '{code}', 0)")).unwrap();
+    }
+    for i in 0..2 {
+        server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{normal}', '{module}::target_n{i}', 'CALLS', '{code}', 0)")).unwrap();
+    }
+    for i in 0..20 {
+        server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{unmeasured}', '{module}::target_u{i}', 'CALLS', '{code}', 0)")).unwrap();
+    }
+    crate::ist_snapshot::evict_process_snapshot(&code);
+    assert!(server.ensure_ram_snapshot_warm(&code));
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "structural_health_index",
+                "arguments": { "project_code": code }
+            })),
+            id: Some(json!(90218706)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let sub_scores = response["data"]["sub_scores"].as_array().cloned().unwrap_or_default();
+    let god_score = sub_scores
+        .iter()
+        .find(|s| s["name"] == "god_objects")
+        .cloned()
+        .unwrap_or_else(|| panic!("god_objects sub-score missing: {response:?}"));
+    assert!(
+        (god_score["value"].as_f64().unwrap() - (2.0 / 3.0)).abs() < 1e-6,
+        "1 god-object / 3 real functions → score 1-1/3=0.667: {god_score:?}"
+    );
+    assert!(
+        god_score["detail"].as_str().unwrap_or("").contains("1 god-object"),
+        "{god_score:?}"
+    );
 
     std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
 }

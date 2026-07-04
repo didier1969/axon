@@ -123,6 +123,7 @@ fn contains_file_path_resolves_from_ram_snapshot_both_directions() {
         project_code: code.to_string(),
         kind: NodeKind::Function,
         flags: NodeFlags::default(),
+        complexity: None,
     }];
     let edges = vec![EdgeTriple {
         source: file_path.clone(),
@@ -307,6 +308,7 @@ fn soll_and_ist_ram_mirrors_are_coresident_for_one_project() {
             project_code: "TSF".to_string(),
             kind: NodeKind::Function,
             flags: NodeFlags::default(),
+            complexity: None,
         }],
         Vec::<EdgeTriple>::new(),
     );
@@ -349,6 +351,7 @@ fn resolve_scoped_symbol_id_canonical_uses_ist_ram() {
                 project_code: code.to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
+                complexity: None,
             }],
             vec![],
         )),
@@ -391,6 +394,7 @@ fn fuse_returns_governing_intent_and_impact_from_ram() {
                 project_code: code.to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
+                complexity: None,
             }],
             vec![],
         )),

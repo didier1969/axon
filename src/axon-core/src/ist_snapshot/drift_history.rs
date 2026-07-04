@@ -96,6 +96,7 @@ mod tests {
             project_code: "AXO".to_string(),
             kind,
             flags: NodeFlags::default(),
+            complexity: None,
         }
     }
     fn edge(src: &str, tgt: &str) -> EdgeTriple {

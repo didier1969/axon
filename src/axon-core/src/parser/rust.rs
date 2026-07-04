@@ -40,6 +40,39 @@ impl RustParser {
             .is_some()
     }
 
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity: base 1 +
+    /// one per decision point (if/if-let/while/while-let/for/match arm)
+    /// anywhere in the subtree, EXCEPT inside a nested `function_item` (which
+    /// gets its own separate count when `extract_function` visits it in the
+    /// normal `walk`). Closures have no Symbol of their own in this parser,
+    /// so their branches count toward the enclosing function — intentional.
+    /// First-pass scope: `&&`/`||`/`?` short-circuit operators are NOT yet
+    /// counted (deferred — the four decision-construct kinds already give a
+    /// real, non-arbitrary signal without guessing at less certain grammar
+    /// node shapes).
+    fn count_branches(&self, node: Node) -> i32 {
+        let mut count = 0i32;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "function_item" {
+                continue;
+            }
+            if matches!(
+                child.kind(),
+                "if_expression"
+                    | "if_let_expression"
+                    | "while_expression"
+                    | "while_let_expression"
+                    | "for_expression"
+                    | "match_arm"
+            ) {
+                count += 1;
+            }
+            count += self.count_branches(child);
+        }
+        count
+    }
+
     fn walk<'a>(
         &self,
         node: Node<'a>,
@@ -216,6 +249,9 @@ impl RustParser {
                         .join(","),
                 );
             }
+            // REQ-AXO-902185 (god-objects) — base 1 + decision points in the body.
+            let complexity = 1 + self.count_branches(block);
+            props.insert("cyclomatic_complexity".to_string(), complexity.to_string());
         }
 
         // REQ-AXO-91504 — keep the function name alive after the Symbol
@@ -1093,5 +1129,65 @@ mod tests {
         // bare `impl Foo` from `impl Trait for Foo`. The `implements`
         // relation already carries the from/to detail.
         assert_eq!(impls[0].name, "Display for Foo");
+    }
+
+    // REQ-AXO-902185 (god-objects) — cyclomatic complexity: base 1 + one per
+    // decision point (if/if-let/while/while-let/for/match arm).
+    #[test]
+    fn simple_function_has_complexity_one() {
+        let p = parser();
+        let result = p.parse("fn f() { let x = 1; let y = x + 1; }");
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert_eq!(f.properties.get("cyclomatic_complexity").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn branching_function_counts_each_decision_point() {
+        let p = parser();
+        // 1 (base) + if + while + for + 2 match arms = 6.
+        let result = p.parse(
+            "fn f(x: i32) -> i32 { \
+                if x > 0 { return 1; } \
+                while x > 0 { break; } \
+                for i in 0..x {} \
+                match x { 0 => 1, _ => 2 } \
+             }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("6"),
+            "props: {:?}",
+            f.properties
+        );
+    }
+
+    #[test]
+    fn nested_function_gets_its_own_complexity_not_added_to_parent() {
+        let p = parser();
+        // outer: base 1 + 1 if = 2. inner (nested fn): base 1 + 1 if = 2.
+        // The nested fn's branch must NOT inflate outer's count.
+        let result = p.parse(
+            "fn outer(x: i32) { \
+                if x > 0 {} \
+                fn inner(y: i32) { if y > 0 {} } \
+             }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let outer = result.symbols.iter().find(|s| s.name == "outer").unwrap();
+        let inner = result.symbols.iter().find(|s| s.name == "inner").unwrap();
+        assert_eq!(outer.properties.get("cyclomatic_complexity").map(String::as_str), Some("2"));
+        assert_eq!(inner.properties.get("cyclomatic_complexity").map(String::as_str), Some("2"));
     }
 }

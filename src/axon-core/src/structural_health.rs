@@ -208,6 +208,18 @@ pub fn module_depth_score(mean_public_ratio: f64) -> f64 {
     clamp01(1.0 - mean_public_ratio)
 }
 
+/// God-objects (REQ-AXO-902185): `1 - god_objects / total_functions`. A god-object is a
+/// function that is BOTH highly complex (McCabe) AND highly coupled (fan-out) — the AND
+/// (not OR) is what avoids the false-positive class a single-axis threshold produced
+/// (a prior LOC-only attempt gave 81 false positives). 1.0 = no god-objects (either
+/// none exist, or none are measurable yet — see `NodeRecord::complexity`).
+pub fn god_objects_score(god_objects: usize, total_functions: usize) -> f64 {
+    if total_functions == 0 {
+        return 1.0;
+    }
+    clamp01(1.0 - (god_objects as f64 / total_functions as f64))
+}
+
 /// Impact radius (REQ-AXO-902185): normalizes the tail (p95) blast radius — the count of
 /// transitive dependents reached by a bounded reverse BFS from a symbol — against the
 /// total node count. A change whose ripple reaches a LARGE fraction of the graph is
@@ -359,6 +371,13 @@ mod tests {
         assert_eq!(module_depth_score(0.0), 1.0); // nothing public — maximally deep
         assert_eq!(module_depth_score(1.0), 0.0); // everything public — maximally shallow
         assert!((module_depth_score(0.2) - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn god_objects_score_is_one_minus_rate() {
+        assert_eq!(god_objects_score(0, 500), 1.0);
+        assert!((god_objects_score(1, 100) - 0.99).abs() < 1e-9);
+        assert_eq!(god_objects_score(5, 0), 1.0);
     }
 
     #[test]

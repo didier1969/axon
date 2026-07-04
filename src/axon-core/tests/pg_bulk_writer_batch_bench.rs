@@ -59,6 +59,7 @@ fn build_batch() -> PgBulkBatch {
             is_unsafe: false,
             project_code: "AXO".to_string(),
             embedding: Some(full_dim_embedding(i)),
+            cyclomatic_complexity: None,
         })
         .collect();
     let chunks: Vec<BulkWriterChunkRow> = (0..CHUNK_COUNT)

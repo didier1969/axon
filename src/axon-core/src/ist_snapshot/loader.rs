@@ -29,7 +29,7 @@ pub trait JsonSqlStore {
     fn query_json(&self, sql: &str) -> Result<String, String>;
 }
 
-const NODE_SQL: &str = "SELECT id, kind, project_code, tested::text, is_public::text, is_nif::text, is_unsafe::text, name FROM ist.symbol WHERE project_code = '{P}'";
+const NODE_SQL: &str = "SELECT id, kind, project_code, tested::text, is_public::text, is_nif::text, is_unsafe::text, name, COALESCE(cyclomatic_complexity::text, '') FROM ist.symbol WHERE project_code = '{P}'";
 const EDGE_SQL: &str =
     "SELECT source_id, target_id, relation_type FROM ist.edge WHERE project_code = '{P}'";
 
@@ -63,6 +63,13 @@ pub fn load_snapshot<S: JsonSqlStore + ?Sized>(
                 .filter(|n| !n.is_empty())
                 .cloned()
                 .unwrap_or_else(|| row[0].rsplit("::").next().unwrap_or(&row[0]).to_string());
+            // REQ-AXO-902185 (god-objects) — `cyclomatic_complexity` (col 9), NULL
+            // (empty string via COALESCE) → None, never 0 (0 would misread as
+            // "measured, zero branches" instead of "not yet measured").
+            let complexity = row
+                .get(8)
+                .filter(|c| !c.is_empty())
+                .and_then(|c| c.parse::<i32>().ok());
             Some(NodeRecord {
                 id: row[0].clone(),
                 name,
@@ -74,6 +81,7 @@ pub fn load_snapshot<S: JsonSqlStore + ?Sized>(
                     parse_bool(&row[5]),
                     parse_bool(&row[6]),
                 ),
+                complexity,
             })
         })
         .collect();

@@ -144,8 +144,16 @@ CREATE TABLE IF NOT EXISTS ist.Symbol (
     is_nif       BOOLEAN NOT NULL DEFAULT FALSE,
     is_unsafe    BOOLEAN NOT NULL DEFAULT FALSE,
     project_code TEXT    NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
-    embedding    vector(1024)
+    embedding    vector(1024),
+    cyclomatic_complexity INTEGER
 );
+-- REQ-AXO-902185 (god-objects) — additive for live DBs whose ist.Symbol
+-- predates the column (CREATE TABLE IF NOT EXISTS above is a no-op when the
+-- table already exists). NULL = not yet computed by this parser/language
+-- (pre-migration rows, or a language whose counting slice hasn't landed
+-- yet) — treated as "not god-object" by the SHI classifier, never as 0.
+ALTER TABLE ist.Symbol
+    ADD COLUMN IF NOT EXISTS cyclomatic_complexity INTEGER;
 
 -- ── Chunks (1 symbol → 1+ chunks) ────────────────────────────────────
 -- file_path FK to IndexedFile: a chunk cannot outlive its file.

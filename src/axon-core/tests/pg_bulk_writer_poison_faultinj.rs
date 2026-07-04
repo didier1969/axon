@@ -33,6 +33,7 @@ fn sym(id: &str) -> BulkWriterSymbolRow {
         is_unsafe: false,
         project_code: P.to_string(),
         embedding: None,
+        cyclomatic_complexity: None,
     }
 }
 

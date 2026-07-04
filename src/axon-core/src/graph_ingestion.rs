@@ -24,6 +24,17 @@ pub use types::{
     VectorPersistOutboxUpdate, VectorPersistOutboxWork, VectorWorkerFault,
 };
 
+/// REQ-AXO-902185 (god-objects) — read the parser-computed McCabe cyclomatic
+/// complexity out of `Symbol.properties` (the same string-keyed bag every
+/// parser already uses for `body_split_lines` etc., `code_chunker.rs:116`).
+/// `None` when the language's counting hasn't landed yet, or the value fails
+/// to parse — never coerced to 0 (0 would read as "simple", not "unmeasured").
+fn parsed_cyclomatic_complexity(sym: &crate::parser::Symbol) -> Option<i32> {
+    sym.properties
+        .get("cyclomatic_complexity")
+        .and_then(|s| s.parse::<i32>().ok())
+}
+
 impl GraphStore {
     // REQ-AXO-901653 slice-5a: `claimable_file_vectorization_candidates_query`
     // deleted ; legacy FileVectorizationQueue + File join.
@@ -929,6 +940,7 @@ impl GraphStore {
                 is_unsafe: sym.is_unsafe,
                 project_code: project_code.to_string(),
                 embedding: sym.embedding.clone(),
+                cyclomatic_complexity: parsed_cyclomatic_complexity(sym),
             });
             contains_rows.push(RelationRow {
                 source_id: path.to_string(),
@@ -1180,6 +1192,7 @@ impl GraphStore {
                     is_unsafe: sym.is_unsafe,
                     project_code: project_code.to_string(),
                     embedding: sym.embedding.clone(),
+                    cyclomatic_complexity: parsed_cyclomatic_complexity(sym),
                 });
                 contains_rows.push(RelationRow {
                     source_id: path_str.clone(),

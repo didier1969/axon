@@ -52,6 +52,7 @@ fn sample_symbol(idx: usize) -> BulkWriterSymbolRow {
         is_unsafe: false,
         project_code: "AXO".to_string(),
         embedding: Some(full_dim_embedding(idx)),
+        cyclomatic_complexity: None,
     }
 }
 
@@ -235,6 +236,7 @@ fn flush_batch_cross_table_round_trip() {
             is_unsafe: false,
             project_code: "AXO".to_string(),
             embedding: None,
+            cyclomatic_complexity: None,
         }],
         chunks: vec![BulkWriterChunkRow {
             chunk_id: "AXO::chunk::partial".to_string(),

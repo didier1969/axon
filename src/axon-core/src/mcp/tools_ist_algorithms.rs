@@ -16,9 +16,9 @@ use crate::mcp::McpServer;
 use std::collections::{HashMap, HashSet};
 
 use crate::structural_health::{
-    acyclicity_score, duplication_score, geometric_aggregate, impact_radius_score, martin_distance,
-    main_sequence_score, module_depth_score, resilience_score, weighted_coverage_score,
-    StructuralHealthIndex, SubScore,
+    acyclicity_score, duplication_score, geometric_aggregate, god_objects_score, impact_radius_score,
+    martin_distance, main_sequence_score, module_depth_score, resilience_score,
+    weighted_coverage_score, StructuralHealthIndex, SubScore,
 };
 
 /// REQ-AXO-902185 (impact radius) — bounded reverse-BFS depth: how many hops of "who
@@ -29,6 +29,16 @@ const IMPACT_RADIUS_MAX_DEPTH: u32 = 3;
 /// extreme hub can't blow up the whole-corpus scan cost; the count saturates at this cap
 /// for genuine super-hubs, which is fine for a percentile (they land in the tail either way).
 const IMPACT_RADIUS_MAX_NEIGHBORS: usize = 200;
+
+/// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity threshold above
+/// which a function is "complex" (industry-standard >10, not a measurement-swept
+/// value — a health index needs a fixed line so a clean codebase can hit 1.0).
+const GOD_OBJECT_COMPLEXITY_THRESHOLD: i32 = 10;
+/// REQ-AXO-902185 (god-objects) — fan-out (distinct outbound CALLS/CALLS_NIF)
+/// threshold. ANDed with complexity (not OR'd) so neither axis alone flags a
+/// false positive — the lesson from the earlier LOC-threshold attempt (20
+/// lines alone gave 81 false positives on a single axis).
+const GOD_OBJECT_FANOUT_THRESHOLD: usize = 10;
 
 /// REQ-AXO-902185 (impact radius) — nearest-rank percentile over an already-sorted slice.
 fn percentile(sorted: &[usize], pct: f64) -> usize {
@@ -162,6 +172,12 @@ struct ShiRawMetrics {
     /// symbols. See `impact_radius_score`.
     median_impact_radius: usize,
     p95_impact_radius: usize,
+    /// REQ-AXO-902185 (god-objects) — count of Function/Method symbols classified
+    /// as god-objects (complexity AND fan-out both over threshold).
+    god_objects: usize,
+    /// REQ-AXO-902185 (god-objects) — total real Function/Method symbols (the
+    /// denominator), regardless of whether complexity has been measured yet.
+    total_real_functions: usize,
 }
 
 fn compute_shi_raw_metrics(
@@ -229,6 +245,16 @@ fn compute_shi_raw_metrics(
     let mut mod_pub_total: HashMap<String, (usize, usize)> = HashMap::new();
     let mut efferent: HashMap<String, HashSet<String>> = HashMap::new();
     let mut afferent: HashMap<String, HashSet<String>> = HashMap::new();
+    // REQ-AXO-902185 (god-objects) — real Function/Method symbols, the population
+    // this axis classifies. `total_real_functions` counts ALL of them regardless
+    // of whether their language's complexity-counting has landed yet (so the
+    // score stays honest: a not-yet-instrumented language never inflates it,
+    // it just can't contribute to the numerator — same "None ≠ 0" discipline as
+    // `NodeRecord::complexity`). `god_objects` counts complexity AND fan-out both
+    // over threshold (AND, not OR — a single-axis threshold gave 81 false
+    // positives on a prior LOC-only attempt).
+    let mut total_real_functions = 0usize;
+    let mut god_objects = 0usize;
     for i in 0..total_nodes as u32 {
         let id = snapshot.id_of(i);
         if !is_real_source_symbol(id) {
@@ -244,6 +270,22 @@ fn compute_shi_raw_metrics(
                 }
                 "struct" | "enum" => entry.1 += 1,
                 _ => {}
+            }
+            if matches!(kind, NodeKind::Function | NodeKind::Method) {
+                total_real_functions += 1;
+                if let Some(complexity) = snapshot.complexity_of(i) {
+                    let fan_out = snapshot
+                        .forward_neighbors(i)
+                        .filter(|(_, rel)| {
+                            matches!(rel, crate::ist_snapshot::RelationType::Calls | crate::ist_snapshot::RelationType::CallsNif)
+                        })
+                        .count();
+                    if complexity > GOD_OBJECT_COMPLEXITY_THRESHOLD
+                        && fan_out > GOD_OBJECT_FANOUT_THRESHOLD
+                    {
+                        god_objects += 1;
+                    }
+                }
             }
         }
         let pub_total = mod_pub_total.entry(m.clone()).or_insert((0, 0));
@@ -312,6 +354,8 @@ fn compute_shi_raw_metrics(
         mod_pub_total_count,
         median_impact_radius,
         p95_impact_radius,
+        god_objects,
+        total_real_functions,
     }
 }
 
@@ -405,6 +449,16 @@ fn build_sub_scores(raw: &ShiRawMetrics) -> Vec<SubScore> {
             format!(
                 "median impact radius={} / p95={} / {} total node(s) (bounded reverse BFS, depth {})",
                 raw.median_impact_radius, raw.p95_impact_radius, raw.total_nodes, IMPACT_RADIUS_MAX_DEPTH
+            ),
+        ),
+        SubScore::new(
+            "god_objects",
+            god_objects_score(raw.god_objects, raw.total_real_functions),
+            1.0,
+            0.95,
+            format!(
+                "{} god-object(s) (complexity>{} AND fan-out>{}) / {} real function(s)/method(s) — languages without complexity-counting yet read as unmeasured, not clean",
+                raw.god_objects, GOD_OBJECT_COMPLEXITY_THRESHOLD, GOD_OBJECT_FANOUT_THRESHOLD, raw.total_real_functions
             ),
         ),
     ]
@@ -657,14 +711,14 @@ impl McpServer {
                 "below_target": below,
                 "node_count": total_nodes,
                 "edge_count": snapshot.edge_count(),
-                "dimensions_wired": 8,
+                "dimensions_wired": 9,
                 "coupled_modules": d_count,
                 "orphan_intent": orphan_intent,
                 "total_intent_nodes": total_intent,
                 "snapshot_id": build_id,
                 "delta_vs_previous": delta_vs_previous,
                 "history_depth": previous_snapshots.len() + 1,
-                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D) + intent_alignment (intent→code half) + duplication (SIMILAR_TO edges, pgvector HNSW scan — see reconcile_duplication_edges, run out-of-band, NOT per-call) + module_depth (interface/impl ratio, APoSD) + impact_radius (bounded reverse-BFS p95); remaining (code→intent orphan half, god-objects) via REQ-AXO-902185. Δ per-call persisted (REQ-AXO-902187) — re_surfaced=true means a below-target axis did not improve since the last measurement."
+                "note": "acyclicity + resilience + coverage×centrality + main_sequence (Martin-D) + intent_alignment (intent→code half) + duplication (SIMILAR_TO edges, pgvector HNSW scan — see reconcile_duplication_edges, run out-of-band, NOT per-call) + module_depth (interface/impl ratio, APoSD) + impact_radius (bounded reverse-BFS p95) + god_objects (complexity AND fan-out, Rust counting landed — other languages read as unmeasured until their parser slice lands, REQ-AXO-902185); remaining (code→intent orphan half) via REQ-AXO-902185. Δ per-call persisted (REQ-AXO-902187) — re_surfaced=true means a below-target axis did not improve since the last measurement."
             }
         }))
     }

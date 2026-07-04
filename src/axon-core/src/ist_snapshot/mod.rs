@@ -151,6 +151,7 @@ mod refresh_tests {
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
+                complexity: None,
             }],
             vec![] as Vec<EdgeTriple>,
         ))

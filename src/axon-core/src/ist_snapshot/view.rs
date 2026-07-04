@@ -344,6 +344,7 @@ mod tests {
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
+                complexity: None,
             },
             NodeRecord {
                 id: "AXO::b".to_string(),
@@ -351,6 +352,7 @@ mod tests {
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
+                complexity: None,
             },
             NodeRecord {
                 id: "AXO::c".to_string(),
@@ -358,6 +360,7 @@ mod tests {
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::default(),
+                complexity: None,
             },
         ];
         let edges = vec![
@@ -421,6 +424,7 @@ mod tests {
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::new(true, false, false, false),
+                complexity: None,
             },
             NodeRecord {
                 id: "AXO::uncovered".to_string(),
@@ -428,6 +432,7 @@ mod tests {
                 project_code: "AXO".to_string(),
                 kind: NodeKind::Function,
                 flags: NodeFlags::new(false, false, false, false),
+                complexity: None,
             },
         ];
         let cache = Arc::new(IstSnapshotCache::new());
