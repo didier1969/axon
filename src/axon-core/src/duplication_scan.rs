@@ -92,7 +92,7 @@ impl GraphStore {
         // through `execute`, NOT `execute_raw_sql_gateway` — that gateway's
         // `is_read_only_sql` classifier only scans statements AFTER the first
         // `;`, so a single WITH-prefixed writable-CTE statement (no semicolon)
-        // is misclassified as read-only. Logged as REQ-AXO-902209 (latent
+        // is misclassified as read-only. Logged as REQ-AXO-902207 (latent
         // gateway gap, no current caller exercises it) rather than fixed here
         // — out of scope for this slice.
         self.execute(&format!(
