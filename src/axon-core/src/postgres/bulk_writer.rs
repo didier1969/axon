@@ -662,9 +662,49 @@ pub fn flush_batch(batch: &PgBulkBatch) -> Result<()> {
 // write routes through the STORE's own pool (correct DB + lifetime-scoped),
 // not this module's global env-resolved `POOL`. Mirrors the embedding half
 // already closed by `NativePgCtx::flush_chunk_embeddings_copy`.
+// REQ-AXO-901959 — exposed to the GraphStore's native ctx. REQ-AXO-902198 — the live drain
+// entrypoint: try the fast atomic path; on a DATA poison (a bad row PG rejects), fall back to
+// a resilient mode that ISOLATES the poison so the batch still lands and the indexer drain
+// never freezes (the 902197 incident class, generalised). NUL is already stripped from every
+// free-text field pre-COPY (defense line 1); this is the backstop (defense line 2) for any
+// other poison (encoding / constraint). Transient faults propagate — the FVQ retry contract
+// re-drives the file.
 pub(crate) async fn flush_batch_async(
     client: &mut deadpool_postgres::Client,
     batch: &PgBulkBatch,
+) -> Result<()> {
+    match flush_batch_tx(client, batch, false).await {
+        Ok(()) => Ok(()),
+        Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
+            Some(CopyErrorClass::Data) => {
+                log::warn!(
+                    "bulk_writer batch atomic flush hit a DATA poison ({e:#}); retrying in resilient mode (structural core + bisected chunks) so one bad row can't freeze the drain (REQ-AXO-902198)"
+                );
+                // Structural core (Project + IndexedFile + Symbol + Edge) atomically WITHOUT
+                // chunks — FK parents (IndexedFile) commit here so the chunk children can then
+                // land in their own txs. Their id fields are NUL-pre-filtered; a residual DATA
+                // poison here is rare and propagates (FVQ retries).
+                flush_batch_tx(client, batch, true).await?;
+                // Chunks (the free-text poison class) — own txs, bisected: the poison chunk is
+                // isolated and dropped, every clean chunk lands.
+                if !batch.chunks.is_empty() {
+                    flush_chunks_async(client, &batch.chunks).await?;
+                }
+                Ok(())
+            }
+            // Transient (lock/deadlock/connection) or Other → propagate unchanged.
+            _ => Err(e),
+        },
+    }
+}
+
+/// The batch flush transaction. `skip_chunks` omits the chunk COPY so the caller can land the
+/// structural core (with the FK parents) first and then drive chunks through the resilient
+/// bisection path (REQ-AXO-902198).
+async fn flush_batch_tx(
+    client: &mut deadpool_postgres::Client,
+    batch: &PgBulkBatch,
+    skip_chunks: bool,
 ) -> Result<()> {
     // Pre-tx: ensure pgvector extension + cache the runtime-assigned
     // OID once. Both are idempotent and stay outside the bulk tx so a
@@ -719,7 +759,7 @@ pub(crate) async fn flush_batch_async(
             .clone();
         copy_symbols_in_tx(&tx, &batch.symbols, vec_type).await?;
     }
-    if !batch.chunks.is_empty() {
+    if !skip_chunks && !batch.chunks.is_empty() {
         copy_chunks_in_tx(&tx, &batch.chunks).await?;
     }
     // REQ-AXO-901747 — unified Edge table (post-MIL-AXO-017).
@@ -862,17 +902,24 @@ async fn copy_symbols_in_tx(
                 }
             }
         };
+        // REQ-AXO-902198 (pre-filter) — strip NUL from every free-text field, like chunks
+        // (902197). A 0x00 in a symbol id/name/kind (parser artifact) would abort the whole
+        // COPY BINARY batch at finish() → freeze the indexer drain (files stuck 'discovered').
+        let id = strip_nul(&row.symbol_id);
+        let name = strip_nul(&row.name);
+        let kind = strip_nul(&row.kind);
+        let pcode = strip_nul(&row.project_code);
         writer
             .as_mut()
             .write(&[
-                &row.symbol_id,
-                &row.name,
-                &row.kind,
+                &id as &(dyn tokio_postgres::types::ToSql + Sync),
+                &name,
+                &kind,
                 &row.tested,
                 &row.is_public,
                 &row.is_nif,
                 &row.is_unsafe,
-                &row.project_code,
+                &pcode,
                 &embed_opt,
             ])
             .await
@@ -1071,13 +1118,19 @@ async fn copy_edges_in_tx(
     pin_mut!(writer);
     let now_ms = chrono::Utc::now().timestamp_millis();
     for (rel_type, row) in rows {
+        // REQ-AXO-902198 (pre-filter) — strip NUL from the parser-derived id fields; a 0x00
+        // would abort the whole edge COPY batch → freeze the drain (rel_type is controlled).
+        let source_id = strip_nul(&row.source_id);
+        let target_id = strip_nul(&row.target_id);
+        let pcode = strip_nul(&row.project_code);
+        let rel = rel_type.to_string();
         writer
             .as_mut()
             .write(&[
-                &row.source_id as &(dyn tokio_postgres::types::ToSql + Sync),
-                &row.target_id,
-                &rel_type.to_string(),
-                &row.project_code,
+                &source_id as &(dyn tokio_postgres::types::ToSql + Sync),
+                &target_id,
+                &rel,
+                &pcode,
                 &now_ms,
             ])
             .await
@@ -1123,11 +1176,15 @@ async fn copy_indexed_files_in_tx(
     let writer = BinaryCopyInWriter::new(copy_sink, &column_types);
     pin_mut!(writer);
     for (path, hash, ts, mtime, size) in rows {
+        // REQ-AXO-902198 (pre-filter) — strip NUL from path/hash so a 0x00 can't abort the
+        // IndexedFile COPY batch → freeze the drain.
+        let path_s = strip_nul(path);
+        let hash_s = strip_nul(hash);
         writer
             .as_mut()
             .write(&[
-                path as &(dyn tokio_postgres::types::ToSql + Sync),
-                hash,
+                &path_s as &(dyn tokio_postgres::types::ToSql + Sync),
+                &hash_s,
                 ts,
                 mtime,
                 size,
