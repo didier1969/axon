@@ -10569,3 +10569,143 @@ fn test_soll_query_context_search_returns_fts_ranked_nodes() {
         "dashboard node must not match 'embedding throughput': {data}"
     );
 }
+
+// REQ-AXO-902192 S3 — the fail-closed anti-orphan gate. A symbol tagged
+// `deliverable` (soll.Traceability, metadata.role='deliverable') that is
+// reachable ONLY from a test (zero production caller — `test_only`) among the
+// files in a commit must block `axon_commit_work`. Untagged orphans (the
+// common case — opt-in gate, zero blast radius on existing code) and
+// deliverable symbols that ARE wired to production must NOT block.
+#[test]
+fn test_axon_commit_work_blocks_deliverable_symbol_never_wired_to_production() {
+    let server = create_test_server();
+    let code = "TST".to_string();
+    let module = format!("{code}::src/lib.rs");
+
+    // orphan_tagged: deliverable-tagged, called ONLY by a #[test] fn — must block.
+    let orphan_tagged = format!("{module}::orphan_tagged");
+    // orphan_untagged: same shape, but NOT tagged deliverable — must NOT block (opt-in).
+    let orphan_untagged = format!("{module}::orphan_untagged");
+    // wired: deliverable-tagged but has a real production caller — must NOT block.
+    let wired = format!("{module}::wired_fn");
+    let wired_caller = format!("{module}::wired_caller");
+    let test_fn = format!("{module}::exercises_orphans");
+
+    for (id, name) in [
+        (&orphan_tagged, "orphan_tagged"),
+        (&orphan_untagged, "orphan_untagged"),
+        (&wired, "wired_fn"),
+        (&wired_caller, "wired_caller"),
+    ] {
+        server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{id}', '{name}', 'function', false, true, false, '{code}')")).unwrap();
+    }
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{test_fn}', 'exercises_orphans', 'function', true, false, false, '{code}')")).unwrap();
+
+    for id in [&orphan_tagged, &orphan_untagged, &wired, &wired_caller] {
+        server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{module}', '{id}', 'CONTAINS', '{code}', 0)")).unwrap();
+    }
+    // test_fn calls the two "orphan" candidates (their only caller is a test).
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{test_fn}', '{orphan_tagged}', 'CALLS', '{code}', 0)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{test_fn}', '{orphan_untagged}', 'CALLS', '{code}', 0)")).unwrap();
+    // wired_caller (a non-test prod symbol) calls `wired` — a real production edge.
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{wired_caller}', '{wired}', 'CALLS', '{code}', 0)")).unwrap();
+
+    // Tag orphan_tagged + wired as deliverable (orphan_untagged is deliberately left untagged).
+    server.graph_store.execute(&format!("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES ('TRC-{code}-1', 'Requirement', 'REQ-{code}-1', 'Symbol', 'orphan_tagged', 1.0, '{{\"role\":\"deliverable\"}}', 0)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES ('TRC-{code}-2', 'Requirement', 'REQ-{code}-1', 'Symbol', 'wired_fn', 1.0, '{{\"role\":\"deliverable\"}}', 0)")).unwrap();
+
+    crate::ist_snapshot::evict_process_snapshot(&code);
+    assert!(server.ensure_ram_snapshot_warm(&code));
+
+    let commit = |diff_path: &str, id: i64| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "axon_commit_work",
+                    "arguments": {
+                        "project_code": code,
+                        "diff_paths": [diff_path],
+                        "message": "feat: touch orphan candidates",
+                        "dry_run": true
+                    }
+                })),
+                id: Some(json!(id)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    // 1) deliverable + test_only (orphan_tagged) in the diff → BLOCKED.
+    let blocked = commit("src/lib.rs", 9021921);
+    assert_eq!(blocked["isError"].as_bool(), Some(true), "deliverable test_only symbol must block: {blocked:?}");
+    let violations = blocked["data"]["violations"].as_array().cloned().unwrap_or_default();
+    assert!(
+        violations.iter().any(|v| v["diagnostic"].as_str().unwrap_or("").contains("orphan_tagged")),
+        "violation must name orphan_tagged: {violations:?}"
+    );
+
+    // 2) Remove the blocking symbol; only the untagged orphan + the prod-wired
+    // deliverable symbol remain in the diff's file → must NOT block.
+    server.graph_store.execute(&format!("DELETE FROM Symbol WHERE id = '{orphan_tagged}'")).unwrap();
+    server.graph_store.execute(&format!("DELETE FROM ist.Edge WHERE target_id = '{orphan_tagged}'")).unwrap();
+    crate::ist_snapshot::evict_process_snapshot(&code);
+    assert!(server.ensure_ram_snapshot_warm(&code));
+
+    let clean = commit("src/lib.rs", 9021922);
+    assert_ne!(
+        clean["isError"].as_bool(),
+        Some(true),
+        "untagged orphan + prod-wired deliverable must NOT block: {clean:?}"
+    );
+    assert!(clean["content"][0]["text"].as_str().unwrap_or("").contains("Validation passed"));
+}
+
+// REQ-AXO-902192 S3 — an explicit `role='entry'` tag (a legitimately declared
+// dynamic-dispatch entry point) exempts a symbol from the gate even when it is
+// ALSO tagged `deliverable` and classifies as `test_only`.
+#[test]
+fn test_axon_commit_work_entry_tag_exempts_deliverable_symbol_from_gate() {
+    let server = create_test_server();
+    let code = "TST".to_string();
+    let module = format!("{code}::src/lib.rs");
+    let hook = format!("{module}::registered_hook");
+    let test_fn = format!("{module}::exercises_hook");
+
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{hook}', 'registered_hook', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{test_fn}', 'exercises_hook', 'function', true, false, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{module}', '{hook}', 'CONTAINS', '{code}', 0)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{test_fn}', '{hook}', 'CALLS', '{code}', 0)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES ('TRC-{code}-3', 'Requirement', 'REQ-{code}-1', 'Symbol', 'registered_hook', 1.0, '{{\"role\":\"deliverable\"}}', 0)")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES ('TRC-{code}-4', 'Requirement', 'REQ-{code}-1', 'Symbol', 'registered_hook', 1.0, '{{\"role\":\"entry\"}}', 0)")).unwrap();
+
+    crate::ist_snapshot::evict_process_snapshot(&code);
+    assert!(server.ensure_ram_snapshot_warm(&code));
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_commit_work",
+                "arguments": {
+                    "project_code": code,
+                    "diff_paths": ["src/lib.rs"],
+                    "message": "feat: touch hook",
+                    "dry_run": true
+                }
+            })),
+            id: Some(json!(9021923)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_ne!(
+        response["isError"].as_bool(),
+        Some(true),
+        "role='entry' must exempt a deliverable symbol from the gate: {response:?}"
+    );
+}

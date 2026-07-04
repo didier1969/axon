@@ -955,6 +955,79 @@ fn is_inferred_entry(name: &str) -> bool {
     n.contains("main") || n.contains("handler") || n.contains("nif_")
 }
 
+/// REQ-AXO-902192 slice S3 — classify a SINGLE node's wiring status, using the
+/// exact same rules as `wiring_orphans` (extracted so the gate can check one
+/// specific symbol WITHOUT inheriting that function's `ANALYTICS_LIMIT` (=20)
+/// display cap — a fail-closed gate must never silently miss a real orphan
+/// because it sorted past the top-20 advisory cutoff). Returns `None` if the
+/// node isn't orphan-candidate shape at all (not callable, a test fn, private,
+/// a test-path symbol, an inferred entry, or SOLL-declared) OR if it has a
+/// production caller. `file_map` is precomputed once by the caller (shared
+/// across every node checked, same as `wiring_orphans` already does).
+fn wiring_classify_node(
+    graph: &IstGraph,
+    idx: u32,
+    declared: &HashSet<String>,
+    file_map: &std::collections::HashMap<u32, String>,
+) -> Option<WiringOrphan> {
+    let (kind_byte, _, flags) = graph.node_meta(idx);
+    if !is_callable(kind_byte) {
+        return None;
+    }
+    // A `#[test]`/fixture fn is not a deliverable — skip (same class orphan_code skips).
+    if NodeFlags(flags.0).tested() {
+        return None;
+    }
+    // Only PUBLIC callables are deliverables. A PRIVATE fn reached only from tests is test
+    // infrastructure (helpers in an inline `mod tests` — `node`/`edge`/`mk_node`…), NOT an
+    // unwired deliverable. This is the exact COMPLEMENT of orphan_code_symbols, which flags
+    // the PRIVATE uncalled ones; wiring flags the PUBLIC ones no prod caller reaches (the OPV
+    // case: a public API with a green test but nothing in the app calls it).
+    if !NodeFlags(flags.0).public() {
+        return None;
+    }
+    let empty = String::new();
+    let path = file_map.get(&idx).unwrap_or(&empty);
+    if !path.is_empty() && is_test_path(path) {
+        return None;
+    }
+    let name = name_from_id(graph.id_of(idx));
+    if is_inferred_entry(name) {
+        return None;
+    }
+    // REQ-AXO-902192 S2 — a symbol wired to intent in the SOLL (a traceability edge) is
+    // DECLARED, not an accidental orphan: this exempts hooks / lazy-imports / wrapper-
+    // dispatched callables the static CALLS graph can't reach (the OPV blind spots). The set
+    // is built by the caller from the SOLL snapshot, so this fn stays free of SOLL coupling.
+    if declared.contains(&name.to_ascii_lowercase()) {
+        return None;
+    }
+    let mut prod_callers = 0usize;
+    let mut test_callers = 0usize;
+    for (src, rel) in graph.reverse_neighbors(idx) {
+        if !matches!(rel, RelationType::Calls | RelationType::CallsNif) {
+            continue;
+        }
+        let (_, _, sflags) = graph.node_meta(src);
+        if NodeFlags(sflags.0).tested() {
+            test_callers += 1;
+        } else {
+            prod_callers += 1;
+        }
+    }
+    if prod_callers > 0 {
+        return None; // wired in prod — not an orphan
+    }
+    let category = if test_callers > 0 { "test_only" } else { "isolated" };
+    Some(WiringOrphan {
+        id: graph.id_of(idx).to_string(),
+        name: name.to_string(),
+        kind: NodeKind::from_u8(kind_byte).as_db().to_string(),
+        test_callers,
+        category,
+    })
+}
+
 /// REQ-AXO-902192 (volet 1a, CPT-AXO-90056) — wiring orphans: DEFINED callables
 /// (function/method, INCLUDING public — the gap `orphan_code_symbols` skips) that no
 /// PRODUCTION caller reaches via CALLS/CALLS_NIF; only tests reach them, or nothing.
@@ -963,6 +1036,10 @@ fn is_inferred_entry(name: &str) -> bool {
 /// all (`isolated`). `test_only` is the high-confidence "delivered + green test but never
 /// wired into prod" class (OPV proof: finance::rebalance_book & co). Inferred entries
 /// (main/handler/nif) are skipped — they legitimately carry no in-graph caller.
+///
+/// ADVISORY / DISPLAY use only (capped at `ANALYTICS_LIMIT`=20, sorted worst-first) — a
+/// fail-closed gate that must check ONE specific symbol regardless of project-wide ranking
+/// uses `wiring_classify_node` directly instead (REQ-AXO-902192 S3, `tools_soll::workflow_project`).
 pub fn wiring_orphans(
     graph: &IstGraph,
     project: &str,
@@ -975,62 +1052,9 @@ pub fn wiring_orphans(
         if !project_matches(graph, idx, project) {
             continue;
         }
-        let (kind_byte, _, flags) = graph.node_meta(idx);
-        if !is_callable(kind_byte) {
-            continue;
+        if let Some(orphan) = wiring_classify_node(graph, idx, declared, &file_map) {
+            out.push(orphan);
         }
-        // A `#[test]`/fixture fn is not a deliverable — skip (same class orphan_code skips).
-        if NodeFlags(flags.0).tested() {
-            continue;
-        }
-        // Only PUBLIC callables are deliverables. A PRIVATE fn reached only from tests is test
-        // infrastructure (helpers in an inline `mod tests` — `node`/`edge`/`mk_node`…), NOT an
-        // unwired deliverable. This is the exact COMPLEMENT of orphan_code_symbols, which flags
-        // the PRIVATE uncalled ones; wiring flags the PUBLIC ones no prod caller reaches (the OPV
-        // case: a public API with a green test but nothing in the app calls it).
-        if !NodeFlags(flags.0).public() {
-            continue;
-        }
-        let empty = String::new();
-        let path = file_map.get(&idx).unwrap_or(&empty);
-        if !path.is_empty() && is_test_path(path) {
-            continue;
-        }
-        let name = name_from_id(graph.id_of(idx));
-        if is_inferred_entry(name) {
-            continue;
-        }
-        // REQ-AXO-902192 S2 — a symbol wired to intent in the SOLL (a traceability edge) is
-        // DECLARED, not an accidental orphan: this exempts hooks / lazy-imports / wrapper-
-        // dispatched callables the static CALLS graph can't reach (the OPV blind spots). The set
-        // is built by the caller from the SOLL snapshot, so this fn stays free of SOLL coupling.
-        if declared.contains(&name.to_ascii_lowercase()) {
-            continue;
-        }
-        let mut prod_callers = 0usize;
-        let mut test_callers = 0usize;
-        for (src, rel) in graph.reverse_neighbors(idx) {
-            if !matches!(rel, RelationType::Calls | RelationType::CallsNif) {
-                continue;
-            }
-            let (_, _, sflags) = graph.node_meta(src);
-            if NodeFlags(sflags.0).tested() {
-                test_callers += 1;
-            } else {
-                prod_callers += 1;
-            }
-        }
-        if prod_callers > 0 {
-            continue; // wired in prod — not an orphan
-        }
-        let category = if test_callers > 0 { "test_only" } else { "isolated" };
-        out.push(WiringOrphan {
-            id: graph.id_of(idx).to_string(),
-            name: name.to_string(),
-            kind: NodeKind::from_u8(kind_byte).as_db().to_string(),
-            test_callers,
-            category,
-        });
     }
     // test_only first (highest confidence), then most-nearly-wired (test_callers desc).
     out.sort_by(|a, b| {
@@ -1040,6 +1064,28 @@ pub fn wiring_orphans(
             .then(a.id.cmp(&b.id))
     });
     out.truncate(limit.max(1).min(ANALYTICS_LIMIT));
+    out
+}
+
+/// REQ-AXO-902192 S3 — wiring status for an EXACT set of candidate symbol ids (the
+/// diff's deliverable-tagged symbols), with NO `ANALYTICS_LIMIT` truncation: every
+/// candidate is checked and returned if it classifies as an orphan. Safe for a
+/// fail-closed gate because the candidate set is already tightly scoped by the
+/// caller (deliverable-tagged ∩ symbols-in-diff), never the whole project.
+pub fn wiring_orphans_among(
+    graph: &IstGraph,
+    declared: &HashSet<String>,
+    candidate_ids: &HashSet<String>,
+) -> Vec<WiringOrphan> {
+    let file_map = build_file_path_map(graph);
+    let mut out: Vec<WiringOrphan> = Vec::new();
+    for id in candidate_ids {
+        let Some(idx) = graph.index_of(id) else { continue };
+        if let Some(orphan) = wiring_classify_node(graph, idx, declared, &file_map) {
+            out.push(orphan);
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
     out
 }
 

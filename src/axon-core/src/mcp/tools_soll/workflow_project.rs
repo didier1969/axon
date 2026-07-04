@@ -272,6 +272,98 @@ impl McpServer {
             }
         }
 
+        // REQ-AXO-902192 S3 — fail-closed anti-orphan gate: a symbol explicitly
+        // tagged `deliverable` (soll.Traceability, artifact_type='Symbol',
+        // metadata->>'role'='deliverable' — set via `soll_attach_evidence`) that
+        // classifies as `test_only` (reachable ONLY from a `#[test]`, zero
+        // production caller) among the files in THIS commit is blocked.
+        //
+        // Opt-in by design: nothing is tagged `deliverable` unless the caller
+        // explicitly marks it, so this gate is INERT (zero blast radius) until
+        // adopted. Deliberately independent of the S1/S2 advisory `declared` set
+        // (`axon_wiring`'s exemption, which treats ANY traceability row as
+        // "known, don't flag") — if S3 reused that blanket rule, a
+        // deliverable-tagged symbol would ALWAYS be exempted before
+        // classification (it has a traceability row by definition), making the
+        // gate a permanent no-op. S3 instead honors ONLY an explicit
+        // `role='entry'` tag as its exemption (dynamic-dispatch entry points
+        // declared on purpose) — distinct from `role='deliverable'`.
+        //
+        // RAM-cold ⇒ skip (warn only, never block on infra staleness — CPT-AXO-029:
+        // freshness is a trust-calibration signal, not a gate).
+        if let Some(project) = effective_project_code.as_deref() {
+            let view = crate::ist_snapshot::process_view();
+            if let Some(snapshot) = view.cache_handle().get(project) {
+                let file_paths: Vec<&str> =
+                    diff_paths.iter().filter_map(|p| p.as_str()).collect();
+                if !file_paths.is_empty() {
+                    let deliverable_raw = self
+                        .graph_store
+                        .query_json(
+                            "SELECT artifact_ref FROM soll.Traceability \
+                             WHERE artifact_type = 'Symbol' AND metadata->>'role' = 'deliverable'",
+                        )
+                        .unwrap_or_else(|_| "[]".to_string());
+                    let deliverable_names: std::collections::HashSet<String> =
+                        serde_json::from_str::<Vec<Vec<String>>>(&deliverable_raw)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|row| row.into_iter().next())
+                            .map(|s| s.to_ascii_lowercase())
+                            .collect();
+                    if !deliverable_names.is_empty() {
+                        let entry_raw = self
+                            .graph_store
+                            .query_json(
+                                "SELECT artifact_ref FROM soll.Traceability \
+                                 WHERE artifact_type = 'Symbol' AND metadata->>'role' = 'entry'",
+                            )
+                            .unwrap_or_else(|_| "[]".to_string());
+                        let entry_declared: std::collections::HashSet<String> =
+                            serde_json::from_str::<Vec<Vec<String>>>(&entry_raw)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter_map(|row| row.into_iter().next())
+                                .map(|s| s.to_ascii_lowercase())
+                                .collect();
+                        let mut candidate_ids: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        for path in &file_paths {
+                            let normalized = path.to_ascii_lowercase();
+                            for id in crate::ist_snapshot::code_smells::symbols_in_matching_files(
+                                &snapshot, project, &normalized, "",
+                            ) {
+                                let name = id.rsplit("::").next().unwrap_or(&id).to_ascii_lowercase();
+                                if deliverable_names.contains(&name) {
+                                    candidate_ids.insert(id);
+                                }
+                            }
+                        }
+                        if !candidate_ids.is_empty() {
+                            let orphans = crate::ist_snapshot::code_smells::wiring_orphans_among(
+                                &snapshot,
+                                &entry_declared,
+                                &candidate_ids,
+                            );
+                            for o in orphans.iter().filter(|o| o.category == "test_only") {
+                                violations.push(serde_json::json!({
+                                    "rule": "REQ-AXO-902192 S3 - deliverable symbol never wired to production",
+                                    "diagnostic": format!(
+                                        "'{}' is tagged deliverable but has {} test caller(s) and ZERO production caller — delivered but never wired (the OPV class).",
+                                        o.id, o.test_callers
+                                    ),
+                                    "remediation_plan": format!(
+                                        "Wire '{}' into a real production call path, OR if it's a legitimate dynamic-dispatch entry point, tag it role='entry' via soll_attach_evidence instead of 'deliverable'.",
+                                        o.id
+                                    )
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if !violations.is_empty() {
             return Some(serde_json::json!({
                 "content": [{ "type": "text", "text": format!("Violation: {}\nRemediation: {}", violations[0]["rule"], violations[0]["remediation_plan"]) }],
