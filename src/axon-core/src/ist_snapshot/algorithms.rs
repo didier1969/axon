@@ -11,8 +11,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::unionfind::UnionFind;
 
-use crate::ist_snapshot::snapshot::{IstGraph, RelationType};
+use crate::ist_snapshot::snapshot::{IstGraph, RelationType, CONTRACT_BRIDGE_FANOUT_CAP};
 
 /// Convert an IstGraph CSR view into a `petgraph::DiGraph`. The petgraph
 /// node weight stores the canonical IST id (so callers can map results back
@@ -576,6 +577,202 @@ pub fn snapshot_edge_diff(
     (added, removed)
 }
 
+/// REQ-AXO-902211 — result of `dead_clusters`: how many otherwise-eligible
+/// callables are unreachable from any root, grouped into `clusters` of
+/// MUTUALLY-connected dead symbols (size ≥ 2 only — a lone unreached symbol
+/// with no dead neighbour is already reported by `wiring_orphans`'
+/// `isolated` category; this type exists specifically for the blind spot
+/// that check cannot see, see doc on `dead_clusters` below).
+#[derive(Debug, Clone, Default)]
+pub struct DeadClusters {
+    pub unreached_count: usize,
+    pub clusters: Vec<Vec<String>>,
+}
+
+/// REQ-AXO-902211 — dead-cluster detection: symbols reachable from NO root
+/// (main/handler/nif/SOLL role=entry), grouped by mutual connectivity.
+///
+/// Complements `code_smells::wiring_orphans` (per-SYMBOL check: "does X have
+/// ≥1 non-test caller?"). That check is blind to a CLUSTER of N functions
+/// that call ONLY each other: each individually has a caller (another
+/// member of the same dead cluster), so none is ever flagged, yet the whole
+/// group is unreachable from anywhere the program actually starts running.
+///
+/// Algorithm:
+/// 1. Multi-source forward reachability from every `root`, hand-rolled as a
+///    plain frontier-BFS directly on the CSR (`forward_neighbors`) — the
+///    same idiom already used by `bfs_layers`/`shortest_path` in this file.
+///    A plain BFS carries no correctness risk worth a library for.
+/// 2. `unreached` = `candidates` minus the reached set.
+/// 3. Weak-connectivity clustering of `unreached`, via `petgraph::unionfind`
+///    over the existing `to_petgraph` conversion — DELIBERATELY NOT
+///    hand-rolled: a naive Union-Find has classic correctness pitfalls
+///    (path compression, union-by-rank bookkeeping) that the already-vendored,
+///    battle-tested library solves for free — the same reasoning that made
+///    `structural_sccs` reuse petgraph's Tarjan machinery instead of a
+///    bespoke SCC implementation (see module doc comment, line 1).
+///
+/// `roots` and `candidates` are plain CSR indices — this function has no
+/// SOLL/traceability/heuristic knowledge of what counts as an entry point or
+/// a reportable candidate; that domain logic lives in
+/// `code_smells::orphan_clusters`, which calls this with the resolved sets.
+pub fn dead_clusters(graph: &IstGraph, roots: &[u32], candidates: &[u32]) -> DeadClusters {
+    if graph.node_count() == 0 || candidates.is_empty() {
+        return DeadClusters::default();
+    }
+
+    let bare_name = |idx: u32| -> &str {
+        let id = graph.id_of(idx);
+        id.rsplit("::").next().unwrap_or(id)
+    };
+    // A call the extractor cannot resolve to a concrete receiver becomes a
+    // PHANTOM node scoped to the CALLING file (empirically confirmed
+    // dogfooding this on AXO: `stage_a2.rs::a2_transform` calling
+    // `parser.parse(&content)` on a `Box<dyn Parser>` produces a phantom
+    // `stage_a2.rs::parse` with NO row in the symbol table and no owning
+    // file — disconnected from every real `XParser::parse`). A phantom has
+    // no CONTAINS reverse-edge (nothing declares/owns it); every real
+    // declared symbol does.
+    let is_phantom =
+        |idx: u32| -> bool { !graph.reverse_neighbors(idx).any(|(_, rel)| rel == RelationType::Contains) };
+    // A method carries NO direct edge to its own struct in this IST (verified
+    // empirically: the FILE contains both the struct and every one of its
+    // methods as flat siblings — `impl Foo { fn parse(...) }` produces no
+    // struct->method edge at all). So "does this candidate belong to a
+    // trait-implementing struct?" is answered via its FILE: does any OTHER
+    // symbol that file CONTAINS have an outgoing IMPLEMENTS edge?
+    let file_has_trait_impl = |idx: u32| -> bool {
+        let Some((file, _)) = graph
+            .reverse_neighbors(idx)
+            .find(|(_, rel)| *rel == RelationType::Contains)
+        else {
+            return false;
+        };
+        graph.forward_neighbors(file).any(|(sibling, rel)| {
+            rel == RelationType::Contains
+                && graph
+                    .forward_neighbors(sibling)
+                    .any(|(_, r2)| r2 == RelationType::Implements)
+        })
+    };
+
+    // Multi-source reachability as a proper fixed point (monotonic, bounded
+    // by node_count — guaranteed to terminate) alternating two bridges:
+    //
+    // 1. Structural: CALLS/CALLS_NIF forward (CALLS_NIF is the existing
+    //    Rust<->BEAM/Elixir cross-language edge — already followed here,
+    //    no separate cross-language logic needed) + the REQ-AXO-902028
+    //    reverse-IMPLEMENTS contract bridge (`bfs_shortest_path`'s own
+    //    mechanism: a call landing ON a trait/contract node continues to
+    //    every concrete implementor).
+    // 2. Name bridge (REQ-AXO-902211): the contract bridge above only fires
+    //    when the call actually lands on the trait node — dogfooding on AXO
+    //    showed the common case lands on a disconnected PHANTOM instead (see
+    //    `is_phantom` doc above), which structural bridge #1 cannot reach.
+    //    Any candidate whose bare name matches a newly-reached phantom's
+    //    bare name AND whose FILE also contains a trait-implementing struct
+    //    (`file_has_trait_impl` — a method carries NO direct edge to its own
+    //    struct in this IST; both are flat CONTAINS-children of the file,
+    //    verified against real AXO data) is bridged too. Restricted this way
+    //    (not every same-named candidate) to bound the false-negative risk
+    //    to the dynamic-dispatch shape this targets.
+    //
+    // Only CALLS/CALLS_NIF are followed in phase 1 — deliberately NOT
+    // CONTAINS/IMPORTS/SIMILAR_TO: a file "reached" by accident must never
+    // make every symbol it contains look reached too.
+    let mut reached: HashSet<u32> = roots.iter().copied().collect();
+    let mut phantom_reached_names: HashSet<String> = HashSet::new();
+    let mut frontier: Vec<u32> = roots.to_vec();
+    loop {
+        let mut next: Vec<u32> = Vec::new();
+        for node in frontier {
+            for (target, rel) in graph.forward_neighbors(node) {
+                if !matches!(rel, RelationType::Calls | RelationType::CallsNif) {
+                    continue;
+                }
+                if reached.insert(target) {
+                    next.push(target);
+                }
+            }
+            let mut bridged = 0usize;
+            for (implementor, rel) in graph.reverse_neighbors(node) {
+                if rel != RelationType::Implements {
+                    continue;
+                }
+                if bridged >= CONTRACT_BRIDGE_FANOUT_CAP {
+                    break;
+                }
+                bridged += 1;
+                if reached.insert(implementor) {
+                    next.push(implementor);
+                }
+            }
+        }
+
+        for &idx in &next {
+            if is_phantom(idx) {
+                phantom_reached_names.insert(bare_name(idx).to_string());
+            }
+        }
+        let mut bridged_by_name: Vec<u32> = Vec::new();
+        for &c in candidates {
+            if reached.contains(&c) {
+                continue;
+            }
+            if phantom_reached_names.contains(bare_name(c)) && file_has_trait_impl(c) {
+                reached.insert(c);
+                bridged_by_name.push(c);
+            }
+        }
+        next.extend(bridged_by_name);
+
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    // Step 2 — candidates never reached from any root.
+    let unreached: HashSet<u32> = candidates
+        .iter()
+        .copied()
+        .filter(|c| !reached.contains(c))
+        .collect();
+    if unreached.is_empty() {
+        return DeadClusters::default();
+    }
+
+    // Step 3 — weak connectivity over the `unreached` induced subgraph, via
+    // petgraph's UnionFind (see doc comment above for why not hand-rolled).
+    let (pg, _) = to_petgraph(graph);
+    let mut uf: UnionFind<u32> = UnionFind::new(graph.node_count());
+    for edge in pg.raw_edges() {
+        let a = edge.source().index() as u32;
+        let b = edge.target().index() as u32;
+        if unreached.contains(&a) && unreached.contains(&b) {
+            uf.union(a, b);
+        }
+    }
+
+    let mut groups: HashMap<u32, Vec<String>> = HashMap::new();
+    for &idx in &unreached {
+        groups
+            .entry(uf.find(idx))
+            .or_default()
+            .push(graph.id_of(idx).to_string());
+    }
+    let mut clusters: Vec<Vec<String>> = groups.into_values().filter(|c| c.len() > 1).collect();
+    for cluster in &mut clusters {
+        cluster.sort();
+    }
+    clusters.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    DeadClusters {
+        unreached_count: unreached.len(),
+        clusters,
+    }
+}
+
 /// REQ-AXO-91488 follow-up — Minimal VF2-style subgraph isomorphism.
 /// Searches for occurrences of `query` (small graph) within `host`
 /// (typically the full IST snapshot). Returns mappings query_id →
@@ -1100,5 +1297,241 @@ mod tests {
         let q = IstGraph::build(vec![n("a"), n("b"), n("c")], vec![]);
         let h = IstGraph::build(vec![n("x"), n("y")], vec![]);
         assert!(vf2_subgraph_match(&q, &h, 5).is_empty());
+    }
+
+    // ── REQ-AXO-902211 — dead_clusters ──────────────────────────
+
+    fn idx(g: &IstGraph, id: &str) -> u32 {
+        g.index_of(id).unwrap_or_else(|| panic!("missing node {id}"))
+    }
+
+    #[test]
+    fn dead_clusters_finds_mutually_wired_group_unreachable_from_root() {
+        // main -> live (reachable). dead_a <-> dead_b call each other but
+        // NOTHING reaches either — a wiring_orphans-blind cluster (each has
+        // a caller: the other dead member).
+        let nodes = vec![n("main"), n("live"), n("dead_a"), n("dead_b")];
+        let edges = vec![
+            e("main", "live", RelationType::Calls),
+            e("dead_a", "dead_b", RelationType::Calls),
+            e("dead_b", "dead_a", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![
+            idx(&g, "main"),
+            idx(&g, "live"),
+            idx(&g, "dead_a"),
+            idx(&g, "dead_b"),
+        ];
+        let result = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(result.unreached_count, 2);
+        assert_eq!(result.clusters.len(), 1);
+        assert_eq!(result.clusters[0], vec!["dead_a".to_string(), "dead_b".to_string()]);
+    }
+
+    #[test]
+    fn dead_clusters_all_reached_returns_empty() {
+        let nodes = vec![n("main"), n("a"), n("b")];
+        let edges = vec![
+            e("main", "a", RelationType::Calls),
+            e("a", "b", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![idx(&g, "main"), idx(&g, "a"), idx(&g, "b")];
+        let result = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(result.unreached_count, 0);
+        assert!(result.clusters.is_empty());
+    }
+
+    #[test]
+    fn dead_clusters_lone_unreached_symbol_is_not_reported_as_a_cluster() {
+        // `orphan` has no dead neighbour — already covered by wiring_orphans'
+        // `isolated` category, so dead_clusters must NOT report a size-1 group.
+        let nodes = vec![n("main"), n("live"), n("orphan")];
+        let edges = vec![e("main", "live", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![idx(&g, "main"), idx(&g, "live"), idx(&g, "orphan")];
+        let result = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(result.unreached_count, 1, "orphan is unreached");
+        assert!(
+            result.clusters.is_empty(),
+            "a lone unreached symbol is not a cluster"
+        );
+    }
+
+    #[test]
+    fn dead_clusters_two_separate_dead_groups_stay_separate() {
+        let nodes = vec![n("main"), n("d1"), n("d2"), n("d3"), n("d4")];
+        let edges = vec![
+            e("d1", "d2", RelationType::Calls),
+            e("d3", "d4", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![
+            idx(&g, "main"),
+            idx(&g, "d1"),
+            idx(&g, "d2"),
+            idx(&g, "d3"),
+            idx(&g, "d4"),
+        ];
+        let result = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(result.unreached_count, 4);
+        assert_eq!(result.clusters.len(), 2, "two distinct dead clusters");
+        assert!(result.clusters.iter().all(|c| c.len() == 2));
+    }
+
+    #[test]
+    fn dead_clusters_undirected_connectivity_ignores_call_direction() {
+        // c1 -> c2 only (one-way edge) — still ONE weakly-connected dead
+        // cluster (clustering treats CALLS as undirected, same convention
+        // as `bridges_and_articulation`).
+        let nodes = vec![n("main"), n("c1"), n("c2")];
+        let edges = vec![e("c1", "c2", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![idx(&g, "main"), idx(&g, "c1"), idx(&g, "c2")];
+        let result = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(result.clusters.len(), 1);
+        assert_eq!(result.clusters[0], vec!["c1".to_string(), "c2".to_string()]);
+    }
+
+    #[test]
+    fn dead_clusters_bridges_dynamic_dispatch_via_reverse_implements() {
+        // REQ-AXO-902028 parity — `main` CALLS the contract `Trait` (dynamic
+        // dispatch, e.g. `Box<dyn Trait>::method()`). `Foo` IMPLEMENTS
+        // `Trait` and internally calls `foo_helper`. WITHOUT the contract
+        // bridge, `Foo`/`foo_helper` would falsely look unreached (nothing
+        // reaches `Foo` via a plain CALLS edge) — exactly the false positive
+        // dogfooding this on AXO's own parser/*.rs trait implementations
+        // surfaced before this fix.
+        let nodes = vec![n("main"), n("Trait"), n("Foo"), n("foo_helper")];
+        let edges = vec![
+            e("main", "Trait", RelationType::Calls),
+            e("Foo", "Trait", RelationType::Implements),
+            e("Foo", "foo_helper", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![idx(&g, "main"), idx(&g, "Foo"), idx(&g, "foo_helper")];
+        let result = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(
+            result.unreached_count, 0,
+            "the reverse-IMPLEMENTS bridge must reach Foo and, transitively, foo_helper"
+        );
+        assert!(result.clusters.is_empty());
+    }
+
+    #[test]
+    fn dead_clusters_bridges_dynamic_dispatch_via_phantom_name_match() {
+        // REQ-AXO-902211 — reproduces the REAL AXO shape found dogfooding:
+        // `main` calls `AXO::dispatcher.rs::parse`, a PHANTOM node (no
+        // CONTAINS edge = no owning file — the extractor's stand-in for an
+        // unresolved `Box<dyn Trait>` method call, e.g. the real
+        // `stage_a2.rs::parse` calling `parser.parse(&content)`). `Foo`
+        // (declared, CONTAINS edge from its file) IMPLEMENTS `Trait` and its
+        // OWN `AXO::foo.rs::parse` method (also declared — bare name
+        // "parse", matching the phantom) calls `foo_helper`. The reverse-
+        // IMPLEMENTS bridge alone CANNOT connect the phantom to `Foo::parse`
+        // — they share no edge, only a bare NAME ("parse").
+        let file_node = NodeRecord {
+            id: "AXO::foo.rs".to_string(),
+            name: "foo.rs".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::File,
+            flags: NodeFlags::default(),
+            complexity: None,
+        };
+        let foo_parse = NodeRecord {
+            id: "AXO::foo.rs::parse".to_string(),
+            name: "parse".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Method,
+            flags: NodeFlags::default(),
+            complexity: None,
+        };
+        let phantom_parse = NodeRecord {
+            id: "AXO::dispatcher.rs::parse".to_string(), // NO Contains edge below
+            name: "parse".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Method,
+            flags: NodeFlags::default(),
+            complexity: None,
+        };
+        let nodes = vec![
+            n("main"),
+            phantom_parse,
+            file_node,
+            foo_parse,
+            n("Trait"),
+            n("Foo"),
+            n("foo_helper"),
+        ];
+        let edges = vec![
+            e("main", "AXO::dispatcher.rs::parse", RelationType::Calls),
+            // The file CONTAINS both the struct AND its method as flat
+            // siblings (verified against real AXO data — no struct->method
+            // edge exists at all).
+            e("AXO::foo.rs", "AXO::foo.rs::parse", RelationType::Contains),
+            e("AXO::foo.rs", "Foo", RelationType::Contains),
+            e("Foo", "Trait", RelationType::Implements),
+            e("AXO::foo.rs::parse", "foo_helper", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        // `Foo` (the struct) is deliberately NOT a candidate here — in the
+        // real domain wiring (`code_smells::orphan_clusters`) only
+        // Function/Method-kind nodes become candidates; a struct is never
+        // one, so it can never itself be "unreached" in this feature's output.
+        let candidates = vec![
+            idx(&g, "main"),
+            idx(&g, "AXO::foo.rs::parse"),
+            idx(&g, "foo_helper"),
+        ];
+        let result = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(
+            result.unreached_count, 0,
+            "name-bridge must reach Foo::parse (implements Trait, name matches the phantom) and, transitively, foo_helper"
+        );
+    }
+
+    #[test]
+    fn dead_clusters_does_not_follow_contains_edges() {
+        // A FILE node reached by accident must NEVER make every symbol it
+        // CONTAINS look reached — CONTAINS is structural containment, not
+        // invocation. `main` calls the file id directly (contrived, but
+        // proves the filter): `sneaky_symbol` must stay unreached.
+        let file_node = NodeRecord {
+            id: "AXO::sneaky.rs".to_string(),
+            name: "sneaky.rs".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::File,
+            flags: NodeFlags::default(),
+            complexity: None,
+        };
+        let nodes = vec![n("main"), file_node, n("sneaky_symbol")];
+        let edges = vec![
+            e("main", "AXO::sneaky.rs", RelationType::Calls),
+            e("AXO::sneaky.rs", "sneaky_symbol", RelationType::Contains),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![idx(&g, "main"), idx(&g, "sneaky_symbol")];
+        let result = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(
+            result.unreached_count, 1,
+            "CONTAINS must never be treated as an invocation edge"
+        );
+    }
+
+    #[test]
+    fn dead_clusters_empty_candidates_returns_empty() {
+        let g = IstGraph::build(vec![n("a")], vec![]);
+        let result = dead_clusters(&g, &[], &[]);
+        assert_eq!(result.unreached_count, 0);
+        assert!(result.clusters.is_empty());
     }
 }

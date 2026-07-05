@@ -790,6 +790,85 @@ impl McpServer {
         }))
     }
 
+    /// REQ-AXO-902211 (REFINES CPT-AXO-90056) — DEAD CLUSTERS: groups of callable symbols
+    /// reachable from NO root (main/handler/nif/SOLL role=entry), grouped by mutual
+    /// connectivity. Complements `wiring` (per-SYMBOL: does X have >=1 non-test caller?),
+    /// which is BLIND to a cluster of N functions calling ONLY each other — each has a
+    /// caller (another dead member) so none is flagged, yet the whole group never runs.
+    /// `roots` uses the SAME `role='entry'` SOLL convention as the S3 gate
+    /// (`workflow_project.rs`) — deliberately NARROWER than `wiring`'s own `declared` set
+    /// (which exempts ANY traceability row): a blanket exemption here would treat half the
+    /// SOLL-tracked codebase as a root and mask real dead clusters. Requires `ist_snapshot_warm`.
+    pub(crate) fn axon_orphan_clusters(&self, args: &Value) -> Option<Value> {
+        let project = match self.ist_resolve_project(args, "orphan_clusters") {
+            Ok(p) => p,
+            Err(e) => return Some(e),
+        };
+        let view = process_view();
+        if !view.is_warm(&project) {
+            return Some(ist_cache_miss_error("orphan_clusters", &project));
+        }
+        let snapshot = match view.cache_handle().get(&project) {
+            Some(s) => s,
+            None => return Some(ist_cache_miss_error("orphan_clusters", &project)),
+        };
+        // REQ-AXO-902211 — same role='entry' query as the S3 gate (workflow_project.rs),
+        // NOT `wiring`'s broad `declared` (any traceability row) — see doc comment above.
+        let entry_raw = self
+            .graph_store
+            .query_json(
+                "SELECT artifact_ref FROM soll.Traceability \
+                 WHERE artifact_type = 'Symbol' AND metadata->>'role' = 'entry'",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let declared_entries: std::collections::HashSet<String> =
+            serde_json::from_str::<Vec<Vec<String>>>(&entry_raw)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|row| row.into_iter().next())
+                .map(|s| s.to_ascii_lowercase())
+                .collect();
+        let report = crate::ist_snapshot::code_smells::orphan_clusters(
+            &snapshot,
+            &project,
+            &declared_entries,
+        );
+        let clusters_json: Vec<Value> = report
+            .clusters
+            .iter()
+            .map(|c| json!({ "size": c.len(), "nodes": c }))
+            .collect();
+        let summary = if report.clusters.is_empty() {
+            format!(
+                "orphan_clusters {} : 0 dead cluster(s) ({} unreached singleton(s) out of {} candidate(s))",
+                project, report.unreached_count, report.candidate_count
+            )
+        } else {
+            format!(
+                "orphan_clusters {} : {} dead cluster(s), largest = {} symbols ({} total unreached out of {} candidate(s))",
+                project,
+                report.clusters.len(),
+                report.clusters[0].len(),
+                report.unreached_count,
+                report.candidate_count
+            )
+        };
+        Some(json!({
+            "content": [{ "type": "text", "text": summary }],
+            "data": {
+                "status": if report.clusters.is_empty() { "ok" } else { "dead_clusters_detected" },
+                "project_code": project,
+                "candidate_count": report.candidate_count,
+                "root_count": report.root_count,
+                "unreached_count": report.unreached_count,
+                "cluster_count": report.clusters.len(),
+                "clusters": clusters_json,
+                "soll_declared_entries": declared_entries.len(),
+                "note": "REQ-AXO-902211 — a lone unreached symbol (no dead neighbour) is NOT reported here (see `wiring`'s isolated category instead); this tool exists specifically for MUTUALLY-wired groups invisible to the per-symbol check. Advisory only — no gate."
+            }
+        }))
+    }
+
     /// REQ-AXO-902186 slice 2 — Structural Health WORKLIST: turns EVERY below-target-capable
     /// SHI axis into concrete remediation candidates, ranked by TRUE ROI = expected ΔSHI ÷
     /// blast-radius (not "worst first" — a catastrophic but cheap-to-fix offender beats a

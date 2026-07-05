@@ -1173,6 +1173,109 @@ pub fn wiring_orphans_among(
     out
 }
 
+/// REQ-AXO-902211 — dead clusters: how many otherwise-eligible callables of
+/// `project` are unreachable from any root, grouped by mutual connectivity.
+#[derive(Debug, Clone, Default)]
+pub struct OrphanClusterReport {
+    pub candidate_count: usize,
+    pub root_count: usize,
+    pub unreached_count: usize,
+    pub clusters: Vec<Vec<String>>,
+}
+
+/// REQ-AXO-902211 — gathers this project's ROOTS (real entry points: the
+/// same `is_inferred_entry` heuristic `wiring_orphans` already uses for
+/// main/handler/nif, PLUS symbols explicitly tagged `soll.Traceability
+/// role='entry'` — the caller passes that set in as `declared_entries`,
+/// same convention as the S3 gate in `workflow_project.rs`, DELIBERATELY
+/// narrower than `wiring_orphans`' own `declared` set which exempts ANY
+/// traceability row regardless of role: a broad exemption here would treat
+/// half the SOLL-tracked codebase as a root and mask real dead clusters)
+/// and CANDIDATES (every non-test callable, public or private — cluster
+/// membership is not restricted to the public "deliverable" surface the
+/// way `wiring_orphans` is, because a private helper can legitimately be
+/// the connective tissue inside a dead cluster), then delegates the pure
+/// graph algorithm to `algorithms::dead_clusters`.
+///
+/// DELIBERATELY project-agnostic — no hardcoded naming convention beyond
+/// `is_inferred_entry`'s existing main/handler/nif heuristic. Dogfooding on
+/// AXO found `main` -> `run_brain` has ZERO recorded outgoing CALLS (a
+/// parser/call-extraction gap, likely a method-chain/builder-pattern HTTP
+/// setup tree-sitter's extraction doesn't capture — a separate, larger fix),
+/// which makes every one of AXO's ~106 MCP tool handlers look unreached.
+/// FIXED VIA DATA, NOT CODE: those 127 `axon_*` symbols are tagged
+/// `soll.Traceability role='entry'` for the AXO project specifically (same
+/// mechanism any OTHER project uses for its own dispatch-dynamic entries,
+/// e.g. OPV already does this for its own hooks) — this function stays
+/// exactly as valid analyzing OPV, LLL, or any other project as it is on AXO.
+pub fn orphan_clusters(
+    graph: &IstGraph,
+    project: &str,
+    declared_entries: &HashSet<String>,
+) -> OrphanClusterReport {
+    let file_map = build_file_path_map(graph);
+    let mut roots: Vec<u32> = Vec::new();
+    let mut candidates: Vec<u32> = Vec::new();
+    for idx in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, idx, project) {
+            continue;
+        }
+        let (kind_byte, _, flags) = graph.node_meta(idx);
+        if !is_callable(kind_byte) {
+            continue;
+        }
+        // An actual `#[test]` fn is neither a root nor a reportable
+        // candidate — same exclusion `wiring_classify_node` applies.
+        if NodeFlags(flags.0).tested() {
+            continue;
+        }
+        let empty = String::new();
+        let path = file_map.get(&idx).unwrap_or(&empty);
+        if !path.is_empty() && is_test_path(path) {
+            continue;
+        }
+        // REQ-AXO-902211 — a PRIVATE symbol reached ONLY by `#[test]`
+        // callers is test infrastructure (e.g. a `fn parser() -> XParser`
+        // helper inside `mod tests`), not a deliverable — same exact
+        // exclusion `wiring_classify_node` already applies (its
+        // `test_helper` case). Without it, every parser file's own test
+        // helper shows up as a "dead cluster" false positive (found
+        // dogfooding this on AXO). A PUBLIC symbol reached only by tests, or
+        // a symbol with ZERO callers at all, is NOT excluded here — those
+        // are exactly what this feature exists to surface.
+        if !NodeFlags(flags.0).public() {
+            let mut has_caller = false;
+            let mut all_test = true;
+            for (src, rel) in graph.reverse_neighbors(idx) {
+                if !matches!(rel, RelationType::Calls | RelationType::CallsNif) {
+                    continue;
+                }
+                has_caller = true;
+                let (_, _, sflags) = graph.node_meta(src);
+                if !NodeFlags(sflags.0).tested() {
+                    all_test = false;
+                    break;
+                }
+            }
+            if has_caller && all_test {
+                continue;
+            }
+        }
+        candidates.push(idx);
+        let name = name_from_id(graph.id_of(idx));
+        if is_inferred_entry(name) || declared_entries.contains(&name.to_ascii_lowercase()) {
+            roots.push(idx);
+        }
+    }
+    let result = crate::ist_snapshot::algorithms::dead_clusters(graph, &roots, &candidates);
+    OrphanClusterReport {
+        candidate_count: candidates.len(),
+        root_count: roots.len(),
+        unreached_count: result.unreached_count,
+        clusters: result.clusters,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2072,5 +2175,227 @@ mod tests {
             2,
             "both CALLS to the println!-named target count via name_of"
         );
+    }
+
+    // ── REQ-AXO-902211 — orphan_clusters ────────────────────────
+
+    #[test]
+    fn orphan_clusters_finds_mutually_wired_dead_group() {
+        // run_main is the only inferred entry. prod_fn is wired to it. dead_a
+        // and dead_b call ONLY each other — invisible to wiring_orphans
+        // (each has a caller: the other dead member) but a real dead cluster.
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::app.rs::prod_fn", true),
+            func("AXO::app.rs::dead_a", true),
+            func("AXO::app.rs::dead_b", false),
+        ];
+        let edges = vec![
+            edge("AXO::app.rs::run_main", "AXO::app.rs::prod_fn", RelationType::Calls),
+            edge("AXO::app.rs::dead_a", "AXO::app.rs::dead_b", RelationType::Calls),
+            edge("AXO::app.rs::dead_b", "AXO::app.rs::dead_a", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let declared: HashSet<String> = HashSet::new();
+        let report = orphan_clusters(&g, "AXO", &declared);
+        assert_eq!(report.root_count, 1, "only run_main is an inferred entry");
+        assert_eq!(report.candidate_count, 4);
+        assert_eq!(report.unreached_count, 2);
+        assert_eq!(report.clusters.len(), 1);
+        let names: Vec<&str> = report.clusters[0].iter().map(String::as_str).collect();
+        assert!(names.contains(&"AXO::app.rs::dead_a") && names.contains(&"AXO::app.rs::dead_b"));
+    }
+
+    #[test]
+    fn orphan_clusters_private_symbol_still_counts_as_candidate() {
+        // Unlike wiring_orphans (public-only), a PRIVATE dead symbol must
+        // still be reportable as part of a cluster.
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::app.rs::priv_dead_a", false),
+            func("AXO::app.rs::priv_dead_b", false),
+        ];
+        let edges = vec![edge(
+            "AXO::app.rs::priv_dead_a",
+            "AXO::app.rs::priv_dead_b",
+            RelationType::Calls,
+        )];
+        let g = IstGraph::build(nodes, edges);
+        let report = orphan_clusters(&g, "AXO", &HashSet::new());
+        assert_eq!(report.clusters.len(), 1, "private symbols form a cluster too");
+    }
+
+    #[test]
+    fn orphan_clusters_role_entry_declared_symbol_becomes_a_root() {
+        // dead_a is tagged role='entry' (dynamic-dispatch entry point) — it
+        // must become a ROOT, reaching dead_b, so NEITHER is reported.
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::app.rs::dead_a", true),
+            func("AXO::app.rs::dead_b", true),
+        ];
+        let edges = vec![edge("AXO::app.rs::dead_a", "AXO::app.rs::dead_b", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let declared: HashSet<String> = ["dead_a".to_string()].into_iter().collect();
+        let report = orphan_clusters(&g, "AXO", &declared);
+        assert_eq!(report.root_count, 2, "run_main (inferred) + dead_a (declared)");
+        assert_eq!(report.unreached_count, 0);
+        assert!(report.clusters.is_empty());
+    }
+
+    #[test]
+    fn orphan_clusters_lone_unreached_symbol_yields_no_cluster() {
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::app.rs::isolated", true),
+        ];
+        let g = IstGraph::build(nodes, vec![]);
+        let report = orphan_clusters(&g, "AXO", &HashSet::new());
+        assert_eq!(report.unreached_count, 1);
+        assert!(
+            report.clusters.is_empty(),
+            "a lone unreached symbol is wiring_orphans' job (isolated), not a cluster"
+        );
+    }
+
+    #[test]
+    fn orphan_clusters_excludes_test_functions_and_test_paths() {
+        let a_test = NodeRecord {
+            id: "AXO::app.rs::a_test".to_string(),
+            name: "a_test".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(true, false, false, false),
+            complexity: None,
+        };
+        let helper_in_tests_dir = NodeRecord {
+            id: "AXO::src/tests/helpers.rs::helper".to_string(),
+            name: "helper".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(false, true, false, false),
+            complexity: None,
+        };
+        let dir_file = file("AXO::src/tests/helpers.rs");
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            a_test,
+            helper_in_tests_dir,
+            dir_file,
+        ];
+        let edges = vec![edge(
+            "AXO::src/tests/helpers.rs",
+            "AXO::src/tests/helpers.rs::helper",
+            RelationType::Contains,
+        )];
+        let g = IstGraph::build(nodes, edges);
+        let report = orphan_clusters(&g, "AXO", &HashSet::new());
+        // Only run_main is a candidate: a_test is an actual #[test] fn,
+        // helper lives under /tests/ — both excluded, like wiring_orphans.
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(report.unreached_count, 0, "run_main is trivially its own root");
+    }
+
+    #[test]
+    fn orphan_clusters_excludes_private_helper_reached_only_by_tests() {
+        // REQ-AXO-902211 — reproduces the exact false positive found
+        // dogfooding this on AXO: `fn parser() -> CParser { CParser::new() }`,
+        // a PRIVATE helper living in a normal source file (not under
+        // `/tests/`), called ONLY by `#[test]` functions in the same file.
+        // `wiring_classify_node`'s `test_helper` case already excludes this
+        // shape for `wiring`; `orphan_clusters` must match it or every
+        // parser file's test helper looks like a "dead cluster".
+        let a_test = NodeRecord {
+            id: "AXO::app.rs::a_test".to_string(),
+            name: "a_test".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(true, false, false, false),
+            complexity: None,
+        };
+        let another_test = NodeRecord {
+            id: "AXO::app.rs::another_test".to_string(),
+            name: "another_test".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(true, false, false, false),
+            complexity: None,
+        };
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::app.rs::test_helper", false), // private, reached only by tests
+            a_test,
+            another_test,
+        ];
+        let edges = vec![
+            edge("AXO::app.rs::a_test", "AXO::app.rs::test_helper", RelationType::Calls),
+            edge("AXO::app.rs::another_test", "AXO::app.rs::test_helper", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let report = orphan_clusters(&g, "AXO", &HashSet::new());
+        assert_eq!(
+            report.candidate_count, 1,
+            "test_helper excluded (private, all callers are #[test] fns) — only run_main remains"
+        );
+        assert_eq!(report.unreached_count, 0);
+    }
+
+    #[test]
+    fn orphan_clusters_treats_declared_entry_as_a_root_project_agnostically() {
+        // REQ-AXO-902211 — the fix for "main's chain to a handler isn't
+        // traceable" is DATA (soll.Traceability role='entry'), not a
+        // hardcoded naming convention — this must work identically for a
+        // symbol name that carries NO Axon-specific meaning at all, proving
+        // the mechanism generalizes to any project's own dispatch shape.
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::app.rs::some_projects_own_dispatch_target", true),
+            func("AXO::app.rs::downstream_helper", true),
+        ];
+        let edges = vec![edge(
+            "AXO::app.rs::some_projects_own_dispatch_target",
+            "AXO::app.rs::downstream_helper",
+            RelationType::Calls,
+        )];
+        let g = IstGraph::build(nodes, edges);
+        let declared: HashSet<String> =
+            ["some_projects_own_dispatch_target".to_string()].into_iter().collect();
+        let report = orphan_clusters(&g, "AXO", &declared);
+        assert_eq!(
+            report.root_count, 2,
+            "run_main (inferred) + the SOLL-declared entry, regardless of its name"
+        );
+        assert_eq!(report.unreached_count, 0);
+        assert!(report.clusters.is_empty());
+    }
+
+    #[test]
+    fn orphan_clusters_private_helper_with_one_prod_caller_is_not_excluded() {
+        // A private helper with AT LEAST ONE non-test caller is real
+        // production code — the test-helper exclusion must not swallow it.
+        let a_test = NodeRecord {
+            id: "AXO::app.rs::a_test".to_string(),
+            name: "a_test".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(true, false, false, false),
+            complexity: None,
+        };
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::app.rs::mixed_helper", false),
+            a_test,
+        ];
+        let edges = vec![
+            edge("AXO::app.rs::run_main", "AXO::app.rs::mixed_helper", RelationType::Calls),
+            edge("AXO::app.rs::a_test", "AXO::app.rs::mixed_helper", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let report = orphan_clusters(&g, "AXO", &HashSet::new());
+        assert_eq!(
+            report.candidate_count, 2,
+            "mixed_helper has a real prod caller (run_main) — must stay a candidate"
+        );
+        assert_eq!(report.unreached_count, 0, "reached via run_main -> mixed_helper");
     }
 }

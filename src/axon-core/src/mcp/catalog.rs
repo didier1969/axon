@@ -611,6 +611,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "orphan_clusters",
+                "description": "[GOVERNANCE] REQ-AXO-902211 (REFINES CPT-AXO-90056) — DEAD CLUSTERS: groups of callable symbols reachable from NO root (main/handler/nif/SOLL role=entry), grouped by mutual connectivity. Complements `wiring` (per-SYMBOL check: does X have >=1 non-test caller?) which is BLIND to a cluster of N functions that call ONLY each other — each individually has a caller (another dead member), so none is flagged, yet the whole group never runs. Algorithm: multi-source reachability BFS from every root, then weak-connectivity clustering of the unreached set (size>=2 only — a lone unreached symbol is `wiring`'s `isolated` category, not reported here). Requires `ist_snapshot_warm`. ADVISORY only, no gate.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
                 "name": "ist_shortest_path",
                 "description": "[IST] REQ-AXO-91488 — bidirectional BFS shortest path between two canonical IST ids. Requires `ist_snapshot_warm`. Max radius default 20.",
                 "inputSchema": {

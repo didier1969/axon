@@ -10,8 +10,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 /// REQ-AXO-902028 — max implementors expanded from a single contract node in the
 /// dynamic-dispatch bridge, bounding path-search fan-out at high-fan-in traits
-/// (e.g. a marker trait with hundreds of impls).
-const CONTRACT_BRIDGE_FANOUT_CAP: usize = 32;
+/// (e.g. a marker trait with hundreds of impls). `pub(crate)` since REQ-AXO-902211
+/// reuses the exact same cap for the analogous bridge in a forward reachability
+/// walk (`algorithms::dead_clusters`) — one tuning knob, not two divergent copies.
+pub(crate) const CONTRACT_BRIDGE_FANOUT_CAP: usize = 32;
 
 /// IST relation_type domain (mirrors ist.edge.relation_type post-AGE
 /// retirement, before REQ-AXO-91505 broadens it). Stored as u8 in the CSR
