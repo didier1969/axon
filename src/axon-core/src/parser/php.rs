@@ -44,6 +44,34 @@ impl PhpParser {
         }
     }
 
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity, base 1 +
+    /// one per decision point. PHP closures/arrow functions are not
+    /// extracted as a separate Symbol in this parser, so their branches
+    /// fold into the enclosing function — no nested-exclusion guard needed.
+    const BRANCHING_KINDS: &[&str] = &[
+        "if_statement",
+        "else_if_clause",
+        "for_statement",
+        "foreach_statement",
+        "while_statement",
+        "do_statement",
+        "case_statement",
+        "catch_clause",
+        "conditional_expression",
+    ];
+
+    fn count_branches(node: Node) -> i32 {
+        let mut count = 0i32;
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if Self::BRANCHING_KINDS.contains(&child.kind()) {
+                count += 1;
+            }
+            count += Self::count_branches(child);
+        }
+        count
+    }
+
     fn extract_function<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
         if let Some(name_node) = Self::find_child_by_type(node, "name") {
             let name = name_node.utf8_text(source_bytes).unwrap_or("").to_string();
@@ -80,6 +108,8 @@ impl PhpParser {
                 if node_content.contains("FFI::cdef") || node_content.contains("FFI::load") {
                     is_nif = true;
                 }
+                let complexity = 1 + Self::count_branches(body);
+                properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
                 // REQ-AXO-91506 — propagate caller into call extraction.
                 Self::walk_for_calls(body, source_bytes, result, &name);
             }
@@ -201,5 +231,52 @@ impl Parser for PhpParser {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! REQ-AXO-902185 (god-objects) — cyclomatic complexity regression tests.
+    use super::*;
+
+    fn parser() -> PhpParser {
+        PhpParser::new()
+    }
+
+    #[test]
+    fn simple_function_has_complexity_one() {
+        let result = parser().parse("<?php function f() { $x = 1; return $x; }");
+        if result.symbols.is_empty() {
+            eprintln!("php wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn branching_function_counts_each_decision_point() {
+        let result = parser().parse(
+            "<?php function f($x) { \
+                if ($x > 0) { return 1; } \
+                foreach ([1,2] as $y) {} \
+                try { } catch (Exception $e) { } \
+                switch ($x) { case 1: break; } \
+                return $x > 0 ? 1 : 0; \
+            }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("php wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        // base 1 + if + foreach + catch + case + ternary = 6
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("6")
+        );
     }
 }

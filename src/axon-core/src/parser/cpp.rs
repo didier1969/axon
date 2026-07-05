@@ -33,6 +33,33 @@ impl CppParser {
         }
     }
 
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity, base 1 +
+    /// one per decision point. C++ lambdas are not extracted as a separate
+    /// Symbol in this parser, so their branches fold into the enclosing
+    /// function — no nested-exclusion guard needed.
+    const BRANCHING_KINDS: &[&str] = &[
+        "if_statement",
+        "for_statement",
+        "for_range_loop",
+        "while_statement",
+        "do_statement",
+        "case_statement",
+        "catch_clause",
+        "conditional_expression",
+    ];
+
+    fn count_branches(node: Node) -> i32 {
+        let mut count = 0i32;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if Self::BRANCHING_KINDS.contains(&child.kind()) {
+                count += 1;
+            }
+            count += Self::count_branches(child);
+        }
+        count
+    }
+
     fn extract_function<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
         let mut name = String::new();
         if let Some(decl) = Self::find_child_by_type(node, "function_declarator") {
@@ -63,9 +90,12 @@ impl CppParser {
                 is_nif = true;
             }
 
+            let mut properties = HashMap::new();
             if let Some(body) = Self::find_child_by_type(node, "compound_statement") {
                 // REQ-AXO-91506 — propagate caller name into call extraction.
                 Self::walk_for_calls(body, source_bytes, result, &name);
+                let complexity = 1 + Self::count_branches(body);
+                properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
             }
 
             result.symbols.push(Symbol {
@@ -79,7 +109,7 @@ impl CppParser {
                 tested: false,
                 is_nif,
                 is_unsafe: true,
-                properties: HashMap::new(),
+                properties,
                 embedding: None,
             });
         }
@@ -172,5 +202,51 @@ impl Parser for CppParser {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! REQ-AXO-902185 (god-objects) — cyclomatic complexity regression tests.
+    use super::*;
+
+    fn parser() -> CppParser {
+        CppParser::new()
+    }
+
+    #[test]
+    fn simple_function_has_complexity_one() {
+        let result = parser().parse("int f() { int x = 1; return x; }");
+        if result.symbols.is_empty() {
+            eprintln!("cpp wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn branching_function_counts_each_decision_point() {
+        let result = parser().parse(
+            "int f(int x) { \
+                if (x > 0) { return 1; } \
+                for (int i : {1,2,3}) {} \
+                try { } catch (int e) { } \
+                return x > 0 ? 1 : 0; \
+            }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("cpp wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        // base 1 + if + range-for + catch + ternary = 5
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("5")
+        );
     }
 }

@@ -36,6 +36,33 @@ impl CSharpParser {
         }
     }
 
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity, base 1 +
+    /// one per decision point. C# local functions/lambdas are not extracted
+    /// as a separate Symbol in this parser, so no nested-exclusion guard is
+    /// needed.
+    const BRANCHING_KINDS: &[&str] = &[
+        "if_statement",
+        "for_statement",
+        "foreach_statement",
+        "while_statement",
+        "do_statement",
+        "switch_section",
+        "catch_clause",
+        "conditional_expression",
+    ];
+
+    fn count_branches(node: Node) -> i32 {
+        let mut count = 0i32;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if Self::BRANCHING_KINDS.contains(&child.kind()) {
+                count += 1;
+            }
+            count += Self::count_branches(child);
+        }
+        count
+    }
+
     fn extract_method<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
         if let Some(name_node) = Self::find_child_by_type(node, "identifier") {
             let name = name_node.utf8_text(source_bytes).unwrap_or("").to_string();
@@ -63,9 +90,12 @@ impl CSharpParser {
                 }
             }
 
+            let mut properties = HashMap::new();
             if let Some(body) = Self::find_child_by_type(node, "block") {
                 // REQ-AXO-91506 — propagate caller into call extraction.
                 Self::walk_for_calls(body, source_bytes, result, &name);
+                let complexity = 1 + Self::count_branches(body);
+                properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
             }
             let name_for_symbol = name.clone();
 
@@ -80,7 +110,7 @@ impl CSharpParser {
                 tested: false,
                 is_nif,
                 is_unsafe,
-                properties: HashMap::new(),
+                properties,
                 embedding: None,
             });
         }
@@ -173,5 +203,55 @@ impl Parser for CSharpParser {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! REQ-AXO-902185 (god-objects) — cyclomatic complexity regression tests.
+    use super::*;
+
+    fn parser() -> CSharpParser {
+        CSharpParser::new()
+    }
+
+    #[test]
+    fn simple_function_has_complexity_one() {
+        let result = parser().parse("class C { int F() { int x = 1; return x; } }");
+        if result.symbols.is_empty() {
+            eprintln!("c_sharp wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "F").unwrap();
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn branching_function_counts_each_decision_point() {
+        let result = parser().parse(
+            "class C { \
+                int F(int x) { \
+                    if (x > 0) { return 1; } \
+                    for (int i = 0; i < x; i++) {} \
+                    foreach (var y in new int[]{1,2}) {} \
+                    try { } catch (Exception e) { } \
+                    switch (x) { case 1: break; } \
+                    return x > 0 ? 1 : 0; \
+                } \
+            }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("c_sharp wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "F").unwrap();
+        // base 1 + if + for + foreach + catch + case + ternary = 7
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("7")
+        );
     }
 }

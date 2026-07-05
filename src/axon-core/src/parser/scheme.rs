@@ -97,6 +97,51 @@ impl SchemeParser {
             && (head.ends_with("Node") || head.ends_with("Link") || head.ends_with("Value"))
     }
 
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity for a
+    /// Scheme procedure body. This grammar has no dedicated `if`/`cond` node
+    /// kinds (everything is a generic `list`) — a decision point is
+    /// recognized by the HEAD SYMBOL of a list: `if`/`when`/`unless` count
+    /// once per occurrence; `cond`/`case` count once PER CLAUSE (each
+    /// remaining list item after the head), since each clause is its own
+    /// decision point, not once for the whole form. Boolean short-circuit
+    /// forms (`and`/`or`) are NOT counted — same first-pass scope as
+    /// rust.rs's `&&`/`||` exclusion. Skips nested `define*` forms entirely
+    /// (they get their own Symbol + complexity via `handle_list`'s normal
+    /// recursion, so their branches must not double-count into the parent).
+    /// `lambda` is not extracted as a separate Symbol, so its branches
+    /// correctly fold into the enclosing procedure via plain recursion.
+    fn count_branches(&self, nodes: &[Node], source: &[u8]) -> i32 {
+        let mut count = 0i32;
+        for node in nodes {
+            if node.kind() != "list" {
+                continue;
+            }
+            let items = self.named(*node);
+            let Some(head) = items.first() else {
+                continue;
+            };
+            if head.kind() == "symbol" {
+                let head_text = self.text(*head, source);
+                if head_text.starts_with("define") {
+                    continue;
+                }
+                match head_text.as_str() {
+                    "if" | "when" | "unless" => count += 1,
+                    "cond" | "case" => {
+                        count += items
+                            .iter()
+                            .skip(1)
+                            .filter(|n| n.kind() == "list")
+                            .count() as i32;
+                    }
+                    _ => {}
+                }
+            }
+            count += self.count_branches(&items, source);
+        }
+        count
+    }
+
     fn push_symbol(
         &self,
         result: &mut ExtractionResult,
@@ -135,7 +180,7 @@ impl SchemeParser {
         };
         let is_public = head_text == "define-public";
 
-        let (name, kind) = match target.kind() {
+        let (name, kind, complexity) = match target.kind() {
             // (define (f a b) …) — curried/procedure definition.
             "list" => {
                 let inner = self.named(*target);
@@ -149,7 +194,10 @@ impl SchemeParser {
                 } else {
                     "function"
                 };
-                (self.text(*name_node, source), kind)
+                // REQ-AXO-902185 — body is everything after the `(f a b)` head.
+                let complexity = (kind == "function")
+                    .then(|| 1 + self.count_branches(items.get(2..).unwrap_or(&[]), source));
+                (self.text(*name_node, source), kind, complexity)
             }
             // (define x …) — value or lambda bound to a name.
             "symbol" => {
@@ -167,7 +215,16 @@ impl SchemeParser {
                     _ if value_is_lambda => "function",
                     _ => "variable",
                 };
-                (self.text(*target, source), kind)
+                // REQ-AXO-902185 — body is everything after `(lambda (a b)`.
+                let complexity = value_is_lambda
+                    .then(|| {
+                        items.get(2).map(|lambda_list| {
+                            let lambda_items = self.named(*lambda_list);
+                            1 + self.count_branches(lambda_items.get(2..).unwrap_or(&[]), source)
+                        })
+                    })
+                    .flatten();
+                (self.text(*target, source), kind, complexity)
             }
             _ => return,
         };
@@ -178,6 +235,9 @@ impl SchemeParser {
         let mut props = HashMap::new();
         props.insert("lang".to_string(), "scheme".to_string());
         props.insert("define_form".to_string(), head_text.to_string());
+        if let Some(c) = complexity {
+            props.insert("cyclomatic_complexity".to_string(), c.to_string());
+        }
         // Guile convention: a `%`-prefixed name is module-internal.
         let public = is_public || !name.starts_with('%');
         self.push_symbol(result, name, kind, list, public, props);
@@ -356,5 +416,68 @@ mod tests {
         // lowercase head must never be treated as an atom type
         let r = parse("(add-link foo bar)");
         assert!(r.symbols.is_empty());
+    }
+
+    /// REQ-AXO-902185 (god-objects) — cyclomatic complexity regression tests.
+    #[test]
+    fn simple_function_has_complexity_one() {
+        let r = parse("(define (square x) (* x x))");
+        let sym = r.symbols.iter().find(|s| s.name == "square").unwrap();
+        assert_eq!(
+            sym.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn counts_if_and_cond_clauses_as_branches() {
+        let r = parse(
+            "(define (classify x) \
+                (if (> x 0) \
+                    (cond ((> x 10) \"big\") ((> x 5) \"medium\") (else \"small\")) \
+                    (when (< x -10) \"very-negative\")))",
+        );
+        let sym = r.symbols.iter().find(|s| s.name == "classify").unwrap();
+        // base 1 + if + 3 cond-clauses + when = 6
+        assert_eq!(
+            sym.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("6")
+        );
+    }
+
+    #[test]
+    fn nested_define_gets_its_own_complexity_not_added_to_parent() {
+        let r = parse(
+            "(define (outer x) \
+                (define (inner y) (if (> y 0) y (- y))) \
+                (if (> x 0) x (inner x)))",
+        );
+        let outer = r.symbols.iter().find(|s| s.name == "outer").unwrap();
+        let inner = r.symbols.iter().find(|s| s.name == "inner").unwrap();
+        assert_eq!(
+            outer.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            inner.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn lambda_bound_function_gets_complexity() {
+        let r = parse("(define add (lambda (a b) (if (> a b) a b)))");
+        let sym = r.symbols.iter().find(|s| s.name == "add").unwrap();
+        assert_eq!(
+            sym.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn plain_value_has_no_complexity_property() {
+        let r = parse("(define pi 3.14159)");
+        let sym = r.symbols.iter().find(|s| s.name == "pi").unwrap();
+        assert_eq!(sym.properties.get("cyclomatic_complexity"), None);
     }
 }

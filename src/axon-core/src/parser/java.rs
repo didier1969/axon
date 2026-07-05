@@ -85,6 +85,37 @@ impl JavaParser {
         }
     }
 
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity: base 1 +
+    /// one per decision point. Java has no lambda/anonymous-class extracted
+    /// as a separate Symbol in this parser (only nested `class_declaration`
+    /// recurses, tagged separately), so no nested-exclusion guard is needed
+    /// here — mirrors the Go/C/PHP precedent. `switch_label` matches both
+    /// `case` and `default` labels (mirrors Go counting `default_case` too).
+    /// Boolean short-circuit operators (`&&`/`||`) are NOT counted, same
+    /// first-pass scope as rust.rs.
+    const BRANCHING_KINDS: &[&str] = &[
+        "if_statement",
+        "for_statement",
+        "enhanced_for_statement",
+        "while_statement",
+        "do_statement",
+        "switch_label",
+        "catch_clause",
+        "ternary_expression",
+    ];
+
+    fn count_branches(&self, node: Node) -> i32 {
+        let mut count = 0i32;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if Self::BRANCHING_KINDS.contains(&child.kind()) {
+                count += 1;
+            }
+            count += self.count_branches(child);
+        }
+        count
+    }
+
     fn extract_method(
         &self,
         node: Node,
@@ -150,6 +181,10 @@ impl JavaParser {
                 }
                 if !decorators.is_empty() {
                     properties.insert("decorators".to_string(), decorators.join(","));
+                }
+                if let Some(body) = node.child_by_field_name("body") {
+                    let complexity = 1 + self.count_branches(body);
+                    properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
                 }
 
                 symbols.push(Symbol {
@@ -235,5 +270,77 @@ impl Parser for JavaParser {
             symbols,
             relations,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! REQ-AXO-902185 (god-objects) — cyclomatic complexity regression tests.
+    use super::*;
+
+    fn parser() -> JavaParser {
+        JavaParser::new()
+    }
+
+    #[test]
+    fn simple_function_has_complexity_one() {
+        let result = parser().parse("class C { void f() { int x = 1; } }");
+        if result.symbols.is_empty() {
+            eprintln!("java wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn branching_function_counts_each_decision_point() {
+        let result = parser().parse(
+            "class C { \
+                int f(int x) { \
+                    if (x > 0) { return 1; } \
+                    for (int i = 0; i < x; i++) {} \
+                    switch (x) { case 1: break; default: break; } \
+                    return x > 0 ? 1 : 0; \
+                } \
+            }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("java wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        // base 1 + if + for + case + default + ternary = 6
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("6")
+        );
+    }
+
+    #[test]
+    fn method_gets_its_own_complexity() {
+        let result = parser().parse(
+            "class C { \
+                void a() { if (true) {} } \
+                void b() {} \
+            }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("java wasm grammar unavailable, skipping");
+            return;
+        }
+        let a = result.symbols.iter().find(|s| s.name == "a").unwrap();
+        let b = result.symbols.iter().find(|s| s.name == "b").unwrap();
+        assert_eq!(
+            a.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            b.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
     }
 }

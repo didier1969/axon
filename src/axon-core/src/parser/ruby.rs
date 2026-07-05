@@ -38,6 +38,39 @@ impl RubyParser {
         }
     }
 
+    /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity, base 1 +
+    /// one per decision point. Nested `method`/`singleton_method` bodies are
+    /// skipped so a nested `def` would get its own complexity rather than
+    /// inflating the enclosing one, IF this parser ever extracts nested defs
+    /// as a separate Symbol — today it does not (`extract_method`'s body
+    /// walk only calls `walk_for_calls`, never re-enters `walk`/
+    /// `extract_method` for a nested `def`), so this guard is a defensive
+    /// no-op, not a fix for that pre-existing extraction gap.
+    fn count_branches(node: Node) -> i32 {
+        let mut count = 0i32;
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "method" || child.kind() == "singleton_method" {
+                continue;
+            }
+            if matches!(
+                child.kind(),
+                "if" | "unless"
+                    | "while"
+                    | "until"
+                    | "for"
+                    | "when"
+                    | "rescue"
+                    | "elsif"
+                    | "conditional"
+            ) {
+                count += 1;
+            }
+            count += Self::count_branches(child);
+        }
+        count
+    }
+
     fn extract_method<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
         if let Some(name_node) = Self::find_child_by_type(node, "identifier") {
             let name = name_node.utf8_text(source_bytes).unwrap_or("").to_string();
@@ -74,6 +107,8 @@ impl RubyParser {
                 if node_content.contains("attach_function") || node_content.contains("FFI::") {
                     is_nif = true;
                 }
+                let complexity = 1 + Self::count_branches(body);
+                properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
                 // REQ-AXO-91506 — propagate caller into call extraction.
                 Self::walk_for_calls(body, source_bytes, result, &name);
             }
@@ -182,5 +217,60 @@ impl Parser for RubyParser {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! REQ-AXO-902185 (god-objects) — cyclomatic complexity regression tests.
+    use super::*;
+
+    fn parser() -> RubyParser {
+        RubyParser::new()
+    }
+
+    #[test]
+    fn simple_function_has_complexity_one() {
+        let result = parser().parse("def f\n  x = 1\n  x\nend\n");
+        if result.symbols.is_empty() {
+            eprintln!("ruby wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn branching_function_counts_each_decision_point() {
+        let result = parser().parse(
+            "def f(x)\n\
+             \x20 if x > 0\n\
+             \x20   1\n\
+             \x20 end\n\
+             \x20 case x\n\
+             \x20 when 1\n\
+             \x20   2\n\
+             \x20 end\n\
+             \x20 begin\n\
+             \x20   risky\n\
+             \x20 rescue\n\
+             \x20   0\n\
+             \x20 end\n\
+             \x20 x > 0 ? 1 : 0\n\
+             end\n",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("ruby wasm grammar unavailable, skipping");
+            return;
+        }
+        let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
+        // base 1 + if + when + rescue + ternary(conditional) = 5
+        assert_eq!(
+            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            Some("5")
+        );
     }
 }
