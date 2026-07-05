@@ -459,6 +459,76 @@ pub fn unsafe_exposure(graph: &IstGraph, project: &str) -> Vec<String> {
     sorted
 }
 
+// REQ-AXO-902210 — injection sinks, slice 1. Deliberately narrow: matched by
+// bare canonical name (same matching primitive as DANGEROUS_NAMES below), so
+// only names that are UNAMBIGUOUS regardless of qualification belong here.
+// `Command::new` / a generic `.new()` sink was considered and REJECTED for
+// this slice: Rust call-target names are captured bare (not receiver-
+// qualified), so "new" would match every `Vec::new()`/`HashMap::new()` in the
+// codebase — a false-positive generator, not a sink. `execute_raw_sql_gateway`
+// is Axon's own single raw-SQL execution boundary (graph_query.rs) and has no
+// such collision. Widening this list to cover exec/shell/deserialization sinks
+// is follow-up work, gated on finding equally unambiguous bare names per sink
+// class (same "don't guess" discipline as GOD_OBJECT_* thresholds).
+const INJECTION_SINK_NAMES: &[&str] = &["execute_raw_sql_gateway"];
+
+fn is_injection_sink(graph: &IstGraph, idx: u32) -> bool {
+    let name = graph.name_of(idx).to_ascii_lowercase();
+    INJECTION_SINK_NAMES
+        .iter()
+        .any(|s| name == s.to_ascii_lowercase())
+}
+
+/// REQ-AXO-902210 — injection-risk reachability, mirroring `unsafe_exposure`'s
+/// BFS shape exactly (same seed: PUBLIC callables ; same bound: depth ≤ 10 ;
+/// same CALLS-only edge filter) but targeting `INJECTION_SINK_NAMES` instead of
+/// `unsafe`/`unwrap`. This is a REACHABILITY signal, not a true taint-flow
+/// analysis: it does not distinguish a literal SQL string from one built via
+/// concatenation/`format!` — a public fn that reaches the sink with a
+/// hardcoded, safe query still surfaces here. Treat findings as "review this
+/// path", not "this is confirmed exploitable" (documented explicitly so the
+/// limitation is visible in every finding, not hidden).
+pub fn injection_risk_paths(graph: &IstGraph, project: &str) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut out: HashSet<String> = HashSet::new();
+
+    for start in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, start, project) {
+            continue;
+        }
+        let (kind_byte, _, flags) = graph.node_meta(start);
+        if !is_callable(kind_byte) || !flags.public() {
+            continue;
+        }
+        let start_name = name_from_id(graph.id_of(start)).to_string();
+        let mut visited: HashSet<u32> = HashSet::from([start]);
+        let mut frontier: Vec<u32> = vec![start];
+        for _depth in 1..=UNSAFE_EXPOSURE_MAX_DEPTH {
+            let mut next: Vec<u32> = Vec::new();
+            for &node in &frontier {
+                for (tgt, rel) in graph.forward_neighbors(node) {
+                    if !matches!(rel, RelationType::Calls) || !visited.insert(tgt) {
+                        continue;
+                    }
+                    if is_injection_sink(graph, tgt) {
+                        let tname = name_from_id(graph.id_of(tgt));
+                        out.insert(format!("{} -> ... -> {}", start_name, tname));
+                    }
+                    next.push(tgt);
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+    }
+
+    let mut sorted: Vec<String> = out.into_iter().collect();
+    sorted.sort();
+    sorted
+}
+
 /// REQ-AXO-901970 — RAM equivalent of `GraphStore::get_nif_blocking_risks`.
 /// From each CALLS_NIF target (a NIF function), BFS forward over CALLS (depth ≤
 /// 20, cycle-avoiding) tracking the deepest reachable chain; emit
@@ -559,7 +629,21 @@ const DANGEROUS_NAMES: &[&str] = &["eval", "unwrap"];
 const LOG_CALL_NAMES: &[&str] = &[
     "println!", "dbg!", "console.log", "io.puts", "print", "printf",
 ];
-const DEBT_NAME_FRAGMENTS: &[&str] = &["todo", "fixme", "secret", "hardcoded credential"];
+// REQ-AXO-902209 — "password"/"token" added to reconnect yaml.rs's
+// `properties["sensitive"]` intent (config keys named password/token/secret/
+// key), which had no downstream reader anywhere. "key" is deliberately NOT
+// added: it would match `primary_key`/`cache_key`/dict-`key` params across
+// the whole codebase — a false-positive generator, not a signal. The
+// stronger secret-VALUE signal (actual API keys/PEM headers/DB URLs) is
+// covered separately by the now-reconnected `scan_secrets` regex scan.
+const DEBT_NAME_FRAGMENTS: &[&str] = &[
+    "todo",
+    "fixme",
+    "secret",
+    "hardcoded credential",
+    "password",
+    "token",
+];
 
 fn is_dangerous(graph: &IstGraph, idx: u32) -> bool {
     let (_, _, flags) = graph.node_meta(idx);
@@ -1640,6 +1724,54 @@ mod tests {
         assert!(!out.iter().any(|s| s.starts_with("priv_root")), "{out:?}");
     }
 
+    // REQ-AXO-902210 — injection_risk_paths: public fn reaching the raw-SQL
+    // gateway sink via a transitive CALLS chain; a private root must not seed.
+    #[test]
+    fn injection_risk_paths_traces_public_to_raw_sql_sink() {
+        let nodes = vec![
+            func_flags("AXO::f.rs::pub_fn", true, false),
+            func_flags("AXO::f.rs::mid", false, false),
+            func_flags("AXO::f.rs::execute_raw_sql_gateway", false, false),
+            func_flags("AXO::f.rs::priv_root", false, false),
+        ];
+        let edges = vec![
+            edge("AXO::f.rs::pub_fn", "AXO::f.rs::mid", RelationType::Calls),
+            edge(
+                "AXO::f.rs::mid",
+                "AXO::f.rs::execute_raw_sql_gateway",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::f.rs::priv_root",
+                "AXO::f.rs::execute_raw_sql_gateway",
+                RelationType::Calls,
+            ),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let out = injection_risk_paths(&g, "AXO");
+        assert!(
+            out.contains(&"pub_fn -> ... -> execute_raw_sql_gateway".to_string()),
+            "{out:?}"
+        );
+        assert!(!out.iter().any(|s| s.starts_with("priv_root")), "{out:?}");
+    }
+
+    #[test]
+    fn injection_risk_paths_ignores_unrelated_dot_new_calls() {
+        // REQ-AXO-902210 — regression guard for the rejected "Command::new"
+        // sink: a bare `.new()` call target must NEVER be flagged (Vec::new,
+        // HashMap::new, etc. are ubiquitous and would be a false-positive
+        // generator, which is exactly why that sink was scoped out).
+        let nodes = vec![
+            func_flags("AXO::f.rs::pub_fn", true, false),
+            func_flags("AXO::f.rs::new", false, false),
+        ];
+        let edges = vec![edge("AXO::f.rs::pub_fn", "AXO::f.rs::new", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let out = injection_risk_paths(&g, "AXO");
+        assert!(out.is_empty(), "{out:?}");
+    }
+
     // REQ-AXO-901970 — nif_blocking_risks: a NIF whose downstream CALLS chain
     // exceeds depth 5 is flagged with its max depth; a shallow NIF is not.
     #[test]
@@ -1880,6 +2012,30 @@ mod tests {
             debt.iter().any(|(f, n)| f == "src/cfg.rs" && n.contains("hardcoded credential")),
             "secret finding must be matched via name_of: {debt:?}"
         );
+    }
+
+    // REQ-AXO-902209 — reconnects yaml.rs's `properties["sensitive"]` intent
+    // (password/token/secret-like config KEY names) via the name-fragment path.
+    #[test]
+    fn technical_debt_flags_password_and_token_named_config_keys() {
+        let nodes = vec![
+            file("src/config.yaml"),
+            named("AXO::src/config.yaml::db_password", "db_password", NodeKind::ConfigKey),
+            named("AXO::src/config.yaml::api_token", "api_token", NodeKind::ConfigKey),
+            named("AXO::src/config.yaml::cache_key", "cache_key", NodeKind::ConfigKey),
+        ];
+        let edges = vec![
+            edge("src/config.yaml", "AXO::src/config.yaml::db_password", RelationType::Contains),
+            edge("src/config.yaml", "AXO::src/config.yaml::api_token", RelationType::Contains),
+            edge("src/config.yaml", "AXO::src/config.yaml::cache_key", RelationType::Contains),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let debt = technical_debt(&g, "AXO");
+        assert!(debt.iter().any(|(_, n)| n == "db_password"), "{debt:?}");
+        assert!(debt.iter().any(|(_, n)| n == "api_token"), "{debt:?}");
+        // "key" is deliberately excluded (false-positive generator) — a bare
+        // cache_key config name must NOT be flagged.
+        assert!(!debt.iter().any(|(_, n)| n == "cache_key"), "{debt:?}");
     }
 
     #[test]

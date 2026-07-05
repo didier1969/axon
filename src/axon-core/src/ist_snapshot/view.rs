@@ -290,6 +290,13 @@ impl IstGraphView {
         Some(code_smells::nif_blocking_risks(&snap, project))
     }
 
+    /// REQ-AXO-902210 — RAM injection-risk call paths (public → known sink,
+    /// slice 1: raw-SQL gateway). `None` ⇒ cold cache (caller surfaces empty).
+    pub fn injection_risk_paths(&self, project: &str) -> Option<Vec<String>> {
+        let snap = self.try_snapshot(project)?;
+        Some(code_smells::injection_risk_paths(&snap, project))
+    }
+
     /// REQ-AXO-901970 — RAM cross-file CALLS flows for `conception_view`.
     /// Returns `(flows[(src,src_file,dst,dst_file)], total_count)`. `None` ⇒
     /// cold cache (caller surfaces empty flows + 0, never a PG join).

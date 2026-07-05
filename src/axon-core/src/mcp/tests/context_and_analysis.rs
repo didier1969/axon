@@ -3917,6 +3917,64 @@ fn test_axon_audit_cross_language_taint() {
 }
 
 #[test]
+fn test_axon_audit_injection_risk_paths() {
+    // REQ-AXO-902210 — a public fn reaching the raw-SQL gateway sink through a
+    // transitive CALLS chain surfaces in the audit report.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO axon.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/api.rs', 'PRJ', 'hash-src/api.rs', 0), ('src/api_dummy.rs', 'PRJ', 'hash-src/api_dummy.rs', 0) ON CONFLICT (path) DO NOTHING").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api.rs', 'symbol', 'sym-src/api.rs', 'PRJ', 'src/api.rs', 'hash-src/api.rs')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/api_dummy.rs', 'symbol', 'sym-src/api_dummy.rs', 'PRJ', 'src/api_dummy.rs', 'hash-src/api_dummy.rs')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::handle_request', 'handle_request', 'function', false, true, false, false, 'PRJ')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::execute_raw_sql_gateway', 'execute_raw_sql_gateway', 'function', false, false, false, false, 'PRJ')").unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/api.rs', 'prj::handle_request', 'CONTAINS', 'PRJ', 0)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('prj::handle_request', 'prj::execute_raw_sql_gateway', 'CALLS', 'PRJ', 0)")
+        .unwrap();
+
+    crate::ist_snapshot::evict_process_snapshot("PRJ");
+    server.soll_cache().invalidate("PRJ");
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "audit",
+            "arguments": {
+                "project": "PRJ"
+            }
+        })),
+        id: Some(json!(14)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(content.contains("Injection-risk"));
+    assert!(content.contains("handle_request"));
+    assert!(content.contains("execute_raw_sql_gateway"));
+}
+
+#[test]
 fn test_axon_health_god_objects() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();

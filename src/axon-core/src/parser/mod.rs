@@ -120,10 +120,12 @@ pub trait Parser: Send + Sync {
     fn parse(&self, content: &str) -> ExtractionResult;
 }
 
-pub fn scan_secrets(content: &str, result: &mut ExtractionResult) {
-    use regex::Regex;
-
-    let patterns = [
+// REQ-AXO-902209 — compiled once (was recompiled from source on every single
+// call inside `scan_secrets`, which was fine when the function was dead code
+// but is a real per-file cost now that A2 (pipeline/stage_a2.rs) invokes it
+// unconditionally for every indexed file).
+static SECRET_PATTERNS: Lazy<Vec<(&'static str, regex::Regex)>> = Lazy::new(|| {
+    let raw: [(&str, &str); 4] = [
         (
             "SECRET_API_KEY",
             r#"(?i)(?:key|api|token|secret|password|passwd|auth)[\s:='\"\[\{]+[a-z0-9\/+]{32,45}"#,
@@ -135,26 +137,33 @@ pub fn scan_secrets(content: &str, result: &mut ExtractionResult) {
         ),
         ("SECRET_DB_URL", r#"[a-zA-Z]+://[^:]+:[^@]+@[^/]+/[^?]+"#),
     ];
+    raw.iter()
+        .filter_map(|(kind, pattern)| {
+            regex::Regex::new(pattern)
+                .ok()
+                .map(|re| (*kind, re))
+        })
+        .collect()
+});
 
-    for (kind, pattern) in patterns {
-        if let Ok(re) = Regex::new(pattern) {
-            for mat in re.find_iter(content) {
-                let line = content[..mat.start()].lines().count() + 1;
-                result.symbols.push(Symbol {
-                    name: format!("{}: Found potential hardcoded credential", kind),
-                    kind: kind.to_string(),
-                    start_line: line,
-                    end_line: line,
-                    docstring: None,
-                    is_entry_point: false,
-                    is_public: false,
-                    tested: false,
-                    is_nif: false,
-                    is_unsafe: true,
-                    properties: HashMap::new(),
-                    embedding: None,
-                });
-            }
+pub fn scan_secrets(content: &str, result: &mut ExtractionResult) {
+    for (kind, re) in SECRET_PATTERNS.iter() {
+        for mat in re.find_iter(content) {
+            let line = content[..mat.start()].lines().count() + 1;
+            result.symbols.push(Symbol {
+                name: format!("{}: Found potential hardcoded credential", kind),
+                kind: kind.to_string(),
+                start_line: line,
+                end_line: line,
+                docstring: None,
+                is_entry_point: false,
+                is_public: false,
+                tested: false,
+                is_nif: false,
+                is_unsafe: true,
+                properties: HashMap::new(),
+                embedding: None,
+            });
         }
     }
 }

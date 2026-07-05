@@ -81,6 +81,21 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
         symbols.extend(phantom_syms);
         relations.extend(phantom_rels);
 
+        // REQ-AXO-902209 — `scan_secrets` had real AWS-key/PEM-header/DB-URL/
+        // generic-token regexes but was never called by any parser (dead
+        // code: it produced zero findings on any real codebase). Run it
+        // unconditionally per-file, same as phantom_extract above: a secret
+        // can leak from ANY file regardless of language or even whether a
+        // parser is registered for its extension.
+        let mut secrets_extraction = crate::parser::ExtractionResult {
+            project_code: None,
+            symbols: Vec::new(),
+            relations: Vec::new(),
+        };
+        crate::parser::scan_secrets(&prep.content, &mut secrets_extraction);
+        symbols.extend(secrets_extraction.symbols);
+        relations.extend(secrets_extraction.relations);
+
         // REQ-AXO-901885 — a parsed file that yields zero symbols AND zero
         // relations is NOT an error: it is "seen, nothing structural to
         // extract" (data/config/markup, a code file with only top-level
@@ -169,6 +184,31 @@ mod tests {
         assert!(
             parsed.symbols.iter().any(|s| s.name == "main"),
             "rust parser should surface `main`: {:?}",
+            parsed.symbols
+        );
+    }
+
+    #[tokio::test]
+    async fn a2_transform_reconnects_scan_secrets_regardless_of_language() {
+        // REQ-AXO-902209 — scan_secrets had real regexes (AWS key, PEM header,
+        // DB URL, generic token) but was never invoked by any parser (dead
+        // code, zero real-world findings). A2 must now run it unconditionally
+        // per-file, alongside the language parser AND phantom_extract.
+        let prep = prep_with(
+            "/tmp/demo.rs",
+            "fn main() { let key = \"AKIAABCDEFGHIJKLMNOP\"; }\n",
+        );
+        let parsed = a2_transform(prep).await.unwrap();
+        assert!(
+            parsed.symbols.iter().any(|s| s.kind == "SECRET_AWS_KEY"),
+            "AWS key pattern must surface as a SECRET_AWS_KEY finding: {:?}",
+            parsed.symbols
+        );
+        // The language parser must ALSO still run (scan_secrets is additive,
+        // not a replacement).
+        assert!(
+            parsed.symbols.iter().any(|s| s.name == "main"),
+            "rust parser must still run alongside scan_secrets: {:?}",
             parsed.symbols
         );
     }

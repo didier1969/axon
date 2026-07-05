@@ -612,6 +612,10 @@ impl McpServer {
             .graph_store
             .get_nif_blocking_risks(project)
             .unwrap_or_default();
+        let injection_risk_paths = self
+            .graph_store
+            .get_injection_risk_paths(project)
+            .unwrap_or_default();
 
         evidence.push_str("\n### 🌪️ Architectural Anti-Patterns\n");
         if circular_deps.is_empty() {
@@ -686,10 +690,29 @@ impl McpServer {
             }
         }
 
+        if injection_risk_paths.is_empty() {
+            evidence.push_str("✅ No injection-risk path detected (public fn → raw-SQL sink).\n");
+        } else {
+            evidence.push_str(&format!(
+                "🚨 [{}] Injection-risk paths detected (reachability, not confirmed exploit — review each):\n",
+                injection_risk_paths.len()
+            ));
+            for path in injection_risk_paths.iter().take(5) {
+                evidence.push_str(&format!("*   `{}`\n", path));
+            }
+            if injection_risk_paths.len() > 5 {
+                evidence.push_str(&format!(
+                    "*   ... and {} more paths.\n",
+                    injection_risk_paths.len() - 5
+                ));
+            }
+        }
+
         let overall_score = if !circular_deps.is_empty()
             || !domain_leaks.is_empty()
             || !unsafe_exposure.is_empty()
             || !nif_blocking_risks.is_empty()
+            || !injection_risk_paths.is_empty()
         {
             0
         } else {

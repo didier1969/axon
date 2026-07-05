@@ -213,6 +213,22 @@ impl GraphStore {
             .unwrap_or_default())
     }
 
+    pub fn get_injection_risk_paths(&self, project: &str) -> Result<Vec<String>> {
+        if !structural_graph_analytics_available() {
+            return Ok(Vec::new());
+        }
+        // REQ-AXO-902210 — RAM-only, same shape as get_unsafe_exposure: from
+        // each public callable, BFS forward CALLS (depth ≤ 10) to a known
+        // injection sink (slice 1: the raw-SQL execution gateway). Workspace-
+        // wide ("*") and a cold cache surface empty (no PG fallback).
+        if project == "*" {
+            return Ok(Vec::new());
+        }
+        Ok(crate::ist_snapshot::process_view()
+            .injection_risk_paths(project)
+            .unwrap_or_default())
+    }
+
     pub fn get_nif_blocking_risks(&self, project: &str) -> Result<Vec<String>> {
         if !structural_graph_analytics_available() {
             return Ok(Vec::new());
