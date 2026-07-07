@@ -477,23 +477,33 @@ impl GraphStore {
     }
 }
 
-/// Strip SQL line (`--`) and block (`/* */`) comments so the read-only guard sees
-/// the actual statement keywords (REQ-AXO-902077: a leading `-- comment` before a
-/// SELECT — or a `/* */` block — was wrongly rejected by the bare first-token match).
-fn strip_sql_comments(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
+/// Produce a lexical *skeleton* of `sql`: comments, string literals, quoted
+/// identifiers and dollar-quoted bodies are each replaced by a single space so
+/// the read-only guard can scan bare keyword tokens without tripping on a
+/// keyword that merely appears inside a literal or identifier.
+///
+/// A single left-to-right pass is required — a `'` inside a comment is not a
+/// string, and a `--` inside a string is not a comment.
+/// REQ-AXO-902077 — a leading `-- comment` / `/* block */` before a SELECT was
+/// wrongly rejected by a bare first-token match; comments must be elided first.
+/// REQ-AXO-902207 — a keyword inside a string literal (`SELECT 'insert' AS c`)
+/// or a double-quoted identifier (`SELECT "update" FROM t`) is NOT a write, so
+/// those spans are elided before the mutation scan to avoid false positives.
+fn sql_skeleton(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
+            // line comment `-- … \n`
             '-' if chars.peek() == Some(&'-') => {
-                // line comment: skip to end of line, keep the newline as a separator
                 for d in chars.by_ref() {
                     if d == '\n' {
-                        out.push('\n');
+                        out.push('\n'); // keep the newline as a token separator
                         break;
                     }
                 }
             }
+            // block comment `/* … */`
             '/' if chars.peek() == Some(&'*') => {
                 chars.next(); // consume '*'
                 let mut prev = ' ';
@@ -505,35 +515,130 @@ fn strip_sql_comments(s: &str) -> String {
                 }
                 out.push(' '); // separator so neighbouring tokens don't fuse
             }
+            // single-quoted string literal (`''` escapes an embedded quote)
+            '\'' => {
+                while let Some(d) = chars.next() {
+                    if d == '\'' {
+                        if chars.peek() == Some(&'\'') {
+                            chars.next();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                out.push(' ');
+            }
+            // double-quoted identifier (`""` escapes an embedded quote)
+            '"' => {
+                while let Some(d) = chars.next() {
+                    if d == '"' {
+                        if chars.peek() == Some(&'"') {
+                            chars.next();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                out.push(' ');
+            }
+            // dollar-quoted string `$tag$ … $tag$` (tag ∈ [A-Za-z0-9_]*).
+            // `$1` / `$sym` are positional / named params, NOT dollar quotes.
+            '$' => {
+                let mut tag = String::new();
+                let mut opened = false;
+                loop {
+                    match chars.peek() {
+                        Some(&'$') => {
+                            chars.next();
+                            opened = true;
+                            break;
+                        }
+                        Some(&d) if d.is_ascii_alphanumeric() || d == '_' => {
+                            tag.push(d);
+                            chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+                if opened {
+                    let closing = format!("${tag}$");
+                    let mut window = String::new();
+                    for d in chars.by_ref() {
+                        window.push(d);
+                        if window.ends_with(&closing) {
+                            break;
+                        }
+                    }
+                    out.push(' ');
+                } else {
+                    // not a dollar quote: re-emit `$` + the consumed tag chars
+                    out.push('$');
+                    out.push_str(&tag);
+                }
+            }
             _ => out.push(c),
         }
     }
     out
 }
 
-/// REQ-AXO-902077 — read-only guard by light parse, not a bare first-token match.
-/// Strips comments, checks the leading statement keyword, and rejects an injected
-/// mutation after a `;` (e.g. `SELECT 1; DROP TABLE t`). A `;` inside a string
-/// literal yields a fragment that doesn't start with a verb → still allowed (safe).
+/// REQ-AXO-902077 / REQ-AXO-902207 — read-only guard by light lexing, not a
+/// bare first-token match. The `sql` MCP tool is strictly read-only, so every
+/// `;`-separated statement must independently satisfy BOTH:
+///   1. its leading keyword is a read verb
+///      (select / with / pragma / show / describe / explain), and
+///   2. it embeds no data-modifying token — `insert` / `update` / `delete` /
+///      `merge` (the statement kinds PostgreSQL allows inside a `WITH` clause
+///      and the only ones `EXPLAIN ANALYZE` executes) nor a bare `into`
+///      (`SELECT … INTO newtbl` creates a table, the `CREATE TABLE AS` cousin).
+/// A DDL / admin verb (drop / alter / truncate / …) cannot live inside a CTE or
+/// sub-query, so it is only reachable at a statement head and is caught by (1).
+/// `sql_skeleton` elides literals / identifiers first, so `SELECT 'insert' AS c`
+/// or `SELECT "update" FROM t` are NOT false positives; and the `FOR [NO KEY]
+/// UPDATE` row-locking clause (a read) is not mistaken for an `UPDATE` write.
+///
+/// Known limitation: keyword scanning cannot see a write performed by a
+/// side-effecting function call (e.g. `SELECT nextval(...)` or
+/// `SELECT a_function_that_inserts()`); such writes are out of scope here.
 pub(crate) fn is_read_only_sql(query: &str) -> bool {
-    let lowered = strip_sql_comments(query).to_ascii_lowercase();
-    let read_only_start = matches!(
-        lowered.trim_start().split_whitespace().next(),
-        Some("select" | "with" | "pragma" | "show" | "describe" | "explain")
-    );
-    if !read_only_start {
-        return false;
+    const READ_VERBS: &[&str] =
+        &["select", "with", "pragma", "show", "describe", "explain"];
+    // Write signals that may appear AFTER a read leading verb: the
+    // data-modifying statements PostgreSQL allows inside a `WITH` clause plus
+    // the table-creating `SELECT … INTO newtbl`. `update` is handled separately
+    // below because the `FOR [NO KEY] UPDATE` row-locking clause is a *read*
+    // that also carries the bare `update` token.
+    const ALWAYS_WRITE_TOKENS: &[&str] = &["insert", "delete", "merge", "into"];
+
+    let skeleton = sql_skeleton(query).to_ascii_lowercase();
+
+    let mut saw_statement = false;
+    for statement in skeleton.split(';') {
+        let mut tokens = statement
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|w| !w.is_empty());
+        let Some(first) = tokens.next() else {
+            continue; // empty fragment (e.g. a trailing `;`)
+        };
+        saw_statement = true;
+        if !READ_VERBS.contains(&first) {
+            return false;
+        }
+        // Scan the remaining tokens for an embedded write. `update` counts only
+        // when it is NOT the tail of a `FOR UPDATE` / `FOR NO KEY UPDATE`
+        // locking clause (those modify no data); a data-modifying `UPDATE` CTE
+        // is preceded by `as` / `(`, never by `for` / `key`.
+        let mut prev = first;
+        for w in tokens {
+            let is_write = ALWAYS_WRITE_TOKENS.contains(&w)
+                || (w == "update" && prev != "for" && prev != "key");
+            if is_write {
+                return false;
+            }
+            prev = w;
+        }
     }
-    const MUTATIONS: &[&str] = &[
-        "insert", "update", "delete", "drop", "alter", "create", "truncate", "grant",
-        "revoke", "copy", "merge", "vacuum", "reindex", "refresh", "call",
-    ];
-    lowered.split(';').skip(1).all(|frag| {
-        frag.trim_start()
-            .split_whitespace()
-            .next()
-            .map_or(true, |w| !MUTATIONS.contains(&w))
-    })
+    saw_statement
 }
 
 // REQ-AXO-091 placeholder-expansion tests live in a sibling file so the
@@ -560,6 +665,70 @@ mod tests {
         assert!(!is_read_only_sql("-- x\nUPDATE t SET a=1"));
         assert!(!is_read_only_sql("SELECT 1; DROP TABLE t"));
         assert!(!is_read_only_sql("SELECT 1 ; truncate t"));
+    }
+
+    #[test]
+    fn read_only_guard_rejects_embedded_writes_req_902207() {
+        use super::is_read_only_sql;
+        // REQ-AXO-902207 — a data-modifying CTE writes despite a SELECT/WITH
+        // prefix; the pre-hardening guard only scanned statements AFTER a `;`,
+        // so these all sailed through as "read-only". Each MUST be rejected.
+        assert!(!is_read_only_sql(
+            "WITH x AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM x"
+        ));
+        assert!(!is_read_only_sql(
+            "WITH d AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT count(*) FROM d"
+        ));
+        assert!(!is_read_only_sql(
+            "WITH u AS (UPDATE t SET a = 1 WHERE id = 2 RETURNING *) SELECT * FROM u"
+        ));
+        assert!(!is_read_only_sql(
+            "WITH m AS (MERGE INTO t USING s ON t.id = s.id \
+             WHEN MATCHED THEN UPDATE SET a = 1) SELECT 1"
+        ));
+        // nested writable CTE + mixed case.
+        assert!(!is_read_only_sql(
+            "WITH outer_cte AS (WITH inner_cte AS (delete from t returning id) \
+             SELECT * FROM inner_cte) SELECT * FROM outer_cte"
+        ));
+        // `EXPLAIN ANALYZE <dml>` actually executes the write.
+        assert!(!is_read_only_sql("EXPLAIN ANALYZE INSERT INTO t VALUES (1)"));
+        // `SELECT … INTO newtbl` creates a table (the `CREATE TABLE AS` cousin).
+        assert!(!is_read_only_sql("SELECT * INTO new_table FROM t"));
+        assert!(!is_read_only_sql("SELECT id INTO t2 FROM t1 WHERE id > 0"));
+        // write embedded in a second statement after a `;`.
+        assert!(!is_read_only_sql(
+            "SELECT 1; WITH x AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM x"
+        ));
+
+        // False-positive guard — a write keyword that only appears inside a
+        // string literal, a quoted identifier, a dollar-quoted body, or as a
+        // substring of a longer identifier is NOT a write and stays accepted.
+        assert!(is_read_only_sql("SELECT 'insert' AS col"));
+        assert!(is_read_only_sql("SELECT 'delete from t' AS note"));
+        assert!(is_read_only_sql("SELECT \"insert\" FROM t")); // quoted identifier
+        assert!(is_read_only_sql("SELECT $$delete$$ AS x")); // dollar-quoted body
+        assert!(is_read_only_sql("SELECT $tag$update t$tag$ AS x")); // tagged dollar-quote
+        assert!(is_read_only_sql("SELECT col AS updated_at FROM t")); // substring, not a token
+        assert!(is_read_only_sql("SELECT created_at, deleted_flag FROM t"));
+        assert!(is_read_only_sql("WITH x AS (SELECT 1) SELECT * FROM x")); // read-only CTE
+        // a non-reserved keyword used as an ordinary column mid-statement is
+        // not a write and must not become a false positive.
+        assert!(is_read_only_sql("SELECT copy, refresh FROM audit_log"));
+        // `FOR [NO KEY] UPDATE` / `FOR SHARE` are row-locking *reads* — the
+        // bare `update` token there must NOT trigger a rejection.
+        assert!(is_read_only_sql("SELECT id FROM t WHERE x = 1 FOR UPDATE"));
+        assert!(is_read_only_sql("SELECT * FROM t FOR NO KEY UPDATE"));
+        assert!(is_read_only_sql("SELECT * FROM t FOR SHARE"));
+        // a read-only CTE may itself carry a locking clause and stay read-only,
+        // while a sibling data-modifying UPDATE CTE is still caught.
+        assert!(is_read_only_sql(
+            "WITH a AS (SELECT * FROM t FOR UPDATE) SELECT * FROM a"
+        ));
+        assert!(!is_read_only_sql(
+            "WITH a AS (SELECT 1 FOR UPDATE), b AS (UPDATE t SET c = 1 RETURNING *) \
+             SELECT * FROM b"
+        ));
     }
 
     #[test]
