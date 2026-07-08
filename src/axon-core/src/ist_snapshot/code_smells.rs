@@ -1039,6 +1039,87 @@ fn is_inferred_entry(name: &str) -> bool {
     n.contains("main") || n.contains("handler") || n.contains("nif_")
 }
 
+/// REQ-AXO-902192 S2 — a call the extractor can't resolve to a CONCRETE
+/// receiver (dynamic dispatch `obj.method()` on a `Box<dyn Trait>`; an
+/// AMBIGUOUS bare name with >=2 defs the RAM resolver refuses to guess, see
+/// `IstGraph::build` REQ-AXO-140) is materialised as a PHANTOM node:
+/// `NodeKind::Other`, empty project, NO reverse CONTAINS edge (nothing
+/// declares/owns it). This is the SAME phantom the `dead_clusters` name-bridge
+/// keys on (REQ-AXO-902211); detected here via the known phantom KIND
+/// (`Other`) ON TOP OF the `!CONTAINS` convention so it never mis-classifies a
+/// real symbol that merely lacks a CONTAINS edge in a hand-built test graph
+/// (real IST symbols are Function/Method/File/Struct/Trait..., never `Other`).
+fn is_phantom_node(graph: &IstGraph, idx: u32) -> bool {
+    let (kind_byte, _, _) = graph.node_meta(idx);
+    if !matches!(NodeKind::from_u8(kind_byte), NodeKind::Other) {
+        return false;
+    }
+    !graph
+        .reverse_neighbors(idx)
+        .any(|(_, rel)| rel == RelationType::Contains)
+}
+
+/// REQ-AXO-902192 S2 — does this candidate's FILE contain a trait-implementing
+/// sibling? A method carries NO direct edge to its own struct in this IST (the
+/// file holds the struct and every method as flat CONTAINS-siblings), so "is
+/// this the dynamic-dispatch shape?" is answered via the file: does any symbol
+/// the file CONTAINS carry an outgoing IMPLEMENTS edge. EXACT mirror of the
+/// `dead_clusters` bound (REQ-AXO-902211) that keeps the phantom name-bridge
+/// from wiring EVERY same-named method (`new`/`parse`/`run`...) — only the
+/// `Box<dyn Trait>` dispatch shape is bridged, capping the false-wiring risk.
+fn file_has_trait_impl(graph: &IstGraph, idx: u32) -> bool {
+    let Some((file, _)) = graph
+        .reverse_neighbors(idx)
+        .find(|(_, rel)| *rel == RelationType::Contains)
+    else {
+        return false;
+    };
+    graph.forward_neighbors(file).any(|(sibling, rel)| {
+        rel == RelationType::Contains
+            && graph
+                .forward_neighbors(sibling)
+                .any(|(_, r2)| r2 == RelationType::Implements)
+    })
+}
+
+/// REQ-AXO-902192 S2 — aggregate, per CASE-SENSITIVE bare method name, the
+/// prod/test caller counts of every PHANTOM call-target of that name. A
+/// dynamically-dispatched `obj.method()` lands on a phantom `caller::method`
+/// instead of the real `Struct::method`, so the real method shows 0 recorded
+/// callers (a FALSE `isolated`). This map lets `wiring_classify_node` fold the
+/// phantom's own callers back onto the real method — bounded by
+/// `file_has_trait_impl` at the use site. Built once per report, O(N+M). Bare
+/// name is kept case-sensitive (method names are; loose matching would
+/// re-introduce the "faux wired massif").
+fn phantom_dispatch_callers(graph: &IstGraph) -> HashMap<String, (usize, usize)> {
+    let mut map: HashMap<String, (usize, usize)> = HashMap::new();
+    for idx in 0..(graph.node_count() as u32) {
+        if !is_phantom_node(graph, idx) {
+            continue;
+        }
+        let (mut prod, mut test) = (0usize, 0usize);
+        for (src, rel) in graph.reverse_neighbors(idx) {
+            if !matches!(rel, RelationType::Calls | RelationType::CallsNif) {
+                continue;
+            }
+            let (_, _, sflags) = graph.node_meta(src);
+            if NodeFlags(sflags.0).tested() {
+                test += 1;
+            } else {
+                prod += 1;
+            }
+        }
+        if prod + test == 0 {
+            continue;
+        }
+        let name = name_from_id(graph.id_of(idx)).to_string();
+        let entry = map.entry(name).or_insert((0, 0));
+        entry.0 += prod;
+        entry.1 += test;
+    }
+    map
+}
+
 /// REQ-AXO-902192 slice S3 — classify a SINGLE node's wiring status, using the
 /// exact same rules as `wiring_orphans` (extracted so the gate can check one
 /// specific symbol WITHOUT inheriting that function's `ANALYTICS_LIMIT` (=20)
@@ -1048,11 +1129,16 @@ fn is_inferred_entry(name: &str) -> bool {
 /// a test-path symbol, an inferred entry, or SOLL-declared) OR if it has a
 /// production caller. `file_map` is precomputed once by the caller (shared
 /// across every node checked, same as `wiring_orphans` already does).
+/// `phantom_callers` (REQ-AXO-902192 S2) is likewise precomputed once — it
+/// carries the prod/test caller counts of dynamic-dispatch PHANTOM targets,
+/// keyed by bare method name, so an `obj.method()` call the static graph
+/// couldn't resolve still rescues its real target from a false `isolated`.
 fn wiring_classify_node(
     graph: &IstGraph,
     idx: u32,
     declared: &HashSet<String>,
     file_map: &std::collections::HashMap<u32, String>,
+    phantom_callers: &HashMap<String, (usize, usize)>,
 ) -> Option<WiringOrphan> {
     let (kind_byte, _, flags) = graph.node_meta(idx);
     if !is_callable(kind_byte) {
@@ -1099,6 +1185,25 @@ fn wiring_classify_node(
             prod_callers += 1;
         }
     }
+    // REQ-AXO-902192 S2 — phantom name-bridge: an UNDECLARED, dynamically-
+    // dispatched callable (`obj.method()` on a `Box<dyn Trait>`) is reached
+    // only through a PHANTOM `caller::method` node, never a resolved CALLS edge,
+    // so the real method carries 0 recorded callers — a FALSE `isolated`. Fold
+    // the phantom's own prod/test callers back on, but ONLY when (a) no direct
+    // prod caller already wires it and (b) the method's FILE implements a trait
+    // (the dispatch shape). The trait-impl gate — the same bound `dead_clusters`
+    // uses (REQ-AXO-902211) — keeps this from wiring EVERY same-named method
+    // (the "faux wired massif"). NOT a general lazy-import fix: a lazy-imported
+    // FREE function lands in a non-trait file with NO phantom and stays isolated
+    // BY DESIGN; its escape hatch is the SOLL `declared` guard above.
+    if prod_callers == 0 {
+        if let Some(&(phantom_prod, phantom_test)) = phantom_callers.get(name) {
+            if file_has_trait_impl(graph, idx) {
+                prod_callers += phantom_prod;
+                test_callers += phantom_test;
+            }
+        }
+    }
     if prod_callers > 0 {
         return None; // wired in prod — not an orphan
     }
@@ -1131,12 +1236,15 @@ pub fn wiring_orphans(
     limit: usize,
 ) -> Vec<WiringOrphan> {
     let file_map = build_file_path_map(graph);
+    let phantom_callers = phantom_dispatch_callers(graph);
     let mut out: Vec<WiringOrphan> = Vec::new();
     for idx in 0..(graph.node_count() as u32) {
         if !project_matches(graph, idx, project) {
             continue;
         }
-        if let Some(orphan) = wiring_classify_node(graph, idx, declared, &file_map) {
+        if let Some(orphan) =
+            wiring_classify_node(graph, idx, declared, &file_map, &phantom_callers)
+        {
             out.push(orphan);
         }
     }
@@ -1162,10 +1270,13 @@ pub fn wiring_orphans_among(
     candidate_ids: &HashSet<String>,
 ) -> Vec<WiringOrphan> {
     let file_map = build_file_path_map(graph);
+    let phantom_callers = phantom_dispatch_callers(graph);
     let mut out: Vec<WiringOrphan> = Vec::new();
     for id in candidate_ids {
         let Some(idx) = graph.index_of(id) else { continue };
-        if let Some(orphan) = wiring_classify_node(graph, idx, declared, &file_map) {
+        if let Some(orphan) =
+            wiring_classify_node(graph, idx, declared, &file_map, &phantom_callers)
+        {
             out.push(orphan);
         }
     }
@@ -2397,5 +2508,185 @@ mod tests {
             "mixed_helper has a real prod caller (run_main) — must stay a candidate"
         );
         assert_eq!(report.unreached_count, 0, "reached via run_main -> mixed_helper");
+    }
+
+    fn node(id: &str, kind: NodeKind, public: bool) -> NodeRecord {
+        NodeRecord {
+            id: id.to_string(),
+            name: id.rsplit("::").next().unwrap_or(id).to_string(),
+            project_code: "AXO".to_string(),
+            kind,
+            flags: NodeFlags::new(false, public, false, false),
+            complexity: None,
+        }
+    }
+
+    #[test]
+    fn wiring_dynamic_dispatch_prod_caller_bridges_to_wired() {
+        // REQ-AXO-902192 S2 — blind spot #1 (dynamic dispatch). Two methods
+        // share the bare name `parse`, so a prod `parser.parse(&content)` call
+        // is AMBIGUOUS and lands on a PHANTOM `stage_a2.rs::parse` (IstGraph::
+        // build refuses to guess an ambiguous receiver, REQ-AXO-140). Each
+        // `parse` lives in a file whose struct IMPLEMENTS a trait → the phantom
+        // name-bridge folds the prod caller back on → both are WIRED, not the
+        // false `isolated` the OPV terrain report flagged.
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::stage_a2.rs::a2_transform", true),
+            node("AXO::cparser.rs::CParser", NodeKind::Struct, true),
+            node("AXO::cparser.rs::parse", NodeKind::Method, true),
+            node("AXO::javaparser.rs::JavaParser", NodeKind::Struct, true),
+            node("AXO::javaparser.rs::parse", NodeKind::Method, true),
+            node("AXO::traits.rs::Parser", NodeKind::Trait, true),
+            file("AXO::cparser.rs"),
+            file("AXO::javaparser.rs"),
+        ];
+        let edges = vec![
+            edge("AXO::app.rs::run_main", "AXO::stage_a2.rs::a2_transform", RelationType::Calls),
+            edge("AXO::stage_a2.rs::a2_transform", "AXO::stage_a2.rs::parse", RelationType::Calls),
+            edge("AXO::cparser.rs", "AXO::cparser.rs::CParser", RelationType::Contains),
+            edge("AXO::cparser.rs", "AXO::cparser.rs::parse", RelationType::Contains),
+            edge("AXO::cparser.rs::CParser", "AXO::traits.rs::Parser", RelationType::Implements),
+            edge("AXO::javaparser.rs", "AXO::javaparser.rs::JavaParser", RelationType::Contains),
+            edge("AXO::javaparser.rs", "AXO::javaparser.rs::parse", RelationType::Contains),
+            edge("AXO::javaparser.rs::JavaParser", "AXO::traits.rs::Parser", RelationType::Implements),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 50);
+        let names: Vec<&str> = orphans.iter().map(|o| o.name.as_str()).collect();
+        assert!(
+            !names.contains(&"parse"),
+            "a dynamically-dispatched method in a trait-impl file must be bridged to its prod caller, not isolated"
+        );
+        assert!(!names.contains(&"a2_transform"), "a2_transform is wired by run_main");
+    }
+
+    #[test]
+    fn wiring_dynamic_dispatch_test_only_caller_bridges_to_test_only() {
+        // REQ-AXO-902192 S2 — same phantom bridge, but the only dynamic caller
+        // is a `#[test]` fn. The bridged method must surface as `test_only`
+        // (delivered + green test but never wired into prod), NOT `isolated`.
+        let a_test = NodeRecord {
+            id: "AXO::app.rs::a_test".to_string(),
+            name: "a_test".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(true, false, false, false),
+            complexity: None,
+        };
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            a_test,
+            node("AXO::renderer_a.rs::RendererA", NodeKind::Struct, true),
+            node("AXO::renderer_a.rs::render", NodeKind::Method, true),
+            node("AXO::renderer_b.rs::RendererB", NodeKind::Struct, true),
+            node("AXO::renderer_b.rs::render", NodeKind::Method, true),
+            node("AXO::traits.rs::Render", NodeKind::Trait, true),
+            file("AXO::renderer_a.rs"),
+            file("AXO::renderer_b.rs"),
+        ];
+        let edges = vec![
+            edge("AXO::app.rs::a_test", "AXO::app.rs::render", RelationType::Calls),
+            edge("AXO::renderer_a.rs", "AXO::renderer_a.rs::RendererA", RelationType::Contains),
+            edge("AXO::renderer_a.rs", "AXO::renderer_a.rs::render", RelationType::Contains),
+            edge("AXO::renderer_a.rs::RendererA", "AXO::traits.rs::Render", RelationType::Implements),
+            edge("AXO::renderer_b.rs", "AXO::renderer_b.rs::RendererB", RelationType::Contains),
+            edge("AXO::renderer_b.rs", "AXO::renderer_b.rs::render", RelationType::Contains),
+            edge("AXO::renderer_b.rs::RendererB", "AXO::traits.rs::Render", RelationType::Implements),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 50);
+        let renders: Vec<&WiringOrphan> = orphans.iter().filter(|o| o.name == "render").collect();
+        assert_eq!(renders.len(), 2, "both dynamically-dispatched render methods surface");
+        assert!(
+            renders.iter().all(|o| o.category == "test_only" && o.test_callers == 1),
+            "dynamic dispatch from a #[test] only → test_only, not isolated"
+        );
+    }
+
+    #[test]
+    fn wiring_phantom_bridge_bounded_by_trait_impl_gate() {
+        // REQ-AXO-902192 S2 — the false-wiring bound. Two `emit` methods make a
+        // dynamic `emit()` ambiguous → a phantom with a PROD caller exists,
+        // matching their bare name. But NEITHER file implements a trait, so the
+        // dispatch shape is absent → the bridge stays CLOSED → both remain
+        // `isolated`. This stops the bridge from wiring every same-named method
+        // (the "faux wired massif" the mission forbids).
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::app.rs::driver", true),
+            node("AXO::a.rs::emit", NodeKind::Method, true),
+            node("AXO::b.rs::emit", NodeKind::Method, true),
+            file("AXO::a.rs"),
+            file("AXO::b.rs"),
+        ];
+        let edges = vec![
+            edge("AXO::app.rs::run_main", "AXO::app.rs::driver", RelationType::Calls),
+            edge("AXO::app.rs::driver", "AXO::app.rs::emit", RelationType::Calls),
+            edge("AXO::a.rs", "AXO::a.rs::emit", RelationType::Contains),
+            edge("AXO::b.rs", "AXO::b.rs::emit", RelationType::Contains),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 50);
+        let emits: Vec<&WiringOrphan> = orphans.iter().filter(|o| o.name == "emit").collect();
+        assert_eq!(emits.len(), 2, "both emit methods surface");
+        assert!(
+            emits.iter().all(|o| o.category == "isolated"),
+            "no trait-impl in the file → phantom bridge stays closed → isolated (bound holds)"
+        );
+    }
+
+    #[test]
+    fn wiring_bridge_requires_a_name_matched_phantom_not_just_trait_impl() {
+        // REQ-AXO-902192 S2 — a public method in a trait-impl file that NOTHING
+        // dynamically calls (no phantom of its name) is genuinely dead → stays
+        // `isolated`. Proves the bridge needs BOTH a name-matched phantom AND the
+        // trait-impl shape — a real dead symbol is never masked.
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            node("AXO::svc.rs::Svc", NodeKind::Struct, true),
+            node("AXO::svc.rs::orphaned_op", NodeKind::Method, true),
+            node("AXO::traits.rs::Op", NodeKind::Trait, true),
+            file("AXO::svc.rs"),
+        ];
+        let edges = vec![
+            edge("AXO::svc.rs", "AXO::svc.rs::Svc", RelationType::Contains),
+            edge("AXO::svc.rs", "AXO::svc.rs::orphaned_op", RelationType::Contains),
+            edge("AXO::svc.rs::Svc", "AXO::traits.rs::Op", RelationType::Implements),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 50);
+        let op = orphans.iter().find(|o| o.name == "orphaned_op").expect("must be flagged");
+        assert_eq!(
+            op.category, "isolated",
+            "a trait-impl file alone must NOT wire a method with no dispatching phantom"
+        );
+    }
+
+    #[test]
+    fn wiring_lazy_import_free_fn_owned_by_declared_guard_not_phantom_bridge() {
+        // REQ-AXO-902192 S2 — blind spot #2 (lazy import) of a FREE function.
+        // The extractor captured NO caller and (unlike dynamic dispatch) NO
+        // phantom — the call simply isn't in the graph — so the trait-impl
+        // phantom bridge structurally cannot fire. BY DESIGN the undeclared case
+        // stays `isolated` (avoids the "faux wired massif"); the SOLL `declared`
+        // guard is the intended escape hatch. This pins that ownership split so a
+        // later change doesn't silently widen the bridge to free functions.
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::util.rs::lazy_target", true),
+        ];
+        let g = IstGraph::build(nodes, vec![]);
+        let undeclared = wiring_orphans(&g, "AXO", &HashSet::new(), 10);
+        assert!(
+            undeclared.iter().any(|o| o.name == "lazy_target" && o.category == "isolated"),
+            "an undeclared lazy-imported free fn stays isolated by design (bridge must NOT fire)"
+        );
+        let declared: HashSet<String> = ["lazy_target".to_string()].into_iter().collect();
+        let with_decl = wiring_orphans(&g, "AXO", &declared, 10);
+        assert!(
+            !with_decl.iter().any(|o| o.name == "lazy_target"),
+            "the SOLL `declared` guard exempts a lazy import, not the phantom bridge"
+        );
     }
 }
