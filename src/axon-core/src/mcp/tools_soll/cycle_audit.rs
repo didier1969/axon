@@ -196,4 +196,126 @@ mod tests {
             .unwrap_or("");
         assert!(text.contains("DEC-AXO-098"));
     }
+
+    // REQ-AXO-902174 — regression guard: soll_acyclic_audit must reflect a
+    // soll_manager(action=unlink) performed through the real dispatch surface.
+    // mcp_feedback #38 reported the audit still reporting a cycle whose edge had
+    // just been unlinked ("residual stale snapshot"). Root cause = the RAM SOLL
+    // snapshot the audit reads (`soll_cache().snapshot()`) must be invalidated
+    // after the edge DELETE. That invalidation lives OUTSIDE this file — in the
+    // dispatch wrapper `attach_derived_docs_refresh_metadata` (REQ-AXO-902060:
+    // derives the project_code from the unlink response `data.project_code` and
+    // calls `soll_cache.invalidate`), reinforced cross-process by the
+    // `soll_revision_committed` listener (REQ-AXO-902176). This test drives the
+    // SAME two sequential tool calls a real MCP client issues, through
+    // `handle_call_tool` (the tools/call path), so it locks that end-to-end
+    // freshness in and fails loudly if any future change stops invalidating the
+    // snapshot on unlink. Zero mock I/O: real ephemeral PG (GUI-PRO-004).
+    #[test]
+    fn acyclic_audit_reflects_unlink_through_dispatch_902174() {
+        let store = std::sync::Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let server = crate::mcp::McpServer::new(store);
+
+        // A throwaway *registered* project (OTH is seeded into the registry by
+        // create_test_db) — registered so resolve_project_code + the unlink
+        // invalidation both fire, throwaway so the derived-docs render triggered
+        // by the dispatch hook never touches real project docs (and
+        // docs/derived/soll is git-ignored, so it leaves no tracked-file noise).
+        let a = "REQ-OTH-990001";
+        let b = "REQ-OTH-990002";
+        for (id, title) in [(a, "Cycle node A"), (b, "Cycle node B")] {
+            server
+                .graph_store
+                .execute(&format!(
+                    "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                     VALUES ('{id}', 'Requirement', 'OTH', '{title}', '', 'planned', '{{}}')"
+                ))
+                .unwrap();
+        }
+        // A -> B -> A : a 2-node strongly-connected component that cycle_sets()
+        // reports as a cycle. Inserted directly to seed the pre-condition.
+        for (src, tgt) in [(a, b), (b, a)] {
+            server
+                .graph_store
+                .execute(&format!(
+                    "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                     VALUES ('{src}', '{tgt}', 'REFINES', 'OTH')"
+                ))
+                .unwrap();
+        }
+
+        // Audit #1 (real surface): the cycle must be present (also warms the RAM
+        // snapshot for OTH — the exact state that used to go stale).
+        let audit_before = call_tool(
+            &server,
+            "soll_acyclic_audit",
+            serde_json::json!({ "project_code": "OTH" }),
+        );
+        assert!(
+            audit_reports_node_in_cycle(&audit_before, a),
+            "pre-unlink audit must report the A<->B cycle, got: {audit_before}"
+        );
+
+        // Unlink one edge through the SAME dispatch path a real client uses; the
+        // response wrapper invalidates the RAM SOLL snapshot for OTH.
+        let unlink = call_tool(
+            &server,
+            "soll_manager",
+            serde_json::json!({
+                "action": "unlink",
+                "entity": "requirement",
+                "data": { "source_id": a, "target_id": b, "relation_type": "REFINES" }
+            }),
+        );
+        assert_ne!(
+            unlink.pointer("/isError").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "unlink must succeed, got: {unlink}"
+        );
+
+        // Audit #2 (real surface): the deleted edge must be reflected — no
+        // phantom cycle served from a residual stale snapshot.
+        let audit_after = call_tool(
+            &server,
+            "soll_acyclic_audit",
+            serde_json::json!({ "project_code": "OTH" }),
+        );
+        assert!(
+            !audit_reports_node_in_cycle(&audit_after, a),
+            "REQ-AXO-902174: post-unlink audit must NOT report the removed cycle, got: {audit_after}"
+        );
+        assert!(
+            !audit_reports_node_in_cycle(&audit_after, b),
+            "REQ-AXO-902174: post-unlink audit must NOT report the removed cycle, got: {audit_after}"
+        );
+    }
+
+    /// Invoke a tool through the real MCP tools/call dispatch path (the same
+    /// entrypoint `handle_request` routes to), returning the tool response.
+    fn call_tool(
+        server: &crate::mcp::McpServer,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        server
+            .handle_call_tool(Some(serde_json::json!({ "name": name, "arguments": arguments })))
+            .expect("dispatch returned a tool response")
+    }
+
+    /// True iff the audit response reports any cycle whose node set contains
+    /// `node_id` (robust to unrelated cycles from pre-seeded fixtures).
+    fn audit_reports_node_in_cycle(resp: &serde_json::Value, node_id: &str) -> bool {
+        resp.pointer("/data/cycles")
+            .and_then(serde_json::Value::as_array)
+            .map(|cycles| {
+                cycles.iter().any(|cycle| {
+                    cycle
+                        .get("nodes")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|nodes| nodes.iter().any(|n| n.as_str() == Some(node_id)))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
 }
