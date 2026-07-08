@@ -6109,6 +6109,162 @@ fn test_soll_attach_evidence_normalizes_entity_type_for_requirement_verification
     assert_eq!(data["missing"].as_u64(), Some(0));
 }
 
+// REQ-AXO-902213 — the optional `role` parameter writes `metadata.role` on the
+// inserted Traceability row so the anti-orphan gate (REQ-AXO-902192, which
+// reads `metadata->>'role' IN ('entry','deliverable')` keyed on the symbol's
+// artifact_ref) can EXEMPT a declared entry point. This is the write side that
+// closes the round-trip with that reader.
+#[test]
+fn test_soll_attach_evidence_role_entry_writes_metadata_role() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-902213', 'Requirement', 'AXO', 'Declared entry write path', 'role param writes metadata.role', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "requirement",
+                    "entity_id": "REQ-AXO-902213",
+                    "role": "entry",
+                    "artifacts": [{
+                        "artifact_type": "symbol",
+                        "artifact_ref": "declared_entry_fn"
+                    }]
+                }
+            })),
+            id: Some(json!(9022131)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    // Attach must succeed cleanly (a silent rejection would produce a
+    // misleading empty-row failure below).
+    assert_eq!(result["data"]["attached"].as_u64(), Some(1), "{result}");
+
+    // Interface assertion (GUI-PRO-115): the persisted jsonb carries role=entry.
+    let raw = server
+        .graph_store
+        .query_json(
+            "SELECT metadata->>'role' FROM soll.Traceability \
+             WHERE soll_entity_id = 'REQ-AXO-902213' AND artifact_ref = 'declared_entry_fn'",
+        )
+        .unwrap();
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    assert_eq!(rows.len(), 1, "exactly one traceability row expected: {raw}");
+    assert_eq!(rows[0][0].as_str(), Some("entry"), "{raw}");
+}
+
+// REQ-AXO-902213 — NON-REGRESSION: with no `role` argument the inserted row
+// carries NO `role` key (behaviour is byte-identical to the pre-REQ path).
+#[test]
+fn test_soll_attach_evidence_no_role_leaves_metadata_role_absent() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-990215', 'Requirement', 'AXO', 'No role regression', 'omitting role leaves metadata untouched', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "requirement",
+                    "entity_id": "REQ-AXO-990215",
+                    "artifacts": [{
+                        "artifact_type": "symbol",
+                        "artifact_ref": "ordinary_fn"
+                    }]
+                }
+            })),
+            id: Some(json!(9022132)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(result["data"]["attached"].as_u64(), Some(1), "{result}");
+
+    // Assert the row carries NO `role` key at all (intent: strict passthrough
+    // when `role` is omitted). `metadata->>'role'` is SQL NULL both for a
+    // missing key AND a null value, and query_json renders SQL NULL as the
+    // string "null" — so read the metadata TEXT and check the key is absent,
+    // which is unambiguous and independent of NULL rendering conventions.
+    let raw = server
+        .graph_store
+        .query_json(
+            "SELECT metadata::text FROM soll.Traceability \
+             WHERE soll_entity_id = 'REQ-AXO-990215' AND artifact_ref = 'ordinary_fn'",
+        )
+        .unwrap();
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    assert_eq!(rows.len(), 1, "exactly one traceability row expected: {raw}");
+    let metadata_text = rows[0][0].as_str().unwrap_or_default();
+    assert!(
+        !metadata_text.contains("role"),
+        "no role key must be present when `role` is omitted: {raw}"
+    );
+}
+
+// REQ-AXO-902213 — an out-of-vocabulary `role` value rejects the WHOLE call
+// cleanly (isError + parameter_repair) and inserts ZERO rows, so a typo can
+// never pollute the gate's `IN ('entry','deliverable')` filter.
+#[test]
+fn test_soll_attach_evidence_invalid_role_rejects_and_inserts_nothing() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-990216', 'Requirement', 'AXO', 'Invalid role rejection', 'bad role rejects whole call', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "requirement",
+                    "entity_id": "REQ-AXO-990216",
+                    "role": "bidon",
+                    "artifacts": [{
+                        "artifact_type": "symbol",
+                        "artifact_ref": "should_not_persist"
+                    }]
+                }
+            })),
+            id: Some(json!(9022133)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(result["isError"].as_bool(), Some(true), "{result}");
+    assert_eq!(
+        result["data"]["parameter_repair"]["invalid_field"].as_str(),
+        Some("role"),
+        "{result}"
+    );
+
+    let raw = server
+        .graph_store
+        .query_json(
+            "SELECT metadata->>'role' FROM soll.Traceability \
+             WHERE soll_entity_id = 'REQ-AXO-990216'",
+        )
+        .unwrap();
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    assert!(rows.is_empty(), "invalid role must insert no rows: {raw}");
+}
+
 #[test]
 fn test_soll_attach_evidence_accepts_file_path_aliases_and_reports_rejections() {
     let server = create_test_server();

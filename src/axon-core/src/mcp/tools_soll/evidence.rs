@@ -14,6 +14,85 @@ fn minimal_evidence_example(accepted_schema: &[String]) -> String {
     )
 }
 
+/// REQ-AXO-902213 — outcome of validating the optional top-level `role`
+/// parameter that declares a symbol as an entry point / deliverable for the
+/// anti-orphan gate (`wiring` / `orphan_clusters`, reader side REQ-AXO-902192).
+enum DeclaredRole {
+    /// `role` was absent or explicitly `null` → strictly no change.
+    Absent,
+    /// `role` was one of the shared vocabulary values `entry` / `deliverable`.
+    Valid(String),
+    /// `role` was supplied but not in the accepted vocabulary → reject cleanly.
+    Invalid,
+}
+
+/// REQ-AXO-902213 — parse + validate the optional top-level `role` argument.
+///
+/// The shared contract (read by the anti-orphan gate, REQ-AXO-902192) mandates
+/// `metadata->>'role' IN ('entry','deliverable')`, so ONLY those two tokens are
+/// accepted. Absent / `null` is a no-op (`Absent`) that preserves the pre-REQ
+/// behaviour byte-for-byte; any other value (typo, wrong case, non-string,
+/// empty string) is `Invalid` so a mistake can never silently pollute the
+/// gate's `IN` filter. The pre-existing FREEFORM `metadata.role` convention
+/// (full-sentence descriptions written directly inside an artifact's own
+/// `metadata` object) is unaffected: those values can never equal the two
+/// governed tokens, so the reader's `IN` filter disambiguates.
+fn parse_declared_evidence_role(args: &Value) -> DeclaredRole {
+    match args.get("role") {
+        None | Some(Value::Null) => DeclaredRole::Absent,
+        Some(Value::String(s)) if s.as_str() == "entry" || s.as_str() == "deliverable" => {
+            DeclaredRole::Valid(s.clone())
+        }
+        Some(_) => DeclaredRole::Invalid,
+    }
+}
+
+/// REQ-AXO-902213 — build the metadata value persisted on a Traceability row.
+///
+/// When `role` is `None` this is a pure passthrough: the artifact's own
+/// `metadata` object (or `{}` when absent) is returned UNCHANGED — identical to
+/// the pre-REQ behaviour. When `role` is `Some`, the validated `role` key is
+/// injected into the metadata object (creating one when the caller supplied a
+/// non-object metadata) so the row carries `metadata.role`.
+fn build_evidence_metadata(art_metadata: Option<&Value>, role: Option<&str>) -> Value {
+    let mut metadata = art_metadata.cloned().unwrap_or_else(|| json!({}));
+    if let Some(role) = role {
+        match metadata.as_object_mut() {
+            Some(obj) => {
+                obj.insert("role".to_string(), json!(role));
+            }
+            None => {
+                metadata = json!({ "role": role });
+            }
+        }
+    }
+    metadata
+}
+
+/// REQ-AXO-902213 — rejection response when `role` is supplied with an
+/// out-of-vocabulary value. Mirrors the `soll_remove_evidence` error shape
+/// (`isError` + `data.status` + `parameter_repair`) for a one-round-trip fix.
+fn invalid_role_response(entity_type: &str, entity_id: &str, supplied: &Value) -> Value {
+    json!({
+        "content": [{"type":"text","text": format!(
+            "Rejected: `role` must be one of [\"entry\", \"deliverable\"] when supplied (got {supplied}). \
+             Omit `role` for ordinary evidence; use it only to declare a symbol \
+             (via the artifact_ref of a `symbol` artifact on {entity_type}:{entity_id}) as a \
+             DECLARED entry point / deliverable so the anti-orphan gate exempts it."
+        )}],
+        "isError": true,
+        "data": {
+            "status": "input_invalid",
+            "parameter_repair": {
+                "invalid_field": "role",
+                "supplied_value": supplied,
+                "accepted_values": ["entry", "deliverable"],
+                "hint": "supply `role`: \"entry\" or \"deliverable\", or omit it entirely for ordinary evidence"
+            }
+        }
+    })
+}
+
 /// REQ-AXO-901983 (REQ-AXO-087 family) — resolve the artifact reference + type
 /// from one artifact object, accepting the aliases an LLM naturally reaches for.
 /// `artifact_ref` aliases: `ref` / `path` / `file_path` / `uri`; `artifact_type`
@@ -129,6 +208,25 @@ impl McpServer {
         let entity_type = args.get("entity_type")?.as_str()?;
         let entity_id = args.get("entity_id")?.as_str()?;
         let artifacts = args.get("artifacts")?.as_array()?;
+
+        // REQ-AXO-902213 — optional DECLARED-entrypoint channel. When `role` is
+        // supplied it writes `metadata.role` on every inserted Traceability row
+        // so the anti-orphan gate (`wiring` / `orphan_clusters`, reader side
+        // REQ-AXO-902192) can exempt a symbol that is a legitimately declared
+        // entry point / deliverable (dynamic dispatch, hooks, lazy-import).
+        // Validated once up front so an out-of-vocabulary value rejects the
+        // whole call cleanly (zero rows inserted) rather than polluting the
+        // gate's `IN ('entry','deliverable')` filter. Absent → strictly
+        // unchanged behaviour.
+        let declared_role = match parse_declared_evidence_role(args) {
+            DeclaredRole::Absent => None,
+            DeclaredRole::Valid(role) => Some(role),
+            DeclaredRole::Invalid => {
+                let supplied = args.get("role").cloned().unwrap_or(Value::Null);
+                return Some(invalid_role_response(entity_type, entity_id, &supplied));
+            }
+        };
+
         let mut attached = 0usize;
         let now = now_unix_ms();
         let normalized_entity_type = normalize_traceability_entity_type(entity_type);
@@ -202,11 +300,11 @@ impl McpServer {
                 .get("confidence")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.8);
-            let metadata = art
-                .get("metadata")
-                .cloned()
-                .unwrap_or(json!({}))
-                .to_string();
+            // REQ-AXO-902213 — inject the validated `role` into this row's
+            // metadata when declared; otherwise a pure passthrough of the
+            // artifact's own `metadata` (pre-REQ behaviour, byte-identical).
+            let metadata =
+                build_evidence_metadata(art.get("metadata"), declared_role.as_deref()).to_string();
             let trace_id = format!("TRC-{}-{}-{}", entity_id, now, idx);
 
             if self.graph_store.execute_param(
@@ -548,6 +646,147 @@ mod build_suggested_absolute_path_tests {
     fn returns_none_for_empty_ref() {
         let result = build_suggested_absolute_path("", Some("/home/dstadel/projects/axon"));
         assert_eq!(result, None);
+    }
+}
+
+// REQ-AXO-902213 — unit coverage for the declared-role write path
+// (`soll_attach_evidence` gains an optional `role` that writes `metadata.role`
+// so the anti-orphan gate can exempt declared entry points / deliverables).
+#[cfg(test)]
+mod declared_role_tests {
+    use super::{build_evidence_metadata, parse_declared_evidence_role, DeclaredRole};
+    use serde_json::json;
+
+    // ---- parse_declared_evidence_role -------------------------------------
+
+    #[test]
+    fn role_absent_is_absent_noop() {
+        // No `role` key at all → strictly unchanged behaviour.
+        assert!(matches!(
+            parse_declared_evidence_role(&json!({"entity_id": "REQ-AXO-1"})),
+            DeclaredRole::Absent
+        ));
+    }
+
+    #[test]
+    fn role_explicit_null_is_absent_noop() {
+        assert!(matches!(
+            parse_declared_evidence_role(&json!({"role": null})),
+            DeclaredRole::Absent
+        ));
+    }
+
+    #[test]
+    fn role_entry_is_valid() {
+        match parse_declared_evidence_role(&json!({"role": "entry"})) {
+            DeclaredRole::Valid(r) => assert_eq!(r, "entry"),
+            _ => panic!("expected Valid(\"entry\")"),
+        }
+    }
+
+    #[test]
+    fn role_deliverable_is_valid() {
+        match parse_declared_evidence_role(&json!({"role": "deliverable"})) {
+            DeclaredRole::Valid(r) => assert_eq!(r, "deliverable"),
+            _ => panic!("expected Valid(\"deliverable\")"),
+        }
+    }
+
+    #[test]
+    fn role_out_of_vocabulary_is_invalid() {
+        assert!(matches!(
+            parse_declared_evidence_role(&json!({"role": "bidon"})),
+            DeclaredRole::Invalid
+        ));
+    }
+
+    #[test]
+    fn role_wrong_case_is_invalid() {
+        // Exact-token contract — no case folding (the gate filters on the raw
+        // lowercase tokens).
+        assert!(matches!(
+            parse_declared_evidence_role(&json!({"role": "Entry"})),
+            DeclaredRole::Invalid
+        ));
+    }
+
+    #[test]
+    fn role_empty_string_is_invalid() {
+        assert!(matches!(
+            parse_declared_evidence_role(&json!({"role": ""})),
+            DeclaredRole::Invalid
+        ));
+    }
+
+    #[test]
+    fn role_non_string_is_invalid() {
+        assert!(matches!(
+            parse_declared_evidence_role(&json!({"role": 42})),
+            DeclaredRole::Invalid
+        ));
+    }
+
+    // ---- build_evidence_metadata ------------------------------------------
+
+    #[test]
+    fn no_metadata_no_role_yields_empty_object() {
+        // Byte-identical to the pre-REQ `unwrap_or(json!({}))` passthrough.
+        assert_eq!(build_evidence_metadata(None, None), json!({}));
+    }
+
+    #[test]
+    fn existing_metadata_no_role_is_unchanged() {
+        let meta = json!({"commit": "abc123"});
+        assert_eq!(build_evidence_metadata(Some(&meta), None), meta);
+    }
+
+    #[test]
+    fn role_injected_when_no_metadata() {
+        assert_eq!(
+            build_evidence_metadata(None, Some("entry")),
+            json!({"role": "entry"})
+        );
+    }
+
+    #[test]
+    fn role_merged_into_existing_metadata_object() {
+        let meta = json!({"commit": "abc123"});
+        let out = build_evidence_metadata(Some(&meta), Some("deliverable"));
+        assert_eq!(out["commit"].as_str(), Some("abc123"));
+        assert_eq!(out["role"].as_str(), Some("deliverable"));
+    }
+
+    #[test]
+    fn role_replaces_non_object_metadata() {
+        // Defensive edge: caller passed a non-object metadata AND a governed
+        // role — the governed role wins (rare; ordinary callers pass objects).
+        let meta = json!("freeform-string");
+        assert_eq!(
+            build_evidence_metadata(Some(&meta), Some("entry")),
+            json!({"role": "entry"})
+        );
+    }
+
+    #[test]
+    fn non_object_metadata_no_role_is_passthrough() {
+        let meta = json!("freeform-string");
+        assert_eq!(build_evidence_metadata(Some(&meta), None), meta);
+    }
+
+    #[test]
+    fn preexisting_freeform_role_key_survives_when_no_governed_role() {
+        // The historical FREEFORM `metadata.role` convention (full-sentence
+        // descriptions) must pass through untouched when no governed `role` is
+        // supplied — the gate's `IN ('entry','deliverable')` filter ignores it.
+        let meta = json!({"role": "why missing symbol+question", "commit": "c9041da"});
+        assert_eq!(build_evidence_metadata(Some(&meta), None), meta);
+    }
+
+    #[test]
+    fn governed_role_overrides_freeform_role_key() {
+        let meta = json!({"role": "some freeform description"});
+        let out = build_evidence_metadata(Some(&meta), Some("entry"));
+        assert_eq!(out["role"].as_str(), Some("entry"));
     }
 }
 

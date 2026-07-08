@@ -378,7 +378,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                                 },
                                 "required": ["artifact_ref"]
                             }
-                        }
+                        },
+                        "role": { "type": "string", "enum": ["entry", "deliverable"], "description": "REQ-AXO-902213 — OPTIONAL declared-entrypoint marker. When set, writes metadata.role on every inserted Traceability row so the anti-orphan gate (wiring/orphan_clusters, REQ-AXO-902192) EXEMPTS the referenced symbol — declare a symbol via a `symbol` artifact whose artifact_ref is the symbol name. `entry` = a legitimately declared entry point unreachable by static call edges (dynamic dispatch, registered hook, lazy import); `deliverable` = a shipped output that need not be statically wired. OMIT for ordinary evidence (behaviour is then unchanged). Only \"entry\" and \"deliverable\" are accepted; any other value rejects the whole call." }
                     },
                     "required": ["entity_type", "entity_id", "artifacts"]
                 }
