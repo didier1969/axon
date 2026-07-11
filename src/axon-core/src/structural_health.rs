@@ -26,6 +26,12 @@ pub struct SubScore {
     pub target: f64,
     /// Human one-liner explaining the raw measurement behind `value`.
     pub detail: String,
+    /// REQ-AXO-902214 — the axis is NOT measurable for this scope (no signal exists at
+    /// all), so it is NEUTRALIZED: `weight` is 0 (excluded from the geometric aggregate in
+    /// BOTH numerator and denominator) and it is never a remediation candidate. Distinct
+    /// from `value == 0`, which is a *measured* failure. Set only via
+    /// [`SubScore::not_applicable`]. Anti-Goodhart: never conflate "unmeasurable" with "0".
+    pub not_applicable: bool,
 }
 
 impl SubScore {
@@ -37,6 +43,28 @@ impl SubScore {
             weight: weight.max(0.0),
             target: clamp01(target),
             detail: detail.into(),
+            not_applicable: false,
+        }
+    }
+
+    /// REQ-AXO-902214 — a NEUTRALIZED axis: no measurable signal exists for this scope
+    /// (e.g. `weighted_coverage` on a corpus whose language carries no native test-coverage
+    /// model — see [`crate::parser::language_has_coverage_model`]). `weight` 0 excludes it
+    /// from the weighted geometric mean (numerator AND denominator) so it neither drags the
+    /// index toward 0 nor inflates it toward 1.0; `value` is a neutral 1.0 for display only,
+    /// and `not_applicable` is the machine-readable truth. This is the anti-Goodhart fix for
+    /// the LLL finding (mailbox #25): a language with no coverage model must read as *absent*,
+    /// not as a 0-coverage failure (which over-penalized) NOR a 1.0 perfect score (which
+    /// mislabeled + inflated) — REQ-AXO-902202 removed the ~0 penalty, this removes the
+    /// remaining 1.0 mislabel.
+    pub fn not_applicable(name: &'static str, target: f64, detail: impl Into<String>) -> Self {
+        SubScore {
+            name,
+            value: 1.0,
+            weight: 0.0,
+            target: clamp01(target),
+            detail: detail.into(),
+            not_applicable: true,
         }
     }
 
@@ -77,7 +105,15 @@ impl StructuralHealthIndex {
     /// The axes below their target, worst-first — the raw material of the remediation
     /// worklist (REQ-AXO-902186 ranks these by ROI = expected ΔSHI ÷ blast radius).
     pub fn below_target(&self) -> Vec<&SubScore> {
-        let mut v: Vec<&SubScore> = self.sub_scores.iter().filter(|s| !s.meets_target()).collect();
+        // REQ-AXO-902214 — a not_applicable (neutralized) axis is never a remediation
+        // candidate: there is no signal to improve, so it can neither be "below target" nor
+        // clutter the worklist. (Its value is a display-only 1.0, so `meets_target` already
+        // excludes it; the explicit guard keeps that true if the neutral value ever changes.)
+        let mut v: Vec<&SubScore> = self
+            .sub_scores
+            .iter()
+            .filter(|s| !s.not_applicable && !s.meets_target())
+            .collect();
         v.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap_or(std::cmp::Ordering::Equal));
         v
     }
@@ -296,6 +332,59 @@ mod tests {
         ]);
         let failing: Vec<&str> = idx.below_target().iter().map(|s| s.name).collect();
         assert_eq!(failing, vec!["worse", "bad"], "worst-first, target-meeting axis excluded");
+    }
+
+    // --- REQ-AXO-902214: not_applicable (neutralized) axis -------------------
+
+    #[test]
+    fn not_applicable_axis_is_invisible_to_the_aggregate_neither_1_nor_0() {
+        // A neutralized axis must be INVISIBLE to the geometric mean — not a 1.0 that inflates
+        // it (the pre-902214 mislabel) nor a 0.0 that zeroes it. Aggregate WITH the na axis ==
+        // aggregate over the real axes alone.
+        let real = vec![s("a", 0.4, 1.0), s("b", 0.9, 1.0)];
+        let with_na = vec![
+            s("a", 0.4, 1.0),
+            s("b", 0.9, 1.0),
+            SubScore::not_applicable("weighted_coverage", 0.8, "no coverage model"),
+        ];
+        let base = geometric_aggregate(&real);
+        assert!(
+            (geometric_aggregate(&with_na) - base).abs() < 1e-12,
+            "not_applicable axis must not move the aggregate ({} vs base {})",
+            geometric_aggregate(&with_na),
+            base
+        );
+        assert!(base < 0.65, "sanity: the real axes keep the index honest (base={base})");
+    }
+
+    #[test]
+    fn not_applicable_axis_never_zeroes_the_index_but_a_measured_zero_still_does() {
+        // weight-0 → not "positively-weighted", so the zero-axis-zeroes rule can't fire on it.
+        let na_only = vec![s("a", 1.0, 1.0), SubScore::not_applicable("cov", 0.8, "")];
+        assert!((geometric_aggregate(&na_only) - 1.0).abs() < 1e-12);
+        // A genuinely measured 0 axis (weight>0) STILL zeroes — the anti-Goodhart property
+        // 902214 must not weaken (the session-100 revert landmine).
+        let real_zero = vec![s("a", 1.0, 1.0), s("cov", 0.0, 1.0)];
+        assert_eq!(geometric_aggregate(&real_zero), 0.0);
+    }
+
+    #[test]
+    fn not_applicable_axis_is_never_a_remediation_candidate() {
+        let idx = StructuralHealthIndex::compute(vec![
+            SubScore::new("bad", 0.30, 1.0, 0.9, ""),
+            SubScore::not_applicable("weighted_coverage", 0.8, "no coverage model"),
+        ]);
+        let failing: Vec<&str> = idx.below_target().iter().map(|s| s.name).collect();
+        assert_eq!(failing, vec!["bad"], "not_applicable axis excluded from the worklist");
+    }
+
+    #[test]
+    fn not_applicable_constructor_sets_weight_zero_and_flag() {
+        let na = SubScore::not_applicable("weighted_coverage", 0.8, "why");
+        assert!(na.not_applicable);
+        assert_eq!(na.weight, 0.0);
+        assert!(na.meets_target(), "display value must not read as below-target");
+        assert!(!SubScore::new("x", 0.5, 1.0, 0.9, "").not_applicable);
     }
 
     // --- normalization functions --------------------------------------------

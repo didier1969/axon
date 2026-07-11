@@ -92,14 +92,14 @@ fn is_real_source_symbol(id: &str) -> bool {
 fn is_testable_symbol(id: &str, kind: Option<NodeKind>) -> bool {
     is_real_source_symbol(id)
         && matches!(kind, Some(NodeKind::Function) | Some(NodeKind::Method))
-        // REQ-AXO-902202 — only Rust carries a coverage model (#[test] → `covered`
-        // propagation). A `.py` ops script (`runtime_contracts.py::mode_contract`,
-        // `qualify_ingestion_run.py::…`) is a function in a file, so it passes the two
-        // gates above, yet it can NEVER be `#[test]`-covered — counting it understates
-        // weighted_coverage (the denominator) AND pollutes the worklist with
-        // un-actionable targets (the cross-tenant LLL finding: distinguish
-        // "not-tested" from "not-MEASURABLE"). Gate on the file being `.rs`.
-        && module_of(id).ends_with(".rs")
+        // REQ-AXO-902202 / REQ-AXO-902214 — only a language with a NATIVE coverage model
+        // (#[test] → `covered` propagation) belongs in the weighted_coverage denominator. A
+        // `.py` ops script (`runtime_contracts.py::mode_contract`) is a function in a file, so
+        // it passes the two gates above, yet it can NEVER be `#[test]`-covered — counting it
+        // understates the axis AND pollutes the worklist with un-actionable targets (the
+        // cross-tenant LLL finding: distinguish "not-tested" from "not-MEASURABLE"). The
+        // capability lives in ONE parser-registry-adjacent home, not an inline `== ".rs"`:
+        && crate::parser::language_has_coverage_model(module_of(id))
 }
 
 /// REQ-AXO-902185 (dimension 5, intent→code half) — count the ORPHAN-INTENT governed SOLL
@@ -390,16 +390,33 @@ fn build_sub_scores(raw: &ShiRawMetrics) -> Vec<SubScore> {
                 raw.total_nodes
             ),
         ),
-        SubScore::new(
-            "weighted_coverage",
-            weighted_coverage_score(raw.covered_pr, raw.total_pr),
-            1.0,
-            0.80,
-            format!(
-                "{:.1}% of the PageRank mass is covered (are the hubs exercised by a test?)",
-                if raw.total_pr > 0.0 { 100.0 * raw.covered_pr / raw.total_pr } else { 100.0 }
-            ),
-        ),
+        // REQ-AXO-902214 — NEUTRALIZE (not_applicable), don't score, when the scope has NO
+        // coverage-capable symbol at all (`total_testable_symbols == 0` ⟺ no language here
+        // carries a native #[test]→covered model — see `is_testable_symbol` /
+        // `parser::language_has_coverage_model`). Gating on the CAPABILITY count, never on
+        // `covered_pr == 0`: a real Rust project at 0% coverage still has testable symbols, so
+        // it stays a measured 0.0 (below target, on the worklist) — the session-100 revert
+        // landmine. A `.lll`/Python-only corpus has zero testable symbols → the axis is excluded
+        // from the geometric aggregate (weight 0) rather than mislabeled 1.0 "100% covered"
+        // (which inflated SHI). REQ-AXO-902202 removed the ~0 penalty; this removes the 1.0 lie.
+        if raw.total_testable_symbols == 0 {
+            SubScore::not_applicable(
+                "weighted_coverage",
+                0.80,
+                "not_applicable: no coverage-capable language in scope (no native #[test]→covered model — e.g. Python/Elixir/.lll) — axis neutralized (weight 0), NOT counted as 0 or 100%",
+            )
+        } else {
+            SubScore::new(
+                "weighted_coverage",
+                weighted_coverage_score(raw.covered_pr, raw.total_pr),
+                1.0,
+                0.80,
+                format!(
+                    "{:.1}% of the PageRank mass is covered (are the hubs exercised by a test?)",
+                    if raw.total_pr > 0.0 { 100.0 * raw.covered_pr / raw.total_pr } else { 100.0 }
+                ),
+            )
+        },
         SubScore::new(
             "main_sequence",
             main_sequence_score(raw.mean_distance),
@@ -682,12 +699,19 @@ impl McpServer {
             .iter()
             .filter(|b| b.get("re_surfaced").and_then(|v| v.as_bool()).unwrap_or(false))
             .count();
+        let not_applicable_count = index.sub_scores.iter().filter(|s| s.not_applicable).count();
         let summary = format!(
-            "structural_health_index {} : SHI={:.4} ({} dimension(s), {} below target{})",
+            "structural_health_index {} : SHI={:.4} ({} dimension(s), {} below target{}{})",
             project,
             index.aggregate,
             index.sub_scores.len(),
             below.len(),
+            if not_applicable_count > 0 {
+                // REQ-AXO-902214 — flag neutralized axes so a non-Rust corpus reads honestly.
+                format!(", {not_applicable_count} not_applicable (neutralized)")
+            } else {
+                String::new()
+            },
             if re_surfaced_count > 0 {
                 format!(", {re_surfaced_count} RE-SURFACED (no improvement since last measurement)")
             } else {
@@ -706,6 +730,9 @@ impl McpServer {
                     "weight": s.weight,
                     "target": s.target,
                     "meets_target": s.meets_target(),
+                    // REQ-AXO-902214 — true = axis neutralized (no measurable signal for this
+                    // scope, weight 0, excluded from the aggregate); NOT a 0-or-100% score.
+                    "not_applicable": s.not_applicable,
                     "detail": s.detail
                 })).collect::<Vec<_>>(),
                 "below_target": below,
@@ -1282,6 +1309,54 @@ mod structural_health_helpers_tests {
         ));
         // Rust file still passes.
         assert!(is_testable_symbol("AXO::x::view.rs::try_snapshot", Some(NodeKind::Method)));
+    }
+
+    // REQ-AXO-902214 — build_sub_scores wires the capability signal into the coverage axis.
+    fn raw_metrics(total_testable_symbols: usize, covered_pr: f64, total_pr: f64) -> super::ShiRawMetrics {
+        super::ShiRawMetrics {
+            total_nodes: 100,
+            sccs: vec![],
+            articulation: vec![],
+            covered_pr,
+            total_pr,
+            mod_d: std::collections::HashMap::new(),
+            mean_distance: 0.0,
+            d_count: 0,
+            orphan_intent: 0,
+            total_intent: 0,
+            clone_pairs: 0,
+            total_testable_symbols,
+            mean_public_ratio: 0.0,
+            mod_pub_total_count: 0,
+            median_impact_radius: 0,
+            p95_impact_radius: 0,
+            god_objects: 0,
+            total_real_functions: 0,
+        }
+    }
+
+    #[test]
+    fn build_sub_scores_neutralizes_weighted_coverage_when_no_coverage_capable_symbol() {
+        // A corpus with ZERO coverage-capable symbols (pure .lll / Python / Elixir) must
+        // NEUTRALIZE the axis — not read "100% covered" (the pre-902214 mislabel that inflated
+        // SHI). total_testable_symbols == 0 is the capability trigger.
+        let scores = super::build_sub_scores(&raw_metrics(0, 0.0, 0.0));
+        let cov = scores.iter().find(|s| s.name == "weighted_coverage").expect("axis present");
+        assert!(cov.not_applicable, "neutralized when no coverage-capable symbol exists");
+        assert_eq!(cov.weight, 0.0, "weight 0 → excluded from the geometric aggregate");
+    }
+
+    #[test]
+    fn build_sub_scores_keeps_weighted_coverage_measured_at_real_zero_coverage() {
+        // The session-100 revert landmine: a REAL Rust project at 0% coverage (covered_pr==0
+        // but testable symbols EXIST) must stay a MEASURED 0.0 below target — NEVER neutralized
+        // (else it would inflate SHI + vanish from the worklist). Trigger on the capability
+        // count, never on covered_pr==0.
+        let scores = super::build_sub_scores(&raw_metrics(42, 0.0, 100.0));
+        let cov = scores.iter().find(|s| s.name == "weighted_coverage").expect("axis present");
+        assert!(!cov.not_applicable, "0% real coverage is a measured failure, not not_applicable");
+        assert_eq!(cov.weight, 1.0);
+        assert_eq!(cov.value, 0.0, "0 covered / 100 total → measured 0.0, below the 0.80 target");
     }
 
     #[test]

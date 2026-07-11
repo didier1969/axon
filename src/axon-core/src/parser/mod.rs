@@ -248,6 +248,51 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
     }
 }
 
+/// REQ-AXO-902214 — does the language of `module_id` carry a NATIVE test-coverage model in
+/// the IST, i.e. can any of its symbols ever be `covered` (reachable from a `#[test]`)?
+///
+/// `module_id` is a canonical IST module id whose tail is the file component, e.g.
+/// `AXO::src::foo.rs`; the extension is read from after its last `.`, matching the SAME
+/// vocabulary [`get_parser_for_file`] dispatches on (case-insensitive, like that fn). Today
+/// ONLY Rust propagates `#[test]` reachability → `covered`. Every other language Axon parses
+/// (Python ops scripts, Elixir, `.lll`, …) HAS a parser but NO coverage extraction, so a
+/// symbol there can never be `covered`: counting it in the `weighted_coverage` denominator
+/// understates the axis (REQ-AXO-902202), and a scope with ZERO coverage-capable symbols must
+/// NEUTRALIZE the axis (`SubScore::not_applicable`) — never read it as 0 (over-penalizes) nor
+/// 1.0 (mislabels + inflates). This is the LLL mailbox #25 finding (SHI LLL dragged to 0.32).
+///
+/// Deliberately keyed on the coverage MODEL, NOT on parser existence — the two are different
+/// questions. This is the single, parser-registry-adjacent home for that capability: flip a
+/// language to `true` the day its coverage extraction lands — ONE edit, here, beside the
+/// parser dispatch it pairs with (no scattered `== ".rs"`, no parallel language list).
+pub fn language_has_coverage_model(module_id: &str) -> bool {
+    let ext = module_id.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    matches!(ext.as_str(), "rs")
+}
+
+#[cfg(test)]
+mod coverage_capability_tests {
+    use super::language_has_coverage_model;
+
+    #[test]
+    fn only_rust_carries_a_coverage_model_today() {
+        // REQ-AXO-902214 — Rust propagates #[test] → covered; nothing else does (yet).
+        assert!(language_has_coverage_model("AXO::src::axon-core::src::mailbox.rs"));
+        assert!(language_has_coverage_model("AXO::a::b::snapshot.rs")); // module id form
+        // Languages Axon PARSES but has no coverage extraction for → false (the capability is
+        // a DIFFERENT question from parser existence; see get_parser_for_file).
+        assert!(!language_has_coverage_model("AXO::x::runtime_contracts.py"));
+        assert!(!language_has_coverage_model("LLL::x::foo.lll"));
+        assert!(!language_has_coverage_model("NEX::lib::app_web::page.ex"));
+        assert!(!language_has_coverage_model("X::src::main.ts"));
+        // Case-insensitive, like the parser dispatch it pairs with.
+        assert!(language_has_coverage_model("X::src::Foo.RS"));
+        // No file extension (external call-target id) → false.
+        assert!(!language_has_coverage_model("AXO::unwrap"));
+        assert!(!language_has_coverage_model("bare"));
+    }
+}
+
 #[cfg(test)]
 mod wasm_grammar_health_tests {
     use super::*;
