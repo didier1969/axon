@@ -656,6 +656,12 @@ impl McpServer {
         let sub_scores_map: serde_json::Map<String, Value> = index
             .sub_scores
             .iter()
+            // REQ-AXO-902214 — never persist a not_applicable axis's display-only 1.0. If the
+            // scope later BECOMES coverage-capable (a Python repo adds Rust), a persisted 1.0
+            // would make the first real measurement (e.g. 0.2) read as a regression → a false
+            // "re_surfaced" flag. Absent instead: the diff then treats that first measurement as
+            // its own positive value (diff_shi_snapshots_first_appearance_of_a_dimension_reads_as_its_own_value).
+            .filter(|s| !s.not_applicable)
             .map(|s| (s.name.to_string(), json!(s.value)))
             .collect();
         let shi_snapshot = json!({
