@@ -179,6 +179,59 @@ impl Drop for TestDb {
     }
 }
 
+/// REQ-AXO-902215 — process-shared isolated test database URL for the
+/// env-resolving `GraphStore` constructors (`":memory:"` / bare-path stores
+/// that carry NO explicit `database_url` and resolve it via
+/// [`crate::postgres::resolve_database_url`]). Without this those constructors
+/// fall through to `AXON_LIVE_DATABASE_URL` and bootstrap/DDL/pollute the LIVE
+/// runtime database, contending with the live indexer's continuous `ist.edge`
+/// writes (`CREATE OR REPLACE TRIGGER` blocks → 55P03/57014 flake; 103 stray
+/// `ist.IndexedFile` rows were found leaked into `axon_live`). This finishes
+/// the never-wired REQ-AXO-91562 "Slice 2 test harness" safety net: one shared
+/// clone per test PROCESS, named `axon_test_shared_<pid>` to match the sweep
+/// exclusion (REQ-AXO-901906), reclaimed by the `atexit` hook + pre-run sweep.
+///
+/// Memoised in a `OnceLock` so the clone is created exactly once, on the first
+/// env-resolving constructor in the process. Real per-test isolation still
+/// comes from [`TestDb`] + `new_with_database`; this is the class-level net so
+/// no env-resolving path — present or future — can reach a runtime database.
+pub(crate) fn shared_test_db_url() -> String {
+    static SHARED_URL: OnceLock<String> = OnceLock::new();
+    SHARED_URL
+        .get_or_init(|| {
+            let port = pg_port();
+            sweep_once(&port);
+            ensure_template_once(&port);
+            let db_name = format!("axon_test_shared_{}", std::process::id());
+            // A prior run that crashed carrying this PID could have left a stale
+            // one; force-drop before cloning so createdb -T never collides.
+            force_dropdb(&db_name, &port);
+            let output = std::process::Command::new("createdb")
+                .args([
+                    "-h",
+                    "127.0.0.1",
+                    "-p",
+                    &port,
+                    "-U",
+                    "axon",
+                    "-T",
+                    &template_name(),
+                    &db_name,
+                ])
+                .output()
+                .expect("createdb (shared test db) failed to execute");
+            if !output.status.success() {
+                panic!(
+                    "shared TestDb create failed for {}: {}",
+                    db_name,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            register_for_atexit_cleanup(&db_name, &port);
+            format!("postgres://axon@127.0.0.1:{port}/{db_name}")
+        })
+        .clone()
+}
 
 /// REQ-AXO-901848 — reclaim `axon_test_*` databases leaked by previous test
 /// runs. Runs exactly once per test process (guarded by [`sweep_once`]) before

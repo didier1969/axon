@@ -100,22 +100,43 @@ pub fn resolve_database_url(override_url: Option<&str>) -> Result<String> {
     if let Some(test_url) = TEST_DB_URL_OVERRIDE.get() {
         return Ok(test_url.clone());
     }
-    let kind = crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
-        .to_lowercase();
-    let primary = match kind.as_str() {
-        "dev" => "AXON_DEV_DATABASE_URL",
-        _ => "AXON_LIVE_DATABASE_URL",
-    };
-    for key in [primary, "DATABASE_URL"] {
-        if let Ok(v) = std::env::var(key) {
-            if !v.trim().is_empty() {
-                return Ok(v);
+    // REQ-AXO-902215 — SAFETY NET (finishes the never-wired REQ-AXO-91562
+    // "Slice 2 test harness"): in test builds a constructor that passes NO
+    // explicit URL (`":memory:"` / bare db_root, e.g.
+    // `new_indexer_ist_writer_without_soll`) must NEVER fall through to
+    // `AXON_LIVE_DATABASE_URL` and bootstrap/DDL/pollute the live runtime DB —
+    // it contends with the live indexer's continuous `ist.edge` writes
+    // (`CREATE OR REPLACE TRIGGER` blocks → 55P03/57014 flake) and leaked 103
+    // stray `ist.IndexedFile` rows into `axon_live`. Pin a process-shared
+    // isolated clone once and cache it in the override. Real per-test isolation
+    // still comes from `TestDb` + `new_with_database`; this is the class-level
+    // net (explicit `override_url` + a prior override both still win above).
+    #[cfg(test)]
+    {
+        let shared = crate::test_support::test_db::shared_test_db_url();
+        let _ = TEST_DB_URL_OVERRIDE.set(shared.clone());
+        Ok(shared)
+    }
+    #[cfg(not(test))]
+    {
+        let kind =
+            crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live")
+                .to_lowercase();
+        let primary = match kind.as_str() {
+            "dev" => "AXON_DEV_DATABASE_URL",
+            _ => "AXON_LIVE_DATABASE_URL",
+        };
+        for key in [primary, "DATABASE_URL"] {
+            if let Ok(v) = std::env::var(key) {
+                if !v.trim().is_empty() {
+                    return Ok(v);
+                }
             }
         }
+        anyhow::bail!(
+            "no PostgreSQL connection URL configured (set {primary} or DATABASE_URL; AXON_INSTANCE={kind})"
+        )
     }
-    anyhow::bail!(
-        "no PostgreSQL connection URL configured (set {primary} or DATABASE_URL; AXON_INSTANCE={kind})"
-    )
 }
 
 /// Build a connection pool against the given URL. Honors
@@ -338,5 +359,25 @@ mod tests {
             vector_version: None,
         };
         assert!(!partial.is_complete());
+    }
+
+    /// REQ-AXO-902215 — the `#[cfg(test)]` safety net must redirect every
+    /// env-resolving resolution (no explicit URL, no prior override) to the
+    /// isolated process-shared clone, NEVER `AXON_LIVE_DATABASE_URL`. Guards
+    /// against the never-wired override (`set_test_db_url_override`) recurring —
+    /// which let env-resolving constructors (`":memory:"` / bare db_root)
+    /// bootstrap/DDL/pollute the live runtime DB (55P03/57014 flake vs the live
+    /// indexer + 103 stray `ist.IndexedFile` rows leaked into `axon_live`).
+    #[test]
+    fn resolve_database_url_never_reaches_live_in_tests() {
+        let url = resolve_database_url(None).expect("test safety net must always resolve a URL");
+        assert!(
+            url.contains("axon_test_shared_"),
+            "env-resolving calls must resolve to the isolated shared test DB, got {url}"
+        );
+        assert!(
+            !url.contains("axon_live"),
+            "env-resolving calls must NEVER reach the live runtime DB in tests, got {url}"
+        );
     }
 }
