@@ -90,6 +90,55 @@ impl EmbedderLifecycle {
         self.sleep_count.load(Ordering::Acquire)
     }
 
+    /// REQ-AXO-902220 — record embedder activity (a non-empty embed batch).
+    /// The idle watchdog keys its drop decision PURELY on this timestamp,
+    /// never on a backlog counter: a chronically-non-empty queue (a language
+    /// with no embedding model, repeat-fail chunks) must not wedge the GPU
+    /// awake forever — that is the 901931 failure-mode reincarnated at the
+    /// queue layer (advisor review, s101).
+    pub fn mark_used(&self) {
+        self.last_used_ms.store(now_unix_ms(), Ordering::Release);
+    }
+
+    /// REQ-AXO-902220 — the ORT session was just rebuilt after an idle drop.
+    /// Flips `Sleeping → Ready`, counts the wake, and refreshes `last_used`
+    /// so the watchdog cannot immediately re-sleep a session that just woke.
+    /// Called UNDER the embedder's inner lock (see `GpuB2Embedder`).
+    pub fn mark_ready_woke(&self) {
+        self.phase
+            .store(EmbedderPhase::Ready as u8, Ordering::Release);
+        self.wake_count.fetch_add(1, Ordering::AcqRel);
+        self.last_used_ms.store(now_unix_ms(), Ordering::Release);
+    }
+
+    /// REQ-AXO-902220 — the ORT session was just dropped (VRAM released).
+    /// Flips `Ready → Sleeping` and counts the sleep. Called UNDER the
+    /// embedder's inner lock so `phase()` never disagrees with whether the
+    /// session is actually resident.
+    pub fn mark_sleeping(&self) {
+        self.phase
+            .store(EmbedderPhase::Sleeping as u8, Ordering::Release);
+        self.sleep_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// REQ-AXO-902220 — pure idle-drop decision (activity-time gate).
+    /// Returns true iff the session is resident (`Ready`) AND no non-empty
+    /// embed batch has run for `t_idle`. `now_ms` is injected so the gate is
+    /// deterministically unit-testable. Leak-proof: reads only the activity
+    /// clock, so no backlog residue can keep it awake.
+    pub fn should_drop(&self, t_idle: Duration, now_ms: i64) -> bool {
+        if self.phase() != EmbedderPhase::Ready {
+            return false;
+        }
+        let idle_ms = now_ms.saturating_sub(self.last_used_ms());
+        idle_ms >= t_idle.as_millis().min(i64::MAX as u128) as i64
+    }
+
+    /// REQ-AXO-902220 — [`should_drop`] evaluated against the wall clock.
+    /// Used by the runtime watchdog; the injectable variant backs the tests.
+    pub fn should_drop_now(&self, t_idle: Duration) -> bool {
+        self.should_drop(t_idle, now_unix_ms())
+    }
 }
 
 impl Default for EmbedderLifecycle {
@@ -203,5 +252,77 @@ mod tests {
     fn phase_as_str_matches_repr() {
         assert_eq!(EmbedderPhase::Ready.as_str(), "ready");
         assert_eq!(EmbedderPhase::Sleeping.as_str(), "sleeping");
+    }
+
+    // REQ-AXO-902220 — idle-drop transition + activity-time gate.
+
+    #[test]
+    fn should_drop_false_when_recently_used() {
+        let l = EmbedderLifecycle::new();
+        // 1 s of idle against a 20 s threshold → keep resident.
+        let now = l.last_used_ms() + 1_000;
+        assert!(!l.should_drop(Duration::from_secs(20), now));
+    }
+
+    #[test]
+    fn should_drop_true_after_t_idle_elapsed_and_ready() {
+        let l = EmbedderLifecycle::new();
+        // Just past the 20 s threshold and still Ready → drop.
+        let now = l.last_used_ms() + 20_001;
+        assert!(l.should_drop(Duration::from_secs(20), now));
+    }
+
+    #[test]
+    fn should_drop_false_when_already_sleeping() {
+        let l = EmbedderLifecycle::new();
+        l.mark_sleeping();
+        assert_eq!(l.phase(), EmbedderPhase::Sleeping);
+        // Even 10 min idle: nothing to drop when already asleep.
+        let now = l.last_used_ms() + 10 * 60_000;
+        assert!(!l.should_drop(Duration::from_secs(20), now));
+    }
+
+    #[test]
+    fn sleep_then_wake_roundtrip_counts_transitions() {
+        let l = EmbedderLifecycle::new();
+        assert_eq!(l.phase(), EmbedderPhase::Ready);
+        assert_eq!(l.sleep_count(), 0);
+        assert_eq!(l.wake_count(), 0);
+
+        l.mark_sleeping();
+        assert_eq!(l.phase(), EmbedderPhase::Sleeping);
+        assert_eq!(l.sleep_count(), 1);
+
+        l.mark_ready_woke();
+        assert_eq!(l.phase(), EmbedderPhase::Ready);
+        assert_eq!(l.wake_count(), 1);
+    }
+
+    #[test]
+    fn mark_used_resets_the_idle_clock() {
+        let l = EmbedderLifecycle::new();
+        let t0 = l.last_used_ms();
+        // Idle far past the threshold at t0.
+        assert!(l.should_drop(Duration::from_secs(20), t0 + 30_000));
+        // A batch runs now → activity clock refreshes → gate flips false.
+        l.mark_used();
+        let now = l.last_used_ms() + 100;
+        assert!(
+            !l.should_drop(Duration::from_secs(20), now),
+            "fresh activity must reset the idle clock"
+        );
+    }
+
+    #[test]
+    fn drain_regime_never_sleeps_a_busy_gpu() {
+        // Simulate a sustained drain: every batch bumps `last_used`. As long
+        // as the last batch is within T_idle, should_drop stays false — the
+        // watchdog cannot touch DEC-AXO-901631's throughput regime.
+        let l = EmbedderLifecycle::new();
+        for _ in 0..5 {
+            l.mark_used();
+            let now = l.last_used_ms() + 500; // 0.5 s between batches
+            assert!(!l.should_drop(Duration::from_secs(20), now));
+        }
     }
 }

@@ -374,49 +374,81 @@ pub fn spawn_pipeline_indexer(
         if let Err(reason) = crate::embedder::gpu_preflight::preflight_gpu_libraries() {
             tracing::error!(reason = %reason, "pipeline: GPU library pre-flight flagged a lib — proceeding to GPU init anyway; if the process crashes during init, THIS names the culprit");
         }
-        let embedder: Arc<dyn crate::pipeline::B2Embedder> =
+        // REQ-AXO-901748 — one ORT session per B2 worker (AXON_B2_WORKERS>1
+        // gives true CUDA double-buffering, each session with its own TensorRT
+        // engine cache). REQ-AXO-902220 — keep the CONCRETE `Arc<GpuB2Embedder>`
+        // handles alongside the `dyn` pipeline view so the opt-in idle watchdog
+        // (armed below) can drop their VRAM at rest.
+        let mut gpu_sessions: Vec<Arc<GpuB2Embedder>> = Vec::new();
+        let embedders: Vec<Arc<dyn crate::pipeline::B2Embedder>> =
             match GpuB2Embedder::try_new_cuda("indexer-pipeline-v2", 0) {
-            // DEC-AXO-901631 — the GPU session stays resident for the worker's
-            // lifetime (no idle watchdog / sleep-wake). Single-GPU live↔dev
-            // cohabitation is handled at the process level (PIL-AXO-004).
-            Ok(e) => Arc::new(e) as Arc<dyn crate::pipeline::B2Embedder>,
-            Err(err) => {
-                // REQ-AXO-901630 — fail-fast when the operator has
-                // explicitly requested a GPU provider. Silent NoOp
-                // fallback produced junk embeddings ((1,0,…,0) vectors)
-                // in session 49, breaking semantic retrieval downstream
-                // while the indexer kept reporting healthy. Only the
-                // `cpu`/unset branch is allowed to substitute NoOp.
-                if gpu_provider_explicitly_requested() {
-                    return Err(anyhow!(
-                        "pipeline: GPU embedder init failed but AXON_EMBEDDING_PROVIDER \
-                         requests a GPU provider (NoOpEmbedder fallback would silently \
-                         produce junk vectors): {err}"
-                    ));
-                }
-                warn!(error = %err, "pipeline: GPU embedder init failed, falling back to NoOpEmbedder");
-                Arc::new(NoOpEmbedder)
-            }
-        };
-        // REQ-AXO-901748 — when AXON_B2_WORKERS > 1, create one ORT
-        // session per worker for true CUDA double-buffering (no Mutex
-        // contention). Each session has its own TensorRT engine cache.
-        let embedders: Vec<Arc<dyn crate::pipeline::B2Embedder>> = if counts_b.b2 > 1 {
-            let mut v = vec![embedder];
-            for i in 1..counts_b.b2 {
-                match GpuB2Embedder::try_new_cuda(&format!("indexer-pipeline-v2-b2w{i}"), i) {
-                    Ok(e) => v.push(Arc::new(e) as Arc<dyn crate::pipeline::B2Embedder>),
-                    Err(err) => {
-                        warn!(worker = i, error = %err, "pipeline: extra B2 worker init failed, continuing with fewer");
-                        break;
+                // DEC-AXO-901631 — by default the GPU session stays resident for
+                // the worker's lifetime (max drain throughput; no sleep/wake).
+                // REQ-AXO-902220 adds an OPT-IN idle-drop watchdog that leaves
+                // this drain regime untouched.
+                Ok(e) => {
+                    let first = Arc::new(e);
+                    gpu_sessions.push(first.clone());
+                    let mut v: Vec<Arc<dyn crate::pipeline::B2Embedder>> =
+                        vec![first as Arc<dyn crate::pipeline::B2Embedder>];
+                    if counts_b.b2 > 1 {
+                        for i in 1..counts_b.b2 {
+                            match GpuB2Embedder::try_new_cuda(
+                                &format!("indexer-pipeline-v2-b2w{i}"),
+                                i,
+                            ) {
+                                Ok(e) => {
+                                    let extra = Arc::new(e);
+                                    gpu_sessions.push(extra.clone());
+                                    v.push(extra as Arc<dyn crate::pipeline::B2Embedder>);
+                                }
+                                Err(err) => {
+                                    warn!(worker = i, error = %err, "pipeline: extra B2 worker init failed, continuing with fewer");
+                                    break;
+                                }
+                            }
+                        }
+                        info!("pipeline: {} B2 GPU workers initialized", v.len());
                     }
+                    v
                 }
-            }
-            info!("pipeline: {} B2 GPU workers initialized", v.len());
-            v
-        } else {
-            vec![embedder]
-        };
+                Err(err) => {
+                    // REQ-AXO-901630 — fail-fast when the operator has explicitly
+                    // requested a GPU provider. Silent NoOp fallback produced junk
+                    // embeddings ((1,0,…,0) vectors) in session 49, breaking
+                    // semantic retrieval downstream while the indexer kept
+                    // reporting healthy. Only the `cpu`/unset branch may NoOp.
+                    if gpu_provider_explicitly_requested() {
+                        return Err(anyhow!(
+                            "pipeline: GPU embedder init failed but AXON_EMBEDDING_PROVIDER \
+                             requests a GPU provider (NoOpEmbedder fallback would silently \
+                             produce junk vectors): {err}"
+                        ));
+                    }
+                    warn!(error = %err, "pipeline: GPU embedder init failed, falling back to NoOpEmbedder");
+                    vec![Arc::new(NoOpEmbedder) as Arc<dyn crate::pipeline::B2Embedder>]
+                }
+            };
+
+        // REQ-AXO-902220 — arm the OPT-IN idle VRAM watchdog. Default OFF
+        // (`AXON_EMBEDDER_IDLE_DROP` unset) preserves DEC-AXO-901631's
+        // always-resident behaviour. Only real GPU sessions are droppable — the
+        // NoOp fallback leaves `gpu_sessions` empty, so no watchdog is spawned.
+        if !gpu_sessions.is_empty() && crate::pipeline::embedder_gpu::idle_drop_enabled() {
+            let t_idle =
+                std::time::Duration::from_secs(crate::pipeline::embedder_gpu::idle_drop_seconds());
+            info!(
+                t_idle_s = t_idle.as_secs(),
+                sessions = gpu_sessions.len(),
+                "pipeline: GPU idle-drop watchdog armed (REQ-AXO-902220)"
+            );
+            crate::pipeline::embedder_gpu::spawn_idle_watchdog(
+                gpu_sessions,
+                t_idle,
+                std::time::Duration::from_secs(5),
+            );
+        }
+
         let mut handles_b = crate::pipeline::orchestrator::spawn_pipeline_b_full_multi(
             counts_b,
             caps,
@@ -686,12 +718,10 @@ mod tests {
         let _ = dev;
     }
 
-    /// REQ-AXO-90009 Slice 3C — the GpuB2Embedder watchdog activation
-    /// uses 5-min idle / 2-s grace / 15-s tick defaults per DEC-AXO-086.
-    /// Lock the numbers here so a silent regression on the constants
-    /// gets caught by a unit test instead of a 5-min wait at runtime.
     /// REQ-AXO-901630 — `gpu_provider_explicitly_requested` flips true
     /// only when the operator unambiguously asked for a GPU provider.
+    /// (The GPU idle-drop watchdog re-introduced by REQ-AXO-902220 lives in
+    /// `pipeline::embedder_gpu`; its config + gate are unit-tested there.)
     /// Locks the env-var matrix so a future refactor cannot weaken the
     /// fail-fast contract that prevents NoOpEmbedder + junk vectors.
     /// Pattern mirrors postgres::tests::ENV_LOCK + EnvGuard — `std::env`
