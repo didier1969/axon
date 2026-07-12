@@ -279,4 +279,77 @@ mod tests {
         // No GPU sessions (NoOp fallback path) → nothing to arm.
         spawn_idle_watchdog(Vec::new(), Duration::from_secs(20), Duration::from_secs(5));
     }
+
+    /// REQ-AXO-902220 SHIP-GATE (advisor) — GPU-gated, `#[ignore]`d so the
+    /// normal suite (no GPU) skips it. Run manually on a box with the GPU
+    /// otherwise idle (e.g. live indexer paused) + the ORT env set:
+    ///
+    /// ```text
+    /// cargo test --lib -- --ignored --test-threads=1 gpu_vram_reclaimed_on_drop_and_restored_on_reload
+    /// ```
+    ///
+    /// Proves the two properties a green suite CANNOT: (1) `drop_session()`
+    /// actually returns VRAM to the device (ORT/TensorRT could otherwise
+    /// retain the CUDA arena); (2) the lazy reload re-establishes a working
+    /// session that embeds correctly. Reads TOTAL GPU `memory.used` because
+    /// WSL2 does not expose per-PID VRAM — so the GPU must be otherwise idle.
+    #[test]
+    #[ignore = "requires a GPU + ORT model + an otherwise-idle GPU; run with --ignored"]
+    fn gpu_vram_reclaimed_on_drop_and_restored_on_reload() {
+        use crate::embedding_contract::DIMENSION;
+
+        fn total_gpu_used_mib() -> u64 {
+            let out = std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+                .output()
+                .expect("nvidia-smi must be on PATH for the ship-gate");
+            String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+        }
+        let settle = || std::thread::sleep(std::time::Duration::from_millis(2000));
+
+        let baseline = total_gpu_used_mib();
+
+        let embedder = GpuB2Embedder::try_new_cuda("shipgate-902220", 0)
+            .expect("GPU embedder init (ORT env + model required)");
+        let v1 = embedder
+            .embed_batch(&["fn hello() { let x = 1; }".to_string()])
+            .expect("first embed");
+        assert_eq!(v1.len(), 1);
+        assert_eq!(v1[0].len(), DIMENSION, "canonical 1024d vector");
+        settle();
+        let loaded = total_gpu_used_mib();
+        assert!(
+            loaded > baseline + 1000,
+            "resident GPU session must hold real VRAM: baseline={baseline} loaded={loaded} MiB \
+             (is the GPU otherwise idle? live indexer paused?)"
+        );
+
+        // (1) Drop → VRAM must return to the device.
+        assert!(embedder.drop_session(), "first drop_session returns true");
+        assert!(!embedder.drop_session(), "second drop is an idempotent no-op");
+        settle();
+        let dropped = total_gpu_used_mib();
+        assert!(
+            dropped + 800 < loaded,
+            "VRAM must be reclaimed after drop_session: loaded={loaded} dropped={dropped} MiB \
+             (if it barely moved, ORT/TensorRT retained the CUDA arena — feature is moot)"
+        );
+
+        // (2) Reload on the next batch → valid vectors + VRAM back up.
+        let v2 = embedder
+            .embed_batch(&["fn reload() { let y = 2; }".to_string()])
+            .expect("reload embed after drop");
+        assert_eq!(v2[0].len(), DIMENSION, "reloaded session still emits 1024d");
+        settle();
+        let reloaded = total_gpu_used_mib();
+        assert!(
+            reloaded > baseline + 1000,
+            "VRAM must return after wake-on-demand reload: baseline={baseline} reloaded={reloaded} MiB"
+        );
+
+        eprintln!(
+            "REQ-AXO-902220 SHIP-GATE OK — baseline={baseline} loaded={loaded} \
+             dropped={dropped} reloaded={reloaded} MiB"
+        );
+    }
 }
