@@ -1005,6 +1005,7 @@ async fn copy_symbols_in_tx(
             is_public BOOLEAN NOT NULL,\
             is_nif BOOLEAN NOT NULL,\
             is_unsafe BOOLEAN NOT NULL,\
+            is_entry_point BOOLEAN NOT NULL,\
             project_code TEXT NOT NULL,\
             embedding {schema}.vector({dim}),\
             cyclomatic_complexity INTEGER\
@@ -1019,7 +1020,7 @@ async fn copy_symbols_in_tx(
     let copy_sink = tx
         .copy_in(
             "COPY _bulk_symbol_stage \
-                  (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding, cyclomatic_complexity) \
+                  (id, name, kind, tested, is_public, is_nif, is_unsafe, is_entry_point, project_code, embedding, cyclomatic_complexity) \
                   FROM STDIN BINARY",
         )
         .await
@@ -1028,6 +1029,7 @@ async fn copy_symbols_in_tx(
         Type::TEXT,
         Type::TEXT,
         Type::TEXT,
+        Type::BOOL,
         Type::BOOL,
         Type::BOOL,
         Type::BOOL,
@@ -1072,6 +1074,7 @@ async fn copy_symbols_in_tx(
                 &row.is_public,
                 &row.is_nif,
                 &row.is_unsafe,
+                &row.is_entry_point,
                 &pcode,
                 &embed_opt,
                 &row.cyclomatic_complexity,
@@ -1090,9 +1093,9 @@ async fn copy_symbols_in_tx(
     // identical, so any winner is correct.
     tx.batch_execute(
         "INSERT INTO ist.Symbol \
-            (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding, cyclomatic_complexity) \
+            (id, name, kind, tested, is_public, is_nif, is_unsafe, is_entry_point, project_code, embedding, cyclomatic_complexity) \
          SELECT DISTINCT ON (id) \
-                id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding, cyclomatic_complexity \
+                id, name, kind, tested, is_public, is_nif, is_unsafe, is_entry_point, project_code, embedding, cyclomatic_complexity \
          FROM _bulk_symbol_stage \
          ORDER BY id \
          ON CONFLICT (id) DO UPDATE SET \
@@ -1102,6 +1105,7 @@ async fn copy_symbols_in_tx(
             is_public = EXCLUDED.is_public, \
             is_nif = EXCLUDED.is_nif, \
             is_unsafe = EXCLUDED.is_unsafe, \
+            is_entry_point = EXCLUDED.is_entry_point, \
             project_code = EXCLUDED.project_code, \
             embedding = EXCLUDED.embedding, \
             cyclomatic_complexity = EXCLUDED.cyclomatic_complexity",
@@ -1748,6 +1752,7 @@ mod tests {
                 is_public: false,
                 is_nif: false,
                 is_unsafe: false,
+                is_entry_point: false,
                 project_code: "AXO".to_string(),
                 embedding: None,
                 cyclomatic_complexity: None,

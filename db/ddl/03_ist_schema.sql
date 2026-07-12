@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS ist.Symbol (
     is_public    BOOLEAN NOT NULL DEFAULT FALSE,
     is_nif       BOOLEAN NOT NULL DEFAULT FALSE,
     is_unsafe    BOOLEAN NOT NULL DEFAULT FALSE,
+    is_entry_point BOOLEAN NOT NULL DEFAULT FALSE,
     project_code TEXT    NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
     embedding    vector(1024),
     cyclomatic_complexity INTEGER
@@ -154,6 +155,13 @@ CREATE TABLE IF NOT EXISTS ist.Symbol (
 -- yet) — treated as "not god-object" by the SHI classifier, never as 0.
 ALTER TABLE ist.Symbol
     ADD COLUMN IF NOT EXISTS cyclomatic_complexity INTEGER;
+-- REQ-AXO-902227 (@impl entry-points) — additive for live DBs whose ist.Symbol
+-- predates the column. Structural entry-point flag set by the parser (@impl
+-- annotation / framework callback / NIF), consumed by orphan_clusters/wiring
+-- reachability seeding so runtime-invoked callbacks aren't false orphans.
+-- Default FALSE; repopulated on reindex.
+ALTER TABLE ist.Symbol
+    ADD COLUMN IF NOT EXISTS is_entry_point BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- ── Chunks (1 symbol → 1+ chunks) ────────────────────────────────────
 -- file_path FK to IndexedFile: a chunk cannot outlive its file.

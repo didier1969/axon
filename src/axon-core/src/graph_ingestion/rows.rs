@@ -17,6 +17,11 @@ pub struct SymbolRow {
     pub is_public: bool,
     pub is_nif: bool,
     pub is_unsafe: bool,
+    /// REQ-AXO-902227 — structural entry-point flag (parser @impl annotation /
+    /// framework callback / NIF). Consumed by orphan_clusters/wiring reachability
+    /// seeding so behaviour callbacks (invoked by the runtime, not via a CALLS
+    /// edge) aren't false orphans. Persisted to `ist.symbol.is_entry_point`.
+    pub is_entry_point: bool,
     pub project_code: String,
     pub embedding: Option<Vec<f32>>,
     /// REQ-AXO-902185 (god-objects) — McCabe cyclomatic complexity (branch-point

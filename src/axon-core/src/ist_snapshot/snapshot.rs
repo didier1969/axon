@@ -171,8 +171,8 @@ impl NodeKind {
 }
 
 /// Bitfield matching ist.symbol bool columns (tested / is_public / is_nif
-/// / is_unsafe) plus the RAM-derived `covered` bit. Stored as a single u8 ;
-/// 3 bits free for future flags.
+/// / is_unsafe / is_entry_point) plus the RAM-derived `covered` bit. Stored as
+/// a single u8 ; 2 bits free for future flags.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeFlags(pub u8);
 
@@ -187,6 +187,13 @@ impl NodeFlags {
     /// ("exercised by a test") the SHI weighted_coverage actually needs. Set by
     /// [`IstGraph::build`]'s propagation pass, never by the parser/loader.
     pub const COVERED: u8 = 1 << 4;
+    /// REQ-AXO-902227 — DB-derived structural entry-point flag
+    /// (`ist.symbol.is_entry_point`): the symbol is invoked by the runtime /
+    /// framework (parser `@impl` annotation / framework callback / NIF), not only
+    /// via a static CALLS edge. Seeds orphan_clusters/wiring reachability roots so
+    /// behaviour callbacks aren't false orphans. Set by the loader from the DB
+    /// column, never by the build-time `covered` propagation pass.
+    pub const ENTRY: u8 = 1 << 5;
 
     pub fn new(tested: bool, public: bool, nif: bool, unsafe_: bool) -> Self {
         let mut bits: u8 = 0;
@@ -205,6 +212,17 @@ impl NodeFlags {
         Self(bits)
     }
 
+    /// REQ-AXO-902227 — chain the DB-derived entry-point bit onto flags built by
+    /// [`new`]. Kept off `new`'s signature so the existing 4-arg call sites (tests,
+    /// view fixtures) are untouched; only the loader sets a real value from
+    /// `ist.symbol.is_entry_point`.
+    pub fn with_entry(mut self, entry: bool) -> Self {
+        if entry {
+            self.0 |= Self::ENTRY;
+        }
+        self
+    }
+
     pub fn tested(self) -> bool {
         self.0 & Self::TESTED != 0
     }
@@ -221,6 +239,13 @@ impl NodeFlags {
     }
     pub fn unsafe_(self) -> bool {
         self.0 & Self::UNSAFE != 0
+    }
+    /// REQ-AXO-902227 — invoked by the runtime/framework (`@impl` annotation /
+    /// framework callback / NIF), not only via a static CALLS edge. Reachability
+    /// (orphan_clusters / wiring) seeds roots from this so callbacks the BEAM/OTP
+    /// runtime dispatches aren't reported as false orphans.
+    pub fn entry(self) -> bool {
+        self.0 & Self::ENTRY != 0
     }
 }
 

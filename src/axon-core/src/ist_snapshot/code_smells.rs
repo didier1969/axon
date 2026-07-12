@@ -1187,7 +1187,10 @@ fn wiring_classify_node(
         return None;
     }
     let name = name_from_id(graph.id_of(idx));
-    if is_inferred_entry(name, path) {
+    // REQ-AXO-902227 — a symbol the runtime/framework invokes (@impl callback /
+    // framework entry / NIF, persisted as is_entry_point) is wired by definition,
+    // even with no static CALLS caller — exempt like is_inferred_entry.
+    if is_inferred_entry(name, path) || NodeFlags(flags.0).entry() {
         return None;
     }
     // REQ-AXO-902192 S2 — a symbol wired to intent in the SOLL (a traceability edge) is
@@ -1399,7 +1402,12 @@ pub fn orphan_clusters(
         }
         candidates.push(idx);
         let name = name_from_id(graph.id_of(idx));
-        if is_inferred_entry(name, path) || declared_entries.contains(&name.to_ascii_lowercase()) {
+        // REQ-AXO-902227 — is_entry_point (@impl / framework callback / NIF) seeds a
+        // reachability root: the runtime invokes it, so its callees are reachable.
+        if is_inferred_entry(name, path)
+            || NodeFlags(flags.0).entry()
+            || declared_entries.contains(&name.to_ascii_lowercase())
+        {
             roots.push(idx);
         }
     }
@@ -1426,6 +1434,19 @@ mod tests {
             project_code: "AXO".to_string(),
             kind: NodeKind::Function,
             flags: NodeFlags::new(false, public, false, false),
+            complexity: None,
+        }
+    }
+
+    // REQ-AXO-902227 — like `func` but with the DB-derived is_entry_point bit set
+    // (the loader flags an `@impl` / framework callback / NIF), for root seeding.
+    fn func_entry(id: &str, public: bool) -> NodeRecord {
+        NodeRecord {
+            id: id.to_string(),
+            name: id.rsplit("::").next().unwrap_or(id).to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(false, public, false, false).with_entry(true),
             complexity: None,
         }
     }
@@ -1617,6 +1638,82 @@ mod tests {
         assert!(
             names.iter().any(|n| n.ends_with("plain_api")),
             "a plain public fn with no prod caller is still an orphan"
+        );
+    }
+
+    #[test]
+    fn orphan_clusters_seeds_impl_flagged_custom_callback_as_root() {
+        // REQ-AXO-902227 — a project-defined behaviour callback (`@impl MyBehaviour
+        // def think`) the OTP name-list (axe A) structurally can't recognise, but the
+        // parser flagged is_entry_point. It must seed a reachability root so its
+        // private callee isn't a false dead cluster — the ~45 NEX custom callbacks.
+        let nodes = vec![
+            file("/proj/lib/nexus/agent.ex"),
+            func_entry("AXO::Nexus.Agent.think", true), // @impl custom callback
+            func("AXO::Nexus.Agent.reason", false),     // private helper it calls
+        ];
+        let edges = vec![
+            edge(
+                "/proj/lib/nexus/agent.ex",
+                "AXO::Nexus.Agent.think",
+                RelationType::Contains,
+            ),
+            edge(
+                "/proj/lib/nexus/agent.ex",
+                "AXO::Nexus.Agent.reason",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::Nexus.Agent.think",
+                "AXO::Nexus.Agent.reason",
+                RelationType::Calls,
+            ),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let report = orphan_clusters(&g, "AXO", &HashSet::new());
+        assert_eq!(
+            report.root_count, 1,
+            "the is_entry_point-flagged @impl callback must seed a reachability root"
+        );
+        assert_eq!(
+            report.unreached_count, 0,
+            "its call tree is reachable from the callback — no false dead cluster"
+        );
+        assert!(report.clusters.is_empty());
+    }
+
+    #[test]
+    fn wiring_exempts_impl_flagged_callback_but_flags_plain_public() {
+        // REQ-AXO-902227 — a public @impl callback (is_entry_point) with no prod
+        // caller is framework-wired, NOT a test_only/isolated orphan; a plain public
+        // fn with no caller IS still flagged (anti-regression: no over-exemption).
+        let nodes = vec![
+            file("/proj/lib/nexus/agent.ex"),
+            func_entry("AXO::Nexus.Agent.evaluate", true), // @impl callback, no caller
+            func("AXO::Nexus.Agent.plain_api", true),      // plain public, no caller
+        ];
+        let edges = vec![
+            edge(
+                "/proj/lib/nexus/agent.ex",
+                "AXO::Nexus.Agent.evaluate",
+                RelationType::Contains,
+            ),
+            edge(
+                "/proj/lib/nexus/agent.ex",
+                "AXO::Nexus.Agent.plain_api",
+                RelationType::Contains,
+            ),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 10);
+        let names: Vec<&str> = orphans.iter().map(|o| o.name.as_str()).collect();
+        assert!(
+            !names.iter().any(|n| n.ends_with("evaluate")),
+            "an is_entry_point @impl callback is framework-wired, exempt from wiring"
+        );
+        assert!(
+            names.iter().any(|n| n.ends_with("plain_api")),
+            "a plain public fn with no prod caller is still an orphan (no over-exemption)"
         );
     }
 

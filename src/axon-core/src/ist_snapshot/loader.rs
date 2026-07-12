@@ -29,7 +29,7 @@ pub trait JsonSqlStore {
     fn query_json(&self, sql: &str) -> Result<String, String>;
 }
 
-const NODE_SQL: &str = "SELECT id, kind, project_code, tested::text, is_public::text, is_nif::text, is_unsafe::text, name, COALESCE(cyclomatic_complexity::text, '') FROM ist.symbol WHERE project_code = '{P}'";
+const NODE_SQL: &str = "SELECT id, kind, project_code, tested::text, is_public::text, is_nif::text, is_unsafe::text, name, COALESCE(cyclomatic_complexity::text, ''), is_entry_point::text FROM ist.symbol WHERE project_code = '{P}'";
 const EDGE_SQL: &str =
     "SELECT source_id, target_id, relation_type FROM ist.edge WHERE project_code = '{P}'";
 
@@ -80,7 +80,10 @@ pub fn load_snapshot<S: JsonSqlStore + ?Sized>(
                     parse_bool(&row[4]),
                     parse_bool(&row[5]),
                     parse_bool(&row[6]),
-                ),
+                )
+                // REQ-AXO-902227 — is_entry_point (col 9), appended to NODE_SQL so
+                // the existing column indices (name=7, complexity=8) don't shift.
+                .with_entry(row.get(9).map(|s| parse_bool(s)).unwrap_or(false)),
                 complexity,
             })
         })

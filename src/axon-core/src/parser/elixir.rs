@@ -386,6 +386,10 @@ impl ElixirParser {
         let end_line = node.end_position().row + 1;
 
         let is_framework_entry = ELIXIR_ENTRY_POINTS.contains(&func_name.as_str());
+        // REQ-AXO-902227 — `@impl` annotation: framework-AGNOSTIC entry-point signal
+        // (catches GenServer / Phoenix / Ecto AND project-defined behaviours without
+        // hardcoding callback names). Feeds is_entry_point → reachability root seeding.
+        let has_impl_entry = Self::has_impl_annotation(node, source_bytes);
 
         let full_name = if module_name.is_empty() {
             func_name.clone()
@@ -452,7 +456,7 @@ impl ElixirParser {
             start_line,
             end_line,
             docstring: None,
-            is_entry_point: is_framework_entry || is_nif,
+            is_entry_point: is_framework_entry || has_impl_entry || is_nif,
             is_public: def_type == "def",
             tested: func_name.starts_with("test_") || module_name.ends_with("Test"),
             is_nif,
@@ -464,6 +468,34 @@ impl ElixirParser {
         if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
             Self::extract_calls_from_block(do_block, source_bytes, result, &full_name, aliases);
         }
+    }
+
+    /// REQ-AXO-902227 — does this `def` carry an `@impl` annotation? `@impl true` /
+    /// `@impl SomeBehaviour` is the idiomatic Elixir marker that the function
+    /// implements a behaviour callback invoked by the runtime/framework, not via a
+    /// direct call. Framework-AGNOSTIC: catches GenServer / Phoenix / Ecto AND
+    /// project-defined behaviours without hardcoding callback names. Scans back over
+    /// any intervening module attributes (`@doc` / `@spec` / …) to the nearest
+    /// `@impl`; `@impl false` (explicit "not a callback") does NOT count.
+    fn has_impl_annotation<'a>(node: Node<'a>, source_bytes: &[u8]) -> bool {
+        let mut sib = node.prev_named_sibling();
+        while let Some(s) = sib {
+            let text = s.utf8_text(source_bytes).unwrap_or("").trim_start();
+            if let Some(rest) = text.strip_prefix("@impl") {
+                // Require a word boundary after `@impl` (reject `@implementation`).
+                if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
+                    return !rest.trim_start().starts_with("false");
+                }
+            }
+            // Keep scanning back over other module attributes (@doc/@spec/@tag…);
+            // stop at the first non-attribute sibling (a prior def/expression).
+            if text.starts_with('@') {
+                sib = s.prev_named_sibling();
+                continue;
+            }
+            break;
+        }
+        false
     }
 
     fn extract_macro<'a>(
@@ -1174,6 +1206,50 @@ mod tests {
                 && rel.rel_type == "CALLS"),
             "piped call label_multi_horizon missing; got: {:?}",
             result.relations
+        );
+    }
+
+    #[test]
+    fn test_elixir_parser_impl_annotation_marks_custom_callback_as_entry_point() {
+        // REQ-AXO-902227 — `@impl` is the framework-AGNOSTIC entry-point signal.
+        // A project-defined behaviour callback (`@impl MyApp.Brain def think`) whose
+        // name is NOT in ELIXIR_ENTRY_POINTS must still be is_entry_point; a plain
+        // public fn must not; and `@impl false` (explicit non-callback) must not.
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule MyApp.Agent do
+          @behaviour MyApp.Brain
+
+          @impl MyApp.Brain
+          def think(state), do: state
+
+          @doc "public but not a callback"
+          def plain_helper(x), do: x
+
+          @impl false
+          def not_a_callback(y), do: y
+        end
+        "#;
+        let result = parser.parse(content);
+        let is_entry = |suffix: &str| {
+            result
+                .symbols
+                .iter()
+                .find(|s| s.name.ends_with(suffix))
+                .unwrap_or_else(|| panic!("symbol {suffix} missing; got {:?}", result.symbols))
+                .is_entry_point
+        };
+        assert!(
+            is_entry(".think"),
+            "@impl-annotated custom callback must be an entry point"
+        );
+        assert!(
+            !is_entry(".plain_helper"),
+            "a non-@impl public fn must NOT be an entry point"
+        );
+        assert!(
+            !is_entry(".not_a_callback"),
+            "@impl false must NOT count as an entry point"
         );
     }
 
