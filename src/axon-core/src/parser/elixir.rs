@@ -231,12 +231,20 @@ impl ElixirParser {
         }
     }
 
-    /// REQ-AXO-901953 — map each `alias Fully.Qualified.Module` directive in a
-    /// module body to `short_name -> FQN` (`Module -> Fully.Qualified.Module`)
-    /// so qualified calls (`Module.fun()`) resolve to the callee's canonical
-    /// Symbol.id (`Fully.Qualified.Module.fun`). Multi-aliases (`A.B.{C, D}`)
-    /// and `as:` renames are intentionally skipped: resolving them wrongly is
-    /// worse than leaving the edge unresolved, so we stay partial-but-correct.
+    /// REQ-AXO-901953 / REQ-AXO-902223 — map each `alias` directive in a module
+    /// body to `short_name -> FQN` (`Module -> Fully.Qualified.Module`) so
+    /// qualified calls (`Module.fun()`) resolve to the callee's canonical
+    /// Symbol.id (`Fully.Qualified.Module.fun`). Handles the three forms
+    /// tree-sitter-elixir produces (structure verified from the AST, never
+    /// string-matched):
+    ///   `alias A.B.C`        -> `C -> A.B.C`             (single)
+    ///   `alias A.B.C, as: X` -> `X -> A.B.C`             (rename)
+    ///   `alias A.B.{C, D}`   -> `C -> A.B.C`, `D -> A.B.D` (multi)
+    /// Any shape we can't resolve unambiguously is skipped — a WRONG resolution
+    /// is worse than a dangling short-name, so we stay partial-but-correct. The
+    /// unresolved `{}`/`as:` forms were the dominant cause of dangling Elixir
+    /// CALLS edges (~78% per REQ-AXO-902223 / APS), which made `wiring` see only
+    /// test callers and mis-report live modules as `test_only`.
     fn collect_module_aliases<'a>(
         do_block: Node<'a>,
         source_bytes: &[u8],
@@ -253,25 +261,110 @@ impl ElixirParser {
             let Some(args) = Self::find_child_by_type(child, "arguments") else {
                 continue;
             };
-            let args_text = args.utf8_text(source_bytes).unwrap_or("");
-            if args_text.contains('{') || args_text.contains("as:") {
-                continue;
-            }
-            let mut fqn = String::new();
-            let mut arg_cursor = args.walk();
-            for arg in args.named_children(&mut arg_cursor) {
-                if arg.kind() == "alias" {
-                    fqn = arg.utf8_text(source_bytes).unwrap_or("").to_string();
-                    break;
-                }
-            }
-            if !fqn.contains('.') {
-                continue;
-            }
-            let short = fqn.rsplit('.').next().unwrap_or(fqn.as_str()).to_string();
-            aliases.insert(short, fqn);
+            Self::collect_alias_args(args, source_bytes, &mut aliases);
         }
         aliases
+    }
+
+    /// REQ-AXO-902223 — resolve one `alias` directive's `arguments` node into
+    /// `short -> FQN` entries. See `collect_module_aliases` for the forms.
+    fn collect_alias_args(args: Node, source_bytes: &[u8], out: &mut HashMap<String, String>) {
+        // Multi-alias `A.B.{C, D}` parses as a `dot` whose children are the
+        // `alias` prefix (`A.B`) and a `tuple` of `alias` short paths (`{C, D}`).
+        if let Some(dot) = Self::find_child_by_type(args, "dot") {
+            let mut dc = dot.walk();
+            let children: Vec<Node> = dot.named_children(&mut dc).collect();
+            let prefix = children.iter().find(|n| n.kind() == "alias");
+            let tuple = children.iter().find(|n| n.kind() == "tuple");
+            if let (Some(prefix), Some(tuple)) = (prefix, tuple) {
+                let prefix_txt = prefix.utf8_text(source_bytes).unwrap_or("");
+                if !prefix_txt.is_empty() {
+                    let mut tc = tuple.walk();
+                    for member in tuple.named_children(&mut tc) {
+                        if member.kind() != "alias" {
+                            continue;
+                        }
+                        let short_path = member.utf8_text(source_bytes).unwrap_or("");
+                        if short_path.is_empty() {
+                            continue;
+                        }
+                        let fqn = format!("{}.{}", prefix_txt, short_path);
+                        let key = short_path
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(short_path)
+                            .to_string();
+                        out.insert(key, fqn);
+                    }
+                }
+                return;
+            }
+        }
+
+        // Single (`alias A.B.C`) or rename (`alias A.B.C, as: X`): the FQN is the
+        // top-level `alias` child; an optional `keywords` sibling carries `as: X`.
+        let mut ac = args.walk();
+        let mut fqn = String::new();
+        let mut as_name: Option<String> = None;
+        for child in args.named_children(&mut ac) {
+            match child.kind() {
+                "alias" if fqn.is_empty() => {
+                    fqn = child.utf8_text(source_bytes).unwrap_or("").to_string();
+                }
+                "keywords" => {
+                    as_name = Self::extract_as_rename(child, source_bytes);
+                }
+                _ => {}
+            }
+        }
+        if fqn.is_empty() {
+            return;
+        }
+        // A single-segment `alias Foo` is an identity no-op unless renamed.
+        if !fqn.contains('.') && as_name.is_none() {
+            return;
+        }
+        let key = match as_name {
+            Some(x) => x,
+            None => fqn.rsplit('.').next().unwrap_or(fqn.as_str()).to_string(),
+        };
+        out.insert(key, fqn);
+    }
+
+    /// REQ-AXO-902223 — pull `X` out of a `keywords` node holding `as: X`
+    /// (`pair(keyword "as:", alias X)`). Returns None for any other keyword.
+    fn extract_as_rename(keywords: Node, source_bytes: &[u8]) -> Option<String> {
+        let mut kc = keywords.walk();
+        for pair in keywords.named_children(&mut kc) {
+            if pair.kind() != "pair" {
+                continue;
+            }
+            let mut pc = pair.walk();
+            let mut is_as = false;
+            let mut rename: Option<String> = None;
+            for pchild in pair.named_children(&mut pc) {
+                match pchild.kind() {
+                    "keyword" => {
+                        let kw = pchild.utf8_text(source_bytes).unwrap_or("");
+                        if kw.trim().trim_end_matches(':') == "as" {
+                            is_as = true;
+                        }
+                    }
+                    "alias" => {
+                        rename = Some(pchild.utf8_text(source_bytes).unwrap_or("").to_string());
+                    }
+                    _ => {}
+                }
+            }
+            if is_as {
+                if let Some(r) = rename {
+                    if !r.is_empty() {
+                        return Some(r);
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn extract_function<'a>(
@@ -773,6 +866,84 @@ impl Parser for ElixirParser {
 mod tests {
     use super::ElixirParser;
     use crate::parser::Parser;
+
+    #[test]
+    fn test_elixir_parser_resolves_multi_alias_to_canonical_symbols() {
+        // REQ-AXO-902223 — `alias A.B.{C, D}` must resolve BOTH short names to
+        // their canonical FQN so the cross-module CALLS edges land on the real
+        // symbols instead of dangling `C`/`D` (the ~78% dangling class that made
+        // `wiring` see only test callers).
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Nexus.Parliament do
+          alias Nexus.Agents.{Router, Memory}
+
+          def dispatch do
+            Router.route()
+            Memory.store()
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "Nexus.Parliament.dispatch"
+                && rel.to == "Nexus.Agents.Router.route"
+                && rel.rel_type == "CALLS"),
+            "multi-alias first member unresolved; got: {:?}",
+            result.relations
+        );
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "Nexus.Parliament.dispatch"
+                && rel.to == "Nexus.Agents.Memory.store"
+                && rel.rel_type == "CALLS"),
+            "multi-alias second member unresolved; got: {:?}",
+            result.relations
+        );
+        assert!(
+            !result
+                .relations
+                .iter()
+                .any(|rel| (rel.to == "Router" || rel.to == "Memory") && rel.rel_type == "CALLS"),
+            "dangling short-name target still emitted: {:?}",
+            result.relations
+        );
+    }
+
+    #[test]
+    fn test_elixir_parser_resolves_as_rename_alias_to_canonical_symbol() {
+        // REQ-AXO-902223 — `alias A.B.C, as: X` must map the RENAME `X` to the
+        // canonical FQN, so `X.fun()` resolves to `A.B.C.fun`.
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Nexus.Controller do
+          alias Nexus.Governance.LegalSources, as: Sources
+
+          def index do
+            Sources.list()
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "Nexus.Controller.index"
+                && rel.to == "Nexus.Governance.LegalSources.list"
+                && rel.rel_type == "CALLS"),
+            "as: rename unresolved; got: {:?}",
+            result.relations
+        );
+        assert!(
+            !result
+                .relations
+                .iter()
+                .any(|rel| rel.to == "Sources" && rel.rel_type == "CALLS"),
+            "dangling rename target still emitted: {:?}",
+            result.relations
+        );
+    }
 
     #[test]
     fn test_elixir_parser_tracks_local_function_calls_with_function_scope() {
