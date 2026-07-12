@@ -1031,12 +1031,37 @@ pub struct WiringOrphan {
     pub category: &'static str,
 }
 
-/// Names legitimately caller-less in the CALLS graph — process/framework entry points
-/// (main, handlers, NIF exports). Mirrors the parser's `is_entry` heuristic
-/// (parser/rust.rs) so wiring doesn't flag them as orphans.
-fn is_inferred_entry(name: &str) -> bool {
+/// Names legitimately caller-less in the CALLS graph — process/framework entry
+/// points. The `name`-only cases are language-agnostic (process `main`, request
+/// `handler`s, NIF exports) and stay SUBSTRING matches for backward
+/// compatibility. `path` gates the LANGUAGE-SPECIFIC set: Elixir/OTP framework
+/// callbacks (`handle_call`, `mount`, `handle_event`, `terminate`, …) are invoked
+/// by the BEAM/Phoenix with NO in-repo caller, so a live OTP process tree must
+/// not read as dead code (REQ-AXO-902221, NEX gate «organe câblé»). Path-scoping
+/// is REQUIRED: names like `init`/`render`/`run`/`call` are ordinary methods in
+/// other ecosystems and matching them globally would MASK real orphans there.
+/// Matches the parser's `ELIXIR_ENTRY_POINTS` (single shared const, no dup). An
+/// Elixir symbol name is dotted-qualified (`Nexus.Foo.handle_call`) so the
+/// callback is the final `.` segment.
+fn is_inferred_entry(name: &str, path: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n.contains("main") || n.contains("handler") || n.contains("nif_")
+    if n.contains("main") || n.contains("handler") || n.contains("nif_") {
+        return true;
+    }
+    if is_elixir_path(path) {
+        let bare = n.rsplit('.').next().unwrap_or(&n);
+        return crate::parser::elixir::ELIXIR_ENTRY_POINTS
+            .iter()
+            .any(|entry| bare == *entry);
+    }
+    false
+}
+
+/// A source path in the Elixir ecosystem (`.ex` modules, `.exs` scripts) — the
+/// gate that keeps Elixir/OTP framework-callback names from being treated as
+/// entry points in any other language's files.
+fn is_elixir_path(path: &str) -> bool {
+    path.ends_with(".ex") || path.ends_with(".exs")
 }
 
 /// REQ-AXO-902192 S2 — a call the extractor can't resolve to a CONCRETE
@@ -1162,7 +1187,7 @@ fn wiring_classify_node(
         return None;
     }
     let name = name_from_id(graph.id_of(idx));
-    if is_inferred_entry(name) {
+    if is_inferred_entry(name, path) {
         return None;
     }
     // REQ-AXO-902192 S2 — a symbol wired to intent in the SOLL (a traceability edge) is
@@ -1374,7 +1399,7 @@ pub fn orphan_clusters(
         }
         candidates.push(idx);
         let name = name_from_id(graph.id_of(idx));
-        if is_inferred_entry(name) || declared_entries.contains(&name.to_ascii_lowercase()) {
+        if is_inferred_entry(name, path) || declared_entries.contains(&name.to_ascii_lowercase()) {
             roots.push(idx);
         }
     }
@@ -1493,6 +1518,106 @@ mod tests {
         assert_eq!(iso.test_callers, 0);
         // test_only outranks isolated in the ordering.
         assert_eq!(orphans[0].name, "opv_case");
+    }
+
+    #[test]
+    fn is_inferred_entry_path_scopes_elixir_framework_callbacks() {
+        // REQ-AXO-902221 — language-agnostic cases match regardless of path.
+        assert!(is_inferred_entry("run_main", ""));
+        assert!(is_inferred_entry("app::server::request_handler", "/p/src/server.rs"));
+        assert!(is_inferred_entry("nif_load", "/p/src/native.rs"));
+        // Elixir framework callbacks are entries ONLY inside an Elixir source
+        // file, matched on the bare final segment of the dotted-qualified name.
+        assert!(is_inferred_entry("Nexus.Worker.handle_call", "/p/lib/worker.ex"));
+        assert!(is_inferred_entry("Nexus.Live.PageLive.mount", "/p/lib/page_live.ex"));
+        assert!(is_inferred_entry("Mix.Tasks.Seed.run", "/p/lib/mix/tasks/seed.exs"));
+        assert!(is_inferred_entry("Nexus.Api.Endpoint.call", "/p/lib/endpoint.ex"));
+        // ANTI-REGRESSION: the SAME names are NOT entries outside Elixir —
+        // matching them globally would MASK real orphans in Rust/TS/Python.
+        assert!(!is_inferred_entry("app::widget::render", "/p/src/widget.rs"));
+        assert!(!is_inferred_entry("app::config::init", "/p/src/config.rs"));
+        assert!(!is_inferred_entry("jobs::worker::run", "/p/src/worker.rs"));
+        // An Elixir file, but a name that is NOT a framework callback, stays a
+        // candidate (a genuinely dead helper must still be detectable).
+        assert!(!is_inferred_entry(
+            "Nexus.Worker.compute_score",
+            "/p/lib/worker.ex"
+        ));
+    }
+
+    #[test]
+    fn orphan_clusters_seeds_elixir_otp_callbacks_as_roots() {
+        // REQ-AXO-902221 — the NEX case in miniature: a GenServer callback the
+        // BEAM invokes (no in-repo caller) fans out into a private helper. Before
+        // the fix neither was a root → the whole tree read as a dead cluster.
+        let nodes = vec![
+            file("/proj/lib/nexus/foo.ex"),
+            func("AXO::Nexus.Foo.handle_call", true), // OTP callback, no prod caller
+            func("AXO::Nexus.Foo.do_work", false),    // private helper it calls
+        ];
+        let edges = vec![
+            edge(
+                "/proj/lib/nexus/foo.ex",
+                "AXO::Nexus.Foo.handle_call",
+                RelationType::Contains,
+            ),
+            edge(
+                "/proj/lib/nexus/foo.ex",
+                "AXO::Nexus.Foo.do_work",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::Nexus.Foo.handle_call",
+                "AXO::Nexus.Foo.do_work",
+                RelationType::Calls,
+            ),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let report = orphan_clusters(&g, "AXO", &HashSet::new());
+        assert_eq!(
+            report.root_count, 1,
+            "the OTP handle_call callback must seed a reachability root"
+        );
+        assert_eq!(
+            report.unreached_count, 0,
+            "its call tree is reachable from the callback — no false dead cluster"
+        );
+        assert!(report.clusters.is_empty());
+    }
+
+    #[test]
+    fn wiring_exempts_elixir_framework_callbacks_but_flags_plain_public() {
+        // REQ-AXO-902221 — a public OTP callback with no prod caller is a
+        // framework entry, NOT a `test_only`/`isolated` orphan; a plain public
+        // fn with no caller in the same Elixir file IS still flagged.
+        let nodes = vec![
+            file("/proj/lib/nexus/worker.ex"),
+            func("AXO::Nexus.Worker.handle_cast", true),
+            func("AXO::Nexus.Worker.plain_api", true),
+        ];
+        let edges = vec![
+            edge(
+                "/proj/lib/nexus/worker.ex",
+                "AXO::Nexus.Worker.handle_cast",
+                RelationType::Contains,
+            ),
+            edge(
+                "/proj/lib/nexus/worker.ex",
+                "AXO::Nexus.Worker.plain_api",
+                RelationType::Contains,
+            ),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 10);
+        let names: Vec<&str> = orphans.iter().map(|o| o.name.as_str()).collect();
+        assert!(
+            !names.iter().any(|n| n.ends_with("handle_cast")),
+            "an OTP callback is a framework entry, exempt from wiring"
+        );
+        assert!(
+            names.iter().any(|n| n.ends_with("plain_api")),
+            "a plain public fn with no prod caller is still an orphan"
+        );
     }
 
     #[test]

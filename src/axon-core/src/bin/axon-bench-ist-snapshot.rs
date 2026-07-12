@@ -31,6 +31,11 @@ struct Args {
     // REQ-AXO-140 demo — print the reverse callers (resolved via the RAM
     // projection) of this symbol name, proving synthetic CALLS targets resolve.
     symbol: Option<String>,
+    // REQ-AXO-902221 ship-gate — run orphan_clusters + wiring on the loaded
+    // snapshot and print the candidate/root/unreached counts. Read-only dev
+    // observation of the exact numbers the live brain would report post-promote,
+    // WITHOUT promoting (dev-first). Point AXON_LIVE_DATABASE_URL at axon_live.
+    orphans: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +50,7 @@ impl Args {
         let mut probes: usize = 1000;
         let mut output = Output::Human;
         let mut symbol: Option<String> = None;
+        let mut orphans = false;
         let raw = std::env::args().skip(1).collect::<Vec<_>>();
         let mut i = 0;
         while i < raw.len() {
@@ -84,6 +90,10 @@ impl Args {
                     );
                     i += 2;
                 }
+                "--orphans" => {
+                    orphans = true;
+                    i += 1;
+                }
                 other => {
                     return Err(anyhow::anyhow!("unknown arg: {}", other));
                 }
@@ -94,6 +104,7 @@ impl Args {
             probes,
             output,
             symbol,
+            orphans,
         })
     }
 }
@@ -163,6 +174,44 @@ fn run(args: Args) -> anyhow::Result<()> {
             }
             None => println!("symbol `{}` not found in snapshot", sym),
         }
+    }
+
+    // REQ-AXO-902221 ship-gate — orphan_clusters + wiring on the live snapshot.
+    if args.orphans {
+        // Same role='entry' traceability query the MCP `orphan_clusters` handler
+        // uses (tools_ist_algorithms.rs) — narrow, role-gated, project-agnostic.
+        let entry_raw = store
+            .query_json(
+                "SELECT artifact_ref FROM soll.Traceability \
+                 WHERE artifact_type = 'Symbol' AND metadata->>'role' = 'entry'",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let declared: std::collections::HashSet<String> =
+            serde_json::from_str::<Vec<Vec<String>>>(&entry_raw)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|row| row.into_iter().next())
+                .map(|s| s.to_ascii_lowercase())
+                .collect();
+        let report =
+            axon_core::ist_snapshot::code_smells::orphan_clusters(&graph, &args.project, &declared);
+        let largest = report.clusters.iter().map(|c| c.len()).max().unwrap_or(0);
+        println!("\n=== orphan_clusters {} (REQ-AXO-902221) ===", args.project);
+        println!("candidates          : {}", report.candidate_count);
+        println!("roots               : {}", report.root_count);
+        println!("unreached           : {}", report.unreached_count);
+        println!("dead_clusters       : {}", report.clusters.len());
+        println!("largest_cluster     : {}", largest);
+        println!("soll_role=entry     : {}", declared.len());
+
+        let wiring =
+            axon_core::ist_snapshot::code_smells::wiring_orphans(&graph, &args.project, &declared, 200);
+        let test_only = wiring.iter().filter(|o| o.category == "test_only").count();
+        let isolated = wiring.iter().filter(|o| o.category == "isolated").count();
+        println!("\n=== wiring {} ===", args.project);
+        println!("orphans_total       : {}", wiring.len());
+        println!("test_only           : {}", test_only);
+        println!("isolated            : {}", isolated);
     }
 
     let mut samples_us: Vec<u128> = Vec::with_capacity(args.probes);

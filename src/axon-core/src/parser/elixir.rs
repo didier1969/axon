@@ -2,13 +2,44 @@ use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
-const OTP_ENTRY_POINTS: &[&str] = &[
+/// Framework/runtime entry-point callbacks in Elixir: functions the BEAM or a
+/// framework invokes by contract with NO in-repo caller — GenServer, Supervisor,
+/// Application, Phoenix LiveView/Component, GenStage, Plug, Mix.Task. Marking
+/// them `is_entry_point` keeps reachability analytics (`orphan_clusters` /
+/// `wiring`) from reading a live OTP process tree as dead code (REQ-AXO-902221,
+/// NEX gate «organe câblé»). SINGLE shared source — `ist_snapshot::code_smells::
+/// is_inferred_entry` matches against this very const (no duplication); the
+/// analytics side PATH-SCOPES it to `.ex/.exs` so these ordinary names
+/// (`init`/`render`/`run`/`call`) never mask a real orphan in another ecosystem.
+/// Match is on the BARE function name.
+pub const ELIXIR_ENTRY_POINTS: &[&str] = &[
+    // GenServer
     "handle_call",
     "handle_cast",
     "handle_info",
     "handle_continue",
+    // OTP lifecycle (GenServer / Supervisor / Application / Agent / Task)
     "init",
     "start_link",
+    "start",
+    "stop",
+    "terminate",
+    "code_change",
+    "child_spec",
+    "format_status",
+    // GenStage / Broadway / Flow
+    "handle_demand",
+    "handle_subscribe",
+    // Phoenix LiveView / LiveComponent / Component (framework-rendered)
+    "mount",
+    "handle_event",
+    "handle_params",
+    "render",
+    "handle_async",
+    // Plug / Mix.Task — framework-dispatched; path-scoping to Elixir keeps the
+    // generic names `call`/`run` from over-marking entries in other languages.
+    "call",
+    "run",
 ];
 
 const IMPORT_DIRECTIVES: &[&str] = &["alias", "import", "use", "require"];
@@ -261,7 +292,7 @@ impl ElixirParser {
         let start_line = node.start_position().row + 1;
         let end_line = node.end_position().row + 1;
 
-        let is_otp_entry = OTP_ENTRY_POINTS.contains(&func_name.as_str());
+        let is_framework_entry = ELIXIR_ENTRY_POINTS.contains(&func_name.as_str());
 
         let full_name = if module_name.is_empty() {
             func_name.clone()
@@ -328,7 +359,7 @@ impl ElixirParser {
             start_line,
             end_line,
             docstring: None,
-            is_entry_point: is_otp_entry || is_nif,
+            is_entry_point: is_framework_entry || is_nif,
             is_public: def_type == "def",
             tested: func_name.starts_with("test_") || module_name.ends_with("Test"),
             is_nif,
