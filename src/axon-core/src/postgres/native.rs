@@ -611,8 +611,29 @@ fn statement_timeout_ms() -> u64 {
         .unwrap_or(30_000)
 }
 
+/// REQ-AXO-902216 — per-session `lock_timeout` (ms) from `AXON_PG_LOCK_TIMEOUT_MS`,
+/// default 10000 (10s). This is NORMALIZED on every acquisition (see
+/// `build_session_setup_sql`) so a value leaked onto a recycled pooled connection
+/// — typically the DDL bootstrap's session-wide `SET lock_timeout='3s'` bleeding
+/// through the pool — can never survive into a later, unrelated borrower.
+///
+/// The default is a DESIGNED fail-fast: well under `statement_timeout` (30s) so
+/// lock contention fails clearly instead of riding the full statement budget, and
+/// distinct from the DDL's 3s. General pooled connections run short transactions
+/// (MCP reads, small SOLL writes); the long/heavy paths (DDL, promote, bulk COPY)
+/// use their own connections, so no legitimate general-query lock wait approaches
+/// 10s. Set `AXON_PG_LOCK_TIMEOUT_MS=0` to restore PG's unbounded default (still
+/// bounded by `statement_timeout`); the leak is cleared either way.
+fn lock_timeout_ms() -> u64 {
+    std::env::var("AXON_PG_LOCK_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(10_000)
+}
+
 /// Project schema first (so unqualified names resolve to `<schema>.X`) then
-/// `public`; statement_timeout always runs (REQ-AXO-91494).
+/// `public`; statement_timeout always runs (REQ-AXO-91494); lock_timeout is
+/// normalized on EVERY acquisition so no leaked value survives (REQ-AXO-902216).
 fn build_session_setup_sql(schema: Option<&str>) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(s) = schema {
@@ -622,6 +643,13 @@ fn build_session_setup_sql(schema: Option<&str>) -> Option<String> {
     if timeout_ms > 0 {
         parts.push(format!("SET statement_timeout TO {timeout_ms}"));
     }
+    // REQ-AXO-902216 — normalize lock_timeout UNCONDITIONALLY (even the 0 case),
+    // so a value set on a connection and then recycled through the pool (the DDL
+    // bootstrap's session-wide `SET lock_timeout='3s'`) can never bleed into a
+    // later borrower. Unlike statement_timeout (a positive default that a `>0`
+    // guard may skip), CLEARING the leak requires always emitting the SET — this
+    // is the fix, not a mere default.
+    parts.push(format!("SET lock_timeout TO {}", lock_timeout_ms()));
     if parts.is_empty() {
         None
     } else {
@@ -770,4 +798,46 @@ fn render_pg_value(row: &tokio_postgres::Row, col: usize) -> String {
         }
     }
     format!("<unsupported type {}>", ty.name())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // REQ-AXO-902216 — the session setup SQL is applied after EVERY `pool.get()`
+    // (run_query_json / run_ann_query_json / run_exact_scan_query_json /
+    // run_query_count / run_execute / acquire_and_setup), so normalizing
+    // lock_timeout here clears any value leaked onto a recycled connection. The
+    // SET must therefore ALWAYS be present, and carry the value `lock_timeout_ms`
+    // resolves to.
+    #[test]
+    fn session_setup_always_normalizes_lock_timeout() {
+        let sql = build_session_setup_sql(Some("ist")).expect("setup sql is present");
+        let expected = format!("SET lock_timeout TO {}", lock_timeout_ms());
+        assert!(
+            sql.contains(&expected),
+            "lock_timeout must be normalized on every acquisition; got: {sql}"
+        );
+    }
+
+    // The normalization must fire even with no schema (defensive: any acquisition
+    // path must clear a leaked lock_timeout, not just the search_path ones).
+    #[test]
+    fn lock_timeout_is_normalized_even_without_schema() {
+        let sql = build_session_setup_sql(None).expect("setup sql is present even without schema");
+        assert!(
+            sql.contains("SET lock_timeout TO "),
+            "lock_timeout must be cleared regardless of schema; got: {sql}"
+        );
+    }
+
+    // The default is the designed 10s fail-fast (distinct from the DDL's 3s, below
+    // statement_timeout's 30s). Skipped when the operator overrides via env.
+    #[test]
+    fn lock_timeout_defaults_to_designed_fail_fast() {
+        if std::env::var("AXON_PG_LOCK_TIMEOUT_MS").is_ok() {
+            return; // operator override in effect; the default is not under test
+        }
+        assert_eq!(lock_timeout_ms(), 10_000, "designed default lock_timeout is 10s");
+    }
 }
