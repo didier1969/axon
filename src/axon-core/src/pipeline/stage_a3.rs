@@ -499,6 +499,54 @@ mod tests {
         );
     }
 
+    /// REQ-AXO-902227 acceptance — end-to-end write round-trip for the
+    /// `is_entry_point` column. Decides H1 (ops: live indexer never re-parsed)
+    /// vs H2 (code: parse→SymbolRow→COPY→PG drops the flag). A `Symbol` with
+    /// `is_entry_point:true` MUST come back true through the SAME production
+    /// path (`a3_enroll` → `upsert_graph` → `copy_symbols_in_tx`), while a
+    /// sibling `false` symbol MUST come back false — proving the column carries
+    /// the parser signal and isn't hard-wired either way.
+    #[tokio::test]
+    async fn a3_enroll_round_trips_is_entry_point_flag() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let mut entry = sym("handle_call_ep");
+        entry.is_entry_point = true;
+        let plain = sym("plain_helper_ep");
+        let parsed = ParsedFile {
+            path: PathBuf::from("/tmp/entry_rt.ex"),
+            content: "def handle_call_ep, do: :ok\ndef plain_helper_ep, do: :ok".to_string(),
+            content_hash: "hash-entry-rt".to_string(),
+            mtime_ms: 1_700_000_000_000,
+            size_bytes: 48,
+            symbols: vec![entry, plain],
+            relations: vec![],
+        };
+
+        a3_enroll(parsed, store.clone(), super::super::const_resolver("AXO"))
+            .await
+            .unwrap();
+
+        let entry_true = store
+            .query_count(
+                "SELECT count(*) FROM Symbol WHERE project_code = 'AXO' AND name = 'handle_call_ep' AND is_entry_point = true",
+            )
+            .unwrap();
+        assert_eq!(
+            entry_true, 1,
+            "the entry-point symbol must round-trip is_entry_point=true through the production COPY path"
+        );
+
+        let plain_true = store
+            .query_count(
+                "SELECT count(*) FROM Symbol WHERE project_code = 'AXO' AND name = 'plain_helper_ep' AND is_entry_point = true",
+            )
+            .unwrap();
+        assert_eq!(
+            plain_true, 0,
+            "a non-entry symbol must round-trip is_entry_point=false (flag is not hard-wired)"
+        );
+    }
+
     /// REQ-AXO-901959 acceptance #4 — explicit routing proof: the bulk graph
     /// COPY (a3_enroll → flush_batch_copy → store native pool) lands in the
     /// store's OWN isolated DB and is INVISIBLE to a second, independently
