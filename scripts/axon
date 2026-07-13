@@ -30,6 +30,7 @@ Commands:
   check-project-identity   Fail if legacy project identity terms reappear in active surfaces
   soll-import [args...]    SOLL import tool via MCP (md/json/ndjson/yaml)
   work-plan [args...]      SOLL read-only work plan tool
+  wiring [args...]         CI wiring gate — exit≠0 when a public prod symbol has no prod caller (REQ-AXO-902224)
   resume-vectorization [args...] Requeue missing chunk vectorization from graph-ready files
   migrate-ignore [args...] Migrate .axonignore patterns to .gitignore (dry-run by default)
   reindex-project [args...] Reindex one project with before/after noise evaluation
@@ -73,6 +74,8 @@ Examples:
   ./scripts/axon soll-import --input /tmp/soll_payload.json --project AXO --author codex --dry-run
   ./scripts/axon work-plan --project AXO
   ./scripts/axon work-plan --project AXO --json
+  ./scripts/axon --instance live wiring --project NEX --fail-on test_only
+  ./scripts/axon --instance live wiring --project NEX --fail-on test_only,orphan --threshold 2 --json
   ./scripts/axon resume-vectorization
   ./scripts/axon migrate-ignore --root "$(cd .. && pwd)" --apply
   ./scripts/axon reindex-project --project BookingSystem --wait-seconds 180
@@ -249,6 +252,11 @@ EOF
   work-plan)
     mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
     exec python3 "$SCRIPT_DIR/work_plan.py" "${forwarded[@]}"
+    ;;
+  wiring)
+    # REQ-AXO-902224 — CI wiring gate (exit≠0 on unwired public prod symbol).
+    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
+    exec python3 "$SCRIPT_DIR/wiring_gate.py" "${forwarded[@]}"
     ;;
   resume-vectorization)
     exec python3 "$SCRIPT_DIR/resume_vectorization.py" "$@"
