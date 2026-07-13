@@ -233,10 +233,13 @@ fn compute_shi_raw_metrics(
     // `AXO::shutil.which`) falls back to a bogus single-node "module" via `module_of`'s
     // rfind-`::` fallback, which trivially scores Martin-D=1.0 (a single incidental edge) and
     // dominated the worklist's top-ROI slot with un-actionable noise. Same anti-pollution
-    // principle already applied to weighted_coverage (REQ-AXO-902193's `is_testable_symbol`);
-    // here the kind restriction is dropped (`is_real_source_symbol` only) because
-    // traits/structs/enums — excluded by `is_testable_symbol` — are exactly what feed the
-    // abstractness (A) side of Martin's distance.
+    // principle already applied to weighted_coverage (REQ-AXO-902193's `is_testable_symbol`).
+    // REQ-AXO-902230 extends 902186: `is_real_source_symbol` still accepts doc/config files
+    // WITH a real path (`…inventory.md::Purpose`, `docker-compose.yml`), so both endpoints are
+    // ALSO gated by `NodeKind::can_form_code_module` (below) — which deliberately KEEPS
+    // trait/struct/enum (they feed the abstractness A side) and drops only the four non-code
+    // kinds; the edge loop is further restricted to `RelationType::is_dependency` (drops
+    // SIMILAR_TO clone-pairs + intra-module CONTAINS, the relations that carried .md pollution).
     let mut mod_types: HashMap<String, (usize, usize)> = HashMap::new();
     // REQ-AXO-902185 (module depth) — (public_count, total_count) per module over ALL
     // real source symbols (any kind), the "interface(nb pub)/impl(taille corps)" ratio's
@@ -260,9 +263,19 @@ fn compute_shi_raw_metrics(
         if !is_real_source_symbol(id) {
             continue;
         }
+        // REQ-AXO-902230 — a Martin module is a CODE module. `is_real_source_symbol`
+        // only asserts the id carries a file segment, so a doc/config/data file WITH a
+        // real path (`…inventory.md::Purpose` = Section, `docker-compose.yml::x` =
+        // ConfigKey, `schema.sql::t`) still passes it and 902186's earlier gate — yet
+        // carries no code semantics. Exclude the unambiguous non-code kinds from BOTH the
+        // coupling and module-depth attribution (`Other` stays — see can_form_code_module).
+        let node_kind = snapshot.node_kind(id);
+        if !node_kind.map(|k| k.can_form_code_module()).unwrap_or(false) {
+            continue;
+        }
         let m = module_of(id).to_string();
         let entry = mod_types.entry(m.clone()).or_insert((0, 0));
-        if let Some(kind) = snapshot.node_kind(id) {
+        if let Some(kind) = node_kind {
             match kind.as_db() {
                 "trait" => {
                     entry.0 += 1;
@@ -293,9 +306,23 @@ fn compute_shi_raw_metrics(
         if snapshot.node_meta(i).2.public() {
             pub_total.0 += 1;
         }
-        for (t, _rel) in snapshot.forward_neighbors(i) {
+        for (t, rel) in snapshot.forward_neighbors(i) {
+            // REQ-AXO-902230 — Martin Ca/Ce is DEPENDENCY coupling. Skip non-dependency
+            // relations: `SIMILAR_TO` (out-of-band pgvector clone pairs, 2886 on AXO —
+            // the .md-domination dogfood flowed entirely through these) and `CONTAINS`
+            // (intra-module structural, never a cross-module dependency).
+            if !rel.is_dependency() {
+                continue;
+            }
             let target_id = snapshot.id_of(t);
             if !is_real_source_symbol(target_id) {
+                continue;
+            }
+            if !snapshot
+                .node_kind(target_id)
+                .map(|k| k.can_form_code_module())
+                .unwrap_or(false)
+            {
                 continue;
             }
             let tm = module_of(target_id).to_string();
@@ -1315,6 +1342,54 @@ mod structural_health_helpers_tests {
         ));
         // Rust file still passes.
         assert!(is_testable_symbol("AXO::x::view.rs::try_snapshot", Some(NodeKind::Method)));
+    }
+
+    #[test]
+    fn martin_coupling_excludes_noncode_kinds_and_nondependency_edges() {
+        // REQ-AXO-902230 — regression guard for the .md-domination dogfood. Build a tiny IST:
+        // two .rs modules wired by a real CALLS dependency, a .rs module wired ONLY by
+        // SIMILAR_TO, and two .md doc sections wired to each other by SIMILAR_TO (the exact
+        // pollution pattern). Only the real dependency-coupled code modules reach mod_d.
+        use crate::ist_snapshot::snapshot::{EdgeTriple, NodeRecord};
+        use crate::ist_snapshot::{IstGraph, NodeFlags, RelationType};
+        let n = |id: &str, kind: NodeKind| NodeRecord {
+            id: id.to_string(),
+            name: id.rsplit("::").next().unwrap_or(id).to_string(),
+            project_code: "AXO".to_string(),
+            kind,
+            flags: NodeFlags::default(),
+            complexity: None,
+        };
+        let e = |s: &str, t: &str, rel: RelationType| EdgeTriple {
+            source: s.to_string(),
+            target: t.to_string(),
+            rel,
+        };
+        let nodes = vec![
+            n("AXO::src::a.rs::foo", NodeKind::Function),
+            n("AXO::src::b.rs::bar", NodeKind::Function),
+            n("AXO::src::c.rs::baz", NodeKind::Function),
+            n("AXO::docs::x.md::Purpose", NodeKind::Section),
+            n("AXO::docs::y.md::Purpose", NodeKind::Section),
+        ];
+        let edges = vec![
+            e("AXO::src::a.rs::foo", "AXO::src::b.rs::bar", RelationType::Calls),
+            e("AXO::src::c.rs::baz", "AXO::src::a.rs::foo", RelationType::SimilarTo),
+            e(
+                "AXO::docs::x.md::Purpose",
+                "AXO::docs::y.md::Purpose",
+                RelationType::SimilarTo,
+            ),
+        ];
+        let raw = super::compute_shi_raw_metrics(&IstGraph::build(nodes, edges), 0, 0);
+        let keys: Vec<&str> = raw.mod_d.keys().map(String::as_str).collect();
+        // Real cross-module dependency survives on BOTH endpoints.
+        assert!(raw.mod_d.contains_key("AXO::src::a.rs"), "caller module present: {keys:?}");
+        assert!(raw.mod_d.contains_key("AXO::src::b.rs"), "callee module present: {keys:?}");
+        // Doc modules never appear (non-code kind AND non-dependency edge).
+        assert!(!keys.iter().any(|k| k.contains(".md")), "no .md coupling module: {keys:?}");
+        // A code module wired ONLY by SIMILAR_TO carries no Martin coupling (relation gate).
+        assert!(!raw.mod_d.contains_key("AXO::src::c.rs"), "SIMILAR_TO-only excluded: {keys:?}");
     }
 
     // REQ-AXO-902214 — build_sub_scores wires the capability signal into the coverage axis.

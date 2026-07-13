@@ -76,6 +76,27 @@ impl RelationType {
             Self::Other => "OTHER",
         }
     }
+
+    /// REQ-AXO-902230 — a directed "A depends on B" edge that constitutes Martin
+    /// afferent/efferent coupling. EXCLUDES: `Contains` (structural containment —
+    /// intra-module by construction in the coupling loop), `SimilarTo` (an
+    /// out-of-band pgvector near-duplicate pair, NEVER a dependency — dogfood found
+    /// these made doc sections in different files masquerade as coupled "modules"),
+    /// `Declares` (the phantom back-edge, inverse of `Reads` — including both would
+    /// double-count), and `Other` (unknown). Exhaustive match: any new variant must
+    /// be classified here or the compiler rejects the build.
+    pub fn is_dependency(self) -> bool {
+        match self {
+            Self::Calls
+            | Self::CallsNif
+            | Self::Implements
+            | Self::Imports
+            | Self::Uses
+            | Self::Reads
+            | Self::ReadsArtifact => true,
+            Self::Contains | Self::SimilarTo | Self::Declares | Self::Other => false,
+        }
+    }
 }
 
 /// CPT-AXO-90003 packed node kind table (subset surfaced today ; the full
@@ -166,6 +187,34 @@ impl NodeKind {
             Self::Interface => "interface",
             Self::DataArtifact => "data_artifact",
             Self::Other => "",
+        }
+    }
+
+    /// REQ-AXO-902230 — can this kind constitute a Martin *code* module (coupling +
+    /// module-depth attribution)? The four documentary/config/data kinds
+    /// (`Section` markdown headings, `Element` HTML/UI, `ConfigKey` YAML/TOML,
+    /// `DataArtifact` CSV/fixtures) are structurally NOT code and must not become
+    /// "modules". `Other` is KEPT (`true`) on purpose: it currently absorbs real
+    /// code the enum doesn't model yet (`impl` / `type_alias` / `macro` — see
+    /// REQ-AXO-902231) ALONGSIDE genuine non-code (`table` / `view`), so dropping
+    /// it would delete real code from the analysis; the `RelationType::is_dependency`
+    /// gate already denies the non-code `Other`s any coupling edge (they carry only
+    /// CONTAINS/SIMILAR_TO — verified zero dependency edges touch non-code on AXO).
+    /// Exhaustive match: a new variant forces a classification decision here.
+    pub fn can_form_code_module(self) -> bool {
+        match self {
+            Self::Section | Self::Element | Self::ConfigKey | Self::DataArtifact => false,
+            Self::File
+            | Self::Function
+            | Self::Method
+            | Self::Class
+            | Self::Struct
+            | Self::Module
+            | Self::Trait
+            | Self::Enum
+            | Self::Field
+            | Self::Interface
+            | Self::Other => true,
         }
     }
 }
@@ -1070,6 +1119,62 @@ fn relation_from_u8(value: u8) -> RelationType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relation_is_dependency_classifies_every_variant() {
+        // REQ-AXO-902230 — Martin Ca/Ce counts dependency edges only.
+        for r in [
+            RelationType::Calls,
+            RelationType::CallsNif,
+            RelationType::Implements,
+            RelationType::Imports,
+            RelationType::Uses,
+            RelationType::Reads,
+            RelationType::ReadsArtifact,
+        ] {
+            assert!(r.is_dependency(), "{r:?} must count as a dependency");
+        }
+        // Containment, similarity, the phantom back-edge and the unknown catch-all
+        // are NOT dependencies (SimilarTo = pgvector clone pairs — the .md pollution).
+        for r in [
+            RelationType::Contains,
+            RelationType::SimilarTo,
+            RelationType::Declares,
+            RelationType::Other,
+        ] {
+            assert!(!r.is_dependency(), "{r:?} must NOT count as a dependency");
+        }
+    }
+
+    #[test]
+    fn node_kind_can_form_code_module_classifies_every_variant() {
+        // REQ-AXO-902230 — the four documentary/config/data kinds are never code modules.
+        for k in [
+            NodeKind::Section,
+            NodeKind::Element,
+            NodeKind::ConfigKey,
+            NodeKind::DataArtifact,
+        ] {
+            assert!(!k.can_form_code_module(), "{k:?} must not form a code module");
+        }
+        // Everything else, INCLUDING Other (absorbs impl/type_alias/macro real code the
+        // enum doesn't model yet — REQ-AXO-902231), can form a code module.
+        for k in [
+            NodeKind::File,
+            NodeKind::Function,
+            NodeKind::Method,
+            NodeKind::Class,
+            NodeKind::Struct,
+            NodeKind::Module,
+            NodeKind::Trait,
+            NodeKind::Enum,
+            NodeKind::Field,
+            NodeKind::Interface,
+            NodeKind::Other,
+        ] {
+            assert!(k.can_form_code_module(), "{k:?} can form a code module");
+        }
+    }
 
     fn node(id: &str, project: &str, kind: NodeKind) -> NodeRecord {
         NodeRecord {
