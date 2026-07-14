@@ -404,6 +404,10 @@ fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::ConfigKey => "config_key",
         NodeKind::Interface => "interface",
         NodeKind::DataArtifact => "data_artifact",
+        // REQ-AXO-902231 — real code kinds de-conflated out of Other.
+        NodeKind::Impl => "impl",
+        NodeKind::TypeAlias => "type_alias",
+        NodeKind::Macro => "macro",
         NodeKind::Other => "other",
     }
 }

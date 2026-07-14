@@ -123,6 +123,15 @@ pub enum NodeKind {
     // as an IST node so data-centric projects answer "what data exists + who
     // reads it" structurally. Appended (not inserted) for CSR u8 stability.
     DataArtifact = 13,
+    // REQ-AXO-902231 — de-conflate `NodeKind::Other`: these three are REAL code
+    // the parsers already emit (`impl` 150×/.rs, `type_alias` 15×/.rs, `macro` 2×)
+    // but that fell into the `Other` catch-all alongside genuine non-code
+    // (`table`/`view` → DataArtifact). Appended (not inserted) for CSR u8 stability.
+    // They form code modules (can_form_code_module=true) but are NOT "types" for
+    // the Martin abstractness ratio (as_db ∉ {trait,struct,enum}) → zero A drift.
+    Impl = 14,
+    TypeAlias = 15,
+    Macro = 16,
     Other = 255,
 }
 
@@ -143,6 +152,14 @@ impl NodeKind {
             "config_key" => Self::ConfigKey,
             "interface" => Self::Interface,
             "data_artifact" => Self::DataArtifact,
+            // REQ-AXO-902231 — real code kinds the parsers emit (were → Other).
+            "impl" => Self::Impl,
+            "type_alias" => Self::TypeAlias,
+            "macro" => Self::Macro,
+            // REQ-AXO-902231 — SQL schema objects are non-code data (were → Other,
+            // polluting Martin module-depth + a cross-project coupling re-pollution
+            // vector). DataArtifact is already gated non-code (can_form=false).
+            "table" | "view" => Self::DataArtifact,
             _ => Self::Other,
         }
     }
@@ -163,6 +180,9 @@ impl NodeKind {
             11 => Self::ConfigKey,
             12 => Self::Interface,
             13 => Self::DataArtifact,
+            14 => Self::Impl,
+            15 => Self::TypeAlias,
+            16 => Self::Macro,
             _ => Self::Other,
         }
     }
@@ -186,6 +206,9 @@ impl NodeKind {
             Self::ConfigKey => "config_key",
             Self::Interface => "interface",
             Self::DataArtifact => "data_artifact",
+            Self::Impl => "impl",
+            Self::TypeAlias => "type_alias",
+            Self::Macro => "macro",
             Self::Other => "",
         }
     }
@@ -193,13 +216,15 @@ impl NodeKind {
     /// REQ-AXO-902230 — can this kind constitute a Martin *code* module (coupling +
     /// module-depth attribution)? The four documentary/config/data kinds
     /// (`Section` markdown headings, `Element` HTML/UI, `ConfigKey` YAML/TOML,
-    /// `DataArtifact` CSV/fixtures) are structurally NOT code and must not become
-    /// "modules". `Other` is KEPT (`true`) on purpose: it currently absorbs real
-    /// code the enum doesn't model yet (`impl` / `type_alias` / `macro` — see
-    /// REQ-AXO-902231) ALONGSIDE genuine non-code (`table` / `view`), so dropping
-    /// it would delete real code from the analysis; the `RelationType::is_dependency`
-    /// gate already denies the non-code `Other`s any coupling edge (they carry only
-    /// CONTAINS/SIMILAR_TO — verified zero dependency edges touch non-code on AXO).
+    /// `DataArtifact` CSV/fixtures + SQL `table`/`view` since REQ-AXO-902231) are
+    /// structurally NOT code and must not become "modules". `Impl` / `TypeAlias` /
+    /// `Macro` (REQ-AXO-902231) ARE real code and stay `true`. `Other` is KEPT
+    /// (`true`) on purpose: post-902231 it absorbs only the not-yet-modelled /
+    /// ambiguous kinds (`TODO`, `SECRET_DB_URL`, `variable`) and any FUTURE parser
+    /// kind — assuming code-capable avoids silently dropping real code the enum
+    /// doesn't model yet; the `RelationType::is_dependency` gate already denies the
+    /// non-code `Other`s any coupling edge (they carry only CONTAINS/SIMILAR_TO —
+    /// verified zero dependency edges touch non-code on AXO).
     /// Exhaustive match: a new variant forces a classification decision here.
     pub fn can_form_code_module(self) -> bool {
         match self {
@@ -214,6 +239,9 @@ impl NodeKind {
             | Self::Enum
             | Self::Field
             | Self::Interface
+            | Self::Impl
+            | Self::TypeAlias
+            | Self::Macro
             | Self::Other => true,
         }
     }
@@ -1157,8 +1185,9 @@ mod tests {
         ] {
             assert!(!k.can_form_code_module(), "{k:?} must not form a code module");
         }
-        // Everything else, INCLUDING Other (absorbs impl/type_alias/macro real code the
-        // enum doesn't model yet — REQ-AXO-902231), can form a code module.
+        // Everything else can form a code module, INCLUDING the REQ-AXO-902231 code
+        // variants (Impl/TypeAlias/Macro, now modelled explicitly) and Other (absorbs
+        // only not-yet-modelled/ambiguous kinds post-902231).
         for k in [
             NodeKind::File,
             NodeKind::Function,
@@ -1170,6 +1199,9 @@ mod tests {
             NodeKind::Enum,
             NodeKind::Field,
             NodeKind::Interface,
+            NodeKind::Impl,
+            NodeKind::TypeAlias,
+            NodeKind::Macro,
             NodeKind::Other,
         ] {
             assert!(k.can_form_code_module(), "{k:?} can form a code module");
@@ -1877,6 +1909,21 @@ mod tests {
         assert_eq!(NodeKind::DataArtifact as u8, 13);
         assert_eq!(NodeKind::from_db("data_artifact"), NodeKind::DataArtifact);
         assert_eq!(NodeKind::DataArtifact.as_db(), "data_artifact");
+        // REQ-AXO-902231 — the three real-code variants round-trip through db + u8.
+        for (byte, variant, s) in [
+            (14u8, NodeKind::Impl, "impl"),
+            (15u8, NodeKind::TypeAlias, "type_alias"),
+            (16u8, NodeKind::Macro, "macro"),
+        ] {
+            assert_eq!(NodeKind::from_u8(byte), variant);
+            assert_eq!(variant as u8, byte);
+            assert_eq!(NodeKind::from_db(s), variant);
+            assert_eq!(variant.as_db(), s);
+        }
+        // REQ-AXO-902231 — SQL schema objects fold into the non-code DataArtifact
+        // (they were → Other, polluting Martin module-depth + coupling).
+        assert_eq!(NodeKind::from_db("table"), NodeKind::DataArtifact);
+        assert_eq!(NodeKind::from_db("view"), NodeKind::DataArtifact);
         assert_eq!(NodeKind::from_u8(42), NodeKind::Other);
         assert_eq!(NodeKind::from_u8(255), NodeKind::Other);
     }
