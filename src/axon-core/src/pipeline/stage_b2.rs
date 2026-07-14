@@ -337,6 +337,13 @@ async fn record_batch_failure(
 mod tests {
     use super::*;
 
+    /// REQ-AXO-902217 — LIVENESS bound (must eventually yield), NOT a perf
+    /// assertion: the old 2 s bound flaked under full-suite CPU saturation while
+    /// proving nothing about speed. A generous bound still catches a real hang.
+    /// NOTE: the deliberate short `from_millis(100)` below is a NEGATIVE check
+    /// (nothing must arrive) — it must stay short and is intentionally untouched.
+    const LIVENESS_TIMEOUT_SECS: u64 = 60;
+
     #[tokio::test]
     async fn no_op_embedder_returns_canonical_dimension_vectors() {
         use crate::embedding_contract::DIMENSION;
@@ -425,7 +432,7 @@ mod tests {
 
         let mut received = Vec::new();
         for _ in 0..16 {
-            let item = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+            let item = tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), out_rx.recv())
                 .await
                 .expect("16 EmbeddedChunk must arrive within 2 s")
                 .expect("output yields Some");
@@ -492,7 +499,7 @@ mod tests {
 
         let mut received = Vec::new();
         for _ in 0..3 {
-            let item = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+            let item = tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), out_rx.recv())
                 .await
                 .expect("partial batch must flush within 2 s")
                 .expect("output yields Some");

@@ -316,8 +316,18 @@ thread_local! {
 /// bumps this global counter, letting a chunker regression test assert the
 /// encode COUNT is O(N) — an unambiguous O(N²) guard, unlike the flaky
 /// wall-clock bound it replaces. Global (not thread-local) so it captures
-/// encodes on the chunker's `spawn_blocking` threads too; deterministic only
-/// under `--test-threads=1` (already required for this crate's lib tests).
+/// encodes on the chunker's `spawn_blocking` threads too.
+///
+/// REQ-AXO-902217 — CORRECTION: the previous note claimed determinism required
+/// `--test-threads=1`, "already required for this crate's lib tests". That was
+/// FALSE — nothing in the repo enforces `--test-threads` (no cargo/nextest config,
+/// no `RUST_TEST_THREADS`), so the suite runs the default parallel harness and any
+/// reader trusting that note would size their bounds on a guarantee that does not
+/// exist. What ACTUALLY makes this counter deterministic: the tokenizer is only
+/// reachable from `code_chunker`, and every chunker test that encodes holds
+/// `test_support::env_test_lock` — so the encoding tests are mutually serialized by
+/// that mutex regardless of thread count. Reset immediately before the measured
+/// call and read immediately after, while holding the lock.
 #[cfg(test)]
 pub(crate) mod encode_counter {
     use std::sync::atomic::{AtomicUsize, Ordering};

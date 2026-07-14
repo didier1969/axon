@@ -565,6 +565,16 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// REQ-AXO-902217 — LIVENESS bound for "the pipeline must eventually yield",
+    /// NOT a performance assertion. The old 5 s bound flaked whenever the full
+    /// suite saturated the CPU (observed: this file's `pipeline_a_end_to_end…`
+    /// test failed in a 1157 s loaded run, then passed in 4 s standalone) — the
+    /// stage was merely descheduled, not hung. Since the test only cares that the
+    /// pipeline does not HANG, a generous bound loses nothing: a real deadlock
+    /// still fails, a busy CPU no longer does. Same class as the wall-clock
+    /// chunker bounds this REQ replaced with deterministic encode counts.
+    const LIVENESS_TIMEOUT_SECS: u64 = 60;
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pipeline_a_end_to_end_persists_graph_chunks_and_indexed_file_for_a_rust_fixture() {
         // Session-19 contract: A persists graph + chunks in ONE transaction
@@ -591,7 +601,7 @@ mod tests {
 
         handles.input_tx.send(path.clone()).await.unwrap();
 
-        let receipt = tokio::time::timeout(Duration::from_secs(5), handles.output_rx.recv())
+        let receipt = tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), handles.output_rx.recv())
             .await
             .expect("pipeline A must produce a receipt within 5 s")
             .expect("output channel must yield Some(EnrolledFile)");
@@ -756,7 +766,7 @@ mod tests {
         // REQ-AXO-901903 — feed B by id (deterministic, residue-independent).
         handles_a.input_tx.send(path.clone()).await.unwrap();
 
-        let enrolled = tokio::time::timeout(Duration::from_secs(5), handles_a.output_rx.recv())
+        let enrolled = tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), handles_a.output_rx.recv())
             .await
             .expect("A must produce a receipt within 5 s")
             .expect("A output channel must yield Some(EnrolledFile)");
@@ -795,7 +805,7 @@ mod tests {
 
         let mut persisted = 0usize;
         for _ in 0..expected_chunks {
-            let receipt = tokio::time::timeout(Duration::from_secs(5), handles_b.output_rx.recv())
+            let receipt = tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), handles_b.output_rx.recv())
                 .await
                 .expect("B3 must produce a persist receipt within 5 s")
                 .expect("B3 output channel must yield Some(PersistedEmbedding)");

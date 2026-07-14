@@ -1044,6 +1044,24 @@ mod tests {
     use crate::parser::Symbol;
     use crate::test_support::env_test_lock;
 
+    /// REQ-AXO-902217 — DETERMINISTIC anti-encode-storm ceiling for the bodies
+    /// that must take a BYTE-ESTIMATED path, replacing the wall-clock bounds that
+    /// flaked whenever the suite saturated the CPU (a wall-clock perf assertion is
+    /// fragile by nature under parallel `cargo test`).
+    ///
+    /// Sized off the structural guarantee, not a stopwatch: once the fan-out passes
+    /// `MAX_PRECISE_ENCODE_CHUNKS` the chunker byte-estimates instead of running a
+    /// precise tokenizer encode, so these bodies must run essentially ZERO encodes
+    /// (measured: 0 for the LOG.txt shape, 1 for the giant single line). The cap is
+    /// therefore enormous headroom over the healthy path yet far under the pre-fix
+    /// storm (~4 500 encodes for the LOG.txt shape ⇒ >40 s).
+    ///
+    /// NOT for the precise/DP path: a body that legitimately runs the linear DP
+    /// encodes ~1× per line (~12 k for a 400 KB body), so those tests assert the
+    /// `< 4·N` super-linearity tripwire instead. Bounding them by this constant
+    /// would be plain wrong.
+    const ENCODE_STORM_CEILING: usize = MAX_PRECISE_ENCODE_CHUNKS;
+
     #[test]
     fn fast_path_and_gray_zone_follow_active_profile() {
         let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
@@ -1388,9 +1406,7 @@ mod tests {
         // linear cost and far below any super-linear reintroduction.
         // Deterministic only under `--test-threads=1` (required for lib tests).
         crate::embedding_profile::encode_counter::reset();
-        let t0 = std::time::Instant::now();
         let chunks = build_symbol_chunks(&symbol, &content);
-        let elapsed = t0.elapsed();
         let encodes = crate::embedding_profile::encode_counter::get();
 
         assert!(
@@ -1399,20 +1415,11 @@ mod tests {
              re-encoding (linear cost is ~N; O(N²) regression would be ~{}M)",
             (n * n) / 2 / 1_000_000
         );
-
-        // Coarse wall-clock net kept as defense-in-depth (the encode count is
-        // the authoritative guard). Profile-aware: the unoptimized cargo-test
-        // build is ~2-3x slower than the RELEASE "sub-second class" target.
-        let max_elapsed = if cfg!(debug_assertions) {
-            std::time::Duration::from_secs(12)
-        } else {
-            std::time::Duration::from_secs(2)
-        };
-        assert!(
-            elapsed < max_elapsed,
-            "5000-line body chunking took {elapsed:?} (limit {max_elapsed:?}; \
-             O(N²) regression would be far slower)"
-        );
+        // REQ-AXO-902217 — the coarse wall-clock "defense-in-depth" net was
+        // DROPPED: it proved strictly less than the encode count above (the
+        // authoritative guard) while being the residual flake vector under CPU
+        // saturation. A wall-clock perf assertion is fragile by nature in a
+        // parallel test suite; the deterministic encode bound is not.
         assert!(
             chunks.len() > 1,
             "expected multi-part split, got {}",
@@ -1470,18 +1477,21 @@ mod tests {
             "test content must exceed the gray zone to exercise the byte-guard"
         );
 
-        let t0 = std::time::Instant::now();
+        // REQ-AXO-902217 — DETERMINISTIC invariant instead of a wall-clock bound.
+        // "Skips the tokenizer" IS an encode count of zero; the old `< 100ms`
+        // proxy flaked under CPU saturation while proving strictly less.
+        crate::embedding_profile::encode_counter::reset();
         let est = single_chunk_token_estimate(profile, &content);
-        let elapsed = t0.elapsed();
+        let encodes = crate::embedding_profile::encode_counter::get();
 
         assert_eq!(
             est,
             fallback_estimated_token_count(&content),
             "past the gray zone the estimate must be byte-based, not a tokenizer encode"
         );
-        assert!(
-            elapsed < std::time::Duration::from_millis(100),
-            "oversized single-chunk estimate must skip the tokenizer (took {elapsed:?})"
+        assert_eq!(
+            encodes, 0,
+            "oversized single-chunk estimate must SKIP the tokenizer (got {encodes} encodes)"
         );
     }
 
@@ -1523,21 +1533,20 @@ mod tests {
         let line_count = content.lines().count();
         let symbol = synthetic_symbol("document_body", line_count.max(1));
 
-        let t0 = std::time::Instant::now();
+        // REQ-AXO-902217 — DETERMINISTIC encode-storm tripwire replaces the
+        // wall-clock ceiling (which flaked under CPU saturation). The pathology
+        // this test guards IS an encode storm: pre-fix ~4.5k precise encodes
+        // (one per segment) spun >40 s. Post-fix the fan-out cap byte-estimates
+        // past MAX_PRECISE_ENCODE_CHUNKS, so the encode count is structurally
+        // bounded — assert the cause, not the (load-dependent) symptom.
+        crate::embedding_profile::encode_counter::reset();
         let chunks = build_symbol_chunks(&symbol, &content);
-        let elapsed = t0.elapsed();
+        let encodes = crate::embedding_profile::encode_counter::get();
 
-        // Pre-fix: >40 s. Post-fix (byte estimates past the fan-out cap): sub-s.
-        // Generous ceiling so cargo-test debug timing never flakes, yet a true
-        // per-chunk encode storm (thousands × ms) cannot fit.
-        let ceiling = if cfg!(debug_assertions) {
-            std::time::Duration::from_secs(8)
-        } else {
-            std::time::Duration::from_secs(3)
-        };
         assert!(
-            elapsed < ceiling,
-            "640 KB log-shaped document_body chunking took {elapsed:?} (limit {ceiling:?}; pre-fix encode-storm spun >40 s)"
+            encodes <= ENCODE_STORM_CEILING,
+            "640 KB log-shaped document_body must not encode-storm: {encodes} encodes \
+             (ceiling {ENCODE_STORM_CEILING}; pre-fix was ~4500 ⇒ >40 s)"
         );
         // Root fix bounds the fan-out: pre-fix this body produced ~28 769
         // micro-chunks (body_budget floored), then `fuse_small_chunks` choked.
@@ -1599,9 +1608,19 @@ mod tests {
         let line_count = content.lines().count();
         let symbol = synthetic_symbol("document_body", line_count.max(1));
 
-        let t0 = std::time::Instant::now();
+        // REQ-AXO-902217 — deterministic SUPER-LINEARITY tripwire replaces the
+        // wall-clock ceiling (this is the assertion that flaked under CPU
+        // saturation). Unlike the byte-estimated paths above, this body legitimately
+        // takes the PRECISE path: the linear DP encodes each body line once via the
+        // memo (measured 12 247 encodes for ~12 700 lines ⇒ ~1·N, exactly the cost
+        // `large_body_chunks_fast_contiguous_and_bounded` documents). So the honest
+        // bound here is the same 4·N super-linearity guard, NOT a flat storm cap —
+        // it sits far above the linear cost and far below an O(N²) reintroduction.
+        // THIS is why the old 8 s wall-clock flaked: 12 k real BPE encodes cost
+        // seconds in a debug build, so a saturated CPU tipped it over.
+        crate::embedding_profile::encode_counter::reset();
         let chunks = build_symbol_chunks(&symbol, &content);
-        let elapsed = t0.elapsed();
+        let encodes = crate::embedding_profile::encode_counter::get();
 
         // Pre-fix this floored-budget body fanned out into thousands of micro
         // chunks; the coarse fallback now bounds the COUNT.
@@ -1614,14 +1633,11 @@ mod tests {
             chunks.len() > 1,
             "a 400 KB body must still split into multiple chunks"
         );
-        let ceiling = if cfg!(debug_assertions) {
-            std::time::Duration::from_secs(8)
-        } else {
-            std::time::Duration::from_secs(3)
-        };
         assert!(
-            elapsed < ceiling,
-            "collapsed-budget chunking took {elapsed:?} (limit {ceiling:?})"
+            encodes < line_count * 4,
+            "collapsed-budget chunking re-encoded super-linearly: {encodes} encodes \
+             for {line_count} lines (linear cost is ~N; an O(N²) regression would be ~{}M)",
+            (line_count * line_count) / 2 / 1_000_000
         );
         // Coarse fallback guarantees contiguous, gap-free coverage.
         for w in chunks.windows(2) {
@@ -1659,13 +1675,17 @@ mod tests {
             "must be a single physical line"
         );
 
-        let t0 = std::time::Instant::now();
+        // REQ-AXO-902217 — deterministic encode bound replaces the wall-clock
+        // ceiling (flaked under CPU saturation; the real invariant is that the
+        // giant-line windowing never re-encodes per segment).
+        crate::embedding_profile::encode_counter::reset();
         let chunks = build_symbol_chunks(&symbol, &content);
-        let elapsed = t0.elapsed();
+        let encodes = crate::embedding_profile::encode_counter::get();
 
         assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "giant-line chunking took {elapsed:?}"
+            encodes <= ENCODE_STORM_CEILING,
+            "giant-line windowing must not encode-storm: {encodes} encodes \
+             (ceiling {ENCODE_STORM_CEILING})"
         );
         assert!(
             chunks.len() > 1,
