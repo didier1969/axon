@@ -145,6 +145,20 @@ mod tests {
                 }),
                 "inc must carry purity=pure"
             );
+            // llmlang REQ-LLL-208 (DEC-LLL-081 tranche 1a): export-ist now carries the contract
+            // PREDICATE TEXT (not just counts), so the generic `properties` map surfaces a REQ's
+            // acceptance-criteria — the intention↔contract leg of the active loop. `inc`'s single
+            // ensures renders `result == x + 1`; the string flows straight into `properties`.
+            assert!(
+                result.symbols.iter().any(|s| {
+                    s.name == "inc"
+                        && s.properties
+                            .get("ensures")
+                            .map(|e| e.contains("result") && e.contains("=="))
+                            .unwrap_or(false)
+                }),
+                "inc must carry its ensures predicate TEXT (intention↔contract bridge)"
+            );
             assert!(
                 result.relations.iter().any(|r| r.from == "twice" && r.to == "inc"),
                 "twice→inc call edge must be captured"
