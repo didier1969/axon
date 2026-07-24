@@ -8,7 +8,7 @@ defmodule AxonDashboardWeb.Live.Nav do
   """
   use Phoenix.Component
 
-  attr :current, :atom, required: true, doc: ":pipeline | :projects | :mcp | :drift"
+  attr :current, :atom, required: true, doc: ":pipeline | :projects | :mcp | :drift | :wiring"
   attr :build_id, :string, default: "n/a"
   attr :install_generation, :string, default: "n/a"
   attr :runtime_mode, :string, default: "unknown"
@@ -41,6 +41,7 @@ defmodule AxonDashboardWeb.Live.Nav do
             <.nav_link href="/" current?={@current == :pipeline} label="Pipeline" />
             <.nav_link href="/projects" current?={@current == :projects} label="Projects" />
             <.nav_link href="/drift" current?={@current == :drift} label="Drift" />
+            <.nav_link href="/wiring" current?={@current == :wiring} label="Wiring" />
             <.nav_link href="/mcp" current?={@current == :mcp} label="MCP" />
           </nav>
 
