@@ -17,7 +17,6 @@ use crate::runtime_writer_guard::WriterGuard;
 // Pipeline_v2 (REQ-AXO-289 / CPT-AXO-054) owns the ingestion path.
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::future::pending;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
@@ -1086,38 +1085,82 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         main_background::spawn_soll_embedding_sweep(graph_store.clone());
     }
 
-    if let Some(tel_listener) = tel_listener {
-        loop {
-            let (mut socket, addr) = match tel_listener.accept().await {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
+    // REQ-AXO-902233 — graceful shutdown. Both keep-alive paths (the telemetry
+    // accept loop and the bare park) now RACE a SIGTERM/SIGINT future via
+    // `select!`, so a process-compose stop (or an OS reboot) unwinds the runtime
+    // and lets the process EXIT instead of parking forever. Root cause of the
+    // brain-zombie-terminating incident (2026-07-13): the never-resolving
+    // keep-alive left the process stuck in `Terminating` until SIGKILL, after
+    // which no fresh brain was spawned → total outage. Symmetric for both roles
+    // (brain + indexer share `boot`); on the indexer this also gives Drop a chance
+    // to release the GPU session on stop instead of a hard kill.
+    let telemetry_loop = async {
+        if let Some(tel_listener) = tel_listener {
+            loop {
+                let (mut socket, addr) = match tel_listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
 
-            info!("New Telemetry connection from {:?}", addr);
+                info!("New Telemetry connection from {:?}", addr);
 
-            let ready_event = BridgeEvent::SystemReady {
-                start_time_utc: boot_time.clone(),
-            };
-            let ready_msg = format!(
-                "Axon Telemetry Ready\n{}\n",
-                serde_json::to_string(&ready_event).unwrap()
-            );
-            let _ = socket.write_all(ready_msg.as_bytes()).await;
+                let ready_event = BridgeEvent::SystemReady {
+                    start_time_utc: boot_time.clone(),
+                };
+                let ready_msg = format!(
+                    "Axon Telemetry Ready\n{}\n",
+                    serde_json::to_string(&ready_event).unwrap()
+                );
+                let _ = socket.write_all(ready_msg.as_bytes()).await;
 
-            main_telemetry::spawn_telemetry_connection(
-                socket,
-                graph_store.clone(),
-                queue_store.clone(),
-                projects_root_str.clone(),
-                current_boot_id.clone(),
-                results_tx.subscribe(),
-                results_tx.clone(),
-            );
+                main_telemetry::spawn_telemetry_connection(
+                    socket,
+                    graph_store.clone(),
+                    queue_store.clone(),
+                    projects_root_str.clone(),
+                    current_boot_id.clone(),
+                    results_tx.subscribe(),
+                    results_tx.clone(),
+                );
+            }
+        } else {
+            std::future::pending::<()>().await;
         }
-    } else {
-        pending::<()>().await;
-        #[allow(unreachable_code)]
-        Ok(())
+    };
+
+    tokio::select! {
+        _ = telemetry_loop => {}
+        _ = shutdown_signal() => {
+            info!("🛑 Shutdown signal (SIGTERM/SIGINT) received — {:?} runtime unwinding for a clean exit (REQ-AXO-902233)", profile.role);
+        }
+    }
+    Ok(())
+}
+
+/// REQ-AXO-902233 — resolves on the first SIGTERM (process-compose stop, OS
+/// reboot) or SIGINT (Ctrl-C). Replaces the never-resolving `pending()`
+/// keep-alive so the runtime unwinds and the process EXITS promptly instead of
+/// lingering in `Terminating` until SIGKILL (brain-zombie incident 2026-07-13).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = sigterm.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+            }
+            Err(err) => {
+                error!(error = %err, "SIGTERM handler install failed; falling back to Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
