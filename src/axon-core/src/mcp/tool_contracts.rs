@@ -59,6 +59,36 @@ pub(crate) struct QueryInput {
     pub semantic: Option<String>,
 }
 
+/// `idle_drop` operation.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum IdleDropAction {
+    /// Read the current desired state (and where it came from).
+    Get,
+    /// Arm or disarm the idle-drop, effective within one watchdog tick (~5 s),
+    /// with NO restart.
+    Set,
+}
+
+/// `idle_drop` — REQ-AXO-902234: arm/disarm the GPU idle-drop watchdog at
+/// RUNTIME. Writes `axon.EmbedderControl`; the indexer picks it up via
+/// `LISTEN embedder_control`, so no restart (hence no GPU teardown) is needed.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct IdleDropInput {
+    /// `get` (default) reads the desired state; `set` writes it.
+    #[serde(default)]
+    pub action: Option<IdleDropAction>,
+    /// `set` only, REQUIRED there: `true` arms the idle-drop (idle VRAM is
+    /// reclaimed after `seconds`), `false` disarms it (session stays resident —
+    /// the DEC-AXO-901631 always-resident behaviour).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// `set` only, optional: idle threshold in seconds before the resident GPU
+    /// session is dropped (clamped to >= 1). Left unchanged when omitted.
+    #[serde(default)]
+    pub seconds: Option<u64>,
+}
+
 /// `soll_manager` operation.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -212,9 +242,19 @@ pub(crate) struct ContractEvolveInput {
     pub action: ContractEvolveAction,
 }
 
-/// Tools currently served by a derived schema (tracer-bullet set).
-pub(crate) const DERIVED_TOOLS: &[&str] =
-    &["sql", "query", "soll_manager", "contract_status", "contract_evolve"];
+/// Tools currently served by a derived schema (tracer-bullet set + every tool
+/// born after GUI-AXO-1026, which mandates the derived contract for new tools).
+pub(crate) const DERIVED_TOOLS: &[&str] = &[
+    "sql",
+    "query",
+    "soll_manager",
+    "contract_status",
+    "contract_evolve",
+    // REQ-AXO-902234 — listing it here is what puts the new tool under the
+    // integrity tests (schema present + object, zero $ref/$defs, catalog serves
+    // the derived schema rather than a literal).
+    "idle_drop",
+];
 
 /// REQ-AXO-901949 — single-source interaction-graph record for a tool.
 ///
@@ -243,6 +283,17 @@ pub(crate) struct ToolRouting {
 /// exactly — this is a co-location, not a behaviour change.
 pub(crate) fn tool_routing(name: &str) -> Option<ToolRouting> {
     Some(match name {
+        // REQ-AXO-902234 — co-located routing (GUI-AXO-1026 inv.6): the natural
+        // follow-up is OBSERVING the effect, since the policy write is desired
+        // state applied by another process.
+        "idle_drop" => ToolRouting {
+            follow_ups: &["embedding_status", "status"],
+            goal: "arm or disarm idle GPU VRAM reclamation without a restart",
+            stage: "runtime_operation",
+            token_hint:
+                "Set the policy once, then confirm the EFFECT with `embedding_status` (lifecycle_sleep_count / compute) rather than re-reading the policy.",
+            use_when: "use when the GPU must be freed at idle (or kept resident for max drain throughput) and a restart is unacceptable",
+        },
         "sql" => ToolRouting {
             follow_ups: &["schema_overview", "query_examples"],
             goal: "move to the next highest-signal MCP step",
@@ -621,6 +672,9 @@ pub(crate) fn derived_input_schema(name: &str) -> Option<Value> {
         "soll_manager" => generator().into_root_schema_for::<SollManagerInput>(),
         "contract_status" => generator().into_root_schema_for::<ContractStatusInput>(),
         "contract_evolve" => generator().into_root_schema_for::<ContractEvolveInput>(),
+        // REQ-AXO-902234 — new tools are born on the derived contract, never on a
+        // hand-written literal (GUI-AXO-1026 inv.1).
+        "idle_drop" => generator().into_root_schema_for::<IdleDropInput>(),
         _ => return None,
     };
     let mut value = serde_json::to_value(schema).ok()?;
@@ -675,6 +729,14 @@ fn soll_manager_conditional_clauses() -> Value {
 pub(crate) fn conditional_clauses_for(name: &str) -> Value {
     match name {
         "soll_manager" => soll_manager_conditional_clauses(),
+        // REQ-AXO-902234 — `set` without `enabled` is the one malformed
+        // `idle_drop` call worth rejecting early (it would otherwise silently
+        // mean "keep current"). Kept OUT of the advertised schema per
+        // REQ-AXO-901990: a flat schema stays bindable by every MCP client.
+        "idle_drop" => serde_json::json!([
+            { "if": { "properties": { "action": { "const": "set" } } },
+              "then": { "required": ["enabled"] } }
+        ]),
         _ => Value::Null,
     }
 }

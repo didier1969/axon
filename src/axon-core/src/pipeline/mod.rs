@@ -51,6 +51,9 @@
 //! `cargo run --release --bin axon-bench-pipeline-v2 -- --source PATH --gpu`
 
 pub mod channels;
+// REQ-AXO-902234 — desired-state consumer (LISTEN embedder_control) that lets the
+// brain flip the idle-drop policy without restarting the indexer.
+pub mod embedder_control_listener;
 pub mod embedder_gpu;
 pub mod in_flight;
 pub mod indexed_file_cache;

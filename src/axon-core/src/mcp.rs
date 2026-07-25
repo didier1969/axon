@@ -1565,6 +1565,9 @@ impl McpServer {
             "diagnose_indexing" => self.axon_diagnose_indexing(arguments),
             "embedding_status" => self.axon_embedding_status(arguments),
             "embed_provider" => self.axon_embed_provider(arguments),
+            // REQ-AXO-902234 — sibling of embed_provider, but cross-process: it
+            // writes a durable control row the indexer consumes via NOTIFY.
+            "idle_drop" => self.axon_idle_drop(arguments),
             "inspect" => self.axon_inspect(arguments),
             "audit" => self.axon_audit(arguments),
             "impact" => self.axon_impact(arguments),

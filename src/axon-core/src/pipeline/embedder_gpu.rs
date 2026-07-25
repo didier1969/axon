@@ -160,13 +160,55 @@ impl B2Embedder for GpuB2Embedder {
     }
 }
 
+/// REQ-AXO-902234 — RUNTIME idle-drop state, flipped without a restart.
+///
+/// `u8`: 0 = unset (fall back to the env seed), 1 = enabled, 2 = disabled. The
+/// tri-state matters: it lets the control-row (written by the `idle_drop` MCP
+/// tool, delivered to this process via `LISTEN embedder_control`) override the
+/// env in BOTH directions, which a plain bool could not express.
+///
+/// Same shape as `embedder.rs::QUERY_EMBED_PROVIDER_OVERRIDE`, but fed by a PG
+/// NOTIFY instead of an in-process call: the watchdog lives in `axon-indexer`
+/// while the MCP tool lives in `axon-brain` (two processes).
+static IDLE_DROP_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// REQ-AXO-902234 — runtime `t_idle` seconds; 0 = unset (env seed applies).
+static IDLE_SECONDS_OVERRIDE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// REQ-AXO-902234 — apply a control-plane update (called by the control
+/// listener on `LISTEN embedder_control`, and at boot from the seeded row).
+/// `seconds` is clamped to ≥1 s so the gate stays meaningful, mirroring the env
+/// path.
+pub fn apply_idle_drop_control(enabled: bool, seconds: u64) {
+    IDLE_DROP_OVERRIDE.store(
+        if enabled { 1 } else { 2 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    IDLE_SECONDS_OVERRIDE.store(seconds.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// REQ-AXO-902220 — idle-drop opt-in. Default OFF: leaving it off keeps the
 /// DEC-AXO-901631 always-resident behaviour (zero wake-stutter, max drain
 /// throughput) for every deployment incl. the client package (MIL-AXO-043).
-/// The operator flips `AXON_EMBEDDER_IDLE_DROP=1` on a workstation where
-/// reclaiming idle VRAM for another GPU consumer matters more than the one-off
-/// 1-3 s reload on the next indexing burst.
+///
+/// REQ-AXO-902234 — precedence: the RUNTIME override (control-row via NOTIFY)
+/// wins when set; otherwise the `AXON_EMBEDDER_IDLE_DROP` env acts as the boot
+/// SEED (operator decision D1 — the env stays the safety net on a fresh DB, so an
+/// activation can never silently vanish the way it did before this REQ).
+///
+/// Read on EVERY watchdog tick, so a flip takes effect within one tick (5 s)
+/// with no restart and no GPU teardown.
 pub fn idle_drop_enabled() -> bool {
+    match IDLE_DROP_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => idle_drop_enabled_from_env(),
+    }
+}
+
+/// The env SEED half of [`idle_drop_enabled`] (REQ-AXO-902234 D1). Also what the
+/// indexer seeds the control-row from at boot.
+pub fn idle_drop_enabled_from_env() -> bool {
     matches!(
         std::env::var("AXON_EMBEDDER_IDLE_DROP")
             .ok()
@@ -178,13 +220,28 @@ pub fn idle_drop_enabled() -> bool {
 
 /// REQ-AXO-902220 — idle threshold (seconds) before the resident GPU session
 /// is dropped. Default 20 s (operator-chosen, aggressive). Clamped to ≥1 s so
-/// the gate always stays meaningful. Override via `AXON_EMBEDDER_IDLE_SECONDS`.
+/// the gate always stays meaningful. REQ-AXO-902234: runtime override first,
+/// `AXON_EMBEDDER_IDLE_SECONDS` as the boot seed.
 pub fn idle_drop_seconds() -> u64 {
+    match IDLE_SECONDS_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => idle_drop_seconds_from_env(),
+        n => n,
+    }
+}
+
+/// The env SEED half of [`idle_drop_seconds`] (REQ-AXO-902234 D1).
+pub fn idle_drop_seconds_from_env() -> u64 {
     std::env::var("AXON_EMBEDDER_IDLE_SECONDS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .map(|v| v.max(1))
         .unwrap_or(20)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_idle_drop_control_for_tests() {
+    IDLE_DROP_OVERRIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+    IDLE_SECONDS_OVERRIDE.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// REQ-AXO-902220 — process-level idle VRAM reclamation watchdog.
@@ -204,11 +261,15 @@ pub fn idle_drop_seconds() -> u64 {
 /// lifecycle singleton, so `last_used` is global — the watchdog drops every
 /// session together on global idle, and each reloads independently on its next
 /// batch.
-pub fn spawn_idle_watchdog(
-    embedders: Vec<Arc<GpuB2Embedder>>,
-    t_idle: Duration,
-    check_interval: Duration,
-) {
+/// REQ-AXO-902234 — the watchdog is now spawned unconditionally for real GPU
+/// sessions and re-reads [`idle_drop_enabled`] + [`idle_drop_seconds`] on EVERY
+/// tick. Two consequences, both wanted:
+///   * a control-row flip takes effect within one `check_interval` (5 s) with NO
+///     restart — hence no GPU teardown, the operation this REQ exists to avoid;
+///   * `t_idle` is no longer frozen at spawn, so `idle_drop set seconds=…` is
+///     live too.
+/// When disabled the tick is a single atomic load — cheap enough to leave armed.
+pub fn spawn_idle_watchdog(embedders: Vec<Arc<GpuB2Embedder>>, check_interval: Duration) {
     if embedders.is_empty() {
         return;
     }
@@ -217,6 +278,10 @@ pub fn spawn_idle_watchdog(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
+            if !idle_drop_enabled() {
+                continue;
+            }
+            let t_idle = Duration::from_secs(idle_drop_seconds());
             if process_lifecycle().should_drop_now(t_idle) {
                 let mut dropped = 0usize;
                 for embedder in &embedders {
@@ -276,8 +341,44 @@ mod tests {
 
     #[test]
     fn empty_watchdog_fleet_is_a_noop_and_does_not_panic() {
-        // No GPU sessions (NoOp fallback path) → nothing to arm.
-        spawn_idle_watchdog(Vec::new(), Duration::from_secs(20), Duration::from_secs(5));
+        // No GPU sessions (NoOp fallback path) → nothing to arm. Invariant kept
+        // by REQ-AXO-902234's always-spawn change: the guard is `gpu_sessions`
+        // being non-empty, NOT the policy flag.
+        spawn_idle_watchdog(Vec::new(), Duration::from_secs(5));
+    }
+
+    /// REQ-AXO-902234 — the runtime override must beat the env in BOTH
+    /// directions (that is why the atomic is a tri-state and not a bool).
+    #[test]
+    fn runtime_control_overrides_env_both_ways() {
+        reset_idle_drop_control_for_tests();
+        // env says OFF …
+        unsafe { std::env::remove_var("AXON_EMBEDDER_IDLE_DROP") };
+        assert!(!idle_drop_enabled(), "env seed OFF applies while unset");
+
+        // … control-row says ON → ON wins (the `idle_drop set enabled=true` path).
+        apply_idle_drop_control(true, 42);
+        assert!(idle_drop_enabled(), "runtime ON must beat an OFF env");
+        assert_eq!(idle_drop_seconds(), 42, "runtime seconds must beat the env");
+
+        // env says ON, control-row says OFF → OFF wins (the disable path that a
+        // plain bool override could not express).
+        unsafe { std::env::set_var("AXON_EMBEDDER_IDLE_DROP", "1") };
+        apply_idle_drop_control(false, 7);
+        assert!(!idle_drop_enabled(), "runtime OFF must beat an ON env");
+
+        // back to unset → env seed governs again.
+        reset_idle_drop_control_for_tests();
+        assert!(idle_drop_enabled(), "cleared override falls back to the env seed");
+        unsafe { std::env::remove_var("AXON_EMBEDDER_IDLE_DROP") };
+    }
+
+    #[test]
+    fn runtime_control_clamps_zero_seconds() {
+        reset_idle_drop_control_for_tests();
+        apply_idle_drop_control(true, 0);
+        assert_eq!(idle_drop_seconds(), 1, "0 s would make the gate meaningless");
+        reset_idle_drop_control_for_tests();
     }
 
     /// REQ-AXO-902220 SHIP-GATE (advisor) — GPU-gated, `#[ignore]`d so the

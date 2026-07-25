@@ -1129,6 +1129,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "idle_drop",
+                "description": "[SYSTEM] REQ-AXO-902234 — get/set the GPU idle-drop policy at RUNTIME, no restart. action=get (default) reports the desired state (armed + t_idle + who set it). action=set with enabled=true|false arms/disarms it; optional seconds sets the idle threshold. Writes a DURABLE control row (survives restarts AND reboots — unlike the boot-only env var it replaces); the indexer applies it within ~5 s via LISTEN embedder_control, so the GPU is never torn down. Use enabled=false to keep the session resident for max drain throughput, true to reclaim idle VRAM for another GPU consumer.",
+                "inputSchema": { "$comment": "derived from tool_contracts::IdleDropInput — injected post-build" }
+            },
+            {
                 "name": "audit",
                 "description": "[GOVERNANCE] In-depth compliance check (security, quality, anti-patterns, technical debt).",
                 "inputSchema": {

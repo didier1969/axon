@@ -139,6 +139,11 @@ pub fn load_canonical_ddl_files() -> Vec<String> {
             "23_soll_traceability_notify.sql",
             include_str!("../../../../db/ddl/23_soll_traceability_notify.sql"),
         ),
+        // REQ-AXO-902234 — embedder control plane (desired state, brain → indexer).
+        (
+            "24_embedder_control.sql",
+            include_str!("../../../../db/ddl/24_embedder_control.sql"),
+        ),
     ];
     let mut stmts = Vec::new();
     for (_name, body) in FILES {

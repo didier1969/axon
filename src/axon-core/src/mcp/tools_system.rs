@@ -245,6 +245,124 @@ impl McpServer {
         }))
     }
 
+    /// REQ-AXO-902234 — runtime arm/disarm of the GPU idle-drop watchdog WITHOUT
+    /// a restart. Writes the DESIRED state to `axon.EmbedderControl`; the PG
+    /// trigger notifies `embedder_control`, and the indexer's listener flips the
+    /// atomics the watchdog re-reads each tick (~5 s).
+    ///
+    /// Why a PG row and not an in-process atomic like `embed_provider`: the
+    /// watchdog lives in `axon-indexer`, this tool in `axon-brain` — two
+    /// processes. The row ALSO makes the setting durable, which fixes the original
+    /// defect (an env var read once at boot, so an activation was lost on every
+    /// restart).
+    pub(crate) fn axon_idle_drop(&self, args: &Value) -> Option<Value> {
+        const ROLE: &str = "indexer";
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("get");
+
+        // Desired state as currently stored (also the `get` answer).
+        let read_row = || -> Option<(bool, i64, String)> {
+            let raw = self
+                .graph_store
+                .execute_raw_sql_gateway(&format!(
+                    "SELECT idle_drop_enabled, idle_seconds, COALESCE(updated_by,'') \
+                     FROM axon.EmbedderControl WHERE process_role = '{ROLE}'"
+                ))
+                .ok()?;
+            let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).ok()?;
+            let row = rows.first()?;
+            // The SQL gateway renders every column as a string (see
+            // tools_system_debug::json_i64) — tolerate both shapes.
+            let enabled = row.first().map(|v| v == "true" || v == true).unwrap_or(false);
+            let seconds = row
+                .get(1)
+                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse::<i64>().ok()))
+                .unwrap_or(0);
+            let by = row
+                .get(2)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Some((enabled, seconds, by))
+        };
+
+        if action == "set" {
+            let Some(enabled) = args.get("enabled").and_then(|v| v.as_bool()) else {
+                // GUI-AXO-1026 inv.5 — repair AS DATA, at the recency edge.
+                return Some(json!({
+                    "content": [{ "type": "text", "text":
+                        "idle_drop action=set requires `enabled` (true = reclaim idle VRAM, false = keep the session resident)." }],
+                    "isError": true,
+                    "data": { "status": "input_invalid", "parameter_repair": {
+                        "invalid_field": "enabled",
+                        "accepted_values": [true, false],
+                        "corrected_call": { "name": "idle_drop", "arguments": { "action": "set", "enabled": true } }
+                    } }
+                }));
+            };
+            let seconds = args.get("seconds").and_then(|v| v.as_u64()).map(|s| s.max(1));
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            // `seconds` omitted ⇒ keep the stored threshold (documented in the
+            // input contract) rather than silently resetting it to the default.
+            let seconds_update = match seconds {
+                Some(_) => "EXCLUDED.idle_seconds",
+                None => "axon.EmbedderControl.idle_seconds",
+            };
+            let seconds_insert = seconds.unwrap_or(20);
+            let sql = format!(
+                "INSERT INTO axon.EmbedderControl \
+                 (process_role, idle_drop_enabled, idle_seconds, updated_ms, updated_by) \
+                 VALUES ('{ROLE}', {enabled}, {seconds_insert}, {now_ms}, 'mcp:idle_drop') \
+                 ON CONFLICT (process_role) DO UPDATE SET \
+                   idle_drop_enabled = EXCLUDED.idle_drop_enabled, \
+                   idle_seconds = {seconds_update}, \
+                   updated_ms = EXCLUDED.updated_ms, \
+                   updated_by = EXCLUDED.updated_by"
+            );
+            return match self.graph_store.execute_raw_sql_gateway(&sql) {
+                Ok(_) => {
+                    let (_, stored_seconds, _) = read_row().unwrap_or((enabled, seconds_insert as i64, String::new()));
+                    Some(json!({
+                        "content": [{ "type": "text", "text": format!(
+                            "GPU idle-drop {} (t_idle={} s). The indexer applies it within ~5 s via LISTEN embedder_control — no restart, no GPU teardown. Durable: survives restarts and reboots.",
+                            if enabled { "ARMED" } else { "DISARMED" },
+                            stored_seconds
+                        ) }],
+                        "data": {
+                            "status": "ok",
+                            "idle_drop_enabled": enabled,
+                            "idle_seconds": stored_seconds,
+                            "applies_in": "<=5s (watchdog tick)",
+                            "next_action": { "kind": "continue_with_follow_up_tool", "tool": "embedding_status", "when": "after_5s" }
+                        }
+                    }))
+                }
+                Err(e) => Some(json!({
+                    "content": [{ "type": "text", "text": format!("idle_drop set failed: {e}") }],
+                    "isError": true,
+                    "data": { "status": "error" }
+                })),
+            };
+        }
+
+        match read_row() {
+            Some((enabled, seconds, by)) => Some(json!({
+                "content": [{ "type": "text", "text": format!(
+                    "GPU idle-drop desired state: {} (t_idle={} s, set by `{}`). Flip it with action=set, enabled=true|false — no restart. Observe the effect via `embedding_status` (lifecycle_sleep_count).",
+                    if enabled { "ARMED" } else { "DISARMED" }, seconds,
+                    if by.is_empty() { "unknown" } else { &by }
+                ) }],
+                "data": { "status": "ok", "idle_drop_enabled": enabled, "idle_seconds": seconds, "updated_by": by }
+            })),
+            // No row yet = the indexer has not booted since this feature landed;
+            // it seeds the row from the env on its next boot (REQ-AXO-902234 D1).
+            None => Some(json!({
+                "content": [{ "type": "text", "text":
+                    "No idle-drop control row yet — the indexer seeds it from AXON_EMBEDDER_IDLE_DROP on its next boot. `action=set` creates it now." }],
+                "data": { "status": "ok", "idle_drop_enabled": null, "seeded": false }
+            })),
+        }
+    }
+
     pub(crate) fn axon_truth_check(&self, _args: &Value) -> Option<Value> {
         let canonical_count = |query: &str| -> i64 {
             self.graph_store

@@ -1055,6 +1055,20 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
                 refresh_store,
             );
             info!("ist_mutated listener spawned (REQ-AXO-901658/902005) — IST cache serve-stale async refresh wired");
+            // REQ-AXO-902234 — desired-state consumer, indexer-side ONLY: the
+            // idle-drop watchdog it steers lives in the pipeline (indexer), and a
+            // brain would only seed/obey a row it has no watchdog for. Reuses the
+            // URL already resolved for the ist_mutated listener above.
+            if profile.role == RuntimeBootRole::Indexer {
+                crate::pipeline::embedder_control_listener::spawn_embedder_control_listener(
+                    _url.clone(),
+                    crate::pipeline::embedder_control_listener::ROLE_INDEXER.to_string(),
+                );
+                info!(
+                    "embedder_control listener spawned (REQ-AXO-902234) — idle-drop policy \
+                     flippable at runtime via the `idle_drop` MCP tool, no restart"
+                );
+            }
             // REQ-AXO-901893 (LEGACY FEED PURGE) — the axon_registry_changed
             // listener (REQ-AXO-901675) was RIPPED with ingress_buffer: it
             // pushed an IngressSource::Scan subtree hint into the in-memory

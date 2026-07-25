@@ -430,21 +430,27 @@ pub fn spawn_pipeline_indexer(
                 }
             };
 
-        // REQ-AXO-902220 — arm the OPT-IN idle VRAM watchdog. Default OFF
-        // (`AXON_EMBEDDER_IDLE_DROP` unset) preserves DEC-AXO-901631's
-        // always-resident behaviour. Only real GPU sessions are droppable — the
-        // NoOp fallback leaves `gpu_sessions` empty, so no watchdog is spawned.
-        if !gpu_sessions.is_empty() && crate::pipeline::embedder_gpu::idle_drop_enabled() {
-            let t_idle =
-                std::time::Duration::from_secs(crate::pipeline::embedder_gpu::idle_drop_seconds());
+        // REQ-AXO-902220 / REQ-AXO-902234 — arm the idle VRAM watchdog whenever
+        // there are REAL GPU sessions. The NoOp fallback leaves `gpu_sessions`
+        // empty, so no watchdog is spawned (invariant preserved).
+        //
+        // 902234 changed the gate from "spawn only if enabled at boot" to
+        // ALWAYS-SPAWN + per-tick policy read: a watchdog that was never spawned
+        // has nothing to flip, so a runtime `idle_drop set enabled=true` could
+        // only take effect after a full restart — i.e. a GPU teardown, precisely
+        // the risky operation this REQ removes. Disabled state costs one atomic
+        // load per 5 s tick. DEC-AXO-901631's drain regime is untouched either
+        // way (during a drain `mark_used` fires every batch, so `should_drop_now`
+        // never trips).
+        if !gpu_sessions.is_empty() {
             info!(
-                t_idle_s = t_idle.as_secs(),
                 sessions = gpu_sessions.len(),
-                "pipeline: GPU idle-drop watchdog armed (REQ-AXO-902220)"
+                enabled = crate::pipeline::embedder_gpu::idle_drop_enabled(),
+                t_idle_s = crate::pipeline::embedder_gpu::idle_drop_seconds(),
+                "pipeline: GPU idle-drop watchdog armed (policy re-read each tick — REQ-AXO-902234)"
             );
             crate::pipeline::embedder_gpu::spawn_idle_watchdog(
                 gpu_sessions,
-                t_idle,
                 std::time::Duration::from_secs(5),
             );
         }
