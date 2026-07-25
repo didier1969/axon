@@ -143,12 +143,20 @@ if not_listening:
     port_list = ", ".join(str(p["port"]) for p in not_listening)
     print(f"--      ports not listening: {port_list}")
 
-# Sockets
+# Sockets. REQ-AXO-902242 — WARN only when the surface is genuinely unavailable.
+# Nothing ever binds the MCP unix socket (MCP is served over HTTP by design), so a
+# bare `exists` check printed a permanent WARN on a healthy runtime — noise that
+# trains operators and LLMs to ignore warnings. `satisfied_by` / `applicable` come
+# from axonctl, which already resolves this for the role contract (REQ-AXO-156).
 for s in data.get("sockets", []):
     name = s.get("name", "?")
     path = s.get("path", "?")
     if s.get("exists"):
         print(f"OK      {name} socket present ({path})")
+    elif not s.get("applicable", True):
+        print(f"--      {name} socket n/a for this role ({path})")
+    elif s.get("satisfied_by"):
+        print(f"OK      {name} served via {s['satisfied_by']} (no socket file by design)")
     else:
         print(f"WARN    {name} socket missing ({path})")
 

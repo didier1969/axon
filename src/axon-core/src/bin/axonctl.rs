@@ -1543,11 +1543,25 @@ struct PortStatus {
     listening: bool,
 }
 
+/// REQ-AXO-902242 — a socket's absence is only NEWS when the surface it backs is
+/// genuinely unavailable. `exists: false` alone made `status` print a permanent
+/// `WARN mcp socket missing` on a fully healthy live runtime: nothing ever binds
+/// the MCP unix socket (`runtime_boot.rs` binds ONLY the telemetry one; MCP is
+/// served over HTTP by design), so the file can never exist. The contract layer
+/// already knew this (`compute_role_contract_violations`, REQ-AXO-156) — the
+/// RENDER layer did not, and a warning that is always on trains operators and
+/// LLMs to ignore warnings.
 #[derive(Debug, Serialize)]
 struct SocketStatus {
     name: String,
     path: String,
     exists: bool,
+    /// What satisfies this surface when the socket file is absent (e.g.
+    /// `"http:44129"`). `None` = nothing does, so absence IS a problem.
+    satisfied_by: Option<String>,
+    /// False when this role never binds this socket at all (the MCP socket on an
+    /// indexer): not a warning, simply not applicable.
+    applicable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1558,6 +1572,33 @@ struct WriterGuardStatus {
     owner_pid: Option<i32>,
     owner_alive: bool,
     stale: bool,
+}
+
+/// REQ-AXO-902242 — build the MCP socket row with the CONTEXT that makes its
+/// absence readable. Pure so the "is this absence news?" decision is unit-tested
+/// instead of living inline in `cmd_status`:
+///   * an indexer never binds the MCP socket at all → not applicable;
+///   * a brain serving MCP over HTTP legitimately has no socket file → satisfied.
+/// Only a genuinely unreachable MCP surface leaves both empty, which is the one
+/// case `status` must still warn about.
+fn mcp_socket_status(
+    role: RuntimeRole,
+    path: String,
+    exists: bool,
+    mcp_http_listening: bool,
+    http_port: u16,
+) -> SocketStatus {
+    SocketStatus {
+        name: "mcp".into(),
+        path,
+        exists,
+        satisfied_by: if mcp_http_listening {
+            Some(format!("http:{http_port}"))
+        } else {
+            None
+        },
+        applicable: !matches!(role, RuntimeRole::Indexer),
+    }
 }
 
 fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
@@ -1592,18 +1633,28 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
         })
         .collect();
 
-    // Socket checks
+    // Socket checks. REQ-AXO-902242 — `mcp_http_listening` is computed HERE (it
+    // used to be derived further down, next to the role contract) so the socket
+    // rows can carry WHY an absence is benign. Single source: the same signal
+    // feeds `compute_role_contract_violations` below.
+    let mcp_http_listening = ports
+        .iter()
+        .any(|p| p.port == config.hydra_http_port && p.listening);
     let sockets = vec![
         SocketStatus {
             name: "telemetry".into(),
             path: config.telemetry_sock.to_string_lossy().into(),
             exists: config.telemetry_sock.exists(),
+            satisfied_by: None,
+            applicable: true,
         },
-        SocketStatus {
-            name: "mcp".into(),
-            path: config.mcp_sock.to_string_lossy().into(),
-            exists: config.mcp_sock.exists(),
-        },
+        mcp_socket_status(
+            config.role,
+            config.mcp_sock.to_string_lossy().into(),
+            config.mcp_sock.exists(),
+            mcp_http_listening,
+            config.hydra_http_port,
+        ),
     ];
 
     // Writer guard checks
@@ -1631,10 +1682,8 @@ fn cmd_status(config: InstanceConfig, json: bool) -> Result<()> {
     // indexer MUST expose its telemetry socket. A live process whose role
     // contract is broken is `degraded`, never `healthy`. REQ-AXO-156 — MCP
     // availability is satisfied via socket OR `hydra_http_port` listening,
-    // since production brains may serve HTTP-only.
-    let mcp_http_listening = ports
-        .iter()
-        .any(|p| p.port == config.hydra_http_port && p.listening);
+    // since production brains may serve HTTP-only. (REQ-AXO-902242 hoisted
+    // `mcp_http_listening` up to the socket rows — same value, one source.)
     let role_contract_violations =
         compute_role_contract_violations(config.role, &sockets, mcp_http_listening);
 

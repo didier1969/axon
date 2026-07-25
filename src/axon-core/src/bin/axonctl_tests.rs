@@ -83,7 +83,45 @@ fn socket(name: &str, exists: bool) -> SocketStatus {
         name: name.into(),
         path: format!("/tmp/{name}.sock"),
         exists,
+        // REQ-AXO-902242 — presentation-only fields; the contract logic under
+        // test reads `exists` + the `mcp_http_listening` argument, so the neutral
+        // values here keep these cases exactly as they were.
+        satisfied_by: None,
+        applicable: true,
     }
+}
+
+// REQ-AXO-902242 — the MCP socket row must explain WHY its absence is benign, so
+// `status` stops printing a permanent WARN on a healthy runtime (noise that
+// trains operators and LLMs to ignore warnings). The contract already resolved
+// this (REQ-AXO-156); these cases pin the RENDER inputs.
+
+#[test]
+fn mcp_socket_row_is_satisfied_by_http_when_the_port_listens() {
+    let row = mcp_socket_status(RuntimeRole::Brain, "/tmp/x.sock".into(), false, true, 44129);
+    assert!(!row.exists, "no socket file is the normal HTTP-only case");
+    assert_eq!(row.satisfied_by.as_deref(), Some("http:44129"));
+    assert!(row.applicable, "a brain does expose an MCP surface");
+}
+
+#[test]
+fn mcp_socket_row_is_not_applicable_for_an_indexer() {
+    // An indexer never binds the MCP socket, so its absence is not even news.
+    let row = mcp_socket_status(RuntimeRole::Indexer, "/tmp/x.sock".into(), false, false, 44129);
+    assert!(!row.applicable);
+}
+
+#[test]
+fn mcp_socket_row_stays_bare_when_mcp_is_genuinely_unreachable() {
+    // NON-REGRESSION: the whole point is to silence the FALSE positive without
+    // silencing a real outage. No socket AND no HTTP on a brain must leave both
+    // fields empty, which is what makes `status` warn.
+    let row = mcp_socket_status(RuntimeRole::Brain, "/tmp/x.sock".into(), false, false, 44129);
+    assert!(row.satisfied_by.is_none(), "nothing satisfies the surface");
+    assert!(row.applicable, "and it IS expected for this role → warn");
+    // And the contract must flag it too, so status degrades rather than lying.
+    let violations = compute_role_contract_violations(RuntimeRole::Brain, &[row], false);
+    assert!(violations.contains(&"mcp_unavailable".to_string()));
 }
 
 #[test]
