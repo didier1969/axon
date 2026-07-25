@@ -942,8 +942,22 @@ impl McpServer {
 
         let mut all_results = Vec::new();
         for file in files {
+            // REQ-AXO-902240 — `EXISTS`, not a `LEFT JOIN Chunk`: the join emitted one
+            // row PER MATCHING CHUNK-PART, so a multi-chunk symbol was repeated and —
+            // since the fan-out precedes `LIMIT` — evicted other symbols from the
+            // budget. Note this site could NOT use `symbol_file_path_join()`: here
+            // `file_path` is the MATCHING predicate (not a mere projection), so
+            // collapsing to the first chunk part would drop symbols whose match lives
+            // in a later part. `EXISTS` expresses the real intent ("symbols with at
+            // least one chunk in this file"), dedups by construction, and lets PG stop
+            // at the first hit.
             let query = format!(
-                "SELECT s.name, s.kind FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' WHERE ch.file_path LIKE '%{}%' LIMIT {}",
+                "SELECT s.name, s.kind FROM Symbol s \
+                 WHERE EXISTS ( \
+                     SELECT 1 FROM Chunk ch \
+                     WHERE ch.source_id = s.id AND ch.source_type = 'symbol' \
+                       AND ch.file_path LIKE '%{}%' \
+                 ) LIMIT {}",
                 file.replace("'", "''"),
                 limit
             );

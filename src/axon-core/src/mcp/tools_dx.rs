@@ -331,6 +331,37 @@ impl McpServer {
          OR lower(replace(replace(replace(replace(s.name, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%'"
     }
 
+    /// REQ-AXO-902240 — join that projects EXACTLY ONE `file_path` per symbol.
+    ///
+    /// The previous `LEFT JOIN Chunk ch ON ch.source_id = s.id` fanned a symbol out
+    /// to one row PER CHUNK-PART. 23 % of AXO symbols (2 236/9 633) carry ≥2 chunks;
+    /// the worst carries 690. Because the fan-out happens BEFORE the `LIMIT`, it
+    /// silently AMPUTATED recall rather than merely looking noisy: a measured
+    /// `LIMIT 10` returned only 4 distinct symbols, and one 690-chunk symbol could
+    /// consume the whole budget alone.
+    ///
+    /// Collapsing is behaviour-preserving for matching: `symbol_search_predicate`
+    /// only ever matches `s.name`, so `ch` exists SOLELY to project
+    /// `COALESCE(ch.file_path, '')`. (Do NOT reuse this in `axon_query_from_chunks`,
+    /// which genuinely matches on `c.file_path`.)
+    ///
+    /// LATERAL + `LIMIT 1` rather than a `ROW_NUMBER()` window: it probes per
+    /// candidate symbol through `chunk_project_source_idx`
+    /// (project_code, source_type, source_id) instead of ranking all 317 720
+    /// symbol-chunks. Measured on live AXO — the fan-out was ALSO a perf bug:
+    /// 424 ms (10 rows, duplicated) → 16 ms (7 rows, the real distinct matches).
+    ///
+    /// `chunk_part_index` tiebreak keeps the chosen path deterministic for the ~15
+    /// degenerate symbols spanning several files (markdown/HTML pseudo-symbols).
+    fn symbol_file_path_join() -> &'static str {
+        "LEFT JOIN LATERAL ( \
+             SELECT c2.file_path FROM Chunk c2 \
+             WHERE c2.project_code = s.project_code AND c2.source_type = 'symbol' \
+               AND c2.source_id = s.id \
+             ORDER BY c2.chunk_part_index, c2.file_path LIMIT 1 \
+         ) ch ON true "
+    }
+
     // Content-substance match only (file-name matching is
     // chunk_path_match_expression). Operates on the raw `c.content` column.
     fn chunk_search_predicate() -> &'static str {
@@ -755,6 +786,10 @@ impl McpServer {
         // cosine-distance operator; on dimension mismatch we fall
         // through to lexical-only.
         let base_predicate = Self::symbol_search_predicate();
+        // REQ-AXO-902240 — captured by the `{join}` placeholder in every arm below,
+        // so the one-row-per-symbol guarantee cannot drift between the semantic and
+        // lexical query shapes.
+        let join = Self::symbol_file_path_join();
         let (sql, params) = if let Some(emb) = embedding {
             let vec_literal = crate::postgres::vector::vector_literal(&emb).ok();
 
@@ -791,7 +826,7 @@ impl McpServer {
                             "{ann}\
                              SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri, ss.dist AS score \
                              FROM Symbol s \
-                             LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                             {join}\
                              LEFT JOIN sym_sem ss ON ss.source_id = s.id \
                              WHERE {} \
                                 OR ss.dist < 0.5 \
@@ -823,7 +858,7 @@ impl McpServer {
                             "{ann}\
                              SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri, ss.dist AS score \
                              FROM Symbol s \
-                             LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                             {join}\
                              LEFT JOIN sym_sem ss ON ss.source_id = s.id \
                              WHERE s.project_code = $proj AND ( {} \
                                 OR ss.dist < 0.5 \
@@ -841,7 +876,7 @@ impl McpServer {
                     (
                         format!(
                             "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
-                             FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                             FROM Symbol s {join}\
                              WHERE {} LIMIT {}",
                             base_predicate, query_limit
                         ),
@@ -851,7 +886,7 @@ impl McpServer {
                     (
                         format!(
                             "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
-                             FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                             FROM Symbol s {join}\
                              WHERE s.project_code = $proj AND ( {} ) LIMIT {}",
                             base_predicate, query_limit
                         ),
@@ -863,7 +898,7 @@ impl McpServer {
             (
                 format!(
                     "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
-                     FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                     FROM Symbol s {join}\
                      WHERE {} \
                      LIMIT {}",
                     base_predicate, query_limit
@@ -874,7 +909,7 @@ impl McpServer {
             (
                 format!(
                     "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
-                     FROM Symbol s LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
+                     FROM Symbol s {join}\
                      WHERE s.project_code = $proj AND ( {} ) LIMIT {}",
                     base_predicate, query_limit
                 ),

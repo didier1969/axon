@@ -26,11 +26,23 @@ impl McpServer {
         let name_match = Self::term_match_sql(terms, "s.name");
         let path_match = Self::path_match_sql(path_hints, "ch.file_path");
         let uri_term_match = Self::term_match_sql(terms, "ch.file_path");
+        // REQ-AXO-902240 — `DISTINCT ON (s.id)`: the plain join emitted one row PER
+        // CHUNK-PART, and since the fan-out precedes `LIMIT`, a multi-chunk symbol
+        // ate slots that belonged to other candidates (23 % of AXO symbols have ≥2
+        // chunks, worst case 690). Downstream `select_entry_candidates` already
+        // deduped the OUTPUT, so the visible bug was purely the burnt budget.
+        // Deliberately NOT `symbol_file_path_join()`: here `ch.file_path` is part of
+        // the MATCHING predicate (`uri_term_match` / `path_match`), so collapsing to
+        // the first chunk part would lose symbols whose match lives in a later part.
+        // `DISTINCT ON` keeps the match over ALL parts and emits one row per symbol;
+        // `ORDER BY s.id` also makes which rows survive `LIMIT` deterministic (it was
+        // arbitrary before, these lexical shapes carry no ORDER BY).
         let query = format!(
-            "SELECT s.id, s.name, s.kind, COALESCE(s.project_code, 'unknown'), COALESCE(ch.file_path, '') \
+            "SELECT DISTINCT ON (s.id) s.id, s.name, s.kind, COALESCE(s.project_code, 'unknown'), COALESCE(ch.file_path, '') \
              FROM Symbol s \
              LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
              WHERE ({name_match} OR {uri_term_match} OR {path_match}){project_filter} \
+             ORDER BY s.id, ch.chunk_part_index, ch.file_path \
              LIMIT {limit}",
             project_filter = Self::sql_project_filter_for_fields(project, &["s.project_code", "ch.project_code"]),
         );
@@ -91,11 +103,16 @@ impl McpServer {
             .map(|term| format!("'{}'", Self::escape_sql(term)))
             .collect::<Vec<_>>()
             .join(", ");
+        // REQ-AXO-902240 — same chunk fan-out as the sibling query above (one row per
+        // chunk-part, burning the `LIMIT` budget). `DISTINCT ON (s.id)` rather than
+        // `symbol_file_path_join()` because the project filter still needs
+        // `ch.project_code`, which the collapsed LATERAL does not expose.
         let query = format!(
-            "SELECT s.id, s.name, s.kind, COALESCE(s.project_code, 'unknown'), COALESCE(ch.file_path, '') \
+            "SELECT DISTINCT ON (s.id) s.id, s.name, s.kind, COALESCE(s.project_code, 'unknown'), COALESCE(ch.file_path, '') \
              FROM Symbol s \
              LEFT JOIN Chunk ch ON ch.source_id = s.id AND ch.source_type = 'symbol' \
              WHERE lower(s.name) IN ({exact_values}){project_filter} \
+             ORDER BY s.id, ch.chunk_part_index, ch.file_path \
              LIMIT {limit}",
             project_filter = Self::sql_project_filter_for_fields(project, &["s.project_code", "ch.project_code"]),
         );

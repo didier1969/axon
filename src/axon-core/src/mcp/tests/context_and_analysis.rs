@@ -2385,6 +2385,90 @@ fn test_axon_query_with_project() {
     assert!(result.get("problem_class").is_none(), "{result}");
 }
 
+/// REQ-AXO-902240 — a multi-chunk symbol must appear ONCE, and must not eat other
+/// symbols' `LIMIT` slots.
+///
+/// The pre-fix `LEFT JOIN Chunk` emitted one row PER CHUNK-PART. Because the
+/// fan-out happened BEFORE the `LIMIT`, it silently AMPUTATED recall: on live AXO a
+/// `LIMIT 10` returned only 4 distinct symbols, and 23 % of symbols carry ≥2 chunks
+/// (worst case 690). The pre-existing `query` tests could not catch this — they seed
+/// exactly ONE chunk per symbol, so they are structurally blind to a per-part
+/// fan-out. This test seeds THREE parts for one symbol plus a second symbol, and
+/// asserts on `data.results` (the JSON the LLM clients actually consume) rather than
+/// on the rendered markdown.
+#[test]
+fn test_axon_query_dedups_multi_chunk_symbols_and_preserves_recall() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    for sym in ["dedup_alpha", "dedup_beta"] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) \
+                 VALUES ('DDP::{sym}', '{sym}', 'function', false, true, false, 'DDP')"
+            ))
+            .unwrap();
+    }
+    // `dedup_alpha` is chunked into 3 parts — the exact shape that used to yield 3
+    // identical rows (same name, kind, path and score).
+    for part in 1..=3 {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash, chunk_part_index) \
+                 VALUES ('ddp-alpha-{part}', 'symbol', 'DDP::dedup_alpha', 'DDP', 'ddp/alpha.rs', 'h-alpha-{part}', {part})"
+            ))
+            .unwrap();
+    }
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash, chunk_part_index) \
+             VALUES ('ddp-beta-1', 'symbol', 'DDP::dedup_beta', 'DDP', 'ddp/beta.rs', 'h-beta-1', 1)",
+        )
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "query",
+            "arguments": { "query": "dedup_", "project": "DDP", "semantic": "lexical" }
+        })),
+        id: Some(json!(902_240)),
+    };
+    let result = server
+        .handle_request(req)
+        .unwrap()
+        .result
+        .expect("Expected result");
+
+    let names: Vec<String> = result
+        .get("data")
+        .and_then(|d| d.get("results"))
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let alpha_rows = names.iter().filter(|n| *n == "dedup_alpha").count();
+    assert_eq!(
+        alpha_rows, 1,
+        "a 3-part symbol must yield ONE row, got {alpha_rows} in {names:?}"
+    );
+    // Recall: the second symbol must still be there — pre-fix, alpha's extra rows
+    // consumed the budget that beta needed.
+    assert!(
+        names.iter().any(|n| n == "dedup_beta"),
+        "the other symbol must survive the LIMIT budget, got {names:?}"
+    );
+}
+
 /// REQ-AXO-901949 inv.5 — `query` graph r=1 expansion is a detail surface:
 /// omitted under brief (default), included under verbose/full. Proves `mode` is
 /// a real knob for normal-sized results, not a no-op until the text cap.
