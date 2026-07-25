@@ -332,7 +332,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string" },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." },
                         "limit": { "type": "integer" },
                         "top": { "type": "integer" },
                         "include_ist": { "type": "boolean" },
@@ -344,7 +344,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "mode": { "type": "string", "enum": ["rrf_trimodal"], "description": "REQ-AXO-91501: opt-in tri-modal RRF retrieval of SOLL nodes related to `seed_node` (ANN over the seed embedding + FTS on its title + 1-hop graph neighbours, fused via Reciprocal Rank Fusion). Requires `seed_node`." },
                         "seed_node": { "type": "string", "description": "REQ-AXO-91501: canonical SOLL id to seed the rrf_trimodal retrieval (e.g. \"REQ-AXO-289\")." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -353,9 +353,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. \"AXO\")." }
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. \"AXO\"). Auto-resolved from cwd when omitted (REQ-AXO-902239)." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -535,9 +535,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Required." }
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -546,9 +546,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Required." }
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -557,12 +557,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." },
                         "top": { "type": "integer", "description": "Top-N nodes returned. Default 20." },
                         "damping": { "type": "number", "description": "PageRank damping factor. Default 0.85." },
                         "iterations": { "type": "integer", "description": "PageRank iterations. Default 50." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -571,9 +571,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." }
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -582,9 +582,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." }
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -593,10 +593,10 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." },
                         "top": { "type": "integer", "description": "Max items per list (default 15, max 200)." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -605,10 +605,10 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." },
                         "top": { "type": "integer", "description": "Max orphans returned (default 20, max 200)." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -617,9 +617,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." }
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -628,12 +628,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." },
                         "from": { "type": "string", "description": "Source canonical IST id." },
                         "to": { "type": "string", "description": "Target canonical IST id." },
                         "max_radius": { "type": "integer", "description": "BFS depth cap. Default 20." }
                     },
-                    "required": ["project_code", "from", "to"]
+                    "required": ["from", "to"]
                 }
             },
             {
@@ -703,9 +703,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. \"AXO\")." }
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. \"AXO\"). Auto-resolved from cwd when omitted (REQ-AXO-902239)." }
                     },
-                    "required": ["project_code"]
+                    "required": []
                 }
             },
             {
@@ -1296,7 +1296,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project":      { "type": "string", "description": "Project code (required, e.g. 'AXO')." },
+                        "project":      { "type": "string", "description": "Project code (e.g. 'AXO'). Auto-resolved from cwd when omitted (REQ-AXO-902239)." },
                         "action":       { "type": "string", "description": "'read' (default) or 'record'.", "default": "read" },
                         "layer_pairs":  { "type": "array",  "description": "record: explicit pairs [{source, target}]. Omit to monitor the forbidden structural_invariant rules.", "items": { "type": "object" } },
                         "source_layer": { "type": "string", "description": "record: single-pair source layer prefix (alternative to layer_pairs)." },
@@ -1306,7 +1306,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "layer_pair":   { "type": "string", "description": "read: filter to one layer_pair key 'src->tgt'." },
                         "limit":        { "type": "integer", "description": "read: max rows (default 50, max 1000).", "default": 50 }
                     },
-                    "required": ["project"]
+                    "required": []
                 }
             },
             {

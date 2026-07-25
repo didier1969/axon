@@ -1465,6 +1465,130 @@ fn test_status_brief_text_surfaces_trust_boundary_and_next_best_action() {
     );
 }
 
+/// REQ-AXO-902239 — an allow-listed tool called WITHOUT its project argument must
+/// auto-resolve from the cwd, exactly as `query`/`inspect` always have.
+///
+/// Ground truth for this REQ: `soll_acyclic_audit` showed 82/82 failed calls in
+/// telemetry, not because it is broken (with the argument it answers fine) but
+/// because LLMs call it the way they call `query`. The rejection came from the
+/// handler, so the fix must land before the handler reads the arguments.
+#[test]
+fn test_allow_listed_tool_auto_resolves_project_code_from_cwd() {
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/test/axo-scope-fixture"))
+        .unwrap();
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/home/test/axo-scope-fixture");
+    }
+
+    // No `project_code` in the arguments at all.
+    let result = server
+        .execute_tool_direct("soll_acyclic_audit", &json!({}))
+        .expect("tool must answer");
+    let text = result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        !text.contains("requires a project_code"),
+        "the project scope must be auto-resolved, got: {text}"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+    }
+}
+
+/// REQ-AXO-902239 — the EXCLUSION list is the safety-critical half.
+///
+/// For a whole family of tools an ABSENT project means "every project".
+/// `embedding_status` returns a per-project rollup; auto-injecting a cwd-derived
+/// scope there would raise no error, it would SILENTLY NARROW the answer — a
+/// regression strictly worse than the visible failure this REQ fixes. This test is
+/// the guard that keeps the allow-list from quietly growing into a blanket
+/// injection.
+#[test]
+fn test_wildcard_scoped_tools_are_not_narrowed_by_auto_resolution() {
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/test/axo-scope-fixture"))
+        .unwrap();
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/home/test/axo-scope-fixture");
+    }
+
+    // The injector must leave the arguments untouched for an excluded tool …
+    let wildcard_args = json!({});
+    let untouched = server.with_resolved_project_scope("embedding_status", &wildcard_args);
+    assert!(
+        untouched.get("project").is_none() && untouched.get("project_code").is_none(),
+        "embedding_status must keep its wildcard scope, got {untouched}"
+    );
+    // … and likewise for a SOLL mutation, where writing into a GUESSED project would
+    // be irreversible.
+    let mutation_args = json!({"action": "create"});
+    let mutation = server.with_resolved_project_scope("soll_manager", &mutation_args);
+    assert!(
+        mutation.get("project_code").is_none(),
+        "soll_manager must never receive a guessed project_code, got {mutation}"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+    }
+}
+
+/// REQ-AXO-902239 — an EXPLICIT argument always wins, and the injection is
+/// observable.
+#[test]
+fn test_explicit_project_code_is_never_overwritten_and_source_is_reported() {
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/test/axo-scope-fixture"))
+        .unwrap();
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/home/test/axo-scope-fixture");
+    }
+
+    let explicit_args = json!({"project_code": "BKS"});
+    let explicit = server.with_resolved_project_scope("wiring", &explicit_args);
+    assert_eq!(
+        explicit.get("project_code").and_then(Value::as_str),
+        Some("BKS"),
+        "an explicit scope must never be overwritten by the cwd"
+    );
+    assert!(
+        explicit.get("project_code_source").is_none(),
+        "no injection happened, so nothing to report"
+    );
+
+    // Omitted → injected, and TAGGED so telemetry can measure the recovery rate.
+    let omitted_args = json!({});
+    let injected = server.with_resolved_project_scope("wiring", &omitted_args);
+    assert_eq!(
+        injected.get("project_code").and_then(Value::as_str),
+        Some("AXO")
+    );
+    assert_eq!(
+        injected.get("project_code_source").and_then(Value::as_str),
+        Some("cwd_auto"),
+        "without this tag the effect of the fix is unmeasurable"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+    }
+}
+
 #[test]
 fn test_auto_resolve_project_code_str_helper() {
     // REQ-AXO-089 (helper coverage) — auto_resolve_project_code_str is

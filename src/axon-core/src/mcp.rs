@@ -1486,11 +1486,109 @@ impl McpServer {
         )
     }
 
+    /// REQ-AXO-902239 — tools whose project scope may be auto-resolved from the cwd,
+    /// with the ARGUMENT KEY each one expects (`project` vs `project_code` — never
+    /// inject both).
+    ///
+    /// Why an explicit allow-list and not a blanket injection: for a whole family of
+    /// tools an ABSENT project means "every project" (`embedding_status` returns a
+    /// per-project rollup, `audit`/`health`/`diagnose_indexing`/`anomalies`/
+    /// `semantic_clones`/`status` default to `*`). Injecting there would raise no
+    /// error — it would SILENTLY NARROW the answer, a regression strictly worse than
+    /// today's visible failure. Also excluded on purpose:
+    ///   * SOLL mutations (`soll_manager` create, `soll_apply_plan`,
+    ///     `infer_soll_mutation`, `entrench_nuance`, `apply_guidelines`,
+    ///     `restore_soll`) — writing nodes into a GUESSED project is irreversible,
+    ///     and they run through a second, divergent resolver
+    ///     (`validate_explicit_canonical_project_code`, which demands a UNIQUE cwd
+    ///     match where this one takes the most specific). Unifying the two is a
+    ///     follow-up, not a prerequisite;
+    ///   * mailbox tools — they already auto-resolve their own `from`, and their other
+    ///     project fields address THIRD PARTIES (`to_project`, room `members`), so
+    ///     injecting would corrupt addressing;
+    ///   * `axon_init_project` (the project does not exist yet by definition),
+    ///     `rescan_project` (heavy indexer op on a guessed project), `impact` (derives
+    ///     the project from the resolved symbol), `sql`/`fs_read`/`debug` (no project
+    ///     semantics).
+    ///
+    /// The v1 set is therefore exactly the READ-ONLY tools that fail outright today —
+    /// `soll_acyclic_audit` alone accounted for 82/82 failed calls in telemetry, not
+    /// because it is broken but because LLMs call it the way they call `query`.
+    const PROJECT_AUTORESOLVE_TOOLS: &'static [(&'static str, &'static str)] = &[
+        ("soll_acyclic_audit", "project_code"),
+        ("structural_health_index", "project_code"),
+        ("structural_health_worklist", "project_code"),
+        ("ist_centrality_pagerank", "project_code"),
+        ("ist_structural_sccs", "project_code"),
+        ("ist_shortest_path", "project_code"),
+        ("wiring", "project_code"),
+        ("orphan_clusters", "project_code"),
+        ("ist_snapshot_warm", "project_code"),
+        ("soll_work_plan", "project_code"),
+        ("soll_roadmap", "project_code"),
+        ("soll_id_registry", "project_code"),
+        ("drift_history", "project"),
+    ];
+
+    /// REQ-AXO-902239 — fill in the project scope for an allow-listed tool when the
+    /// caller omitted it, mirroring what `query`/`inspect` have always done.
+    ///
+    /// Borrowed (zero-copy) on every path that needs no injection — the hot path pays
+    /// nothing, and `auto_resolve_project_code_str` (one SQL round-trip) is only
+    /// called once the tool is allow-listed AND the key is genuinely missing. A
+    /// `None` from the resolver leaves the arguments untouched, so the existing
+    /// "requires project_code" error still surfaces rather than being swallowed.
+    fn with_resolved_project_scope<'a>(
+        &self,
+        normalized_name: &str,
+        arguments: &'a Value,
+    ) -> std::borrow::Cow<'a, Value> {
+        let Some((_, key)) = Self::PROJECT_AUTORESOLVE_TOOLS
+            .iter()
+            .find(|(tool, _)| *tool == normalized_name)
+        else {
+            return std::borrow::Cow::Borrowed(arguments);
+        };
+        let already_set = arguments
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.trim().is_empty());
+        if already_set {
+            return std::borrow::Cow::Borrowed(arguments);
+        }
+        let Some(resolved) = self.auto_resolve_project_code_str() else {
+            return std::borrow::Cow::Borrowed(arguments);
+        };
+        let mut patched = arguments.clone();
+        if let Some(obj) = patched.as_object_mut() {
+            obj.insert((*key).to_string(), Value::from(resolved.clone()));
+            // Observability (REQ-AXO-902239): without this, the effect of the fix is
+            // unmeasurable — we could not tell a recovered call from one that always
+            // passed the argument.
+            obj.insert(
+                "project_code_source".to_string(),
+                Value::from("cwd_auto"),
+            );
+        }
+        tracing::debug!(
+            tool = normalized_name,
+            key = *key,
+            project = %resolved,
+            "REQ-AXO-902239 — project scope auto-resolved from cwd"
+        );
+        std::borrow::Cow::Owned(patched)
+    }
+
     pub(crate) fn execute_tool_direct(
         &self,
         normalized_name: &str,
         arguments: &Value,
     ) -> Option<Value> {
+        // REQ-AXO-902239 — normalise the project scope HERE, not in `handle_call_tool`:
+        // `axon_batch` calls this function directly, bypassing the dispatch entry
+        // point, and LLMs do batch. All three paths (dispatch, batch, async mutation
+        // jobs) converge on `execute_tool_direct`.
+        let arguments = &*self.with_resolved_project_scope(normalized_name, arguments);
         match normalized_name {
             "help" => self.axon_help(arguments),
             "contradiction_check" => self.axon_contradiction_check(arguments),
