@@ -47,6 +47,7 @@ Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (superv
 | Commit work | `axon_pre_flight_check` → `axon_commit_work` |
 | Hybrid retrieval (FTS+vector+graph) | `retrieve_context` / `retrieve_context_layered` |
 | Toggle query-embed provider (runtime) | `embed_provider` |
+| **Arm/disarm GPU idle-drop** (runtime, no restart) | `idle_drop` (action=get\|set ; durable control-row, cross-process — REQ-AXO-902234) |
 | **Recall how-to-work memory** (PRIMARY, at init) | `practice_recall` |
 | **Save a learned practice** (governed, decaying) | `practice_put` (scope/role/model partitioning, REQ-AXO-902149) |
 | **Reinforce/consolidate practices** | `practice_tick` / `practice_card` |
