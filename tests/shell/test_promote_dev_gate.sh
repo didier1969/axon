@@ -180,31 +180,57 @@ pass "Case 9 — mismatch : gate refuses correctly"
 # `indexer_ready=true` via runtime_authority_contract("brain"), so any
 # brain_only restart times out at 150s. Operator hit the workaround twice
 # in session 59 (curl POST /process/start/{axon-indexer,dashboard} then
-# --finalize-only). The canonical spawn in promote_live.sh --restart-live
-# is now `start full` — locked in by static grep below.
+# --finalize-only). The canonical spawn now lives in the cutover executor
+# and is `start full` — locked in by the static greps below.
 
-promote_script="$ROOT_DIR/scripts/release/promote_live.sh"
-if [[ ! -f "$promote_script" ]]; then
-    fail "Case 10 — promote_live.sh missing at $promote_script"
+# REQ-AXO-902256 — promote_live.sh is DELETED; the restart now lives in
+# `RealCutoverIo::spawn_start` (axonctl). The same invariant is guarded there,
+# plus the REQ-AXO-902258 one that promote_live.sh never had.
+cutover_src="$ROOT_DIR/src/axon-core/src/bin/axonctl.rs"
+if [[ ! -f "$cutover_src" ]]; then
+    fail "Case 10 — axonctl.rs missing at $cutover_src"
 fi
 
-# Case 10a : the canonical `start full` invocation lives inside the
-# RESTART_LIVE block. We grep the literal command tail to keep the
-# guard tight against unrelated edits.
-if ! grep -q "scripts/axon\" --instance live start full" "$promote_script"; then
-    fail "Case 10a — promote_live.sh does not invoke 'start full' for --restart-live (REQ-AXO-901782 regression?). Inspect lines around the RESTART_LIVE branch."
+# Case 10a : the cutover restart must spawn `start full`. `start brain --fast`
+# leaves the indexer down, and the post-check enforces indexer_ready=true via
+# runtime_authority_contract("brain") → 150s timeout (operator hit this twice in
+# session 59).
+if ! grep -q '"start", "full"' "$cutover_src"; then
+    fail "Case 10a — RealCutoverIo::spawn_start no longer passes 'start full' (REQ-AXO-901782 regression). Inspect spawn_start."
 fi
-pass "Case 10a — promote_live.sh --restart-live spawns 'start full' (brain+indexer+dashboard)"
+pass "Case 10a — cutover restart spawns 'start full' (brain+indexer+dashboard)"
 
-# Case 10b : the deprecated `start brain --fast` MUST NOT appear in the
-# restart-live spawn line. If it reappears, the post-check times out
-# again. We allow the substring to live in comments/docs, but not as the
-# active spawn argument.
-if grep -E '^[[:space:]]*if[[:space:]]+!.*scripts/axon".*--instance live start brain --fast' "$promote_script" >/dev/null; then
-    fail "Case 10b — promote_live.sh still spawns 'start brain --fast' (REQ-AXO-901782 regression). Replace with 'start full'."
+# Case 10b : `start brain --fast` must not be the active spawn argument.
+if grep -E '"start",[[:space:]]*"brain"' "$cutover_src" >/dev/null; then
+    fail "Case 10b — cutover spawns 'start brain' (REQ-AXO-901782 regression). Replace with 'start full'."
 fi
-pass "Case 10b — promote_live.sh does not spawn 'start brain --fast' in --restart-live"
+pass "Case 10b — cutover does not spawn 'start brain --fast'"
+
+# Case 10c : REQ-AXO-902258 — the restart MUST pin the release manifest it
+# materialises bin/* from. Without this, start.sh defaults to current.json, which
+# during a cutover still names the OLD release: it silently overwrote the staged
+# candidate and promote 1400 shipped 1399's binary under a 1400 identity while
+# every gate stayed green.
+if ! grep -q 'AXON_LIVE_RELEASE_MANIFEST' "$cutover_src"; then
+    fail "Case 10c — the cutover restart no longer pins AXON_LIVE_RELEASE_MANIFEST (REQ-AXO-902258 regression): start.sh will reinstall the OLD release over the staged candidate."
+fi
+pass "Case 10c — cutover restart pins AXON_LIVE_RELEASE_MANIFEST (no wrong-binary promote)"
+
+# Case 10d : the byte-level guard must stay wired into finalize. It is the only
+# check that compares BYTES; manifest_runtime_match compares the identity the
+# runtime *reports*, which the cutover itself writes from the manifest.
+if ! grep -q 'verify_bin_matches_manifest' "$cutover_src"; then
+    fail "Case 10d — verify_bin_matches_manifest is gone (REQ-AXO-902258 regression): a wrong-binary promote becomes silent again."
+fi
+pass "Case 10d — byte-level bin/*↔manifest verification still wired"
+
+# Case 10e : the retired executor must NOT come back. Two co-equal promote paths
+# is what let the orchestrator run the unprotected one for months.
+if [[ -f "$ROOT_DIR/scripts/release/promote_live.sh" ]]; then
+    fail "Case 10e — scripts/release/promote_live.sh is back. The cutover is the single promote path (REQ-AXO-902256); a second executor reintroduces the divergence."
+fi
+pass "Case 10e — no second promote executor"
 
 echo ""
-echo "🎯 All 11 cases passed — promote-live dev gate parser + --restart-live spawn locked in."
+echo "🎯 All 14 cases passed — dev gate parser + cutover restart contract locked in."
 exit 0

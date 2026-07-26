@@ -48,6 +48,57 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902254 — grade the enrolled↔chunked gap. PURE so the thresholds are
+    /// testable without a database (the rest of `indexing_diagnosis_markdown` needs one).
+    ///
+    /// Why this exists: every other count in the diagnosis is chunk-derived (`known` =
+    /// `files_chunked`, and `completed` is literally `known`), so the two can never
+    /// disagree and the tool structurally could not see an under-indexed project. Real
+    /// incident (LLL, 2026-07-26): 25 of 434 files chunked — 5.8% — verdict
+    /// `no_blocker_detected`, which closed the investigation on a genuinely broken project.
+    ///
+    /// Thresholds come from the measured distribution over the 43 registered projects that
+    /// day: 42 sat between 86.7% and 100%, LLL alone at 5.8%. Hence <50% = unambiguously
+    /// broken; 50–90% = a real gap worth naming but often legitimate (extensions the
+    /// chunker does not handle). Stated here so a future reader can re-derive them.
+    fn chunk_coverage_cause(
+        chunked: i64,
+        enrolled: i64,
+    ) -> Option<(&'static str, String, &'static str)> {
+        if enrolled <= 0 || chunked >= enrolled {
+            return None;
+        }
+        let gap = enrolled - chunked;
+        let pct = (chunked as f64) * 100.0 / (enrolled as f64);
+        if pct < 50.0 {
+            Some((
+                "chunk_coverage_severe_gap",
+                format!(
+                    "only {chunked} of {enrolled} enrolled files have chunks ({pct:.1}%) — \
+                     {gap} file(s) are enrolled but NOT retrievable: `retrieve_context`, semantic \
+                     search and FTS are blind to them (structural tools still answer wherever \
+                     symbols were extracted)"
+                ),
+                "restart axon-indexer — a RUNNING indexer does not drain a pre-existing \
+                 'discovered' backlog, only a fresh boot does (REQ-AXO-902253); then re-run \
+                 diagnose_indexing and expect coverage to climb",
+            ))
+        } else if pct < 90.0 {
+            Some((
+                "chunk_coverage_partial_gap",
+                format!(
+                    "{chunked} of {enrolled} enrolled files have chunks ({pct:.1}%) — {gap} \
+                     file(s) carry no chunk. Often legitimate (extensions the chunker does not \
+                     handle), but verify it is not a stalled backlog"
+                ),
+                "compare the gap against the excluded-by-reason table below; if the missing files \
+                 are ordinary source, restart axon-indexer and re-measure",
+            ))
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn indexing_diagnosis_markdown(&self, project: &str) -> String {
         // Canonical projection (REQ-AXO-901865): diagnose_indexing reads the
         // SAME ist.project_telemetry view as the dashboard + embedding_status,
@@ -72,6 +123,22 @@ impl McpServer {
         ));
         let global_known = self
             .sql_scalar("SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM axon.project_telemetry");
+        // REQ-AXO-902254 — the DENOMINATOR. Everything above counts files that HAVE
+        // chunks, and `completed` is literally `known`, so the two can never disagree and
+        // the tool structurally cannot see an under-indexed project. Real incident (LLL,
+        // 2026-07-26): 25 of 434 files chunked — 5.8% — and the verdict was
+        // `no_blocker_detected`, which closed the investigation. `files_total` is the
+        // enrolled count from the SAME view, so the gap costs one extra scalar.
+        let enrolled = self.sql_scalar(&format!(
+            "SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM axon.project_telemetry{}",
+            where_project
+        ));
+        let coverage_gap = (enrolled - known).max(0);
+        let coverage_pct = if enrolled > 0 {
+            (known as f64) * 100.0 / (enrolled as f64)
+        } else {
+            0.0
+        };
         let pending = 0i64;
         let indexing = 0i64;
         let completed = known;
@@ -119,7 +186,11 @@ impl McpServer {
                         .to_string(),
                     "switch to indexer_full (or indexer_graph) via `axon-{live,dev} start --indexer-full`",
                 ));
-            } else if project != "*" && global_known > 0 {
+            } else if project != "*" && global_known > 0 && enrolled == 0 {
+                // REQ-AXO-902254 — `enrolled == 0` is what "not registered" actually means.
+                // Without it this fired for any project with 0 CHUNKED files, telling the
+                // operator to re-register a project that was enrolled all along — the
+                // remediation would have been a no-op and the real gap stayed hidden.
                 causes.push((
                     "path_not_in_runtime_registry",
                     "the workspace contains indexed files, but none for this project_code; \
@@ -170,6 +241,9 @@ impl McpServer {
                 "verify tree-sitter grammar coverage for the file extensions; inspect \
                  `last_error_reason` for parser-side failures",
             ));
+        }
+        if let Some(cause) = Self::chunk_coverage_cause(known, enrolled) {
+            causes.push(cause);
         }
         if symbols > 0 && (calls_direct + calls_nif) == 0 {
             causes.push((
@@ -239,7 +313,8 @@ impl McpServer {
         format!(
             "### 🔎 Day-1 Indexing Diagnosis ({})\n\n\
              **Scope facts**\n\
-             * known files: {}\n\
+             * enrolled files: {}\n\
+             * files WITH chunks (retrievable): {} — coverage {:.1}%, gap {}\n\
              * completed files: {}\n\
              * pending: {}\n\
              * indexing: {}\n\
@@ -260,7 +335,10 @@ impl McpServer {
              * if the 'discovered' backlog (stock_a in `pipeline_status`) stays high, check the indexer is running and the Watchman daemon is reachable\
              {}",
             project,
+            enrolled,
             known,
+            coverage_pct,
+            coverage_gap,
             completed,
             pending,
             indexing,
@@ -1716,6 +1794,72 @@ fn format_diagnose_cause_line(id: &str, explain: &str, remediation: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- REQ-AXO-902254 chunk-coverage grading -----------------------------------
+    // The tool used to be structurally unable to report an under-indexed project:
+    // `known` = files_chunked and `completed` = known, so no comparison could fail.
+    // LLL sat at 25/434 files (5.8%) and the verdict was `no_blocker_detected`.
+
+    #[test]
+    fn coverage_severe_gap_fires_on_the_real_lll_numbers() {
+        let (id, explain, fix) = McpServer::chunk_coverage_cause(25, 434).expect("must flag 5.8%");
+        assert_eq!(id, "chunk_coverage_severe_gap");
+        assert!(explain.contains("25 of 434"), "got: {explain}");
+        assert!(explain.contains("5.8%"), "the percentage must be stated: {explain}");
+        assert!(explain.contains("409 file(s)"), "the gap must be stated: {explain}");
+        // The remediation must name the actual cure found in session 104.
+        assert!(fix.contains("restart axon-indexer"), "got: {fix}");
+    }
+
+    #[test]
+    fn coverage_stays_silent_on_the_healthy_projects() {
+        // Measured 2026-07-26: AXO 883/885, and LLL after the fix 434/434.
+        assert!(McpServer::chunk_coverage_cause(883, 885).is_none(), "AXO 99.8% must be silent");
+        assert!(McpServer::chunk_coverage_cause(434, 434).is_none(), "100% must be silent");
+        // Acceptance criterion of REQ-AXO-902254: the 41 other healthy projects must NOT
+        // be flagged, otherwise a true negative is traded for a mass false positive.
+        assert!(McpServer::chunk_coverage_cause(1090, 1094).is_none(), "APS 99.6% silent");
+        assert!(McpServer::chunk_coverage_cause(3448, 3538).is_none(), "FSF 97.5% silent");
+    }
+
+    #[test]
+    fn coverage_partial_gap_fires_between_50_and_90_percent() {
+        // TRD, measured: 1028/1186 = 86.7% — a real gap the old tool reported as
+        // `no_blocker_detected`, but plausibly legitimate, so it must NOT be graded severe.
+        let (id, explain, _) = McpServer::chunk_coverage_cause(1028, 1186).expect("must flag 86.7%");
+        assert_eq!(id, "chunk_coverage_partial_gap");
+        assert!(explain.contains("86.7%"), "got: {explain}");
+        assert!(explain.contains("158 file(s)"), "got: {explain}");
+    }
+
+    #[test]
+    fn coverage_handles_empty_and_impossible_scopes_without_dividing_by_zero() {
+        assert!(McpServer::chunk_coverage_cause(0, 0).is_none(), "nothing enrolled → no verdict");
+        // chunked > enrolled should not underflow into a fake gap.
+        assert!(McpServer::chunk_coverage_cause(10, 5).is_none());
+        // Total absence of chunks on an enrolled project is the severest case.
+        let (id, _, _) = McpServer::chunk_coverage_cause(0, 200).expect("0% must flag");
+        assert_eq!(id, "chunk_coverage_severe_gap");
+    }
+
+    #[test]
+    fn coverage_threshold_boundaries_are_exact() {
+        // Exactly 90% is healthy (strict <90), 89.x% is a partial gap.
+        assert!(McpServer::chunk_coverage_cause(90, 100).is_none(), "90% is not a gap");
+        assert_eq!(
+            McpServer::chunk_coverage_cause(89, 100).unwrap().0,
+            "chunk_coverage_partial_gap"
+        );
+        // Exactly 50% is partial (strict <50 for severe), 49% is severe.
+        assert_eq!(
+            McpServer::chunk_coverage_cause(50, 100).unwrap().0,
+            "chunk_coverage_partial_gap"
+        );
+        assert_eq!(
+            McpServer::chunk_coverage_cause(49, 100).unwrap().0,
+            "chunk_coverage_severe_gap"
+        );
+    }
 
     #[test]
     fn cause_line_renders_machine_id_and_remediation() {

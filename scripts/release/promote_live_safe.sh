@@ -55,7 +55,8 @@ Flags:
 
 Emergency paths (deliberately NOT flags of this script):
   Stranded pending.json  bash scripts/release/promote_live_safe.sh   (auto-resumes)
-  Manual promote         ./scripts/axon promote-live --manifest <m> --restart-live
+  Direct executor        bin/axonctl cutover --project-root . --instance-kind live \
+                         --manifest <candidate.json> --max-polls 120 --poll-interval-ms 2000
   Roll back a release    bash scripts/release/rollback_live.sh
 EOF
 }
@@ -217,7 +218,7 @@ validate_dev_healthy() {
     -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' 2>&1 | head -c 80 || true)
   if [[ "$probe_status" != *'"jsonrpc"'* ]]; then
     echo "❌ Dev MCP not responding on port ${dev_mcp_port} (feedback_dev_first_no_exception)." >&2
-    echo "   New binaries must validate in dev BEFORE promote-live." >&2
+    echo "   New binaries must validate in dev BEFORE promoting to live." >&2
     echo "   Recovery:" >&2
     echo "     ./scripts/axon-dev start brain        # or full" >&2
     echo "     # Verify dev MCP responds, run for >5 min." >&2
@@ -307,20 +308,31 @@ if [[ -f "$pending_manifest" && "${PROMOTE_SKIP_AUTORESUME:-0}" != "1" ]]; then
   promote_log "⚠️ Unfinalized pending promote detected (build_id=${pending_build:-?}) — auto-resuming before any fresh promote (REQ-AXO-902104)."
   candidate_manifest="$(ls -1 "$ROOT_DIR"/.axon/releases/candidates/*"${pending_build}".json 2>/dev/null | head -1)"
   if [[ -n "$candidate_manifest" && -f "$candidate_manifest" ]]; then
-    PROMOTE_LIVE_POSTCHECK_TIMEOUT_S="${PROMOTE_LIVE_POSTCHECK_TIMEOUT_S:-600}" \
-      "$ROOT_DIR/scripts/axon" promote-live --manifest "$candidate_manifest" --restart-live --resume
+    # REQ-AXO-902256 — resume through the CUTOVER, not `promote-live --resume`. This was
+    # the last thing keeping promote_live.sh alive, and keeping it meant keeping two
+    # divergent executors for the same job. Re-running the cutover on the stranded build's
+    # candidate manifest IS the resume: snapshot (current.json is still a valid rollback
+    # target — the stranded run never finalized), stage (rewrites pending.json + bin/*,
+    # idempotent), restart, liveness gate, then finalize. It is strictly stronger than the
+    # old path because the byte check of REQ-AXO-902258 now runs on the way through, so a
+    # resume cannot re-commit a wrong binary.
+    "$ROOT_DIR/bin/axonctl" cutover \
+      --project-root "$ROOT_DIR" --instance-kind live --manifest "$candidate_manifest" \
+      --max-polls 120 --poll-interval-ms 2000 --json >> "$PROMOTE_LOG" 2>&1
     resume_rc=$?
-    promote_log "   auto-resume exit=$resume_rc (build_id=$pending_build)"
+    promote_log "   auto-resume via cutover exit=$resume_rc (build_id=$pending_build)"
     exit $resume_rc
   fi
-  promote_log "   ⚠️ candidate manifest for $pending_build not found — aborting to avoid stacking; recover manually with promote-live --resume."
+  promote_log "   ⚠️ candidate manifest for $pending_build not found — aborting to avoid stacking."
+  promote_log "      Recover with: bin/axonctl cutover --project-root $ROOT_DIR --instance-kind live --manifest <candidate>"
+  promote_log "      Or roll back:  bash scripts/release/rollback_live.sh"
   exit 1
 fi
 
 # --- REQ-AXO-902194: pre-notice (brain still up) — warn peers the step-5 restart
 # will drop MCP briefly. Async, so mostly read on reconnect; harmless to send early. ---
 broadcast_promote "🔧 Promote ${PROJECT_CODE} en cours — coupure MCP brève à venir" \
-  "Un promote AXO démarre (${PROMOTE_TIMESTAMP}). Au restart du brain (dans ~1-3 min) le MCP tombera quelques secondes pour TOUS les clients connectés. C'est PLANIFIÉ — ne diagnostique pas cette coupure comme un incident. Un all-clear suivra dès que le brain répond. Si ton binding reste stale, reconnecte via /mcp." \
+  "Un promote AXO démarre (${PROMOTE_TIMESTAMP}). Au restart du brain (dans ~3-6 min) le MCP tombera pour TOUS les clients connectés. Ordre de grandeur mesuré: le brain met ~8 s entre son lancement et /readyz, plus la durée de son arrêt — donc DIZAINES DE SECONDES, pas quelques secondes. C'est PLANIFIÉ: NE relance PAS le serveur toi-même, ton self-heal entrerait en course avec la bascule (incident du 2026-07-26, REQ-AXO-902256). Attends l'all-clear, qui suit dès que le brain répond. Si ton binding reste stale ensuite, reconnecte via /mcp." \
   "promote-notice-${PROMOTE_TIMESTAMP}"
 BROADCAST_PREFLIGHT_SENT=1
 
@@ -532,11 +544,10 @@ old_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo
 #
 # `promote_live.sh` is NOT deleted: it still carries `--resume`, the documented recovery
 # for a stranded `pending.json` — and `release_reconciler::next_action` points operators
-# at it by name. It stays reachable manually (`scripts/axon promote-live`) for
-# emergencies. What is removed is its status as a DEFAULTABLE path in this orchestrator.
-# Retiring it outright requires porting `--resume` onto the cutover executor first
-# (tracked in REQ-AXO-902256) — doing that by halves would break the very recovery path
-# used when a promote goes wrong.
+# at it by name — BOTH have since been repointed at the cutover, and the script itself
+# is DELETED. `--resume` now means: re-run this script; it detects the stranded
+# pending.json and replays the cutover on that build's candidate manifest, byte-check
+# included. One executor, one path.
 run_step 5 cutover "$ROOT_DIR/bin/axonctl" cutover \
   --project-root "$ROOT_DIR" --instance-kind live --manifest "$manifest_path" \
   --max-polls 120 --poll-interval-ms 2000 --json
@@ -544,7 +555,7 @@ new_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo
 promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
 # NOTE: an UNCHANGED md5 is NOT a failure — re-promoting an identical build
 # (same HEAD → byte-identical candidate) is idempotent and expected. Promotion
-# correctness is proven by promote-live's internal runtime-identity match +
+# correctness is proven by the cutover's own byte verification (REQ-AXO-902258) +
 # step-6 qualify-mcp, not by an old-vs-new binary diff. (clean-win: removed the
 # false "md5 unchanged → copy may have failed" warning.)
 

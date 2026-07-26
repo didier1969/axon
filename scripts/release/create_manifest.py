@@ -68,7 +68,7 @@ def runtime_primary_artifact(
 def runtime_artifact_names() -> tuple[str, ...]:
     # REQ-AXO-153 — axonctl supervises both axon-brain and axon-indexer and
     # owns the status contract surfaced to `axon status` / qualify-mcp.
-    # Including it in the manifest is what makes promote_live.sh's generic
+    # Including it in the manifest is what makes the release executor's generic
     # artifact-copy loop deploy a fresh axonctl alongside the runtime
     # binaries; otherwise axonctl-side fixes never reach production.
     return ("axon-brain", "axon-indexer", "axonctl")

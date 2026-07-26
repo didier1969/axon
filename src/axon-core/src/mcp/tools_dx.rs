@@ -331,6 +331,37 @@ impl McpServer {
          OR lower(replace(replace(replace(replace(s.name, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%'"
     }
 
+    /// REQ-AXO-902243 — deterministic lexical relevance ordering for the NON-semantic
+    /// `query` arms.
+    ///
+    /// Those arms had `LIMIT` with NO `ORDER BY`, so which rows survived truncation was
+    /// whatever PG returned first: plan-, cache- and physical-order dependent. Two
+    /// identical calls could answer differently, and nothing guaranteed the best matches
+    /// were the ones kept. REQ-AXO-902240's fan-out fix removed the chunk duplication that
+    /// had been MASKING this (by wasting the slots), leaving the ranking plainly undefined.
+    ///
+    /// The ordering is the one the REQ proposes — explicit lexical relevance, not an
+    /// arbitrary tiebreak:
+    ///   1. exact name match (case-insensitive) — the overwhelmingly common intent when a
+    ///      bare identifier is queried;
+    ///   2. prefix match — `reserve_budget` should outrank `unreserve_budget_later`;
+    ///   3. earliest match position, so a needle near the start ranks higher;
+    ///   4. shortest name — the tightest match for the same substring;
+    ///   5. `s.name` then `uri`, purely to make the result REPRODUCIBLE once relevance ties.
+    ///
+    /// `NULLIF(position(...), 0)` matters: `position` returns 0 when the needle is absent
+    /// (it can be — the predicate also matches the wildcard/compact forms), and 0 would
+    /// sort those FIRST. `NULLS LAST` puts them after every genuine positional hit.
+    fn symbol_search_order_by() -> &'static str {
+        "ORDER BY \
+         (lower(s.name) = $normalized) DESC, \
+         (lower(s.name) LIKE $normalized || '%') DESC, \
+         NULLIF(position($normalized in lower(s.name)), 0) ASC NULLS LAST, \
+         length(s.name) ASC, \
+         s.name ASC, \
+         uri ASC "
+    }
+
     /// REQ-AXO-902240 — join that projects EXACTLY ONE `file_path` per symbol.
     ///
     /// The previous `LEFT JOIN Chunk ch ON ch.source_id = s.id` fanned a symbol out
@@ -877,8 +908,8 @@ impl McpServer {
                         format!(
                             "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                              FROM Symbol s {join}\
-                             WHERE {} LIMIT {}",
-                            base_predicate, query_limit
+                             WHERE {} {} LIMIT {}",
+                            base_predicate, Self::symbol_search_order_by(), query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
                     )
@@ -887,8 +918,8 @@ impl McpServer {
                         format!(
                             "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                              FROM Symbol s {join}\
-                             WHERE s.project_code = $proj AND ( {} ) LIMIT {}",
-                            base_predicate, query_limit
+                             WHERE s.project_code = $proj AND ( {} ) {} LIMIT {}",
+                            base_predicate, Self::symbol_search_order_by(), query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
                     )
@@ -899,9 +930,9 @@ impl McpServer {
                 format!(
                     "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                      FROM Symbol s {join}\
-                     WHERE {} \
+                     WHERE {} {} \
                      LIMIT {}",
-                    base_predicate, query_limit
+                    base_predicate, Self::symbol_search_order_by(), query_limit
                 ),
                 Self::build_symbol_search_params(query_text, project),
             )
@@ -910,8 +941,8 @@ impl McpServer {
                 format!(
                     "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                      FROM Symbol s {join}\
-                     WHERE s.project_code = $proj AND ( {} ) LIMIT {}",
-                    base_predicate, query_limit
+                     WHERE s.project_code = $proj AND ( {} ) {} LIMIT {}",
+                    base_predicate, Self::symbol_search_order_by(), query_limit
                 ),
                 Self::build_symbol_search_params(query_text, project),
             )
@@ -2615,6 +2646,77 @@ impl McpServer {
     }
 
     // MIL-AXO-017 slice 6B: AGE helper bidi_trace_via_age removed ; SQL is canonical.
+}
+
+#[cfg(test)]
+mod symbol_search_order_by_tests {
+    use crate::mcp::McpServer;
+
+    /// REQ-AXO-902243 — the lexical `query` arms had `LIMIT` with no `ORDER BY`, so which
+    /// rows survived truncation was plan-, cache- and physical-order dependent: two
+    /// identical calls could answer differently. These pin the ordering CONTRACT, since the
+    /// clause itself is only exercised end-to-end against a live PG.
+    #[test]
+    fn relevance_keys_are_ordered_exact_then_prefix_then_position_then_length() {
+        let clause = McpServer::symbol_search_order_by();
+        let idx = |needle: &str| {
+            clause
+                .find(needle)
+                .unwrap_or_else(|| panic!("ordering key missing from clause: {needle}\n{clause}"))
+        };
+        let exact = idx("(lower(s.name) = $normalized) DESC");
+        let prefix = idx("(lower(s.name) LIKE $normalized || '%') DESC");
+        let position = idx("position($normalized in lower(s.name))");
+        let length = idx("length(s.name) ASC");
+        assert!(exact < prefix, "an exact match must outrank a prefix match");
+        assert!(prefix < position, "a prefix match must outrank a mid-string match");
+        assert!(position < length, "match position must outrank mere shortness");
+    }
+
+    /// The pitfall the clause exists to avoid: `position()` returns 0 when the needle is
+    /// ABSENT (the predicate also matches the wildcard/compact forms), and a bare
+    /// `position(...) ASC` would therefore sort every non-positional hit FIRST — the exact
+    /// opposite of the intent. `NULLIF(..., 0)` + `NULLS LAST` is what prevents it.
+    #[test]
+    fn absent_needle_cannot_rank_first() {
+        let clause = McpServer::symbol_search_order_by();
+        assert!(
+            clause.contains("NULLIF(position($normalized in lower(s.name)), 0)"),
+            "position must be NULLIF'd on 0 or absent needles rank first: {clause}"
+        );
+        assert!(
+            clause.contains("NULLS LAST"),
+            "the NULLIF'd position must sort NULLS LAST: {clause}"
+        );
+    }
+
+    /// Relevance can tie; the result must still be reproducible across identical calls.
+    /// Without a total order the LIMIT truncates arbitrarily again.
+    #[test]
+    fn ties_are_broken_deterministically() {
+        let clause = McpServer::symbol_search_order_by();
+        assert!(clause.contains("s.name ASC"), "missing deterministic name tiebreak: {clause}");
+        assert!(clause.contains("uri ASC"), "missing deterministic uri tiebreak: {clause}");
+        // `uri` is an output alias (COALESCE(ch.file_path,'') AS uri) — it must come last,
+        // after every relevance key, or it would dominate the ranking.
+        let uri = clause.find("uri ASC").unwrap();
+        let name = clause.find("s.name ASC").unwrap();
+        assert!(name < uri, "uri is the LAST tiebreak, never a relevance key");
+    }
+
+    /// Only the params the lexical arms actually bind may appear, or the query 500s at
+    /// runtime on an unbound placeholder.
+    #[test]
+    fn clause_binds_only_normalized() {
+        let clause = McpServer::symbol_search_order_by();
+        for forbidden in ["$needle", "$wildcard", "$compact", "$proj"] {
+            assert!(
+                !clause.contains(forbidden),
+                "{forbidden} is not guaranteed bound in every lexical arm: {clause}"
+            );
+        }
+        assert!(clause.contains("$normalized"));
+    }
 }
 
 #[cfg(test)]

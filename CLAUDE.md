@@ -108,9 +108,11 @@ Procedure = **GUI-PRO-028** in SOLL (6 steps : practice_put apprentissages / ses
   **native auto-rollback** to the previous build. Since REQ-AXO-902256 this is the ONLY
   step-5 path: the `promote-live --in-place` branch and its `USE_CUTOVER` toggle are gone
   (an opt-in safe path is not a safe path — it defaulted OFF for months).
-- `promote_live.sh` is NOT the promote path any more. It survives only for `--resume`
-  (recovering a stranded `.axon/live-release/pending.json`), which `promote_live_safe.sh`
-  triggers automatically and which `release_reconciler::next_action` names explicitly.
+- `promote_live.sh` is **DELETED** (REQ-AXO-902256) — there is exactly ONE promote executor.
+  A stranded `.axon/live-release/pending.json` is recovered by simply re-running
+  `promote_live_safe.sh`: it detects the pending build and replays the cutover on that
+  build's candidate manifest, byte-check included. `./scripts/axon promote-live` now prints
+  the replacement and exits 2.
 - A promote interrupts live MCP. The script now MEASURES that window (1Hz sampling of
   `/mcp` across steps 5→6c → `.axon/live-release/mcp-availability-<ts>.csv`) instead of
   reporting the binary-copy duration. Warn third-party MCP clients before promoting: they

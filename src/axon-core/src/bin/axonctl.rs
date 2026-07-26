@@ -427,7 +427,8 @@ fn cmd_liveness(config: InstanceConfig, json: bool) -> Result<()> {
 // REQ-AXO-902165 (MIL-AXO-051 S3) — `axonctl cutover`: the I/O executor for an
 // in-place, health-gated promote with AUTO-ROLLBACK. Composes the reconciler's
 // tested choreography (`drive_cutover` + `CutoverIo`) with real manifest/bin I/O
-// faithful to promote_live.sh + rollback_live.sh, and the `axonctl liveness` HTTP
+// faithful to the retired promote_live.sh (deleted, REQ-AXO-902256) + rollback_live.sh,
+// and the `axonctl liveness` HTTP
 // health probe. The bin-swap is IN-PLACE (writer-guard exclusivity forbids two
 // coexisting writers — DEC-AXO-901666), so a failed candidate becomes a blip +
 // auto-recovery (restore old bin/* from current.json + restart), never the s94
@@ -516,14 +517,14 @@ fn copy_manifest_artifacts_to_bin(manifest: &serde_json::Value, bin_dir: &Path) 
         // ETXTBSY when target is a CURRENTLY-EXECUTING binary — and the cutover swaps
         // `bin/axonctl`, which is the very process running this code. rename() over a
         // running executable is safe (the live process keeps the old inode; the next
-        // exec opens the new one), mirroring promote_live.sh's `os.replace` in-place
+        // exec opens the new one). Inherited from the retired promote_live.sh `os.replace`
         // swap. `fs::copy` preserves the source's exec bit, so the temp is already +x.
         let tmp = bin_dir.join(format!(".{name}.cutover-tmp"));
         fs::copy(source, &tmp)
             .with_context(|| format!("copy {} -> {}", source.display(), tmp.display()))?;
         fs::rename(&tmp, &target)
             .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
-        // build-info alongside (best-effort — matches promote_live.sh's paired swap).
+        // build-info alongside (best-effort — the retired promote_live.sh paired them too).
         if let Some(bi) = entry.get("build_info_path").and_then(|b| b.as_str()) {
             let bi = Path::new(bi);
             if bi.exists() {
@@ -560,7 +561,7 @@ fn cutover_snapshot(release_dir: &Path) -> Result<serde_json::Value> {
 /// whenever the binary's embedded build_id lags the manifest — e.g. an unchanged
 /// axon-brain source across commits yields a byte-identical binary carrying the OLD
 /// build_id, so `promote_status` sees `manifest_runtime_match` fail (observed s95 A3).
-/// Mirrors promote_live.sh:546. Atomic (tmp + rename). Path matches
+/// Atomic (tmp + rename); logic inherited from the retired promote_live.sh. Path matches
 /// AXON_ACTIVE_IDENTITY_FILE in process-compose.live.yaml.
 fn write_active_identity(manifest: &serde_json::Value, release_dir: &Path) -> Result<()> {
     let rv = manifest.get("runtime_version").and_then(|v| v.as_object());
@@ -597,7 +598,7 @@ fn cutover_stage_files(candidate_manifest_path: &Path, release_dir: &Path, bin_d
 }
 
 /// finalize: archive current→history/<gen>.json, promote pending→current (state=promoted),
-/// unlink pending. Mirrors promote_live.sh:471-492.
+/// unlink pending. Logic inherited from the retired promote_live.sh (REQ-AXO-902256).
 fn cutover_finalize_files(release_dir: &Path) -> Result<()> {
     let current_path = release_dir.join("current.json");
     let pending_path = release_dir.join("pending.json");
@@ -629,7 +630,7 @@ fn cutover_finalize_files(release_dir: &Path) -> Result<()> {
 
 /// rollback: restore bin/* from current.json (the untouched old manifest) and drop the
 /// failed pending staging, leaving bin/* ↔ current.json coherent. Mirrors
-/// promote_live.sh `rollback_bin_to_current` + pending cleanup.
+/// the retired promote_live.sh's `rollback_bin_to_current` + pending cleanup.
 fn cutover_rollback_files(release_dir: &Path, bin_dir: &Path) -> Result<()> {
     let current = read_json_file(&release_dir.join("current.json")).context("rollback needs current.json")?;
     copy_manifest_artifacts_to_bin(&current, bin_dir)?;

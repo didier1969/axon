@@ -166,7 +166,7 @@ pub fn liveness_next_action(l: &LivenessFacts) -> Option<String> {
     }
     if l.indexer_expected && !l.indexer_ready {
         return Some(match l.indexer_lifecycle.as_str() {
-            "crashed_or_abandoned" => "indexer heartbeat went stale — restart the indexer (`axonctl` / `promote-live --restart-live`) then re-check.".to_string(),
+            "crashed_or_abandoned" => "indexer heartbeat went stale — restart the indexer only (`curl -X POST :8080/process/restart/axon-indexer`), NOT the whole stack: a full restart takes the brain down with it (PIL-AXO-008, REQ-AXO-902256). Then re-check.".to_string(),
             "never_launched" => "no indexer heartbeat — the split indexer was never started; start the full runtime (`./scripts/axon-live start full`).".to_string(),
             _ => "indexer not ready — inspect the indexer process and its heartbeat.".to_string(),
         });
@@ -240,7 +240,10 @@ pub fn phase(f: &ReleaseFacts) -> &'static str {
 pub fn next_action(f: &ReleaseFacts) -> Option<String> {
     match phase(f) {
         "staged" => Some(format!(
-            "a promote is mid-flight or stranded (pending build_id={}). If no promote is running: resume it (`promote-live --resume --restart-live`) or clear `.axon/live-release/pending.json`.",
+            // REQ-AXO-902256 — `promote-live --resume` no longer exists; the resume path is
+            // a re-run of promote_live_safe.sh, which detects the stranded pending and
+            // replays the cutover on that build's candidate manifest (byte-verified).
+            "a promote is mid-flight or stranded (pending build_id={}). If no promote is running: re-run `bash scripts/release/promote_live_safe.sh --project <CODE>` (it auto-resumes the stranded build via the cutover), or roll back with `bash scripts/release/rollback_live.sh`.",
             f.pending_build_id.as_deref().unwrap_or("<unknown>")
         )),
         "drift" => Some(format!(
@@ -385,7 +388,10 @@ pub fn run_cutover_loop(
 
 /// The side-effecting steps of an in-place cutover, injected so the choreography is
 /// testable without a runtime. The real impl (`axonctl`'s `RealCutoverIo`) replicates
-/// promote_live.sh's manifest/bin I/O; a fake records the call order + scripted errors.
+/// the real manifest/bin I/O (axonctl); a fake records the call order + scripted errors.
+/// NOTE: the fake replaces the RESTART step, so it cannot exercise start.sh's
+/// re-materialisation of bin/* from a manifest — the exact gap that let promote 1400 ship
+/// the wrong binary (REQ-AXO-902258). Byte equality is asserted in axonctl's own tests.
 ///
 /// Invariant every impl must uphold: after `rollback()` returns `Ok`, the PREVIOUS
 /// release (captured by `snapshot_current`) is restored on disk and restarting.

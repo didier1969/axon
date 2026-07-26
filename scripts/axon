@@ -24,7 +24,7 @@ Commands:
   release-preflight [args...] Verify tracked-clean build/manifests prerequisites before release actions
   create-release-manifest [args...] Create canonical release manifest for promotion
   promote-live-safe [args...] One-shot safe live promotion: build, preflight, manifest, promote, qualify
-  promote-live [args...]   Promote a qualified manifest to the live install state
+  promote-live             RETIRED (REQ-AXO-902256) — prints the cutover-based replacement
   rollback-live [args...]  Roll back live install state to a prior manifest
   sync-codex-mcp-config [args...] Print or refresh Codex MCP config with advertised Axon endpoints
   check-project-identity   Fail if legacy project identity terms reappear in active surfaces
@@ -65,7 +65,7 @@ Examples:
   ./scripts/axon release-preflight
   ./scripts/axon create-release-manifest --state qualified
   ./scripts/axon promote-live-safe --project AXO
-  ./scripts/axon promote-live --manifest .axon/releases/candidates/v0.8.0-abc.json
+  bash scripts/release/rollback_live.sh          # roll a bad release back
   ./scripts/axon rollback-live --manifest .axon/live-release/history/live-20260418T120000Z.json
   ./scripts/axon sync-codex-mcp-config
   ./scripts/axon sync-codex-mcp-config --apply
@@ -234,7 +234,20 @@ EOF
     exec bash "$SCRIPT_DIR/release/promote_live_safe.sh" "$@"
     ;;
   promote-live)
-    exec bash "$SCRIPT_DIR/release/promote_live.sh" "$@"
+    # REQ-AXO-902256 — retired. promote_live.sh was the SECOND step-5 executor; keeping it
+    # meant maintaining two divergent promote paths, and the orchestrator defaulted to the
+    # unprotected one for months (no liveness gate, no rollback, no DDL re-bootstrap).
+    cat >&2 <<'RETIRED'
+`promote-live` is retired (REQ-AXO-902256). The single promote path is the health-gated,
+byte-verified cutover:
+
+  Normal promote      bash scripts/release/promote_live_safe.sh --project AXO
+  Stranded pending    same command — it auto-resumes the stranded build via the cutover
+  Roll back           bash scripts/release/rollback_live.sh
+  Direct executor     bin/axonctl cutover --project-root . --instance-kind live \
+                          --manifest <candidate.json> --max-polls 120 --poll-interval-ms 2000
+RETIRED
+    exit 2
     ;;
   rollback-live)
     exec bash "$SCRIPT_DIR/release/rollback_live.sh" "$@"

@@ -14,7 +14,9 @@ MANIFEST_PATH=""
 RESTART_LIVE=0
 SKIP_POSTCHECK=0
 DRY_RUN=0
-# DEC-AXO-901598 + REQ-AXO-901638 polling discipline (shared with promote_live.sh).
+# DEC-AXO-901598 + REQ-AXO-901638 polling discipline (was shared with promote_live.sh,
+# deleted in REQ-AXO-902256 — this script is now the only bash release actor besides
+# promote_live_safe.sh).
 ASSERT_STOPPED_TIMEOUT_S="${PROMOTE_LIVE_ASSERT_STOPPED_TIMEOUT_S:-5}"
 ASSERT_STOPPED_INTERVAL_S="${PROMOTE_LIVE_ASSERT_STOPPED_INTERVAL_S:-0.1}"
 
@@ -197,7 +199,8 @@ PY
     # indexer_ready=true via runtime_authority_contract("brain"), so a
     # brain_only restart (`start brain --fast`) makes the post-check impossible
     # to pass (no indexer heartbeat → 150s timeout → false postcheck_failed).
-    # Mirror promote_live.sh:497 — the canonical live profile is `start full`.
+    # The canonical live profile is `start full` (same invariant the cutover guards;
+    # `start brain --fast` leaves the indexer down — REQ-AXO-901782).
     if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/axon" --instance live start full; then
       restart_failed=1
     elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then

@@ -104,10 +104,18 @@ impl McpServer {
                 "gates": gates_json,
                 "failed_gates": failed,
                 "next_action": action,
+                // REQ-AXO-902256 — `promote_live.sh` is deleted; the resume path is a
+                // re-run of promote_live_safe.sh, which detects the stranded pending.json
+                // and replays the cutover on that build's candidate manifest (and the
+                // REQ-AXO-902258 byte check runs on the way through, so a resume cannot
+                // re-commit a wrong binary). Handing an operator a command that names a
+                // deleted script is the kind of stale instruction this session spent hours
+                // paying for.
                 "recovery": {
-                    "resume": "bash scripts/release/promote_live.sh --manifest <candidate> --restart-live --resume",
+                    "resume": "bash scripts/release/promote_live_safe.sh --project AXO   # auto-resumes a stranded pending via the cutover",
                     "re_promote": "bash scripts/release/promote_live_safe.sh --project AXO",
-                    "rollback": "bash scripts/release/rollback_live.sh"
+                    "rollback": "bash scripts/release/rollback_live.sh",
+                    "direct_executor": "bin/axonctl cutover --project-root . --instance-kind live --manifest <candidate.json> --max-polls 120 --poll-interval-ms 2000"
                 }
             }
         }))
