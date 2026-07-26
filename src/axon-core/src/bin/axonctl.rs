@@ -640,6 +640,71 @@ fn cutover_rollback_files(release_dir: &Path, bin_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// REQ-AXO-902258 — assert `bin/<name>` is byte-identical to the manifest's artifact for
+/// every artifact it declares.
+///
+/// This exists because nothing else in the promote compares BYTES. `manifest_runtime_match`
+/// compares the identity the runtime *reports*, and that identity comes from
+/// `active-identity.env`, which the cutover writes from the manifest — so a wrong binary
+/// still reports the right build_id. The liveness gate is worse than blind here: the
+/// previous build answers `/readyz` perfectly, so substituting it makes every gate greener.
+/// Promote 1400 shipped `bin/axon-brain` holding 1399's bytes under a 1400 identity, and
+/// every check passed.
+///
+/// Compares length first (cheap, catches most cases) then streams the contents, so a
+/// same-size-different-content swap cannot slip through.
+fn verify_bin_matches_manifest(manifest_path: &Path, bin_dir: &Path) -> Result<()> {
+    use std::io::Read;
+    let manifest = read_json_file(manifest_path)
+        .with_context(|| format!("byte-verify needs {}", manifest_path.display()))?;
+    for (name, entry) in manifest_artifact_entries(&manifest)? {
+        let source = entry
+            .get("path")
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| anyhow!("artifact {name} has no path"))?;
+        let source = Path::new(source);
+        let installed = bin_dir.join(&name);
+        if !installed.exists() {
+            return Err(anyhow!(
+                "{} declares artifact {name} but {} is absent",
+                manifest_path.display(),
+                installed.display()
+            ));
+        }
+        let (slen, ilen) = (
+            fs::metadata(source).map(|m| m.len()).unwrap_or(u64::MAX),
+            fs::metadata(&installed).map(|m| m.len()).unwrap_or(0),
+        );
+        if slen != ilen {
+            return Err(anyhow!(
+                "WRONG BINARY INSTALLED: {} is {ilen} bytes but {name} in {} is {slen} bytes — \
+                 the running build is NOT the one this manifest claims",
+                installed.display(),
+                manifest_path.display()
+            ));
+        }
+        let mut a = std::io::BufReader::new(fs::File::open(source)?);
+        let mut b = std::io::BufReader::new(fs::File::open(&installed)?);
+        let (mut ba, mut bb) = ([0u8; 65536], [0u8; 65536]);
+        loop {
+            let na = a.read(&mut ba)?;
+            let nb = b.read(&mut bb)?;
+            if na != nb || ba[..na] != bb[..nb] {
+                return Err(anyhow!(
+                    "WRONG BINARY INSTALLED: {} differs from artifact {name} declared by {} \
+                     (same size, different content)",
+                    installed.display(),
+                    manifest_path.display()
+                ));
+            }
+            if na == 0 {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The real `CutoverIo`: file steps via the free functions above; process steps (stop /
 /// start) via the existing teardown helpers + a spawned `scripts/axon start full`.
 struct RealCutoverIo {
@@ -690,14 +755,30 @@ impl RealCutoverIo {
 
     /// Spawn `scripts/axon --instance <kind> start full` detached (process-compose
     /// backgrounds the DAG); the health-poll gates readiness, not this spawn.
-    fn spawn_start(&self) -> Result<()> {
+    ///
+    /// REQ-AXO-902258 — `install_from` is MANDATORY, not a convenience. `start.sh:223`
+    /// re-materialises `bin/*` from a release manifest on every start, defaulting to
+    /// `current.json`. During a cutover the restart happens BEFORE finalize, so that
+    /// default is still the OLD release: it silently overwrote the staged candidate and
+    /// the promote then reported success while running the previous build (observed on
+    /// promote 1400 — bin/axon-brain held 1399's bytes under a 1400 identity). Callers
+    /// must pass the manifest whose bytes should actually end up serving:
+    /// `pending.json` after staging, `current.json` after a rollback.
+    fn spawn_start(&self, install_from: &Path) -> Result<()> {
         let axon_entry = self.config.project_root.join("scripts").join("axon");
         if !axon_entry.exists() {
             return Err(anyhow!("scripts/axon not found at {}", axon_entry.display()));
         }
+        if !install_from.exists() {
+            return Err(anyhow!(
+                "cutover restart would materialise bin/* from a missing manifest: {}",
+                install_from.display()
+            ));
+        }
         let mut cmd = Command::new("bash");
         cmd.arg(&axon_entry)
-            .args(["--instance", self.config.instance_kind.label(), "start", "full"]);
+            .args(["--instance", self.config.instance_kind.label(), "start", "full"])
+            .env("AXON_LIVE_RELEASE_MANIFEST", install_from);
         if let Ok(log) = fs::File::create(self.release_dir.join("cutover-start.log")) {
             if let Ok(errlog) = log.try_clone() {
                 cmd.stdout(std::process::Stdio::from(log));
@@ -718,16 +799,33 @@ impl CutoverIo for RealCutoverIo {
     }
     fn restart_runtime(&mut self) -> Result<(), String> {
         self.stop_instance().map_err(|e| format!("{e:#}"))?;
-        self.spawn_start().map_err(|e| format!("{e:#}"))
+        // REQ-AXO-902258 — start from the STAGED manifest: `current.json` still names the
+        // OLD release at this point, and start.sh would reinstall it over the candidate.
+        // No byte check here: the spawn is DETACHED, so start.sh has not necessarily
+        // installed anything yet — checking now would race. The proof lives in finalize(),
+        // which the FSM only reaches after the liveness gate.
+        let pending = self.release_dir.join("pending.json");
+        self.spawn_start(&pending).map_err(|e| format!("{e:#}"))
     }
     fn finalize(&mut self) -> Result<(), String> {
+        // REQ-AXO-902258 — byte-level proof BEFORE declaring the promote done. The
+        // liveness gate cannot catch a wrong binary: it polls /readyz, and the OLD build
+        // answers it happily — the substitution made the gate GREENER, not redder. A
+        // mismatch here returns Err, so the FSM rolls back instead of finalizing a lie.
+        verify_bin_matches_manifest(&self.release_dir.join("pending.json"), &self.bin_dir)
+            .map_err(|e| format!("{e:#}"))?;
         cutover_finalize_files(&self.release_dir).map_err(|e| format!("{e:#}"))
     }
     fn rollback(&mut self) -> Result<(), String> {
         // Restore old bin/* + drop pending, then restart the OLD release so it serves again.
         cutover_rollback_files(&self.release_dir, &self.bin_dir).map_err(|e| format!("{e:#}"))?;
         self.stop_instance().map_err(|e| format!("{e:#}"))?;
-        self.spawn_start().map_err(|e| format!("{e:#}"))
+        // Symmetry: after a rollback the OLD release IS the one to materialise, so
+        // current.json is the correct source here (pending has just been dropped) — and
+        // it is what cutover_rollback_files already copied into bin/, so start.sh
+        // reinstalling from it is idempotent rather than destructive.
+        let current = self.release_dir.join("current.json");
+        self.spawn_start(&current).map_err(|e| format!("{e:#}"))
     }
 }
 
@@ -2490,6 +2588,66 @@ mod tests {
             cutover_finalize_files(&release).is_err(),
             "finalize without a staged pending must error"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // --- REQ-AXO-902258 byte-level verification -----------------------------------
+    // Promote 1400 installed 1399's binary and EVERY existing check passed, because
+    // nothing compared bytes. These pin the check that makes that silent again impossible.
+
+    /// (manifest, release_dir, bin_dir, root) with one artifact whose content is `body`.
+    fn verify_fixture(tag: &str, body: &[u8]) -> (serde_json::Value, PathBuf, PathBuf, PathBuf) {
+        let (root, release, bin, archive) = cutover_tmp(tag);
+        let art = archive.join("axon-brain-art");
+        fs::write(&art, body).unwrap();
+        let manifest = serde_json::json!({
+            "state": "staged",
+            "runtime_version": {"install_generation": "gen", "build_id": "v-x"},
+            "artifacts": {"axon-brain": {"path": art.to_string_lossy()}}
+        });
+        write_json_file(&release.join("pending.json"), &manifest).unwrap();
+        (manifest, release, bin, root)
+    }
+
+    #[test]
+    fn verify_bin_matches_manifest_ok_when_bytes_identical() {
+        let (_m, release, bin, root) = verify_fixture("verify-ok", b"CANDIDATE-BYTES");
+        fs::write(bin.join("axon-brain"), b"CANDIDATE-BYTES").unwrap();
+        verify_bin_matches_manifest(&release.join("pending.json"), &bin).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn verify_bin_matches_manifest_catches_the_promote_1400_substitution() {
+        // The real incident: bin/ holds the PREVIOUS release, same shape, different bytes.
+        let (_m, release, bin, root) = verify_fixture("verify-wrong", b"NEW-RELEASE-1400");
+        fs::write(bin.join("axon-brain"), b"OLD-RELEASE-1399").unwrap(); // same length!
+        let err = verify_bin_matches_manifest(&release.join("pending.json"), &bin)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("WRONG BINARY INSTALLED"), "got: {err}");
+        assert!(err.contains("different content"), "same-size swap must be named: {err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn verify_bin_matches_manifest_catches_a_size_mismatch() {
+        let (_m, release, bin, root) = verify_fixture("verify-size", b"CANDIDATE-BYTES");
+        fs::write(bin.join("axon-brain"), b"SHORT").unwrap();
+        let err = verify_bin_matches_manifest(&release.join("pending.json"), &bin)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("WRONG BINARY INSTALLED"), "got: {err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn verify_bin_matches_manifest_errs_when_the_binary_is_absent() {
+        let (_m, release, bin, root) = verify_fixture("verify-absent", b"CANDIDATE-BYTES");
+        let err = verify_bin_matches_manifest(&release.join("pending.json"), &bin)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is absent"), "got: {err}");
         let _ = fs::remove_dir_all(&root);
     }
 

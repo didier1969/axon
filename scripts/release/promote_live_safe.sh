@@ -429,13 +429,24 @@ _start_mcp_sampler() {
   : > "$MCP_SAMPLE_FILE"
   (
     while :; do
+      # NO `|| echo 000` here. `-w '%{http_code}'` ALREADY prints 000 when the connection
+      # is refused, so a fallback echo appended a SECOND 000 → code="000000" → the
+      # `== "000"` test never matched and every sample was classified `up`. The first
+      # version of this sampler had that bug and reported "0s outage" across a promote
+      # that demonstrably restarted the brain (REQ-AXO-902256). An instrument that cannot
+      # fail is not an instrument.
       code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
         "http://127.0.0.1:${AXON_BRAIN_PORT:-44129}/mcp" \
         -H 'content-type: application/json' \
-        -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' 2>/dev/null || echo 000)"
-      # Any HTTP status means the endpoint answered; 000 = connection refused/timeout,
-      # i.e. exactly what a third-party MCP client experiences as "server down".
-      [[ "$code" == "000" ]] && printf '%s,down\n' "$(date -u +%s)" || printf '%s,up\n' "$(date -u +%s)"
+        -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' 2>/dev/null)"
+      # Any real HTTP status means the endpoint answered; 000 (or empty, if curl itself
+      # could not run) = connection refused/timeout — exactly what a third-party MCP
+      # client experiences as "server down".
+      if [[ -z "$code" || "$code" == "000" ]]; then
+        printf '%s,down\n' "$(date -u +%s)"
+      else
+        printf '%s,up\n' "$(date -u +%s)"
+      fi
       sleep 1
     done
   ) >> "$MCP_SAMPLE_FILE" 2>/dev/null &
@@ -463,9 +474,23 @@ except OSError:
 print(worst, total)
 PY
   )
+  # A silent instrument reads exactly like a green result. Report the sample count and
+  # the covered span so "0 outage" can be distinguished from "measured nothing", and say
+  # the true resolution: each sample costs a curl (up to 2s) PLUS the 1s sleep, so the
+  # effective period is ~2s and a shorter blip can fall between samples.
+  local n span first last
+  n="$(wc -l < "$MCP_SAMPLE_FILE" 2>/dev/null | tr -d ' ')"; n="${n:-0}"
+  first="$(head -1 "$MCP_SAMPLE_FILE" 2>/dev/null | cut -d, -f1)"
+  last="$(tail -1 "$MCP_SAMPLE_FILE" 2>/dev/null | cut -d, -f1)"
+  span=0
+  [[ -n "$first" && -n "$last" ]] && span=$(( last - first ))
   promote_log ""
-  promote_log "== MCP availability (measured, 1s sampling across steps 5→6c) =="
-  promote_log "   worst contiguous outage: ${worst}s · total unreachable samples: ${total}s"
+  promote_log "== MCP availability (measured across steps 5→6c) =="
+  if [[ "$n" -lt 5 ]]; then
+    promote_log "   ⚠️ NOT MEASURED — only ${n} sample(s) collected. Treat the figures below as UNKNOWN, not as zero."
+  fi
+  promote_log "   worst contiguous outage: ${worst}s · total unreachable: ${total}s"
+  promote_log "   ${n} samples over ${span}s (resolution ~2s: a shorter blip can fall between samples)"
   promote_log "   samples: $MCP_SAMPLE_FILE"
   if [[ "${worst:-0}" -gt 60 ]]; then
     promote_log "   ⚠️ outage > 60s — third-party MCP clients may have declared a crash and self-restarted (REQ-AXO-902256 acceptance breach)."
