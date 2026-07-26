@@ -1465,6 +1465,70 @@ fn test_status_brief_text_surfaces_trust_boundary_and_next_best_action() {
     );
 }
 
+/// REQ-AXO-902250 — GUI-PRO-028's two SOLL hard gates now run INSIDE
+/// `axon_handoff_check` instead of being raw SQL the LLM must retype at every
+/// handoff of every project (session 104 mistyped one: `column e.src does not
+/// exist`).
+///
+/// The case this pins is the DELIBERATE DIVERGENCE from the prescribed query:
+/// that query only excludes delivered/completed/superseded, so it re-flags
+/// `rejected` / `deferred` / `archived` milestones forever. Those are terminal
+/// states set on purpose — flipping them to green a gate would falsify the record.
+#[test]
+fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let exec = |sql: &str| server.graph_store.execute(sql).unwrap();
+
+    // A delivered REQ with NO evidence → must be flagged.
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-001', 'Requirement', 'HND', 'no evidence', 'x', 'delivered', '{}')");
+    // A delivered REQ WITH evidence → must NOT be flagged.
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-002', 'Requirement', 'HND', 'has evidence', 'x', 'delivered', '{}')");
+    // `id` is not auto-generated on this table — supply it explicitly.
+    exec("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref) VALUES ('TRC-HND-001', 'requirement', 'REQ-HND-002', 'file', 'src/lib.rs')");
+    // A REJECTED milestone whose only child is terminal → deliberate state, must
+    // NOT be flagged (the divergence under test).
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HND-900', 'Milestone', 'HND', 'rejected mil', 'x', 'rejected', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('MIL-HND-900', 'REQ-HND-002', 'TARGETS', 'HND')");
+
+    let result = server
+        .axon_handoff_check(&json!({ "project_code": "HND" }))
+        .expect("handoff_check must answer");
+    let checks = result["data"]["checks"].as_array().cloned().unwrap_or_default();
+    let find = |name: &str| {
+        checks
+            .iter()
+            .find(|c| c["check"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing check {name} in {checks:?}"))
+            .clone()
+    };
+
+    let ev = find("delivered_without_evidence");
+    let offenders: Vec<String> = ev["offenders"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    assert!(
+        offenders.contains(&"REQ-HND-001".to_string()),
+        "a delivered REQ without evidence must be flagged, got {offenders:?}"
+    );
+    assert!(
+        !offenders.contains(&"REQ-HND-002".to_string()),
+        "a delivered REQ WITH evidence must not be flagged, got {offenders:?}"
+    );
+
+    let mil = find("milestone_reconciliation");
+    let mil_offenders: Vec<String> = mil["offenders"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    assert!(
+        !mil_offenders.contains(&"MIL-HND-900".to_string()),
+        "a REJECTED milestone is a deliberate decision — greening a gate must never \
+         push the operator to falsify it; got {mil_offenders:?}"
+    );
+}
+
 /// REQ-AXO-902239 — an allow-listed tool called WITHOUT its project argument must
 /// auto-resolve from the cwd, exactly as `query`/`inspect` always have.
 ///

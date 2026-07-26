@@ -458,6 +458,76 @@ impl McpServer {
             "remediation": if st_ok { "" } else { "./scripts/axon-live status" }
         }));
 
+        // REQ-AXO-902250 — GUI-PRO-028's two HARD GATES, previously prescribed to
+        // the LLM as raw SQL to type by hand at every handoff, of every project.
+        // Folding them here is the point: a gate that must be hand-typed is a gate
+        // that gets skipped or mistyped (session 104 hit `column e.src does not
+        // exist` writing one of them). The queries are the canonical ones from the
+        // guideline, verbatim in intent.
+        let project_code = args
+            .get("project_code")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .replace('\'', "''");
+        let rows_of = |sql: &str| -> Vec<Vec<Value>> {
+            self.graph_store
+                .execute_raw_sql_gateway(sql)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                .unwrap_or_default()
+        };
+
+        // Gate 1 — a `delivered` REQ with no evidence row is NOT closed: the next
+        // session re-opens it or duplicates the work.
+        let no_evidence = rows_of(&format!(
+            "SELECT id FROM soll.Node WHERE project_code = '{project_code}' \
+               AND type = 'Requirement' AND status = 'delivered' \
+               AND id NOT IN (SELECT DISTINCT soll_entity_id FROM soll.Traceability \
+                              WHERE soll_entity_id IS NOT NULL) LIMIT 50"
+        ));
+        let n_no_ev = no_evidence.len();
+        if n_no_ev > 0 {
+            warns += 1;
+        }
+        checks.push(json!({
+            "check": "delivered_without_evidence",
+            "status": if n_no_ev == 0 { "pass" } else { "warn" },
+            "detail": format!("{n_no_ev} delivered REQ(s) carry no evidence"),
+            "offenders": no_evidence.iter().filter_map(|r| r.first().cloned()).collect::<Vec<_>>(),
+            "remediation": if n_no_ev > 0 { "soll_attach_evidence per REQ (commit SHA + test + metric)" } else { "" }
+        }));
+
+        // Gate 2 — climb-the-chain: a milestone whose every TARGETS child is
+        // terminal must itself be closed in the SAME session.
+        let stale_mil = rows_of(&format!(
+            "WITH c AS (SELECT e.source_id AS mil, n.status AS st FROM soll.Edge e \
+                        JOIN soll.Node n ON n.id = e.target_id \
+                        WHERE e.relation_type = 'TARGETS' AND e.source_id LIKE 'MIL-%' \
+                          AND e.project_code = '{project_code}') \
+             SELECT m.id FROM soll.Node m LEFT JOIN c ON c.mil = m.id \
+             WHERE m.type = 'Milestone' AND m.project_code = '{project_code}' \
+               AND m.status NOT IN ('delivered','completed','superseded','rejected','deferred','archived') \
+             GROUP BY m.id HAVING count(*) FILTER (WHERE st IN ('current','planned')) = 0 LIMIT 50"
+        ));
+        let n_mil = stale_mil.len();
+        if n_mil > 0 {
+            warns += 1;
+        }
+        checks.push(json!({
+            "check": "milestone_reconciliation",
+            "status": if n_mil == 0 { "pass" } else { "warn" },
+            "detail": format!("{n_mil} milestone(s) whose children are all terminal but which are still open"),
+            "offenders": stale_mil.iter().filter_map(|r| r.first().cloned()).collect::<Vec<_>>(),
+            // DELIBERATE DIVERGENCE from the SQL GUI-PRO-028 prescribes: that query
+            // only excludes delivered/completed/superseded, so it re-flags
+            // `rejected` / `deferred` / `archived` milestones at EVERY handoff. Those
+            // are terminal states set on purpose (AXO carries 4 rejected/deferred +
+            // 1 archived), and flipping them to green a gate would falsify the
+            // record. Verified against the canonical query on live AXO: identical
+            // result minus exactly those deliberate states.
+            "remediation": if n_mil > 0 { "soll_manager update status=delivered on each, or justify in the body" } else { "" }
+        }));
+
         let overall = if fails > 0 {
             "fail"
         } else if warns > 0 {
@@ -477,8 +547,11 @@ impl McpServer {
                 "status": "ok",
                 "overall": overall,
                 "checks": checks,
+                // REQ-AXO-902250 — the two SOLL hard gates moved OUT of this list
+                // and INTO the automated checks above; what remains here is only
+                // what genuinely cannot be machine-checked.
                 "manual_reminders": [
-                    "GUI-PRO-028 manual steps not auto-checked: update the rolling session_pointer (CPT-{P}-052), prune boot docs, audit docs/working-notes, run `cargo test --lib` if runtime logic changed"
+                    "GUI-PRO-028 manual steps not auto-checked: practice_put the session's learnings, update the rolling session_pointer (CPT-{P}-052), prune boot docs, audit docs/working-notes, run `cargo test --lib` if runtime logic changed"
                 ],
                 "follow_up_tools": ["axon_commit_work", "soll_validate", "status"]
             }
