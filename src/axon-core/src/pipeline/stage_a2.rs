@@ -23,6 +23,20 @@ use super::types::{ParsedFile, PreparedFile};
 /// Returns an error if no parser exists for the file's extension OR if the
 /// blocking task itself panicked. A file with zero symbols is a valid result
 /// (e.g. a file containing only comments) — it returns `Ok(ParsedFile { symbols: vec![], ... })`.
+/// REQ-AXO-902252 — files whose parse blew the per-file budget and were therefore emitted
+/// as a zero-symbol `ParsedFile`.
+///
+/// The timeout path is a deliberate trade-off (REQ-AXO-901895: a clean skip beats a retry
+/// storm), but it is also SILENT symbol loss: A3 marks the file `parsed`, and nothing
+/// downstream can tell "timed out under load" from "nothing structural to extract". A
+/// non-zero value here means the index is incomplete for reasons unrelated to the code.
+static PARSE_TIMEOUTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Read side of [`PARSE_TIMEOUTS`]. Monotonic for the process lifetime.
+pub fn parse_timeouts() -> u64 {
+    PARSE_TIMEOUTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
     // REQ-AXO-345 — A2 in/out trace.
     info!(target: "pipeline::a2", "A2 in: {}", prep.path.display());
@@ -132,6 +146,17 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
             // background (its result discarded) while we record a clean
             // zero-symbol skip → A3 marks 'parsed', no retry storm, and the
             // pipeline keeps draining other files.
+            //
+            // REQ-AXO-902252 — COUNT it. This branch marks a file `parsed` with ZERO
+            // symbols: structurally indistinguishable, downstream, from "a data file with
+            // nothing to extract". Until now the only trace was this `warn!`, so a host
+            // under load could silently strip the symbols off arbitrarily many files and
+            // nothing would report it — the same silent-degradation shape as
+            // REQ-AXO-902254 (diagnose_indexing blind to a coverage gap) and
+            // REQ-AXO-902258 (a promote installing the wrong binary while every gate
+            // stayed green). A monotonic counter makes it observable; `parse_timeouts()`
+            // is the read side.
+            PARSE_TIMEOUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             warn!(
                 target: "pipeline::a2",
                 "A2 timeout: {} after {}ms — skipping (zero-symbol)",
@@ -178,14 +203,82 @@ mod tests {
 
     #[tokio::test]
     async fn a2_transform_extracts_at_least_one_symbol_from_a_minimal_rust_file() {
+        // REQ-AXO-902252 — this assertion is about PARSER WIRING, but it used to be
+        // wall-clock dependent and failed on a real full-suite run ("rust parser should
+        // surface `main`: []", 1665 passed / 1 failed). Mechanism: `a2_transform` wraps the
+        // parse in `timeout(parse_timeout_ms())`, and on expiry deliberately returns a
+        // CLEAN zero-symbol ParsedFile (REQ-AXO-901895, to avoid a retry storm). Under a
+        // saturated machine — 1600+ parallel tests, each `#[tokio::test]` with its own
+        // runtime, plus a concurrent build — the `spawn_blocking` thread may not even be
+        // SCHEDULED inside the 30s default budget. The parser was never at fault; the test
+        // was measuring the host's load.
+        //
+        // Fixed by neutralising the clock rather than retrying: a 10-minute budget cannot
+        // expire in a unit test, so the assertion measures only what it claims to. The
+        // env lock is mandatory here — a bare `set_var` is the flake class of
+        // REQ-AXO-902261.
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("AXON_A_PARSE_TIMEOUT_MS").ok();
+        std::env::set_var("AXON_A_PARSE_TIMEOUT_MS", "600000");
+
+        let before_timeouts = super::parse_timeouts();
         let prep = prep_with("/tmp/demo.rs", "fn main() { println!(\"hi\"); }\n");
         let parsed = a2_transform(prep).await.unwrap();
+
+        match prev {
+            Some(v) => std::env::set_var("AXON_A_PARSE_TIMEOUT_MS", v),
+            None => std::env::remove_var("AXON_A_PARSE_TIMEOUT_MS"),
+        }
+
         assert_eq!(parsed.path, PathBuf::from("/tmp/demo.rs"));
+        // Distinguish the two ways this test can see zero symbols. Without this, a timeout
+        // reads exactly like a parser regression — which is what cost the false diagnosis.
+        assert_eq!(
+            super::parse_timeouts(),
+            before_timeouts,
+            "the parse budget expired: this run measured host load, not the parser (REQ-AXO-902252)"
+        );
         assert!(
             parsed.symbols.iter().any(|s| s.name == "main"),
             "rust parser should surface `main`: {:?}",
             parsed.symbols
         );
+    }
+
+    /// REQ-AXO-902252 — the timeout path must be COUNTED, not merely logged. A zero-symbol
+    /// file is indistinguishable downstream from "nothing to extract", so without this
+    /// counter a loaded host can silently strip symbols off arbitrarily many files and
+    /// report nothing. Driven with a 1ms budget so the expiry is deterministic rather than
+    /// load-dependent.
+    #[tokio::test]
+    async fn a2_transform_counts_a_parse_timeout_instead_of_failing_silently() {
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("AXON_A_PARSE_TIMEOUT_MS").ok();
+        std::env::set_var("AXON_A_PARSE_TIMEOUT_MS", "1");
+
+        let before = super::parse_timeouts();
+        // Enough content that a 1ms budget cannot cover the parse.
+        let big = "fn f() {}\n".repeat(20_000);
+        let parsed = a2_transform(prep_with("/tmp/slow.rs", &big)).await.unwrap();
+
+        match prev {
+            Some(v) => std::env::set_var("AXON_A_PARSE_TIMEOUT_MS", v),
+            None => std::env::remove_var("AXON_A_PARSE_TIMEOUT_MS"),
+        }
+
+        // The contract of the timeout branch: a CLEAN zero-symbol skip (never an Err —
+        // an Err would leave the file unmarked and re-queued forever, REQ-AXO-901885).
+        if super::parse_timeouts() > before {
+            assert!(parsed.symbols.is_empty(), "a timed-out parse must yield no symbols");
+            assert!(parsed.relations.is_empty());
+            assert_eq!(parsed.path, PathBuf::from("/tmp/slow.rs"));
+        }
+        // If the parse beat even a 1ms budget, there is nothing to assert — this test never
+        // fails on a FAST machine, which is the whole point of not asserting on timing.
     }
 
     #[tokio::test]
