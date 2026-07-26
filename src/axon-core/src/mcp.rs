@@ -1668,6 +1668,8 @@ impl McpServer {
             "idle_drop" => self.axon_idle_drop(arguments),
             // REQ-AXO-902248 — replaces the globally-prescribed raw SQL body read.
             "soll_get" => self.axon_soll_get(arguments),
+            // REQ-AXO-902249 — edge traversal without hand-written SQL.
+            "soll_children" => self.axon_soll_children(arguments),
             "inspect" => self.axon_inspect(arguments),
             "audit" => self.axon_audit(arguments),
             "impact" => self.axon_impact(arguments),

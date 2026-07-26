@@ -5316,6 +5316,62 @@ fn test_axon_soll_manager_create_attached_validation_rejects_invalid_target_kind
     );
 }
 
+/// REQ-AXO-902249 — `soll_children` replaces the hand-written
+/// `JOIN soll.Edge / soll.Node` (real columns `source_id`/`target_id`, mistyped
+/// on the first attempt in session 104). The point of the tool is to make that
+/// class of error impossible, so the test pins BOTH directions and the filter.
+#[test]
+fn test_soll_children_traverses_both_directions_and_filters_relation() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let exec = |sql: &str| server.graph_store.execute(sql).unwrap();
+
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-CHD-100', 'Requirement', 'CHD', 'umbrella', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-CHD-101', 'Requirement', 'CHD', 'child refines', 'x', 'delivered', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-CHD-102', 'Requirement', 'CHD', 'child blocked', 'x', 'planned', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-CHD-001', 'Pillar', 'CHD', 'parent pillar', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-CHD-101', 'REQ-CHD-100', 'REFINES')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-CHD-102', 'REQ-CHD-100', 'BLOCKED_BY')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-CHD-100', 'PIL-CHD-001', 'BELONGS_TO')");
+
+    let ids = |v: &Value| -> Vec<String> {
+        v["data"]["nodes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n["id"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // children (default): both edges pointing AT the umbrella.
+    let all = server
+        .axon_soll_children(&json!({ "id": "REQ-CHD-100" }))
+        .expect("must answer");
+    let got = ids(&all);
+    assert!(
+        got.contains(&"REQ-CHD-101".to_string()) && got.contains(&"REQ-CHD-102".to_string()),
+        "both children expected, got {got:?}"
+    );
+
+    // relation filter narrows to exactly one.
+    let refines = server
+        .axon_soll_children(&json!({ "id": "REQ-CHD-100", "relation_type": "REFINES" }))
+        .expect("must answer");
+    assert_eq!(ids(&refines), vec!["REQ-CHD-101".to_string()]);
+
+    // parents: climbs the other way.
+    let parents = server
+        .axon_soll_children(&json!({ "id": "REQ-CHD-100", "direction": "parents" }))
+        .expect("must answer");
+    assert_eq!(
+        ids(&parents),
+        vec!["PIL-CHD-001".to_string()],
+        "direction=parents must climb, not re-list children"
+    );
+}
+
 /// REQ-AXO-902248 — `soll_get` replaces the single most-prescribed raw-SQL
 /// pattern in the system (`sql SELECT description FROM soll.Node WHERE id=…`,
 /// which the GLOBAL CLAUDE.md tells every LLM to run, in every project).

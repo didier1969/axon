@@ -59,6 +59,33 @@ pub(crate) struct QueryInput {
     pub semantic: Option<String>,
 }
 
+/// Direction of a `soll_children` traversal.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SollDirection {
+    /// Nodes attached BELOW this one (an umbrella's REFINES children).
+    Children,
+    /// Nodes this one is attached to (its parents).
+    Parents,
+}
+
+/// `soll_children` — REQ-AXO-902249: traverse SOLL edges from one node, instead
+/// of hand-writing a `JOIN soll.Edge / soll.Node` (whose real columns are
+/// `source_id` / `target_id` — a classic mistyping).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct SollChildrenInput {
+    /// Canonical SOLL id to traverse from, e.g. "REQ-AXO-902192".
+    pub id: String,
+    /// `children` (default) or `parents`.
+    #[serde(default)]
+    pub direction: Option<SollDirection>,
+    /// Optional edge filter, e.g. "REFINES", "BELONGS_TO", "TARGETS". Omit for
+    /// every relation. Legal values depend on the (source, target) kind pair —
+    /// see `soll_relation_schema`.
+    #[serde(default)]
+    pub relation_type: Option<String>,
+}
+
 /// `soll_get` — REQ-AXO-902248: return the BODY of one SOLL node by id. Replaces
 /// the raw `sql SELECT description FROM soll.Node WHERE id='<ID>'` that the global
 /// CLAUDE.md prescribes to every LLM in every project.
@@ -274,6 +301,8 @@ pub(crate) const DERIVED_TOOLS: &[&str] = &[
     "idle_drop",
     // REQ-AXO-902248
     "soll_get",
+    // REQ-AXO-902249
+    "soll_children",
 ];
 
 /// REQ-AXO-901949 — single-source interaction-graph record for a tool.
@@ -308,6 +337,15 @@ pub(crate) fn tool_routing(name: &str) -> Option<ToolRouting> {
         // state applied by another process.
         // REQ-AXO-902248 — reading a node body is usually the FIRST step of a
         // procedure; the natural follow-up is the wider context, not another read.
+        // REQ-AXO-902249 — traversal usually precedes reading a specific body.
+        "soll_children" => ToolRouting {
+            follow_ups: &["soll_get", "soll_work_plan"],
+            goal: "list the SOLL nodes attached to one node",
+            stage: "intent_governance",
+            token_hint:
+                "Traverse once with the relation filter you need, then `soll_get` only the bodies you will actually read.",
+            use_when: "use when you need an umbrella's children, or a node's parents, without writing SQL",
+        },
         "soll_get" => ToolRouting {
             follow_ups: &["soll_query_context", "soll_work_plan"],
             goal: "read the canonical body of one SOLL node",
@@ -706,6 +744,7 @@ pub(crate) fn derived_input_schema(name: &str) -> Option<Value> {
         // hand-written literal (GUI-AXO-1026 inv.1).
         "idle_drop" => generator().into_root_schema_for::<IdleDropInput>(),
         "soll_get" => generator().into_root_schema_for::<SollGetInput>(),
+        "soll_children" => generator().into_root_schema_for::<SollChildrenInput>(),
         _ => return None,
     };
     let mut value = serde_json::to_value(schema).ok()?;

@@ -650,6 +650,94 @@ impl McpServer {
         }))
     }
 
+    /// REQ-AXO-902249 — traverse SOLL edges from one node.
+    ///
+    /// The second most common raw-SQL shape after `soll_get`: listing an
+    /// umbrella's `REFINES` children, or climbing to a parent, meant hand-writing
+    /// a `JOIN soll.Edge e ON ... soll.Node n` every single time. Session 104 got
+    /// it wrong on the first try (`column e.src does not exist` — the real columns
+    /// are `source_id` / `target_id`). A tool removes that class of error by
+    /// construction, which is the whole point of the operator's ask: MCP commands
+    /// rather than LLMs querying the database themselves.
+    pub(crate) fn axon_soll_children(&self, args: &Value) -> Option<Value> {
+        let Some(id) = args
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "soll_children requires `id` (canonical SOLL id, e.g. REQ-AXO-902192)." }],
+                "isError": true,
+                "data": { "status": "input_invalid", "parameter_repair": {
+                    "invalid_field": "id",
+                    "corrected_call": { "name": "soll_children", "arguments": { "id": "REQ-AXO-902192" } }
+                } }
+            }));
+        };
+        // `children` = nodes pointing AT `id` (an umbrella's REFINES children are
+        // edges child -> umbrella). `parents` = the reverse. Naming follows the
+        // SOLL mental model, not the edge direction, because that is how the
+        // procedures phrase it.
+        let direction = args
+            .get("direction")
+            .and_then(Value::as_str)
+            .unwrap_or("children");
+        let rel = args
+            .get("relation_type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let (match_col, other_col) = match direction {
+            "parents" => ("source_id", "target_id"),
+            _ => ("target_id", "source_id"),
+        };
+        let sql = format!(
+            "SELECT n.id, n.type, COALESCE(n.status,''), COALESCE(n.title,''), e.relation_type \
+             FROM soll.Edge e JOIN soll.Node n ON n.id = e.{other_col} \
+             WHERE e.{match_col} = ?{} ORDER BY n.id LIMIT 200",
+            if rel.is_some() { " AND e.relation_type = ?" } else { "" }
+        );
+        let params = match rel {
+            Some(r) => json!([id, r]),
+            None => json!([id]),
+        };
+        let rows: Vec<Vec<Value>> = self
+            .graph_store
+            .query_json_param(&sql, &params)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+
+        let cell = |r: &[Value], i: usize| r.get(i).and_then(Value::as_str).unwrap_or("").to_string();
+        let items: Vec<Value> = rows
+            .iter()
+            .map(|r| json!({
+                "id": cell(r, 0), "type": cell(r, 1),
+                "status": cell(r, 2), "title": cell(r, 3),
+                "relation_type": cell(r, 4),
+            }))
+            .collect();
+
+        let lines: Vec<String> = rows
+            .iter()
+            .map(|r| format!("- {} [{}] {} — {}", cell(r, 0), cell(r, 2), cell(r, 4), cell(r, 3)))
+            .collect();
+        Some(json!({
+            "content": [{ "type": "text", "text": format!(
+                "{} of {}{}: {} found\n{}",
+                if direction == "parents" { "Parents" } else { "Children" },
+                id,
+                rel.map(|r| format!(" via {r}")).unwrap_or_default(),
+                items.len(),
+                if lines.is_empty() { "(none)".to_string() } else { lines.join("\n") }
+            ) }],
+            "data": { "status": "ok", "id": id, "direction": direction,
+                      "relation_type": rel, "count": items.len(), "nodes": items }
+        }))
+    }
+
     /// REQ-AXO-902248 — return the BODY of one SOLL node, by id.
     ///
     /// This is the single most-prescribed raw-SQL pattern in the whole system:

@@ -1129,6 +1129,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "soll_children",
+                "description": "[SOLL] REQ-AXO-902249 — traverse SOLL edges from one node: `direction=children` (default, nodes attached below — e.g. an umbrella's REFINES children) or `parents`. Optional `relation_type` filter (REFINES / BELONGS_TO / TARGETS / ...). Use this instead of hand-writing a JOIN on soll.Edge + soll.Node.",
+                "inputSchema": { "$comment": "derived from tool_contracts::SollChildrenInput — injected post-build" }
+            },
+            {
                 "name": "soll_get",
                 "description": "[SOLL] REQ-AXO-902248 — return the BODY (description) of ONE SOLL node by canonical id, plus its type/title/status/project. Use this instead of `sql SELECT description FROM soll.Node WHERE id=...`: it is the same answer, validated, with nearby-id repair when the id is wrong. For the project-wide picture use `soll_query_context`; for scored execution order use `soll_work_plan`.",
                 "inputSchema": { "$comment": "derived from tool_contracts::SollGetInput — injected post-build" }
