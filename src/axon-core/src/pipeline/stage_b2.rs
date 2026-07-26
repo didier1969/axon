@@ -652,9 +652,14 @@ mod tests {
     }
 
     // REQ-AXO-902033 — inference watchdog budget resolution. Run single-threaded
-    // (env is process-global); the suite already pins --test-threads=1.
+    // (env is process-global). REQ-AXO-902261 — the previous comment claimed the suite
+    // pins --test-threads=1; that was FALSE (no .cargo/config.toml, nothing sets it).
+    // Serialised on the canonical lock instead of on a guarantee that does not exist.
     #[test]
     fn b2_inference_timeout_resolves_default_override_and_disable() {
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("AXON_B2_INFERENCE_TIMEOUT_MS") };
         assert_eq!(b2_inference_timeout_ms(), 180_000, "default budget");
 

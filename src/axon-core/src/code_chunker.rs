@@ -1404,7 +1404,9 @@ mod tests {
         // the old divide-and-conquer re-encoded growing spans at every recursion
         // node (~N²/2 ≈ 12.5M for N=5000). A `< 4·N` ceiling sits far above the
         // linear cost and far below any super-linear reintroduction.
-        // Deterministic only under `--test-threads=1` (required for lib tests).
+        // REQ-AXO-902261 — was "deterministic only under --test-threads=1 (required for
+        // lib tests)": FALSE, nothing in this repo sets --test-threads. Determinism comes
+        // from the env lock this module already takes.
         crate::embedding_profile::encode_counter::reset();
         let chunks = build_symbol_chunks(&symbol, &content);
         let encodes = crate::embedding_profile::encode_counter::get();

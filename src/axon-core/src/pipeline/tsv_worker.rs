@@ -410,12 +410,20 @@ mod tests {
         assert_eq!(parsed_count, 0);
     }
 
+    /// REQ-AXO-902261 — the previous comment here argued the lock "isn't applicable (no
+    /// GPU)" and that the "conflict surface is small (only AXON_TSV_*)". Both are wrong:
+    /// `env_test_lock` has nothing to do with the GPU, and it protects ALL env operations
+    /// as ONE unit precisely because env is a single OS-level table (see its own doc in
+    /// `test_support.rs`). Per-key reasoning does not make a parallel harness safe.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn config_env_concurrency_override() {
-        // SAFETY: env writes inside a test mutate process-global state.
-        // The harness lock used by embedder tests isn't applicable here
-        // (no GPU). Conflict surface is small (only AXON_TSV_*) and the
-        // assertion lives within the same scope.
+        let _env = env_guard();
         std::env::set_var("AXON_TSV_WORKER_CONCURRENCY", "7");
         let cfg = TsvWorkerConfig::from_env();
         assert_eq!(cfg.concurrency, 7);
@@ -424,6 +432,7 @@ mod tests {
 
     #[test]
     fn config_env_rejects_zero() {
+        let _env = env_guard();
         std::env::set_var("AXON_TSV_BATCH_SIZE", "0");
         let cfg = TsvWorkerConfig::from_env();
         assert_eq!(cfg.batch_size, 256); // default preserved

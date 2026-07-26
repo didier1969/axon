@@ -306,11 +306,24 @@ pub fn spawn_idle_watchdog(embedders: Vec<Arc<GpuB2Embedder>>, check_interval: D
 mod tests {
     use super::*;
 
-    // REQ-AXO-902220 — config resolution (env is process-global; the suite
-    // pins --test-threads=1, mirroring stage_b2's timeout test).
+    // REQ-AXO-902220 — config resolution. Env is process-global and the Rust harness runs
+    // tests in PARALLEL THREADS within one process.
+    //
+    // REQ-AXO-902261 — the previous comment here claimed "the suite pins --test-threads=1".
+    // **That was false**: there is no `.cargo/config.toml` in this repo and nothing sets
+    // `--test-threads` anywhere (verified). These tests believed they were protected by a
+    // guarantee that does not exist — the same shape as the "DBQ-A claim feeder drains the
+    // backlog by construction" comment describing a feeder absent from the code
+    // (REQ-AXO-902260). Serialised properly now, on the canonical lock.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn idle_drop_disabled_by_default_and_env_matrix() {
+        let _env = env_guard();
         unsafe { std::env::remove_var("AXON_EMBEDDER_IDLE_DROP") };
         assert!(!idle_drop_enabled(), "default OFF preserves DEC-AXO-901631");
 
@@ -327,6 +340,7 @@ mod tests {
 
     #[test]
     fn idle_drop_seconds_defaults_to_twenty_and_clamps_zero() {
+        let _env = env_guard();
         unsafe { std::env::remove_var("AXON_EMBEDDER_IDLE_SECONDS") };
         assert_eq!(idle_drop_seconds(), 20, "operator default");
 
@@ -351,6 +365,7 @@ mod tests {
     /// directions (that is why the atomic is a tri-state and not a bool).
     #[test]
     fn runtime_control_overrides_env_both_ways() {
+        let _env = env_guard();
         reset_idle_drop_control_for_tests();
         // env says OFF …
         unsafe { std::env::remove_var("AXON_EMBEDDER_IDLE_DROP") };
