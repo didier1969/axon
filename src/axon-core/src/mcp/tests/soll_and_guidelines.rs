@@ -5316,6 +5316,50 @@ fn test_axon_soll_manager_create_attached_validation_rejects_invalid_target_kind
     );
 }
 
+/// REQ-AXO-902248 — `soll_get` replaces the single most-prescribed raw-SQL
+/// pattern in the system (`sql SELECT description FROM soll.Node WHERE id=…`,
+/// which the GLOBAL CLAUDE.md tells every LLM to run, in every project).
+#[test]
+fn test_soll_get_returns_node_body_and_repairs_unknown_id() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('GUI-SGT-001', 'Guideline', 'SGT', 'Probe guideline', 'CANONICAL BODY TEXT', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('GUI-SGT-002', 'Guideline', 'SGT', 'Sibling', 'other', 'current', '{}')")
+        .unwrap();
+
+    // Known id → the BODY is the answer (that is what the procedures reach for).
+    let ok = server
+        .axon_soll_get(&json!({ "id": "GUI-SGT-001" }))
+        .expect("soll_get must answer");
+    let text = ok["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("CANONICAL BODY TEXT"),
+        "the body must be in the terse answer, got: {text}"
+    );
+    assert_eq!(ok["data"]["type"].as_str(), Some("Guideline"));
+    assert_eq!(ok["data"]["node_status"].as_str(), Some("current"));
+
+    // Unknown id → repair AS DATA with real neighbours, not a bare "not found".
+    let miss = server
+        .axon_soll_get(&json!({ "id": "GUI-SGT-999" }))
+        .expect("soll_get must answer");
+    assert_eq!(miss.get("isError").and_then(Value::as_bool), Some(true));
+    assert_eq!(miss["data"]["status"].as_str(), Some("not_found"));
+    let nearby: Vec<String> = miss["data"]["parameter_repair"]["nearby_ids"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    assert!(
+        nearby.contains(&"GUI-SGT-001".to_string()),
+        "an unknown id must hand back real neighbours, got {nearby:?}"
+    );
+}
+
 /// REQ-AXO-902247 — `forbidden_relation_for_type` is the #1 open friction in
 /// telemetry (217 occurrences). When the (source, target) pair admits exactly ONE
 /// canonical relation, the caller had no real choice — so the rejection must hand

@@ -59,6 +59,15 @@ pub(crate) struct QueryInput {
     pub semantic: Option<String>,
 }
 
+/// `soll_get` — REQ-AXO-902248: return the BODY of one SOLL node by id. Replaces
+/// the raw `sql SELECT description FROM soll.Node WHERE id='<ID>'` that the global
+/// CLAUDE.md prescribes to every LLM in every project.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct SollGetInput {
+    /// Canonical SOLL id, e.g. "GUI-PRO-028", "REQ-AXO-902248", "CPT-AXO-052".
+    pub id: String,
+}
+
 /// `idle_drop` operation.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -263,6 +272,8 @@ pub(crate) const DERIVED_TOOLS: &[&str] = &[
     // integrity tests (schema present + object, zero $ref/$defs, catalog serves
     // the derived schema rather than a literal).
     "idle_drop",
+    // REQ-AXO-902248
+    "soll_get",
 ];
 
 /// REQ-AXO-901949 — single-source interaction-graph record for a tool.
@@ -295,6 +306,16 @@ pub(crate) fn tool_routing(name: &str) -> Option<ToolRouting> {
         // REQ-AXO-902234 — co-located routing (GUI-AXO-1026 inv.6): the natural
         // follow-up is OBSERVING the effect, since the policy write is desired
         // state applied by another process.
+        // REQ-AXO-902248 — reading a node body is usually the FIRST step of a
+        // procedure; the natural follow-up is the wider context, not another read.
+        "soll_get" => ToolRouting {
+            follow_ups: &["soll_query_context", "soll_work_plan"],
+            goal: "read the canonical body of one SOLL node",
+            stage: "intent_governance",
+            token_hint:
+                "Fetch the one node you need by id; use `soll_query_context` only when you need the project-wide picture.",
+            use_when: "use when a procedure or a cross-reference names a SOLL id and you need its body",
+        },
         "idle_drop" => ToolRouting {
             follow_ups: &["embedding_status", "status"],
             goal: "arm or disarm idle GPU VRAM reclamation without a restart",
@@ -684,6 +705,7 @@ pub(crate) fn derived_input_schema(name: &str) -> Option<Value> {
         // REQ-AXO-902234 — new tools are born on the derived contract, never on a
         // hand-written literal (GUI-AXO-1026 inv.1).
         "idle_drop" => generator().into_root_schema_for::<IdleDropInput>(),
+        "soll_get" => generator().into_root_schema_for::<SollGetInput>(),
         _ => return None,
     };
     let mut value = serde_json::to_value(schema).ok()?;

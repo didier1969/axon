@@ -650,6 +650,96 @@ impl McpServer {
         }))
     }
 
+    /// REQ-AXO-902248 — return the BODY of one SOLL node, by id.
+    ///
+    /// This is the single most-prescribed raw-SQL pattern in the whole system:
+    /// `~/.claude/CLAUDE.md` (global, loaded in every session of every project)
+    /// tells every LLM, twice, to run
+    /// `sql SELECT description FROM soll.Node WHERE id='<ID>'`. It says so because
+    /// no tool did the job — `soll_query_context` IGNORES an id and returns a
+    /// project overview. `sql` is 63.5 % of all MCP traffic (71 424 calls); this
+    /// pattern is plausibly its single largest contributor.
+    ///
+    /// Terse by default (GUI-AXO-1026 inv.4): the body IS the answer, since that
+    /// is what the procedures reach for. Identity/status ride along in `data`.
+    pub(crate) fn axon_soll_get(&self, args: &Value) -> Option<Value> {
+        let Some(id) = args
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "soll_get requires `id` (canonical SOLL id, e.g. GUI-PRO-028)." }],
+                "isError": true,
+                "data": { "status": "input_invalid", "parameter_repair": {
+                    "invalid_field": "id",
+                    "corrected_call": { "name": "soll_get", "arguments": { "id": "GUI-PRO-028" } }
+                } }
+            }));
+        };
+
+        let rows: Vec<Vec<Value>> = self
+            .graph_store
+            .query_json_param(
+                "SELECT id, type, COALESCE(title,''), COALESCE(description,''), \
+                        COALESCE(status,''), COALESCE(project_code,'') \
+                 FROM soll.Node WHERE id = ? LIMIT 1",
+                &json!([id]),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+
+        let Some(row) = rows.first() else {
+            // Repair AS DATA (inv.5): an unknown id is nearly always a typo or a
+            // wrong family prefix, so hand back real neighbours rather than a bare
+            // "not found" the caller must then go hunting for.
+            let prefix = id.rsplit_once('-').map(|(p, _)| p).unwrap_or(id);
+            let near: Vec<Value> = self
+                .graph_store
+                .query_json_param(
+                    "SELECT id FROM soll.Node WHERE id LIKE ? ORDER BY id DESC LIMIT 8",
+                    &json!([format!("{prefix}-%")]),
+                )
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|r| r.into_iter().next())
+                .collect();
+            return Some(json!({
+                "content": [{ "type": "text", "text": format!(
+                    "No SOLL node `{id}`. Closest ids in the `{prefix}` family: {}.",
+                    if near.is_empty() { "(none)".to_string() }
+                    else { near.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ") }
+                ) }],
+                "isError": true,
+                "data": { "status": "not_found", "parameter_repair": {
+                    "invalid_field": "id", "supplied_value": id, "nearby_ids": near,
+                    "follow_up_tools": ["soll_id_registry", "soll_query_context"]
+                } }
+            }));
+        };
+
+        let cell = |i: usize| row.get(i).and_then(Value::as_str).unwrap_or("");
+        let (node_type, title, body, status, project) =
+            (cell(1), cell(2), cell(3), cell(4), cell(5));
+
+        Some(json!({
+            "content": [{ "type": "text", "text": format!(
+                "## {id} — {title}\n_{node_type} · {status} · {project}_\n\n{body}"
+            ) }],
+            "data": {
+                "status": "ok",
+                "id": id, "type": node_type, "title": title,
+                "node_status": status, "project_code": project,
+                "description": body,
+                "next_action": { "kind": "continue_with_follow_up_tool", "tool": "soll_query_context", "when": "if_more_context_needed" }
+            }
+        }))
+    }
+
     pub(crate) fn axon_soll_query_context(&self, args: &Value) -> Option<Value> {
         let project_code_input = args
             .get("project_code")
