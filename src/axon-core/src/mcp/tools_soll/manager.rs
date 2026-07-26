@@ -795,6 +795,28 @@ impl McpServer {
                             .join(", ");
                         let reverse_hint =
                             reverse_relation_hint_payload(source_prefix, &target_prefix);
+                        // REQ-AXO-902247 (GUI-AXO-1026 inv.5 — repair AS DATA) — when the
+                        // pair admits exactly ONE legal relation, the call is unambiguously
+                        // fixable, so hand back the corrected value instead of a list the
+                        // LLM must still reason over. This is the FREQUENT case (REQ → PIL
+                        // only admits BELONGS_TO) and `forbidden_relation_for_type` is the
+                        // #1 open friction in telemetry: 217 occurrences, i.e. 217 wasted
+                        // round-trips on a choice that had no choice.
+                        //
+                        // Deliberately a PATCH, not a reconstructed full call: the original
+                        // `data` payload is not faithfully reproducible here, and inventing
+                        // one would be worse than useless. When several relations are legal
+                        // we emit nothing — picking for the caller would be guessing.
+                        let corrected_call = match allowed.as_slice() {
+                            [only] => json!({
+                                "tool": "soll_manager",
+                                "patch": { "data.relation_type": only },
+                                "note": format!(
+                                    "{source_prefix} → {target_prefix} admits exactly one canonical relation; re-send the SAME call with this value."
+                                ),
+                            }),
+                            _ => Value::Null,
+                        };
                         return Some(json!({
                             "content": [{
                                 "type": "text",
@@ -825,6 +847,10 @@ impl McpServer {
                                     "reverse_direction": reverse_hint,
                                     "hint": "pick an allowed relation_type for this (source_type, target_type) pair, or change attach_to to a target whose type fits one of `source_can_reach`",
                                     "follow_up_tools": ["soll_relation_schema"],
+                                    // REQ-AXO-902247 — present ONLY when the fix is
+                                    // unambiguous (single legal relation). Absent otherwise,
+                                    // so its presence always means "apply this verbatim".
+                                    "corrected_call": corrected_call,
                                 },
                                 "canonical_source": "MIL-AXO-020",
                             },

@@ -138,6 +138,15 @@ pub(crate) struct SollManagerData {
     pub attach_to: Option<String>,
     /// Canonical edge type (create attach / link). e.g. "BELONGS_TO",
     /// "REFINES", "SOLVES", "EPITOMIZES", "SUPERSEDES".
+    ///
+    /// REQ-AXO-902247 — NOT free-form: the legal values depend on the PAIR
+    /// (source kind, target kind), not on the relation alone. `REQ → PIL` admits
+    /// only `BELONGS_TO`; `REQ → CPT` admits nothing (attach the REQ to a PIL or
+    /// another REQ instead). Call `soll_relation_schema` to get the matrix for a
+    /// kind BEFORE guessing — this is the #1 open friction in telemetry
+    /// (`forbidden_relation_for_type`, 217 occurrences), and it is entirely
+    /// avoidable. On a rejection the error carries `parameter_repair`, plus a
+    /// ready-to-apply `corrected_call` whenever the pair admits a single relation.
     #[serde(default)]
     pub relation_type: Option<String>,
     /// Node id (update target). DB-allocated on create — forbidden there.

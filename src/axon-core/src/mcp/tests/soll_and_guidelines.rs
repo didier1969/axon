@@ -5316,6 +5316,105 @@ fn test_axon_soll_manager_create_attached_validation_rejects_invalid_target_kind
     );
 }
 
+/// REQ-AXO-902247 — `forbidden_relation_for_type` is the #1 open friction in
+/// telemetry (217 occurrences). When the (source, target) pair admits exactly ONE
+/// canonical relation, the caller had no real choice — so the rejection must hand
+/// back the corrected value, not just a list to reason over.
+#[test]
+fn test_soll_manager_forbidden_relation_returns_corrected_call_when_unambiguous() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-002', 'Pillar', 'AXO', 'Surface', 'probe pillar', '', '{}')")
+        .unwrap();
+
+    // REQ → PIL admits only BELONGS_TO; ask for a wrong one on purpose.
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "requirement",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "902247 corrected-call probe",
+                    "description": "probe",
+                    "attach_to": "PIL-AXO-002",
+                    "relation_type": "REFINES"
+                }
+            }
+        })),
+        id: Some(json!(902_247)),
+    };
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    assert_eq!(response.get("isError").and_then(|v| v.as_bool()), Some(true));
+
+    let repair = &response["data"]["parameter_repair"];
+    assert_eq!(repair["source_type"].as_str(), Some("REQ"));
+    assert_eq!(repair["target_type"].as_str(), Some("PIL"));
+
+    let corrected = &repair["corrected_call"];
+    assert!(
+        !corrected.is_null(),
+        "a single-legal-relation pair must yield a corrected_call, got {repair}"
+    );
+    assert_eq!(
+        corrected["patch"]["data.relation_type"].as_str(),
+        Some("BELONGS_TO"),
+        "the corrected value must be the one legal relation, got {corrected}"
+    );
+}
+
+/// REQ-AXO-902247 — the mirror case: when SEVERAL relations are legal, picking one
+/// for the caller would be guessing. `corrected_call` must then be ABSENT, so its
+/// presence always means "apply this verbatim".
+#[test]
+fn test_soll_manager_forbidden_relation_omits_corrected_call_when_ambiguous() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-902192', 'Requirement', 'AXO', 'Parent', 'probe req', 'current', '{}')")
+        .unwrap();
+
+    // REQ → REQ admits several (REFINES / BELONGS_TO / SUPERSEDES / BLOCKED_BY).
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "requirement",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "902247 ambiguous probe",
+                    "description": "probe",
+                    "attach_to": "REQ-AXO-902192",
+                    "relation_type": "EPITOMIZES"
+                }
+            }
+        })),
+        id: Some(json!(902_248)),
+    };
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    assert_eq!(response.get("isError").and_then(|v| v.as_bool()), Some(true));
+
+    let repair = &response["data"]["parameter_repair"];
+    let accepted = repair["accepted_values"].as_array().cloned().unwrap_or_default();
+    assert!(
+        accepted.len() > 1,
+        "fixture assumes an ambiguous pair; got {accepted:?}"
+    );
+    assert!(
+        repair["corrected_call"].is_null(),
+        "several legal relations → must NOT pick one for the caller, got {repair}"
+    );
+}
+
 #[test]
 fn test_axon_soll_manager_link_rejects_relation_outside_policy() {
     let server = create_test_server();
