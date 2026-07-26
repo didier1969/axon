@@ -103,4 +103,15 @@ Procedure = **GUI-PRO-028** in SOLL (6 steps : practice_put apprentissages / ses
 - Promote dev→live: `bash scripts/release/promote_live_safe.sh --project AXO`
 - Rollback: `bash scripts/release/rollback_live.sh`
 - Dev builds: `cargo build` (debug → `.axon/cargo-target/debug/`).
-- Live binaries: installed by `promote_live.sh` to `bin/` (release).
+- Live binaries: installed into `bin/` by **`axonctl cutover`** (step 5), the Rust
+  health-gated executor — snapshot → stage → restart → 240s liveness gate → finalize, with
+  **native auto-rollback** to the previous build. Since REQ-AXO-902256 this is the ONLY
+  step-5 path: the `promote-live --in-place` branch and its `USE_CUTOVER` toggle are gone
+  (an opt-in safe path is not a safe path — it defaulted OFF for months).
+- `promote_live.sh` is NOT the promote path any more. It survives only for `--resume`
+  (recovering a stranded `.axon/live-release/pending.json`), which `promote_live_safe.sh`
+  triggers automatically and which `release_reconciler::next_action` names explicitly.
+- A promote interrupts live MCP. The script now MEASURES that window (1Hz sampling of
+  `/mcp` across steps 5→6c → `.axon/live-release/mcp-availability-<ts>.csv`) instead of
+  reporting the binary-copy duration. Warn third-party MCP clients before promoting: they
+  read an outage as a crash and self-restart (REQ-AXO-902256).

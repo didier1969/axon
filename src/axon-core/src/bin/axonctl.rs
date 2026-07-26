@@ -2474,6 +2474,25 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// REQ-AXO-902256 — finalize with nothing staged must FAIL, not succeed quietly.
+    /// A silent no-op would re-promote the release already serving and report success,
+    /// so a promote that never staged anything would look like it shipped. The sibling
+    /// tests above all finalize a real pending; this pins the empty case.
+    #[test]
+    fn cutover_finalize_without_pending_errs() {
+        let (root, release, _bin, _archive) = cutover_tmp("finalize-nopending");
+        write_json_file(
+            &release.join("current.json"),
+            &serde_json::json!({"state": "promoted", "runtime_version": {"install_generation": "old-gen"}}),
+        )
+        .unwrap();
+        assert!(
+            cutover_finalize_files(&release).is_err(),
+            "finalize without a staged pending must error"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn cutover_rollback_restores_old_bin_and_drops_pending() {
         // THE s94 recovery: after a bad staged swap, rollback must restore bin/* from

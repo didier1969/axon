@@ -332,6 +332,56 @@ pub enum RuntimeBootRole {
     Indexer,
 }
 
+impl RuntimeBootRole {
+    /// Token used in the per-role socket paths (`/tmp/axon-live-brain-telemetry.sock`).
+    pub(crate) fn socket_token(self) -> &'static str {
+        match self {
+            RuntimeBootRole::Brain => "brain",
+            RuntimeBootRole::Indexer => "indexer",
+        }
+    }
+
+    pub(crate) fn peer(self) -> RuntimeBootRole {
+        match self {
+            RuntimeBootRole::Brain => RuntimeBootRole::Indexer,
+            RuntimeBootRole::Indexer => RuntimeBootRole::Brain,
+        }
+    }
+}
+
+/// REQ-AXO-902256 — why a socket was already on disk at boot.
+///
+/// The previous single WARN asserted "potential brain/indexer collision" for EVERY
+/// pre-existing socket. That is wrong in the common case and actively costly: the socket
+/// paths are ALREADY per-role, so a restarting brain always finds its own
+/// `…-brain-…` socket and always tripped the collision wording. In session 104 that
+/// sentence sent a production root-cause investigation down a dead end (the real defect
+/// was elsewhere entirely — the promote's in-place path never relaunching the indexer).
+/// The path carries the answer, so classify instead of guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StaleSocketKind {
+    /// Leftover from a previous instance of THIS role — expected after any restart.
+    SelfRestartLeftover,
+    /// The path carries the OTHER role's token: a genuine cross-role collision.
+    CrossRoleCollision,
+    /// No role token in the path (legacy default shared by both roles) — can't tell.
+    RoleUnmarked,
+}
+
+pub(crate) fn classify_stale_socket(path: &str, role: RuntimeBootRole) -> StaleSocketKind {
+    // Match on `-<token>-` so a directory or instance name that merely contains the word
+    // (e.g. /home/brainstorm/…) cannot be mistaken for a role marker.
+    let own = format!("-{}-", role.socket_token());
+    let peer = format!("-{}-", role.peer().socket_token());
+    if path.contains(&own) {
+        StaleSocketKind::SelfRestartLeftover
+    } else if path.contains(&peer) {
+        StaleSocketKind::CrossRoleCollision
+    } else {
+        StaleSocketKind::RoleUnmarked
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeBootProfile {
     pub role: RuntimeBootRole,
@@ -887,11 +937,32 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     // explicitement chaque fois qu'un sock préexistant est supprimé : si
     // un peer encore vivant écoutait dessus, le warn surface dans les
     // logs et l'opérateur sait que la collision s'est produite.
+    // REQ-AXO-902256 — report WHICH of the two cases this is (see classify_stale_socket).
+    // Only a cross-role path warrants the collision wording; a same-role leftover is the
+    // normal consequence of a restart and must not read as an anomaly.
+    let log_stale_socket = |path: &str, kind: StaleSocketKind, env_var: &str, which: &str| match kind
+    {
+        StaleSocketKind::SelfRestartLeftover => info!(
+            socket = %path,
+            "{which} socket left by a previous instance of this role; removed before bind (expected after a restart — NOT a cross-role collision)"
+        ),
+        StaleSocketKind::CrossRoleCollision => warn!(
+            socket = %path,
+            "{which} socket belongs to the OTHER role and was removed before bind — genuine brain/indexer collision, a live peer may have been orphaned; verify the per-role {env_var} override"
+        ),
+        StaleSocketKind::RoleUnmarked => warn!(
+            socket = %path,
+            "{which} socket pre-existed at boot with no role marker in its path (legacy shared default); removed before bind — set a per-role {env_var} so collisions become diagnosable"
+        ),
+    };
     if std::path::Path::new(&tel_socket_path).exists() {
+        let kind = classify_stale_socket(&tel_socket_path, profile.role);
         match fs::remove_file(&tel_socket_path) {
-            Ok(()) => warn!(
-                socket = %tel_socket_path,
-                "telemetry socket pre-existed at boot; removed before bind (potential brain/indexer collision — verify per-role AXON_TELEMETRY_SOCK env override)"
+            Ok(()) => log_stale_socket(
+                &tel_socket_path,
+                kind,
+                "AXON_TELEMETRY_SOCK",
+                "telemetry",
             ),
             Err(err) => warn!(
                 socket = %tel_socket_path,
@@ -901,11 +972,9 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         }
     }
     if std::path::Path::new(&mcp_socket_path).exists() {
+        let kind = classify_stale_socket(&mcp_socket_path, profile.role);
         match fs::remove_file(&mcp_socket_path) {
-            Ok(()) => warn!(
-                socket = %mcp_socket_path,
-                "mcp socket pre-existed at boot; removed before bind (potential brain/indexer collision — verify per-role AXON_MCP_SOCK env override)"
-            ),
+            Ok(()) => log_stale_socket(&mcp_socket_path, kind, "AXON_MCP_SOCK", "mcp"),
             Err(err) => warn!(
                 socket = %mcp_socket_path,
                 error = %err,
@@ -1185,11 +1254,74 @@ mod tests {
         apply_canonical_ort_thread_defaults_from_openmp, apply_graph_first_indexer_memory_defaults,
         canonical_effective_embedding_lane_config, canonical_embedding_provider_request,
         graph_first_indexer_lane_sizing, parse_boot_warm_project_codes,
-        parse_build_info_identity, resource_release_identity, RuntimeBootProfile, RuntimeBootRole,
+        classify_stale_socket, parse_build_info_identity, resource_release_identity,
+        RuntimeBootProfile, RuntimeBootRole, StaleSocketKind,
     };
     use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_capacity_profile::{EmbeddingLaneSizing, RuntimeProfile};
     use crate::runtime_writer_guard::WriterTarget;
+
+    /// REQ-AXO-902256 — the real session-104 path: a restarting BRAIN finds
+    /// `/tmp/axon-live-brain-telemetry.sock`. The old code called that a
+    /// "potential brain/indexer collision", which is false and cost a wrong
+    /// root-cause branch during a production investigation.
+    #[test]
+    fn own_role_socket_is_a_restart_leftover_not_a_collision() {
+        assert_eq!(
+            classify_stale_socket(
+                "/tmp/axon-live-brain-telemetry.sock",
+                RuntimeBootRole::Brain
+            ),
+            StaleSocketKind::SelfRestartLeftover
+        );
+        assert_eq!(
+            classify_stale_socket(
+                "/tmp/axon-live-indexer-telemetry.sock",
+                RuntimeBootRole::Indexer
+            ),
+            StaleSocketKind::SelfRestartLeftover
+        );
+    }
+
+    /// The case the WARN was actually written for must still be reported loudly.
+    #[test]
+    fn peer_role_socket_is_a_genuine_cross_role_collision() {
+        assert_eq!(
+            classify_stale_socket(
+                "/tmp/axon-live-indexer-telemetry.sock",
+                RuntimeBootRole::Brain
+            ),
+            StaleSocketKind::CrossRoleCollision
+        );
+        assert_eq!(
+            classify_stale_socket("/tmp/axon-live-brain-mcp.sock", RuntimeBootRole::Indexer),
+            StaleSocketKind::CrossRoleCollision
+        );
+    }
+
+    /// The legacy defaults (`/tmp/axon-telemetry.sock`, `/tmp/axon-mcp.sock`) carry no role
+    /// token, so both roles would share them — undiagnosable, and worth saying so.
+    #[test]
+    fn unmarked_path_is_reported_as_role_unmarked() {
+        assert_eq!(
+            classify_stale_socket("/tmp/axon-telemetry.sock", RuntimeBootRole::Brain),
+            StaleSocketKind::RoleUnmarked
+        );
+        assert_eq!(
+            classify_stale_socket("/tmp/axon-mcp.sock", RuntimeBootRole::Indexer),
+            StaleSocketKind::RoleUnmarked
+        );
+    }
+
+    /// A directory that merely CONTAINS a role word must not be read as a role marker —
+    /// hence the `-<token>-` delimiters rather than a bare `contains`.
+    #[test]
+    fn role_word_inside_a_directory_name_is_not_a_marker() {
+        assert_eq!(
+            classify_stale_socket("/home/brainstorm/axon.sock", RuntimeBootRole::Brain),
+            StaleSocketKind::RoleUnmarked
+        );
+    }
 
     /// REQ-AXO-902064 — the active-identity re-source OVERRIDES the inherited
     /// (stale) env from the promote-written file. This is the mechanism that lets

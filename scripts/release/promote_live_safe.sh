@@ -13,12 +13,17 @@ SKIP_BUILD=0
 SKIP_QUALIFY=0
 DRY_RUN=0
 SKIP_DEV_VALIDATION=0
-# REQ-AXO-902165 / DEC-AXO-901666 — opt-in: run step 5 via `axonctl cutover` (the Rust
-# health-gated cutover with NATIVE auto-rollback) instead of `promote-live --in-place`.
-# Default 0 keeps the proven in-place + step-6c-failclosed path until cutover is
-# validated on live (self-cutover). The cutover does a full stop→swap→start→liveness-gate
-# →finalize|rollback in one executor, restoring the PREVIOUS build on a bad candidate.
-USE_CUTOVER=0
+# REQ-AXO-902165 / DEC-AXO-901666 / REQ-AXO-902256 — step 5 runs via `axonctl cutover`
+# (the Rust health-gated cutover with NATIVE auto-rollback). There is no longer a second
+# step-5 implementation to choose between: the `USE_CUTOVER` toggle and the
+# `promote-live --in-place` branch it guarded are both REMOVED.
+#
+# Why the toggle had to go rather than merely flip to 1: it defaulted to 0, so every
+# promote for months ran the unprotected path while the protected one sat behind a flag
+# nobody passed. That path has left the live indexer down on three documented occasions
+# (s95/1306 · 2026-06-27/REQ-AXO-902109 · 2026-07-26/1399, where step-6c's recovery then
+# took the BRAIN down ~3m53s and third-party MCP clients self-restarted). A safe path
+# that is opt-in is not a safe path.
 
 usage() {
   cat <<'EOF'
@@ -29,7 +34,7 @@ One-shot promotion flow:
   2. Restart dev with candidate binary + validate dev healthy
   3. Run release preflight
   4. Create qualified release manifest
-  5. Promote live (copy + restart)
+  5. Promote live — health-gated cutover with auto-rollback (axonctl)
   6. Run core MCP qualification
   7. Finalize (SOLL export + status)
 
@@ -40,11 +45,18 @@ Flags:
                          only when dev environment is intentionally
                          unavailable (e.g. fresh-clone bootstrap before
                          dev has ever been started). Logs the bypass.
-  --cutover              Run step 5 via `axonctl cutover` (Rust health-gated
-                         cutover + NATIVE auto-rollback to the previous build)
-                         instead of `promote-live --in-place`. Full restart
-                         (slower than in-place) but true rollback on a bad
-                         candidate. Default: in-place + step-6c fail-closed.
+  --cutover              Accepted and ignored. Step 5 ALWAYS runs the health-gated
+                         `axonctl cutover` now (240s liveness budget covering the
+                         indexer's GPU cold-start, native auto-rollback to the
+                         previous build, DDL re-bootstrap). The in-place
+                         alternative and its toggle were removed in
+                         REQ-AXO-902256. Kept only so existing muscle memory and
+                         docs do not fail on an unknown option.
+
+Emergency paths (deliberately NOT flags of this script):
+  Stranded pending.json  bash scripts/release/promote_live_safe.sh   (auto-resumes)
+  Manual promote         ./scripts/axon promote-live --manifest <m> --restart-live
+  Roll back a release    bash scripts/release/rollback_live.sh
 EOF
 }
 
@@ -54,7 +66,8 @@ while [[ $# -gt 0 ]]; do
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-qualify) SKIP_QUALIFY=1; shift ;;
     --skip-dev-validation) SKIP_DEV_VALIDATION=1; shift ;;
-    --cutover) USE_CUTOVER=1; shift ;;
+    # REQ-AXO-902256 — no-op: the cutover is the only step-5 path now.
+    --cutover) shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -403,28 +416,99 @@ fi
 manifest_path="$(realpath "$manifest_path")"
 promote_log "   ✅ step 4 (manifest) done — $manifest_path"
 
+# --- MCP availability sampler (REQ-AXO-902256) ---
+# The promote used to report step 5 as "done in 35s" — a figure that measures the binary
+# copy and EXCLUDES the indexer coming back and any step-6c recovery. On promote 1399 the
+# real MCP outage was ~3m53s while the reported number was 35s, so the operator was told
+# the interruption was negligible when third-party clients were self-restarting. Estimates
+# are not good enough here: sample the endpoint other clients actually call, once a second,
+# across steps 5→6c, then report the measured worst contiguous gap.
+MCP_SAMPLE_FILE="$LOG_DIR/mcp-availability-${PROMOTE_TIMESTAMP}.csv"
+MCP_SAMPLER_PID=""
+_start_mcp_sampler() {
+  : > "$MCP_SAMPLE_FILE"
+  (
+    while :; do
+      code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:${AXON_BRAIN_PORT:-44129}/mcp" \
+        -H 'content-type: application/json' \
+        -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' 2>/dev/null || echo 000)"
+      # Any HTTP status means the endpoint answered; 000 = connection refused/timeout,
+      # i.e. exactly what a third-party MCP client experiences as "server down".
+      [[ "$code" == "000" ]] && printf '%s,down\n' "$(date -u +%s)" || printf '%s,up\n' "$(date -u +%s)"
+      sleep 1
+    done
+  ) >> "$MCP_SAMPLE_FILE" 2>/dev/null &
+  MCP_SAMPLER_PID=$!
+}
+_report_mcp_outage() {
+  [[ -n "$MCP_SAMPLER_PID" ]] || return 0
+  kill "$MCP_SAMPLER_PID" 2>/dev/null || true
+  wait "$MCP_SAMPLER_PID" 2>/dev/null || true
+  local worst total
+  read -r worst total < <(python3 - "$MCP_SAMPLE_FILE" <<'PY' 2>/dev/null || echo "0 0"
+import sys
+run = worst = total = 0
+try:
+    for line in open(sys.argv[1]):
+        parts = line.strip().split(',')
+        if len(parts) != 2:
+            continue
+        if parts[1] == 'down':
+            run += 1; total += 1; worst = max(worst, run)
+        else:
+            run = 0
+except OSError:
+    pass
+print(worst, total)
+PY
+  )
+  promote_log ""
+  promote_log "== MCP availability (measured, 1s sampling across steps 5→6c) =="
+  promote_log "   worst contiguous outage: ${worst}s · total unreachable samples: ${total}s"
+  promote_log "   samples: $MCP_SAMPLE_FILE"
+  if [[ "${worst:-0}" -gt 60 ]]; then
+    promote_log "   ⚠️ outage > 60s — third-party MCP clients may have declared a crash and self-restarted (REQ-AXO-902256 acceptance breach)."
+  fi
+}
+
 # --- Step 5: promote (copy + restart) ---
+_start_mcp_sampler
 ensure_head_stable
 old_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
-if [[ "$USE_CUTOVER" -eq 1 ]]; then
-  # REQ-AXO-902165 / DEC-AXO-901666 — health-gated cutover with NATIVE auto-rollback
-  # (the Rust control-plane executor). One command: snapshot (current.json = rollback
-  # target) → stage (candidate bin/*) → full restart (re-bootstraps DDL, unlike in-place
-  # → step 5b becomes a redundant idempotent no-op) → `axonctl liveness` gate (FULL
-  # runtime_contract: brain + indexer /readyz) → finalize (pending→current) OR
-  # auto-rollback (restore the PREVIOUS build + restart). A bad candidate is reverted to
-  # the last-good build, not just restarted. bin/axonctl was rebuilt by step 1, so it
-  # carries the current cutover logic. On failure it exits non-zero → run_step fails the
-  # promote (the ERR trap logs it; no half-finalized manifest — cutover rolled back).
-  # --max-polls 120 × 2000ms = 240s health-gate budget: covers the new indexer's
-  # BGE-Large GPU cold-start (can exceed the 60s default under load) so a slow-but-fine
-  # indexer is NOT falsely rolled back.
-  run_step 5 cutover "$ROOT_DIR/bin/axonctl" cutover \
-    --project-root "$ROOT_DIR" --instance-kind live --manifest "$manifest_path" \
-    --max-polls 120 --poll-interval-ms 2000 --json
-else
-  run_step 5 promote_copy_restart "$ROOT_DIR/scripts/axon" promote-live --manifest "$manifest_path" --restart-live --in-place
-fi
+# REQ-AXO-902165 / DEC-AXO-901666 — health-gated cutover with NATIVE auto-rollback
+# (the Rust control-plane executor). One command: snapshot (current.json = rollback
+# target) → stage (candidate bin/*) → full restart (re-bootstraps DDL, unlike the retired
+# in-place path → step 5b is now a cheap idempotent no-op kept as a guard) → `axonctl
+# liveness` gate (FULL runtime_contract: brain + indexer /readyz) → finalize
+# (pending→current) OR auto-rollback (restore the PREVIOUS build + restart). A bad
+# candidate is reverted to the last-good build, not just restarted. bin/axonctl was
+# rebuilt by step 1, so it carries the current cutover logic. On failure it exits
+# non-zero → run_step fails the promote (the ERR trap logs it; no half-finalized
+# manifest — cutover rolled back).
+# --max-polls 120 × 2000ms = 240s health-gate budget: covers the new indexer's
+# BGE-Large GPU cold-start (can exceed the 60s default under load) so a slow-but-fine
+# indexer is NOT falsely rolled back.
+#
+# REQ-AXO-902256 — the `promote-live --in-place` branch that used to live here is GONE,
+# and with it the dual-executor divergence. Keeping two co-equal step-5 implementations
+# is what let the orchestrator run the unprotected one for months: no liveness gate, no
+# rollback, no DDL re-bootstrap, and a documented history of leaving the live indexer
+# down (s95/1306, 2026-06-27/902109, 2026-07-26/1399). The file-level guarantees this
+# executor relies on are pinned by tests in axonctl_tests.rs (snapshot refuses without a
+# rollback target · stage leaves current.json intact · rollback restores the OLD binary
+# BYTES · finalize consumes pending and archives both generations).
+#
+# `promote_live.sh` is NOT deleted: it still carries `--resume`, the documented recovery
+# for a stranded `pending.json` — and `release_reconciler::next_action` points operators
+# at it by name. It stays reachable manually (`scripts/axon promote-live`) for
+# emergencies. What is removed is its status as a DEFAULTABLE path in this orchestrator.
+# Retiring it outright requires porting `--resume` onto the cutover executor first
+# (tracked in REQ-AXO-902256) — doing that by halves would break the very recovery path
+# used when a promote goes wrong.
+run_step 5 cutover "$ROOT_DIR/bin/axonctl" cutover \
+  --project-root "$ROOT_DIR" --instance-kind live --manifest "$manifest_path" \
+  --max-polls 120 --poll-interval-ms 2000 --json
 new_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
 promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
 # NOTE: an UNCHANGED md5 is NOT a failure — re-promoting an identical build
@@ -434,11 +518,22 @@ promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
 # false "md5 unchanged → copy may have failed" warning.)
 
 # --- Step 5b: apply canonical DDL to live (REQ-AXO-902127) ---
-# The in-place restart (step 5) does NOT re-run the canonical DDL bootstrap, so a
-# promote that ADDS/changes a db/ddl/*.sql file leaves axon_live without it (real
-# incident: MBX-1's axon.mailbox_message was missing post-promote, needed a manual
-# psql). The DDL files are idempotent (CREATE … IF NOT EXISTS) → applying every
-# promote is a few-ms no-op when warm, and guarantees the live DB matches db/ddl/.
+# HISTORY: written because the (now-retired) in-place restart did NOT re-run the
+# canonical DDL bootstrap, so a promote that ADDS/changes a db/ddl/*.sql file left
+# axon_live without it (real incident: MBX-1's axon.mailbox_message missing
+# post-promote, needed a manual psql).
+#
+# REQ-AXO-902256 — step 5 is now a full-restart cutover, which DOES re-bootstrap the
+# DDL, so this step is expected to be a no-op. It is KEPT DELIBERATELY as a defensive
+# guard, not left behind by accident: the DDL files are idempotent (CREATE … IF NOT
+# EXISTS) so this costs a few ms when warm, and it is the only thing standing between a
+# regression in the cutover's bootstrap and a live DB silently missing a table. A cheap
+# idempotent guard is not the redundancy worth removing — two divergent promote
+# executors was.
+#
+# Observed 2026-07-26 (promote 1399, in-place path): the runtime started BEFORE this
+# step ran, so axon.EmbedderControl did not exist when the indexer tried to seed its
+# idle-drop control row. The cutover ordering removes that window.
 # Runs in devenv so psql resolves.
 run_step 5b apply_ddl_live bash -lc "cd '$ROOT_DIR' && devenv shell --no-reload --no-tui -- bash -lc 'source scripts/lib/ensure-runtime.sh && apply_canonical_ddl live'"
 
@@ -492,14 +587,20 @@ fi
 
 # --- Step 6c: reconcile + FAIL-CLOSED health-gate (REQ-AXO-902111 / REQ-AXO-902157) ---
 # Dogfood promote_status as the post-swap verdict over the FULL runtime_contract
-# (brain_serving + indexer_alive). The in-place restart (step 5) can leave the live
-# indexer down/crash-looping — the s95 incident (promote 1306): the promote reported
-# COMPLETE on a DEGRADED runtime because this gate was warn-only AND step-6 qualify
-# tests only the brain (surface=core). Fix (the follow-up this block long promised):
-# poll the verdict on an extended GPU-cold-start budget; on a persistent non-clean
-# phase, AUTO-RECOVER via the proven full restart (stop --hard + start full), re-verify,
-# and FAIL CLOSED if still not clean — a promote must NEVER silently report success on
-# a half-up runtime_contract.
+# (brain_serving + indexer_alive). Written for the s95 incident (promote 1306): the
+# RETIRED in-place restart left the live indexer down/crash-looping and the promote
+# reported COMPLETE on a DEGRADED runtime, because this gate was warn-only AND step-6
+# qualify tests only the brain (surface=core). Poll the verdict on an extended
+# GPU-cold-start budget; on a persistent non-clean phase, AUTO-RECOVER, re-verify, and
+# FAIL CLOSED if still not clean — a promote must NEVER silently report success on a
+# half-up runtime_contract.
+#
+# REQ-AXO-902256 — step 5 is now the health-gated cutover, which owns its OWN liveness
+# gate (240s) plus native rollback, so this block should rarely fire at all. It is kept
+# because the two gates check different things: the cutover gates the CANDIDATE and
+# rolls back a bad build, while this one gates the runtime_contract after everything the
+# orchestrator did (including step 5b's DDL). Recovery is now an escalation ladder
+# (see below) rather than an unconditional full restart.
 CURRENT_STEP=6c; CURRENT_STEP_NAME="reconcile"
 promote_log ""
 promote_log "== step 6c: reconcile + health-gate (promote_status) =="
@@ -511,14 +612,51 @@ promote_log "== step 6c: reconcile + health-gate (promote_status) =="
 # can take minutes to publish its first heartbeat.
 _poll_promote_clean 24 || true
 
+# REQ-AXO-902256 — ESCALATION LADDER, not a single hammer. The previous code went
+# straight to `stop --hard + start full`, which takes the BRAIN down to recover the
+# INDEXER. That violates PIL-AXO-008 (the two roles are independently activatable) and
+# is what cost ~3m53s of MCP unavailability on promote 1399 — long enough that MCP
+# clients in other projects declared a crash and restarted the server themselves.
+# Tier 1 restarts ONLY the failed role via the process-compose REST control plane
+# (which already carries a per-process readiness probe: has_ready_probe=true). Tier 2
+# is the old full restart, unchanged, reached only when Tier 1 does not converge — so
+# the safety net is preserved while the blast radius is capped in the common case.
+_AXON_PC_PORT="${AXON_PC_PORT:-8080}"
+_restart_role_only() {  # $1 = process-compose process name; 0 iff the REST call was accepted
+  local proc="$1" code
+  code="$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST \
+    "http://127.0.0.1:${_AXON_PC_PORT}/process/restart/${proc}" 2>/dev/null || echo 000)"
+  promote_log "   ↻ targeted restart ${proc} → HTTP ${code}"
+  [[ "$code" == "200" ]]
+}
+
 if [[ "$recon_phase" != "clean" ]]; then
-  promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) after warmup — AUTO-RECOVERY: full restart (stop --hard + start full)."
-  set +e
-  bash "$ROOT_DIR/scripts/axon-live" stop --hard >> "$PROMOTE_LOG" 2>&1
-  bash "$ROOT_DIR/scripts/axon-live" start full  >> "$PROMOTE_LOG" 2>&1
-  set -e
-  _poll_promote_clean 36 || true   # re-verify on a fuller cold-start budget (~180s)
+  # Tier 1 — the indexer is the ONLY failing gate: recover it without touching the brain.
+  if [[ "$recon_failed" == "indexer_alive" ]]; then
+    promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (failed_gates: indexer_alive) — TIER-1 AUTO-RECOVERY: restart the indexer ONLY (brain keeps serving)."
+    set +e
+    _restart_role_only axon-indexer
+    set -e
+    _poll_promote_clean 36 || true   # ~180s: BGE-Large GPU cold-start budget
+    [[ "$recon_phase" == "clean" ]] && promote_log "   ✅ step 6c tier-1: recovered WITHOUT a brain outage (blast radius contained)."
+  else
+    promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) — not indexer-only, skipping tier 1."
+  fi
+
+  # Tier 2 — unchanged full restart, only if tier 1 did not converge.
+  if [[ "$recon_phase" != "clean" ]]; then
+    promote_log "   ⚠️ step 6c: still phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) — TIER-2 AUTO-RECOVERY: full restart (stop --hard + start full). THIS INTERRUPTS THE BRAIN — expect third-party MCP clients to see an outage."
+    set +e
+    bash "$ROOT_DIR/scripts/axon-live" stop --hard >> "$PROMOTE_LOG" 2>&1
+    bash "$ROOT_DIR/scripts/axon-live" start full  >> "$PROMOTE_LOG" 2>&1
+    set -e
+    _poll_promote_clean 36 || true   # re-verify on a fuller cold-start budget (~180s)
+  fi
 fi
+
+# Stop sampling and report BEFORE the verdict, so the measured outage is logged on the
+# failure path too (that branch exits 1 — the outage figure matters most there).
+_report_mcp_outage
 
 if [[ "$recon_phase" == "clean" ]]; then
   promote_log "   ✅ step 6c: phase=clean (manifest↔runtime↔FULL-contract liveness all green)"
