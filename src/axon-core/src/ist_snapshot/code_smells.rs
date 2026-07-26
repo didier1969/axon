@@ -1324,6 +1324,32 @@ pub struct OrphanClusterReport {
     pub root_count: usize,
     pub unreached_count: usize,
     pub clusters: Vec<Vec<String>>,
+    /// REQ-AXO-902244 — the S1 promise of REQ-AXO-902192 that never shipped:
+    /// roots/leaves IDENTITIES (not just counts) and a coverage metric. All three are
+    /// projections of the reachability fixed point `dead_clusters` already computed and
+    /// discarded, so this costs one O(E) pass for `leaves` and nothing else.
+    ///
+    /// Resolved entry-point ids, sorted. `root_count` gave the size; an LLM asking WHICH
+    /// symbols the project treats as entry points had no answer.
+    pub roots: Vec<String>,
+    /// Reached candidates that call no other candidate — the wired sinks (live endpoints,
+    /// the opposite of dead code). Sorted.
+    pub leaves: Vec<String>,
+    /// Candidates reachable from >= 1 root. With `candidate_count`, the numerator and
+    /// denominator of `wiring_coverage()`.
+    pub reached_count: usize,
+}
+
+impl OrphanClusterReport {
+    /// REQ-AXO-902244 — share of candidates reachable from an entry point, in \[0,1\].
+    /// 0.0 for an empty candidate set rather than NaN, so formatting can never print
+    /// "NaN%".
+    pub fn wiring_coverage(&self) -> f64 {
+        if self.candidate_count == 0 {
+            return 0.0;
+        }
+        self.reached_count as f64 / self.candidate_count as f64
+    }
 }
 
 /// REQ-AXO-902211 — gathers this project's ROOTS (real entry points: the
@@ -1421,6 +1447,10 @@ pub fn orphan_clusters(
         root_count: roots.len(),
         unreached_count: result.unreached_count,
         clusters: result.clusters,
+        // REQ-AXO-902244 — carried through instead of dropped on the floor.
+        roots: result.roots,
+        leaves: result.leaves,
+        reached_count: result.reached_count,
     }
 }
 

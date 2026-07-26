@@ -898,21 +898,42 @@ impl McpServer {
             .iter()
             .map(|c| json!({ "size": c.len(), "nodes": c }))
             .collect();
+        // REQ-AXO-902244 — coverage in the TEXT channel, which is the one an LLM actually
+        // reads. S1 of REQ-AXO-902192 promised `wiring_coverage` and shipped only
+        // `orphans[]`: the tool gave a list of dead things with no denominator, so
+        // "3 dead clusters" was unreadable without knowing whether the project has 30
+        // callables or 3000.
+        let coverage_pct = report.wiring_coverage() * 100.0;
+        let coverage_note = format!(
+            " · wiring coverage {:.1}% ({}/{} candidates reachable from {} root(s)), {} leaf/leaves",
+            coverage_pct,
+            report.reached_count,
+            report.candidate_count,
+            report.root_count,
+            report.leaves.len()
+        );
         let summary = if report.clusters.is_empty() {
             format!(
-                "orphan_clusters {} : 0 dead cluster(s) ({} unreached singleton(s) out of {} candidate(s))",
-                project, report.unreached_count, report.candidate_count
+                "orphan_clusters {} : 0 dead cluster(s) ({} unreached singleton(s) out of {} candidate(s)){}",
+                project, report.unreached_count, report.candidate_count, coverage_note
             )
         } else {
             format!(
-                "orphan_clusters {} : {} dead cluster(s), largest = {} symbols ({} total unreached out of {} candidate(s))",
+                "orphan_clusters {} : {} dead cluster(s), largest = {} symbols ({} total unreached out of {} candidate(s)){}",
                 project,
                 report.clusters.len(),
                 report.clusters[0].len(),
                 report.unreached_count,
-                report.candidate_count
+                report.candidate_count,
+                coverage_note
             )
         };
+        // Cap the identity lists: `roots` is small by nature (79 on AXO) but `leaves` can
+        // run to thousands, and this response is read into an LLM context. Full counts stay
+        // available above, so truncation never hides the magnitude — only the enumeration.
+        const IDENTITY_CAP: usize = 200;
+        let roots_truncated = report.roots.len() > IDENTITY_CAP;
+        let leaves_truncated = report.leaves.len() > IDENTITY_CAP;
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
             "data": {
@@ -924,6 +945,16 @@ impl McpServer {
                 "cluster_count": report.clusters.len(),
                 "clusters": clusters_json,
                 "soll_declared_entries": declared_entries.len(),
+                // REQ-AXO-902244 — ADDITIVE only: every field above keeps its name and
+                // meaning, because this response shape is consumed by the S3 gate of
+                // axon_commit_work AND by the /wiring LiveView.
+                "reached_count": report.reached_count,
+                "wiring_coverage": report.wiring_coverage(),
+                "roots": report.roots.iter().take(IDENTITY_CAP).collect::<Vec<_>>(),
+                "roots_truncated": roots_truncated,
+                "leaves": report.leaves.iter().take(IDENTITY_CAP).collect::<Vec<_>>(),
+                "leaves_truncated": leaves_truncated,
+                "leaves_note": "A LEAF is REACHED and calls no other candidate — a live endpoint, the OPPOSITE of dead code. Do not read it as a problem.",
                 "note": "REQ-AXO-902211 — a lone unreached symbol (no dead neighbour) is NOT reported here (see `wiring`'s isolated category instead); this tool exists specifically for MUTUALLY-wired groups invisible to the per-symbol check. Advisory only — no gate."
             }
         }))

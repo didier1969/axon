@@ -88,8 +88,24 @@ mod tests {
     use super::*;
     use std::thread;
 
+    // These two tests mutate the SAME process-global env var, and the Rust harness runs
+    // tests in parallel threads within ONE process. Unsynchronised, `remove_var` from the
+    // first could land between the second's `set_var("true")` and its assertion, producing
+    // `expected enabled for true` — observed on a full-suite run (session 104, 1665 passed
+    // / 1 failed). That is the shared-global-resource flake class this project already
+    // fights (REQ-AXO-902217, REQ-AXO-902252): the symptom rotates, the cause is one
+    // mutable resource shared by concurrent tests. Fixed by naming the resource and
+    // serialising on the canonical `test_support::env_test_lock()` — never by a retry, a
+    // sleep, or a blanket single-threaded harness.
+    //
+    // `.unwrap_or_else(|e| e.into_inner())` keeps a panic in one test from poisoning the
+    // lock and cascading into a spurious failure in the other.
+
     #[test]
     fn inline_pipeline_disabled_without_env() {
+        let _guard = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("AXON_VECTOR_PIPELINE_INLINE").ok();
         std::env::remove_var("AXON_VECTOR_PIPELINE_INLINE");
         assert!(!inline_pipeline_enabled());
@@ -100,6 +116,9 @@ mod tests {
 
     #[test]
     fn inline_pipeline_enabled_for_truthy_values() {
+        let _guard = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("AXON_VECTOR_PIPELINE_INLINE").ok();
         for v in ["true", "TRUE", "1", "yes", "on"] {
             std::env::set_var("AXON_VECTOR_PIPELINE_INLINE", v);

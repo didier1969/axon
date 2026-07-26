@@ -1608,6 +1608,8 @@ impl McpServer {
             "practice_recall" => self.axon_practice_recall(arguments),
             "practice_tick" => self.axon_practice_tick(arguments),
             "practice_card" => self.axon_practice_card(arguments),
+            // REQ-AXO-902241 — on-demand retirement, the counterpart practice_put lacked.
+            "practice_retire" => self.axon_practice_retire(arguments),
             // REQ-AXO-902094 (S7) — surface de consommation du squelette de contrats.
             "contract_status" => self.axon_contract_status(arguments),
             // REQ-AXO-902095 (S8) — transitions d'évolution gouvernées.

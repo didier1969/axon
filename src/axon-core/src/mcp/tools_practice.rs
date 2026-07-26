@@ -191,6 +191,20 @@ fn provenance_count(source_project: &str) -> usize {
 /// the default (a best-practice store is durable by nature) ; only `perishable` is
 /// accepted as the alternative (future news/context memory). Anything else →
 /// `durable` (fail-safe: never silently apply time-decay to a best practice).
+/// REQ-AXO-902241 — the audit line APPENDED to a retired practice's `evidence`.
+///
+/// The row is never deleted, so this string is the only record of WHY it stopped being
+/// advice. Kept pure (and tested) because it is written once and read much later, possibly
+/// by a different agent: the `[RETIRED: …]` marker has to be recognisable without knowing
+/// the tool, and the `superseded_by` pointer has to survive in the text even if the caller
+/// later reads only `evidence`.
+fn retirement_trail(reason: &str, superseded_by: Option<i64>) -> String {
+    match superseded_by {
+        Some(sup) => format!("[RETIRED: {reason} · superseded_by=#{sup}]"),
+        None => format!("[RETIRED: {reason}]"),
+    }
+}
+
 fn normalize_perishability(raw: &str) -> &'static str {
     if raw.trim().eq_ignore_ascii_case("perishable") {
         "perishable"
@@ -415,6 +429,137 @@ impl McpServer {
             )}],
             "data": {"status":"ok","id":id,"inserted":inserted,"scope":scope,"gate":gate_label,"embed":embed_state,
                      "encoding":dense_state,"dense_advisory":dense_advisory,"perishability":perishability}
+        }))
+    }
+
+    /// REQ-AXO-902241 / CPT-AXO-90061 — RETIRE a practice on demand: the missing
+    /// counterpart to `soll_rollback_revision`.
+    ///
+    /// `practice_put` could only ADD. A practice discovered to be WRONG could therefore
+    /// only be answered with a second, contradicting practice — and `practice_recall`
+    /// filters on `status='active'`, so BOTH surfaced, side by side, with no ordering
+    /// guarantee that the correction wins. Lived case (session 104): practice 437 carried
+    /// a root-cause diagnosis that turned out to be false; 438 corrected it; 437 stayed
+    /// `active` and recallable. A memory that cannot forget a mistake teaches it.
+    ///
+    /// Sets `status='pruned'` — **never DELETE**, per the table's own audit contract
+    /// (`16_practice.sql`: "active | pruned | merged (never DELETE — audit)"), the same
+    /// discipline as SOLL nodes. `practice_tick` already prunes on stagnation; this makes
+    /// it deliberate and immediate.
+    ///
+    /// The anti-poison gate of `practice_put` guards ADDITIONS. The symmetric risk here is
+    /// the opposite — retiring a GOOD practice — so the guards are different in kind:
+    /// `reason` is mandatory (an unexplained retirement is unauditable), `superseded_by`
+    /// must exist and be active when supplied (never point the reader at nothing), and the
+    /// reason is appended to `evidence` so the trail survives the state change.
+    pub(crate) fn axon_practice_retire(&self, args: &Value) -> Option<Value> {
+        let Some(id) = args
+            .get("id")
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        else {
+            return Some(practice_err(
+                "practice_retire requires `id` (the practice to retire — find it with practice_recall or practice_card)",
+                "input_invalid",
+            ));
+        };
+        let reason = args.get("reason").and_then(Value::as_str).unwrap_or("").trim();
+        if reason.is_empty() {
+            // Repair-as-data (GUI-AXO-1026 inv.5): a retirement without a stated reason
+            // is indistinguishable from an accident when read back months later.
+            return Some(json!({
+                "content": [{"type":"text","text":
+                    "practice_retire requires `reason` — an unexplained retirement is unauditable. State WHY the practice is wrong or obsolete."}],
+                "isError": true,
+                "data": {"status":"input_invalid","parameter_repair":{
+                    "invalid_field":"reason",
+                    "corrected_call":{"name":"practice_retire","arguments":{
+                        "id": id,
+                        "reason":"<why it is wrong/obsolete>",
+                        "superseded_by":"<id of the replacement, if any>"}}}}
+            }));
+        }
+        let superseded_by = args
+            .get("superseded_by")
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+
+        // The target must exist AND still be active — retiring twice, or retiring a row
+        // already merged away, would silently report success on a no-op.
+        let target = self
+            .graph_store
+            .query_json_writer(&format!(
+                "SELECT status, left(practice, 80) FROM axon.practice WHERE id = {id}"
+            ))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<Vec<Value>>>(&s).ok())
+            .and_then(|rows| rows.into_iter().next());
+        let Some(row) = target else {
+            return Some(practice_err(
+                &format!("no practice with id={id}"),
+                "not_found",
+            ));
+        };
+        let current_status = row.first().and_then(Value::as_str).unwrap_or("");
+        if current_status != "active" {
+            return Some(practice_err(
+                &format!("practice {id} is already `{current_status}` — nothing to retire"),
+                "no_op",
+            ));
+        }
+        let excerpt = row.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+
+        if let Some(sup) = superseded_by {
+            if sup == id {
+                return Some(practice_err(
+                    "a practice cannot supersede itself",
+                    "input_invalid",
+                ));
+            }
+            let ok = self
+                .graph_store
+                .query_json_writer(&format!(
+                    "SELECT status FROM axon.practice WHERE id = {sup}"
+                ))
+                .ok()
+                .and_then(|s| serde_json::from_str::<Vec<Vec<Value>>>(&s).ok())
+                .and_then(|rows| rows.into_iter().next())
+                .and_then(|r| r.first().and_then(Value::as_str).map(str::to_string));
+            match ok.as_deref() {
+                Some("active") => {}
+                Some(other) => {
+                    return Some(practice_err(
+                        &format!("superseded_by={sup} exists but is `{other}` — point at an ACTIVE replacement or omit the field"),
+                        "input_invalid",
+                    ))
+                }
+                None => {
+                    return Some(practice_err(
+                        &format!("superseded_by={sup} does not exist — omit the field rather than point the reader at nothing"),
+                        "input_invalid",
+                    ))
+                }
+            }
+        }
+
+        let trail = retirement_trail(reason, superseded_by);
+        let sql = format!(
+            "UPDATE axon.practice \
+             SET status = 'pruned', \
+                 evidence = CASE WHEN evidence = '' THEN '{trail}' ELSE evidence || ' ' || '{trail}' END, \
+                 updated_at = now() \
+             WHERE id = {id} AND status = 'active'",
+            trail = esc(&trail)
+        );
+        if let Err(e) = self.graph_store.query_json_writer(&sql) {
+            return Some(practice_err(&format!("store failed: {e}"), "degraded"));
+        }
+        Some(json!({
+            "content": [{"type":"text","text": format!(
+                "### 🧠 practice_retire — practice #{id} pruned (not deleted: audit trail preserved){}\n\nWas: {excerpt}…\nReason: {reason}\n\nIt no longer surfaces in `practice_recall` (which filters status='active').",
+                superseded_by.map(|s| format!(" · superseded by #{s}")).unwrap_or_default()
+            )}],
+            "data": {"status":"ok","id":id,"new_status":"pruned",
+                     "superseded_by":superseded_by,"reason":reason,
+                     "note":"Never deleted — `status='pruned'` keeps the row auditable, same discipline as SOLL nodes."}
         }))
     }
 
@@ -742,8 +887,55 @@ mod tests {
         axis_recall_set, consolidate_tier, covering_scopes, is_failure_mode,
         is_imperative_directive, merge_provenance, normalize_axis_tag, normalize_perishability,
         perishability_decays_by_time, provenance_count, render_practice_list, resolve_dense_form,
+        retirement_trail,
     };
     use serde_json::json;
+
+    // --- REQ-AXO-902241 practice_retire -------------------------------------------
+
+    #[test]
+    fn retirement_trail_is_recognisable_and_keeps_the_supersede_pointer() {
+        // Read back possibly by another agent, long after: the marker must be findable
+        // without knowing the tool, and the pointer must survive inside the text.
+        let t = retirement_trail("root cause was false", Some(438));
+        assert!(t.starts_with("[RETIRED: "), "marker must lead: {t}");
+        assert!(t.contains("root cause was false"));
+        assert!(t.contains("superseded_by=#438"), "pointer must survive in the text: {t}");
+
+        let bare = retirement_trail("obsolete since the tool was removed", None);
+        assert!(bare.starts_with("[RETIRED: "));
+        assert!(
+            !bare.contains("superseded_by"),
+            "no replacement must not fabricate a dangling pointer: {bare}"
+        );
+    }
+
+    /// A tool that is DISPATCHED but not ADVERTISED is invisible to every client — the
+    /// exact failure mode that made `practice_*` look absent from stale registries.
+    #[test]
+    fn practice_retire_is_advertised_with_id_and_reason_required() {
+        let catalog = crate::mcp::catalog::tools_catalog(true);
+        let tools = catalog["tools"].as_array().expect("tools array");
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "practice_retire")
+            .expect("practice_retire must be in the catalog, not only in the dispatch match");
+        let required = tool["inputSchema"]["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>();
+        // `reason` is required BY DESIGN: an unexplained retirement is unauditable, and the
+        // row is never deleted so the reason is the only record of why advice was withdrawn.
+        assert!(required.contains(&"id"), "got: {required:?}");
+        assert!(required.contains(&"reason"), "reason must be mandatory: {required:?}");
+        let desc = tool["description"].as_str().unwrap_or("");
+        assert!(
+            desc.contains("NEVER delete") || desc.contains("NEVER deletes"),
+            "the audit contract must be stated to the caller: {desc}"
+        );
+    }
 
     #[test]
     fn render_practice_list_inlines_bodies_902171() {

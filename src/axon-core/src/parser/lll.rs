@@ -49,6 +49,49 @@ impl LllParser {
         std::env::var("LLL_BIN").unwrap_or_else(|_| "lll".to_string())
     }
 
+    /// REQ-AXO-902259 — drop symbols that this file merely IMPORTS.
+    ///
+    /// `lll export-ist` RESOLVES AND FLATTENS imports, so running it on a consumer emits
+    /// the library's symbols too. AXO attributes every symbol of an extraction to the file
+    /// being parsed, so a library function was materialised once PER CONSUMER, each copy
+    /// attributed to the consumer: `query ledger_total` returned 3 hits for 1 symbol,
+    /// `inspect` named the consumer as the definition site, and a project's symbol count
+    /// grew with its import fan-out rather than its content. Reported by the LLL project
+    /// (mailbox 3646) and confirmed on real data.
+    ///
+    /// `properties.source_file` (llmlang commit f9eafcb, specified with LLL in mailbox
+    /// 3648) carries the file where the symbol is REALLY defined. A symbol whose
+    /// `source_file` differs from the parsed path is an import: skip it here, because it is
+    /// materialised — once, correctly attributed — when its OWN file is parsed. The
+    /// name-based `calls` relations are untouched, so `report -> ledger_total` still
+    /// resolves from the consumer.
+    ///
+    /// Deliberately conservative:
+    /// * no `source_file` (older `lll`, or a symbol llmlang cannot attribute) → KEEP. A
+    ///   missing field must never silently delete symbols; the pre-fix duplication is a
+    ///   lesser evil than data loss.
+    /// * paths compared canonicalised, since llmlang emits absolute canonical paths while
+    ///   the indexer may pass a differently-spelled path to the same file.
+    ///
+    /// Known trade-off (flagged by LLL): if the defining file is OUTSIDE the watch scope,
+    /// its symbols are now absent instead of duplicated into every in-scope consumer. That
+    /// is the correct semantic — Axon does not index what it does not watch — but it IS a
+    /// recall change, not purely a de-duplication.
+    fn drop_imported_symbols(mut result: ExtractionResult, parsed: &Path) -> ExtractionResult {
+        let own = std::fs::canonicalize(parsed).unwrap_or_else(|_| parsed.to_path_buf());
+        result.symbols.retain(|s| match s.properties.get("source_file") {
+            Some(src) if !src.trim().is_empty() => {
+                let src_path = Path::new(src);
+                let src_canon =
+                    std::fs::canonicalize(src_path).unwrap_or_else(|_| src_path.to_path_buf());
+                src_canon == own
+            }
+            // No attribution available → keep (never lose a symbol to a missing field).
+            _ => true,
+        });
+        result
+    }
+
     /// Run `lll export-ist <path>` and deserialize its `ExtractionResult` JSON.
     /// Any failure (missing binary, load error, invalid JSON) → empty result.
     fn run(&self, path: &Path) -> ExtractionResult {
@@ -65,7 +108,9 @@ impl LllParser {
             Ok(out) if out.status.success() => {
                 match serde_json::from_str::<ExtractionResult>(&String::from_utf8_lossy(&out.stdout))
                 {
-                    Ok(result) => result,
+                    // REQ-AXO-902259 — strip the flattened imports before they reach the
+                    // indexer, which would attribute them to the consumer.
+                    Ok(result) => Self::drop_imported_symbols(result, path),
                     Err(e) => {
                         error!("llmlang export-ist emitted invalid JSON: {}", e);
                         empty
@@ -125,6 +170,27 @@ mod tests {
             .output()
             .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
             .unwrap_or(false)
+    }
+
+    /// Minimal `Symbol` fixture — `Symbol` has no `Default`, and spelling every field in
+    /// each test would bury the one property under test.
+    fn sym(name: &str, source_file: Option<&str>) -> crate::parser::Symbol {
+        crate::parser::Symbol {
+            name: name.into(),
+            kind: "function".into(),
+            start_line: 1,
+            end_line: 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: source_file
+                .map(|f| [("source_file".to_string(), f.to_string())].into_iter().collect())
+                .unwrap_or_default(),
+            embedding: None,
+        }
     }
 
     /// End-to-end bridge test — only meaningful when the `lll` binary is
@@ -193,5 +259,61 @@ mod tests {
             result.symbols.iter().any(|s| s.name == "twice" && s.kind == "function"),
             "twice must be extracted with imports resolved"
         );
+        // REQ-AXO-902259 — but `inc` belongs to lib.lll and must NOT be attributed to
+        // main.lll. Before the fix, every consumer carried its own copy of every imported
+        // symbol: `query inc` returned one hit per importer, and `inspect` pointed at the
+        // importer as the definition site. `inc` is still materialised — once — when
+        // lib.lll is itself indexed, and the twice→inc call edge below is unaffected
+        // because relations are name-based.
+        //
+        // Guarded on the field being present, so an older `lll` on the host degrades this
+        // to a no-op assertion instead of a spurious failure.
+        let emits_source_file = result
+            .symbols
+            .iter()
+            .any(|s| s.properties.contains_key("source_file"));
+        if emits_source_file {
+            assert!(
+                !result.symbols.iter().any(|s| s.name == "inc"),
+                "inc is defined in lib.lll — it must not be attributed to main.lll (REQ-AXO-902259)"
+            );
+        }
+    }
+
+    /// REQ-AXO-902259 — the conservative half of the contract, and the one that matters
+    /// most: a MISSING `source_file` must never delete a symbol. An older `lll` on the
+    /// host, or a symbol llmlang cannot attribute, would otherwise silently empty a file's
+    /// extraction — data loss dressed up as de-duplication.
+    #[test]
+    fn missing_source_file_keeps_every_symbol() {
+        let dir = Builder::new().prefix("lll-keep-").tempdir().expect("tempdir");
+        let f = dir.path().join("a.lll");
+        std::fs::write(&f, "x").unwrap();
+        let mut result = ExtractionResult {
+            project_code: None,
+            symbols: vec![sym("no_attribution", None), sym("blank_attribution", Some("   "))],
+            relations: Vec::new(),
+        };
+        result = LllParser::drop_imported_symbols(result, &f);
+        assert_eq!(result.symbols.len(), 2, "no/blank attribution must never drop a symbol");
+    }
+
+    /// A symbol attributed to ANOTHER file is dropped even when neither path exists on
+    /// disk — `canonicalize` fails there, and the fallback must still compare correctly
+    /// rather than silently keep the duplicate.
+    #[test]
+    fn foreign_source_file_is_dropped_even_when_paths_do_not_exist() {
+        let own = Path::new("/nonexistent/consumer.lll");
+        let result = ExtractionResult {
+            project_code: None,
+            symbols: vec![
+                sym("mine", Some(&own.display().to_string())),
+                sym("imported", Some("/nonexistent/lib.lll")),
+            ],
+            relations: Vec::new(),
+        };
+        let out = LllParser::drop_imported_symbols(result, own);
+        let names: Vec<&str> = out.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["mine"]);
     }
 }

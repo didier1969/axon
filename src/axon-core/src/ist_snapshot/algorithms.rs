@@ -587,6 +587,42 @@ pub fn snapshot_edge_diff(
 pub struct DeadClusters {
     pub unreached_count: usize,
     pub clusters: Vec<Vec<String>>,
+    /// REQ-AXO-902244 — the wiring facts this function already computes and used to
+    /// THROW AWAY. S1 of REQ-AXO-902192 promised "roots/leaves classification + forward
+    /// reachability BFS + orphans[] + wiring_coverage"; only `orphans[]` shipped, so the
+    /// tool advertised a coverage metric that existed nowhere. Everything below is a
+    /// projection of the same fixed point — no extra traversal except `leaves`, which is
+    /// one O(E) forward pass.
+    ///
+    /// Total candidates considered (the denominator of `wiring_coverage`).
+    pub candidates_count: usize,
+    /// Candidates REACHED from at least one root. `candidates_count - reached_count` is
+    /// the unreached population, of which `clusters` holds only the groups of size >= 2
+    /// (a lone unreached symbol is `wiring`'s per-symbol job, not this one) — so
+    /// `unreached_count` and the flattened `clusters` deliberately disagree.
+    pub reached_count: usize,
+    /// Resolved entry points, sorted. Previously computed and discarded; an LLM asking
+    /// "what does this project consider an entry point?" had no way to find out.
+    pub roots: Vec<String>,
+    /// REACHED candidates with no outgoing CALLS/CALLS_NIF edge to another candidate —
+    /// the wired sinks. Sorted. Note these are LIVE endpoints, the opposite of dead code:
+    /// reachable, and calling nothing further in-scope.
+    pub leaves: Vec<String>,
+}
+
+impl DeadClusters {
+    /// REQ-AXO-902244 — share of candidates reachable from at least one root, in \[0,1\].
+    ///
+    /// Returns 0.0 (not NaN) for an empty candidate set, so a caller that formats this
+    /// cannot print "NaN%" — the historical failure mode of ratio metrics in this
+    /// codebase. 0 candidates means "nothing to wire", which reads correctly as no
+    /// coverage claim rather than as full coverage.
+    pub fn wiring_coverage(&self) -> f64 {
+        if self.candidates_count == 0 {
+            return 0.0;
+        }
+        self.reached_count as f64 / self.candidates_count as f64
+    }
 }
 
 /// REQ-AXO-902211 — dead-cluster detection: symbols reachable from NO root
@@ -732,6 +768,39 @@ pub fn dead_clusters(graph: &IstGraph, roots: &[u32], candidates: &[u32]) -> Dea
         frontier = next;
     }
 
+    // REQ-AXO-902244 — project the wiring facts out of the fixed point BEFORE the
+    // early return below. Building them only on the has-dead-code path would make
+    // `wiring_coverage` collapse to 0 on a perfectly-wired project, i.e. report the
+    // WORST possible coverage exactly when it is best.
+    let candidate_set: HashSet<u32> = candidates.iter().copied().collect();
+    let reached_candidates: Vec<u32> =
+        candidates.iter().copied().filter(|c| reached.contains(c)).collect();
+    let mut root_ids: Vec<String> = roots.iter().map(|&r| graph.id_of(r).to_string()).collect();
+    root_ids.sort();
+    root_ids.dedup();
+    // Leaves = reached candidates that call no OTHER candidate. Self-edges are ignored:
+    // a recursive function is not a sink. One O(E) forward pass over reached candidates.
+    let mut leaf_ids: Vec<String> = reached_candidates
+        .iter()
+        .filter(|&&c| {
+            !graph.forward_neighbors(c).any(|(target, rel)| {
+                matches!(rel, RelationType::Calls | RelationType::CallsNif)
+                    && target != c
+                    && candidate_set.contains(&target)
+            })
+        })
+        .map(|&c| graph.id_of(c).to_string())
+        .collect();
+    leaf_ids.sort();
+    let wiring_facts = |unreached_count: usize, clusters: Vec<Vec<String>>| DeadClusters {
+        unreached_count,
+        clusters,
+        candidates_count: candidates.len(),
+        reached_count: reached_candidates.len(),
+        roots: root_ids.clone(),
+        leaves: leaf_ids.clone(),
+    };
+
     // Step 2 — candidates never reached from any root.
     let unreached: HashSet<u32> = candidates
         .iter()
@@ -739,7 +808,7 @@ pub fn dead_clusters(graph: &IstGraph, roots: &[u32], candidates: &[u32]) -> Dea
         .filter(|c| !reached.contains(c))
         .collect();
     if unreached.is_empty() {
-        return DeadClusters::default();
+        return wiring_facts(0, Vec::new());
     }
 
     // Step 3 — weak connectivity over the `unreached` induced subgraph, via
@@ -767,10 +836,7 @@ pub fn dead_clusters(graph: &IstGraph, roots: &[u32], candidates: &[u32]) -> Dea
     }
     clusters.sort_by(|a, b| b.len().cmp(&a.len()));
 
-    DeadClusters {
-        unreached_count: unreached.len(),
-        clusters,
-    }
+    wiring_facts(unreached.len(), clusters)
 }
 
 /// REQ-AXO-91488 follow-up — Minimal VF2-style subgraph isomorphism.
@@ -1382,6 +1448,96 @@ mod tests {
         assert_eq!(result.unreached_count, 4);
         assert_eq!(result.clusters.len(), 2, "two distinct dead clusters");
         assert!(result.clusters.iter().all(|c| c.len() == 2));
+    }
+
+    // --- REQ-AXO-902244 wiring facts ------------------------------------------------
+    // S1 of REQ-AXO-902192 promised roots/leaves + wiring_coverage; only orphans[]
+    // shipped. These pin the facts now projected out of the same fixed point.
+
+    #[test]
+    fn wiring_facts_are_reported_even_when_nothing_is_dead() {
+        // The regression that matters most: `dead_clusters` used to `return
+        // DeadClusters::default()` when nothing was unreached, which would zero the new
+        // fields and make coverage read 0% exactly when the project is PERFECTLY wired.
+        let nodes = vec![n("main"), n("a"), n("b")];
+        let edges = vec![e("main", "a", RelationType::Calls), e("a", "b", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![idx(&g, "main"), idx(&g, "a"), idx(&g, "b")];
+        let r = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(r.unreached_count, 0);
+        assert_eq!(r.candidates_count, 3);
+        assert_eq!(r.reached_count, 3);
+        assert!((r.wiring_coverage() - 1.0).abs() < f64::EPSILON, "fully wired must be 100%");
+        assert_eq!(r.roots, vec!["main".to_string()]);
+        // `b` calls nothing → the only leaf. `main` and `a` both call a candidate.
+        assert_eq!(r.leaves, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn wiring_coverage_counts_only_reached_candidates() {
+        // main -> a ; d1 <-> d2 dead. 2 of 4 candidates reachable.
+        let nodes = vec![n("main"), n("a"), n("d1"), n("d2")];
+        let edges = vec![
+            e("main", "a", RelationType::Calls),
+            e("d1", "d2", RelationType::Calls),
+            e("d2", "d1", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates =
+            vec![idx(&g, "main"), idx(&g, "a"), idx(&g, "d1"), idx(&g, "d2")];
+        let r = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(r.candidates_count, 4);
+        assert_eq!(r.reached_count, 2, "only main + a are reachable");
+        assert!((r.wiring_coverage() - 0.5).abs() < 1e-9);
+        // Leaves are computed over REACHED candidates only — a dead symbol that calls
+        // nothing is unreached, not a live endpoint.
+        assert_eq!(r.leaves, vec!["a".to_string()]);
+        assert_eq!(r.unreached_count, 2);
+    }
+
+    #[test]
+    fn a_recursive_symbol_is_still_a_leaf() {
+        // A self-call is not "calling something further in scope": ignoring self-edges is
+        // what keeps a recursive endpoint classified as the sink it is.
+        let nodes = vec![n("main"), n("rec")];
+        let edges = vec![
+            e("main", "rec", RelationType::Calls),
+            e("rec", "rec", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![idx(&g, "main"), idx(&g, "rec")];
+        let r = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(r.leaves, vec!["rec".to_string()]);
+    }
+
+    #[test]
+    fn a_call_leaving_the_candidate_set_does_not_disqualify_a_leaf() {
+        // `a` calls `outside`, which is NOT a candidate (e.g. a test helper excluded by
+        // the caller's own filtering). `a` is still a sink OF THE ANALYSED SET.
+        let nodes = vec![n("main"), n("a"), n("outside")];
+        let edges = vec![
+            e("main", "a", RelationType::Calls),
+            e("a", "outside", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![idx(&g, "main"), idx(&g, "a")];
+        let r = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(r.leaves, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn wiring_coverage_is_zero_not_nan_on_an_empty_candidate_set() {
+        // A ratio metric that can emit NaN eventually prints "NaN%" to an operator.
+        let r = dead_clusters(&IstGraph::build(vec![n("main")], vec![]), &[], &[]);
+        assert_eq!(r.candidates_count, 0);
+        assert_eq!(r.wiring_coverage(), 0.0);
+        assert!(r.wiring_coverage().is_finite());
+        assert!(r.roots.is_empty());
+        assert!(r.leaves.is_empty());
     }
 
     #[test]

@@ -1085,6 +1085,19 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "practice_retire",
+                "description": "[PRACTICE] REQ-AXO-902241 — RETIRE a practice that turned out to be WRONG or obsolete: the missing counterpart to `practice_put`, which could only ADD. Without it, correcting a bad practice meant writing a second contradicting one — and `practice_recall` filters `status='active'`, so BOTH kept surfacing with no guarantee the correction won. Sets `status='pruned'`; NEVER deletes (audit trail, same discipline as SOLL nodes), so the row stays inspectable and `practice_card` still counts it. `reason` is MANDATORY — an unexplained retirement is unauditable. Pass `superseded_by` when a replacement exists (validated: must be an ACTIVE practice).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "integer", "description": "Id of the practice to retire (from practice_recall / practice_card)." },
+                        "reason": { "type": "string", "description": "REQUIRED. WHY it is wrong or obsolete. Appended to the practice's `evidence` so the trail survives the state change." },
+                        "superseded_by": { "type": "integer", "description": "Optional id of the ACTIVE practice that replaces this one. Refused if it does not exist, is not active, or equals `id`." }
+                    },
+                    "required": ["id", "reason"]
+                }
+            },
+            {
                 "name": "contract_status",
                 "description": "[CONTRACT] REQ-AXO-902094 (S7) — navigate the structural contract skeleton (ContractNodes): desired typed shape + Merkle seal status + LIVE IST↔contract drift (reconciliation) + governance edges. READ-ONLY. Omit `contract_id` to LIST the project's contracts (paginated); pass it to INSPECT one. The skeleton becomes navigable like the IST (query/inspect/impact).",
                 "inputSchema": { "$comment": "derived from tool_contracts::ContractStatusInput — injected post-build" }
