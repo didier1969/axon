@@ -1808,9 +1808,32 @@ def run_lifecycle_restart(instance: str) -> dict[str, Any]:
         timeout=600,
     )
     duration_ms = int((time.monotonic() - started) * 1000)
-    tail = (proc.stdout or proc.stderr or "").strip().splitlines()[-1:] or ["no output"]
+    out = proc.stdout or proc.stderr or ""
+
+    # A SKIP must NEVER be reported as `pass`. The first version of this step mapped
+    # returncode 0 → pass, and `qualify --profile lifecycle` (which defaults to instance=dev)
+    # duly printed `lifecycle_restart: pass` while the script had skipped for want of a dev
+    # supervisor: a vacuous green, i.e. the exact lying-signal class this whole REQ exists to
+    # remove. Exit 77 is the script's skip channel (autotools convention); it maps to `warn`,
+    # which combine_step_statuses surfaces without failing the run.
+    if proc.returncode == 77:
+        reason = next(
+            (ln.strip() for ln in out.splitlines() if ln.strip().startswith("SKIP")),
+            "skipped (no reason captured)",
+        )
+        return step_result(
+            "lifecycle_restart", "warn", duration_ms,
+            f"NOT RUN — {reason}. Target a running instance, e.g. "
+            f"`./scripts/axon --instance live qualify --profile lifecycle`.",
+        )
+
+    # Report the SUMMARY line ("N passed, M failed"), not the last line of output. The last
+    # line is often the cleanup notice, which reads as alarming on an otherwise green run —
+    # a note that misrepresents its own result is the small version of the same problem.
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    note = next((ln for ln in reversed(lines) if "passed," in ln), lines[-1] if lines else "no output")
     status = "pass" if proc.returncode == 0 else "fail"
-    return step_result("lifecycle_restart", status, duration_ms, tail[-1])
+    return step_result("lifecycle_restart", status, duration_ms, note)
 
 
 def step_result(name: str, status: str, duration_ms: int, note: str, summary: Any = None) -> dict[str, Any]:

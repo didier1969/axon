@@ -411,7 +411,19 @@ else
   # indexer downtime; the BRAIN is the sensitive one and the test asserts it never stops
   # serving. The script SKIPs (exit 0) when the runtime is not in a testable state, so this
   # never fails a promote for an unrelated reason.
-  run_step 2d lifecycle_gate bash "$ROOT_DIR/tests/shell/test_role_restart_live.sh"
+  # Exit 77 = the script SKIPPED (nothing measured, e.g. the role is not Running+Ready).
+  # A skip must not fail a release — but it must not pass silently either, or the gate
+  # becomes the vacuous green it exists to prevent. Surface it loudly and continue.
+  lifecycle_gate_step() {
+    local rc=0
+    bash "$ROOT_DIR/tests/shell/test_role_restart_live.sh" || rc=$?
+    if [[ "$rc" -eq 77 ]]; then
+      echo "⚠️ lifecycle gate SKIPPED (nothing measured) — the per-role restart was NOT verified for this release"
+      return 0
+    fi
+    return "$rc"
+  }
+  run_step 2d lifecycle_gate lifecycle_gate_step
 fi
 
 # --- Step 3: preflight ---

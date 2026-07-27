@@ -33,6 +33,11 @@
 # This test NEVER touches the brain: no /mcp call, no embed_provider flip, no
 # `stop --hard` (which would reap the live indexer via axonctl).
 
+# Exit codes: 0 = assertions ran and passed · 1 = a real failure · 77 = SKIPPED, nothing
+# was measured (autotools convention). 77 matters: a skip reported as success is the same
+# lying signal as everything else this REQ removes — `qualify --profile lifecycle` printed
+# `pass` on a skipped run before this distinction existed.
+
 set -uo pipefail   # NOT -e: the whole point is to observe failures, not abort on them
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,8 +68,15 @@ cleanup() {
     [[ -n "$SAMPLER_PID" ]] && { kill "$SAMPLER_PID" 2>/dev/null; wait "$SAMPLER_PID" 2>/dev/null; }
     local st
     st="$(_axon_role_field "$PC_PORT" "$PROC" status)"
-    if [[ "$st" != "Running" ]]; then
-        printf '  ⚠️  cleanup: %s is "%s" — sending start so live is not left without it\n' "$PROC" "${st:-unreachable}"
+    # REQ-AXO-902263 — ask the ROLE, not only the supervisor. process-compose can report
+    # Completed while a healthy instance serves (its status then tracks a duplicate the IST
+    # writer guard refused). Firing a start there spawns another doomed process: the cleanup
+    # would manufacture the mess it exists to prevent. Observed for real during this test's
+    # own development.
+    if _axon_role_serving "$INSTANCE" "$PROC"; then
+        [[ "$st" != "Running" ]] && printf '  ℹ️  cleanup: %s reports "%s" but IS SERVING — supervisor tracks a refused duplicate; no start sent\n' "$PROC" "$st"
+    elif [[ "$st" != "Running" ]]; then
+        printf '  ⚠️  cleanup: %s is "%s" and not serving — sending start so live is not left without it\n' "$PROC" "${st:-unreachable}"
         curl -s -m 30 -o /dev/null -X POST \
             "http://127.0.0.1:${PC_PORT}/process/start/${PROC}" >/dev/null 2>&1 || true
     fi
@@ -113,18 +125,18 @@ printf 'test_role_restart_live — instance=%s role=%s budget=%ss (REQ-AXO-90226
 # --- Pre-conditions: SKIP, never fail, when the fixture is absent ------------
 if ! axon_supervisor_healthy "$PC_PORT"; then
     skip "no supervisor on :$PC_PORT — instance '$INSTANCE' is not running"
-    printf '\n%d passed, %d failed (skipped)\n' "$PASS" "$FAIL"; exit 0
+    printf '\n%d passed, %d failed (SKIPPED — nothing was measured)\n' "$PASS" "$FAIL"; exit 77
 fi
 PRE_STATUS="$(_axon_role_field "$PC_PORT" "$PROC" status)"
 PRE_READY="$(_axon_role_field "$PC_PORT" "$PROC" is_ready)"
 PRE_PID="$(_axon_role_field "$PC_PORT" "$PROC" pid)"
 if [[ "$PRE_STATUS" != "Running" || "$PRE_READY" != "Ready" ]]; then
     skip "$PROC is status='$PRE_STATUS' ready='$PRE_READY' — needs Running+Ready to be a meaningful test"
-    printf '\n%d passed, %d failed (skipped)\n' "$PASS" "$FAIL"; exit 0
+    printf '\n%d passed, %d failed (SKIPPED — nothing was measured)\n' "$PASS" "$FAIL"; exit 77
 fi
 if ! axon_brain_healthy "$BRAIN_PORT"; then
     skip "brain not serving on :$BRAIN_PORT — refusing to add load to an already-degraded instance"
-    printf '\n%d passed, %d failed (skipped)\n' "$PASS" "$FAIL"; exit 0
+    printf '\n%d passed, %d failed (SKIPPED — nothing was measured)\n' "$PASS" "$FAIL"; exit 77
 fi
 printf '  pre-condition: %s Running+Ready pid=%s · brain :%s serving\n' "$PROC" "$PRE_PID" "$BRAIN_PORT"
 

@@ -84,5 +84,32 @@ assert_action 'empty pid while Running is not a new process' \
 assert_action 'no previous process (orig 0) → a real pid is recovery' \
     done Running 999 0
 
+printf '\n_axon_role_health_port — the role'"'"'s OWN endpoint, not the supervisor'"'"'s view\n'
+
+assert_port() {
+    local desc="$1" expected="$2" kind="$3" proc="$4" got
+    got="$(_axon_role_health_port "$kind" "$proc")"
+    if [[ "$got" == "$expected" ]]; then
+        printf '  PASS  %s\n' "$desc"; PASS=$(( PASS + 1 ))
+    else
+        printf '  FAIL  %s  (expected "%s", got "%s")\n' "$desc" "$expected" "$got"; FAIL=$(( FAIL + 1 ))
+    fi
+}
+
+# The ground truth that outranks process-compose bookkeeping. Observed for real: the live
+# indexer answered /readyz + /livez with a 3.7 s-fresh heartbeat while the supervisor said
+# `Completed`, because earlier `start` calls had spawned duplicates the IST writer guard
+# refused ("ownership is already held … owner=…;pid=…"). Without this probe, a caller
+# fires yet another doomed start and inflates the restart counter — manufacturing the mess
+# it means to clean up.
+assert_port 'live indexer health port'  44130 live axon-indexer
+assert_port 'dev indexer health port'   44149 dev  axon-indexer
+
+# A role with no health endpoint must yield EMPTY, so `_axon_role_serving` returns
+# "unknown" (≠ serving) and the caller falls back to the supervisor rather than assuming
+# health. Guessing a port here would be worse than admitting ignorance.
+assert_port 'dashboard has no role health port' '' live dashboard
+assert_port 'unknown role has no health port'   '' live zzz-nonexistent
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

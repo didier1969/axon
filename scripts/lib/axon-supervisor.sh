@@ -245,6 +245,31 @@ except Exception:
 " "$key" 2>/dev/null || printf ''
 }
 
+# _axon_role_health_port <instance_kind> <process> — the role's own health port, or empty
+# when the role has none (only the two runtime roles expose one).
+_axon_role_health_port() {
+    local instance_kind="${1:?}" proc="${2:?}"
+    case "$proc" in
+        axon-indexer) [[ "$instance_kind" == "live" ]] && printf '44130' || printf '44149' ;;
+        axon-brain)   axon_brain_port_for_instance "$instance_kind" ;;
+        *)            printf '' ;;
+    esac
+}
+
+# _axon_role_serving <instance_kind> <process> — 0 when the role answers its OWN health
+# endpoint, whatever the supervisor believes.
+#
+# This is the ground truth that outranks process-compose's bookkeeping: the supervisor
+# tracks the last process IT launched, which may be a duplicate the writer guard refused,
+# while the real instance keeps serving. Roles without a health port return 1 (unknown ≠
+# serving) so callers fall back to the supervisor's view rather than assume health.
+_axon_role_serving() {
+    local port
+    port="$(_axon_role_health_port "$1" "$2")"
+    [[ -n "$port" ]] || return 1
+    curl -sf --connect-timeout 3 -m 5 "http://127.0.0.1:${port}/readyz" >/dev/null 2>&1
+}
+
 # axon_restart_role_verified <instance_kind> <process> [budget_s]
 #
 # Restart ONE process-compose role and return 0 only once the OBSERVED state is
@@ -289,6 +314,19 @@ axon_restart_role_verified() {
             return 0
         fi
         if [[ "$action" == "start" && "$start_sent" -eq 0 ]]; then
+            # REQ-AXO-902263 — before spawning, check whether the ROLE IS ALREADY SERVING.
+            # process-compose can report `Completed` while a perfectly healthy instance runs:
+            # its status then tracks a REFUSED DUPLICATE, not the live process. Observed for
+            # real — the indexer answered /readyz and /livez with a 3.7 s-fresh heartbeat
+            # while the supervisor said Completed, because earlier `start` calls had spawned
+            # duplicates that the IST writer guard correctly refused ("ownership is already
+            # held ... owner=...;pid=..."). Firing another start there manufactures another
+            # doomed process and inflates the restart counter — the caller creating the mess
+            # it is trying to clean up.
+            if _axon_role_serving "$instance_kind" "$proc"; then
+                _axon_sup_log "[restart-verified] ${proc} reports '${status}' but IS SERVING its health endpoint — supervisor is tracking a refused duplicate, not the live process. No start sent."
+                return 0
+            fi
             # The observed process-compose defect. Send the missing half ONCE —
             # resending on every tick would fight a slow launch.
             _axon_sup_log "[restart-verified] ${proc} reported '${status}' — supervisor will not relaunch a requested stop; sending explicit start"
