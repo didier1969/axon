@@ -117,6 +117,32 @@ fn resolve_artifact_ref_and_type(art: &Value) -> (&str, &str) {
     (artifact_ref, artifact_type)
 }
 
+/// REQ-AXO-902265 — which caller-supplied `artifact_refs` matched NO row at all.
+///
+/// PURE, and extracted for exactly that reason: the one way to land in `kept` while being
+/// targeted is a failed DELETE, which cannot be provoked through the tool's public path.
+/// Keeping the rule inline would leave the branch that matters permanently untested.
+///
+/// The rule: a ref is "unmatched" only when it appears in NEITHER `removed` NOR `kept`.
+/// Measuring against `removed` alone would report a row whose DELETE failed as "absent or
+/// spelled differently" — the very false message this field exists to eliminate, one code
+/// path over. `removed 0` must never be the answer to two different questions.
+fn unmatched_explicit_refs(
+    explicit_refs: &[String],
+    removed: &[Value],
+    kept: &[Value],
+) -> Vec<String> {
+    let seen_in = |set: &[Value], r: &str| {
+        set.iter()
+            .any(|e| e.get("artifact_ref").and_then(|v| v.as_str()) == Some(r))
+    };
+    explicit_refs
+        .iter()
+        .filter(|r| !seen_in(removed, r) && !seen_in(kept, r))
+        .cloned()
+        .collect()
+}
+
 impl McpServer {
     fn normalize_file_artifact_ref(
         &self,
@@ -616,6 +642,72 @@ mod resolve_artifact_ref_and_type_tests {
 }
 
 #[cfg(test)]
+mod unmatched_explicit_refs_tests {
+    use super::unmatched_explicit_refs;
+    use serde_json::json;
+
+    #[test]
+    fn a_ref_present_in_removed_is_matched() {
+        let removed = vec![json!({"artifact_ref": "src/x.rs"})];
+        assert!(unmatched_explicit_refs(&["src/x.rs".into()], &removed, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_ref_absent_everywhere_is_reported() {
+        assert_eq!(
+            unmatched_explicit_refs(&["tests::typo".into()], &[], &[]),
+            vec!["tests::typo".to_string()]
+        );
+    }
+
+    /// THE reason this function is extracted. A targeted row whose DELETE failed lands in
+    /// `kept` with `status: delete_failed`. Reporting it as "matched NO row … absent or
+    /// spelled differently" would send the caller hunting for a typo in a ref that exists
+    /// and was found — the same "removed 0 means two different things" defect the field
+    /// was added to remove. Unreachable through the tool's public path (a DELETE has to
+    /// fail), hence covered here.
+    #[test]
+    fn a_ref_whose_delete_failed_is_matched_not_reported_missing() {
+        let kept = vec![json!({
+            "artifact_ref": "src/x.rs",
+            "status": "delete_failed",
+            "error": "permission denied"
+        })];
+        assert!(
+            unmatched_explicit_refs(&["src/x.rs".into()], &[], &kept).is_empty(),
+            "a failed delete is a MATCH that did not complete, not a missing ref"
+        );
+    }
+
+    #[test]
+    fn a_preserved_row_also_counts_as_matched() {
+        let kept = vec![json!({"artifact_ref": "src/keep.rs", "status": "preserved"})];
+        assert!(unmatched_explicit_refs(&["src/keep.rs".into()], &[], &kept).is_empty());
+    }
+
+    #[test]
+    fn only_the_missing_ones_are_reported_out_of_a_mixed_batch() {
+        let removed = vec![json!({"artifact_ref": "a"})];
+        let kept = vec![json!({"artifact_ref": "b", "status": "delete_failed"})];
+        assert_eq!(
+            unmatched_explicit_refs(
+                &["a".into(), "b".into(), "c".into()],
+                &removed,
+                &kept
+            ),
+            vec!["c".to_string()]
+        );
+    }
+
+    #[test]
+    fn no_requested_refs_reports_nothing() {
+        // The empty-request case must stay silent: `broken_only=false` with no
+        // `artifact_refs` removes nothing, so there is nothing to fail to match.
+        assert!(unmatched_explicit_refs(&[], &[], &[]).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod build_suggested_absolute_path_tests {
     use super::build_suggested_absolute_path;
 
@@ -938,12 +1030,21 @@ impl McpServer {
     ///    (project-root-relative or absolute). Safe maintenance.
     ///
     /// 2. `broken_only=false`: removes the explicit `artifact_refs` regardless
-    ///    of disk state. Intended for surgical correction (e.g. a renamed
-    ///    file that still exists at the new path — operator wants to drop the
-    ///    stale row without waiting for the file to actually disappear).
+    ///    of disk state, and regardless of artifact TYPE (REQ-AXO-902265 —
+    ///    `Test`, `Metric`, `Commit`… were silently out of reach before).
+    ///    Intended for surgical correction (e.g. a renamed file that still
+    ///    exists at the new path — operator wants to drop the stale row
+    ///    without waiting for the file to actually disappear).
+    ///
+    /// The type restriction applies to mode 1 ONLY, on purpose: "broken" is
+    /// decided by a filesystem existence check, which says nothing about a
+    /// `Test` or `Metric` ref. Sweeping those there would delete rows the tool
+    /// cannot evaluate.
     ///
     /// Returns: `removed_count`, `removed[]` (id + artifact_ref), `kept[]`
-    /// (entries that did NOT match the removal criterion, for audit).
+    /// (entries that did NOT match the removal criterion, for audit), and
+    /// `unmatched_refs[]` — requested refs that matched no row at all, so that
+    /// `removed 0` is never mistaken for "the row was protected".
     pub(crate) fn axon_soll_remove_evidence(&self, args: &Value) -> Option<Value> {
         let entity_id = match args.get("entity_id").and_then(|v| v.as_str()) {
             Some(s) if !s.trim().is_empty() => s.trim().to_string(),
@@ -980,11 +1081,27 @@ impl McpServer {
         // `broken_file_evidence_count_for_requirement`).
         let project_root = self.canonical_project_root_for_entity(&entity_id);
         let escaped = escape_sql(&entity_id);
+        // REQ-AXO-902265 — the artifact-type restriction belongs to `broken_only`, NOT to
+        // the tool. Applying it in both modes was a silent no-op on every `Test`, `Metric`,
+        // `Commit`… row: the caller passed an artifact_ref copied verbatim from
+        // soll.Traceability and got `removed 0`, indistinguishable from "that ref does not
+        // exist". Measured on NEX: 2 `Test` refs and 3 `Metric` refs unremovable, while
+        // `REQ-NEX-096` (delivered) kept three `Metric` refs pointing at scratch files that
+        // were never committed — dead evidence reads exactly like evidence.
+        //
+        // `broken_only=true` keeps the filter, and that is deliberate: "broken" is decided
+        // by a filesystem existence check, which is meaningless for a Test or Metric ref.
+        // Widening the sweep there would DELETE rows it cannot evaluate.
+        let type_filter = if broken_only {
+            "AND lower(artifact_type) IN ('file', 'document') "
+        } else {
+            ""
+        };
         let query = format!(
             "SELECT id, COALESCE(artifact_ref, ''), COALESCE(artifact_type, '') \
              FROM soll.Traceability \
              WHERE soll_entity_id = '{escaped}' \
-               AND lower(artifact_type) IN ('file', 'document') \
+               {type_filter}\
              ORDER BY id"
         );
         let raw = match self.graph_store.query_json(&query) {
@@ -1062,11 +1179,31 @@ impl McpServer {
         } else {
             "explicit_refs"
         };
+        // REQ-AXO-902265 — name the refs that matched NOTHING. `removed 0` alone reads
+        // identically whether the row was protected, absent, or misspelled, so a caller
+        // cleaning an evidence store believes it succeeded. Only meaningful in the explicit
+        // mode: `broken_only` derives its own candidate set and has no caller-supplied
+        // refs to fail against.
+        //
+        let unmatched_refs = if broken_only {
+            Vec::new()
+        } else {
+            unmatched_explicit_refs(&explicit_refs, &removed, &kept)
+        };
+        let unmatched_note = if unmatched_refs.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — {} requested ref(s) matched NO row on {entity_id} (not a protection: they are absent or spelled differently): {:?}",
+                unmatched_refs.len(),
+                unmatched_refs
+            )
+        };
         Some(json!({
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "soll_remove_evidence({entity_id}, mode={mode_label}): removed {removed_count}, kept {kept_count}"
+                    "soll_remove_evidence({entity_id}, mode={mode_label}): removed {removed_count}, kept {kept_count}{unmatched_note}"
                 )
             }],
             "data": {
@@ -1075,6 +1212,7 @@ impl McpServer {
                 "removed_count": removed_count,
                 "removed": removed,
                 "kept": kept,
+                "unmatched_refs": unmatched_refs,
                 "follow_up_tools": ["soll_verify_requirements", "soll_validate"]
             }
         }))

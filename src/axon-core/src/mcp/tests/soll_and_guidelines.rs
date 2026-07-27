@@ -9668,6 +9668,203 @@ fn test_soll_remove_evidence_drops_only_broken_file_refs_by_default() {
     assert_eq!(response2["data"]["kept"].as_array().unwrap().len(), 1);
 }
 
+#[test]
+fn test_soll_remove_evidence_explicit_mode_reaches_non_file_artifact_types() {
+    // REQ-AXO-902265 — the explicit mode promised removal "regardless of disk state" with
+    // no word about artifact TYPE, but the candidate query filtered
+    // `artifact_type IN ('file','document')` in BOTH modes. Measured on NEX: two `Test`
+    // refs and three `Metric` refs, copied verbatim out of soll.Traceability, answered
+    // `removed 0` — indistinguishable from "that ref does not exist". A dead evidence row
+    // that cannot be removed still reads as evidence.
+    let server = create_test_server();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-9022650', 'Requirement', 'AXO', 'remove_evidence non-file types', 'explicit mode', 'current', '{\"acceptance_criteria\":\"a\"}')")
+        .unwrap();
+
+    let seed = |trace_id: &str, artifact_type: &str, artifact_ref: &str, created: u64| {
+        server
+            .graph_store
+            .execute_param(
+                "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                &json!([trace_id, "Requirement", "REQ-AXO-9022650", artifact_type, artifact_ref, 1.0, "{}", created]),
+            )
+            .unwrap();
+    };
+    seed("TRC-902265-TEST", "Test", "tests::some_dead_test", 1);
+    seed("TRC-902265-METRIC", "Metric", "bench/scratch-never-committed.json", 2);
+    seed("TRC-902265-FILE", "file", "/tmp/does-not-exist-902265.rs", 3);
+
+    // Explicit mode targeting ONLY the two non-file rows: they must now be reachable.
+    let data = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_remove_evidence",
+                "arguments": {
+                    "entity_id": "REQ-AXO-9022650",
+                    "broken_only": false,
+                    "artifact_refs": [
+                        "tests::some_dead_test",
+                        "bench/scratch-never-committed.json"
+                    ]
+                }
+            })),
+            id: Some(json!(902265001)),
+        })
+        .unwrap()
+        .result
+        .unwrap()["data"]
+        .clone();
+
+    assert_eq!(data["mode"].as_str(), Some("explicit_refs"));
+    assert_eq!(
+        data["removed_count"].as_u64(),
+        Some(2),
+        "Test and Metric refs must be removable in explicit mode: {data}"
+    );
+    let removed_types: Vec<&str> = data["removed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r.get("artifact_type").and_then(|v| v.as_str()))
+        .collect();
+    assert!(removed_types.contains(&"Test"), "got {removed_types:?}");
+    assert!(removed_types.contains(&"Metric"), "got {removed_types:?}");
+    // The untargeted `file` row is preserved: widening the type reach must not widen the
+    // blast radius.
+    assert_eq!(data["kept"].as_array().unwrap().len(), 1);
+    assert!(data["unmatched_refs"].as_array().unwrap().is_empty());
+
+    // A ref that matches nothing must SAY so. `removed 0` on its own reads as "the row was
+    // protected", which is how an evidence store gets cleaned in name only.
+    let miss = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_remove_evidence",
+                "arguments": {
+                    "entity_id": "REQ-AXO-9022650",
+                    "broken_only": false,
+                    "artifact_refs": ["tests::typo_in_this_ref"]
+                }
+            })),
+            id: Some(json!(902265002)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(miss["data"]["removed_count"].as_u64(), Some(0));
+    let unmatched: Vec<&str> = miss["data"]["unmatched_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(unmatched, vec!["tests::typo_in_this_ref"]);
+    let text = miss["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("matched NO row"),
+        "the human-readable line must name the miss, got: {text}"
+    );
+
+    // BLAST-RADIUS GUARD. Widening the candidate SELECT to every artifact type is safe
+    // only because an empty `artifact_refs` matches nothing. If that ever inverted —
+    // "no filter given" read as "remove everything" — this call would wipe an entity's
+    // whole evidence store in one shot. The remaining `file` row from earlier in this
+    // test is the canary.
+    let empty = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_remove_evidence",
+                "arguments": {"entity_id": "REQ-AXO-9022650", "broken_only": false}
+            })),
+            id: Some(json!(902265004)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        empty["data"]["removed_count"].as_u64(),
+        Some(0),
+        "broken_only=false with NO artifact_refs must remove nothing, never everything"
+    );
+    let survivors: String = server
+        .graph_store
+        .query_json("SELECT artifact_ref FROM soll.Traceability WHERE soll_entity_id = 'REQ-AXO-9022650'")
+        .unwrap();
+    assert!(
+        survivors.contains("/tmp/does-not-exist-902265.rs"),
+        "the untargeted row must survive an empty explicit request, got {survivors}"
+    );
+}
+
+#[test]
+fn test_soll_remove_evidence_broken_only_still_ignores_non_file_types() {
+    // REQ-AXO-902265, the other half: `broken_only` decides via a filesystem existence
+    // check, which says nothing about a `Test` or `Metric` ref. Widening the sweep there
+    // would DELETE rows the tool cannot evaluate — a data-loss bug dressed as a fix. This
+    // pins the asymmetry so a later "consistency" cleanup cannot quietly remove it.
+    let server = create_test_server();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-9022651', 'Requirement', 'AXO', 'remove_evidence broken_only scope', 'broken_only mode', 'current', '{\"acceptance_criteria\":\"a\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute_param(
+            "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            &json!(["TRC-902265-KEEP-TEST", "Requirement", "REQ-AXO-9022651", "Test", "tests::not_a_path_at_all", 1.0, "{}", 1u64]),
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute_param(
+            "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            &json!(["TRC-902265-DROP-FILE", "Requirement", "REQ-AXO-9022651", "file", "/tmp/does-not-exist-902265-b.rs", 1.0, "{}", 2u64]),
+        )
+        .unwrap();
+
+    let data = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_remove_evidence",
+                "arguments": {"entity_id": "REQ-AXO-9022651"}
+            })),
+            id: Some(json!(902265003)),
+        })
+        .unwrap()
+        .result
+        .unwrap()["data"]
+        .clone();
+
+    assert_eq!(data["mode"].as_str(), Some("broken_only"));
+    // Only the broken FILE row goes. The Test row is never even a candidate — it must not
+    // appear in `removed`, and `unmatched_refs` stays empty (no caller ref to fail).
+    assert_eq!(data["removed_count"].as_u64(), Some(1));
+    assert_eq!(
+        data["removed"][0]["artifact_ref"].as_str(),
+        Some("/tmp/does-not-exist-902265-b.rs")
+    );
+    assert!(data["unmatched_refs"].as_array().unwrap().is_empty());
+    let survivors: String = server
+        .graph_store
+        .query_json("SELECT artifact_ref FROM soll.Traceability WHERE soll_entity_id = 'REQ-AXO-9022651'")
+        .unwrap();
+    assert!(
+        survivors.contains("tests::not_a_path_at_all"),
+        "the Test row must survive broken_only, got {survivors}"
+    );
+}
+
 // REQ-AXO-274 phase 2 — canonical relation policy extensions
 #[test]
 fn test_relation_policy_accepts_cpt_to_cpt_inherits_from() {
