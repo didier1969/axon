@@ -1514,13 +1514,29 @@ mod tests {
 
     #[test]
     fn test_gpu_vector_lease_is_claimed_by_current_instance() {
+        // REQ-AXO-902261 — this test drives a REAL lease file through production code, so
+        // the env is genuinely part of the fixture and cannot be turned into arguments.
+        // The lock plus restoring guards is the right shape here.
+        //
+        // Two defects fixed at once. The bare `set_var` raced sibling tests (the harness
+        // runs them in parallel threads of ONE process). And the manual `remove_var`
+        // cleanup at the end never ran when an assertion above it failed — a failing test
+        // leaked three variables into everything that ran afterwards, turning one failure
+        // into a cascade with no obvious origin. `EnvVarGuard` restores on Drop, panic
+        // included.
+        let _lock = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = tempdir().expect("tempdir");
         let lease_path = dir.path().join("gpu-vector.lock");
-        unsafe {
-            std::env::set_var("AXON_GPU_VECTOR_LEASE_PATH", &lease_path);
-            std::env::set_var("AXON_RUNTIME_IDENTITY", "test-dev");
-            std::env::set_var("AXON_GPU_VECTOR_EXCLUSIVE_LEASE", "true");
-        }
+        let _g_path = crate::test_support::EnvVarGuard::set(
+            "AXON_GPU_VECTOR_LEASE_PATH",
+            &lease_path.to_string_lossy(),
+        );
+        let _g_identity =
+            crate::test_support::EnvVarGuard::set("AXON_RUNTIME_IDENTITY", "test-dev");
+        let _g_exclusive =
+            crate::test_support::EnvVarGuard::set("AXON_GPU_VECTOR_EXCLUSIVE_LEASE", "true");
         reset_gpu_vector_lease_for_tests();
 
         assert!(vector_worker_admitted(
@@ -1536,11 +1552,8 @@ mod tests {
         assert_eq!(diagnostics.owner_identity.as_deref(), Some("test-dev"));
         assert_eq!(diagnostics.path, lease_path.to_string_lossy().to_string());
 
-        unsafe {
-            std::env::remove_var("AXON_GPU_VECTOR_LEASE_PATH");
-            std::env::remove_var("AXON_RUNTIME_IDENTITY");
-            std::env::remove_var("AXON_GPU_VECTOR_EXCLUSIVE_LEASE");
-        }
+        // The guards restore the environment as they drop; only the process-global lease
+        // cache still needs an explicit reset for the tests that follow.
         reset_gpu_vector_lease_for_tests();
     }
 }

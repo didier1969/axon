@@ -130,41 +130,74 @@ pub async fn serve_health_probes(port: u16, state: IndexerHealthState) {
 /// process-compose yaml (live=44130, dev=44149). Le +1 est le fallback
 /// quand aucun override n'est posé.
 pub fn resolve_health_port() -> u16 {
-    if let Ok(p) = std::env::var("AXON_INDEXER_HEALTH_PORT") {
-        if let Ok(n) = p.trim().parse::<u16>() {
-            return n;
-        }
+    resolve_health_port_from(
+        std::env::var("AXON_INDEXER_HEALTH_PORT").ok(),
+        std::env::var("AXON_BRAIN_PORT").ok(),
+    )
+}
+
+/// PURE core of `resolve_health_port` — both env values arrive as parameters.
+///
+/// REQ-AXO-902261 — the tests for this used to mutate the process environment behind a
+/// `static ENV_TEST_LOCK: Mutex<()>` declared right here: a FOURTH private lock over the
+/// one process environment, serializing this file against itself and nothing else. They
+/// also left both variables unset afterwards, for every test that ran later.
+///
+/// Extracting the decision beats locking it: the precedence rule is what deserves the
+/// test, and it can be exercised without touching global state at all.
+pub fn resolve_health_port_from(
+    indexer_override: Option<String>,
+    brain_port: Option<String>,
+) -> u16 {
+    if let Some(n) = indexer_override.and_then(|p| p.trim().parse::<u16>().ok()) {
+        return n;
     }
-    let base = std::env::var("AXON_BRAIN_PORT")
-        .ok()
+    let base = brain_port
         .and_then(|p| p.trim().parse::<u16>().ok())
         .unwrap_or(44129);
-    base + 1
+    base.saturating_add(1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+    // REQ-AXO-902261 — no lock and no env mutation: the values are arguments now.
 
     #[test]
     fn resolve_health_port_uses_indexer_override_first() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::remove_var("AXON_BRAIN_PORT");
-        std::env::set_var("AXON_INDEXER_HEALTH_PORT", "33333");
-        assert_eq!(resolve_health_port(), 33333);
-        std::env::remove_var("AXON_INDEXER_HEALTH_PORT");
+        assert_eq!(
+            resolve_health_port_from(Some("33333".into()), Some("44129".into())),
+            33333,
+            "the explicit indexer override outranks the brain port"
+        );
     }
 
     #[test]
     fn resolve_health_port_falls_back_to_brain_port_plus_one() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::remove_var("AXON_INDEXER_HEALTH_PORT");
-        std::env::set_var("AXON_BRAIN_PORT", "44129");
-        assert_eq!(resolve_health_port(), 44130);
-        std::env::remove_var("AXON_BRAIN_PORT");
+        assert_eq!(resolve_health_port_from(None, Some("44129".into())), 44130);
+    }
+
+    #[test]
+    fn resolve_health_port_defaults_when_nothing_is_set() {
+        assert_eq!(resolve_health_port_from(None, None), 44130);
+    }
+
+    #[test]
+    fn resolve_health_port_ignores_a_malformed_override() {
+        // A typo in AXON_INDEXER_HEALTH_PORT must fall through to the brain-port rule,
+        // never yield 0. Untested before — the old tests only fed valid values.
+        assert_eq!(
+            resolve_health_port_from(Some("not-a-port".into()), Some("44129".into())),
+            44130
+        );
+    }
+
+    #[test]
+    fn resolve_health_port_does_not_overflow_at_the_top_of_the_range() {
+        // base + 1 on 65535 would wrap to 0 and bind a random port. `saturating_add`
+        // keeps it in range; nothing pinned this before.
+        assert_eq!(resolve_health_port_from(None, Some("65535".into())), 65535);
     }
 
     #[test]

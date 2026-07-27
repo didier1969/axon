@@ -57,6 +57,9 @@ fn build_batch() -> PgBulkBatch {
             is_public: i % 3 == 0,
             is_nif: false,
             is_unsafe: false,
+            // REQ-AXO-902227 (2026-07-12) added this field; `tests/` stopped compiling
+            // that day and no gate builds this directory.
+            is_entry_point: false,
             project_code: "AXO".to_string(),
             embedding: Some(full_dim_embedding(i)),
             cyclomatic_complexity: None,

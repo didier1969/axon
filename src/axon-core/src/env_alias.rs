@@ -108,12 +108,19 @@ pub fn __reset_warned_for_tests() {
 mod tests {
     use super::*;
 
-    // std::env is process-global ; serialize alias tests.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // REQ-AXO-902261 — std::env is process-global, so this delegates to the ONE crate-wide
+    // mutex. It used to declare `static ENV_LOCK: Mutex<()>` here: a private lock
+    // serializes this file against itself and against nothing else, which is not
+    // serialization at all when the resource is shared by the whole test binary.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
 
     #[test]
     fn canonical_wins_over_alias() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         unsafe {
             std::env::set_var("AXON_TEST_CANON_A", "canonical");
             std::env::set_var("AXON_TEST_ALIAS_A", "alias");
@@ -128,7 +135,7 @@ mod tests {
 
     #[test]
     fn alias_used_when_canonical_unset() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         unsafe {
             std::env::remove_var("AXON_TEST_CANON_B");
             std::env::set_var("AXON_TEST_ALIAS_B", "from-alias");
@@ -143,7 +150,7 @@ mod tests {
 
     #[test]
     fn both_unset_returns_none() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         unsafe {
             std::env::remove_var("AXON_TEST_CANON_C");
             std::env::remove_var("AXON_TEST_ALIAS_C");
@@ -154,7 +161,7 @@ mod tests {
 
     #[test]
     fn empty_string_treated_as_unset() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         unsafe {
             std::env::set_var("AXON_TEST_CANON_D", "");
             std::env::set_var("AXON_TEST_ALIAS_D", "alias-value");

@@ -125,8 +125,6 @@ fn no_test_mutates_process_env_without_the_lock() {
         "mcp/tests/guidance_contract.rs",
         "runtime_capacity_profile.rs",
         "embedder.rs",
-        "indexer_health_http.rs",
-        "vector_control.rs",
         "postgres/bulk_writer.rs",
         // REQ-AXO-902261 — REMOVED, each one fixed:
         //   `mcp/tests/mod.rs`  — its `env_lock()` minted a private mutex; now delegates
@@ -248,9 +246,63 @@ fn no_test_lock_is_minted_outside_test_support() {
                 continue;
             }
             let lines: Vec<&str> = text.lines().collect();
+            // Only TEST code is in scope. A production mutex is a legitimate design
+            // choice and must not be reported: `graph_bootstrap.rs` holds a
+            // `BOOTSTRAP_LOCK` over the PG catalog during DDL, which the first version of
+            // this scan flagged. Accusing correct production code is how a guard gets
+            // disabled. Scope = inside a `#[cfg(test)]` module, tracked by brace depth.
+            let mut depth = 0i32;
+            let mut pending_cfg_test = false;
+            let mut test_mod_depth: Option<i32> = None;
             for (idx, raw) in lines.iter().enumerate() {
                 let line = raw.trim_start();
-                // A DEFINITION, not a call: `fn x_lock(` / `pub fn x_lock(` / …
+                let opens = line.matches('{').count() as i32;
+                let closes = line.matches('}').count() as i32;
+
+                if line.starts_with("#[cfg(test)]") {
+                    pending_cfg_test = true;
+                }
+                if pending_cfg_test && line.contains("mod ") && opens > 0 {
+                    test_mod_depth = Some(depth);
+                    pending_cfg_test = false;
+                }
+                let in_test = test_mod_depth.is_some();
+                // Update depth for the NEXT line, and leave the test module when its
+                // brace closes.
+                let depth_after = depth + opens - closes;
+                if let Some(d) = test_mod_depth {
+                    if depth_after <= d && closes > 0 {
+                        test_mod_depth = None;
+                    }
+                }
+                depth = depth_after;
+                if !in_test {
+                    continue;
+                }
+
+                // Spelling 2 — a BARE static mutex: `static ENV_TEST_LOCK: Mutex<()> =
+                // Mutex::new(());`. No `fn`, no `OnceLock`, so the accessor scan below
+                // never sees it. `indexer_health_http.rs` carried exactly this: a fourth
+                // private lock over the one process environment, serializing that file
+                // against itself and nothing else. Caught here, at the declaration.
+                if let Some(rest) = line
+                    .strip_prefix("static ")
+                    .or_else(|| line.strip_prefix("pub static "))
+                {
+                    if let Some(sname) = rest.split(':').next() {
+                        let sname = sname.trim();
+                        if sname.ends_with("_LOCK") && line.contains("Mutex") {
+                            definitions
+                                .entry(sname.to_string())
+                                .or_default()
+                                .push(rel.clone());
+                            continue;
+                        }
+                    }
+                }
+
+                // Spelling 1 — an accessor fn that mints its own lazily-initialized
+                // static: `fn x_lock(` / `pub fn x_lock(` / …
                 let Some(rest) = line
                     .strip_prefix("pub fn ")
                     .or_else(|| line.strip_prefix("pub(crate) fn "))

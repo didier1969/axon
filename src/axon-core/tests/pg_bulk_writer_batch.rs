@@ -50,6 +50,9 @@ fn sample_symbol(idx: usize) -> BulkWriterSymbolRow {
         is_public: idx % 3 == 0,
         is_nif: false,
         is_unsafe: false,
+        // REQ-AXO-902227 (2026-07-12) added this field; `tests/` was not updated and has
+        // not compiled since. `--lib` + `--bins` never builds this directory.
+        is_entry_point: idx % 5 == 0,
         project_code: "AXO".to_string(),
         embedding: Some(full_dim_embedding(idx)),
         cyclomatic_complexity: None,
@@ -234,6 +237,7 @@ fn flush_batch_cross_table_round_trip() {
             is_public: false,
             is_nif: false,
             is_unsafe: false,
+            is_entry_point: false,
             project_code: "AXO".to_string(),
             embedding: None,
             cyclomatic_complexity: None,

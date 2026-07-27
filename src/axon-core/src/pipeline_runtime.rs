@@ -751,13 +751,20 @@ mod tests {
     /// `pipeline::embedder_gpu`; its config + gate are unit-tested there.)
     /// Locks the env-var matrix so a future refactor cannot weaken the
     /// fail-fast contract that prevents NoOpEmbedder + junk vectors.
-    /// Pattern mirrors postgres::tests::ENV_LOCK + EnvGuard — `std::env`
-    /// is process-global and cargo runs tests multi-threaded.
+    /// `std::env` is process-global and cargo runs tests multi-threaded, so this takes
+    /// the crate-wide lock.
+    ///
+    /// REQ-AXO-902261 — it used to declare a `static ENV_LOCK: Mutex<()>` inside the test
+    /// body itself, described as mirroring `postgres::tests::ENV_LOCK`. Both were private
+    /// mutexes over the SAME process environment: each serialized its own test against
+    /// itself, and neither against the other. The mirroring propagated the defect rather
+    /// than the protection — the same way a dead `embedder_env_lock` was cited elsewhere
+    /// as "the canonical pattern".
     #[test]
     fn gpu_provider_explicitly_requested_env_matrix() {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let prov_key = "AXON_EMBEDDING_PROVIDER";
         let trt_key = "AXON_GPU_EMBED_SERVICE_TENSORRT";

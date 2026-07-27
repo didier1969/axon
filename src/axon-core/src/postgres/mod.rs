@@ -283,15 +283,22 @@ impl SmokeReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// Global lock for the env-var-mutating tests below. Cargo runs tests
-    /// in parallel by default, but std::env is process-global, so two
-    /// tests that touch the same vars race and produce flaky failures.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// REQ-AXO-902261 — the crate-wide env mutex, not a private one.
+    ///
+    /// The doc comment that used to sit on a local `static ENV_LOCK` was right about the
+    /// hazard ("std::env is process-global, so two tests that touch the same vars race")
+    /// and wrong about the remedy: a lock declared HERE serializes this module against
+    /// itself only, while the vars it protects are shared with every other test in the
+    /// binary. Same defect as three private `registry_test_lock()` over one registry.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     /// RAII guard: snapshots the listed env vars on construction, restores
-    /// them (set or unset) on Drop. Holds the ENV_LOCK so concurrent
+    /// them (set or unset) on Drop. Holds the crate-wide env lock so concurrent
     /// tests never observe each other's mid-run state.
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -300,7 +307,7 @@ mod tests {
 
     impl EnvGuard {
         fn new(vars: &[&'static str]) -> Self {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = env_lock();
             let snapshots = vars.iter().map(|v| (*v, std::env::var(*v).ok())).collect();
             Self {
                 _lock: lock,

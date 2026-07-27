@@ -31,6 +31,10 @@ fn sym(id: &str) -> BulkWriterSymbolRow {
         is_public: false,
         is_nif: false,
         is_unsafe: false,
+        // REQ-AXO-902227 added this field on 2026-07-12; the integration tests were not
+        // updated and stopped COMPILING that day. Nobody noticed for 15 days because the
+        // documented gate is `--lib` + `--bins`, and neither builds `tests/`.
+        is_entry_point: false,
         project_code: P.to_string(),
         embedding: None,
         cyclomatic_complexity: None,
