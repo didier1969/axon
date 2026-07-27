@@ -258,3 +258,71 @@ axon_resolve_resource_policy() {
 
     export AXON_RESOURCE_POLICY_COMPUTED_INSTANCE="$instance_kind"
 }
+
+# REQ-AXO-902267 — cargo build parallelism, bounded by AVAILABLE memory.
+#
+# Why this exists. On 2026-07-27 a promote made the whole laptop unresponsive: two global
+# OOM kills (both took Chrome down) inside a single promote window. The primary cause was a
+# fork storm since fixed (REQ-AXO-902266), but the host is structurally tight — 47 GB total
+# yet swap sitting at 7/8 GB — so the release build is the remaining large consumer on the
+# promote path. `cargo` defaults to one rustc per core (16 here); a release rustc on this
+# crate is GB-scale, so an unbounded build can commit far more than the machine has free
+# and push a busy host into swap thrashing.
+#
+# The existing helpers read TOTAL ram (`axon_detect_host_ram_gb`), which is the wrong
+# quantity: what matters is what is free WHILE the promote runs, alongside the live runtime,
+# Postgres, the indexer's GPU session and the operator's browser.
+#
+# Deliberately a floor of 1 and a cap of the core count: this may only ever REDUCE
+# parallelism, never raise it above cargo's own default.
+
+# axon_available_ram_gb — MemAvailable in GiB (the kernel's own estimate of what can be
+# allocated without swapping), 0 when unreadable.
+axon_available_ram_gb() {
+    local kb
+    kb="$(sed -n 's/^MemAvailable:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' /proc/meminfo 2>/dev/null | head -n1)"
+    [[ -n "$kb" ]] && printf '%s\n' "$(( kb / 1024 / 1024 ))" || printf '0\n'
+}
+
+# axon_swap_used_pct — percentage of swap in use, 0 when there is no swap or it is
+# unreadable. Heavy swap use means the host is ALREADY struggling; adding 16 rustc
+# processes to that is how a build takes the desktop down with it.
+axon_swap_used_pct() {
+    local total free
+    total="$(sed -n 's/^SwapTotal:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' /proc/meminfo 2>/dev/null | head -n1)"
+    free="$(sed -n 's/^SwapFree:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' /proc/meminfo 2>/dev/null | head -n1)"
+    [[ -n "$total" && -n "$free" && "$total" -gt 0 ]] || { printf '0\n'; return 0; }
+    printf '%s\n' "$(( (total - free) * 100 / total ))"
+}
+
+# axon_compute_cargo_jobs <available_gb> <swap_used_pct> <cores> [gb_per_job]
+#
+# PURE (no /proc, no env) so the policy is unit-testable on any host.
+#
+# `gb_per_job` defaults to 2: a conservative ESTIMATE of peak rustc RSS for a release build
+# of this crate, not a measurement — erring high costs a slower build, erring low costs the
+# operator's session. Halve again past 50 % swap: at that point the kernel is already
+# evicting, and the next allocation storm is what triggers the OOM killer.
+axon_compute_cargo_jobs() {
+    local available_gb="${1:-0}" swap_pct="${2:-0}" cores="${3:-4}" gb_per_job="${4:-2}"
+    [[ "$gb_per_job" -ge 1 ]] || gb_per_job=1
+    local jobs=$(( available_gb / gb_per_job ))
+    (( swap_pct >= 50 )) && jobs=$(( jobs / 2 ))
+    (( jobs < 1 )) && jobs=1
+    (( jobs > cores )) && jobs="$cores"
+    printf '%s\n' "$jobs"
+}
+
+# axon_resolve_cargo_jobs — the host-reading wrapper. Honours an explicit
+# AXON_BUILD_JOBS override (operator wins, always).
+axon_resolve_cargo_jobs() {
+    if [[ -n "${AXON_BUILD_JOBS:-}" && "${AXON_BUILD_JOBS}" =~ ^[0-9]+$ && "${AXON_BUILD_JOBS}" -ge 1 ]]; then
+        printf '%s\n' "$AXON_BUILD_JOBS"
+        return 0
+    fi
+    axon_compute_cargo_jobs \
+        "$(axon_available_ram_gb)" \
+        "$(axon_swap_used_pct)" \
+        "$(axon_detect_host_cpu_cores)" \
+        "${AXON_BUILD_GB_PER_JOB:-2}"
+}

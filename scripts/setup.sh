@@ -10,6 +10,8 @@ cd "$PROJECT_ROOT"
 source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
 # shellcheck source=scripts/lib/axon-os-limits.sh
 source "$PROJECT_ROOT/scripts/lib/axon-os-limits.sh"
+# shellcheck source=scripts/lib/axon-resource-policy.sh
+source "$PROJECT_ROOT/scripts/lib/axon-resource-policy.sh"
 
 ARTIFACT_ONLY=0
 WITH_TENSORRT=0
@@ -154,8 +156,17 @@ TARGET_BIN="$BIN_DIR/axon-core"
 CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
 mkdir -p "$BIN_DIR"
 
-echo "🔨 Building Rust core..."
-devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release --bins"
+# REQ-AXO-902267 — bound build parallelism by AVAILABLE memory, not by core count.
+# `cargo` defaults to one rustc per core (16 on this host) and a release rustc here is
+# GB-scale, so an unbounded build can commit far more than the machine has free. On
+# 2026-07-27 a promote produced two global OOM kills (Chrome died twice) and left the
+# laptop unresponsive; the primary cause was a fork storm (REQ-AXO-902266, fixed), but the
+# host runs with swap at 7/8 GB, so the build is the remaining large consumer on this path.
+# This only ever LOWERS parallelism — never above cargo's own default — and
+# `AXON_BUILD_JOBS` overrides it outright.
+CARGO_JOBS="$(axon_resolve_cargo_jobs)"
+echo "🔨 Building Rust core (-j ${CARGO_JOBS}: $(axon_available_ram_gb) GB free, swap $(axon_swap_used_pct)%, $(axon_detect_host_cpu_cores) cores)..."
+devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release --bins -j ${CARGO_JOBS}"
 
 install_release_bin() {
     local bin_name="$1"
