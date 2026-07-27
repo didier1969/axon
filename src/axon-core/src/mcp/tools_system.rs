@@ -1311,15 +1311,46 @@ impl McpServer {
     /// string for the envelope. Failure is non-fatal : the NOTIFY
     /// still fires and the indexer will at minimum re-touch
     /// `last_seen_ms` on next pass.
+    /// REQ-AXO-902262 — wipe the PG rows AND tell the indexer to forget them.
+    ///
+    /// Wiping PG alone was never enough, and the old `cache_invalidation: "wiped"` said
+    /// otherwise. The cache that decides whether a file is re-read is `IndexedFileCache`,
+    /// a DashMap in the INDEXER's RAM hydrated once at boot; this tool runs in the BRAIN.
+    /// So `full=true` deleted a project's chunks, the walk re-enrolled the rows with the
+    /// same on-disk mtime/size, A1 asked the untouched RAM cache, got "unchanged", and
+    /// skipped — permanently. Measured on LLL: 434/434 files chunked → 2/438, with the
+    /// 15-minute reconciliation walk replaying the same skip forever and `status: ok`
+    /// throughout. The only recovery was an indexer restart (a GPU teardown), which the
+    /// tool never mentioned.
+    ///
+    /// `pg_notify` crosses the process boundary; the indexer's `ist_cache_invalidate`
+    /// listener calls `forget_prefix`. Same mechanism as REQ-AXO-902234's idle-drop
+    /// control, and no restart is required.
+    ///
+    /// The NOTIFY is best-effort AND its outcome is REPORTED: if the cache could not be
+    /// signalled, the caller is told the re-index will not happen on its own rather than
+    /// being handed a success that means nothing.
     fn rescan_wipe_indexed_files(&self, project_path: &str) -> String {
         let escaped = project_path.replace('\'', "''");
         let sql = format!(
             "DELETE FROM ist.IndexedFile WHERE path LIKE '{}/%'",
             escaped
         );
-        match self.graph_store.execute_raw_sql_gateway(&sql) {
-            Ok(_) => "wiped (full mode)".to_string(),
-            Err(err) => format!("wipe_failed: {err}"),
+        if let Err(err) = self.graph_store.execute_raw_sql_gateway(&sql) {
+            return format!("wipe_failed: {err}");
+        }
+        let notify_sql = format!(
+            "SELECT pg_notify('{}', '{}')",
+            crate::pipeline::cache_invalidate_listener::LISTEN_CHANNEL,
+            escaped
+        );
+        match self.graph_store.execute_raw_sql_gateway(&notify_sql) {
+            Ok(_) => "wiped (full mode) + indexer dedup-cache invalidated".to_string(),
+            Err(err) => format!(
+                "wiped (full mode) BUT cache-invalidate NOTIFY failed ({err}) — the indexer \
+                 will keep skipping these files as unchanged; restart axon-indexer to force \
+                 the re-index (REQ-AXO-902262)"
+            ),
         }
     }
 
@@ -1338,9 +1369,18 @@ impl McpServer {
     /// to turn into an in-memory ingress subtree hint. Both the listener and the
     /// ingress_buffer were ripped, so the NOTIFY had no consumer. The tool now
     /// runs a direct scanner walk that UPSERTs every eligible file into
-    /// ist.IndexedFile with status='discovered'; the DBQ-A claim feeder
-    /// (REQ-AXO-901897) drains those rows into pipeline A by construction — no
-    /// indexer restart, no live watcher dependency. `full` is informational here
+    /// ist.IndexedFile with status='discovered'.
+    ///
+    /// REQ-AXO-902262 — the previous sentence here claimed "the DBQ-A claim feeder
+    /// (REQ-AXO-901897) drains those rows into pipeline A **by construction** — no indexer
+    /// restart". That feeder DOES NOT EXIST: REQ-AXO-901916 (PIL-AXO-007) "replaces the
+    /// claim-feeder + status='discovered' machine ENTIRELY" with a direct-streaming walk
+    /// that pushes paths into pipeline A's input_tx. Nothing anywhere SELECTs
+    /// status='discovered' (verified). So the column is dead debt, and this tool's
+    /// re-index relied on a component that had been removed — which is exactly why
+    /// full=true destroyed LLL's chunks without rebuilding them. The re-index now happens
+    /// because the indexer's reconciliation walk re-reads the files, and it re-reads them
+    /// because `rescan_wipe_indexed_files` invalidates the RAM dedup cache. `full` is informational here
     /// (the walk always re-enrols the whole subtree; the UPSERT is idempotent and
     /// only flips status back to 'discovered' for files whose mtime/size changed).
     fn rescan_emit_subtree_notify(

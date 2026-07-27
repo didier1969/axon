@@ -53,6 +53,7 @@
 pub mod channels;
 // REQ-AXO-902234 — desired-state consumer (LISTEN embedder_control) that lets the
 // brain flip the idle-drop policy without restarting the indexer.
+pub mod cache_invalidate_listener;
 pub mod embedder_control_listener;
 pub mod embedder_gpu;
 pub mod in_flight;

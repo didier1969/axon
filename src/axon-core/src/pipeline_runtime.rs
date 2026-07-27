@@ -313,6 +313,11 @@ pub fn spawn_pipeline_indexer(
                 },
             ));
             info!("pipeline: dedup cache hydrated with {count} entries from IndexedFile");
+            // REQ-AXO-902262 — publish it so `rescan_project full=true` can actually reach
+            // it. Wiping the PG rows never mattered: THIS map is what A1 consults, and it
+            // kept answering "unchanged, skip" for files whose chunks had just been
+            // deleted (LLL: 434/434 chunked → 2/438, no automatic recovery).
+            cache.publish_global();
             Some(cache)
         }
         Err(err) => {

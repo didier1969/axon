@@ -1137,6 +1137,19 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
                     "embedder_control listener spawned (REQ-AXO-902234) — idle-drop policy \
                      flippable at runtime via the `idle_drop` MCP tool, no restart"
                 );
+                // REQ-AXO-902262 — same two-process problem, other direction: the
+                // `rescan_project full=true` tool runs in the BRAIN and wipes PG rows, but
+                // the cache that decides whether a file is re-read is the indexer's in-RAM
+                // `IndexedFileCache`. Without this listener the tool DESTROYED a project's
+                // chunks and could not rebuild them (LLL: 434/434 → 2/438, no automatic
+                // recovery, the reconciliation walk replaying the same skip every 15 min).
+                crate::pipeline::cache_invalidate_listener::spawn_cache_invalidate_listener(
+                    _url.clone(),
+                );
+                info!(
+                    "ist_cache_invalidate listener spawned (REQ-AXO-902262) — rescan_project \
+                     full=true can now purge the dedup cache, no indexer restart"
+                );
             }
             // REQ-AXO-901893 (LEGACY FEED PURGE) — the axon_registry_changed
             // listener (REQ-AXO-901675) was RIPPED with ingress_buffer: it
