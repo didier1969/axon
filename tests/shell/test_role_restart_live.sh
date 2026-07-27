@@ -182,7 +182,17 @@ fi
 if (( ELAPSED <= BUDGET_S )); then
     pass "role unavailable ${ELAPSED}s (budget ${BUDGET_S}s — operator allows seconds to 2-3 min)"
 else
-    fail "role unavailable ${ELAPSED}s, over the ${BUDGET_S}s budget"
+    # Report the HOST STATE with the overshoot. This host is shared: a sibling project's
+    # pre-push gate (`llmlang/scripts/gate.sh` → `cargo test`) spawns one rustc per test
+    # case and reached 29 concurrent during a real promote, dragging this restart to 193 s
+    # against the same 180 s budget it met at 37 s and 118 s when the host was idle.
+    # Without these two numbers the failure reads as an Axon regression, and the next
+    # reader re-derives the provenance from `/tmp/lll-test-*` paths — which is how a
+    # contention symptom gets "fixed" by raising the budget.
+    _rustc_now="$(pgrep -c rustc 2>/dev/null || echo '?')"
+    _swap_free="$(awk '/SwapFree/ {print $2}' /proc/meminfo 2>/dev/null || echo '?')"
+    _swap_total="$(awk '/SwapTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo '?')"
+    fail "role unavailable ${ELAPSED}s, over the ${BUDGET_S}s budget — host at that moment: ${_rustc_now} concurrent rustc, swap ${_swap_free}/${_swap_total} kB free. A busy host inflates the GPU teardown; re-run on an idle host before treating this as a regression (and never raise the budget to make it pass — it encodes the operator's 2-3 min constraint)."
 fi
 
 # --- The hard invariant: the brain never flinched ----------------------------
