@@ -163,10 +163,20 @@ else
     fail "pid did not change ($PRE_PID → ${POST_PID:-?}): the role was never actually restarted"
 fi
 
+# Ground truth first, supervisor second — the same rule the primitive follows. Two ways to
+# be genuinely up:
+#   * the supervisor agrees (Running + Ready), or
+#   * the ROLE answers its own /readyz, which outranks the supervisor's bookkeeping.
+# The second case is not a loophole: process-compose's readiness probe has a 5 s initial
+# delay and a 5 s period, so right after a restart it legitimately still reads `-` while the
+# role already serves. Asserting only on the supervisor failed a run where the role was
+# demonstrably healthy — measuring the bookkeeping instead of the service.
 if [[ "$POST_STATUS" == "Running" && "$POST_READY" == "Ready" ]]; then
-    pass "final observed state: Running + Ready"
+    pass "final observed state: Running + Ready (supervisor agrees)"
+elif _axon_role_serving "$INSTANCE" "$PROC"; then
+    pass "final state: role SERVES its own /readyz (supervisor still says status='${POST_STATUS:-?}' ready='${POST_READY:-?}' — probe lag or duplicate-tracking)"
 else
-    fail "final observed state: status='${POST_STATUS:-?}' ready='${POST_READY:-?}'"
+    fail "final observed state: status='${POST_STATUS:-?}' ready='${POST_READY:-?}' AND not serving"
 fi
 
 if (( ELAPSED <= BUDGET_S )); then

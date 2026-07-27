@@ -284,7 +284,7 @@ axon_restart_role_verified() {
     local instance_kind="${1:?instance kind required}"
     local proc="${2:?process name required}"
     local budget_s="${3:-180}"
-    local pc_port original_pid status observed_pid ready action started elapsed start_sent=0
+    local pc_port original_pid status observed_pid ready action started elapsed start_sent=0 down_ticks=0
 
     pc_port="$(axon_pc_port_for_instance "$instance_kind")"
     if ! axon_supervisor_healthy "$pc_port"; then
@@ -313,23 +313,39 @@ axon_restart_role_verified() {
             _axon_sup_log "[restart-verified] ${proc} back after ${elapsed}s (pid ${original_pid} → ${observed_pid}, ready)"
             return 0
         fi
-        if [[ "$action" == "start" && "$start_sent" -eq 0 ]]; then
-            # REQ-AXO-902263 — before spawning, check whether the ROLE IS ALREADY SERVING.
-            # process-compose can report `Completed` while a perfectly healthy instance runs:
-            # its status then tracks a REFUSED DUPLICATE, not the live process. Observed for
-            # real — the indexer answered /readyz and /livez with a 3.7 s-fresh heartbeat
-            # while the supervisor said Completed, because earlier `start` calls had spawned
-            # duplicates that the IST writer guard correctly refused ("ownership is already
-            # held ... owner=...;pid=..."). Firing another start there manufactures another
-            # doomed process and inflates the restart counter — the caller creating the mess
-            # it is trying to clean up.
-            if _axon_role_serving "$instance_kind" "$proc"; then
-                _axon_sup_log "[restart-verified] ${proc} reports '${status}' but IS SERVING its health endpoint — supervisor is tracking a refused duplicate, not the live process. No start sent."
-                return 0
-            fi
-            # The observed process-compose defect. Send the missing half ONCE —
-            # resending on every tick would fight a slow launch.
-            _axon_sup_log "[restart-verified] ${proc} reported '${status}' — supervisor will not relaunch a requested stop; sending explicit start"
+        # REQ-AXO-902263 — GROUND TRUTH, checked on EVERY tick the supervisor claims the
+        # role is down. process-compose can report `Completed` while a perfectly healthy
+        # instance serves: its status then tracks a REFUSED DUPLICATE (the IST writer guard
+        # rejects a second writer with "ownership is already held … owner=…;pid=…"), not the
+        # live process.
+        #
+        # This check was FIRST written inside the `start_sent -eq 0` branch, i.e. evaluated
+        # ONCE before sending the start and never again. That is exactly wrong: the
+        # duplicate-tracking state arises AFTER the start, so the loop then polled a status
+        # that could never become Running and burned the whole budget. It failed a real
+        # promote at step 2d while `/readyz` answered 200 throughout. Correctness here is
+        # "ask the role, every time", not "ask the role once".
+        if [[ "$action" == "start" ]] && _axon_role_serving "$instance_kind" "$proc"; then
+            _axon_sup_log "[restart-verified] ${proc} reports '${status}' after ${elapsed}s but IS SERVING its own health endpoint — the supervisor is tracking a refused duplicate, not the live process. Treating as recovered."
+            return 0
+        fi
+        if [[ "$action" == "start" ]]; then
+            down_ticks=$(( down_ticks + 1 ))
+        else
+            down_ticks=0
+        fi
+        # Require the role to look down for SEVERAL consecutive ticks before spawning.
+        # Sending `start` on the FIRST `Completed` races a role that is already coming back
+        # up: the spawned duplicate is refused by the IST writer guard, and the supervisor
+        # then tracks THAT dead duplicate instead of the live process — poisoning its own
+        # bookkeeping (observed: `Completed` reported while /readyz answered 200, which then
+        # made the functional test skip). Patience costs ~9 s; eagerness costs a desynced
+        # supervisor until the next clean stop/start cycle.
+        if [[ "$action" == "start" && "$start_sent" -eq 0 && "$down_ticks" -ge 3 ]]; then
+            # The observed process-compose defect: a REQUESTED stop is not a "failure", so
+            # `availability.restart: on_failure` never fires. Send the missing half ONCE —
+            # resending on every tick would spawn more refused duplicates.
+            _axon_sup_log "[restart-verified] ${proc} reported '${status}' for ${down_ticks} consecutive checks — supervisor will not relaunch a requested stop; sending explicit start"
             curl -s -m 30 -o /dev/null -X POST \
                 "http://127.0.0.1:${pc_port}/process/start/${proc}" >/dev/null 2>&1 || true
             start_sent=1
