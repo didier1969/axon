@@ -627,32 +627,19 @@ impl McpServer {
             indexer_heartbeat.is_some(),
         );
 
-        // REQ-AXO-901816 (MIL-AXO-029 slice 6 P0) — pipeline A
-        // discovered-backlog count + demand-pull feeder counters.
-        // `stock_a` is NEW info (not derivable from existing fields).
-        // Pipeline B backlog is already surfaced as `pending_chunks`
-        // (total_chunks - embedded_chunks above) so re-exposing it
-        // here would violate GUI-PRO-013 (DRY). The feeder counters
-        // (replenish_a / replenish_b) come from the in-process
-        // demand_pull metrics, which are independent of the DB-derived
-        // backlog and surface the failure mode where a non-zero stock
-        // sits behind a dead feeder loop.
+        // PIL-AXO-007 (REQ-AXO-901916) — the pipeline-A claim feeder and the
+        // status='discovered' work queue were retired. Pipeline A is fed directly by the
+        // scanner/Watchman walk into a bounded in-process channel, so there is no DB
+        // 'discovered' stock and no A feeder metrics: stock_a=0, replenish_a=null.
+        // DEC-AXO-901631 — pipeline B is fed by the flat sorted-drain (no demand_pull
+        // feeder, no (s,Q) metrics); the B backlog is already surfaced as the top-level
+        // `pending_chunks` field, so replenish_b=null.
         //
-        // REQ-AXO-901809 slice 2 — global stock uses the canonical
-        // `pipeline_a_discovered_stock` helper (data layer owns the
-        // SQL). The project-scoped variant still inlines its own
-        // WHERE clause because the helper doesn't take a path filter
-        // — adding one would be over-engineered for this single
-        // caller. Both paths use the same retry-count cap (3) so the
-        // numbers reconcile across surfaces.
-        // PIL-AXO-007 (REQ-AXO-901916) — the pipeline-A claim feeder + the
-        // status='discovered' work queue were retired. Pipeline A is now fed
-        // directly by the scanner/Watchman walk into a bounded in-process
-        // channel, so there is no DB 'discovered' stock and no A feeder metrics.
-        // stock_a=0, replenish_a=null. DEC-AXO-901631 — pipeline B is now fed
-        // by the flat sorted-drain (no demand_pull feeder, no (s,Q) metrics) ;
-        // the B backlog is already surfaced as the top-level `pending_chunks`
-        // field, so replenish_b=null.
+        // REQ-AXO-902260 — the paragraph that used to sit here described `stock_a` as a
+        // live discovered-backlog count read through a "canonical helper", ten lines above
+        // `let stock_a: i64 = 0;`. That helper is now deleted; the description of a feed
+        // that no longer exists is what sent the LLL investigation down the wrong path
+        // (REQ-AXO-902253). Coverage truth is chunk presence (`diagnose_indexing`).
         let stock_a: i64 = 0;
         let replenish_a = json!(null);
         let replenish_b = json!(null);

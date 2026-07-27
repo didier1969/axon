@@ -66,7 +66,9 @@ pub mod viz_freshness;
 // The legacy notify/inotify watcher + ingress_buffer FIFO + reconciliation/
 // periodic sweeps it replaced were RIPPED in the LEGACY FEED PURGE (REQ-AXO-901893
 // deferred RIP): fs_watcher, ingress_buffer, file_ingress_guard, watcher_probe,
-// registry_notify_listener are gone. Watchman + the DBQ-A claim feeder are the feed.
+// registry_notify_listener are gone. REQ-AXO-902260 — the DBQ-A claim feeder named here
+// before is gone too (REQ-AXO-901916 / PIL-AXO-007): the feed is Watchman + the
+// scanner/reconciliation walk, both streaming into pipeline A directly.
 pub mod watchman_source;
 // REQ-AXO-901653 slice-5c — legacy `pub mod worker;` removed (v1 WorkerPool +
 // writer-actor + DbWriteTask retired). Pipeline_v2 (REQ-AXO-289 / CPT-AXO-054)

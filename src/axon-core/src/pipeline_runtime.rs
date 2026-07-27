@@ -14,10 +14,14 @@
 //!    Channel backpressure paces it to B's throughput. Replaces the retired
 //!    demand_pull (s, Q) / NOTIFY machinery.
 //! 4. Spawns the durable bootstrap + periodic reconciliation walk
-//!    ([`crate::scanner::Scanner::scan`], REQ-AXO-901901): UPSERTs every eligible
-//!    file as status='discovered' so the claim feeder (3) has a backlog to drain.
-//!    This is what actually populates the queue — Watchman's fresh crawl alone
-//!    under-delivers the cold-start bulk (see the boot-walk block below).
+//!    ([`crate::scanner::Scanner::scan`], REQ-AXO-901901): it STREAMS every eligible
+//!    path into pipeline A's input channel, and records the file in ist.IndexedFile
+//!    on the side. This is what actually delivers the work — Watchman's fresh crawl
+//!    alone under-delivers the cold-start bulk (see the boot-walk block below).
+//!    REQ-AXO-902260 — this used to read "UPSERTs every eligible file as
+//!    status='discovered' so the claim feeder (3) has a backlog to drain". There is
+//!    no claim feeder (deleted by REQ-AXO-901916 / PIL-AXO-007) and no backlog: the
+//!    column records what the last walk saw, and nothing consumes it.
 //!
 //! The legacy notify watcher + in-memory `ingress_buffer` FIFO were RIPPED in the
 //! LEGACY FEED PURGE (REQ-AXO-901893). The bulk-discovery walk is NOT legacy: it
@@ -236,15 +240,16 @@ pub fn spawn_pipeline_indexer(
     store: Arc<GraphStore>,
     watch_root: String,
 ) -> Result<()> {
-    // REQ-AXO-901901 — discovery has TWO complementary feeds, both landing in
-    // the DBQ-A PG work queue / pipeline-A input (no in-memory buffer):
+    // REQ-AXO-901901 — discovery has TWO complementary feeds, both landing directly in
+    // pipeline A's input channel (no in-memory buffer, and — REQ-AXO-902260 — no DB work
+    // queue either):
     //   * Watchman (live deltas, fast-path) — feeds input_tx directly.
-    //   * Scanner walk (boot + periodic) — UPSERTs status='discovered' for the
-    //     full eligible set; the claim feeder drains it. This is the bulk +
+    //   * Scanner walk (boot + periodic) — streams the full eligible set into input_tx,
+    //     recording each file in ist.IndexedFile on the side. This is the bulk +
     //     crash-recovery floor (Watchman's fresh crawl under-delivers cold-start).
-    // Both are idempotent via the dedup cache below (skips the A2 parse on
-    // unchanged content_hash) and A3's ON CONFLICT UPSERTs. The boot walk is
-    // wired at the END of this function, once the claim feeder is live.
+    // Both are idempotent via the dedup cache below (skips the A2 parse on unchanged
+    // content_hash) and A3's ON CONFLICT UPSERTs. The boot walk is wired at the END of
+    // this function.
     let caps = PipelineChannelCaps::from_env();
     let counts_a = PipelineAWorkerCounts::from_env();
 

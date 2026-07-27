@@ -754,31 +754,20 @@ impl GraphStore {
             .collect())
     }
 
-    /// REQ-AXO-901809 / REQ-AXO-901891 — pipeline A discovered-backlog count:
-    /// files enrolled but not yet parsed (status='discovered'). Post-reconciler
-    /// this is the "pending parse" headline the bootstrap+drain are working
-    /// through (the claim/retry machinery it used to mirror is gone).
-    ///
-    /// Source = `COUNT(*) FROM IndexedFile WHERE status='discovered'`
-    /// — NOT `pg_stat_user_tables.n_live_tup`, which lags the
-    /// autovacuum cadence and double-counts uncommitted rows.
-    /// Used by the MCP `embedding_status` observability surface
-    /// (REQ-AXO-901816) and reserved for the future watcher
-    /// max-stock back-pressure (REQ-AXO-901815).
-    pub fn pipeline_a_discovered_stock(&self, max_retry: i32) -> Result<u64> {
-        let sql = format!(
-            "SELECT count(*)::bigint FROM IndexedFile \
-             WHERE status='discovered' AND retry_count<{max_retry}"
-        );
-        let raw = self.query_json(&sql)?;
-        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        Ok(rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)
-            .max(0) as u64)
-    }
+    // REQ-AXO-902260 — `pipeline_a_discovered_stock` DELETED here. It counted
+    // `IndexedFile WHERE status='discovered'` and called the result the pipeline-A
+    // backlog. Three things were wrong with keeping it:
+    //   1. Nothing called it. Its only mention was a COMMENT in tools_system.rs saying
+    //      the global stock "uses the canonical helper", ten lines above
+    //      `let stock_a: i64 = 0;`.
+    //   2. The quantity it computed is not a backlog. PIL-AXO-007 (REQ-AXO-901916)
+    //      replaced the claim-feeder + 'discovered' work queue with a direct-streaming
+    //      walk, so no consumer drains that column. Measured on AXO: 781 rows sat at
+    //      'discovered' since 2026-07-04 and 779 of them were fully chunked.
+    //   3. A dead helper with a confident docstring is how a false mechanism survives a
+    //      purge — this one outlived the feeder it mirrored by two months and misdirected
+    //      the LLL investigation (REQ-AXO-902253).
+    // Coverage truth is CHUNK PRESENCE (`diagnose_indexing`, REQ-AXO-902254).
 
     /// 9f: detect and remove files that disappeared from the filesystem.
     /// Call after a scanner walk. Rows with discovered_ms < scan_start_ms were

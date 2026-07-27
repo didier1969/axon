@@ -86,10 +86,20 @@ impl Scanner {
     }
 
     /// Full walk under the root, UPSERTing every eligible file into
-    /// ist.IndexedFile with status='discovered'. The DBQ-A claim feeder
-    /// (REQ-AXO-901897) drains those rows into pipeline A. The legacy
-    /// in-memory ingress_buffer + FileIngressGuard push was RIPPED in the
-    /// LEGACY FEED PURGE (REQ-AXO-901893); discovery now lands directly in PG.
+    /// ist.IndexedFile. A file whose mtime/size changed is stamped
+    /// `status='discovered'`; an unchanged row is not rewritten at all.
+    ///
+    /// REQ-AXO-902260 — that stamp is a RECORD, not an enqueue. The sentence
+    /// removed from here ("the DBQ-A claim feeder (REQ-AXO-901897) drains those
+    /// rows into pipeline A") described a component REQ-AXO-901916 / PIL-AXO-007
+    /// deleted: nothing selects that column. Files reach pipeline A because the
+    /// walk streams their paths into it directly, and a row can therefore sit at
+    /// 'discovered' forever while being fully indexed (measured on AXO: 779 of
+    /// 781 such rows were chunked). Never read this column as a backlog —
+    /// coverage truth is chunk presence (`diagnose_indexing`, REQ-AXO-902254).
+    ///
+    /// The legacy in-memory ingress_buffer + FileIngressGuard push was RIPPED in
+    /// the LEGACY FEED PURGE (REQ-AXO-901893).
     pub fn scan(&self, graph: Arc<GraphStore>) {
         let scan_start_ms = chrono::Utc::now().timestamp_millis();
         info!(
@@ -607,11 +617,12 @@ impl Scanner {
 }
 
 fn dispatch_scanner_batch(graph: &Arc<GraphStore>, batch: &[(String, String, i64, i64)]) -> bool {
-    // DEC-AXO-901619: durable discovery — batch UPSERT into ist.IndexedFile
-    // with status='discovered'. The DBQ-A claim feeder (REQ-AXO-901897) atomically
-    // claims those rows into pipeline A. The legacy in-memory ingress_buffer push
-    // was RIPPED in the LEGACY FEED PURGE (REQ-AXO-901893) — PG is the durable
-    // work queue, no separate buffer to keep in sync.
+    // DEC-AXO-901619: durable discovery — batch UPSERT into ist.IndexedFile.
+    // REQ-AXO-902260 — this UPSERT RECORDS what the walk saw; it does not enqueue
+    // anything. The claim feeder that used to consume these rows (REQ-AXO-901897) was
+    // deleted by REQ-AXO-901916 / PIL-AXO-007; the walk streams the paths into pipeline A
+    // itself. The legacy in-memory ingress_buffer push was RIPPED in the LEGACY FEED
+    // PURGE (REQ-AXO-901893).
     match persist_discovery_batch(graph, batch) {
         Ok(()) => true,
         Err(e) => {
@@ -1209,19 +1220,21 @@ mod tests {
     // REQ-AXO-901901 — durable bootstrap/reconciliation walk regression tests.
     //
     // The live stall (this session) was: Watchman's fresh crawl under-delivered
-    // the cold-start bulk (5.3K of 18K eligible), and NOTHING else populated the
-    // DBQ-A 'discovered' queue (the bootstrap scanner walk was removed in the
-    // LEGACY FEED PURGE but the comments still claimed it ran). These lock the
-    // two invariants the wiring fix depends on: scan() ENROLS eligible files as
-    // 'discovered' (drainable by the claim feeder), and the stale reconciliation
-    // it runs at the end of every walk NEVER erodes existing indexed data.
+    // the cold-start bulk (5.3K of 18K eligible), and nothing else enrolled the files
+    // (the bootstrap scanner walk was removed in the LEGACY FEED PURGE but the comments
+    // still claimed it ran). These lock the two invariants the wiring fix depends on:
+    // scan() ENROLS eligible files, and the stale reconciliation it runs at the end of
+    // every walk NEVER erodes existing indexed data.
     // ───────────────────────────────────────────────────────────────────
 
     /// scan() must UPSERT every eligible source file as status='discovered'
-    /// (discovered_ms>0) — the exact rows the DBQ-A claim feeder drains — while
-    /// pruning build-output directories. Combined with demand_pull's
-    /// `claim_against_real_pg_selects_only_claimable_rows`, this covers the full
-    /// discovery → claim chain the live fix restores.
+    /// (discovered_ms>0) while pruning build-output directories.
+    ///
+    /// REQ-AXO-902260 — what this asserts is ENROLMENT, not queueing. The claim feeder
+    /// this docstring used to name was deleted (REQ-AXO-901916 / PIL-AXO-007); files
+    /// reach pipeline A because the walk streams them there. The assertion is still
+    /// worth keeping: enrolment is what the dedup cache and the stale-reconciliation
+    /// pass are built on.
     #[tokio::test]
     async fn scan_enrols_new_eligible_files_as_discovered_and_prunes_build_dirs() {
         let store = std::sync::Arc::new(crate::tests::test_helpers::create_test_db().unwrap());

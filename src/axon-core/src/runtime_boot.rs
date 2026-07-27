@@ -1073,8 +1073,10 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         // REQ-AXO-289 S7 / DEC-AXO-081 — streaming pipeline v2 replaces
         // the DuckDB-era public.File state machine. spawn_pipeline_indexer
         // boots A1→A2→A3 (and B1→B2→B3 when semantic workers are enabled),
-        // feeds them from the Watchman file source + the DBQ-A claim feeder
-        // (REQ-AXO-901893 / REQ-AXO-901897), and resolves project_code per file.
+        // feeds them from the Watchman file source + the scanner/reconciliation
+        // walk (REQ-AXO-901893 / REQ-AXO-901916 — the DBQ-A claim feeder named
+        // here before was deleted with PIL-AXO-007), and resolves project_code
+        // per file.
         // The legacy notify watcher + federation/scope orchestrators that pushed
         // into the in-memory ingress_buffer were RIPPED in the LEGACY FEED PURGE.
         if let Err(err) = crate::pipeline_runtime::spawn_pipeline_indexer(
@@ -1157,8 +1159,11 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             // ingress_buffer, which no longer exists. The PG trigger in
             // `db/ddl/07_registry_notify.sql` still fires; live new-project
             // discovery now relies on the next indexer restart (Watchman
-            // resolves all watch_root roots at boot, DBQ-A drains the
-            // 'discovered' backlog by construction). Tracked: REQ-AXO-901899.
+            // resolves all watch_root roots at boot and the boot walk streams
+            // the paths straight into pipeline A). Tracked: REQ-AXO-901899.
+            // REQ-AXO-902260 — the old wording said "DBQ-A drains the
+            // 'discovered' backlog by construction": that feeder was deleted by
+            // REQ-AXO-901916, and no backlog is drained by construction here.
         }
         Err(err) => {
             warn!(

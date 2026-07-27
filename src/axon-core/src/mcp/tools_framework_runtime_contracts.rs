@@ -152,12 +152,19 @@ impl McpServer {
             "max_wip": controller_state.profile.max_wip,
             "hold_window_ms": controller_state.profile.hold_window_ms,
             "forced_bulk_fill_threshold": controller_state.profile.forced_bulk_fill_threshold,
-            "admission_completion_surface": "ist.IndexedFile(status='discovered'/'parsing') drained by Watchman + DBQ-A",
+            // REQ-AXO-902260 — this field used to answer
+            // "ist.IndexedFile(status='discovered'/'parsing') drained by Watchman + DBQ-A".
+            // Both halves were false and the falsehood cost a day of blindness on LLL:
+            // PIL-AXO-007 (REQ-AXO-901916) replaced the claim-feeder + 'discovered' work
+            // queue ENTIRELY with a direct-streaming walk, and NOTHING selects that column
+            // any more. An LLM reading this contract concluded a drain existed and looked
+            // everywhere except at the real cause.
+            "admission_completion_surface": "in-process channel: the scanner/reconciliation walk streams paths straight into pipeline A (PIL-AXO-007). There is NO DB work queue and NO claim feeder — ist.IndexedFile.status is a record, not a queue",
             "blocking_authority": controller_state.blocking_authority,
             "allowed_by_contract": runtime_mode.ingestion_enabled(),
             "allowed_under_current_runtime": controller_state.admission_open,
             "bulk_fill_preferred": controller_state.bulk_fill_preferred,
-            "notes": "Controls the canonical discovered -> graph_ready handoff (Watchman + DBQ-A feed, ingress_buffer RIPPED)."
+            "notes": "Controls the walk -> graph_ready handoff. Coverage truth is CHUNK PRESENCE (diagnose_indexing compares files_chunked to files_total, REQ-AXO-902254) — never ist.IndexedFile.status, which can read 'discovered' for a file that is fully indexed."
         })
     }
 
@@ -332,8 +339,13 @@ impl McpServer {
             },
             "file_source": {
                 "status": "tracked",
-                "ownership_surface": "watchman_source + dbq_a",
-                "notes": "REQ-AXO-901893 (LEGACY FEED PURGE): the ingress_buffer (buffered/watcher/scan/promotion stages) was ripped. Watchman clock/cursor deltas feed pipeline A directly; the DBQ-A claim feeder drains the ist.IndexedFile 'discovered' backlog by construction."
+                "ownership_surface": "watchman_source + reconciliation_walk",
+                // REQ-AXO-902260 — the second half of the old sentence ("the DBQ-A claim
+                // feeder drains the ist.IndexedFile 'discovered' backlog by construction")
+                // described a component REQ-AXO-901916 had already deleted. Published as a
+                // contract, a false mechanism is worse than no mechanism: it tells the
+                // reader where NOT to look.
+                "notes": "REQ-AXO-901893 (LEGACY FEED PURGE): the ingress_buffer (buffered/watcher/scan/promotion stages) was ripped. Watchman clock/cursor deltas feed pipeline A directly. REQ-AXO-901916 / PIL-AXO-007: the DBQ-A claim feeder was ripped too — the reconciliation walk streams paths into pipeline A itself. NOTHING drains ist.IndexedFile.status='discovered'; that value means 'the last walk saw a size/mtime delta the pipeline never confirmed', NOT 'queued for indexing'."
             },
             "persisted_file": {
                 "status": "tracked",
