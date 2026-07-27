@@ -50,9 +50,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--profile",
-        choices=["smoke", "demo", "full", "ingestion", "retrieval"],
+        choices=["smoke", "demo", "full", "ingestion", "retrieval", "lifecycle"],
         default="demo",
-        help="Qualification profile to run. Default: demo",
+        help=(
+            "Qualification profile to run. Default: demo. "
+            "`lifecycle` (REQ-AXO-902263) exercises the per-role restart against the REAL "
+            "runtime: it DROPS the indexer for tens of seconds and asserts the brain never "
+            "stops serving. Deliberately not part of any other profile."
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -322,6 +327,14 @@ def default_mcp_url_for_instance(instance: str) -> str:
 
 
 def profile_steps(profile: str) -> list[str]:
+    # REQ-AXO-902263 — `lifecycle` is its OWN profile and is deliberately absent from
+    # smoke/demo/full/ingestion/retrieval: the step DROPS the live indexer for tens of
+    # seconds to exercise the per-role restart for real. That is authorised (the operator
+    # allows the indexer down for seconds to 2-3 min; the BRAIN is the sensitive one, and
+    # the test asserts it never flinches) but it must never be an implicit side effect of
+    # asking for a smoke test.
+    if profile == "lifecycle":
+        return ["lifecycle_restart"]
     if profile == "smoke":
         return ["runtime_smoke", "mcp_validate"]
     if profile == "demo":
@@ -1765,6 +1778,41 @@ def discover_summary_file(root: Path) -> Path | None:
     return None
 
 
+def run_lifecycle_restart(instance: str) -> dict[str, Any]:
+    """REQ-AXO-902263 — exercise the per-role restart against the REAL runtime.
+
+    Delegates to `tests/shell/test_role_restart_live.sh`, which owns the assertions
+    (verified new pid, Running+Ready, within budget, and the hard invariant that the
+    BRAIN stays 200 throughout — sampled, one non-200 fails it).
+
+    Why a functional step at all: the ~2 758 lines of lifecycle scripts had ZERO
+    functional coverage, and all three defects of session 104 were consequently found by
+    breaking production (a restart that answers HTTP 200 without restarting; a
+    `|| true` resume that silently leaves live without an indexer; a 15 s shutdown
+    budget on a TensorRT holder). None was a logic bug — the logic was fine and the
+    OBSERVED EFFECT was not, which is exactly what a pure test cannot see.
+
+    The script SKIPS (exit 0, no assertion) when the runtime is not in a testable state,
+    so this step never fails for a reason unrelated to what it measures.
+    """
+    started = time.monotonic()
+    script = PROJECT_ROOT / "tests" / "shell" / "test_role_restart_live.sh"
+    if not script.is_file():
+        return step_result("lifecycle_restart", "fail", 0, f"missing {script}")
+    proc = subprocess.run(  # noqa: S603
+        ["bash", str(script)],
+        cwd=str(PROJECT_ROOT),
+        env={**os.environ, "AXON_TEST_INSTANCE": instance},
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    duration_ms = int((time.monotonic() - started) * 1000)
+    tail = (proc.stdout or proc.stderr or "").strip().splitlines()[-1:] or ["no output"]
+    status = "pass" if proc.returncode == 0 else "fail"
+    return step_result("lifecycle_restart", status, duration_ms, tail[-1])
+
+
 def step_result(name: str, status: str, duration_ms: int, note: str, summary: Any = None) -> dict[str, Any]:
     payload = {
         "name": name,
@@ -2230,6 +2278,11 @@ def run_mode_profile(args: argparse.Namespace, mode: str, suite_run_dir: Path) -
                 gpu_qualified_runtime=args.gpu_qualified_runtime,
                 reuse_runtime=args.reuse_runtime,
             )
+        elif step_name == "lifecycle_restart":
+            # REQ-AXO-902263 — stands alone (profile `lifecycle`): it needs a RUNNING
+            # instance, not a freshly-smoked one, and it must never piggyback on a
+            # smoke/full run since it drops the indexer.
+            result = run_lifecycle_restart(instance)
         elif step_name == "mcp_validate":
             if steps.get("runtime_smoke", {}).get("status") == "fail":
                 result = step_result("mcp_validate", "fail", 0, "skipped because runtime_smoke failed")

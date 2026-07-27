@@ -176,6 +176,134 @@ axon_brain_healthy() {
     curl -sf --connect-timeout 3 "http://127.0.0.1:${brain_port}/readyz" >/dev/null 2>&1
 }
 
+# ---------------------------------------------------------------------------
+# REQ-AXO-902263 — VERIFIED per-role restart.
+#
+# Why this exists: `POST /process/restart/<name>` returns HTTP 200 and then does
+# NOT necessarily restart the process. Observed on the live indexer (session
+# 104): 200 + {"name":"axon-indexer"}, then status=Terminating for ~4 minutes
+# (a tokio worker stuck in state D on wchan `dxgvmb_send_sync_msg` — the WSL2
+# GPU VM-bus channel, unkillable even by SIGKILL), then status=Completed with NO
+# new process. Because the stop was REQUESTED, `availability.restart:
+# on_failure` never fires, so process-compose leaves the role down.
+#
+# Every caller that trusted the HTTP code was therefore reporting a recovery it
+# had not performed — the promote's step-6c TIER-1 among them. The fix is not a
+# longer timeout: it is to stop believing the return code and poll the OBSERVED
+# state instead. Same lesson as REQ-AXO-902258 (`promoted: true` on a wrong
+# binary) and REQ-AXO-902262 (`status: ok` on destroyed data).
+# ---------------------------------------------------------------------------
+
+# axon_role_recovery_action <observed_status> <observed_pid> <original_pid>
+#
+# PURE decision function (no I/O, no process side effect — unit-tested in
+# axon-supervisor.test.sh). Echoes the next action for the polling loop:
+#   done  — the role is back on a genuinely NEW process
+#   start — process-compose considers the role finished; it needs an explicit start
+#   wait  — still converging, keep polling
+#
+# The `pid != original` clause is the crux: right after a restart request the OLD
+# process can still be reported Running/Ready for several seconds. Accepting that
+# as success is exactly the false positive this whole REQ is about.
+axon_role_recovery_action() {
+    local status="${1:-}" observed_pid="${2:-}" original_pid="${3:-}"
+    case "$status" in
+        Running)
+            # Ready-ness is checked by the caller (it needs a second field); here
+            # only the identity question is decided.
+            if [[ -n "$observed_pid" && "$observed_pid" != "0" && "$observed_pid" != "$original_pid" ]]; then
+                printf 'done\n'
+            else
+                printf 'wait\n'
+            fi
+            ;;
+        Completed|Stopped|Skipped|Disabled)
+            # The observed defect: a requested stop is not a "failure", so the
+            # supervisor will never restart it on its own.
+            printf 'start\n'
+            ;;
+        *)
+            # Terminating / Restarting / Launching / Pending / unreachable ("").
+            printf 'wait\n'
+            ;;
+    esac
+}
+
+# _axon_role_field <pc_port> <process> <json_key> — read one field of the
+# supervisor's view of a process. Empty on any failure (daemon down, unknown
+# process, malformed body) so callers treat "unknown" as "keep waiting" rather
+# than as a verdict.
+_axon_role_field() {
+    local pc_port="${1:?pc port required}" proc="${2:?process required}" key="${3:?key required}"
+    curl -s -m 8 "http://127.0.0.1:${pc_port}/process/${proc}" 2>/dev/null \
+        | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get(sys.argv[1], '') or '')
+except Exception:
+    print('')
+" "$key" 2>/dev/null || printf ''
+}
+
+# axon_restart_role_verified <instance_kind> <process> [budget_s]
+#
+# Restart ONE process-compose role and return 0 only once the OBSERVED state is
+# Running AND is_ready=Ready AND running under a pid different from the one seen
+# before the request. Returns 1 on budget exhaustion, naming the terminal state
+# so the caller can escalate knowingly (the promote escalates to a full restart).
+#
+# NEVER touches the brain: no /mcp call, no embed_provider flip. The operator's
+# constraint is explicit — dropping the live INDEXER for seconds to 2-3 minutes is
+# fine, the BRAIN is what every LLM depends on. Hence the 180 s default budget.
+axon_restart_role_verified() {
+    local instance_kind="${1:?instance kind required}"
+    local proc="${2:?process name required}"
+    local budget_s="${3:-180}"
+    local pc_port original_pid status observed_pid ready action started elapsed start_sent=0
+
+    pc_port="$(axon_pc_port_for_instance "$instance_kind")"
+    if ! axon_supervisor_healthy "$pc_port"; then
+        _axon_sup_warn "[restart-verified] no supervisor on :${pc_port} for instance=${instance_kind} — cannot restart ${proc}"
+        return 1
+    fi
+
+    original_pid="$(_axon_role_field "$pc_port" "$proc" pid)"
+    [[ -n "$original_pid" ]] || original_pid="0"
+    _axon_sup_log "[restart-verified] ${proc} (instance=${instance_kind}, pid=${original_pid}, budget=${budget_s}s)"
+
+    # Fire and FORGET the HTTP result on purpose: the response code carries no
+    # information about whether the role actually came back (that is the defect).
+    curl -s -m 15 -o /dev/null -X POST \
+        "http://127.0.0.1:${pc_port}/process/restart/${proc}" >/dev/null 2>&1 || true
+
+    started="$SECONDS"
+    while :; do
+        elapsed=$(( SECONDS - started ))
+        status="$(_axon_role_field "$pc_port" "$proc" status)"
+        observed_pid="$(_axon_role_field "$pc_port" "$proc" pid)"
+        ready="$(_axon_role_field "$pc_port" "$proc" is_ready)"
+        action="$(axon_role_recovery_action "$status" "$observed_pid" "$original_pid")"
+
+        if [[ "$action" == "done" && "$ready" == "Ready" ]]; then
+            _axon_sup_log "[restart-verified] ${proc} back after ${elapsed}s (pid ${original_pid} → ${observed_pid}, ready)"
+            return 0
+        fi
+        if [[ "$action" == "start" && "$start_sent" -eq 0 ]]; then
+            # The observed process-compose defect. Send the missing half ONCE —
+            # resending on every tick would fight a slow launch.
+            _axon_sup_log "[restart-verified] ${proc} reported '${status}' — supervisor will not relaunch a requested stop; sending explicit start"
+            curl -s -m 30 -o /dev/null -X POST \
+                "http://127.0.0.1:${pc_port}/process/start/${proc}" >/dev/null 2>&1 || true
+            start_sent=1
+        fi
+        if (( elapsed >= budget_s )); then
+            _axon_sup_warn "[restart-verified] ${proc} NOT recovered within ${budget_s}s — terminal observed state: status='${status:-unreachable}' ready='${ready:-?}' pid='${observed_pid:-?}' (was ${original_pid})"
+            return 1
+        fi
+        sleep 3
+    done
+}
+
 # axon_reap_supervisor_tree — reap the process-compose supervisor for this
 # instance + its repo-scoped runtime children, then verify the canonical brain
 # port is freed (retry/escalate to SIGKILL if still bound). Best-effort but
@@ -399,7 +527,14 @@ axon_resume_live_indexer_after_dev() {
 
     if axon_supervisor_healthy "$live_pc_port" && [[ -x "$pc_bin" ]]; then
         _axon_sup_log "[auto-resume] dev stop → resuming live indexer paused for the GPU session (REQ-AXO-234)"
-        "$pc_bin" process start axon-indexer -p "$live_pc_port" 2>/dev/null || true
+        # REQ-AXO-902263 — was `"$pc_bin" process start … || true`: a silent failure left
+        # LIVE without an indexer after every dev session, and nothing reported it. Same
+        # class as the promote's TIER-1 (trusting a request instead of checking the effect).
+        # Verify, and be LOUD on failure — the operator can then restore it deliberately
+        # instead of discovering a degraded live hours later.
+        if ! axon_restart_role_verified live axon-indexer 180; then
+            _axon_sup_warn "[auto-resume] live indexer did NOT come back — LIVE IS WITHOUT AN INDEXER. Restore with: curl -X POST :${live_pc_port}/process/start/axon-indexer"
+        fi
 
         # REQ-AXO-234 layer B — restore the brain's query-embed provider. `set`
         # only accepts cpu|gpu|auto, so an `unset`/missing prior maps to `auto`

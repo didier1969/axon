@@ -161,7 +161,14 @@ processes:
       backoff_seconds: 10
     shutdown:
       signal: 15
-      timeout_seconds: 15
+      # REQ-AXO-902263 — 120 s, NOT 15 s. This process holds a TensorRT/CUDA session;
+      # tearing it down can take minutes, and a SIGKILL mid-teardown is how a tokio worker
+      # ended up stuck in state D on wchan `dxgvmb_send_sync_msg` (unkillable, process
+      # unreapable for ~4 min, supervisor left the role Completed). This is a MAXIMUM wait,
+      # not a fixed delay: a fast stop still returns immediately, so raising it costs
+      # nothing and lets a slow-but-fine GPU teardown finish cleanly. The operator allows
+      # the indexer to be down seconds to 2-3 min, which this stays well inside.
+      timeout_seconds: 120
 
   dashboard:
     command: |

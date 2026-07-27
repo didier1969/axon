@@ -395,6 +395,23 @@ else
     bash "$ROOT_DIR/scripts/axon-dev" stop 2>&1 || true
   }
   run_step 2c teardown_dev teardown_dev_after_validation
+
+  # REQ-AXO-902263 — LIFECYCLE GATE. Placed AFTER teardown_dev on purpose: with dev gone,
+  # the live indexer has resumed (REQ-AXO-234 GPU exclusion), so this exercises the real
+  # per-role restart on a representative runtime rather than a GPU-starved one.
+  #
+  # Why gate a release on this: step-6c TIER-1 is the promote's own recovery path, and it
+  # was INOPERATIVE for a whole day — it trusted the HTTP 200 of
+  # `POST /process/restart/axon-indexer` while the role stayed down. Nothing caught it
+  # because ~2 758 lines of lifecycle script had zero functional coverage. Shipping a
+  # release whose recovery path is broken is exactly what this refuses.
+  #
+  # Cost, stated rather than hidden: the live INDEXER is dropped once more than before,
+  # here, upstream of the cutover. The operator explicitly authorised seconds to 2-3 min of
+  # indexer downtime; the BRAIN is the sensitive one and the test asserts it never stops
+  # serving. The script SKIPs (exit 0) when the runtime is not in a testable state, so this
+  # never fails a promote for an unrelated reason.
+  run_step 2d lifecycle_gate bash "$ROOT_DIR/tests/shell/test_role_restart_live.sh"
 fi
 
 # --- Step 3: preflight ---
@@ -663,21 +680,31 @@ _poll_promote_clean 24 || true
 # (which already carries a per-process readiness probe: has_ready_probe=true). Tier 2
 # is the old full restart, unchanged, reached only when Tier 1 does not converge — so
 # the safety net is preserved while the blast radius is capped in the common case.
-_AXON_PC_PORT="${AXON_PC_PORT:-8080}"
-_restart_role_only() {  # $1 = process-compose process name; 0 iff the REST call was accepted
-  local proc="$1" code
-  code="$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST \
-    "http://127.0.0.1:${_AXON_PC_PORT}/process/restart/${proc}" 2>/dev/null || echo 000)"
-  promote_log "   ↻ targeted restart ${proc} → HTTP ${code}"
-  [[ "$code" == "200" ]]
-}
-
+# REQ-AXO-902263 — TIER-1 now VERIFIES the effect instead of trusting the HTTP code.
+# The first version of this block did `[[ "$code" == "200" ]]`, and that predicate is
+# WRONG: `POST /process/restart/<name>` answers 200 and then may leave the role down.
+# Observed on the live indexer — 200, then `Terminating` ~4 min (a tokio worker stuck in
+# state D on wchan `dxgvmb_send_sync_msg`, unkillable even by SIGKILL), then `Completed`
+# with NO new process, because a REQUESTED stop is not a "failure" so
+# `availability.restart: on_failure` never fires. TIER-1 therefore reported a recovery it
+# had not performed, burned ~3 min, and only then fell through to TIER-2 — strictly worse
+# than having no TIER-1 at all.
+# `axon_restart_role_verified` polls the OBSERVED state (Running AND Ready AND a pid
+# different from the one seen before) and sends the missing explicit `start` when the
+# supervisor gives up. Same lesson as the byte check of REQ-AXO-902258: never certify an
+# outcome from the return code of the thing you asked.
 if [[ "$recon_phase" != "clean" ]]; then
   # Tier 1 — the indexer is the ONLY failing gate: recover it without touching the brain.
   if [[ "$recon_failed" == "indexer_alive" ]]; then
     promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (failed_gates: indexer_alive) — TIER-1 AUTO-RECOVERY: restart the indexer ONLY (brain keeps serving)."
     set +e
-    _restart_role_only axon-indexer
+    # shellcheck source=../lib/axon-supervisor.sh
+    source "$ROOT_DIR/scripts/lib/axon-supervisor.sh"
+    if axon_restart_role_verified live axon-indexer 180 >> "$PROMOTE_LOG" 2>&1; then
+      promote_log "   ↻ TIER-1: indexer restart VERIFIED (new pid, Running+Ready)"
+    else
+      promote_log "   ⚠️ TIER-1 could not verify the indexer restart — escalating to TIER-2"
+    fi
     set -e
     _poll_promote_clean 36 || true   # ~180s: BGE-Large GPU cold-start budget
     [[ "$recon_phase" == "clean" ]] && promote_log "   ✅ step 6c tier-1: recovered WITHOUT a brain outage (blast radius contained)."
