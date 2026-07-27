@@ -432,6 +432,24 @@ else
   run_step 2d lifecycle_gate lifecycle_gate_step
 fi
 
+# --- Step 2e: the TEST TARGETS must still compile (REQ-AXO-902269) ---
+# `--lib` and `--bins` — the pair every delivery runs — do not BUILD `src/axon-core/tests/`.
+# On 2026-07-12 REQ-AXO-902227 added a field to `SymbolRow` without updating four
+# initializers there, and the six integration binaries stopped compiling. It went unnoticed
+# for 15 days while every session reported a green suite: `0 failed` was true and useless.
+#
+# This builds the test targets in DEBUG and does not RUN them, deliberately. The 9 tests are
+# `#[ignore = "requires docker"]`, so running them without `--ignored` executes nothing, and
+# with `--ignored` the gate would depend on a Docker daemon — an environment dependency is
+# how a gate ends up disabled (the fate of the `USE_CUTOVER` toggle REQ-AXO-902256 removed).
+# Compiling catches 100% of the class actually observed — structural drift — for ~1 min on a
+# warm cache.
+test_targets_compile_step() {
+  devenv shell --no-reload --no-tui -- bash -lc \
+    "cd '$ROOT_DIR/src/axon-core' && cargo build --tests 2>&1 | tail -20"
+}
+run_step 2e test_targets_compile test_targets_compile_step
+
 # --- Step 3: preflight ---
 ensure_head_stable
 run_step 3 preflight "$ROOT_DIR/scripts/axon" release-preflight

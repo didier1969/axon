@@ -15,7 +15,14 @@
 cargo build --manifest-path src/axon-core/Cargo.toml --release
 cargo test  --manifest-path src/axon-core/Cargo.toml --lib
 cargo test  --manifest-path src/axon-core/Cargo.toml --bins
+cargo build --manifest-path src/axon-core/Cargo.toml --tests   # REQ-AXO-902269 — see below
 ```
+⚠️ **`--lib` and `--bins` do NOT build `src/axon-core/tests/`.** On 2026-07-12 a new struct
+field broke all six integration binaries and it went unnoticed for **15 days** while every
+session reported a green suite — `0 failed` was true and useless. The third line closes that
+class; it is also enforced at promote step 2e. It BUILDS and does not RUN them on purpose:
+those 9 tests are `#[ignore = "requires docker"]`, so running them without `--ignored` does
+nothing and with `--ignored` the gate would depend on a Docker daemon.
 Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (supervisor).
 
 ## Architecture
