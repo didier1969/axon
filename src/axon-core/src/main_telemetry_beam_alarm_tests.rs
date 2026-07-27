@@ -8,12 +8,8 @@ use super::handle_beam_alarm;
 use crate::runtime_readiness::{
     report_subsystem_state, reset_for_tests, snapshot_subsystem_reports, Subsystem, SubsystemState,
 };
-use std::sync::{Mutex, OnceLock};
-
-fn registry_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+// REQ-AXO-902261 — crate-wide registry lock; this file used to declare its own.
+use crate::test_support::registry_test_lock;
 
 #[test]
 fn beam_alarm_memory_high_watermark_set_marks_dashboard_degraded() {

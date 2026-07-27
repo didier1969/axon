@@ -6,19 +6,16 @@
 // shared mutex to serialize against each other. Roll-up tests do not
 // touch the global registry and stay fully parallel.
 
-use std::sync::{Mutex, OnceLock};
-
 use super::{
     heartbeat_period_for_tests, report_subsystem_state, require_heartbeat, reset_for_tests,
     set_last_observed_for_tests, snapshot_runtime_readiness, snapshot_subsystem_reports,
     tick_watchdog, RuntimeReadiness, Subsystem, SubsystemReport, SubsystemState,
     HEARTBEAT_STALENESS_MULTIPLIER,
 };
-
-fn registry_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+// REQ-AXO-902261 — the crate-wide lock, not a private one. This file used to declare its
+// own `registry_test_lock()`; two sibling test files declared theirs. Three mutexes, one
+// registry, zero cross-file exclusion.
+use crate::test_support::registry_test_lock;
 
 fn report(subsystem: &str, state: SubsystemState) -> SubsystemReport {
     SubsystemReport {

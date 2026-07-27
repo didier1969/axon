@@ -1,9 +1,8 @@
 // REQ-AXO-097 — sibling tests for the runtime watchdog tokio task
 // and the heartbeater. The registry is a process-global singleton;
-// these tests acquire a shared mutex with the runtime_readiness
-// tests to prevent interleaving on the same registry.
+// these tests acquire `test_support::registry_test_lock()` — the SAME mutex the
+// runtime_readiness and BEAM-alarm tests take — to prevent interleaving on it.
 
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use super::{spawn_heartbeat_task, DEFAULT_HEARTBEAT_PERIOD_MS, DEFAULT_TICK_INTERVAL_MS};
@@ -12,11 +11,12 @@ use crate::runtime_readiness::{
     snapshot_subsystem_reports, tick_watchdog, Subsystem, SubsystemState,
     HEARTBEAT_STALENESS_MULTIPLIER,
 };
-
-fn registry_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+// REQ-AXO-902261 — the header above used to claim these tests "acquire a shared mutex
+// with the runtime_readiness tests". They did not: the private `registry_test_lock()`
+// declared here was a THIRD independent mutex. That false claim is why the flake it let
+// through (`watchdog_observes_dead_heartbeat_after_threshold`, got []) read as a watchdog
+// regression rather than as test interference.
+use crate::test_support::registry_test_lock;
 
 #[test]
 fn watchdog_defaults_are_internally_consistent() {

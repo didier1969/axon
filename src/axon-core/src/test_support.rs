@@ -48,6 +48,29 @@ pub fn env_test_lock() -> &'static Mutex<()> {
     MUTEX.get_or_init(|| Mutex::new(()))
 }
 
+/// Process-wide serialization mutex for the runtime-readiness registry
+/// (`runtime_readiness::registry()`), which is a single global singleton.
+///
+/// REQ-AXO-902261 — this lives HERE, once, because it previously existed THREE times:
+/// `runtime_readiness_tests.rs`, `runtime_watchdog_tests.rs` and
+/// `main_telemetry_beam_alarm_tests.rs` each declared their own private
+/// `registry_test_lock()` with its own `static`. Three independent mutexes guarding one
+/// shared registry is no mutual exclusion at all across files — and the comment at the
+/// top of `runtime_watchdog_tests.rs` asserted the opposite ("acquire a shared mutex with
+/// the runtime_readiness tests"), so the defect read as already handled.
+///
+/// Observed cost: `watchdog_observes_dead_heartbeat_after_threshold` failed with
+/// `got []` (0 transitions instead of 1) in a full-suite run — a concurrent test in
+/// another file called `reset_for_tests()` inside its 400 ms sleep window and wiped the
+/// registry entry it was about to assert on. Rare, load-dependent, and indistinguishable
+/// from a real watchdog regression, which is the worst property a flake can have.
+///
+/// Same rule as `env_test_lock`: ONE global resource ⇒ ONE lock, crate-wide.
+pub fn registry_test_lock() -> &'static Mutex<()> {
+    static MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    MUTEX.get_or_init(|| Mutex::new(()))
+}
+
 /// RAII guard for one env-var mutation. The guard does NOT acquire
 /// any lock itself — the caller holds `env_test_lock()` for the
 /// guard's lifetime. Drop restores the prior value (or unsets if
