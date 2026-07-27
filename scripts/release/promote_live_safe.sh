@@ -153,14 +153,20 @@ run_step() {
   promote_log ""
   promote_log "== step ${step_num}: ${step_name} =="
   local _step_t0=$SECONDS
-  local step_tmp
-  step_tmp="$(mktemp)"
+  # REQ-AXO-902263 — STREAM the step's output; do NOT buffer it to a temp file and print at
+  # the end. Buffering means a step that HANGS produces zero diagnostic: the promote of
+  # 2026-07-27 sat in `dev_restart` for ~30 min and was killed by its own `timeout 2400`
+  # having written nothing past the step header, so the cause was invisible in the log. The
+  # buffered text was only recoverable by digging a leftover /tmp file out of the
+  # filesystem afterwards. An operator watching a promote must be able to see WHERE it is
+  # stuck while it is stuck — that is the whole point of a step log.
+  #
+  # `pipefail` is already set (line 2), so the pipeline's status is the COMMAND's status,
+  # not tee's. PIPESTATUS is captured anyway to stay correct if that ever changes.
   set +e
-  "$@" > "$step_tmp" 2>&1
-  local rc=$?
+  "$@" 2>&1 | tee -a "$PROMOTE_LOG"
+  local rc="${PIPESTATUS[0]}"
   set -e
-  cat "$step_tmp" | tee -a "$PROMOTE_LOG"
-  rm -f "$step_tmp"
   if [[ "$rc" -ne 0 ]]; then
     promote_log "   step ${step_num} (${step_name}) returned exit code ${rc} after $((SECONDS - _step_t0))s"
     promote_log ""

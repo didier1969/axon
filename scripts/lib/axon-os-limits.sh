@@ -61,18 +61,38 @@ _axon_oslim_warn() {
 # axon_count_inotify_instances — count live inotify instances across all
 # processes by enumerating anon_inode:inotify fds under /proc/*/fd. Prints an
 # integer (0 on any error). Best-effort: unreadable /proc entries are skipped.
+#
+# REQ-AXO-902263 — ONE `find`, not one fork PER DESCRIPTOR.
+#
+# The previous implementation looped over `/proc/[0-9]*/fd/*` in bash and ran a
+# `readlink` subprocess for each. Measured on this host: **60 226 descriptors**, and the
+# forked loop costs ~1.26 s per 300 → **~253 s (over 4 minutes) for a single call**, versus
+# **0.132 s** for the `find` below (same answer: 84). Roughly 1900× slower.
+#
+# Worse than slow, it degrades exactly when it must not: the cost scales with the number of
+# open descriptors host-wide, so it is at its worst when the machine is busy — which is
+# precisely when a promote runs. This is what hung the promote of 2026-07-27 in
+# `step 2: dev_restart` until its own `timeout 2400` killed it, leaving the live indexer
+# down (the dev stop had reaped it) with no diagnostic in the log.
+#
+# `-lname` reads the symlink target in the kernel walk, so the whole scan is one process.
+# On failure (no GNU find, /proc unreadable) print 0, which the contract already documents
+# as "unknown" — never fall back to the pathological loop: a health WARNING must never be
+# able to cost minutes.
+# The result is captured, THEN validated. A naive `find … | wc -l || printf 0` is wrong
+# under `set -o pipefail` (which callers do set): `find` legitimately exits non-zero when a
+# /proc entry vanishes mid-walk — constant on a live host — so the fallback fired ON TOP of
+# a correct count and the function printed "84\n0", which the caller then fed to `(( ))`
+# ("syntax error in expression"). Capture, sanity-check, print exactly one integer.
 axon_count_inotify_instances() {
-    local count=0
-    local fd target
-    shopt -s nullglob
-    for fd in /proc/[0-9]*/fd/*; do
-        target="$(readlink "$fd" 2>/dev/null || true)"
-        if [[ "$target" == "anon_inode:inotify" ]]; then
-            count=$((count + 1))
-        fi
-    done
-    shopt -u nullglob
-    printf '%s\n' "$count"
+    local out
+    out="$(find /proc/[0-9]*/fd -maxdepth 1 -type l -lname 'anon_inode:inotify' 2>/dev/null | wc -l 2>/dev/null)" || true
+    out="${out//[$'\n\r\t ']/}"
+    if [[ "$out" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$out"
+    else
+        printf '0\n'
+    fi
 }
 
 # _axon_read_sysctl <key> — print the current value of a sysctl key, or empty.
