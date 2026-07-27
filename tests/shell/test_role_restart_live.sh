@@ -189,9 +189,19 @@ else
     # Without these two numbers the failure reads as an Axon regression, and the next
     # reader re-derives the provenance from `/tmp/lll-test-*` paths — which is how a
     # contention symptom gets "fixed" by raising the budget.
-    _rustc_now="$(pgrep -c rustc 2>/dev/null || echo '?')"
-    _swap_free="$(awk '/SwapFree/ {print $2}' /proc/meminfo 2>/dev/null || echo '?')"
-    _swap_total="$(awk '/SwapTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo '?')"
+    # Capture THEN validate — never chain a fallback on the exit status. Both spellings
+    # are wrong in opposite directions, and both only misfire in the message that matters
+    # most (an overshoot on an otherwise-quiet host):
+    #   * `pgrep -c rustc || echo '?'` prints "0" AND exits 1 when nothing matches, so the
+    #     fallback fires ON TOP of a correct answer → "0\n?" with an embedded newline.
+    #     Same shape as the `84\n0` from axon_count_inotify_instances and the sampler's
+    #     `|| echo 000` → "000000" (REQ-AXO-902263 / REQ-AXO-902256).
+    #   * `awk … || echo '?'` never fires: awk exits 0 on no match, so the value is EMPTY
+    #     rather than '?'.
+    _num_or_unknown() { [[ "$1" =~ ^[0-9]+$ ]] && printf '%s' "$1" || printf '?'; }
+    _rustc_now="$(_num_or_unknown "$(pgrep -c rustc 2>/dev/null)")"
+    _swap_free="$(_num_or_unknown "$(awk '/^SwapFree:/ {print $2}' /proc/meminfo 2>/dev/null)")"
+    _swap_total="$(_num_or_unknown "$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null)")"
     fail "role unavailable ${ELAPSED}s, over the ${BUDGET_S}s budget — host at that moment: ${_rustc_now} concurrent rustc, swap ${_swap_free}/${_swap_total} kB free. A busy host inflates the GPU teardown; re-run on an idle host before treating this as a regression (and never raise the budget to make it pass — it encodes the operator's 2-3 min constraint)."
 fi
 
