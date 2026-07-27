@@ -270,6 +270,151 @@ _axon_role_serving() {
     curl -sf --connect-timeout 3 -m 5 "http://127.0.0.1:${port}/readyz" >/dev/null 2>&1
 }
 
+# axon_role_supervision_verdict <status> <is_ready> <has_ready_probe> <exit_code> \
+#                               <restarts> <max_restarts> <serving>
+#
+# PURE decision function (no I/O — unit-tested in axon-supervisor.test.sh). Turns one
+# process-compose row plus the role's own ground truth into ONE token:
+#
+#   ok        — Running, and either Ready or nothing to be ready about
+#   no_budget — Running, but the restart budget is already spent: no safety net left
+#   not_ready — Running but its own readiness probe says no
+#   drift     — the supervisor gave up on it, yet the role IS serving its health port
+#   disabled  — not selected for this runtime mode (brain_only, dashboard toggle)
+#   oneshot   — a task, not a service: no readiness probe and it exited 0
+#   exhausted — down AND the restart budget is spent: the supervisor will NEVER retry
+#   down      — down with retries left (the supervisor may still bring it back)
+#
+# REQ-AXO-902264 — `exhausted` is the whole reason this exists. `max_restarts: 3` with
+# `restart: on_failure` means self-healing GIVES UP after the third failure and then does
+# nothing forever, in silence: the only trace is a log line nobody reads. Meanwhile
+# `axon status` reported on ONE role (the one derived from the pid files) and could print
+# HEALTHY while another role had been dead for hours. Giving up must not be
+# indistinguishable from working.
+#
+# `serving` outranks the supervisor deliberately, for the same reason as in
+# `axon_restart_role_verified`: process-compose tracks the last process IT launched, which
+# may be a duplicate the writer guard refused while the real instance keeps answering.
+axon_role_supervision_verdict() {
+    local status="${1:-}" is_ready="${2:-}" has_probe="${3:-}" exit_code="${4:-0}"
+    local restarts="${5:-0}" max_restarts="${6:-0}" serving="${7:-unknown}"
+
+    [[ "$restarts" =~ ^[0-9]+$ ]] || restarts=0
+    [[ "$max_restarts" =~ ^[0-9]+$ ]] || max_restarts=0
+
+    if [[ "$status" == "Running" ]]; then
+        if [[ "$is_ready" != "Ready" && "$has_probe" == "true" ]]; then
+            printf 'not_ready\n'
+        elif (( max_restarts > 0 && restarts >= max_restarts )); then
+            # MEASURED (isolated process-compose 1.94.0 probe, REQ-AXO-902264): the restart
+            # counter NEVER goes back down — not after a healthy period, and not after the
+            # explicit `POST /process/start` this very tool recommends as the recovery. The
+            # role comes back Running with `restarts` still at the ceiling, so the NEXT
+            # failure is terminal and nothing says so. A green line here would be the same
+            # class of lie the whole REQ is about, one step further down the timeline.
+            printf 'no_budget\n'
+        else
+            printf 'ok\n'
+        fi
+        return 0
+    fi
+
+    # Ground truth first: a role that answers /readyz is not down, whatever the
+    # supervisor's bookkeeping says.
+    if [[ "$serving" == "yes" ]]; then printf 'drift\n'; return 0; fi
+    # `Disabled` is configuration, not failure: process-compose marks every process the
+    # launcher did not select (brain_only omits the indexer; AXON_DASHBOARD_DISABLED omits
+    # the dashboard). Surfaced as a warning with its recovery command, never as a failure.
+    if [[ "$status" == "Disabled" ]]; then printf 'disabled\n'; return 0; fi
+    # A process with no readiness probe that exited 0 is a completed task (postgres-check),
+    # not a dead service. This is the only discriminator process-compose offers.
+    if [[ "$has_probe" != "true" && "$exit_code" == "0" ]]; then printf 'oneshot\n'; return 0; fi
+    if (( max_restarts > 0 && restarts >= max_restarts )); then printf 'exhausted\n'; return 0; fi
+    printf 'down\n'
+}
+
+# axon_role_survey <project_root> <instance_kind>
+#
+# One line per supervised role, pipe-separated, for the caller to render:
+#   name|status|is_ready|restarts|max_restarts|serving|verdict
+#
+# Returns 1 (no output) when there is no supervisor to ask — the caller decides whether
+# that is expected. `max_restarts` comes from the process-compose YAML because the REST
+# API exposes the CONSUMED count and not the budget, so the exhaustion boundary is
+# unknowable from the API alone.
+axon_role_survey() {
+    local project_root="${1:?project root required}" instance_kind="${2:?instance kind required}"
+    local pc_port cfg rows name status ready probe code restarts maxr serving verdict
+
+    pc_port="$(axon_pc_port_for_instance "$instance_kind")"
+    axon_supervisor_healthy "$pc_port" || return 1
+    cfg="$(axon_pc_config_path "$project_root" "$instance_kind")"
+
+    local body
+    body="$(curl -s -m 8 "http://127.0.0.1:${pc_port}/processes" 2>/dev/null)" || return 1
+    [[ -n "$body" ]] || return 1
+
+    # The payload travels in the ENVIRONMENT, not on stdin: `python3 -` already takes its
+    # program from stdin, so a heredoc script and a piped body cannot coexist — the
+    # heredoc silently wins and the parse sees an empty document. Same idiom as
+    # `AXONCTL_JSON` in scripts/status.sh.
+    rows="$(AXON_PC_PROCESSES_JSON="$body" python3 - "$cfg" <<'PY'
+import json, os, sys
+
+try:
+    body = json.loads(os.environ.get("AXON_PC_PROCESSES_JSON", ""))
+except Exception:
+    sys.exit(1)
+procs = body.get("data", body) if isinstance(body, dict) else body
+if not isinstance(procs, list):
+    sys.exit(1)
+
+# The restart BUDGET lives only in the YAML; the API reports the consumed count.
+budgets = {}
+try:
+    import yaml
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        # The YAML carries ${VAR:-default} interpolations; they parse as plain strings,
+        # and none of them appear in the availability block we read here.
+        conf = yaml.safe_load(fh) or {}
+    for pname, pconf in (conf.get("processes") or {}).items():
+        avail = (pconf or {}).get("availability") or {}
+        budgets[pname] = avail.get("max_restarts", 0)
+except Exception:
+    budgets = {}
+
+# Sorted by name: the API returns roles in an order that varies between calls, and a
+# status surface people read (and diff) twice in a row must not reshuffle itself.
+for p in sorted(procs, key=lambda r: str(r.get("name", ""))):
+    name = str(p.get("name", "")).strip()
+    if not name:
+        continue
+    print("|".join([
+        name,
+        str(p.get("status", "")).strip() or "?",
+        str(p.get("is_ready", "")).strip() or "-",
+        "true" if p.get("has_ready_probe") else "false",
+        str(p.get("exit_code", 0)),
+        str(p.get("restarts", 0)),
+        str(budgets.get(name, 0)),
+    ]))
+PY
+)" || return 1
+    [[ -n "$rows" ]] || return 1
+
+    while IFS='|' read -r name status ready probe code restarts maxr; do
+        [[ -n "$name" ]] || continue
+        # Probe the role's own health port ONLY when the supervisor claims it is not
+        # Running: on a healthy runtime `status` must stay cheap.
+        serving="-"
+        if [[ "$status" != "Running" ]] && [[ -n "$(_axon_role_health_port "$instance_kind" "$name")" ]]; then
+            if _axon_role_serving "$instance_kind" "$name"; then serving="yes"; else serving="no"; fi
+        fi
+        verdict="$(axon_role_supervision_verdict "$status" "$ready" "$probe" "$code" "$restarts" "$maxr" "$serving")"
+        printf '%s|%s|%s|%s|%s|%s|%s\n' "$name" "$status" "$ready" "$restarts" "$maxr" "$serving" "$verdict"
+    done <<< "$rows"
+}
+
 # axon_restart_role_verified <instance_kind> <process> [budget_s]
 #
 # Restart ONE process-compose role and return 0 only once the OBSERVED state is

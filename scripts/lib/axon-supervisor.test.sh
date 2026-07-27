@@ -111,5 +111,86 @@ assert_port 'dev indexer health port'   44149 dev  axon-indexer
 assert_port 'dashboard has no role health port' '' live dashboard
 assert_port 'unknown role has no health port'   '' live zzz-nonexistent
 
+printf '\naxon_role_supervision_verdict — REQ-AXO-902264 (giving up must not look like working)\n'
+
+# args: status is_ready has_ready_probe exit_code restarts max_restarts serving
+assert_verdict() {
+    local desc="$1" expected="$2"; shift 2
+    local got; got="$(axon_role_supervision_verdict "$@")"
+    if [[ "$got" == "$expected" ]]; then
+        printf '  PASS  %s\n' "$desc"; PASS=$(( PASS + 1 ))
+    else
+        printf '  FAIL  %s  (expected %s, got %s)\n' "$desc" "$expected" "$got"; FAIL=$(( FAIL + 1 ))
+    fi
+}
+
+# THE case this whole function exists for. `restart: on_failure` + `max_restarts: 3` means
+# the supervisor stops trying after the third failure and then does nothing, forever, with
+# no signal beyond a log line. Observed in production: the live indexer had been dead for
+# hours while `axon-live status` printed HEALTHY.
+assert_verdict 'restart budget spent → exhausted, the supervisor will never retry' \
+    exhausted Completed - true 1 3 3 no
+assert_verdict 'restarts consumed BEYOND the budget is still exhausted' \
+    exhausted Error - true 1 5 3 no
+
+# Retries left is a materially different situation: the runtime may still recover on its
+# own. Still a FAIL for the operator, but not the same sentence.
+assert_verdict 'down with retries left is not exhaustion' \
+    down Completed - true 1 1 3 no
+assert_verdict 'no restart policy at all (max=0) can never be "exhausted"' \
+    down Completed - true 1 0 0 no
+
+# Ground truth outranks the supervisor. Observed for real: `Completed` in process-compose
+# while the role answered /readyz, because a duplicate start was refused by the writer
+# guard. Reporting that as a dead role sends the operator to restart a healthy process.
+assert_verdict 'serving its own health port outranks a Completed verdict' \
+    drift Completed - true 1 3 3 yes
+
+# Configuration, not failure: brain_only does not select the indexer, and
+# AXON_DASHBOARD_DISABLED omits the dashboard. Both surface as Disabled.
+assert_verdict 'Disabled is a runtime-mode choice, not a failure' \
+    disabled Disabled - true 0 0 3 no
+
+# postgres-check: a task, not a service. No readiness probe + exit 0 is the only
+# discriminator process-compose offers, and mis-classifying it would print a permanent
+# FAIL on a perfectly healthy runtime — the fastest way to train everyone to ignore this
+# section.
+assert_verdict 'a probe-less process that exited 0 is a completed task' \
+    oneshot Completed - false 0 0 0 -
+assert_verdict 'a probe-less process that exited NON-zero is still a failure' \
+    down Completed - false 1 0 0 -
+
+# Nominal.
+assert_verdict 'Running + Ready is ok'          ok Running Ready true 0 0 3 -
+assert_verdict 'Running without a probe is ok'  ok Running -     false 0 0 0 -
+
+# MEASURED on process-compose 1.94.0 in an isolated probe: `restarts` never decreases —
+# not after a healthy period, and not after the explicit `POST /process/start` used to
+# recover. The role returns Running with the counter still at the ceiling, so the next
+# failure is terminal and unannounced. Running-and-doomed must not print like Running.
+assert_verdict 'Running with the restart budget already spent is NOT plain ok' \
+    no_budget Running Ready true 3 3 3 -
+assert_verdict 'Running with budget left is ok' \
+    ok Running Ready true 0 2 3 -
+assert_verdict 'no restart policy (max=0) never reports a spent budget' \
+    ok Running Ready true 7 0 0 -
+# Ordering: not-ready outranks the budget question. A role that is not serving is the more
+# urgent fact, and reporting "no safety net" about a process that is already not working
+# would bury it.
+assert_verdict 'not_ready wins over no_budget' \
+    not_ready Running 'Not Ready' true 3 3 3 -
+# Running but not ready: the indexer spends minutes loading the GPU model at boot. Named
+# distinctly so the renderer can warn without declaring the runtime degraded.
+assert_verdict 'Running but not ready is its own verdict, not a failure' \
+    not_ready Running 'Not Ready' true 0 0 3 -
+
+# Transient supervisor states must never be read as abandonment.
+assert_verdict 'Terminating is down, not exhausted, when the budget is untouched' \
+    down Terminating - true 0 0 3 no
+
+# Malformed counters must not crash an arithmetic comparison inside `axon status`.
+assert_verdict 'non-numeric counters degrade to 0 instead of erroring' \
+    down Completed - true 1 '' 'n/a' no
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

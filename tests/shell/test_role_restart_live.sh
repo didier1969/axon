@@ -204,6 +204,22 @@ else
     fail "brain UNSERVED during the test: ${N_DOWN} no-answer(>10s) + ${N_BAD} non-200 out of ${N_SAMPLES} samples (slowest answered ${SLOWEST}s ; samples kept: $BRAIN_SAMPLES)"
 fi
 
+# --- REQ-AXO-902264: every role accounted for, not just the one we restarted ---
+# A restart that succeeds while ANOTHER role was silently abandoned is not a green
+# lifecycle. The survey is the surface an operator reads; assert on it here so a
+# regression in the verdicts is caught by the test rather than in production.
+SURVEY="$(axon_role_survey "$ROOT_DIR" "$INSTANCE" 2>/dev/null || true)"
+if [[ -z "$SURVEY" ]]; then
+    fail "role survey returned nothing while the supervisor is up — the observability surface is blind"
+else
+    BAD_ROLES="$(printf '%s\n' "$SURVEY" | awk -F'|' '$7 == "exhausted" || $7 == "down" {print $1"("$7")"}' | tr '\n' ' ')"
+    if [[ -z "${BAD_ROLES// /}" ]]; then
+        pass "role survey: $(printf '%s\n' "$SURVEY" | wc -l | tr -d ' ') role(s), none abandoned"
+    else
+        fail "role survey reports abandoned role(s): ${BAD_ROLES}"
+    fi
+fi
+
 # Keep the samples when the invariant failed — the file IS the evidence, and deleting it
 # would leave the failure message pointing at a path that no longer exists.
 (( FAIL == 0 )) && rm -f "$BRAIN_SAMPLES" 2>/dev/null

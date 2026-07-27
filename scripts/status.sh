@@ -85,6 +85,24 @@ fi
 export AXON_DEAD_BRAIN AXON_BRAIN_PORT
 export AXON_PC_PORT="$_STATUS_PC_PORT"
 
+# REQ-AXO-902264 — survey EVERY supervised role, not just the one this invocation
+# happens to be about. `axon status` derives a single role from the pid files, so a
+# runtime whose indexer had exhausted `max_restarts` hours earlier still printed
+# HEALTHY. Self-healing that gives up must not look like self-healing that worked.
+AXON_ROLE_SURVEY="$(axon_role_survey "$ROOT_DIR" "$AXON_INSTANCE_KIND" 2>/dev/null || true)"
+AXON_ROLE_SURVEY_RENDER=""
+AXON_ROLE_SURVEY_DEGRADED="0"
+if [[ -n "$AXON_ROLE_SURVEY" ]]; then
+  _survey_rc=0
+  AXON_ROLE_SURVEY_RENDER="$(printf '%s\n' "$AXON_ROLE_SURVEY" \
+    | AXON_PC_PORT="$_STATUS_PC_PORT" AXON_INSTANCE_KIND="$AXON_INSTANCE_KIND" \
+      python3 "$ROOT_DIR/scripts/lib/axon-role-survey-render.py")" || _survey_rc=$?
+  # Exit 2 is the renderer's "a role is abandoned" contract, not an error.
+  [[ "$_survey_rc" -eq 2 ]] && AXON_ROLE_SURVEY_DEGRADED="1"
+  unset _survey_rc
+fi
+export AXON_ROLE_SURVEY_RENDER AXON_ROLE_SURVEY_DEGRADED
+
 # ---------------------------------------------------------------------------
 # Format human-readable output from JSON
 # ---------------------------------------------------------------------------
@@ -100,6 +118,12 @@ data = json.loads(os.environ["AXONCTL_JSON"])
 instance = data.get("instance_kind", instance_kind)
 role = data.get("role", role_hint)
 overall = data.get("overall", "unknown")
+# REQ-AXO-902264 — an abandoned role degrades the runtime BEFORE the header is printed.
+# axonctl's `overall` only knows the single role this invocation is about, so leaving the
+# survey to degrade further down produced `OVERALL HEALTHY` above `STATUS DEGRADED` in the
+# same output — two answers to one question, which is the ambiguity this REQ removes.
+if os.environ.get("AXON_ROLE_SURVEY_DEGRADED", "0") == "1":
+    overall = "degraded"
 
 print("Axon status")
 print("------------")
@@ -195,6 +219,16 @@ if run_root:
         # Heartbeat absent or malformed: silent — the process-state lines
         # above already convey liveness; this surface is additive.
         pass
+
+# REQ-AXO-902264 — supervised-role survey. Rendered LAST (just above STATUS) because it
+# is the section that decides whether a role has been silently abandoned. The lines and
+# the degrade decision are produced by scripts/lib/axon-role-survey-render.py (fixture-
+# tested in tests/shell/test_role_survey_render.sh); this block only places them.
+survey_render = os.environ.get("AXON_ROLE_SURVEY_RENDER", "").rstrip()
+if survey_render:
+    print()
+    print("Supervisor roles")
+    print(survey_render)
 
 # REQ-AXO-901735 — dead-brain condition computed in shell (supervisor up but
 # canonical brain port not listening). This is a runtime failure the supervisor
