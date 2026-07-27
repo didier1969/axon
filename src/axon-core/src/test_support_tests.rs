@@ -123,13 +123,21 @@ fn no_test_mutates_process_env_without_the_lock() {
     const KNOWN_UNLOCKED: &[&str] = &[
         "mcp/tests/context_and_analysis.rs",
         "mcp/tests/guidance_contract.rs",
-        "mcp/tests/mod.rs",
         "runtime_capacity_profile.rs",
         "embedder.rs",
         "indexer_health_http.rs",
         "vector_control.rs",
         "postgres/bulk_writer.rs",
-        "bin/axonctl.rs",
+        // REQ-AXO-902261 — REMOVED, each one fixed:
+        //   `mcp/tests/mod.rs`  — its `env_lock()` minted a private mutex; now delegates
+        //                         to `test_support::env_test_lock()`.
+        //   `bin/axonctl.rs`    — could not reach the lock at all (`test_support` is
+        //                         `#[cfg(test)]` on the LIB, and axonctl is a separate
+        //                         binary crate). Fixed by removing the dependency on
+        //                         process-global state instead: the env override is now a
+        //                         parameter of a pure `indexer_health_port_from`, which
+        //                         also gained coverage for the malformed-override case
+        //                         nothing tested before.
     ];
     const LOCK_MARKERS: &[&str] =
         &["env_test_lock", "ENV_LOCK", "EnvVarGuard", "registry_test_lock"];
@@ -178,5 +186,132 @@ fn no_test_mutates_process_env_without_the_lock() {
          Do NOT silence this by adding the file to KNOWN_UNLOCKED, and do NOT rely on \
          `--test-threads=1`: nothing in this repo sets it (verified — no .cargo/config.toml).",
         offenders.join("\n  ")
+    );
+}
+
+/// REQ-AXO-902261 — the guard above only knows about ENV. The class is wider: **any
+/// process-global resource serialized by a lock that is duplicated instead of shared**.
+///
+/// Found live, not hypothesized. `runtime_readiness::registry()` is one global singleton,
+/// and THREE test files each declared their own private `registry_test_lock()` with its
+/// own `static`. Three mutexes, one registry, zero exclusion across files. It surfaced as
+/// `watchdog_observes_dead_heartbeat_after_threshold` failing with `got []` in a full-suite
+/// run — 1682 passed, 1 failed — because a sibling file called `reset_for_tests()` inside
+/// the 400 ms sleep window of the test that was about to assert. Load-dependent, rare, and
+/// indistinguishable from a real watchdog regression.
+///
+/// What made it survive: the header of `runtime_watchdog_tests.rs` ASSERTED that these
+/// tests "acquire a shared mutex with the runtime_readiness tests". They did not. Same
+/// failure mode as the "DBQ-A claim feeder drains the backlog by construction" comment
+/// (REQ-AXO-902260) — a confident sentence describing a mechanism that is not there tells
+/// the reader the problem is already handled.
+///
+/// The rule enforced here: **only `test_support` may MINT a test lock.** A minting
+/// definition is a `fn …_lock()` whose body creates its own `OnceLock` — that is what
+/// produces a second mutex. A function that merely DELEGATES to `test_support` contains no
+/// `OnceLock` and is fine; that is how `runtime_boot.rs` has always done it.
+///
+/// A first version of this guard only flagged the same `fn <name>_test_lock()` appearing
+/// in two files. It passed — and missed a live offender found minutes later:
+/// `mcp/tests/mod.rs` minted its own `env_lock()` (different NAME, same defect) while
+/// `runtime_boot.rs` delegated, so the MCP tests serialized against nothing else in the
+/// crate. Matching on names was matching on spelling; minting is the actual defect.
+#[test]
+fn no_test_lock_is_minted_outside_test_support() {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    // lock fn name -> files that MINT it (own OnceLock in the body)
+    let mut definitions: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            // `test_support.rs` is the ONE place allowed to mint. Its own tests file is
+            // this one, which mints nothing.
+            if rel == "test_support.rs" {
+                continue;
+            }
+            let lines: Vec<&str> = text.lines().collect();
+            for (idx, raw) in lines.iter().enumerate() {
+                let line = raw.trim_start();
+                // A DEFINITION, not a call: `fn x_lock(` / `pub fn x_lock(` / …
+                let Some(rest) = line
+                    .strip_prefix("pub fn ")
+                    .or_else(|| line.strip_prefix("pub(crate) fn "))
+                    .or_else(|| line.strip_prefix("fn "))
+                else {
+                    continue;
+                };
+                let Some(name) = rest.split('(').next() else { continue };
+                if !name.ends_with("_lock") {
+                    continue;
+                }
+                // MINTING = the body creates its own lazily-initialized static. A
+                // delegating wrapper has no `OnceLock` and is the correct pattern.
+                //
+                // The body is delimited by BRACE DEPTH, not by a line budget. A first
+                // version scanned a fixed 12-line window and reported `mcp/tests/mod.rs`
+                // as an offender AFTER it had been fixed: the window ran past the closing
+                // brace into the next function, which legitimately holds a `OnceLock`. A
+                // guard that accuses a corrected file is worse than no guard — it teaches
+                // people to distrust it.
+                let mut depth = 0i32;
+                let mut mints = false;
+                for body_line in &lines[idx..] {
+                    if body_line.contains("OnceLock") && depth > 0 {
+                        mints = true;
+                    }
+                    depth += body_line.matches('{').count() as i32;
+                    depth -= body_line.matches('}').count() as i32;
+                    if depth <= 0 && body_line.contains('}') {
+                        break;
+                    }
+                }
+                if !mints {
+                    continue;
+                }
+                definitions
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(rel.clone());
+            }
+        }
+    }
+
+    let duplicated: Vec<String> = definitions
+        .iter()
+        .map(|(name, files)| format!("{name} minted in: {}", files.join(", ")))
+        .collect();
+
+    assert!(
+        duplicated.is_empty(),
+        "REQ-AXO-902261 — a test lock is MINTED outside `test_support`. Each of these \
+         creates its OWN `OnceLock`, so it is a separate mutex: it serializes its own file \
+         against itself and against NOTHING ELSE, while the resource it guards (process \
+         env, the readiness registry, …) is global to the whole test binary:\n  {}\n\n\
+         Fix: delete the local `static` and DELEGATE —\n  \
+         fn my_lock() -> std::sync::MutexGuard<'static, ()> {{\n      \
+         crate::test_support::env_test_lock().lock().unwrap_or_else(|p| p.into_inner())\n  \
+         }}\n\n\
+         If the resource is new, add ONE minting accessor to `test_support` next to \
+         `env_test_lock` / `registry_test_lock` and delegate to that. One global resource, \
+         one lock.",
+        duplicated.join("\n  ")
     );
 }

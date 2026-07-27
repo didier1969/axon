@@ -18,9 +18,16 @@ use tempfile::tempdir;
 
 use crate::test_support::test_db::{sweep_stale_test_databases, TestDb};
 
+/// REQ-AXO-902261 — delegates to the crate-wide lock instead of minting its own.
+///
+/// This function used to hold `static LOCK: OnceLock<Mutex<()>>` of its own, so the MCP
+/// tests serialized against each other and against NOTHING ELSE — while `runtime_boot.rs`
+/// correctly delegated to `test_support::env_test_lock()`. Two independent mutexes over
+/// one process environment: a `set_var` from either side could land inside the other's
+/// assertion. Exactly the shape that made the readiness-registry flake
+/// (three private `registry_test_lock()`), found the same session.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+    crate::test_support::env_test_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
 }

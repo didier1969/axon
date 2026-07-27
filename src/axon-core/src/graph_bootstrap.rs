@@ -209,8 +209,12 @@ impl GraphStore {
         // "already exists" path when two threads race on the same
         // shared catalog rows. A process-wide Mutex held for the
         // ~50 statements is much cheaper than the PG advisory-lock
-        // alternative (one round-trip vs N) and is the canonical
-        // pattern (mirrors `embedder_env_lock`).
+        // alternative (one round-trip vs N).
+        // REQ-AXO-902261 — this used to say "mirrors `embedder_env_lock`". That helper
+        // was a TEST lock over the process environment with zero callers, since deleted.
+        // This one is different in kind and stays: it is a production mutex over the PG
+        // catalog, not a test-serialization device, and it guards a resource this module
+        // owns.
         static BOOTSTRAP_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
             std::sync::OnceLock::new();
         let _guard = BOOTSTRAP_LOCK

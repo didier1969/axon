@@ -3,12 +3,14 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-pub fn embedder_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-}
+// REQ-AXO-902261 — `embedder_env_lock()` DELETED here. It minted its own
+// `OnceLock<Mutex<()>>` over the process environment, in parallel with
+// `test_support::env_test_lock()`, and had **zero callers**: the only other mention in the
+// crate was a comment in `graph_bootstrap.rs` citing it as "the canonical pattern". A dead
+// lock advertised as the model to copy is how the class spreads — it was the third
+// instance found this session, after three private `registry_test_lock()` and
+// `mcp/tests/mod.rs`'s own `env_lock()`. Anything needing env serialization takes
+// `crate::test_support::env_test_lock()`.
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 

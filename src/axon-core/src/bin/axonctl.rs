@@ -337,8 +337,20 @@ fn http_ready(url: &str, timeout_s: u64) -> bool {
 /// The indexer's dedicated health-probe port (REQ-AXO-901735). Env override, else the
 /// per-instance default (44130 live / 44149 dev), mirroring indexer_health_http.rs.
 fn indexer_health_port(kind: InstanceKind) -> u16 {
-    std::env::var("AXON_INDEXER_HEALTH_PORT")
-        .ok()
+    indexer_health_port_from(std::env::var("AXON_INDEXER_HEALTH_PORT").ok(), kind)
+}
+
+/// PURE core of `indexer_health_port` — the override arrives as a parameter.
+///
+/// REQ-AXO-902261 — extracted rather than locked. `axonctl` is a separate binary crate,
+/// so it cannot reach `test_support::env_test_lock()` (that module is `#[cfg(test)]` on
+/// the LIB). Its test therefore called a bare `remove_var`, which both raced sibling
+/// tests and left the variable unset for everything that ran after it. Serializing was
+/// not available; removing the dependency on process-global state was — and it is the
+/// better answer anyway: this is the decision logic, and it is now testable without
+/// touching the environment at all.
+fn indexer_health_port_from(raw_override: Option<String>, kind: InstanceKind) -> u16 {
+    raw_override
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(match kind {
             InstanceKind::Live => 44130,
@@ -2498,11 +2510,31 @@ mod tests {
         assert!(!runtime_contract_has_indexer(r#"{"other":"x"}"#));
     }
 
+    // REQ-AXO-902261 — no env mutation at all: the override is an argument now.
     #[test]
-    fn indexer_health_port_defaults() {
-        std::env::remove_var("AXON_INDEXER_HEALTH_PORT");
-        assert_eq!(indexer_health_port(InstanceKind::Live), 44130);
-        assert_eq!(indexer_health_port(InstanceKind::Dev), 44149);
+    fn indexer_health_port_defaults_without_touching_the_environment() {
+        assert_eq!(indexer_health_port_from(None, InstanceKind::Live), 44130);
+        assert_eq!(indexer_health_port_from(None, InstanceKind::Dev), 44149);
+    }
+
+    #[test]
+    fn indexer_health_port_honours_a_valid_override() {
+        assert_eq!(
+            indexer_health_port_from(Some("  45000 ".into()), InstanceKind::Live),
+            45000,
+            "surrounding whitespace must not defeat the override"
+        );
+    }
+
+    #[test]
+    fn indexer_health_port_falls_back_on_a_malformed_override() {
+        // A typo in the env var must not yield port 0 or a panic — the instance default
+        // is the only safe answer, and nothing in the old test covered this.
+        assert_eq!(
+            indexer_health_port_from(Some("not-a-port".into()), InstanceKind::Dev),
+            44149
+        );
+        assert_eq!(indexer_health_port_from(Some(String::new()), InstanceKind::Live), 44130);
     }
 
     // --- REQ-AXO-902165 cutover file-I/O (real manifest/bin steps, tempdir) --------
