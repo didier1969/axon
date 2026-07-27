@@ -552,6 +552,7 @@ pub fn spawn_pipeline_indexer(
             "pipeline: direct-streaming bootstrap + reconciliation walk active \
              (sweep_secs={sweep_secs}) — enumerate → input_tx (PIL-AXO-007)"
         );
+        let walk_wake = crate::pipeline::indexed_file_cache::walk_wake_signal();
         tokio::spawn(async move {
             loop {
                 let walk_start_ms = chrono::Utc::now().timestamp_millis();
@@ -598,7 +599,17 @@ pub fn spawn_pipeline_indexer(
                     Ok(Err(e)) => warn!(error = %e, "pipeline: delete_stale failed (non-fatal)"),
                     Err(e) => warn!(error = %e, "pipeline: delete_stale task panicked"),
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(sweep_secs)).await;
+                // REQ-AXO-902268 — wait for the period OR for an explicit wake, whichever
+                // comes first. `rescan_project full=true` purges the dedup cache, which only
+                // makes files ELIGIBLE to be re-read; without this the re-read waited out the
+                // full period (900 s default), leaving the project at ZERO coverage for up to
+                // 15 minutes with no signal that the wait was normal.
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(sweep_secs)) => {}
+                    _ = walk_wake.notified() => {
+                        info!("pipeline: reconciliation walk woken early (cache invalidated — REQ-AXO-902268)");
+                    }
+                }
             }
         });
     }

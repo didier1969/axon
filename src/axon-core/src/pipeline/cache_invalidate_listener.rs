@@ -57,7 +57,12 @@ pub fn apply_invalidate_payload(payload: &str) -> Option<usize> {
         return None;
     }
     let cache = IndexedFileCache::global()?;
-    Some(cache.forget_prefix(prefix))
+    let forgotten = cache.forget_prefix(prefix);
+    // REQ-AXO-902268 — purging only makes the files ELIGIBLE to be re-read; the re-read
+    // happens on the reconciliation walk. Wake it now instead of waiting out its period
+    // (900 s default), which used to leave the project at zero coverage for up to 15 min.
+    crate::pipeline::indexed_file_cache::walk_wake_signal().notify_one();
+    Some(forgotten)
 }
 
 /// Supervised listener. Returns immediately, then reconnects forever on error.
@@ -123,7 +128,7 @@ async fn listen_once(database_url: &str) -> Result<()> {
             info!(
                 prefix = n.payload(),
                 forgotten,
-                "ist_cache_invalidate: dedup cache purged — those files will be re-read on the next walk (REQ-AXO-902262)"
+                "ist_cache_invalidate: dedup cache purged + reconciliation walk woken — re-read starts now, not at the next period (REQ-AXO-902262 / REQ-AXO-902268)"
             );
         }
     }

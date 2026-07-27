@@ -12,9 +12,17 @@ source "$SCRIPT_DIR/axon-resource-policy.sh"
 PASS=0
 FAIL=0
 
+# When no per-job budget is given, call the function WITHOUT that argument so ITS OWN
+# default is what gets exercised. An earlier version of this helper substituted its own
+# default (2) instead, which meant the tests could never have caught a drift in the
+# function's default — the very thing the measured-budget test below exists to pin.
 assert_jobs() {
-    local desc="$1" expected="$2" avail="$3" swap="$4" cores="$5" per_job="${6:-2}" got
-    got="$(axon_compute_cargo_jobs "$avail" "$swap" "$cores" "$per_job")"
+    local desc="$1" expected="$2" avail="$3" swap="$4" cores="$5" per_job="${6:-}" got
+    if [[ -n "$per_job" ]]; then
+        got="$(axon_compute_cargo_jobs "$avail" "$swap" "$cores" "$per_job")"
+    else
+        got="$(axon_compute_cargo_jobs "$avail" "$swap" "$cores")"
+    fi
     if [[ "$got" == "$expected" ]]; then
         printf '  PASS  %s\n' "$desc"; PASS=$(( PASS + 1 ))
     else
@@ -27,13 +35,14 @@ printf 'axon_compute_cargo_jobs — REQ-AXO-902267\n'
 # The host as measured when this was written: 24 GB free, swap at 98 %, 16 cores.
 # Unbounded cargo would run 16 rustc processes on a machine already evicting to swap —
 # the shape that produced two global OOM kills (Chrome died twice) during a promote.
-assert_jobs 'the real host (24 GB free, swap 98%, 16 cores) → 6, not 16' \
-    6 24 98 16
+# 24/3 = 8, halved for swap ≥ 50 % → 4.
+assert_jobs 'the real host (24 GB free, swap 98%, 16 cores) → 4, not 16' \
+    4 24 98 16
 
 # Memory is the binding constraint, not cores: plenty of cores but little RAM must NOT
 # spawn one rustc per core.
 assert_jobs 'RAM-starved host is bounded by RAM, not by cores' \
-    2 4 0 16
+    1 4 0 16
 
 # …and the converse: never exceed the core count even with abundant RAM. This policy may
 # only ever LOWER parallelism; raising it above cargo's own default is not its job.
@@ -43,9 +52,14 @@ assert_jobs 'abundant RAM is still capped at the core count' \
 # Swap pressure halves the budget. Heavy swap use means the kernel is ALREADY evicting;
 # the next allocation storm is what invokes the OOM killer.
 assert_jobs 'swap ≥ 50% halves the budget' \
-    6 24 50 16
+    4 24 50 16
 assert_jobs 'swap just under the threshold does not halve' \
-    12 24 49 16
+    8 24 49 16
+
+# The default budget must stay at the MEASURED peak (2.13 GB rounded up), never drift back
+# to the estimate it replaced. 24/3 = 8 with no swap pressure.
+assert_jobs 'default per-job budget is the measured 3 GB, not the old estimate of 2' \
+    8 24 0 16
 
 # Never return 0 or a negative: `cargo -j 0` is an error, and a build that cannot start is
 # a worse failure than a slow one.

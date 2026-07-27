@@ -52,6 +52,25 @@ pub struct IndexedFileCache {
 /// See `IndexedFileCache::publish_global`.
 static GLOBAL_CACHE: OnceLock<Arc<IndexedFileCache>> = OnceLock::new();
 
+/// REQ-AXO-902268 — wake the reconciliation walk NOW instead of waiting out its period.
+///
+/// Purging the cache only makes files ELIGIBLE to be re-read; the re-read itself happens on
+/// the next reconciliation walk, whose period is 900 s by default. So
+/// `rescan_project full=true` left a project at ZERO coverage for up to 15 minutes —
+/// `retrieve_context`, semantic search and FTS all blind on it — with nothing to indicate
+/// the wait was normal rather than another failure. (It also cost a real diagnosis: a
+/// 6-minute observation window on a 15-minute mechanism read as "the fix does not work".)
+///
+/// A `Notify` rather than a channel: the signal carries no data and is purely "there is work
+/// now". `notify_one` on a waiter-less Notify stores a permit, so a wake that arrives while
+/// the walk is already running is honoured at the next wait instead of being lost.
+static WALK_WAKE: OnceLock<Arc<tokio::sync::Notify>> = OnceLock::new();
+
+/// The process-wide walk-wake signal, created on first use.
+pub fn walk_wake_signal() -> Arc<tokio::sync::Notify> {
+    Arc::clone(WALK_WAKE.get_or_init(|| Arc::new(tokio::sync::Notify::new())))
+}
+
 impl IndexedFileCache {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -435,5 +454,17 @@ mod tests {
         ]);
         assert_eq!(cache.forget_prefix("/nowhere"), 0);
         assert_eq!(cache.len(), 1);
+    }
+
+    /// REQ-AXO-902268 — `walk_wake_signal()` MUST return the same instance every call.
+    /// If it minted a fresh Notify per call, the listener would signal one object while the
+    /// walk loop waited on another: the wake would be silently lost and the 15-minute
+    /// period would silently remain — a defect indistinguishable from "the feature does
+    /// nothing", which is the hardest kind to notice.
+    #[test]
+    fn walk_wake_signal_is_the_same_instance_for_every_caller() {
+        let a = super::walk_wake_signal();
+        let b = super::walk_wake_signal();
+        assert!(std::sync::Arc::ptr_eq(&a, &b), "signal must be process-wide, not per-call");
     }
 }

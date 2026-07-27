@@ -299,12 +299,23 @@ axon_swap_used_pct() {
 #
 # PURE (no /proc, no env) so the policy is unit-testable on any host.
 #
-# `gb_per_job` defaults to 2: a conservative ESTIMATE of peak rustc RSS for a release build
-# of this crate, not a measurement — erring high costs a slower build, erring low costs the
-# operator's session. Halve again past 50 % swap: at that point the kernel is already
-# evicting, and the next allocation storm is what triggers the OOM killer.
+# `gb_per_job` defaults to 3, and that 3 is MEASURED, not guessed. Sampling
+# /proc/<pid>/status VmRSS once a second across a real `cargo build --release -j6` of this
+# crate (154 samples):  peak 2.13 GB · mean 1.04 GB.
+#
+# The budget tracks the PEAK rounded up, not the mean, because an OOM is caused by
+# SIMULTANEOUS peaks — betting on the mean assumes rustc processes never peak together, and
+# losing that bet costs the operator's whole session (two global OOM kills on 2026-07-27,
+# Chrome killed twice). Erring high only costs a slower build.
+#
+# The first version of this used 2 as an ADMITTED ESTIMATE; the measurement showed 2 sat
+# BELOW the observed peak, i.e. it under-budgeted. Re-sample if the crate or the toolchain
+# changes materially.
+#
+# Halve again past 50 % swap: at that point the kernel is already evicting, and the next
+# allocation storm is what triggers the OOM killer.
 axon_compute_cargo_jobs() {
-    local available_gb="${1:-0}" swap_pct="${2:-0}" cores="${3:-4}" gb_per_job="${4:-2}"
+    local available_gb="${1:-0}" swap_pct="${2:-0}" cores="${3:-4}" gb_per_job="${4:-3}"
     [[ "$gb_per_job" -ge 1 ]] || gb_per_job=1
     local jobs=$(( available_gb / gb_per_job ))
     (( swap_pct >= 50 )) && jobs=$(( jobs / 2 ))
@@ -324,5 +335,5 @@ axon_resolve_cargo_jobs() {
         "$(axon_available_ram_gb)" \
         "$(axon_swap_used_pct)" \
         "$(axon_detect_host_cpu_cores)" \
-        "${AXON_BUILD_GB_PER_JOB:-2}"
+        "${AXON_BUILD_GB_PER_JOB:-3}"
 }
