@@ -138,6 +138,25 @@ if ! axon_brain_healthy "$BRAIN_PORT"; then
     skip "brain not serving on :$BRAIN_PORT — refusing to add load to an already-degraded instance"
     printf '\n%d passed, %d failed (SKIPPED — nothing was measured)\n' "$PASS" "$FAIL"; exit 77
 fi
+# REQ-AXO-902271 — the GPU virtualisation channel must be free BEFORE we ask the indexer
+# to stop. Its teardown releases a TensorRT/CUDA session through that channel; when the
+# channel is wedged, the process cannot finish exiting, becomes an unreapable zombie, and
+# process-compose reports `Terminating` forever.
+#
+# Measured, three times on 2026-07-28: this gate failed at ~196 s with the pid UNCHANGED,
+# each failure leaving the live indexer down. The cause was never the restart logic — it
+# was an `nvidia-smi --query-gpu` from a sibling tool (agent-deck) sitting in uninterruptible
+# D-state on `dxgvmb_send_sync_msg`. Running the test then does not measure the restart, it
+# measures the wedge, and it manufactures the outage it exists to prevent.
+#
+# This is a SKIP, not a failure: the release is not broken, the host is momentarily unable
+# to answer the question. Loud, because a silent skip is the vacuous green this gate exists
+# to remove.
+_gpu_wedged_pids="$(ps -eo pid,stat,args 2>/dev/null | awk '$2 ~ /^D/ && /nvidia-smi|axon-indexer/ {print $1}' | tr '\n' ' ')"
+if [[ -n "${_gpu_wedged_pids// /}" ]]; then
+    skip "GPU channel WEDGED (pids in uninterruptible D-state: ${_gpu_wedged_pids}) — the indexer cannot complete a TensorRT teardown through a stuck dxg channel. Testing now would measure the wedge and strand the live indexer (REQ-AXO-902271). Re-run when \`ps -eo stat | grep '^D'\` is empty."
+    printf '\n%d passed, %d failed (SKIPPED — nothing was measured)\n' "$PASS" "$FAIL"; exit 77
+fi
 printf '  pre-condition: %s Running+Ready pid=%s · brain :%s serving\n' "$PROC" "$PRE_PID" "$BRAIN_PORT"
 
 start_brain_sampler
