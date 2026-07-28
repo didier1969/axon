@@ -118,6 +118,13 @@ print(json.dumps({
 BROADCAST_PREFLIGHT_SENT=0
 on_promote_exit() {
   local rc=$?
+  # REQ-AXO-902233 — report the measured outage on EVERY exit, including the failure path.
+  # `run_step` calls `exit "$rc"` when a step fails, which skipped the nominal call to
+  # `_report_mcp_outage` at the end of the script — so the availability number was missing
+  # exactly on the runs where it matters most, and the sampler subshell was left running.
+  # It is a no-op when the sampler never started or has already been reported (the function
+  # clears MCP_SAMPLER_PID).
+  _report_mcp_outage || true
   [[ "$BROADCAST_PREFLIGHT_SENT" -eq 1 ]] || return 0
   curl -fsS --max-time 5 "http://127.0.0.1:44129/readyz" >/dev/null 2>&1 || return 0
   if [[ "$rc" -eq 0 ]]; then
@@ -526,42 +533,21 @@ _report_mcp_outage() {
   [[ -n "$MCP_SAMPLER_PID" ]] || return 0
   kill "$MCP_SAMPLER_PID" 2>/dev/null || true
   wait "$MCP_SAMPLER_PID" 2>/dev/null || true
-  local worst total
-  read -r worst total < <(python3 - "$MCP_SAMPLE_FILE" <<'PY' 2>/dev/null || echo "0 0"
-import sys
-run = worst = total = 0
-try:
-    for line in open(sys.argv[1]):
-        parts = line.strip().split(',')
-        if len(parts) != 2:
-            continue
-        if parts[1] == 'down':
-            run += 1; total += 1; worst = max(worst, run)
-        else:
-            run = 0
-except OSError:
-    pass
-print(worst, total)
-PY
-  )
-  # A silent instrument reads exactly like a green result. Report the sample count and
-  # the covered span so "0 outage" can be distinguished from "measured nothing", and say
-  # the true resolution: each sample costs a curl (up to its 2s timeout) PLUS the 1s
-  # sleep. MEASURED on a refused port: ~3s between samples, so a blip shorter than that
-  # can fall between two samples. Do not quote this instrument to finer than ~3s.
-  local n span first last
-  n="$(wc -l < "$MCP_SAMPLE_FILE" 2>/dev/null | tr -d ' ')"; n="${n:-0}"
-  first="$(head -1 "$MCP_SAMPLE_FILE" 2>/dev/null | cut -d, -f1)"
-  last="$(tail -1 "$MCP_SAMPLE_FILE" 2>/dev/null | cut -d, -f1)"
-  span=0
-  [[ -n "$first" && -n "$last" ]] && span=$(( last - first ))
+  MCP_SAMPLER_PID=""
+  local worst total n span res
+  read -r worst total n span res < <(python3 "$ROOT_DIR/scripts/release/mcp_outage_report.py" "$MCP_SAMPLE_FILE" 2>/dev/null || echo "0 0 0 0 0")
   promote_log ""
   promote_log "== MCP availability (measured across steps 5→6c) =="
+  # A silent instrument reads exactly like a green result: publish the sample count and the
+  # covered span so "0 outage" can never be confused with "measured nothing".
   if [[ "$n" -lt 5 ]]; then
     promote_log "   ⚠️ NOT MEASURED — only ${n} sample(s) collected. Treat the figures below as UNKNOWN, not as zero."
   fi
   promote_log "   worst contiguous outage: ${worst}s · total unreachable: ${total}s"
-  promote_log "   ${n} samples over ${span}s (measured resolution ~3s — a shorter blip can fall between samples)"
+  # The resolution is MEASURED from the samples, not asserted. It is the number that says
+  # how finely this instrument may be quoted — a sub-second claim from a ~3s instrument is
+  # not a measurement.
+  promote_log "   ${n} samples over ${span}s · measured resolution ${res}s (a blip shorter than that can fall between two samples)"
   promote_log "   samples: $MCP_SAMPLE_FILE"
   if [[ "${worst:-0}" -gt 60 ]]; then
     promote_log "   ⚠️ outage > 60s — third-party MCP clients may have declared a crash and self-restarted (REQ-AXO-902256 acceptance breach)."
