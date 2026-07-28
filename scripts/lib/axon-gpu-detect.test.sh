@@ -52,5 +52,33 @@ r=0
 ( export PROJECT_ROOT="$(mktemp -d)"; unset AXON_GPU_PROBE_CMD; detect_gpu ) || r=1
 assert "no helper -> detect_gpu returns 1" "[ $r -eq 1 ]"
 
+# --- gpu_probe_json: same bounded contract, but it returns the PAYLOAD -------------
+# Callers needed a field (memory_used_mb, compute_cap) and were reaching for
+# `nvidia-smi` or a bare synchronous `gpu_nvml.py` to get it. Operator rule: NVML only,
+# never the CLI — and this file's own doctrine adds the part that matters more: NVML
+# talks to the same driver and wedges just as hard, so never wait unboundedly.
+
+# T5 — payload is returned verbatim when the probe answers.
+export AXON_GPU_PROBE_CMD='printf "{\"available\":true,\"memory_used_mb\":1234,\"compute_cap\":\"8.6\"}\n"'
+_out="$(gpu_probe_json 3 2>/dev/null || true)"
+assert "gpu_probe_json returns the payload" "[[ '$_out' == *'\"memory_used_mb\":1234'* ]]"
+assert "gpu_probe_json carries compute_cap" "[[ '$_out' == *'8.6'* ]]"
+unset AXON_GPU_PROBE_CMD
+
+# T6 — THE regression guard for the bug this function shipped with. `gpu_probe_json` is
+# called inside `$(...)`, and command substitution waits for EOF on its pipe — which only
+# arrives when EVERY holder closes it, background jobs included. Without `>/dev/null 2>&1`
+# on the background subshell, the deadline below is decorative: MEASURED at 90 s for a
+# 3 s budget against a genuinely wedged WSL2 GPU channel. The assertion must therefore be
+# made through a command substitution, exactly as real callers do — testing the function
+# bare would pass while the caller hangs.
+export AXON_GPU_PROBE_CMD='sleep 30'
+_start=$SECONDS
+_out="$(gpu_probe_json 2 2>/dev/null || true)"
+_elapsed=$(( SECONDS - _start ))
+assert "hung probe -> gpu_probe_json returns within its deadline THROUGH \$( )" "[ $_elapsed -le 4 ]"
+assert "hung probe -> gpu_probe_json yields empty (unknown), never a fabricated 0" "[ -z '$_out' ]"
+unset AXON_GPU_PROBE_CMD
+
 printf '\ndetect_gpu tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -46,6 +46,7 @@ KEYS = (
     "temperature_c",
     "power_w",
     "power_limit_w",
+    "compute_cap",
 )
 
 
@@ -159,6 +160,23 @@ def _bind(library: ctypes.CDLL) -> dict[str, Any]:
     except AttributeError:
         fns["get_power_limit"] = None
 
+    # CUDA compute capability — needed by build_ort_tensorrt_artifact.sh to pick
+    # CMAKE_CUDA_ARCHITECTURES. It used to shell out to
+    # `nvidia-smi --query-gpu=compute_cap`, the last CLI probe on a build path.
+    # Operator rule: NVML only, never the CLI — a wedged `nvidia-smi` sits in
+    # uninterruptible D-state and takes the whole GPU channel with it.
+    try:
+        get_cuda_cc = library.nvmlDeviceGetCudaComputeCapability
+        get_cuda_cc.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        get_cuda_cc.restype = ctypes.c_int
+        fns["get_cuda_cc"] = get_cuda_cc
+    except AttributeError:
+        fns["get_cuda_cc"] = None
+
     return fns
 
 
@@ -202,7 +220,14 @@ def _status_for_library(candidate: str, device_index: int) -> dict[str, Any]:
             "temperature_c": None,
             "power_w": None,
             "power_limit_w": None,
+            "compute_cap": None,
         }
+
+        if fns["get_cuda_cc"] is not None:
+            major = ctypes.c_int(0)
+            minor = ctypes.c_int(0)
+            if fns["get_cuda_cc"](device, ctypes.byref(major), ctypes.byref(minor)) == 0:
+                result["compute_cap"] = f"{major.value}.{minor.value}"
 
         if fns["get_name"] is not None:
             name_buf = ctypes.create_string_buffer(_NVML_DEVICE_NAME_BUFFER_SIZE)

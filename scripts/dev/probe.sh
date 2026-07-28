@@ -62,6 +62,10 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+# `gpu_probe_json` needs PROJECT_ROOT to locate the NVML helper (REQ-AXO-902163).
+PROJECT_ROOT="$ROOT"
+# shellcheck source=../lib/axon-gpu-detect.sh
+source "$ROOT/scripts/lib/axon-gpu-detect.sh"
 
 # Auto-rebuild debug binary if any .rs is newer than the binary
 BIN=".axon/cargo-target/debug/axon-indexer"
@@ -180,7 +184,21 @@ except Exception:
     print("0,0,0,err,err")
 ' "$HB_PATH")"
 
-    GPU="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ' || echo 0)"
+    # NVML via the BOUNDED probe, never the `nvidia-smi` CLI and never a synchronous NVML
+    # call either. This runs in a SAMPLING LOOP, the worst possible place to block: NVML
+    # talks to the same WSL2 driver as the CLI and wedges just as hard (measured: a
+    # synchronous probe blocked past 120 s while four nvidia-smi sat in D-state), so a
+    # naive loop would add one unkillable process per iteration.
+    # `gpu_probe_json` abandons on a deadline instead of waiting — REQ-AXO-902163.
+    GPU="$(gpu_probe_json 3 2>/dev/null | python3 -c 'import json,sys
+try:
+    v = json.load(sys.stdin).get("memory_used_mb")
+    print(v if v is not None else "")
+except Exception:
+    print("")' 2>/dev/null || true)"
+    # Empty = unknown (probe wedged or no GPU). Recorded as "na", NOT as 0: a zero here
+    # would read as "the GPU is idle" in the CSV, which is a different claim entirely.
+    [[ -n "$GPU" ]] || GPU="na"
     ZOMBIES="$(ps -ef | awk -v p="$DEV_PID" '$3 == p && /<defunct>/' | wc -l | tr -d ' ')"
 
     # Split HB into total,rate,queue,claim,provider

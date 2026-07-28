@@ -122,10 +122,25 @@ case "$ORT_TENSORRT_BUILD_PROFILE" in
     ;;
 esac
 
-if [[ -z "$CUDA_ARCHITECTURES" ]] && command -v /usr/lib/wsl/lib/nvidia-smi >/dev/null 2>&1; then
-  detected_compute_cap="$(/usr/lib/wsl/lib/nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
-  if [[ "$detected_compute_cap" =~ ^[0-9]+\.[0-9]+$ ]]; then
-    CUDA_ARCHITECTURES="${detected_compute_cap/.}"
+# Compute capability via NVML, never the `nvidia-smi` CLI (operator rule, and
+# REQ-AXO-902271 gives the reason: a wedged `nvidia-smi` sits in uninterruptible D-state
+# and holds the WSL2 GPU channel, which then stalls every stop/promote on this host —
+# observed repeatedly on 2026-07-28). `scripts/lib/gpu_nvml.py` is the single canonical
+# probe; it now exposes `compute_cap` for exactly this call site.
+if [[ -z "$CUDA_ARCHITECTURES" ]]; then
+  _gpu_detect_lib="$(dirname "${BASH_SOURCE[0]}")/lib/axon-gpu-detect.sh"
+  if [[ -f "$_gpu_detect_lib" ]]; then
+    PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+    # shellcheck source=lib/axon-gpu-detect.sh
+    source "$_gpu_detect_lib"
+    detected_compute_cap="$(gpu_probe_json 6 2>/dev/null | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("compute_cap") or "")
+except Exception:
+    print("")' 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$detected_compute_cap" =~ ^[0-9]+\.[0-9]+$ ]]; then
+      CUDA_ARCHITECTURES="${detected_compute_cap/.}"
+    fi
   fi
 fi
 

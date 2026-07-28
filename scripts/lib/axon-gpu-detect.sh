@@ -57,3 +57,53 @@ detect_gpu() {
     rm -f "$out" 2>/dev/null
     return 1
 }
+
+# gpu_probe_json [timeout_s] — same BOUNDED probe as `detect_gpu`, but prints the NVML
+# JSON payload on stdout (empty string when unavailable, wedged, or past the deadline).
+#
+# Exists because callers needed a FIELD (`memory_used_mb`, `compute_cap`), not a
+# yes/no, and were reaching for `nvidia-smi` or a bare synchronous `gpu_nvml.py` to get
+# it. Both are wrong here for the same reason, stated at the top of this file: NVML talks
+# to the same driver as the CLI and wedges just as hard, so the rule is not "use NVML" —
+# it is NEVER WAIT UNBOUNDEDLY.
+#
+# Measured on 2026-07-28: a synchronous `python3 gpu_nvml.py` blocked past 120 s while
+# four `nvidia-smi` sat in D-state on the WSL2 channel. A sampling loop calling that
+# synchronously would add one stuck process per iteration.
+#
+# Callers must treat an empty result as "unknown", never as zero.
+gpu_probe_json() {
+    local timeout_s="${1:-${AXON_GPU_PROBE_TIMEOUT_S:-4}}"
+    local probe_cmd="${AXON_GPU_PROBE_CMD:-}"
+    if [[ -z "$probe_cmd" ]]; then
+        local helper="${PROJECT_ROOT:-.}/scripts/lib/gpu_nvml.py"
+        [[ -f "$helper" ]] || return 1
+        probe_cmd="python3 $helper"
+    fi
+
+    local out
+    out="$(mktemp)"
+    # `>/dev/null 2>&1` on the SUBSHELL is load-bearing, not tidiness. This function is
+    # called inside `$(...)`, and command substitution waits for EOF on its pipe — which
+    # only arrives when every holder of that descriptor closes it, background jobs
+    # included. Without this, the caller blocks on the wedged probe for as long as it
+    # takes and the deadline below does nothing at all. MEASURED before the fix: a
+    # `gpu_probe_json 3` returned after 90 s. The probe's real output already goes to
+    # "$out"; the inherited descriptor carries nothing and must simply be let go.
+    ( eval "$probe_cmd" >"$out" 2>/dev/null; printf '\n__AXON_GPU_PROBE_DONE__\n' >>"$out" ) \
+        >/dev/null 2>&1 &
+
+    local deadline=$(( SECONDS + timeout_s ))
+    while (( SECONDS < deadline )); do
+        if grep -q '__AXON_GPU_PROBE_DONE__' "$out" 2>/dev/null; then
+            grep -v '__AXON_GPU_PROBE_DONE__' "$out" 2>/dev/null
+            rm -f "$out"
+            return 0
+        fi
+        sleep 0.2
+    done
+    # Wedged: abandon the background job (it is reparented to init and dies when the
+    # driver recovers) and report nothing rather than blocking the caller.
+    rm -f "$out" 2>/dev/null
+    return 1
+}
