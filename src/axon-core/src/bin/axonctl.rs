@@ -782,13 +782,33 @@ impl RealCutoverIo {
             (brain_gone, indexer_gone)
         });
 
-        let _ = Command::new("bash")
+        // REQ-AXO-902233 — CAPTURE this output instead of discarding it. It went to
+        // `Stdio::null()`, which is why 63-74 s of the promote's outage had no diagnostic
+        // at all: `stop.sh` now emits `[stop-phase]` markers and they would have been
+        // thrown away. Same file-redirect shape as `spawn_start`'s cutover-start.log.
+        let mut stop_cmd = Command::new("bash");
+        stop_cmd
             .arg(&axon_entry)
-            .args(["--instance", self.config.instance_kind.label(), "stop", "--hard"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .context("run scripts/axon stop --hard")?;
+            .args(["--instance", self.config.instance_kind.label(), "stop", "--hard"]);
+        match fs::File::create(self.release_dir.join("cutover-stop.log")) {
+            Ok(log) => match log.try_clone() {
+                Ok(errlog) => {
+                    stop_cmd.stdout(std::process::Stdio::from(log));
+                    stop_cmd.stderr(std::process::Stdio::from(errlog));
+                }
+                Err(_) => {
+                    stop_cmd.stdout(std::process::Stdio::null());
+                    stop_cmd.stderr(std::process::Stdio::null());
+                }
+            },
+            Err(_) => {
+                // Log file unavailable: fall back to discarding rather than letting the
+                // stop inherit our stdout and interleave with the promote log.
+                stop_cmd.stdout(std::process::Stdio::null());
+                stop_cmd.stderr(std::process::Stdio::null());
+            }
+        }
+        let _ = stop_cmd.status().context("run scripts/axon stop --hard")?;
 
         done.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Ok((brain_gone, indexer_gone)) = sampler.join() {

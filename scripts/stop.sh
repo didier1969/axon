@@ -443,6 +443,23 @@ verify_only_exit_if_needed() {
 
 echo "🛑 Stopping Axon v2 Architecture (Chirurgical Mode)..."
 
+# REQ-AXO-902233 — phase timings for this script.
+#
+# `stop_instance` (the cutover's) takes 63-74 s and is the single largest slice of the
+# promote's MCP outage (89-96 s measured). Yet the roles themselves are GONE in ~200 ms:
+# the cutover's own sampler recorded brain_stop_ms=108 and indexer_stop_ms=205. So the
+# time is spent in this script's machinery, not waiting for processes to die — and nothing
+# said where. `devenv shell` was the obvious suspect and was cleared by measurement: 2.3 s,
+# called once.
+#
+# Absolute epoch stamps, like the cutover phases, so the two logs can be joined.
+_STOP_T0_MS="$(date +%s%3N)"
+_stop_phase() {
+    printf '[stop-phase] %s at_ms=%s elapsed_ms=%s\n' \
+        "$1" "$(date +%s%3N)" "$(( $(date +%s%3N) - _STOP_T0_MS ))"
+}
+_stop_phase begin
+
 # REQ-AXO-901735 — stop process-compose daemon if running for this instance.
 # Process-compose manages restart policies; killing children without stopping
 # the supervisor causes immediate respawn.
@@ -464,6 +481,7 @@ if axon_supervisor_healthy "$_PC_PORT"; then
             # reap below (axon_reap_supervisor_tree / SIGKILL-by-PID) cleans up.
             timeout -k 5 25 "$_PC_BIN" down -p "$_PC_PORT" 2>/dev/null || true
             sleep 1
+            _stop_phase pc_down
         else
             # REQ-AXO-901794 — role-scoped stop must NOT tear down the whole
             # process-compose daemon (which would kill brain + indexer + dashboard
@@ -547,7 +565,9 @@ if [[ -x "$AXONCTL_BIN" ]]; then
     if [ "$HARD_MODE" = "1" ]; then
         AXONCTL_ARGS+=(--hard)
     fi
+    _stop_phase before_axonctl_stop
     "$AXONCTL_BIN" "${AXONCTL_ARGS[@]}" && AXONCTL_OK=1 || AXONCTL_OK=0
+    _stop_phase after_axonctl_stop
 
     # REQ-AXO-093 — orphan-socket guard: axonctl stop kills processes but
     # does not always unlink the AF_UNIX sockets. Leftover sockets cause
@@ -592,6 +612,7 @@ if [[ -x "$AXONCTL_BIN" ]]; then
     # soit le chemin du binaire — y compris le brain dev depuis
     # .axon/cargo-target/release/axon-brain (hors bin/, invisible au matcher
     # binaire canonical_axon_processes_alive_pids).
+    _stop_phase before_residual_sweep
     _residual_pids="$(collect_canonical_listener_pids)"
     if [[ -n "$_residual_pids" && "$STOP_ROLE" == "all" && "$HARD_MODE" != "1" ]]; then
         echo "⚠️ Résidu canonical détecté après stop (pids: $_residual_pids) — escalade --hard."
@@ -604,6 +625,7 @@ if [[ -x "$AXONCTL_BIN" ]]; then
         exit 1
     fi
     if [ "$AXONCTL_OK" = "1" ]; then
+        _stop_phase end
         echo "✅ Axon stopped (Other projects preserved)."
         exit 0
     else
