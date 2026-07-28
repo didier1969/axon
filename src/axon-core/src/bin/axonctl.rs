@@ -746,6 +746,42 @@ impl RealCutoverIo {
         if !axon_entry.exists() {
             return Err(anyhow!("scripts/axon not found at {}", axon_entry.display()));
         }
+        // REQ-AXO-902233 — WHICH role costs the 63 s this stop takes?
+        //
+        // `stop --hard` takes down brain AND indexer together, and the promote's MCP
+        // outage (89 s measured) contains all of it. But the SOLL writer-guard exclusivity
+        // that makes the stop mandatory concerns the BRAIN alone — the indexer holds the
+        // IST guard. If the indexer's TensorRT teardown is most of the 63 s, then the
+        // brain is kept down waiting for a role that has no bearing on serving MCP, and
+        // `stop.sh --role brain` (which already exists: "others preserved") would cut the
+        // outage without touching any topology.
+        //
+        // A sampler thread polls each role's pids while the blocking stop runs, and
+        // records the instant each one is gone. Measuring is what decides — the previous
+        // hypothesis on this same window ("the gate waits on the GPU") turned out half
+        // wrong: the indexer adds only 8.7 s at the gate.
+        let brain_cfg = self.role_config(RuntimeRole::Brain);
+        let indexer_cfg = self.role_config(RuntimeRole::Indexer);
+        let stop_t0 = now_ms();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done_sampler = done.clone();
+        let sampler = std::thread::spawn(move || {
+            let (mut brain_gone, mut indexer_gone) = (0u128, 0u128);
+            while !done_sampler.load(std::sync::atomic::Ordering::Relaxed) {
+                if brain_gone == 0 && find_instance_all_pids(&brain_cfg).is_empty() {
+                    brain_gone = now_ms();
+                }
+                if indexer_gone == 0 && find_instance_all_pids(&indexer_cfg).is_empty() {
+                    indexer_gone = now_ms();
+                }
+                if brain_gone != 0 && indexer_gone != 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            (brain_gone, indexer_gone)
+        });
+
         let _ = Command::new("bash")
             .arg(&axon_entry)
             .args(["--instance", self.config.instance_kind.label(), "stop", "--hard"])
@@ -753,6 +789,17 @@ impl RealCutoverIo {
             .stderr(std::process::Stdio::null())
             .status()
             .context("run scripts/axon stop --hard")?;
+
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Ok((brain_gone, indexer_gone)) = sampler.join() {
+            // 0 = never observed gone within the stop (it was already down, or the poll
+            // missed it). Reported as-is rather than as a fabricated duration.
+            eprintln!(
+                "[cutover-phase] stop_detail stop_start_ms={stop_t0} brain_gone_ms={brain_gone} indexer_gone_ms={indexer_gone} brain_stop_ms={} indexer_stop_ms={}",
+                brain_gone.saturating_sub(stop_t0),
+                indexer_gone.saturating_sub(stop_t0),
+            );
+        }
         // `stop.sh` is best-effort on residuals, so verify canonically: no live listener
         // for either role means the writer guard is releasable and the swap can proceed.
         let remaining: Vec<i32> = [RuntimeRole::Brain, RuntimeRole::Indexer]
