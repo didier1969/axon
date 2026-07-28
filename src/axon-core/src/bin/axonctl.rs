@@ -802,23 +802,76 @@ impl RealCutoverIo {
     }
 }
 
+/// REQ-AXO-902233 — emit one phase-boundary timing line, in epoch milliseconds.
+///
+/// The MCP-availability sampler records absolute unix seconds, so absolute stamps here are
+/// what makes the two joinable: the outage window can be ATTRIBUTED to a phase instead of
+/// merely coexisting with the cutover step. Elapsed-only durations could not do that.
+///
+/// Why this exists at all: the promote's outage was measured (~28 s, once the scorer was
+/// fixed) but never decomposed. `brain launch→readyz` is ~5 s, so the bulk sits elsewhere —
+/// and REQ-AXO-902233 says in as many words "à MESURER avant de coder". These lines are
+/// that measurement. They go to stderr, which `promote_live_safe.sh` streams into the
+/// promote log.
+fn cutover_phase(phase: &str, started_ms: u128) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    eprintln!(
+        "[cutover-phase] {phase} start_ms={started_ms} end_ms={now} elapsed_ms={}",
+        now.saturating_sub(started_ms)
+    );
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 impl CutoverIo for RealCutoverIo {
     fn snapshot_current(&mut self) -> Result<(), String> {
-        cutover_snapshot(&self.release_dir).map(|_| ()).map_err(|e| format!("{e:#}"))
+        let t0 = now_ms();
+        let r = cutover_snapshot(&self.release_dir).map(|_| ()).map_err(|e| format!("{e:#}"));
+        cutover_phase("snapshot_current", t0);
+        r
     }
     fn stage_candidate(&mut self) -> Result<(), String> {
-        cutover_stage_files(&self.candidate_manifest, &self.release_dir, &self.bin_dir)
-            .map_err(|e| format!("{e:#}"))
+        let t0 = now_ms();
+        let r = cutover_stage_files(&self.candidate_manifest, &self.release_dir, &self.bin_dir)
+            .map_err(|e| format!("{e:#}"));
+        cutover_phase("stage_candidate", t0);
+        r
     }
     fn restart_runtime(&mut self) -> Result<(), String> {
-        self.stop_instance().map_err(|e| format!("{e:#}"))?;
+        // Timed SEPARATELY from spawn_start on purpose. `stop_instance` runs
+        // `scripts/axon stop --hard`, which takes down the WHOLE instance — brain AND
+        // indexer — and then waits for both roles' pids to disappear. The GPU indexer's
+        // teardown is the slow one (TensorRT; its shutdown budget is 120 s since
+        // REQ-AXO-902263), while the SOLL writer-guard exclusivity that motivates the stop
+        // concerns the BRAIN alone; the indexer holds the IST guard, not SOLL. If these two
+        // numbers show `stop_instance` dominating, the remedy is to restart only what
+        // changed — which REQ-AXO-902148 had already delivered before the cutover became
+        // the single path — and NOT a topology change.
+        let t0 = now_ms();
+        let stop = self.stop_instance().map_err(|e| format!("{e:#}"));
+        cutover_phase("stop_instance", t0);
+        stop?;
         // REQ-AXO-902258 — start from the STAGED manifest: `current.json` still names the
         // OLD release at this point, and start.sh would reinstall it over the candidate.
         // No byte check here: the spawn is DETACHED, so start.sh has not necessarily
         // installed anything yet — checking now would race. The proof lives in finalize(),
         // which the FSM only reaches after the liveness gate.
         let pending = self.release_dir.join("pending.json");
-        self.spawn_start(&pending).map_err(|e| format!("{e:#}"))
+        let t1 = now_ms();
+        let spawned = self.spawn_start(&pending).map_err(|e| format!("{e:#}"));
+        // NOTE: this measures the SPAWN only — the child is detached, so the runtime's own
+        // boot continues past this line. The gap between here and the first green probe is
+        // the boot, and it is visible as `liveness_gate` below.
+        cutover_phase("spawn_start", t1);
+        spawned
     }
     fn finalize(&mut self) -> Result<(), String> {
         // REQ-AXO-902258 — byte-level proof BEFORE declaring the promote done. The
@@ -903,9 +956,32 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
         indexer_health_port(config.instance_kind)
     );
     let indexer_expected = manifest_indexer_expected(&config);
+    // REQ-AXO-902233 — time the liveness gate, and time the two ROLES SEPARATELY.
+    //
+    // The gate waits for brain AND indexer. If the brain is green early and the gate keeps
+    // waiting on the GPU indexer, then the promote's outage is not a brain problem at all,
+    // and no amount of blue/green on the brain would shorten it. That distinction is
+    // invisible today because the gate reports one boolean. These counters make it a
+    // measurement instead of a guess.
+    //
+    // Instrumented HERE, in the I/O caller, rather than inside `drive_cutover`: the FSM is
+    // pure and unit-tested (its decision table is what proved the auto-rollback), and
+    // threading a clock through it would trade that away for nothing.
+    let gate_t0 = std::cell::Cell::new(0u128);
+    let brain_green_ms = std::cell::Cell::new(0u128);
+    let indexer_green_ms = std::cell::Cell::new(0u128);
     let probe = || {
+        if gate_t0.get() == 0 {
+            gate_t0.set(now_ms());
+        }
         let brain_ok = http_ready(&brain_url, 3);
+        if brain_ok && brain_green_ms.get() == 0 {
+            brain_green_ms.set(now_ms());
+        }
         let indexer_ok = !indexer_expected || http_ready(&indexer_url, 3);
+        if indexer_ok && indexer_green_ms.get() == 0 {
+            indexer_green_ms.set(now_ms());
+        }
         brain_ok && indexer_ok
     };
     let wait = || thread::sleep(Duration::from_millis(cargs.poll_interval_ms));
@@ -918,6 +994,21 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
     };
 
     let verdict = drive_cutover(&mut io, probe, cargs.max_polls, wait);
+
+    // REQ-AXO-902233 — publish the gate breakdown. `indexer_green - brain_green` is the
+    // number that decides the next step: positive and large means the promote waits on the
+    // GPU indexer, not on the brain.
+    if gate_t0.get() != 0 {
+        cutover_phase("liveness_gate", gate_t0.get());
+        eprintln!(
+            "[cutover-phase] liveness_detail gate_start_ms={} brain_green_ms={} indexer_green_ms={} brain_wait_ms={} indexer_extra_ms={}",
+            gate_t0.get(),
+            brain_green_ms.get(),
+            indexer_green_ms.get(),
+            brain_green_ms.get().saturating_sub(gate_t0.get()),
+            indexer_green_ms.get().saturating_sub(brain_green_ms.get()),
+        );
+    }
 
     let (ok, phase, detail): (bool, &str, Option<String>) = match &verdict {
         CutoverVerdict::Promoted => (true, "promoted", None),
