@@ -762,37 +762,66 @@ impl RealCutoverIo {
         // wrong: the indexer adds only 8.7 s at the gate.
         let brain_cfg = self.role_config(RuntimeRole::Brain);
         let indexer_cfg = self.role_config(RuntimeRole::Indexer);
-        // REQ-AXO-902233 — how much of each role is ON DISK when we ask it to stop.
+        // REQ-AXO-902233 — host conditions at the instant we ask the roles to stop.
         //
-        // The indexer's teardown time varies by a factor of 200 between promotes (205 ms
-        // vs 46.6 s) on identical code. Two hypotheses were tested and one died: it is NOT
-        // the GPU session state — a stop performed while the embedder was `sleeping` still
-        // took 48 s. The surviving hypothesis is paging: this host runs with swap ~93 %
-        // full, the indexer holds ~8 GB RSS, and an idle process is exactly what the kernel
-        // evicts. Tearing it down then means faulting all of it back from disk — slow, and
-        // it shows up as uninterruptible D-state, which in turn inflates the load average
-        // (measured at 71 on 16 cores, driven by TypeDB/Python, not by Axon).
+        // The indexer's teardown varies by a factor of 200 across promotes on identical
+        // code (205 ms vs 46.6 s). Three explanations were tested and all three died:
         //
-        // If that is right, the counter-intuitive consequence is that the LONGER the
-        // indexer has been idle, the SLOWER it stops. VmSwap at stop time is the number
-        // that settles it; without it we would keep guessing.
-        let vm_swap_kb = |pids: &[i32]| -> u64 {
+        //   * GPU session active — REFUTED: a stop taken while the embedder was `sleeping`
+        //     (GPU released by the idle-drop, REQ-AXO-902234) still took 48 s.
+        //   * the indexer is swapped out — REFUTED: `VmSwap` is 0 throughout, even with
+        //     the host's swap 99.7 % occupied. (An earlier version of this very block
+        //     recorded VmSwap; it can only ever print 0 here, so it was replaced.)
+        //   * file-backed pages evicted and re-read — REFUTED: major faults sit at 190 and
+        //     do not move, and kernel memory pressure (PSI) is 0.08 %. The 2→7→2 GB RSS
+        //     swing is the pipeline allocating in bursts, not paging.
+        //
+        // What survives is the FIRST thing observed: contention on the WSL2 GPU channel.
+        // Every slow teardown coincided with `nvidia-smi` processes stuck in
+        // uninterruptible D-state on `dxgvmb_send_sync_msg` (REQ-AXO-902271), and the host
+        // carries a load average of 71-82 on 16 cores driven by TypeDB and Python — not by
+        // Axon. So record what actually discriminates: how many tasks are blocked in D,
+        // and how big each role is at that moment.
+        let d_state_count = std::fs::read_dir("/proc")
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()))
+                    .filter(|pid| {
+                        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                            .ok()
+                            .and_then(|s| {
+                                // state is the field after the (comm) parenthesis
+                                s.rsplit(')').next().and_then(|rest| {
+                                    rest.split_whitespace().next().map(|st| st == "D")
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let rss_kb = |pids: &[i32]| -> u64 {
             pids.iter()
                 .filter_map(|p| std::fs::read_to_string(format!("/proc/{p}/status")).ok())
                 .filter_map(|s| {
                     s.lines()
-                        .find(|l| l.starts_with("VmSwap:"))
+                        .find(|l| l.starts_with("VmRSS:"))
                         .and_then(|l| l.split_whitespace().nth(1).map(str::to_string))
                 })
                 .filter_map(|v| v.parse::<u64>().ok())
                 .sum()
         };
+        let loadavg = std::fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|s| s.split_whitespace().next().map(str::to_string))
+            .unwrap_or_else(|| "?".to_string());
         let brain_pids = find_instance_all_pids(&brain_cfg);
         let indexer_pids = find_instance_all_pids(&indexer_cfg);
         eprintln!(
-            "[cutover-phase] stop_paging brain_swap_kb={} indexer_swap_kb={} brain_pids={} indexer_pids={}",
-            vm_swap_kb(&brain_pids),
-            vm_swap_kb(&indexer_pids),
+            "[cutover-phase] stop_conditions d_state={d_state_count} loadavg={loadavg} brain_rss_kb={} indexer_rss_kb={} brain_pids={} indexer_pids={}",
+            rss_kb(&brain_pids),
+            rss_kb(&indexer_pids),
             brain_pids.len(),
             indexer_pids.len(),
         );
