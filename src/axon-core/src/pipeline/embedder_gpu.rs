@@ -414,12 +414,15 @@ mod tests {
     fn gpu_vram_reclaimed_on_drop_and_restored_on_reload() {
         use crate::embedding_contract::DIMENSION;
 
+        // NVML, never the `nvidia-smi` CLI (operator rule; the crate already binds NVML
+        // for exactly this). Spawning the CLI here was the last executable violation in
+        // the tree, and the worst kind: on a host whose WSL2 GPU channel is wedged the
+        // process enters uninterruptible D-state, so the test could not be killed — not
+        // even with SIGKILL. Observed repeatedly on 2026-07-28 (REQ-AXO-902271).
         fn total_gpu_used_mib() -> u64 {
-            let out = std::process::Command::new("nvidia-smi")
-                .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-                .output()
-                .expect("nvidia-smi must be on PATH for the ship-gate");
-            String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+            crate::embedder::current_gpu_memory_snapshot()
+                .map(|s| s.used_mb)
+                .expect("NVML must answer for the ship-gate (GPU + driver required)")
         }
         let settle = || std::thread::sleep(std::time::Duration::from_millis(2000));
 
