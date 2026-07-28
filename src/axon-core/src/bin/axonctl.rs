@@ -762,6 +762,40 @@ impl RealCutoverIo {
         // wrong: the indexer adds only 8.7 s at the gate.
         let brain_cfg = self.role_config(RuntimeRole::Brain);
         let indexer_cfg = self.role_config(RuntimeRole::Indexer);
+        // REQ-AXO-902233 — how much of each role is ON DISK when we ask it to stop.
+        //
+        // The indexer's teardown time varies by a factor of 200 between promotes (205 ms
+        // vs 46.6 s) on identical code. Two hypotheses were tested and one died: it is NOT
+        // the GPU session state — a stop performed while the embedder was `sleeping` still
+        // took 48 s. The surviving hypothesis is paging: this host runs with swap ~93 %
+        // full, the indexer holds ~8 GB RSS, and an idle process is exactly what the kernel
+        // evicts. Tearing it down then means faulting all of it back from disk — slow, and
+        // it shows up as uninterruptible D-state, which in turn inflates the load average
+        // (measured at 71 on 16 cores, driven by TypeDB/Python, not by Axon).
+        //
+        // If that is right, the counter-intuitive consequence is that the LONGER the
+        // indexer has been idle, the SLOWER it stops. VmSwap at stop time is the number
+        // that settles it; without it we would keep guessing.
+        let vm_swap_kb = |pids: &[i32]| -> u64 {
+            pids.iter()
+                .filter_map(|p| std::fs::read_to_string(format!("/proc/{p}/status")).ok())
+                .filter_map(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("VmSwap:"))
+                        .and_then(|l| l.split_whitespace().nth(1).map(str::to_string))
+                })
+                .filter_map(|v| v.parse::<u64>().ok())
+                .sum()
+        };
+        let brain_pids = find_instance_all_pids(&brain_cfg);
+        let indexer_pids = find_instance_all_pids(&indexer_cfg);
+        eprintln!(
+            "[cutover-phase] stop_paging brain_swap_kb={} indexer_swap_kb={} brain_pids={} indexer_pids={}",
+            vm_swap_kb(&brain_pids),
+            vm_swap_kb(&indexer_pids),
+            brain_pids.len(),
+            indexer_pids.len(),
+        );
         let stop_t0 = now_ms();
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done_sampler = done.clone();
