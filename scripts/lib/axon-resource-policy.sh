@@ -93,40 +93,20 @@ axon_default_watcher_policy() {
     esac
 }
 
-axon_compute_worker_cap() {
-    local instance_kind="${1:?instance kind required}"
-    local budget_class="${2:?budget class required}"
-    local cpu_cores="${3:?cpu cores required}"
-    local cap=1
-
-    case "$budget_class" in
-        aggressive)
-            cap="$cpu_cores"
-            ;;
-        balanced)
-            cap=$(( cpu_cores - 1 ))
-            ;;
-        conservative)
-            cap=$(( cpu_cores / 3 ))
-            ;;
-    esac
-
-    if [[ "$instance_kind" == "dev" && "$cap" -gt 6 ]]; then
-        cap=6
-    fi
-
-    if [[ "$instance_kind" == "live" && "$cap" -gt 12 ]]; then
-        cap=12
-    fi
-
-    if [[ "$instance_kind" == "live" && "$cap" -lt 2 ]]; then
-        cap=2
-    elif [[ "$instance_kind" != "live" && "$cap" -lt 1 ]]; then
-        cap=1
-    fi
-
-    printf '%s\n' "$cap"
-}
+# REQ-AXO-902275 — `axon_compute_worker_cap` SUPPRIMÉE. Elle calculait un plafond de
+# workers (aggressive/balanced/conservative, bornes dev 6 / live 2-12) exporté dans
+# `MAX_AXON_WORKERS` — variable qui n'avait **aucun consommateur** : ni Rust, ni Elixir,
+# ni YAML, ni Nix, ni aucun autre script. Ses seules occurrences étaient son producteur
+# et ses propres tests.
+#
+# Le dimensionnement réel des workers est décidé côté Rust par
+# `runtime_capacity_profile::recommend_sizing()`, avec une formule DIFFÉRENTE. Deux
+# politiques pour une même question, dont une inerte : le genre d'écart qui ne se voit
+# qu'en remontant les consommateurs un par un.
+#
+# Écrite en Rust, une fonction sans appelant aurait déclenché un warning, et
+# GUI-PRO-003 impose zéro warning. En bash rien ne le signale — d'où la règle posée par
+# ce REQ : toute fonction PURE (testable sans lancer un processus) appartient au Rust.
 
 axon_compute_queue_memory_budget_bytes() {
     local budget_class="${1:?budget class required}"
@@ -163,13 +143,9 @@ axon_compute_queue_memory_budget_bytes() {
     printf '%s\n' "$(( budget_gb * 1024 * 1024 * 1024 ))"
 }
 
-axon_compute_watcher_subtree_hint_budget() {
-    case "${1:?watcher policy required}" in
-        full) printf '128\n' ;;
-        bounded) printf '32\n' ;;
-        off) printf '0\n' ;;
-    esac
-}
+# REQ-AXO-902275 — `axon_compute_watcher_subtree_hint_budget` SUPPRIMÉE, même motif :
+# elle alimentait `AXON_WATCHER_SUBTREE_HINT_BUDGET`, sans aucun consommateur dans le
+# dépôt. `AXON_WATCHER_POLICY`, dont elle dérivait, reste exportée et vivante.
 
 axon_resolve_resource_policy() {
     local instance_kind="${1:?instance kind required}"
@@ -182,9 +158,7 @@ axon_resolve_resource_policy() {
             AXON_BACKGROUND_BUDGET_CLASS \
             AXON_GPU_ACCESS_POLICY \
             AXON_WATCHER_POLICY \
-            MAX_AXON_WORKERS \
             AXON_QUEUE_MEMORY_BUDGET_BYTES \
-            AXON_WATCHER_SUBTREE_HINT_BUDGET \
             AXON_EMBEDDING_PROVIDER
         do
             local source_var="AXON_POLICY_SOURCE_${scoped_var}"
@@ -228,27 +202,19 @@ axon_resolve_resource_policy() {
 
     export AXON_RESOURCE_POLICY_CPU_CORES="$cpu_cores"
     export AXON_RESOURCE_POLICY_RAM_GB="$ram_gb"
-    export AXON_EFFECTIVE_MAX_AXON_WORKERS="$(
-        axon_compute_worker_cap "$instance_kind" "$AXON_BACKGROUND_BUDGET_CLASS" "$cpu_cores"
-    )"
+    # REQ-AXO-902275 — `AXON_EFFECTIVE_MAX_AXON_WORKERS` et
+    # `AXON_EFFECTIVE_WATCHER_SUBTREE_HINT_BUDGET` retirées avec les deux `MAX_*` /
+    # `*_SUBTREE_HINT_BUDGET` qu'elles alimentaient : aucune n'avait de consommateur.
+    # Le doublet EFFECTIVE/canonique reste pour le budget mémoire, où il a un sens —
+    # il distingue ce que la politique RECOMMANDE de ce qui est EN VIGUEUR après
+    # override opérateur.
     export AXON_EFFECTIVE_QUEUE_MEMORY_BUDGET_BYTES="$(
         axon_compute_queue_memory_budget_bytes "$AXON_BACKGROUND_BUDGET_CLASS" "$ram_gb"
     )"
-    export AXON_EFFECTIVE_WATCHER_SUBTREE_HINT_BUDGET="$(
-        axon_compute_watcher_subtree_hint_budget "$AXON_WATCHER_POLICY"
-    )"
 
-    if [[ -z "${MAX_AXON_WORKERS:-}" ]]; then
-        export MAX_AXON_WORKERS="$AXON_EFFECTIVE_MAX_AXON_WORKERS"
-        AXON_POLICY_SOURCE_MAX_AXON_WORKERS="policy_default"
-    fi
     if [[ -z "${AXON_QUEUE_MEMORY_BUDGET_BYTES:-}" ]]; then
         export AXON_QUEUE_MEMORY_BUDGET_BYTES="$AXON_EFFECTIVE_QUEUE_MEMORY_BUDGET_BYTES"
         AXON_POLICY_SOURCE_AXON_QUEUE_MEMORY_BUDGET_BYTES="policy_default"
-    fi
-    if [[ -z "${AXON_WATCHER_SUBTREE_HINT_BUDGET:-}" ]]; then
-        export AXON_WATCHER_SUBTREE_HINT_BUDGET="$AXON_EFFECTIVE_WATCHER_SUBTREE_HINT_BUDGET"
-        AXON_POLICY_SOURCE_AXON_WATCHER_SUBTREE_HINT_BUDGET="policy_default"
     fi
 
     # REQ-AXO-184 #1: avoid → cpu auto-coercion deleted. AXON_EMBEDDING_PROVIDER
