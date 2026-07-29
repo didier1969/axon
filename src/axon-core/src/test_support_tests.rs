@@ -94,54 +94,14 @@ fn multiple_env_var_guards_in_same_test_do_not_deadlock() {
     assert_eq!(std::env::var(VAR_B).ok(), None);
 }
 
-/// REQ-AXO-902261 — the GUARD. Fixing the known offenders one by one does not hold: the
-/// next test added anywhere reintroduces the class. This walks the source and fails on a
-/// test function that mutates process env without holding `env_test_lock()`.
-///
-/// Why it matters concretely (session 104): `inline_pipeline_enabled_for_truthy_values`
-/// failed a full-suite run — `remove_var` from a sibling test landed between its
-/// `set_var("true")` and its assertion. The Rust harness runs tests in parallel threads
-/// within ONE process, so env is shared state.
-///
-/// And three files carried the comment "the suite pins --test-threads=1" as their
-/// justification for NOT locking. **That claim is false**: there is no `.cargo/config.toml`
-/// and nothing anywhere sets `--test-threads`. Those tests believed they were protected by
-/// a guarantee that does not exist — the same shape as the "DBQ-A claim feeder drains the
-/// backlog by construction" comment describing a feeder that is absent from the code
-/// (REQ-AXO-902260). A comment asserting an invariant needs a test behind it or it
-/// eventually lies. This is that test.
-///
-/// ALLOWLIST semantics: entries are files with KNOWN unlocked mutations, kept so the guard
-/// can land before all 43 call sites are converted. Shrinking it is the work; a NEW file
-/// cannot be added without someone reading this doc comment.
-#[test]
-fn no_test_mutates_process_env_without_the_lock() {
-    use std::path::PathBuf;
+// ---------------------------------------------------------------------------
+// REQ-AXO-902261 — source scanners shared by the two guards below.
+// ---------------------------------------------------------------------------
 
-    // Files whose test functions still mutate env unlocked (REQ-AXO-902261 inventory).
-    // ONLY REMOVE entries — never add. Each removal is a fixed file.
-    const KNOWN_UNLOCKED: &[&str] = &[
-        "mcp/tests/context_and_analysis.rs",
-        "mcp/tests/guidance_contract.rs",
-        "runtime_capacity_profile.rs",
-        "embedder.rs",
-        "postgres/bulk_writer.rs",
-        // REQ-AXO-902261 — REMOVED, each one fixed:
-        //   `mcp/tests/mod.rs`  — its `env_lock()` minted a private mutex; now delegates
-        //                         to `test_support::env_test_lock()`.
-        //   `bin/axonctl.rs`    — could not reach the lock at all (`test_support` is
-        //                         `#[cfg(test)]` on the LIB, and axonctl is a separate
-        //                         binary crate). Fixed by removing the dependency on
-        //                         process-global state instead: the env override is now a
-        //                         parameter of a pure `indexer_health_port_from`, which
-        //                         also gained coverage for the malformed-override case
-        //                         nothing tested before.
-    ];
-    const LOCK_MARKERS: &[&str] =
-        &["env_test_lock", "ENV_LOCK", "EnvVarGuard", "registry_test_lock"];
-
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut offenders: Vec<String> = Vec::new();
+/// Every `.rs` file under `src/`, as `(path relative to src/, contents)`.
+fn crate_sources() -> Vec<(String, String)> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut out = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -155,33 +115,255 @@ fn no_test_mutates_process_env_without_the_lock() {
                 continue;
             }
             let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            let mutates = text.contains("env::set_var") || text.contains("env::remove_var");
-            if !mutates || !text.contains("#[test]") {
-                continue;
-            }
-            if LOCK_MARKERS.iter().any(|m| text.contains(m)) {
-                continue;
-            }
             let rel = path
                 .strip_prefix(&root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            if KNOWN_UNLOCKED.iter().any(|k| rel.ends_with(k)) {
+            out.push((rel, text));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Index of the line closing the block opened at or after `start`, by brace depth.
+///
+/// A line budget was tried here first and was wrong: an earlier version of the minting
+/// guard scanned a fixed 12-line window from the `fn`, ran past the closing brace into
+/// the next function, and reported `mcp/tests/mod.rs` as an offender AFTER it had been
+/// fixed. A guard that accuses a corrected file teaches people to distrust it.
+fn block_end(lines: &[&str], start: usize) -> usize {
+    let mut depth = 0i32;
+    let mut opened = false;
+    for (i, line) in lines.iter().enumerate().skip(start) {
+        depth += line.matches('{').count() as i32;
+        if line.contains('{') {
+            opened = true;
+        }
+        depth -= line.matches('}').count() as i32;
+        if opened && depth <= 0 {
+            return i;
+        }
+    }
+    lines.len().saturating_sub(1)
+}
+
+fn mutates_env(text: &str) -> bool {
+    text.contains("env::set_var") || text.contains("env::remove_var")
+}
+
+/// `Mutex<()>` — a serialization lock. `Mutex<Vec<_>>` / `Mutex<HashMap<_>>` is a pool or
+/// a registry protecting a collection, which is an ordinary design choice and must not be
+/// reported: `mcp/tests/mod.rs` parks test databases that way.
+fn is_unit_mutex(text: &str) -> bool {
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains("Mutex<()>")
+}
+
+fn is_test_fn(lines: &[&str], start: usize) -> bool {
+    lines[start.saturating_sub(6)..start]
+        .iter()
+        .any(|l| l.contains("#[test]") || l.contains("#[tokio::test"))
+}
+
+fn fn_name_at(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("pub(crate) fn ")
+        .or_else(|| trimmed.strip_prefix("pub async fn "))
+        .or_else(|| trimmed.strip_prefix("pub fn "))
+        .or_else(|| trimmed.strip_prefix("async fn "))
+        .or_else(|| trimmed.strip_prefix("fn "))?;
+    let name = rest
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .next()
+        .unwrap_or("");
+    (!name.is_empty()).then_some(name)
+}
+
+fn static_name_at(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("pub static ")
+        .or_else(|| trimmed.strip_prefix("static "))?;
+    let name = rest.split(':').next().unwrap_or("").trim();
+    (!name.is_empty()).then_some(name)
+}
+
+/// `impl Foo {` / `impl Drop for Foo {` / `impl<T> Foo<T> {` → `Foo`.
+fn impl_type_at(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("impl")?;
+    let rest = rest.trim_start();
+    let rest = if let Some(stripped) = rest.strip_prefix('<') {
+        let close = stripped.find('>')?;
+        &stripped[close + 1..]
+    } else {
+        rest
+    };
+    let tail = rest.rsplit(" for ").next().unwrap_or(rest);
+    let ty: String = tail
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!ty.is_empty()).then_some(ty)
+}
+
+/// `(name, start, end, is_inside_an_impl)` for every `fn` in the file.
+fn fn_blocks(lines: &[&str]) -> Vec<(String, usize, usize, bool)> {
+    let impl_spans: Vec<(usize, usize)> = (0..lines.len())
+        .filter(|i| impl_type_at(lines[*i]).is_some())
+        .map(|i| (i, block_end(lines, i)))
+        .collect();
+    (0..lines.len())
+        .filter_map(|i| fn_name_at(lines[i]).map(|n| (n.to_string(), i)))
+        .map(|(name, i)| {
+            let inside = impl_spans.iter().any(|(s, e)| *s < i && i <= *e);
+            (name, i, block_end(lines, i), inside)
+        })
+        .collect()
+}
+
+fn impl_blocks(lines: &[&str]) -> Vec<(String, usize, usize)> {
+    (0..lines.len())
+        .filter_map(|i| impl_type_at(lines[i]).map(|t| (t, i, block_end(lines, i))))
+        .collect()
+}
+
+/// A file whose WHOLE contents are test code — included by `mod tests;` or `#[path]`, so
+/// it carries no `#[cfg(test)] mod` of its own.
+///
+/// This is the scope hole that let the largest offender in the repo hide: the minting
+/// guard only walked inline `#[cfg(test)] mod … {` blocks, so `embedder/tests.rs` — 30
+/// env-mutating test functions serialized by a private `static ENV_TEST_GUARD` — was
+/// never even read.
+fn is_test_file(rel: &str) -> bool {
+    let base = rel.rsplit('/').next().unwrap_or(rel);
+    base == "tests.rs" || base.ends_with("_tests.rs") || rel.contains("tests/")
+}
+
+fn test_regions(lines: &[&str], whole_file: bool) -> Vec<(usize, usize)> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    if whole_file {
+        return vec![(0, lines.len() - 1)];
+    }
+    let mut out = Vec::new();
+    let mut pending_cfg_test = false;
+    for (i, raw) in lines.iter().enumerate() {
+        let line = raw.trim_start();
+        if line.starts_with("#[cfg(test)]") {
+            pending_cfg_test = true;
+            continue;
+        }
+        if pending_cfg_test && line.starts_with("mod ") {
+            if line.contains('{') {
+                out.push((i, block_end(lines, i)));
+            }
+            pending_cfg_test = false;
+        }
+    }
+    out
+}
+
+/// REQ-AXO-902261 — the ENV guard, per FUNCTION.
+///
+/// Why it matters concretely (session 104): `inline_pipeline_enabled_for_truthy_values`
+/// failed a full-suite run — `remove_var` from a sibling test landed between its
+/// `set_var("true")` and its assertion. The Rust harness runs tests in parallel threads
+/// within ONE process, so env is shared state.
+///
+/// The first version of this guard matched lock markers per FILE against an allowlist,
+/// and both halves of that design were wrong:
+///
+/// 1. **Per-file granularity.** `embedder/tests.rs` has ONE function that uses
+///    `env_test_lock` (out of 31 that touch env) — enough for the whole file to be
+///    exempted. Its other 30 functions, 180 mutation sites, were serialized by a private
+///    `static ENV_TEST_GUARD` whose own comment admitted it "only serializes … within
+///    this mod". The single largest env consumer in the crate read as compliant.
+/// 2. **`EnvVarGuard` counted as a lock marker.** It is not one — `test_support`'s own
+///    doc says the guard "does NOT acquire any lock itself" and lists holding the lock as
+///    its PRECONDITION. Half the two-step contract was being accepted as the whole of it.
+///    `registry_test_lock` was in the list too, and that lock guards a different resource.
+///
+/// So the check is now per function, and conformance is *derived* rather than spelled:
+/// a test body must mention something whose call chain reaches `test_support::env_test_lock`.
+/// Local delegating helpers (`env_lock`, `env_guard`, `lock_env_guard`) and RAII guard
+/// types (`EnvGuard`, `RuntimeEnvGuard`, `SollSiteRootGuard`) are picked up automatically,
+/// which is why no allowlist survives here: there is nothing left to exempt.
+#[test]
+fn no_test_mutates_process_env_without_the_lock() {
+    use std::collections::BTreeSet;
+
+    let sources = crate_sources();
+    let mut conforming: BTreeSet<String> = BTreeSet::new();
+    conforming.insert("env_test_lock".to_string());
+
+    // TWO rounds, deliberately bounded: helper → RAII type → test body is the deepest
+    // real chain (`EnvGuard::new` → `env_lock` → `env_test_lock`), and a third round adds
+    // no new type. An UNBOUNDED fixpoint was measured first and was the wrong answer:
+    // substring propagation reached 3180 identifiers — nearly every type in the crate —
+    // and the guard went green on everything. A guard that cannot fail is not a guard.
+    for _ in 0..2 {
+        for (_, text) in &sources {
+            let lines: Vec<&str> = text.lines().collect();
+            for (name, start, end, inside_impl) in fn_blocks(&lines) {
+                if inside_impl || conforming.contains(&name) {
+                    continue;
+                }
+                let body = lines[start..=end].join("\n");
+                if conforming.iter().any(|c| body.contains(c)) {
+                    conforming.insert(name);
+                }
+            }
+            for (ty, start, end) in impl_blocks(&lines) {
+                // ONLY `*Guard` RAII types propagate. Without that restriction `impl
+                // GraphStore` acquired conformance and any test merely NAMING GraphStore
+                // read as serialized. `EnvVarGuard` is excluded by name for the reason in
+                // the doc comment above: it takes no lock.
+                if !ty.ends_with("Guard") || ty == "EnvVarGuard" || conforming.contains(&ty) {
+                    continue;
+                }
+                let body = lines[start..=end].join("\n");
+                if conforming.iter().any(|c| body.contains(c)) {
+                    conforming.insert(ty);
+                }
+            }
+        }
+    }
+
+    let mut offenders: Vec<String> = Vec::new();
+    for (rel, text) in &sources {
+        if rel == "test_support.rs" || !mutates_env(text) {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        for (name, start, end, _) in fn_blocks(&lines) {
+            if !is_test_fn(&lines, start) {
                 continue;
             }
-            offenders.push(rel);
+            let body = lines[start..=end].join("\n");
+            if !mutates_env(&body) || conforming.iter().any(|c| body.contains(c)) {
+                continue;
+            }
+            offenders.push(format!("{rel}:{}  {name}", start + 1));
         }
     }
     offenders.sort();
+
     assert!(
         offenders.is_empty(),
-        "REQ-AXO-902261 — these files mutate process env in tests without holding \
-         `test_support::env_test_lock()`, which makes the suite non-deterministic \
-         (a sibling test's set_var/remove_var can land mid-assertion):\n  {}\n\n\
-         Fix: take the lock first —\n  \
+        "REQ-AXO-902261 — these TEST FUNCTIONS mutate the process environment without \
+         holding a lock that reaches `test_support::env_test_lock()`, which makes the \
+         suite non-deterministic (a sibling test's set_var/remove_var can land \
+         mid-assertion):\n  {}\n\n\
+         Fix: take the lock as the FIRST statement —\n  \
          let _env = crate::test_support::env_test_lock().lock().unwrap_or_else(|e| e.into_inner());\n\n\
-         Do NOT silence this by adding the file to KNOWN_UNLOCKED, and do NOT rely on \
+         An `EnvVarGuard` alone does NOT satisfy this: it restores prior values, it does \
+         not serialize (see its doc — holding the lock is its PRECONDITION). Delegating \
+         through a local helper is fine and is detected automatically. Do NOT rely on \
          `--test-threads=1`: nothing in this repo sets it (verified — no .cargo/config.toml).",
         offenders.join("\n  ")
     );
@@ -193,10 +375,9 @@ fn no_test_mutates_process_env_without_the_lock() {
 /// Found live, not hypothesized. `runtime_readiness::registry()` is one global singleton,
 /// and THREE test files each declared their own private `registry_test_lock()` with its
 /// own `static`. Three mutexes, one registry, zero exclusion across files. It surfaced as
-/// `watchdog_observes_dead_heartbeat_after_threshold` failing with `got []` in a full-suite
-/// run — 1682 passed, 1 failed — because a sibling file called `reset_for_tests()` inside
-/// the 400 ms sleep window of the test that was about to assert. Load-dependent, rare, and
-/// indistinguishable from a real watchdog regression.
+/// `watchdog_observes_dead_heartbeat_after_threshold` failing with `got []` in a
+/// full-suite run — 1682 passed, 1 failed — because a sibling file called
+/// `reset_for_tests()` inside the 400 ms sleep window of the test about to assert.
 ///
 /// What made it survive: the header of `runtime_watchdog_tests.rs` ASSERTED that these
 /// tests "acquire a shared mutex with the runtime_readiness tests". They did not. Same
@@ -204,166 +385,68 @@ fn no_test_mutates_process_env_without_the_lock() {
 /// (REQ-AXO-902260) — a confident sentence describing a mechanism that is not there tells
 /// the reader the problem is already handled.
 ///
-/// The rule enforced here: **only `test_support` may MINT a test lock.** A minting
-/// definition is a `fn …_lock()` whose body creates its own `OnceLock` — that is what
-/// produces a second mutex. A function that merely DELEGATES to `test_support` contains no
-/// `OnceLock` and is fine; that is how `runtime_boot.rs` has always done it.
+/// The rule enforced: **only `test_support` may MINT a test lock.** Minting is a
+/// `Mutex<()>` brought into being outside it — as a `static`, or lazily inside a `fn` via
+/// `OnceLock`. A function that merely DELEGATES contains neither and is correct.
 ///
-/// A first version of this guard only flagged the same `fn <name>_test_lock()` appearing
-/// in two files. It passed — and missed a live offender found minutes later:
-/// `mcp/tests/mod.rs` minted its own `env_lock()` (different NAME, same defect) while
-/// `runtime_boot.rs` delegated, so the MCP tests serialized against nothing else in the
-/// crate. Matching on names was matching on spelling; minting is the actual defect.
+/// Three spellings of the same defect have now been missed by three successive versions
+/// of this check, which is the argument for matching on SHAPE rather than on names:
+///
+/// | Spelling | Missed because |
+/// |---|---|
+/// | `fn registry_test_lock()` × 3 files | first version compared names across files only |
+/// | `mcp/tests/mod.rs::env_lock()` | different NAME, same defect — matching on spelling |
+/// | `embedder/tests.rs::ENV_TEST_GUARD` | suffix `_GUARD` not `_LOCK`, **and** the file has no inline `#[cfg(test)] mod` so it was out of scope entirely |
+///
+/// Widening the scope to whole test FILES immediately surfaced a fourth: `service_guard.rs`
+/// held BOTH a public `lock_for_tests()` and a private `static TEST_GUARD` over the same
+/// global atomics, with its own 24 tests taking the private one while `embedder/tests.rs`
+/// took the public one — while `lock_for_tests`'s doc said every test touching that state
+/// must hold IT.
 #[test]
 fn no_test_lock_is_minted_outside_test_support() {
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
-
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    // lock fn name -> files that MINT it (own OnceLock in the body)
-    let mut definitions: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            let rel = path
-                .strip_prefix(&root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            // `test_support.rs` is the ONE place allowed to mint. Its own tests file is
-            // this one, which mints nothing.
-            if rel == "test_support.rs" {
-                continue;
-            }
-            let lines: Vec<&str> = text.lines().collect();
-            // Only TEST code is in scope. A production mutex is a legitimate design
-            // choice and must not be reported: `graph_bootstrap.rs` holds a
-            // `BOOTSTRAP_LOCK` over the PG catalog during DDL, which the first version of
-            // this scan flagged. Accusing correct production code is how a guard gets
-            // disabled. Scope = inside a `#[cfg(test)]` module, tracked by brace depth.
-            let mut depth = 0i32;
-            let mut pending_cfg_test = false;
-            let mut test_mod_depth: Option<i32> = None;
-            for (idx, raw) in lines.iter().enumerate() {
-                let line = raw.trim_start();
-                let opens = line.matches('{').count() as i32;
-                let closes = line.matches('}').count() as i32;
-
-                if line.starts_with("#[cfg(test)]") {
-                    pending_cfg_test = true;
-                }
-                if pending_cfg_test && line.contains("mod ") && opens > 0 {
-                    test_mod_depth = Some(depth);
-                    pending_cfg_test = false;
-                }
-                let in_test = test_mod_depth.is_some();
-                // Update depth for the NEXT line, and leave the test module when its
-                // brace closes.
-                let depth_after = depth + opens - closes;
-                if let Some(d) = test_mod_depth {
-                    if depth_after <= d && closes > 0 {
-                        test_mod_depth = None;
+    let mut offenders: Vec<String> = Vec::new();
+    for (rel, text) in crate_sources() {
+        // `test_support.rs` is the ONE place allowed to mint, and this file is its test
+        // sibling: its assertion strings quote both `OnceLock` and `Mutex<()>`.
+        if rel == "test_support.rs" || rel == "test_support_tests.rs" {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        for (region_start, region_end) in test_regions(&lines, is_test_file(&rel)) {
+            for i in region_start..=region_end {
+                if let Some(name) = static_name_at(lines[i]) {
+                    if is_unit_mutex(lines[i]) {
+                        offenders.push(format!("{rel}:{}  static {name}", i + 1));
+                        continue;
                     }
                 }
-                depth = depth_after;
-                if !in_test {
-                    continue;
-                }
-
-                // Spelling 2 — a BARE static mutex: `static ENV_TEST_LOCK: Mutex<()> =
-                // Mutex::new(());`. No `fn`, no `OnceLock`, so the accessor scan below
-                // never sees it. `indexer_health_http.rs` carried exactly this: a fourth
-                // private lock over the one process environment, serializing that file
-                // against itself and nothing else. Caught here, at the declaration.
-                if let Some(rest) = line
-                    .strip_prefix("static ")
-                    .or_else(|| line.strip_prefix("pub static "))
-                {
-                    if let Some(sname) = rest.split(':').next() {
-                        let sname = sname.trim();
-                        if sname.ends_with("_LOCK") && line.contains("Mutex") {
-                            definitions
-                                .entry(sname.to_string())
-                                .or_default()
-                                .push(rel.clone());
-                            continue;
-                        }
+                if let Some(name) = fn_name_at(lines[i]) {
+                    let body = lines[i..=block_end(&lines, i)].join("\n");
+                    if body.contains("OnceLock") && is_unit_mutex(&body) {
+                        offenders.push(format!("{rel}:{}  fn {name}()", i + 1));
                     }
                 }
-
-                // Spelling 1 — an accessor fn that mints its own lazily-initialized
-                // static: `fn x_lock(` / `pub fn x_lock(` / …
-                let Some(rest) = line
-                    .strip_prefix("pub fn ")
-                    .or_else(|| line.strip_prefix("pub(crate) fn "))
-                    .or_else(|| line.strip_prefix("fn "))
-                else {
-                    continue;
-                };
-                let Some(name) = rest.split('(').next() else { continue };
-                if !name.ends_with("_lock") {
-                    continue;
-                }
-                // MINTING = the body creates its own lazily-initialized static. A
-                // delegating wrapper has no `OnceLock` and is the correct pattern.
-                //
-                // The body is delimited by BRACE DEPTH, not by a line budget. A first
-                // version scanned a fixed 12-line window and reported `mcp/tests/mod.rs`
-                // as an offender AFTER it had been fixed: the window ran past the closing
-                // brace into the next function, which legitimately holds a `OnceLock`. A
-                // guard that accuses a corrected file is worse than no guard — it teaches
-                // people to distrust it.
-                let mut depth = 0i32;
-                let mut mints = false;
-                for body_line in &lines[idx..] {
-                    if body_line.contains("OnceLock") && depth > 0 {
-                        mints = true;
-                    }
-                    depth += body_line.matches('{').count() as i32;
-                    depth -= body_line.matches('}').count() as i32;
-                    if depth <= 0 && body_line.contains('}') {
-                        break;
-                    }
-                }
-                if !mints {
-                    continue;
-                }
-                definitions
-                    .entry(name.to_string())
-                    .or_default()
-                    .push(rel.clone());
             }
         }
     }
-
-    let duplicated: Vec<String> = definitions
-        .iter()
-        .map(|(name, files)| format!("{name} minted in: {}", files.join(", ")))
-        .collect();
+    offenders.sort();
+    offenders.dedup();
 
     assert!(
-        duplicated.is_empty(),
+        offenders.is_empty(),
         "REQ-AXO-902261 — a test lock is MINTED outside `test_support`. Each of these \
-         creates its OWN `OnceLock`, so it is a separate mutex: it serializes its own file \
-         against itself and against NOTHING ELSE, while the resource it guards (process \
-         env, the readiness registry, …) is global to the whole test binary:\n  {}\n\n\
-         Fix: delete the local `static` and DELEGATE —\n  \
+         creates its OWN `Mutex<()>`, so it is a separate mutex: it serializes its own \
+         file against itself and against NOTHING ELSE, while the resource it guards \
+         (process env, the readiness registry, the service_guard atomics, …) is global to \
+         the whole test binary:\n  {}\n\n\
+         Fix: delete the local lock and DELEGATE —\n  \
          fn my_lock() -> std::sync::MutexGuard<'static, ()> {{\n      \
          crate::test_support::env_test_lock().lock().unwrap_or_else(|p| p.into_inner())\n  \
          }}\n\n\
-         If the resource is new, add ONE minting accessor to `test_support` next to \
-         `env_test_lock` / `registry_test_lock` and delegate to that. One global resource, \
-         one lock.",
-        duplicated.join("\n  ")
+         If the resource is genuinely new, add ONE minting accessor to `test_support` \
+         next to `env_test_lock` / `registry_test_lock` / `service_guard_test_lock` and \
+         delegate to that. One global resource, one lock.",
+        offenders.join("\n  ")
     );
 }

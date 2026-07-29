@@ -19,20 +19,34 @@ use crate::vector_control::{
 use crossbeam_channel::unbounded;
 use fastembed::{InitOptions, TextEmbedding};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Duration;
 
-static ENV_TEST_GUARD: Mutex<()> = Mutex::new(());
-
+// REQ-AXO-902261 — this used to mint its own `static ENV_TEST_GUARD: Mutex<()>`, and the
+// comment below said so out loud: "only serializes env-var-affecting tests within this
+// mod". That is the whole defect. This file is the single biggest env consumer in the
+// crate — 30 test functions, 180 mutation sites — and it was serializing against ITSELF
+// and nothing else, while the process environment is one OS-level table shared by every
+// test in the binary. A sibling in `runtime_boot.rs` or `stage_a2.rs` could land a
+// `set_var` between this file's `set_var` and its assertion, and no lock here would see it.
+//
+// It survived two guards. `no_test_mutates_process_env_without_the_lock` matches markers
+// per FILE, and one function further down (L1065) does use `env_test_lock` — so the whole
+// file was exempted on the strength of one conforming function. And
+// `no_test_lock_is_minted_outside_test_support` looks for `static …_LOCK` / `fn …_lock()`,
+// while this was `ENV_TEST_GUARD` / `lock_env_guard` — the same defect, a third spelling.
+// Both guards are widened alongside this fix; a guard that reports green on the largest
+// offender in the repo is worse than no guard.
 fn lock_env_guard() -> std::sync::MutexGuard<'static, ()> {
-    ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    crate::test_support::env_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 // REQ-AXO-291 — cross-module test serialization for tests that
 // mutate `service_guard` global atomics (record_vector_*,
-// reset_for_tests). The local `ENV_TEST_GUARD` only serializes
-// env-var-affecting tests within this mod ; the crate-level
-// `service_guard::lock_for_tests` synchronises across modules.
+// reset_for_tests). `lock_env_guard` above covers the process
+// environment ; the crate-level `service_guard::lock_for_tests`
+// synchronises the service-guard atomics across modules.
 fn lock_service_guard() -> parking_lot::MutexGuard<'static, ()> {
     crate::service_guard::lock_for_tests()
 }
@@ -856,6 +870,7 @@ fn test_cuda_execution_provider_dispatch_is_strict() {
 
 #[test]
 fn test_cuda_execution_provider_dispatch_omits_tf32_option_by_default() {
+    let _env = lock_env_guard();
     unsafe {
         std::env::remove_var("AXON_CUDA_ALLOW_TF32");
     }
@@ -926,6 +941,7 @@ fn manual_fastembed_cuda_init_matches_direct_ort_probe() {
 
 #[test]
 fn test_ort_cuda_provider_library_path_uses_ort_dylib_directory() {
+    let _env = lock_env_guard();
     unsafe {
         std::env::set_var(
             "ORT_DYLIB_PATH",
@@ -947,6 +963,7 @@ fn test_ort_cuda_provider_library_path_uses_ort_dylib_directory() {
 
 #[test]
 fn test_ort_cuda_provider_library_available_is_false_without_provider_binary() {
+    let _env = lock_env_guard();
     let tempdir = tempfile::tempdir().unwrap();
     let ort_dir = tempdir.path().join("lib");
     std::fs::create_dir_all(&ort_dir).unwrap();

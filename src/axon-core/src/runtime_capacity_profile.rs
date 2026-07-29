@@ -499,6 +499,9 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_sizing_disables_graph_lane_on_large_cpu_hosts_by_default() {
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
         let profile = RuntimeProfile {
             cpu_cores: 16,
@@ -521,6 +524,9 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_sizing_expands_when_gpu_is_available() {
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
         let profile = RuntimeProfile {
             cpu_cores: 16,
@@ -544,6 +550,9 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_sizing_prefers_batch_depth_over_gpu_worker_fanout() {
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
         let profile = RuntimeProfile {
             cpu_cores: 24,
@@ -566,6 +575,9 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_sizing_stays_small_on_constrained_hosts() {
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
         let profile = RuntimeProfile {
             cpu_cores: 4,
@@ -587,6 +599,9 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_sizing_disables_graph_lane_when_canonical_flag_is_off() {
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "false");
         let profile = RuntimeProfile {
             cpu_cores: 16,
