@@ -305,88 +305,60 @@ axon_resolve_cargo_jobs() {
 }
 
 # ---------------------------------------------------------------------------
-# REQ-AXO-902273 — is this host quiet enough for a MEASUREMENT to mean anything?
+# REQ-AXO-902275 — host readiness for a MEASUREMENT: the POLICY now lives in Rust
+# (`src/axon-core/src/host_readiness.rs`), this is the thin call site.
 #
-# Distinct from the sizing policy above, and the difference is the whole point. The
-# functions above answer "how big a build can this host take"; this one answers "can I
-# BELIEVE a number I measure right now". A host can be perfectly capable of running a
-# build while being far too busy for its timings to mean anything.
+# It was first written here, in bash, with 25 bash assertions — the exact reflex the
+# operator called out: "I thought our bash scripts only carried the sequence and that
+# everything else was in Rust and DRY". A function that can be tested WITHOUT launching
+# a process does not belong in a shell script. The same audit found a sibling bash
+# policy computing a worker cap that no consumer read; in Rust an unused function is a
+# compiler warning, and GUI-PRO-003 forbids warnings.
 #
-# Why it exists (session 107, and it cost most of a session). A full `--lib` run was
-# timed on a host whose only checked precondition — `pgrep -c rustc` — read ZERO, i.e.
-# the documented gate said GO. It was in fact at load 76 with 20 kB of 8 GB swap free,
-# saturated by THIRD-PARTY processes (a typedb server at 321 % CPU, a python3.11 at
-# 100 %). The suite passed 594 tests in its first minutes and 7 in its last ten. The
-# conclusion nearly drawn from that — "my change makes the suite unusable" — would have
-# been false, and would have thrown away a correct fix.
+# Rationale for the thresholds, the measured incident behind them, and the tests now
+# live with the code in `host_readiness.rs`.
 #
-# The lesson is not "also look at the load". It is that a precondition covering ONE
-# family of processes silently ignores every other one. `rustc` was the family we had
-# been burned by (a sibling repo's pre-push hook), so it became the check; nothing else
-# did. Load average and swap are process-agnostic: they cannot miss a consumer because
-# they never enumerate consumers.
+# DEGRADES, never blocks: if the binary is missing (fresh clone, pre-build, broken
+# runtime) this reports `unknown` and returns 0. This signal is advisory — a check that
+# refuses to run is a check people route around, and then it protects nothing.
 
-# axon_load_avg_1m — 1-minute load average, integer (rounded down). 0 when unreadable.
-axon_load_avg_1m() {
-    local raw
-    raw="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)"
-    [[ "$raw" =~ ^([0-9]+) ]] && printf '%s\n' "${BASH_REMATCH[1]}" || printf '0\n'
-}
-
-# axon_measurement_readiness <load1> <cores> <swap_used_pct> <rustc_count>
-#
-# PURE (no /proc, no env) so the policy is unit-testable on any host. Prints one line:
-#   quiet
-#   busy:<reason>[,<reason>...]
-#
-# Thresholds, and why each is where it is:
-#   * load > 2 x cores — the run queue is more than double what the machine can serve, so
-#     wall-clock timings measure the queue, not the code. Two-times rather than one-times
-#     because a healthy build legitimately saturates every core.
-#   * swap used >= 90 % — the kernel is out of room to evict into; the next allocation
-#     stalls on I/O. Observed at 99.9 % while `MemAvailable` still read 18 GB, which is
-#     why free RAM alone is NOT a sufficient signal.
-#   * any foreign rustc — kept from the original gate: a sibling repo's pre-push hook
-#     spawns one rustc per test case (29 observed simultaneously).
-axon_measurement_readiness() {
-    local load1="${1:-0}" cores="${2:-1}" swap_pct="${3:-0}" rustc="${4:-0}"
-    [[ "$load1" =~ ^[0-9]+$ ]] || load1=0
-    [[ "$cores" =~ ^[0-9]+$ ]] && (( cores >= 1 )) || cores=1
-    [[ "$swap_pct" =~ ^[0-9]+$ ]] || swap_pct=0
-    [[ "$rustc" =~ ^[0-9]+$ ]] || rustc=0
-
-    local -a reasons=()
-    (( load1 > cores * 2 )) && reasons+=( "load=${load1}>2x${cores}cores" )
-    (( swap_pct >= 90 ))    && reasons+=( "swap=${swap_pct}%" )
-    (( rustc > 0 ))         && reasons+=( "rustc=${rustc}" )
-
-    if (( ${#reasons[@]} == 0 )); then
-        printf 'quiet\n'
+# axon_host_measurement_verdict — prints `quiet` / `busy:<reasons>` / `unknown`.
+# Returns 0 when quiet or unknown, 1 when busy, so callers can branch on status alone.
+axon_host_measurement_verdict() {
+    local root ctl out rc
+    root="${AXON_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    ctl="$root/bin/axonctl"
+    # Prefer the freshly built binary over the installed one: during development the
+    # promoted `bin/axonctl` can predate this subcommand by several releases.
+    if [[ -x "$root/.axon/cargo-target/debug/axonctl" ]]; then
+        ctl="$root/.axon/cargo-target/debug/axonctl"
+    fi
+    [[ -x "$ctl" ]] || ctl="$(command -v axonctl 2>/dev/null || true)"
+    if [[ -z "$ctl" || ! -x "$ctl" ]]; then
+        printf 'unknown\n'
         return 0
     fi
-    local IFS=,
-    printf 'busy:%s\n' "${reasons[*]}"
-}
 
-# axon_host_measurement_verdict — the host-reading wrapper. Prints the same one-line
-# verdict; returns 0 when quiet, 1 when busy, so a caller can gate on it directly.
-axon_host_measurement_verdict() {
-    local verdict
-    verdict="$(axon_measurement_readiness \
-        "$(axon_load_avg_1m)" \
-        "$(axon_detect_host_cpu_cores)" \
-        "$(axon_swap_used_pct)" \
-        "$(pgrep -c rustc 2>/dev/null || printf '0')")"
-    printf '%s\n' "$verdict"
-    [[ "$verdict" == "quiet" ]]
+    out="$("$ctl" host-readiness 2>/dev/null)"
+    rc=$?
+    # A PRESENT but OUTDATED binary is the case that bites: `bin/axonctl` is whatever the
+    # last promote installed, and it may not know this subcommand. It then exits non-zero
+    # with nothing on stdout — and an empty verdict is worse than an honest `unknown`,
+    # because callers embed it in their own PASS/FAIL line. Only exit 1 WITH output means
+    # "busy"; anything else means the binary could not answer.
+    if [[ -z "$out" ]]; then
+        printf 'unknown\n'
+        return 0
+    fi
+    printf '%s\n' "$out"
+    return "$rc"
 }
 
 # axon_warn_unless_host_quiet <what> — NOISY advisory, never a blocker.
 #
-# Deliberately does not exit: refusing to run would be its own failure mode (an operator
-# who cannot measure when they need to will simply bypass the check, and then it protects
-# nothing). It states the verdict so a number produced on a busy host is never read later
-# as if it had been taken on a quiet one.
+# Deliberately does not exit: refusing to run would be its own failure mode. It states
+# the verdict so a number produced on a busy host is never later read as if it had been
+# taken on a quiet one.
 axon_warn_unless_host_quiet() {
     local what="${1:-this measurement}" verdict
     verdict="$(axon_host_measurement_verdict)" && return 0

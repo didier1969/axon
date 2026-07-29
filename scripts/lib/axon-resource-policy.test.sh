@@ -82,58 +82,11 @@ assert_jobs 'a larger per-job budget allows fewer' \
 assert_jobs 'per-job budget of 0 is coerced to 1, never a division by zero' \
     16 24 0 16 0
 
-# ---------------------------------------------------------------------------
-# REQ-AXO-902273 — measurement readiness (distinct from build sizing).
-# ---------------------------------------------------------------------------
-assert_ready() {
-    local desc="$1" expected="$2" load="$3" cores="$4" swap="$5" rustc="$6" got
-    got="$(axon_measurement_readiness "$load" "$cores" "$swap" "$rustc")"
-    if [[ "$got" == "$expected" ]]; then
-        printf '  PASS  %s\n' "$desc"; PASS=$(( PASS + 1 ))
-    else
-        printf '  FAIL  %s  (expected %s, got %s)\n' "$desc" "$expected" "$got"; FAIL=$(( FAIL + 1 ))
-    fi
-}
-
-# THE case this exists for (session 107): zero rustc — the only precondition the project
-# had — while the host sat at load 76 with swap essentially full, saturated by non-Rust
-# third-party processes. The old gate said GO and the measurement taken was meaningless.
-assert_ready 'zero rustc does NOT mean quiet when load and swap say otherwise' \
-    'busy:load=76>2x16cores,swap=99%' 76 16 99 0
-
-# Each signal must be able to fire ALONE, or a single blind spot reopens.
-assert_ready 'load alone is enough to disqualify a measurement' \
-    'busy:load=40>2x16cores' 40 16 10 0
-assert_ready 'a saturated swap alone disqualifies' \
-    'busy:swap=95%' 4 16 95 0
-assert_ready 'foreign rustc alone still disqualifies (the original gate)' \
-    'busy:rustc=29' 4 16 10 29
-
-# A healthy build legitimately saturates every core, so the bar is 2x cores, not 1x —
-# otherwise every honest full-load measurement would be refused and the check ignored.
-assert_ready 'load equal to the core count is normal, not busy' \
-    'quiet' 16 16 10 0
-assert_ready 'load at exactly 2x cores is still accepted' \
-    'quiet' 32 16 10 0
-assert_ready 'one over 2x cores tips it' \
-    'busy:load=33>2x16cores' 33 16 10 0
-
-# Swap: 89 % is pressure, 90 % is the floor where the kernel has nowhere left to evict.
-assert_ready 'swap just under the threshold is tolerated' 'quiet' 4 16 89 0
-assert_ready 'swap at the threshold is not'  'busy:swap=90%' 4 16 90 0
-
-# All three at once must report ALL THREE — naming one cause when there are three sends
-# the operator to fix the wrong thing.
-assert_ready 'every reason is reported, not just the first' \
-    'busy:load=80>2x8cores,swap=99%,rustc=12' 80 8 99 12
-
-# An idle host is the nominal case.
-assert_ready 'an idle host is quiet' 'quiet' 0 16 0 0
-
-# Unreadable /proc values must degrade to "quiet" rather than block work on a parse error.
-assert_ready 'non-numeric inputs degrade to quiet instead of erroring' 'quiet' '' '' '' ''
-assert_ready 'a zero core count is coerced to 1, never a division by zero' \
-    'busy:load=3>2x1cores' 3 0 0 0
+# REQ-AXO-902275 — les assertions de `axon_measurement_readiness` ont MIGRÉ vers Rust
+# (`src/axon-core/src/host_readiness_tests.rs`), avec la fonction qu'elles couvraient.
+# Elles testaient une décision PURE ; leur place est dans `cargo test`, pas dans un
+# harnais PASS/FAIL réimplémenté en shell. Ce qui reste ici teste ce qui doit rester en
+# shell : la résolution de politique qui EXPORTE des variables d'environnement.
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

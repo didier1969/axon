@@ -18,6 +18,9 @@ pub mod graph_analytics;
 pub mod graph_bootstrap;
 pub mod graph_ingestion;
 pub mod graph_query;
+// REQ-AXO-902275 — host-readiness policy, moved OUT of the shell. A pure decision
+// function belongs where the compiler and the main test harness can see it.
+pub mod host_readiness;
 // REQ-AXO-901653 slice-5d — `hot_status_cache` deleted (env-gated FileVectorizationQueue
 // flush path ; pipeline owns chunk-state directly).
 pub mod indexer_health_http;

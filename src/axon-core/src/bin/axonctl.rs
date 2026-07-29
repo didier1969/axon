@@ -210,6 +210,9 @@ Commands:
   status        Health check for an instance
   liveness      Full runtime_contract liveness (brain+indexer /readyz); exit 0 iff healthy
   cutover       In-place health-gated promote to a candidate manifest, with AUTO-ROLLBACK
+  host-readiness  Is this host quiet enough for a MEASUREMENT to be believable?
+                  Prints `quiet` or `busy:<reason>,<reason>`; exit 0 iff quiet.
+                  Needs no --project-root/--instance-kind: it reads the machine.
 
 Options:
   --project-root PATH     Axon project root directory
@@ -1196,6 +1199,31 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
     }
 }
 
+/// REQ-AXO-902275 — count `rustc` processes not spawned by this build.
+///
+/// Kept out of the pure policy on purpose: enumerating processes is I/O, and the whole
+/// point of `host_readiness::assess` is to stay testable without a machine under it.
+/// Best-effort by design — an unreadable `/proc` yields 0 (advisory signal, never a
+/// blocker).
+fn count_foreign_rustc() -> usize {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .filter(|e| {
+            std::fs::read_to_string(e.path().join("comm"))
+                .map(|c| c.trim() == "rustc")
+                .unwrap_or(false)
+        })
+        .count()
+}
+
 fn main() -> Result<()> {
     let all_args: Vec<String> = std::env::args().skip(1).collect();
     let (command, args) = parse_global_args(all_args)?;
@@ -1236,6 +1264,25 @@ fn main() -> Result<()> {
         "liveness" => cmd_liveness(require_config_any_role(&args)?, args.json),
         // REQ-AXO-902165 (S3) — in-place health-gated cutover + auto-rollback.
         "cutover" => cmd_cutover(require_config_any_role(&args)?, &args.remaining, args.json),
+        // REQ-AXO-902275 — host readiness for a MEASUREMENT. Needs no instance config:
+        // it reads the machine, not a runtime. Exits 0 when quiet, 1 when busy, so a
+        // shell gate can branch on the status code alone.
+        "host-readiness" => {
+            let verdict = axon_core::host_readiness::assess(axon_core::host_readiness::HostSample {
+                load_1m: axon_core::host_readiness::read_load_1m(),
+                cores: std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1),
+                swap_used_pct: axon_core::host_readiness::read_swap_used_pct(),
+                foreign_rustc: count_foreign_rustc(),
+            });
+            println!("{}", verdict.render());
+            if verdict.is_quiet() {
+                Ok(())
+            } else {
+                std::process::exit(1)
+            }
+        }
         "help" | "--help" | "-h" => {
             print!("{}", usage());
             Ok(())
