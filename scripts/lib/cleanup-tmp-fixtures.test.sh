@@ -135,6 +135,40 @@ assert "T8: stdout has deleted= field" "[[ '$out' == *deleted=* ]]"
 assert "T8: stdout has freed= field" "[[ '$out' == *freed=* ]]"
 teardown_sandbox
 
+# ---------------------------------------------------------------------------
+# REQ-AXO-902272 — the DB sweep's safety filter.
+#
+# These tests do NOT touch a database. They exercise the shell-side half of the double
+# check, which is the only thing standing between this helper and the operator's real
+# data. That filter deserves more coverage than the SQL itself: a wrong LIKE pattern
+# loses a test fixture, a wrong shell filter loses `axon_live`.
+# ---------------------------------------------------------------------------
+assert "DB: a real leaked fixture name is reclaimable" \
+    "_axon_test_db_is_reclaimable axon_test_18c6a2687e7aebc1_t57"
+assert "DB: prefix plus a suffix is reclaimable" \
+    "_axon_test_db_is_reclaimable axon_test_x"
+
+# The whole point. These must survive every future edit to this helper.
+assert "DB: axon_live is NEVER reclaimable"  "! _axon_test_db_is_reclaimable axon_live"
+assert "DB: axon_dev is NEVER reclaimable"   "! _axon_test_db_is_reclaimable axon_dev"
+assert "DB: postgres is NEVER reclaimable"   "! _axon_test_db_is_reclaimable postgres"
+assert "DB: template0 is NEVER reclaimable"  "! _axon_test_db_is_reclaimable template0"
+assert "DB: template1 is NEVER reclaimable"  "! _axon_test_db_is_reclaimable template1"
+assert "DB: ddl_probe is untouched"          "! _axon_test_db_is_reclaimable ddl_probe"
+assert "DB: clone_probe is untouched"        "! _axon_test_db_is_reclaimable clone_probe"
+
+# Near-misses: the prefix must be anchored at the START, not merely present.
+assert "DB: a name CONTAINING the prefix is not reclaimable" \
+    "! _axon_test_db_is_reclaimable keep_axon_test_x"
+assert "DB: a truncated prefix is not reclaimable" \
+    "! _axon_test_db_is_reclaimable axon_tes"
+assert "DB: an empty name is not reclaimable" \
+    "! _axon_test_db_is_reclaimable ''"
+
+# The sweep must degrade quietly rather than fail a start when the DB is unreachable.
+out="$(axon_cleanup_orphan_test_databases --url='postgres://nobody@127.0.0.1:1/none' 2>/dev/null)"
+assert "DB: an unreachable database is skipped, not fatal" "[[ '$out' == axon-cleanup-db:* ]]"
+
 echo ""
 echo "=== Result: $PASS passed, $FAIL failed ==="
 if (( FAIL > 0 )); then
