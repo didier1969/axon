@@ -44,10 +44,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=../../scripts/lib/axon-supervisor.sh
 source "$ROOT_DIR/scripts/lib/axon-supervisor.sh"
+# REQ-AXO-902273 — host readiness comes from the shared policy, not from a private
+# re-read of /proc. This gate had its own `pgrep -c rustc` + swap snapshot, taken ONLY on
+# failure; that combination is what let session 107 time a suite on a host at load 76
+# with full swap and read the result as a code regression.
+# shellcheck source=../../scripts/lib/axon-resource-policy.sh
+source "$ROOT_DIR/scripts/lib/axon-resource-policy.sh"
 
 INSTANCE="${AXON_TEST_INSTANCE:-live}"
 PROC="${AXON_TEST_ROLE:-axon-indexer}"
 BUDGET_S="${AXON_TEST_RESTART_BUDGET_S:-180}"
+
+# REQ-AXO-902273 — captured BEFORE the restart, and reported on BOTH outcomes. A PASS on
+# a saturated host is no more trustworthy than a FAIL: it just happens to be the one
+# nobody questions. Advisory only — this gate must never refuse to run.
+HOST_AT_START="$(axon_host_measurement_verdict || true)"
 
 PC_PORT="$(axon_pc_port_for_instance "$INSTANCE")"
 BRAIN_PORT="$(axon_brain_port_for_instance "$INSTANCE")"
@@ -199,7 +210,7 @@ else
 fi
 
 if (( ELAPSED <= BUDGET_S )); then
-    pass "role unavailable ${ELAPSED}s (budget ${BUDGET_S}s — operator allows seconds to 2-3 min)"
+    pass "role unavailable ${ELAPSED}s (budget ${BUDGET_S}s — operator allows seconds to 2-3 min) — host at start: ${HOST_AT_START}"
 else
     # Report the HOST STATE with the overshoot. This host is shared: a sibling project's
     # pre-push gate (`llmlang/scripts/gate.sh` → `cargo test`) spawns one rustc per test
@@ -221,7 +232,7 @@ else
     _rustc_now="$(_num_or_unknown "$(pgrep -c rustc 2>/dev/null)")"
     _swap_free="$(_num_or_unknown "$(awk '/^SwapFree:/ {print $2}' /proc/meminfo 2>/dev/null)")"
     _swap_total="$(_num_or_unknown "$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null)")"
-    fail "role unavailable ${ELAPSED}s, over the ${BUDGET_S}s budget — host at that moment: ${_rustc_now} concurrent rustc, swap ${_swap_free}/${_swap_total} kB free. A busy host inflates the GPU teardown; re-run on an idle host before treating this as a regression (and never raise the budget to make it pass — it encodes the operator's 2-3 min constraint)."
+    fail "role unavailable ${ELAPSED}s, over the ${BUDGET_S}s budget — host at start: ${HOST_AT_START}; at that moment: ${_rustc_now} concurrent rustc, swap ${_swap_free}/${_swap_total} kB free. A busy host inflates the GPU teardown; re-run on an idle host before treating this as a regression (and never raise the budget to make it pass — it encodes the operator's 2-3 min constraint)."
 fi
 
 # --- The hard invariant: the brain never flinched ----------------------------

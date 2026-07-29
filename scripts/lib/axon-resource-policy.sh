@@ -337,3 +337,96 @@ axon_resolve_cargo_jobs() {
         "$(axon_detect_host_cpu_cores)" \
         "${AXON_BUILD_GB_PER_JOB:-3}"
 }
+
+# ---------------------------------------------------------------------------
+# REQ-AXO-902273 — is this host quiet enough for a MEASUREMENT to mean anything?
+#
+# Distinct from the sizing policy above, and the difference is the whole point. The
+# functions above answer "how big a build can this host take"; this one answers "can I
+# BELIEVE a number I measure right now". A host can be perfectly capable of running a
+# build while being far too busy for its timings to mean anything.
+#
+# Why it exists (session 107, and it cost most of a session). A full `--lib` run was
+# timed on a host whose only checked precondition — `pgrep -c rustc` — read ZERO, i.e.
+# the documented gate said GO. It was in fact at load 76 with 20 kB of 8 GB swap free,
+# saturated by THIRD-PARTY processes (a typedb server at 321 % CPU, a python3.11 at
+# 100 %). The suite passed 594 tests in its first minutes and 7 in its last ten. The
+# conclusion nearly drawn from that — "my change makes the suite unusable" — would have
+# been false, and would have thrown away a correct fix.
+#
+# The lesson is not "also look at the load". It is that a precondition covering ONE
+# family of processes silently ignores every other one. `rustc` was the family we had
+# been burned by (a sibling repo's pre-push hook), so it became the check; nothing else
+# did. Load average and swap are process-agnostic: they cannot miss a consumer because
+# they never enumerate consumers.
+
+# axon_load_avg_1m — 1-minute load average, integer (rounded down). 0 when unreadable.
+axon_load_avg_1m() {
+    local raw
+    raw="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)"
+    [[ "$raw" =~ ^([0-9]+) ]] && printf '%s\n' "${BASH_REMATCH[1]}" || printf '0\n'
+}
+
+# axon_measurement_readiness <load1> <cores> <swap_used_pct> <rustc_count>
+#
+# PURE (no /proc, no env) so the policy is unit-testable on any host. Prints one line:
+#   quiet
+#   busy:<reason>[,<reason>...]
+#
+# Thresholds, and why each is where it is:
+#   * load > 2 x cores — the run queue is more than double what the machine can serve, so
+#     wall-clock timings measure the queue, not the code. Two-times rather than one-times
+#     because a healthy build legitimately saturates every core.
+#   * swap used >= 90 % — the kernel is out of room to evict into; the next allocation
+#     stalls on I/O. Observed at 99.9 % while `MemAvailable` still read 18 GB, which is
+#     why free RAM alone is NOT a sufficient signal.
+#   * any foreign rustc — kept from the original gate: a sibling repo's pre-push hook
+#     spawns one rustc per test case (29 observed simultaneously).
+axon_measurement_readiness() {
+    local load1="${1:-0}" cores="${2:-1}" swap_pct="${3:-0}" rustc="${4:-0}"
+    [[ "$load1" =~ ^[0-9]+$ ]] || load1=0
+    [[ "$cores" =~ ^[0-9]+$ ]] && (( cores >= 1 )) || cores=1
+    [[ "$swap_pct" =~ ^[0-9]+$ ]] || swap_pct=0
+    [[ "$rustc" =~ ^[0-9]+$ ]] || rustc=0
+
+    local -a reasons=()
+    (( load1 > cores * 2 )) && reasons+=( "load=${load1}>2x${cores}cores" )
+    (( swap_pct >= 90 ))    && reasons+=( "swap=${swap_pct}%" )
+    (( rustc > 0 ))         && reasons+=( "rustc=${rustc}" )
+
+    if (( ${#reasons[@]} == 0 )); then
+        printf 'quiet\n'
+        return 0
+    fi
+    local IFS=,
+    printf 'busy:%s\n' "${reasons[*]}"
+}
+
+# axon_host_measurement_verdict — the host-reading wrapper. Prints the same one-line
+# verdict; returns 0 when quiet, 1 when busy, so a caller can gate on it directly.
+axon_host_measurement_verdict() {
+    local verdict
+    verdict="$(axon_measurement_readiness \
+        "$(axon_load_avg_1m)" \
+        "$(axon_detect_host_cpu_cores)" \
+        "$(axon_swap_used_pct)" \
+        "$(pgrep -c rustc 2>/dev/null || printf '0')")"
+    printf '%s\n' "$verdict"
+    [[ "$verdict" == "quiet" ]]
+}
+
+# axon_warn_unless_host_quiet <what> — NOISY advisory, never a blocker.
+#
+# Deliberately does not exit: refusing to run would be its own failure mode (an operator
+# who cannot measure when they need to will simply bypass the check, and then it protects
+# nothing). It states the verdict so a number produced on a busy host is never read later
+# as if it had been taken on a quiet one.
+axon_warn_unless_host_quiet() {
+    local what="${1:-this measurement}" verdict
+    verdict="$(axon_host_measurement_verdict)" && return 0
+    printf '⚠️  HOST NOT QUIET (%s) — %s may be unreliable.\n' "$verdict" "$what" >&2
+    printf '    Timings taken now measure host contention as much as the code.\n' >&2
+    printf '    Top consumers: %s\n' \
+        "$(ps -eo pcpu,comm --sort=-pcpu 2>/dev/null | sed -n '2,4p' | awk '{printf "%s(%s%%) ", $2, $1}')" >&2
+    return 1
+}
