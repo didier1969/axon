@@ -12,16 +12,11 @@ axon_detect_host_cpu_cores() {
     getconf _NPROCESSORS_ONLN 2>/dev/null || printf '4\n'
 }
 
-axon_detect_host_ram_gb() {
-    local kb=""
-    kb="$(sed -n 's/^MemTotal:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' /proc/meminfo 2>/dev/null | head -n1)"
-    if [[ -n "$kb" ]]; then
-        printf '%s\n' "$(( kb / 1024 / 1024 ))"
-        return 0
-    fi
-
-    printf '16\n'
-}
+# REQ-AXO-902275 — `axon_detect_host_ram_gb` SUPPRIMÉE : elle ne servait qu'au budget
+# de queue, lui-même retiré (voir plus bas). Elle DUPLIQUAIT
+# `runtime_capacity_profile::detect_total_ram_gb` — même /proc/meminfo, même division,
+# même fallback 16. Deux implémentations d'une lecture triviale, libres de diverger.
+# `axon_detect_host_cpu_cores` reste : `axon_resolve_cargo_jobs` la consomme.
 
 axon_normalize_resource_priority() {
     case "${1:-}" in
@@ -108,49 +103,27 @@ axon_default_watcher_policy() {
 # GUI-PRO-003 impose zéro warning. En bash rien ne le signale — d'où la règle posée par
 # ce REQ : toute fonction PURE (testable sans lancer un processus) appartient au Rust.
 
-axon_compute_queue_memory_budget_bytes() {
-    local budget_class="${1:?budget class required}"
-    local ram_gb="${2:?ram_gb required}"
-    local budget_gb=1
-
-    case "$budget_class" in
-        aggressive)
-            budget_gb=$(( ram_gb / 3 ))
-            ;;
-        balanced)
-            budget_gb=$(( ram_gb / 4 ))
-            ;;
-        conservative)
-            budget_gb=$(( ram_gb / 8 ))
-            ;;
-    esac
-
-    if [[ "$budget_class" == "balanced" || "$budget_class" == "aggressive" ]]; then
-        if [[ "$budget_gb" -lt 2 ]]; then
-            budget_gb=2
-        fi
-    elif [[ "$budget_gb" -lt 1 ]]; then
-        budget_gb=1
-    fi
-
-    if [[ "$budget_class" == "conservative" && "$budget_gb" -gt 4 ]]; then
-        budget_gb=4
-    fi
-    if [[ "$budget_gb" -gt 8 ]]; then
-        budget_gb=8
-    fi
-
-    printf '%s\n' "$(( budget_gb * 1024 * 1024 * 1024 ))"
-}
-
+# REQ-AXO-902275 — `axon_compute_queue_memory_budget_bytes` SUPPRIMÉE, et ce cas est le
+# plus grave des trois : la variable qu'elle produisait, `AXON_QUEUE_MEMORY_BUDGET_BYTES`,
+# est RETIRÉE côté Rust depuis REQ-AXO-290 S3 (`queue.rs` : « the streaming-pipeline v2
+# bounded channels obviate the global queue budget ; AXON_MEMORY_LIMIT_GB remains the
+# single operator knob »).
+#
+# Pire : `axonctl preflight` la REFUSE explicitement. `check_env_no_stale_vars()` la liste
+# parmi les 15 variables retirées et rend `passed: false` quand elle est présente.
+# Vérifié empiriquement — la politique shell posait une variable que notre propre
+# preflight rejette :
+#
+#     ❌ env-stale-vars — AXON_QUEUE_MEMORY_BUDGET_BYTES → retiré par REQ-AXO-290 S3
+#
+# Une politique en dérive ne se contente pas de calculer dans le vide : elle finit par
+# CONTREDIRE le runtime qu'elle est censée configurer.
 # REQ-AXO-902275 — `axon_compute_watcher_subtree_hint_budget` SUPPRIMÉE, même motif :
 # elle alimentait `AXON_WATCHER_SUBTREE_HINT_BUDGET`, sans aucun consommateur dans le
 # dépôt. `AXON_WATCHER_POLICY`, dont elle dérivait, reste exportée et vivante.
 
 axon_resolve_resource_policy() {
     local instance_kind="${1:?instance kind required}"
-    local cpu_cores=""
-    local ram_gb=""
 
     if [[ -n "${AXON_RESOURCE_POLICY_COMPUTED_INSTANCE:-}" && "$AXON_RESOURCE_POLICY_COMPUTED_INSTANCE" != "$instance_kind" ]]; then
         for scoped_var in \
@@ -158,7 +131,6 @@ axon_resolve_resource_policy() {
             AXON_BACKGROUND_BUDGET_CLASS \
             AXON_GPU_ACCESS_POLICY \
             AXON_WATCHER_POLICY \
-            AXON_QUEUE_MEMORY_BUDGET_BYTES \
             AXON_EMBEDDING_PROVIDER
         do
             local source_var="AXON_POLICY_SOURCE_${scoped_var}"
@@ -168,8 +140,6 @@ axon_resolve_resource_policy() {
         done
     fi
 
-    cpu_cores="$(axon_detect_host_cpu_cores)"
-    ram_gb="$(axon_detect_host_ram_gb)"
 
     if axon_normalize_resource_priority "${AXON_RESOURCE_PRIORITY:-}" >/dev/null 2>&1; then
         export AXON_RESOURCE_PRIORITY
@@ -200,22 +170,14 @@ axon_resolve_resource_policy() {
         AXON_POLICY_SOURCE_AXON_WATCHER_POLICY="policy_default"
     fi
 
-    export AXON_RESOURCE_POLICY_CPU_CORES="$cpu_cores"
-    export AXON_RESOURCE_POLICY_RAM_GB="$ram_gb"
-    # REQ-AXO-902275 — `AXON_EFFECTIVE_MAX_AXON_WORKERS` et
-    # `AXON_EFFECTIVE_WATCHER_SUBTREE_HINT_BUDGET` retirées avec les deux `MAX_*` /
-    # `*_SUBTREE_HINT_BUDGET` qu'elles alimentaient : aucune n'avait de consommateur.
-    # Le doublet EFFECTIVE/canonique reste pour le budget mémoire, où il a un sens —
-    # il distingue ce que la politique RECOMMANDE de ce qui est EN VIGUEUR après
-    # override opérateur.
-    export AXON_EFFECTIVE_QUEUE_MEMORY_BUDGET_BYTES="$(
-        axon_compute_queue_memory_budget_bytes "$AXON_BACKGROUND_BUDGET_CLASS" "$ram_gb"
-    )"
-
-    if [[ -z "${AXON_QUEUE_MEMORY_BUDGET_BYTES:-}" ]]; then
-        export AXON_QUEUE_MEMORY_BUDGET_BYTES="$AXON_EFFECTIVE_QUEUE_MEMORY_BUDGET_BYTES"
-        AXON_POLICY_SOURCE_AXON_QUEUE_MEMORY_BUDGET_BYTES="policy_default"
-    fi
+    # REQ-AXO-902275 — TOUTES les sorties `AXON_EFFECTIVE_*` sont retirées, ainsi que
+    # `AXON_RESOURCE_POLICY_CPU_CORES` / `_RAM_GB` : aucune n'avait de consommateur, et
+    # `AXON_QUEUE_MEMORY_BUDGET_BYTES` était pire qu'inerte — `axonctl preflight` la
+    # rejette comme résidu de migration.
+    #
+    # Ce qui reste ici est exactement ce qui pilote quelque chose : quatre knobs, tous
+    # lus par le runtime (2 à 3 sites Rust chacun). C'est ce que ce fichier était censé
+    # être depuis le début — de la SÉQUENCE et des réglages, pas de la politique.
 
     # REQ-AXO-184 #1: avoid → cpu auto-coercion deleted. AXON_EMBEDDING_PROVIDER
     # is the canonical knob; the runtime (canonical_embedding_provider_request)
@@ -235,9 +197,10 @@ axon_resolve_resource_policy() {
 # crate is GB-scale, so an unbounded build can commit far more than the machine has free
 # and push a busy host into swap thrashing.
 #
-# The existing helpers read TOTAL ram (`axon_detect_host_ram_gb`), which is the wrong
-# quantity: what matters is what is free WHILE the promote runs, alongside the live runtime,
-# Postgres, the indexer's GPU session and the operator's browser.
+# TOTAL ram is the wrong quantity here: what matters is what is free WHILE the promote
+# runs, alongside the live runtime, Postgres, the indexer's GPU session and the operator's
+# browser. (The total-ram helper that used to sit above was removed by REQ-AXO-902275 —
+# it duplicated `runtime_capacity_profile::detect_total_ram_gb` and fed a retired knob.)
 #
 # Deliberately a floor of 1 and a cap of the core count: this may only ever REDUCE
 # parallelism, never raise it above cargo's own default.

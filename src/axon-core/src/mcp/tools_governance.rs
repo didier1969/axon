@@ -218,21 +218,17 @@ impl McpServer {
                  inspect `last_error_reason` and `status_reason` columns",
             ));
         }
-        // REQ-AXO-901653 slice-5c — `oversized_for_current_budget` status was
-        // a public.File enum ; pipeline enforces budget via in-line stage
-        // back-pressure (no persisted oversized flag).
-        let oversized = 0i64;
-        if oversized > 0 {
-            causes.push((
-                "file_too_large_for_budget",
-                format!(
-                    "{} file(s) exceed the indexer queue memory budget for the current runtime profile",
-                    oversized
-                ),
-                "increase AXON_QUEUE_MEMORY_BUDGET_BYTES, or split the offending file(s) before \
-                 reindexing",
-            ));
-        }
+        // REQ-AXO-902275 — cause `file_too_large_for_budget` SUPPRIMÉE. Elle était morte
+        // deux fois : sa condition était `if 0 > 0` depuis REQ-AXO-901653 slice-5c (le
+        // statut `oversized_for_current_budget` était une enum `public.File`, et la
+        // pipeline applique désormais son budget par back-pressure de stage, sans flag
+        // persisté) — et le remède qu'elle affichait, « increase
+        // AXON_QUEUE_MEMORY_BUDGET_BYTES », désigne une variable RETIRÉE par
+        // REQ-AXO-290 S3, que `axonctl preflight` rejette activement.
+        //
+        // Un conseil produit qui ne peut pas fonctionner est du même ordre que le
+        // `POST /process/start` inerte de REQ-AXO-902271 : l'opérateur suit l'indication,
+        // elle ne marche pas, et il en déduit que le diagnostic ment.
         if known > 0 && symbols == 0 {
             causes.push((
                 "parser_extraction_gap",
