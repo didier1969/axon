@@ -113,7 +113,7 @@ assert_port 'unknown role has no health port'   '' live zzz-nonexistent
 
 printf '\naxon_role_supervision_verdict — REQ-AXO-902264 (giving up must not look like working)\n'
 
-# args: status is_ready has_ready_probe exit_code restarts max_restarts serving
+# args: status is_ready has_ready_probe exit_code restarts max_restarts serving [proc_state]
 assert_verdict() {
     local desc="$1" expected="$2"; shift 2
     local got; got="$(axon_role_supervision_verdict "$@")"
@@ -145,6 +145,32 @@ assert_verdict 'no restart policy at all (max=0) can never be "exhausted"' \
 # guard. Reporting that as a dead role sends the operator to restart a healthy process.
 assert_verdict 'serving its own health port outranks a Completed verdict' \
     drift Completed - true 1 3 3 yes
+
+# REQ-AXO-902271 — `wedged`: the supervisor never TRIED, as opposed to `exhausted` where
+# it tried and gave up. The role's process is an unreapable zombie, so the stop never
+# completes and self-healing never starts. Note `restarts=0`: the counter designed to warn
+# about abandonment reads perfectly healthy here, which is why the verdict cannot be
+# derived from it.
+assert_verdict 'Terminating behind a zombie is wedged, not down' \
+    wedged Terminating - true 1 0 3 no zombie
+# The budget is irrelevant to this verdict and must not be allowed to mask it: a role can
+# be wedged with its budget spent too, and the actionable fact is still the wedge (the
+# start command that `exhausted` prints is inert while the stop has not completed).
+assert_verdict 'wedged outranks exhausted — the recovery differs' \
+    wedged Terminating - true 1 3 3 no zombie
+# Discriminate on the ZOMBIE, not on the status: an ordinary teardown also passes through
+# Terminating, and crying wolf on every clean stop would train people to skip the section.
+assert_verdict 'Terminating with a live process is an ordinary teardown' \
+    down Terminating - true 1 0 3 no alive
+assert_verdict 'Terminating with the process already gone is not wedged' \
+    down Terminating - true 1 0 3 no gone
+# A caller that cannot inspect the pid must degrade to the old verdict rather than invent
+# one — the parameter defaults to unknown for exactly this.
+assert_verdict 'Terminating without pid information falls back to down' \
+    down Terminating - true 1 0 3 no
+# Ground truth still outranks everything: a role answering /readyz is not wedged.
+assert_verdict 'a serving role is never reported as wedged' \
+    drift Terminating - true 1 0 3 yes zombie
 
 # Configuration, not failure: brain_only does not select the indexer, and
 # AXON_DASHBOARD_DISABLED omits the dashboard. Both surface as Disabled.

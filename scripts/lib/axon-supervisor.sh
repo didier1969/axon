@@ -271,7 +271,7 @@ _axon_role_serving() {
 }
 
 # axon_role_supervision_verdict <status> <is_ready> <has_ready_probe> <exit_code> \
-#                               <restarts> <max_restarts> <serving>
+#                               <restarts> <max_restarts> <serving> [proc_state]
 #
 # PURE decision function (no I/O — unit-tested in axon-supervisor.test.sh). Turns one
 # process-compose row plus the role's own ground truth into ONE token:
@@ -283,7 +283,31 @@ _axon_role_serving() {
 #   disabled  — not selected for this runtime mode (brain_only, dashboard toggle)
 #   oneshot   — a task, not a service: no readiness probe and it exited 0
 #   exhausted — down AND the restart budget is spent: the supervisor will NEVER retry
+#   wedged    — stuck mid-teardown behind an unreapable zombie: self-healing never STARTS
 #   down      — down with retries left (the supervisor may still bring it back)
+#
+# REQ-AXO-902271 — `wedged` names a failure mode `exhausted` does NOT cover, and the
+# difference matters because the two need OPPOSITE recovery. `exhausted` is the supervisor
+# having tried its 3 restarts and given up. `wedged` is `restarts=0`: it never tried, and
+# never will, because from its point of view the stop has not FINISHED. The role's process
+# is dead but `<defunct>` — a multi-threaded zombie (`Zl`) with one thread stuck in
+# uninterruptible D-state on the WSL2 GPU virtualisation channel
+# (`dxgglobal_acquire_process_adapter`), which SIGKILL does not clear. So the role sits at
+# `Terminating` indefinitely with its whole restart budget intact — dead with a full tank,
+# which no counter reports.
+#
+# Measured on 2026-07-28 (three promote gate failures in one day, host verifiably idle at
+# `0 concurrent rustc`). The `down` verdict this used to yield is not merely imprecise: its
+# recovery command is WRONG. `POST /process/start` is ignored while the supervisor believes
+# the role is still terminating, and `PATCH stop` answers
+# `{"error":"process axon-indexer is not running"}`. Printing a command that cannot work is
+# the same class of defect as printing HEALTHY for a dead role.
+#
+# The discriminator is the ZOMBIE, not elapsed time: an ordinary teardown passes through
+# `Terminating` too, and crying wolf on every clean stop would train people to skip this
+# section — which is the blindness this whole surface exists to remove. `proc_state`
+# defaults to unknown, so a caller that cannot look at the pid degrades to `down` rather
+# than inventing a verdict.
 #
 # REQ-AXO-902264 — `exhausted` is the whole reason this exists. `max_restarts: 3` with
 # `restart: on_failure` means self-healing GIVES UP after the third failure and then does
@@ -298,6 +322,7 @@ _axon_role_serving() {
 axon_role_supervision_verdict() {
     local status="${1:-}" is_ready="${2:-}" has_probe="${3:-}" exit_code="${4:-0}"
     local restarts="${5:-0}" max_restarts="${6:-0}" serving="${7:-unknown}"
+    local proc_state="${8:-unknown}"
 
     [[ "$restarts" =~ ^[0-9]+$ ]] || restarts=0
     [[ "$max_restarts" =~ ^[0-9]+$ ]] || max_restarts=0
@@ -322,6 +347,13 @@ axon_role_supervision_verdict() {
     # Ground truth first: a role that answers /readyz is not down, whatever the
     # supervisor's bookkeeping says.
     if [[ "$serving" == "yes" ]]; then printf 'drift\n'; return 0; fi
+    # REQ-AXO-902271 — before the budget arithmetic, because the budget is IRRELEVANT here:
+    # a wedged role has consumed none of it and will consume none of it. Ordering this
+    # after the `exhausted`/`down` branches would have hidden the case behind a count that
+    # reads perfectly healthy.
+    if [[ "$status" == "Terminating" && "$proc_state" == "zombie" ]]; then
+        printf 'wedged\n'; return 0
+    fi
     # `Disabled` is configuration, not failure: process-compose marks every process the
     # launcher did not select (brain_only omits the indexer; AXON_DASHBOARD_DISABLED omits
     # the dashboard). Surfaced as a warning with its recovery command, never as a failure.
@@ -345,6 +377,7 @@ axon_role_supervision_verdict() {
 axon_role_survey() {
     local project_root="${1:?project root required}" instance_kind="${2:?instance kind required}"
     local pc_port cfg rows name status ready probe code restarts maxr serving verdict
+    local pid proc_state
 
     pc_port="$(axon_pc_port_for_instance "$instance_kind")"
     axon_supervisor_healthy "$pc_port" || return 1
@@ -397,12 +430,15 @@ for p in sorted(procs, key=lambda r: str(r.get("name", ""))):
         str(p.get("exit_code", 0)),
         str(p.get("restarts", 0)),
         str(budgets.get(name, 0)),
+        # REQ-AXO-902271 — the pid is what tells a teardown in progress apart from one
+        # wedged behind an unreapable zombie. The API has it; nothing read it before.
+        str(p.get("pid", 0)),
     ]))
 PY
 )" || return 1
     [[ -n "$rows" ]] || return 1
 
-    while IFS='|' read -r name status ready probe code restarts maxr; do
+    while IFS='|' read -r name status ready probe code restarts maxr pid; do
         [[ -n "$name" ]] || continue
         # Probe the role's own health port ONLY when the supervisor claims it is not
         # Running: on a healthy runtime `status` must stay cheap.
@@ -410,7 +446,19 @@ PY
         if [[ "$status" != "Running" ]] && [[ -n "$(_axon_role_health_port "$instance_kind" "$name")" ]]; then
             if _axon_role_serving "$instance_kind" "$name"; then serving="yes"; else serving="no"; fi
         fi
-        verdict="$(axon_role_supervision_verdict "$status" "$ready" "$probe" "$code" "$restarts" "$maxr" "$serving")"
+        # REQ-AXO-902271 — only for `Terminating`, and only then: `ps` on every role of a
+        # healthy runtime would be paid on every `axon status` for a question that cannot
+        # arise. `Zl` is the multi-threaded zombie observed in production; matching on the
+        # leading `Z` covers `Z` and `Zl` alike.
+        proc_state="unknown"
+        if [[ "$status" == "Terminating" ]] && [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 0 )); then
+            case "$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')" in
+                Z*) proc_state="zombie" ;;
+                "") proc_state="gone" ;;
+                *)  proc_state="alive" ;;
+            esac
+        fi
+        verdict="$(axon_role_supervision_verdict "$status" "$ready" "$probe" "$code" "$restarts" "$maxr" "$serving" "$proc_state")"
         printf '%s|%s|%s|%s|%s|%s|%s\n' "$name" "$status" "$ready" "$restarts" "$maxr" "$serving" "$verdict"
     done <<< "$rows"
 }

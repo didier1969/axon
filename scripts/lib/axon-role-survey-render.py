@@ -21,6 +21,11 @@ Context, measured on process-compose 1.94.0 in an isolated probe (see the REQ):
   * The counter NEVER goes back down: not after a healthy period, and not after the
     explicit `POST /process/start` used to recover. So a role can be Running with zero
     remaining safety net, which is what the `no_budget` verdict names.
+
+REQ-AXO-902271 adds `wedged`, which is the opposite shape and needs the opposite advice:
+the budget is INTACT because the supervisor never got to spend it. The role's stop never
+completes (unreapable zombie on the WSL2 GPU channel), so self-healing does not give up —
+it never starts. It is the only verdict here whose recovery is not a command to run now.
 """
 
 import os
@@ -69,6 +74,21 @@ def render(rows, pc_port, instance):
             # for; warmup is not abandonment.
             yield (f"WARN    {name:<15} Running but its readiness probe is not passing "
                    f"(boot, or degraded)"), False
+        elif verdict == "wedged":
+            # REQ-AXO-902271 — the one verdict whose recovery is NOT a start command.
+            # `POST /process/start` is ignored while the supervisor still believes the role
+            # is terminating, and `PATCH stop` answers "process is not running". Naming a
+            # command that cannot work here would be the same lie as a green line.
+            yield (f"FAIL    {name:<15} {state} — WEDGED mid-teardown behind an unreapable "
+                   f"zombie ({restarts}/{maxr} restarts consumed: self-healing has not "
+                   f"even STARTED, and will not, because the stop never completes). "
+                   f"A start command will NOT work here. The blocked thread sits in "
+                   f"uninterruptible D-state on the WSL2 GPU channel, usually behind an "
+                   f"`nvidia-smi` from another tool: check with "
+                   f"`ps -eo pid,stat,cmd | grep -E '^ *[0-9]+ +D'`. It clears on its own "
+                   f"in 5-15 min once that caller releases the adapter, after which "
+                   f"{start_cmd} works. `wsl --shutdown` forces it but closes every one of "
+                   f"your Windows sessions — operator decision, never automatic."), True
         elif verdict == "exhausted":
             yield (f"FAIL    {name:<15} {state} — SELF-HEALING EXHAUSTED "
                    f"({restarts}/{maxr} restarts consumed): the supervisor will NEVER "

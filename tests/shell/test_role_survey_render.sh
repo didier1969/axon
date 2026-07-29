@@ -94,6 +94,26 @@ assert_contains 'spent budget is named as such' 'budget is SPENT' "$NOBUDGET"
 assert_contains 'spent budget points at the only real fix' './scripts/axon --instance live stop' "$NOBUDGET"
 assert_contains 'spent budget flags the brain cost of that fix' 'interrupts the brain' "$NOBUDGET"
 
+# --- Wedged: dead with a FULL tank (REQ-AXO-902271) --------------------------
+# The failure mode `exhausted` does not cover. Observed three times on 2026-07-28 with the
+# host verifiably idle: the role's process is an unreapable zombie, so from the
+# supervisor's point of view the stop never finishes and self-healing never STARTS.
+# `restarts=0` — the counter that is supposed to warn us reads perfectly healthy.
+WEDGED='axon-brain|Running|Ready|0|3|-|ok
+axon-indexer|Terminating|-|0|3|no|wedged'
+assert_rc 'a wedged role degrades the runtime (exit 2)' 2 "$WEDGED"
+assert_contains 'wedged is named, not folded into "down"' 'WEDGED' "$WEDGED"
+# The whole point of a separate verdict: `down` would print a start command, and that
+# command is INERT here (the supervisor ignores it while it believes the role is still
+# terminating). Printing an inert command is the same class of defect as printing HEALTHY
+# for a dead role, so the line must say so out loud.
+assert_contains 'wedged states that a start command will not work' 'will NOT work' "$WEDGED"
+assert_contains 'wedged gives the diagnostic for the real blocker' 'D-state' "$WEDGED"
+assert_contains 'wedged says the budget is intact, not spent' '0/3' "$WEDGED"
+# `wsl --shutdown` closes every session the operator has open. It may be named as the
+# forced way out; it must never read as the recommended first move.
+assert_contains 'wedged marks the forced cure as an operator decision' 'operator decision' "$WEDGED"
+
 # --- States that must NOT degrade -------------------------------------------
 # The indexer spends minutes loading its GPU model at boot; failing there would make
 # `axon status` red on every normal start.
