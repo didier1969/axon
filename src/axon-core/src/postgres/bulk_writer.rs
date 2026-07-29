@@ -1605,11 +1605,17 @@ mod tests {
 
     #[test]
     fn bulk_writer_env_override_and_adaptive_dispatch() {
-        // ONE test owns AXON_BULK_WRITER_ENABLED / AXON_BULK_WRITER_MIN_ROWS.
-        // Rust runs tests in parallel threads sharing the process env, so
-        // splitting these into separate #[test]s races — a sibling's set_var
-        // clobbers this one's assertion mid-run (observed flake on
-        // bulk_writer_truthy_values_enable). Kept serial in a single test.
+        // REQ-AXO-902261 — this test used to justify itself with "ONE test owns
+        // AXON_BULK_WRITER_ENABLED, so splitting it into separate #[test]s would race".
+        // Merging the assertions into one function only serializes this file against
+        // ITSELF; the process environment is one system-wide table shared by the whole
+        // test binary, so any sibling anywhere in the crate could still land a mutation
+        // mid-assertion. Reasoning per-key is exactly the false justification found in
+        // tsv_worker.rs. The lock is what makes it safe — the grouping is now just a
+        // readability choice.
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         std::env::remove_var("AXON_BULK_WRITER_ENABLED");
         std::env::remove_var("AXON_BULK_WRITER_MIN_ROWS");
 

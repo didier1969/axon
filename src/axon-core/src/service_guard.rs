@@ -1534,9 +1534,17 @@ pub fn vector_pipeline_stage_telemetry() -> VectorPipelineStageTelemetry {
 /// for its critical section, otherwise parallel `cargo test`
 /// invocations across modules race against each other on the shared
 /// atomics. Returns a guard ; drop releases.
+/// REQ-AXO-902261 — delegates instead of minting. One global resource, one lock, and the
+/// mint lives in `test_support` next to `env_test_lock` / `registry_test_lock`.
+///
+/// `#[cfg(test)]` is REQUIRED, not tidiness: `test_support` is itself `#[cfg(test)]` on the
+/// library, so a delegating function compiled into the normal build cannot name it
+/// (E0433 — caught by `cargo test --bins`, which the `--lib` gate alone does not surface).
+/// Same wall session 105 hit from `bin/axonctl.rs`. It has no production caller: the only
+/// user in the repo is `embedder/tests.rs::lock_service_guard`.
+#[cfg(test)]
 pub fn lock_for_tests() -> parking_lot::MutexGuard<'static, ()> {
-    static TEST_SERIAL_GUARD: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-    TEST_SERIAL_GUARD.lock()
+    crate::test_support::service_guard_test_lock().lock()
 }
 
 pub fn reset_for_tests() {
@@ -2058,13 +2066,16 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static TEST_GUARD: Mutex<()> = Mutex::new(());
+    // REQ-AXO-902261 — these tests used to take a private `static TEST_GUARD: Mutex<()>`
+    // declared right here, while `embedder/tests.rs` took `lock_for_tests()`. Two mutexes
+    // over ONE set of global atomics is no exclusion at all across the two files — and
+    // `lock_for_tests`'s own doc says every test touching this state must hold IT. They
+    // now do.
 
     #[test]
     fn test_recent_peak_latency_expires() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         LAST_SQL_LATENCY_MS.store(900, Ordering::Relaxed);
         LAST_MCP_LATENCY_MS.store(200, Ordering::Relaxed);
         LAST_SAMPLE_AT_MS.store(10_000, Ordering::Relaxed);
@@ -2076,7 +2087,7 @@ mod tests {
 
     #[test]
     fn test_recent_peak_latency_uses_max_surface() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         LAST_SQL_LATENCY_MS.store(250, Ordering::Relaxed);
         LAST_MCP_LATENCY_MS.store(700, Ordering::Relaxed);
         LAST_SAMPLE_AT_MS.store(20_000, Ordering::Relaxed);
@@ -2087,7 +2098,7 @@ mod tests {
 
     #[test]
     fn test_current_pressure_reports_critical_when_sample_is_fresh() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         LAST_SQL_LATENCY_MS.store(1_700, Ordering::Relaxed);
         LAST_MCP_LATENCY_MS.store(200, Ordering::Relaxed);
         LAST_SAMPLE_AT_MS.store(30_000, Ordering::Relaxed);
@@ -2098,7 +2109,7 @@ mod tests {
 
     #[test]
     fn test_current_pressure_enters_recovering_after_ttl() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         LAST_SQL_LATENCY_MS.store(1_700, Ordering::Relaxed);
         LAST_MCP_LATENCY_MS.store(200, Ordering::Relaxed);
         LAST_SAMPLE_AT_MS.store(40_000, Ordering::Relaxed);
@@ -2109,7 +2120,7 @@ mod tests {
 
     #[test]
     fn test_current_pressure_returns_healthy_after_recovery_window() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         LAST_SQL_LATENCY_MS.store(1_700, Ordering::Relaxed);
         LAST_MCP_LATENCY_MS.store(200, Ordering::Relaxed);
         LAST_SAMPLE_AT_MS.store(50_000, Ordering::Relaxed);
@@ -2120,7 +2131,7 @@ mod tests {
 
     #[test]
     fn test_current_pressure_stays_recovering_after_low_latency_sample() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         LAST_SQL_LATENCY_MS.store(120, Ordering::Relaxed);
         LAST_MCP_LATENCY_MS.store(140, Ordering::Relaxed);
         LAST_SAMPLE_AT_MS.store(70_000, Ordering::Relaxed);
@@ -2132,7 +2143,7 @@ mod tests {
 
     #[test]
     fn test_interactive_priority_enters_and_exits_cleanly() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
         let before = interactive_requests_in_flight();
         mcp_request_started();
@@ -2144,7 +2155,7 @@ mod tests {
 
     #[test]
     fn test_interactive_priority_does_not_linger_without_inflight_requests() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
         LAST_INTERACTIVE_AT_MS.store(50_000, Ordering::Relaxed);
         INTERACTIVE_REQUESTS_IN_FLIGHT.store(0, Ordering::Relaxed);
@@ -2159,7 +2170,7 @@ mod tests {
 
     #[test]
     fn test_vector_runtime_metrics_reports_real_ready_depth_without_graph_floor() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
         record_vector_ready_queue_depth(0);
 
@@ -2168,7 +2179,7 @@ mod tests {
 
     #[test]
     fn test_vector_ready_replenishment_deficit_tracks_request_and_fulfillment() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
 
         record_vector_ready_replenishment_requested(3);
@@ -2186,7 +2197,7 @@ mod tests {
 
     #[test]
     fn test_quiescent_state_detects_idle_candidate_without_backlog_or_claims() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
         assert_eq!(
             current_runtime_quiescent_state(0, 0),
@@ -2196,7 +2207,7 @@ mod tests {
 
     #[test]
     fn test_quiescent_scale_only_applies_in_idle_candidate_state() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         assert_eq!(
             scale_interval_for_quiescent(
                 1_000,
@@ -2221,7 +2232,7 @@ mod tests {
 
     #[test]
     fn test_runtime_wake_summary_tracks_quiescent_entry_and_exit() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
 
         record_runtime_wakeup(RuntimeWakeSource::Background, 0, 0);
@@ -2240,7 +2251,7 @@ mod tests {
 
     #[test]
     fn test_runtime_wake_summary_tracks_useful_resume_after_completion() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
 
         record_runtime_wakeup(RuntimeWakeSource::Background, 0, 0);
@@ -2254,7 +2265,7 @@ mod tests {
 
     #[test]
     fn test_runtime_wake_summary_tracks_quiescent_exit_reason() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
 
         record_runtime_wakeup(RuntimeWakeSource::Background, 0, 0);
@@ -2267,7 +2278,7 @@ mod tests {
 
     #[test]
     fn test_runtime_wake_summary_tracks_last_wake_source() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
 
         record_runtime_wakeup(RuntimeWakeSource::Background, 0, 0);
@@ -2281,7 +2292,7 @@ mod tests {
 
     #[test]
     fn test_vector_stage_latency_summaries_compute_recent_percentiles() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
         for latency in [5, 10, 15, 20, 25] {
             record_vector_stage_ms(VectorStageKind::Fetch, latency);
@@ -2297,7 +2308,7 @@ mod tests {
 
     #[test]
     fn test_vector_embed_breakdown_totals_accumulate() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
         record_vector_embed_breakdown(13, 7);
         record_vector_embed_breakdown(17, 11);
@@ -2309,7 +2320,7 @@ mod tests {
 
     #[test]
     fn test_vector_pipeline_stage_telemetry_exposes_tensorrt_ready_names() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
 
         record_vector_prepare_reply_wait_ms(3);
@@ -2336,7 +2347,7 @@ mod tests {
 
     #[test]
     fn test_vector_embed_attempt_tracks_inflight_state_until_finished() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
         record_vector_embed_attempt(48, 53_652);
 
@@ -2357,7 +2368,7 @@ mod tests {
 
     #[test]
     fn test_vector_worker_liveness_tracks_start_heartbeat_and_stop() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
 
         record_vector_worker_started();
@@ -2380,7 +2391,7 @@ mod tests {
 
     #[test]
     fn test_graph_worker_liveness_tracks_start_heartbeat_and_stop() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
 
         record_graph_worker_started();
@@ -2397,7 +2408,7 @@ mod tests {
 
     #[test]
     fn test_vector_chunk_embedding_rate_tracks_recent_throughput() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
 
         record_vector_embed_call(64, 2);
@@ -2413,7 +2424,7 @@ mod tests {
 
     #[test]
     fn test_vector_lane_state_tracks_restart_success_and_fault() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = lock_for_tests();
         reset_for_tests();
 
         record_vector_worker_restart();

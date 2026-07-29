@@ -71,10 +71,34 @@ pub fn registry_test_lock() -> &'static Mutex<()> {
     MUTEX.get_or_init(|| Mutex::new(()))
 }
 
+/// Process-wide serialization mutex for the `service_guard` global atomics
+/// (`LAST_SQL_LATENCY_MS`, `LAST_MCP_LATENCY_MS`, `LAST_SAMPLE_AT_MS`, …), which every
+/// `record_*` / `reset_for_tests` call mutates.
+///
+/// REQ-AXO-902261 — FOURTH instance of the class, and this one was found BY the widened
+/// guard rather than by a flake. `service_guard.rs` carried TWO mutexes over that one set
+/// of atomics: the public `lock_for_tests()` (taken by `embedder/tests.rs`) and a private
+/// `static TEST_GUARD` inside its own `mod tests` (taken by its own 24 tests). Two
+/// mutexes, one resource, no exclusion between the two files — while the doc-comment on
+/// `lock_for_tests` stated that *any* test reading this state must hold it. Its own tests
+/// were the ones not holding it.
+///
+/// `parking_lot` here, unlike the two `std` locks above, because `lock_for_tests()`
+/// already returned a `parking_lot::MutexGuard` and its callers name that type.
+pub fn service_guard_test_lock() -> &'static parking_lot::Mutex<()> {
+    static MUTEX: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+    MUTEX.get_or_init(|| parking_lot::Mutex::new(()))
+}
+
 /// RAII guard for one env-var mutation. The guard does NOT acquire
 /// any lock itself — the caller holds `env_test_lock()` for the
 /// guard's lifetime. Drop restores the prior value (or unsets if
 /// the prior state was unset) and is panic-safe.
+///
+/// REQ-AXO-902261 — because of that, `EnvVarGuard` is NOT proof of serialization, and the
+/// guard test below refuses to treat it as such. The original guard listed it among its
+/// `LOCK_MARKERS`, so a file using guards without ever taking the lock read as compliant:
+/// half the two-step contract counted as the whole of it.
 pub struct EnvVarGuard {
     name: &'static str,
     prior: Option<String>,

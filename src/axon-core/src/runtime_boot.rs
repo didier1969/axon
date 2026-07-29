@@ -1347,6 +1347,9 @@ mod tests {
     /// daemon's frozen env. Saves/restores the process env around the assertion.
     #[test]
     fn resource_release_identity_overrides_env_from_active_file() {
+        // REQ-AXO-902261 — saving and restoring the vars is NOT serialization: a sibling
+        // test can still read or clobber them between the save and the restore.
+        let _lock = env_lock();
         let saved_file = std::env::var("AXON_ACTIVE_IDENTITY_FILE").ok();
         let saved_build = std::env::var("AXON_BUILD_ID").ok();
         let saved_gen = std::env::var("AXON_INSTALL_GENERATION").ok();
@@ -1388,6 +1391,8 @@ mod tests {
 
     #[test]
     fn resource_release_identity_noop_without_env() {
+        // REQ-AXO-902261 — see the sibling test above: save/restore is not a lock.
+        let _lock = env_lock();
         let saved_file = std::env::var("AXON_ACTIVE_IDENTITY_FILE").ok();
         let saved_build = std::env::var("AXON_BUILD_ID").ok();
         std::env::remove_var("AXON_ACTIVE_IDENTITY_FILE");
@@ -1896,6 +1901,8 @@ mod tests {
 
     #[test]
     fn indexer_shadow_gpu_boot_applies_conservative_memory_defaults_for_8gb_gpu() {
+        // REQ-AXO-902261 — 57 env mutations, previously unserialized.
+        let _lock = env_lock();
         let runtime_profile = RuntimeProfile {
             cpu_cores: 8,
             ram_total_gb: 32,
