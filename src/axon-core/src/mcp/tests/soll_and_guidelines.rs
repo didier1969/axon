@@ -5316,6 +5316,99 @@ fn test_axon_soll_manager_create_attached_validation_rejects_invalid_target_kind
     );
 }
 
+/// REQ-AXO-902283 (Lot F) — a MILESTONE create whose relation to a REQ is wrong (only TARGETS
+/// is legal) auto-canonizes to TARGETS instead of rejecting, mirroring action=link. SCOPED to
+/// MIL, so REQ-AXO-902247's corrected_call contract for every other source kind is untouched.
+#[test]
+fn test_soll_manager_create_milestone_autocanonizes_wrong_relation_to_targets() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-990001', 'Requirement', 'AXO', 'target req', 'x', 'current', '{}')")
+        .unwrap();
+
+    // MIL → REQ admits only TARGETS; ask for REFINES on purpose.
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "milestone",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "M1 auto-canonize probe",
+                    "description": "probe",
+                    "attach_to": "REQ-AXO-990001",
+                    "relation_type": "REFINES"
+                }
+            }
+        })),
+        id: Some(json!(902_283)),
+    };
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    assert_ne!(
+        response.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "MIL→REQ with a wrong relation must auto-canonize, not reject: {response}"
+    );
+    // The edge that landed must be TARGETS, not the requested REFINES.
+    let rels: Vec<String> = server
+        .graph_store
+        .query_json("SELECT relation_type FROM soll.Edge WHERE target_id = 'REQ-AXO-990001'")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| r.into_iter().next())
+        .collect();
+    assert!(rels.contains(&"TARGETS".to_string()), "the edge must be TARGETS, got {rels:?}");
+    assert!(!rels.contains(&"REFINES".to_string()), "REFINES must NOT be created, got {rels:?}");
+}
+
+/// REQ-AXO-902283 (Lot F) — a MIL→PIL create has no legal relation (a milestone TARGETS REQs,
+/// never a pillar), so it still rejects — but with an explicit `milestone_guidance` hint that
+/// teaches the mental model instead of a bare empty allowed-set.
+#[test]
+fn test_soll_manager_create_milestone_to_pillar_rejects_with_guidance() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-990001', 'Pillar', 'AXO', 'a pillar', 'x', 'current', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "milestone",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "M2 to-pillar probe",
+                    "description": "probe",
+                    "attach_to": "PIL-AXO-990001",
+                    "relation_type": "BELONGS_TO"
+                }
+            }
+        })),
+        id: Some(json!(9_022_831)),
+    };
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    assert_eq!(response.get("isError").and_then(|v| v.as_bool()), Some(true));
+    let guidance = response["data"]["parameter_repair"]["milestone_guidance"].as_str();
+    assert!(
+        guidance.is_some_and(|g| g.contains("TARGETS") && g.contains("REQUIREMENT")),
+        "MIL→PIL must carry the milestone_guidance hint, got: {:?}",
+        response["data"]["parameter_repair"]
+    );
+}
+
 /// REQ-AXO-902249 — `soll_children` replaces the hand-written
 /// `JOIN soll.Edge / soll.Node` (real columns `source_id`/`target_id`, mistyped
 /// on the first attempt in session 104). The point of the tool is to make that

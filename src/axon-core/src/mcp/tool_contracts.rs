@@ -179,10 +179,14 @@ pub(crate) struct SollManagerData {
     /// (source kind, target kind), not on the relation alone. `REQ → PIL` admits
     /// only `BELONGS_TO`; `REQ → CPT` admits nothing (attach the REQ to a PIL or
     /// another REQ instead). Call `soll_relation_schema` to get the matrix for a
-    /// kind BEFORE guessing — this is the #1 open friction in telemetry
-    /// (`forbidden_relation_for_type`, 217 occurrences), and it is entirely
+    /// kind BEFORE guessing — this is the top open friction in telemetry
+    /// (`forbidden_relation_for_type`; live count via `mcp_friction_report`, never
+    /// hardcoded — REQ-AXO-902283 / GUI-PRO-013 DRY), and it is entirely
     /// avoidable. On a rejection the error carries `parameter_repair`, plus a
     /// ready-to-apply `corrected_call` whenever the pair admits a single relation.
+    /// REQ-AXO-902283 — a MILESTONE source is the exception: a MIL create whose
+    /// relation to its single legal target (REQ → TARGETS) is wrong auto-canonizes
+    /// to that relation instead of rejecting (mirrors action=link).
     #[serde(default)]
     pub relation_type: Option<String>,
     /// Node id (update target). DB-allocated on create — forbidden there.

@@ -664,7 +664,7 @@ impl McpServer {
                     .or_else(|| data.get("relation_hint").and_then(|v| v.as_str()))
                     .filter(|s| !s.trim().is_empty());
 
-                let (attach_to, relation_type) = match (attach_to, relation_type_raw) {
+                let (attach_to, mut relation_type) = match (attach_to, relation_type_raw) {
                     (Some(a), Some(r)) => (a, r.to_uppercase()),
                     (missing_attach, _) => {
                         let missing_field = if missing_attach.is_none() {
@@ -760,6 +760,22 @@ impl McpServer {
                 };
                 let target_prefix: String = attach_to.split('-').next().unwrap_or("").to_string();
                 let policy = relation_policy_for_pair(source_prefix, &target_prefix);
+                // REQ-AXO-902283 (Lot F, item 1) — a MILESTONE create whose relation to its
+                // single legal target is wrong auto-canonizes to that relation, mirroring
+                // action=link (select_relation_type_for_link, REQ-901939). SCOPED to MIL so
+                // REQ-AXO-902247's deliberate corrected_call contract for every OTHER source
+                // kind is untouched — only the milestone orientation trou (MIL→REQ = TARGETS)
+                // is smoothed. A no-op when the supplied relation is already the legal one, so
+                // the match below still accepts as usual.
+                if source_prefix == "MIL" {
+                    if let Some(p) = &policy {
+                        if p.allowed.len() == 1
+                            && !p.allowed.iter().any(|a| *a == relation_type.as_str())
+                        {
+                            relation_type = p.allowed[0].to_string();
+                        }
+                    }
+                }
                 match &policy {
                     Some(p)
                         if p.allowed
@@ -800,8 +816,9 @@ impl McpServer {
                         // fixable, so hand back the corrected value instead of a list the
                         // LLM must still reason over. This is the FREQUENT case (REQ → PIL
                         // only admits BELONGS_TO) and `forbidden_relation_for_type` is the
-                        // #1 open friction in telemetry: 217 occurrences, i.e. 217 wasted
-                        // round-trips on a choice that had no choice.
+                        // top open friction in telemetry — a wasted round-trip on a choice
+                        // that had no choice (live count via `mcp_friction_report`, never
+                        // hardcoded: REQ-AXO-902283 / GUI-PRO-013 DRY).
                         //
                         // Deliberately a PATCH, not a reconstructed full call: the original
                         // `data` payload is not faithfully reproducible here, and inventing
@@ -816,6 +833,15 @@ impl McpServer {
                                 ),
                             }),
                             _ => Value::Null,
+                        };
+                        // REQ-AXO-902283 (Lot F, item 2) — the milestone orientation hint.
+                        // A MIL→PIL/VIS create lands here (no legal relation, so the MIL
+                        // auto-canonize above could not fire): teach the mental model
+                        // explicitly instead of just handing back an empty allowed-set.
+                        let milestone_guidance = if source_prefix == "MIL" {
+                            json!("un milestone ne se rattache PAS à un pilier ni à une vision : il TARGETS un ou plusieurs REQUIREMENTS. Crée d'abord les REQ, puis le milestone qui les cible. Le pilier/thème d'un milestone est DÉRIVÉ du pilier dominant de ses REQ (jamais déclaré ; cf soll_roadmap). Un milestone sans TARGETS→REQ est invisible dans soll_roadmap.")
+                        } else {
+                            Value::Null
                         };
                         return Some(json!({
                             "content": [{
@@ -851,6 +877,9 @@ impl McpServer {
                                     // unambiguous (single legal relation). Absent otherwise,
                                     // so its presence always means "apply this verbatim".
                                     "corrected_call": corrected_call,
+                                    // REQ-AXO-902283 (Lot F) — present (non-null) only for a
+                                    // Milestone source; teaches MIL → TARGETS → REQ.
+                                    "milestone_guidance": milestone_guidance,
                                 },
                                 "canonical_source": "MIL-AXO-020",
                             },
