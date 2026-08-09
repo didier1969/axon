@@ -21,6 +21,26 @@ use crate::structural_health::{
     weighted_coverage_score, StructuralHealthIndex, SubScore,
 };
 
+/// REQ-AXO-902279 (feedback #46, NEX — blocking) — sample up to `cap` identifiers into a
+/// tool's TEXT summary (`content[0].text`), the channel an LLM actually reads. The names
+/// are ALREADY in `data`; this only echoes a bounded sample so a bare count like "77 dead
+/// clusters" stops being unactionable. Truncation is ALWAYS disclosed ("showing N of M") —
+/// a summary that silently drops names is the class of defect rejected for the S4 wiring
+/// image (a caveat carried in prose, never hidden). Returns "" for an empty slice so the
+/// caller can append it unconditionally.
+fn sample_identities(label: &str, names: &[String], cap: usize) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    let shown = names.len().min(cap);
+    let list = names[..shown].join(", ");
+    if names.len() > shown {
+        format!(" · {} (showing {} of {}): {}, …", label, shown, names.len(), list)
+    } else {
+        format!(" · {}: {}", label, list)
+    }
+}
+
 /// REQ-AXO-902185 (impact radius) — bounded reverse-BFS depth: how many hops of "who
 /// depends on this" we walk before stopping. 3 matches the existing `impact` tool's
 /// convention (blast radius display depth).
@@ -609,6 +629,18 @@ impl McpServer {
                 })
             })
             .collect();
+        // REQ-AXO-902279 (feedback #46) — name the members of the largest SCC in the TEXT
+        // channel: "62 SCC>1, largest = 35" gives no cycle to break until an LLM knows WHICH
+        // symbols form it. Names are already in `data.sccs[].nodes` (size-desc); echo a
+        // bounded sample of the biggest with truncation disclosure.
+        let scc_phrase = match sccs.first() {
+            Some(largest) => sample_identities(
+                &format!("largest SCC ({} symbols)", largest.len()),
+                largest,
+                12,
+            ),
+            None => String::new(),
+        };
         let summary = if sccs.is_empty() {
             format!(
                 "ist_structural_sccs {} : 0 SCC>1 detected ({} nodes, {} edges)",
@@ -618,10 +650,11 @@ impl McpServer {
             )
         } else {
             format!(
-                "ist_structural_sccs {} : {} SCC>1 (largest size = {})",
+                "ist_structural_sccs {} : {} SCC>1 (largest size = {}){}",
                 project,
                 sccs.len(),
-                sccs[0].len()
+                sccs[0].len(),
+                scc_phrase
             )
         };
         Some(json!({
@@ -832,9 +865,15 @@ impl McpServer {
                 })
             })
             .collect();
+        // REQ-AXO-902279 (feedback #46) — name the orphans in the TEXT channel, not just
+        // the count. `orphans` is already capped at `top` upstream, so this samples the
+        // returned set (each annotated with its category) with truncation disclosure.
+        let orphan_names: Vec<String> =
+            orphans.iter().map(|o| format!("{} [{}]", o.name, o.category)).collect();
+        let orphan_phrase = sample_identities("orphans", &orphan_names, 12);
         let summary = format!(
-            "wiring {} : {} orphan(s) — {} test_only (delivered+tested but NO prod caller — the OPV class) + {} isolated (no caller at all, advisory). A test_only symbol tagged deliverable = must be wired before delivery (gate S3, axon_pre_flight_check).",
-            project, orphans.len(), test_only, isolated
+            "wiring {} : {} orphan(s) — {} test_only (delivered+tested but NO prod caller — the OPV class) + {} isolated (no caller at all, advisory). A test_only symbol tagged deliverable = must be wired before delivery (gate S3, axon_pre_flight_check).{}",
+            project, orphans.len(), test_only, isolated, orphan_phrase
         );
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
@@ -912,6 +951,18 @@ impl McpServer {
             report.root_count,
             report.leaves.len()
         );
+        // REQ-AXO-902279 (feedback #46) — name the members of the largest dead cluster in
+        // the TEXT channel: "77 dead clusters" is unactionable until an LLM knows WHICH
+        // symbols are dead. Names are already in `data.clusters[].nodes`; this echoes a
+        // bounded sample of the biggest (clusters are size-desc) with truncation disclosure.
+        let cluster_phrase = match report.clusters.first() {
+            Some(largest) => sample_identities(
+                &format!("largest dead cluster ({} symbols)", largest.len()),
+                largest,
+                12,
+            ),
+            None => String::new(),
+        };
         let summary = if report.clusters.is_empty() {
             format!(
                 "orphan_clusters {} : 0 dead cluster(s) ({} unreached singleton(s) out of {} candidate(s)){}",
@@ -919,13 +970,14 @@ impl McpServer {
             )
         } else {
             format!(
-                "orphan_clusters {} : {} dead cluster(s), largest = {} symbols ({} total unreached out of {} candidate(s)){}",
+                "orphan_clusters {} : {} dead cluster(s), largest = {} symbols ({} total unreached out of {} candidate(s)){}{}",
                 project,
                 report.clusters.len(),
                 report.clusters[0].len(),
                 report.unreached_count,
                 report.candidate_count,
-                coverage_note
+                coverage_note,
+                cluster_phrase
             )
         };
         // Cap the identity lists: `roots` is small by nature (79 on AXO) but `leaves` can
@@ -1320,6 +1372,37 @@ mod structural_health_helpers_tests {
         );
         // No file-like component → strip the last segment.
         assert_eq!(module_of("AXO::unwrap"), "AXO");
+    }
+
+    // REQ-AXO-902279 (feedback #46, NEX) — the TEXT summary of wiring/orphan_clusters/
+    // ist_structural_sccs must NAME symbols and, when it caps the list, DISCLOSE the
+    // truncation with the true magnitude. sample_identities is the shared renderer.
+    #[test]
+    fn sample_identities_lists_all_names_when_under_cap() {
+        let names = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        let out = super::sample_identities("orphans", &names, 12);
+        assert!(
+            out.contains("alpha") && out.contains("beta") && out.contains("gamma"),
+            "all names present under cap: {out}"
+        );
+        // Not truncated → no "showing N of M" disclosure clause.
+        assert!(!out.contains("showing"), "no truncation clause when under cap: {out}");
+    }
+
+    #[test]
+    fn sample_identities_discloses_truncation_and_magnitude() {
+        let names: Vec<String> = (0..80).map(|i| format!("sym{i}")).collect();
+        let out = super::sample_identities("largest dead cluster (80 symbols)", &names, 12);
+        // The first `cap` names are present; the (cap+1)-th is not.
+        assert!(out.contains("sym0") && out.contains("sym11"), "capped names present: {out}");
+        assert!(!out.contains("sym12"), "name past the cap must not appear: {out}");
+        // Magnitude is NEVER hidden — the class of defect rejected for the S4 wiring image.
+        assert!(out.contains("showing 12 of 80"), "truncation disclosed with magnitude: {out}");
+    }
+
+    #[test]
+    fn sample_identities_empty_is_blank() {
+        assert_eq!(super::sample_identities("orphans", &[], 12), "");
     }
 
     #[test]
