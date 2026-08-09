@@ -10,6 +10,32 @@ use crate::ist_snapshot::structural_invariants::{
 };
 use crate::ist_snapshot::RelationType;
 
+/// REQ-AXO-902280 (feedback #44, LLL — blocking) — pick the eligible↔indexed verdict from
+/// BOTH the row gap AND the `discovered` (enrolled-but-unparsed) backlog. A row in
+/// `ist.IndexedFile` being present ("indexed") does NOT mean its symbols were parsed; a
+/// stuck `discovered` backlog means the feeder never drained it, so `eligible == indexed`
+/// is NOT proof the source is searchable — the exact false-positive #44 hit (429 LLL files
+/// `discovered`, verdict "✅ every eligible source file is indexed"). Kept a pure free fn
+/// (no `&self`, no filesystem) so the whole verdict matrix is unit-testable.
+fn indexing_verdict(eligible: i64, indexed: i64, discovered: i64) -> String {
+    if eligible == 0 {
+        return "⚠️ zero eligible source files under the project root — check the watch root / ignore rules.".to_string();
+    }
+    if discovered > 0 {
+        return format!(
+            "⛔ {discovered} file(s) ENROLLED but NOT parsed (status='discovered'): 'indexed' counts the IndexedFile ROW, not extracted symbols — so eligible==indexed does NOT mean the source is searchable. The feeder is not draining this backlog; the index is stale/incomplete. Check the indexer is running and Watchman is reachable, or trigger a fresh boot (REQ-AXO-902253)."
+        );
+    }
+    let gap = eligible - indexed;
+    if gap == 0 {
+        "✅ every eligible source file is indexed AND parsed (no `discovered` backlog); the wider on-disk population is fully accounted for by the exclusion reasons below (assert: all relevant source is indexed).".to_string()
+    } else if gap > 0 {
+        "⏳ indexing incomplete: eligible source files are not yet all enrolled — wait an indexer cycle or check pipeline A health.".to_string()
+    } else {
+        "ℹ️ more indexed rows than currently-eligible files: stale IndexedFile rows for paths now removed/ignored (purged on next full walk).".to_string()
+    }
+}
+
 impl McpServer {
     fn json_to_i64(value: &Value) -> Option<i64> {
         match value {
@@ -380,19 +406,20 @@ impl McpServer {
             escaped
         ));
 
+        // REQ-AXO-902280 (feedback #44) — a `discovered` row is ENROLLED (IndexedFile row
+        // present) but NOT PARSED (no symbols extracted). `indexed` above counts the row, so
+        // gap==0 does NOT prove the source is searchable; a stuck `discovered` backlog hides
+        // behind "✅ all indexed". Count it so the verdict can distinguish indexed from parsed.
+        let discovered = self.sql_scalar(&format!(
+            "SELECT COUNT(*)::BIGINT FROM ist.indexedfile WHERE project_code = '{}' AND status = 'discovered'",
+            escaped
+        ));
+
         let breakdown = crate::scanner::Scanner::new(&project_path, project).scope_breakdown();
         let eligible = breakdown.eligible as i64;
         let gap = eligible - indexed;
 
-        let verdict = if breakdown.eligible == 0 {
-            "⚠️ zero eligible source files under the project root — check the watch root / ignore rules."
-        } else if gap == 0 {
-            "✅ every eligible source file is indexed; the wider on-disk population is fully accounted for by the exclusion reasons below (assert: all relevant source is indexed)."
-        } else if gap > 0 {
-            "⏳ indexing incomplete: eligible source files are not yet all enrolled — wait an indexer cycle or check pipeline A health."
-        } else {
-            "ℹ️ more indexed rows than currently-eligible files: stale IndexedFile rows for paths now removed/ignored (purged on next full walk)."
-        };
+        let verdict = indexing_verdict(eligible, indexed, discovered);
 
         let reason_lines = if breakdown.excluded_by_reason.is_empty() {
             "* (none — every walked file is eligible)".to_string()
@@ -408,7 +435,8 @@ impl McpServer {
         format!(
             "\n\n### Scope explanation (REQ-AXO-901932 F2 — eligible↔indexed reconciliation)\n\
              * eligible (would be indexed): {eligible}\n\
-             * indexed (ist.IndexedFile rows): {indexed}\n\
+             * indexed (ist.IndexedFile rows present): {indexed}\n\
+             * discovered (row present but symbols NOT yet parsed): {discovered}\n\
              * gap (eligible − indexed): {gap}\n\
              * files walked (build/dependency/VCS dirs pruned at descent): {walked}\n\n\
              **Excluded files by reason** (out-of-ecosystem = data/CSV/JSON/binary/docs):\n{reason_lines}\n\n\
@@ -1877,5 +1905,32 @@ mod tests {
         assert!(lines[0].contains("path_not_in_runtime_registry"));
         assert!(lines[0].contains("explain"));
         assert!(lines[1].trim_start().starts_with("* remediation: fix"));
+    }
+
+    // --- REQ-AXO-902280 eligible↔indexed↔parsed verdict (feedback #44, LLL) -----------
+    #[test]
+    fn indexing_verdict_flags_discovered_backlog_as_blocker() {
+        // The exact #44 shape: 429 LLL files enrolled, none parsed (all `discovered`).
+        let v = indexing_verdict(429, 429, 429);
+        assert!(v.starts_with("⛔"), "discovered backlog must block, got: {v}");
+        assert!(v.contains("429"), "the backlog size must be stated: {v}");
+        assert!(v.contains("discovered"), "the stuck status must be named: {v}");
+        assert!(!v.contains('✅'), "must NOT claim all-indexed over an unparsed backlog: {v}");
+    }
+
+    #[test]
+    fn indexing_verdict_green_only_when_parsed_and_no_backlog() {
+        // LLL after the post-outage reindex: 457 parsed, zero discovered.
+        let v = indexing_verdict(457, 457, 0);
+        assert!(v.starts_with("✅"), "clean parsed state is green: {v}");
+        assert!(v.contains("parsed"), "the green verdict distinguishes parsed: {v}");
+    }
+
+    #[test]
+    fn indexing_verdict_incomplete_empty_and_discovered_precedence() {
+        assert!(indexing_verdict(100, 90, 0).starts_with("⏳"), "under-enrolled → waiting");
+        assert!(indexing_verdict(0, 0, 0).starts_with("⚠"), "no eligible → watch-root warning");
+        // A discovered backlog dominates a raw row gap: the parse stall is the actionable cause.
+        assert!(indexing_verdict(100, 90, 5).starts_with("⛔"), "discovered dominates the gap verdict");
     }
 }
