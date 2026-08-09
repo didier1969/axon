@@ -8492,6 +8492,80 @@ fn test_axon_commit_work_executes_git_without_auto_export_when_dry_run_false() {
     );
 }
 
+// REQ-AXO-902062 (feedback #48, APS) — regression guard for the SUCCESS branch of a pure
+// file DELETION. The pre-fix `git add <paths>` errored on a removed path (pathspec did not
+// match) and refused the whole commit; `git add -A -- <paths>` (workflow_project.rs) stages
+// the removal. The sibling test above covers only the FAILURE branch (never-tracked path);
+// this proves deletion is actually DELIVERED end-to-end (row gone from the committed tree).
+#[test]
+fn test_axon_commit_work_delivers_pure_file_deletion() {
+    let server = create_test_server();
+    let sandbox = init_commit_work_sandbox();
+
+    // Seed + commit a tracked file, then delete it from the working tree.
+    let run_git = |args: &[&str]| {
+        let st = std::process::Command::new("git")
+            .current_dir(sandbox.path())
+            .args(args)
+            .status()
+            .expect("git invocation");
+        assert!(st.success(), "git {args:?} failed in sandbox");
+    };
+    std::fs::write(sandbox.path().join("victim.txt"), "delete me\n").expect("seed victim");
+    run_git(&["add", "victim.txt"]);
+    run_git(&["commit", "-m", "seed victim for deletion test"]);
+    std::fs::remove_file(sandbox.path().join("victim.txt")).expect("rm victim");
+
+    // Dummy Guideline that passes trivially (same pattern as the sibling success test).
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+         VALUES ('GUI-AXO-999', 'Guideline', 'AXO', 'Dummy', 'Dummy', 'active', '{\"trigger_path\":\"\",\"required_path\":\"\",\"enforcement\":\"strict\"}')"
+    ).unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_commit_work",
+            "arguments": {
+                "diff_paths": ["victim.txt"],
+                "project_path": sandbox.path().to_str().unwrap(),
+                "message": "test: REQ-AXO-902062 pure deletion delivery (feedback #48)",
+                "dry_run": false
+            }
+        },
+        "id": 1
+    });
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(
+        !result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false),
+        "a pure deletion must NOT be refused: {content}"
+    );
+    assert!(
+        content.contains("Commit succeeded"),
+        "the deletion commit must succeed: {content}"
+    );
+    // The removal must be in HEAD: git ls-files no longer tracks victim.txt.
+    let tracked = std::process::Command::new("git")
+        .current_dir(sandbox.path())
+        .args(["ls-files", "victim.txt"])
+        .output()
+        .expect("git ls-files");
+    assert!(
+        String::from_utf8_lossy(&tracked.stdout).trim().is_empty(),
+        "victim.txt must be gone from the committed tree after a pure-deletion commit"
+    );
+}
+
 // REQ-AXO-246 — set up an ephemeral git repo for axon_commit_work tests.
 // Returns a TempDir whose drop cleans the sandbox at end of test.
 fn init_commit_work_sandbox() -> tempfile::TempDir {
@@ -10736,6 +10810,66 @@ fn test_re_anchor_returns_canonical_state_packet() {
     assert!(data.get("recent_revisions").is_some());
     assert!(data.get("session_pointer").is_some());
     assert!(data.get("work_plan_top").is_some());
+}
+
+// REQ-AXO-902281 (feedback #45, NEX) — re_anchor must read the REGISTERED session pointer
+// for ANY project, not guess `CPT-{project}-052` (which was AXO-only, null everywhere else).
+// Register NEX with a pointer node whose id is NOT CPT-NEX-052, and assert re_anchor resolves
+// THAT node — the exact result axon_init_project's resolve_session_pointer yields.
+#[test]
+fn test_re_anchor_reads_registered_pointer_for_non_axo_project() {
+    let server = create_test_server();
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.ProjectCodeRegistry WHERE project_code='NEX'");
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id='CPT-NEX-777'");
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-NEX-777', 'Concept', 'NEX', 'NEX session pointer', 'NEX resume body here', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name, session_pointer_json) VALUES ('NEX', '/tmp/nex', 'nex', '{\"kind\":\"soll_node\",\"value\":\"CPT-NEX-777\",\"label\":\"NEX pointer\"}')")
+        .unwrap();
+
+    // Ground truth: exactly what axon_init_project resolves for NEX.
+    let registered = server
+        .graph_store
+        .read_session_pointer("NEX")
+        .unwrap()
+        .expect("NEX registry pointer");
+    assert_eq!(
+        registered.get("value").and_then(|v| v.as_str()),
+        Some("CPT-NEX-777")
+    );
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "re_anchor",
+            "arguments": { "reason": "non_axo_drift", "project_code": "NEX" }
+        },
+        "id": 902281
+    });
+    let resp = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let data = resp.result.unwrap().get("data").cloned().unwrap();
+    let sp = data.get("session_pointer").unwrap();
+    // The OLD hardcode (CPT-NEX-052) would have yielded null; the fix resolves the REAL node.
+    assert_eq!(
+        sp.get("id").and_then(|v| v.as_str()),
+        Some("CPT-NEX-777"),
+        "re_anchor must resolve the registered pointer, not CPT-NEX-052: {sp:?}"
+    );
+    assert_eq!(
+        sp.get("body").and_then(|v| v.as_str()),
+        Some("NEX resume body here"),
+        "the resolved pointer body must be the registered node's body"
+    );
 }
 
 // REQ-AXO-91583 — status() returns methodology_drift_warnings field.

@@ -786,26 +786,35 @@ impl McpServer {
             })
             .collect();
 
-        // Session pointer body — `CPT-{P}-NNN` canonical (default CPT-AXO-052 for AXO).
-        let pointer_id = format!("CPT-{}-052", project_code);
-        let pointer_rows = query_string(&format!(
-            "SELECT id, COALESCE(title, ''), COALESCE(description, '') \
-             FROM soll.Node \
-             WHERE id='{}'",
-            pointer_id.replace('\'', "''")
-        ));
-        let session_pointer = pointer_rows
-            .iter()
-            .filter(|r| r.len() >= 3)
-            .map(|r| {
-                json!({
-                    "id": r[0],
-                    "title": r[1],
-                    "body": r[2],
-                })
-            })
-            .next()
-            .unwrap_or(json!(null));
+        // REQ-AXO-902281 (feedback #45, NEX) — read the project's REGISTERED session pointer
+        // (soll.ProjectCodeRegistry.session_pointer_json), the SAME source axon_init_project
+        // resolves via resolve_session_pointer, instead of guessing `CPT-{project}-052`. The
+        // old hardcode was AXO-only: every non-AXO project got a null/wrong pointer even when
+        // its registry row held a valid one. The descriptor is {kind,value,label}.
+        let pointer_descriptor = self.resolve_session_pointer(&project_code, None);
+        let session_pointer = match pointer_descriptor.get("kind").and_then(Value::as_str) {
+            Some("soll_node") => {
+                let node_id = pointer_descriptor
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                query_string(&format!(
+                    "SELECT id, COALESCE(title, ''), COALESCE(description, '') \
+                     FROM soll.Node \
+                     WHERE id='{}'",
+                    node_id.replace('\'', "''")
+                ))
+                .iter()
+                .filter(|r| r.len() >= 3)
+                .map(|r| json!({ "id": r[0], "title": r[1], "body": r[2], "kind": "soll_node" }))
+                .next()
+                .unwrap_or(json!(null))
+            }
+            // file / url / none descriptors carry no SOLL body — return them verbatim so the
+            // caller still sees WHERE the pointer lives (matches axon_init_project).
+            Some(_) => pointer_descriptor.clone(),
+            None => json!(null),
+        };
 
         // Work plan top (just IDs + titles — full scoring lives in soll_work_plan).
         let work_plan_rows = query_string(&format!(
