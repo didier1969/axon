@@ -208,4 +208,84 @@ mod tests {
             "quarantined chunk is marked failed"
         );
     }
+
+    /// REQ-AXO-902277 — the B2 inference-HANG path must quarantine the culprit
+    /// batch BEFORE it exits for a supervisor restart. Otherwise the poison
+    /// chunk stays `pending` and is re-drained on every restart (the drain is a
+    /// re-drainable reservoir, `WHERE embed_status='pending'` with no claim), so
+    /// the same deterministic hang recurs and burns `max_restarts` in minutes —
+    /// the class of the 2026-08-06 ~2-day silent outage. Same DB-layer proof as
+    /// the REQ-902012 sibling (GUI-PRO-004, no mock embedder), driven through
+    /// the hang path's own recorder `quarantine_hung_batch`.
+    #[tokio::test]
+    async fn hang_path_quarantines_poison_chunk_at_attempt_cap() {
+        use crate::pipeline::stage_b1::ChunkForEmbedding;
+        use crate::pipeline::stage_b2::quarantine_hung_batch;
+
+        let store = std::sync::Arc::new(create_test_db().unwrap());
+        let path = "/tmp/b2_hang_quarantine_test.rs";
+        store
+            .upsert_graph_batch(
+                &[parsed_file(
+                    path,
+                    "fn embed_me() { let a = 1; let b = 2; let c = a + b; }",
+                    vec![sym("embed_me")],
+                )],
+                "AXO",
+            )
+            .unwrap();
+
+        let pending = store.select_chunks_needing_embedding(100).unwrap();
+        assert!(!pending.is_empty(), "ingest created a pending chunk");
+        let n = pending.len();
+        // record_batch_failure only reads chunk_id; content/hash are irrelevant here.
+        let batch: Vec<ChunkForEmbedding> = pending
+            .iter()
+            .map(|id| ChunkForEmbedding {
+                chunk_id: id.clone(),
+                content: String::new(),
+                content_hash: String::new(),
+            })
+            .collect();
+
+        // Two hangs below the cap (3): the chunk stays pending → re-drained on restart.
+        quarantine_hung_batch(Some(&store), &batch).await;
+        quarantine_hung_batch(Some(&store), &batch).await;
+        assert_eq!(
+            store.select_chunks_needing_embedding(100).unwrap().len(),
+            n,
+            "below the cap the hung chunk is still retried on the next restart"
+        );
+
+        // The cap-th hang quarantines it → gone from the drain, so the supervisor
+        // restart no longer re-hangs on it.
+        quarantine_hung_batch(Some(&store), &batch).await;
+        assert_eq!(
+            store.select_chunks_needing_embedding(100).unwrap().len(),
+            0,
+            "at the cap the poison chunk leaves the drain (restart won't re-hang)"
+        );
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM ist.Chunk WHERE embed_status = 'failed'")
+                .unwrap() as usize,
+            n,
+            "the hung chunk is marked failed"
+        );
+    }
+
+    /// REQ-AXO-902277 — the hang path with no store handle (pure batching tests)
+    /// must be a safe no-op, never a panic: the exit must still proceed.
+    #[tokio::test]
+    async fn hang_path_quarantine_is_noop_without_store() {
+        use crate::pipeline::stage_b1::ChunkForEmbedding;
+        use crate::pipeline::stage_b2::quarantine_hung_batch;
+
+        let batch = vec![ChunkForEmbedding {
+            chunk_id: "AXO::x::y::chunk".to_string(),
+            content: String::new(),
+            content_hash: String::new(),
+        }];
+        quarantine_hung_batch(None, &batch).await; // must not panic
+    }
 }

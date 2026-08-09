@@ -240,6 +240,12 @@ pub fn spawn_b2_batched_worker(
                          exiting for supervisor restart (REQ-AXO-902033). pending chunks \
                          resume from the durable queue on restart."
                     );
+                    // REQ-AXO-902277 — quarantine the culprit batch BEFORE the exit so the
+                    // supervisor restart does not re-drain and re-hang on the same poison
+                    // chunk. Without this the deterministic drain re-selects the same chunk
+                    // every restart and burns the bounded `max_restarts` budget in minutes
+                    // (incident 2026-08-06: ~2 days of a silently dead indexer).
+                    quarantine_hung_batch(store.as_ref(), &batch).await;
                     std::process::exit(75); // EX_TEMPFAIL — signals on_failure restart
                 }
             };
@@ -313,6 +319,46 @@ pub fn spawn_b2_batched_worker(
 /// drain. Small: a chunk that fails deterministically fails fast; a transient
 /// GPU blip gets a couple of retries.
 const MAX_EMBED_ATTEMPTS: i32 = 3;
+
+/// REQ-AXO-902277 — internal budget for the hang-path quarantine write. A hang
+/// is only *detected* after `b2_inference_timeout_ms()` (180 s); the quarantine
+/// write that follows must never turn that detected hang into an unbounded
+/// stall, so it is bounded and the process exits regardless. A DB write that
+/// cannot complete in 10 s is itself a fault the supervisor restart resolves.
+const HANG_QUARANTINE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// REQ-AXO-902277 — quarantine the batch that just hung the B2 inference, called
+/// on the hang path immediately BEFORE `std::process::exit(75)`. Reuses the
+/// REQ-AXO-902012 attempt-cap machinery: increments `embed_attempts` for every
+/// chunk in the batch; at [`MAX_EMBED_ATTEMPTS`] the culprit flips to
+/// `embed_status='failed'` and leaves the sorted drain, so the supervisor
+/// restart no longer re-feeds the poison chunk.
+///
+/// Whole-batch increment (not just the logged `first_id`): the exact culprit
+/// within the batch is unknowable in-process — the wedged GPU thread still holds
+/// the embedder Mutex, so in-process bisection is impossible. The deterministic
+/// token-sorted drain re-forms the same batch on each restart, so the poison
+/// chunk reaches the cap across restarts; bounded collateral on its batch-mates
+/// is the accepted trade-off against a multi-day outage (single-item isolation
+/// would require reworking the B1 drain — separate REQ if it ever matters).
+///
+/// `None` store (pure batching tests) is a no-op. The write is bounded by
+/// [`HANG_QUARANTINE_TIMEOUT`] so a wedged recorder cannot block the exit.
+pub(crate) async fn quarantine_hung_batch(
+    store: Option<&Arc<crate::graph::GraphStore>>,
+    batch: &[ChunkForEmbedding],
+) {
+    let Some(s) = store else { return };
+    if tokio::time::timeout(HANG_QUARANTINE_TIMEOUT, record_batch_failure(s, batch))
+        .await
+        .is_err()
+    {
+        warn!(
+            stage = "B2",
+            "record_embed_failure timed out on the hang path; exiting for restart anyway"
+        );
+    }
+}
 
 /// REQ-AXO-902012 — increment `embed_attempts` (and quarantine at the cap) for a
 /// batch the embedder could not process, off the async worker thread. Best
