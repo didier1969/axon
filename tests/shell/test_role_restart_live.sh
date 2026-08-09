@@ -44,6 +44,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=../../scripts/lib/axon-supervisor.sh
 source "$ROOT_DIR/scripts/lib/axon-supervisor.sh"
+# REQ-AXO-902285 — shared GPU-wedge detector (also gates the promote); DRY, one detector.
+source "$ROOT_DIR/scripts/lib/axon-gpu-detect.sh"
 # REQ-AXO-902273 — host readiness comes from the shared policy, not from a private
 # re-read of /proc. This gate had its own `pgrep -c rustc` + swap snapshot, taken ONLY on
 # failure; that combination is what let session 107 time a suite on a host at load 76
@@ -163,7 +165,7 @@ fi
 # This is a SKIP, not a failure: the release is not broken, the host is momentarily unable
 # to answer the question. Loud, because a silent skip is the vacuous green this gate exists
 # to remove.
-_gpu_wedged_pids="$(ps -eo pid,stat,args 2>/dev/null | awk '$2 ~ /^D/ && /nvidia-smi|axon-indexer/ {print $1}' | tr '\n' ' ')"
+_gpu_wedged_pids="$(gpu_wedged_pids)"  # REQ-AXO-902285 — shared detector (scripts/lib/axon-gpu-detect.sh)
 if [[ -n "${_gpu_wedged_pids// /}" ]]; then
     skip "GPU channel WEDGED (pids in uninterruptible D-state: ${_gpu_wedged_pids}) — the indexer cannot complete a TensorRT teardown through a stuck dxg channel. Testing now would measure the wedge and strand the live indexer (REQ-AXO-902271). Re-run when \`ps -eo stat | grep '^D'\` is empty."
     printf '\n%d passed, %d failed (SKIPPED — nothing was measured)\n' "$PASS" "$FAIL"; exit 77

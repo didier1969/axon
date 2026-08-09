@@ -107,3 +107,23 @@ gpu_probe_json() {
     rm -f "$out" 2>/dev/null
     return 1
 }
+
+# gpu_wedged_pids [ps_output] — REQ-AXO-902285 / REQ-AXO-902271. Space-separated pids of
+# processes in uninterruptible D-state whose command touches the GPU (nvidia-smi /
+# axon-indexer). A NON-EMPTY result means the WSL2 GPU virtualisation channel is WEDGED:
+# any new GPU teardown/init through that channel — an indexer restart, a promote cutover —
+# hangs the same way, so a promote must REFUSE rather than pay a full MCP outage and roll
+# back (the 2026-08-09 incident). Unlike `detect_gpu`/`gpu_probe_json` this is a PURE `ps`
+# text scan: it NEVER touches the GPU, so it cannot itself wedge (there is nothing to time
+# out — the whole point of this file). Pass ps output as $1 for unit tests; defaults to a
+# live `ps -eo pid,stat,args`. NB: a SINGLE sample is intentionally noisy — a healthy GPU
+# worker samples D transiently; callers that gate on it (promote) confirm across two
+# samples (see require_gpu_channel_free), the test-only caller tolerates the noise.
+gpu_wedged_pids() {
+    local ps_out="${1:-}"
+    [[ -n "$ps_out" ]] || ps_out="$(ps -eo pid,stat,args 2>/dev/null)"
+    printf '%s\n' "$ps_out" \
+        | awk '$2 ~ /^D/ && /nvidia-smi|axon-indexer/ {print $1}' \
+        | tr '\n' ' ' \
+        | sed 's/  */ /g; s/^ //; s/ *$//'
+}

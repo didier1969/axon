@@ -80,5 +80,31 @@ assert "hung probe -> gpu_probe_json returns within its deadline THROUGH \$( )" 
 assert "hung probe -> gpu_probe_json yields empty (unknown), never a fabricated 0" "[ -z '$_out' ]"
 unset AXON_GPU_PROBE_CMD
 
+# --- gpu_wedged_pids: REQ-AXO-902285 — the promote GPU-wedge fail-fast detector ----------
+# Pure `ps` text scan (fed synthetic input via $1) — it NEVER touches the GPU, so unlike a
+# probe it cannot itself wedge. A non-empty result gates the promote (confirm-twice in the
+# caller filters transient D). Columns are `pid stat args` per `ps -eo pid,stat,args`.
+
+# T7 — a D-state nvidia-smi (the agent-deck wedge) is flagged by pid.
+_out="$(gpu_wedged_pids $'  111 Dl+  nvidia-smi --query-gpu=utilization.gpu,name\n  222 Sl   /x/axon-brain')"
+assert "D-state nvidia-smi -> its pid" "[[ '$_out' == '111' ]]"
+
+# T8 — a D-state axon-indexer (the self-wedge / 2-day-outage class) is flagged.
+_out="$(gpu_wedged_pids $'  333 D    /home/x/bin/axon-indexer\n  444 R    bash')"
+assert "D-state axon-indexer -> its pid" "[[ '$_out' == '333' ]]"
+
+# T9 — THE negative case that bites: a HEALTHY (non-D) indexer + a healthy nvidia-smi must
+# yield EMPTY. Without this the gate would refuse every promote (a live indexer is always up).
+_out="$(gpu_wedged_pids $'  555 Sl   /home/x/bin/axon-indexer\n  666 R+   nvidia-smi -L\n  777 S    bash')"
+assert "healthy (non-D) GPU procs -> empty" "[[ -z '$_out' ]]"
+
+# T10 — two wedged pids returned space-separated and trimmed (no leading/trailing space).
+_out="$(gpu_wedged_pids $'  111 D    nvidia-smi\n  222 Dl+  /x/axon-indexer\n  333 S    other')"
+assert "two wedged -> both pids, trimmed" "[[ '$_out' == '111 222' ]]"
+
+# T11 — a D-state process that is NOT GPU-related is ignored (scope = GPU procs only).
+_out="$(gpu_wedged_pids $'  999 D    some-disk-bound-proc\n  888 R    bash')"
+assert "non-GPU D-state -> empty (scoped to GPU procs)" "[[ -z '$_out' ]]"
+
 printf '\ndetect_gpu tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

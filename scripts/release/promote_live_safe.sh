@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=scripts/lib/axon-instance.sh
 source "$ROOT_DIR/scripts/lib/axon-instance.sh"
+# shellcheck source=scripts/lib/axon-gpu-detect.sh
+# REQ-AXO-902285 — `gpu_wedged_pids` for the fail-fast GPU-wedge gate below.
+source "$ROOT_DIR/scripts/lib/axon-gpu-detect.sh"
 AXON_INSTANCE_KIND=live
 axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
 
@@ -91,6 +94,43 @@ promote_log() {
   ts="$(date -u +%H:%M:%S)"
   echo "[$ts] $*" >> "$PROMOTE_LOG"
   echo "$*"
+}
+
+# REQ-AXO-902285 — refuse the promote FAIL-FAST (0s of MCP outage) when the WSL2 GPU
+# virtualisation channel is WEDGED. A cutover's stop_instance tears the indexer's
+# TensorRT/CUDA session down through the dxg channel; if a process is already stuck in
+# uninterruptible D-state on it, the NEW indexer hangs the same way, the health-gate never
+# goes green, and axonctl auto-rolls-back — paying a full MCP outage (measured 104s pic /
+# 209s on 2026-08-09) for ZERO gain. Detect the wedge with a pure `ps` scan (never touches
+# the GPU, so the check itself cannot wedge) and refuse before we stop anything.
+#
+# CONFIRM-TWICE: a healthy live indexer doing continuous GPU work samples `D` transiently,
+# so a single sample would refuse a perfectly promotable host. Only a pid stuck in D across
+# a 1s gap is a genuine wedge. First sample empty → return immediately (0 added latency on a
+# clean host).
+require_gpu_channel_free() {
+  local phase="$1" first second persistent p q
+  # `|| true`: gpu_wedged_pids ends in a pipe; under `set -o pipefail` a stray ps failure
+  # must never itself fail the promote — an unreadable process table is "not wedged".
+  first="$(gpu_wedged_pids || true)"
+  [[ -z "$first" ]] && return 0
+  sleep 1
+  second="$(gpu_wedged_pids || true)"
+  persistent=""
+  # Explicit `if` (not `[[ ]] && x`): under `set -e` a false `&&` list as the loop-body
+  # statement can trip the errexit trap; the if-test form never does.
+  for p in $first; do
+    for q in $second; do
+      if [[ "$p" == "$q" ]]; then persistent+="$p "; fi
+    done
+  done
+  persistent="${persistent% }"
+  [[ -z "$persistent" ]] && return 0
+  promote_log "❌ PROMOTE REFUSED ($phase): GPU virtualisation channel WEDGED — pid(s) persistently in uninterruptible D-state (2 samples, 1s apart) touching the GPU: ${persistent}."
+  promote_log "   Proceeding would strand the new indexer: it cannot finish a TensorRT teardown through a stuck dxg channel (REQ-AXO-902271), the health-gate fails ~200s later, and the cutover auto-rolls-back — a full MCP outage for nothing."
+  promote_log "   Most frequent cause: agent-deck's Footer GPU widget shelling \`nvidia-smi\` every 5s. Cure: remove \"gpu\" from [system_stats].show in ~/.agent-deck/config.toml (hot-reloads)."
+  promote_log "   Recover: wait for \`ps -eo stat | grep '^D'\` to clear (frees itself ~15 min) or \`wsl --shutdown\` (operator), then re-run this promote."
+  exit 3
 }
 
 # --- REQ-AXO-902194: best-effort cross-project MCP-disruption broadcast ---
@@ -342,6 +382,13 @@ if [[ -f "$pending_manifest" && "${PROMOTE_SKIP_AUTORESUME:-0}" != "1" ]]; then
   exit 1
 fi
 
+# REQ-AXO-902285 — fresh-promote fail-fast gate. Placed AFTER the auto-resume block (so a
+# wedged host never BLOCKS a recovery: the stranded resume-cutover above runs and fails at
+# its own health-gate) and BEFORE the pre-notice broadcast (so a refusal here sends no
+# "MCP will drop" message that would then need an all-clear). A wedge appearing LATER, during
+# the ~9-min build, is caught by the second gate just before step 5.
+require_gpu_channel_free "pre-flight (fresh promote)"
+
 # --- REQ-AXO-902194: pre-notice (brain still up) — warn peers the step-5 restart
 # will drop MCP briefly. Async, so mostly read on reconnect; harmless to send early. ---
 broadcast_promote "🔧 Promote ${PROJECT_CODE} en cours — coupure MCP brève à venir" \
@@ -555,6 +602,11 @@ _report_mcp_outage() {
 }
 
 # --- Step 5: promote (copy + restart) ---
+# REQ-AXO-902285 — last GPU-wedge check, immediately before the destructive cutover and
+# BEFORE the outage sampler starts. Catches a wedge that appeared DURING the ~9-min build
+# (the pre-flight gate could not). On refusal the brain is still up → the EXIT trap's
+# "brain UP, pas un incident" all-clear reaches the peers who saw the pre-notice broadcast.
+require_gpu_channel_free "pre-cutover"
 _start_mcp_sampler
 ensure_head_stable
 old_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
