@@ -169,6 +169,21 @@ pub(super) fn decay_factor_for_node(
     (-age_days / half_life_days).exp()
 }
 
+/// REQ-AXO-902282 (feedback #47, FSF) — the ONE canonical priority vocabulary for the work
+/// plan. Maps canonical `P0..P3` AND legacy `critical/high/medium/low` to a level where
+/// 0 = highest priority. `None` for unrecognised/empty values (fixture rows, unset priority).
+/// Single source of truth the three former interpreters now share (score_node bonus,
+/// actionable_priority_rank sort key, kickoff priority_rank) so P2/P3 stop collapsing into P1.
+pub(super) fn priority_level(priority: &str) -> Option<u8> {
+    match priority.trim().to_ascii_lowercase().as_str() {
+        "p0" | "critical" => Some(0),
+        "p1" | "high" => Some(1),
+        "p2" | "medium" => Some(2),
+        "p3" | "low" => Some(3),
+        _ => None,
+    }
+}
+
 pub(super) fn score_node(
     node: &WorkPlanNode,
     include_ist: bool,
@@ -180,20 +195,19 @@ pub(super) fn score_node(
     let mut reasons = vec![format!("unblocks {} descendant(s)", node.descendants)];
     let mut validation_gates = Vec::new();
 
-    match node.priority.as_str() {
-        "P0" => {
-            score += 20;
-            reasons.push("priority P0".to_string());
-        }
-        "P1" => {
-            score += 15;
-            reasons.push("priority P1".to_string());
-        }
-        "P2" => {
-            score += 8;
-            reasons.push("priority P2".to_string());
-        }
-        _ => {}
+    // REQ-AXO-902282 (feedback #47) — score EVERY priority level through the shared
+    // `priority_level` vocabulary, not just P0/P1/P2. The old `_ => {}` gave P3 (and any
+    // legacy value) +0 and NO reason, so a P3 backlog was invisible and unranked. P0/P1/P2
+    // bonuses are preserved exactly; P3 now earns a monotone +4 and its own reason.
+    if let Some(level) = priority_level(&node.priority) {
+        let bonus = match level {
+            0 => 20,
+            1 => 15,
+            2 => 8,
+            _ => 4,
+        };
+        score += bonus;
+        reasons.push(format!("priority P{level}"));
     }
 
     if let Some(state) = node.requirement_state.as_deref() {
@@ -424,5 +438,74 @@ mod tests {
         ] {
             assert!(!is_blocked_status(status), "`{status}` must NOT be blocked");
         }
+    }
+
+    // --- REQ-AXO-902282 canonical priority vocabulary + score_node (feedback #47) ---------
+
+    #[test]
+    fn priority_level_maps_canonical_and_legacy() {
+        use super::priority_level;
+        assert_eq!(priority_level("P0"), Some(0));
+        assert_eq!(priority_level("p3"), Some(3));
+        assert_eq!(priority_level("critical"), Some(0));
+        assert_eq!(priority_level("HIGH"), Some(1));
+        assert_eq!(priority_level("  medium  "), Some(2));
+        assert_eq!(priority_level("low"), Some(3));
+        assert_eq!(priority_level(""), None, "empty is unranked");
+        assert_eq!(priority_level("bogus"), None);
+        // Canonical and legacy names are the same level.
+        assert_eq!(priority_level("P1"), priority_level("high"));
+    }
+
+    // Isolate the priority contribution: 0 descendants, no proof gap, evidence present,
+    // no backlog, no decay — so score_node's only non-zero term is the priority bonus.
+    fn scored(priority: &str) -> (i64, Vec<String>) {
+        let node = super::WorkPlanNode {
+            id: "REQ-AXO-TEST".to_string(),
+            title: "t".to_string(),
+            entity_type: super::WorkPlanEntityType::Requirement,
+            status: "planned".to_string(),
+            priority: priority.to_string(),
+            requirement_state: None,
+            evidence_count: 1,
+            descendants: 0,
+            ist_degraded_links: 0,
+            backlog_visible: false,
+            score: 0,
+            reasons: Vec::new(),
+            validation_gates: Vec::new(),
+            ist_signals: Vec::new(),
+            updated_at_ms: None,
+            centrality: None,
+            breadcrumb: None,
+        };
+        let (score, reasons, _gates) = super::score_node(&node, false, false, 30.0, 0);
+        (score, reasons)
+    }
+
+    #[test]
+    fn score_node_honours_p3_and_ranks_priorities_monotonically() {
+        let p0 = scored("P0").0;
+        let p1 = scored("P1").0;
+        let p2 = scored("P2").0;
+        let (p3_score, p3_reasons) = scored("P3");
+        let unset = scored("").0;
+        // Every level strictly outranks the next — P3 is no longer flattened to +0.
+        assert!(
+            p0 > p1 && p1 > p2 && p2 > p3_score && p3_score > unset,
+            "monotone P0>P1>P2>P3>unset: {p0},{p1},{p2},{p3_score},{unset}"
+        );
+        // The #47 regression: a P3 node must earn a bonus AND surface a visible reason.
+        assert!(p3_score > 0, "P3 must earn a positive bonus, got {p3_score}");
+        assert!(
+            p3_reasons.iter().any(|r| r == "priority P3"),
+            "P3 must surface its priority reason: {p3_reasons:?}"
+        );
+        // P0/P1/P2 canonical bonuses are preserved exactly (regression guard on the values).
+        assert_eq!(p0, 20);
+        assert_eq!(p1, 15);
+        assert_eq!(p2, 8);
+        // Legacy vocabulary is scored like its canonical twin.
+        assert_eq!(scored("high").0, p1, "legacy 'high' scores as P1");
     }
 }

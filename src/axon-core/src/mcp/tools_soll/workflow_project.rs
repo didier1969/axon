@@ -1314,14 +1314,11 @@ impl McpServer {
         let Ok(snapshot) = self.soll_cache().snapshot(project_code) else {
             return serde_json::json!([]);
         };
+        // REQ-AXO-902282 — share the canonical priority vocabulary so the kickoff fast path
+        // ranks canonical `P0..P3` too. The old legacy-only match sent every canonical
+        // P0..P3 node to rank 4 (unranked); unknown/empty still sorts last.
         fn priority_rank(p: &str) -> u8 {
-            match p {
-                "critical" => 0,
-                "high" => 1,
-                "medium" => 2,
-                "low" => 3,
-                _ => 4,
-            }
+            super::inference::priority_level(p).map_or(4, |level| level)
         }
         let mut rows: Vec<(&String, &String, &String, i64, String)> = snapshot
             .node_ids_of_type("Requirement")

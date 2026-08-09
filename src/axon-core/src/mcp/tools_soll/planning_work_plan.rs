@@ -129,14 +129,10 @@ fn descendant_counts_snapshot(
 /// Lower rank = higher priority (sorted ascending). Recognized formats :
 /// canonical `P0`..`P3`, legacy `critical`/`high`/`medium`/`low`. Any
 /// unknown value (empty, fixture rows pre-DEC-PRO-100) sorts last.
+/// REQ-AXO-902282 — delegates to the shared `priority_level` vocabulary so the
+/// actionable sort key and the score_node bonus can never drift apart again.
 fn actionable_priority_rank(priority: &str) -> u8 {
-    match priority.trim().to_ascii_lowercase().as_str() {
-        "p0" | "critical" => 0,
-        "p1" | "high" => 1,
-        "p2" | "medium" => 2,
-        "p3" | "low" => 3,
-        _ => 9,
-    }
+    super::inference::priority_level(priority).map_or(9, |level| level)
 }
 
 /// REQ-AXO-346 Slice 2 — build a single synthetic wave of open
