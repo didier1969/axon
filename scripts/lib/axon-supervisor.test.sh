@@ -218,5 +218,140 @@ assert_verdict 'Terminating is down, not exhausted, when the budget is untouched
 assert_verdict 'non-numeric counters degrade to 0 instead of erroring' \
     down Completed - true 1 '' 'n/a' no
 
+printf '\naxon_self_heal_should_act — REQ-AXO-902277 (act ONLY on the abandoned class)\n'
+
+assert_should_act() {
+    local desc="$1" expected="$2" verdict="$3" rc
+    if axon_self_heal_should_act "$verdict"; then rc=0; else rc=$?; fi
+    if [[ "$rc" == "$expected" ]]; then
+        printf '  PASS  %s\n' "$desc"; PASS=$(( PASS + 1 ))
+    else
+        printf '  FAIL  %s  (expected rc %s, got %s)\n' "$desc" "$expected" "$rc"; FAIL=$(( FAIL + 1 ))
+    fi
+}
+
+# `exhausted` is the ONLY verdict the healer owns: not Running, budget spent, the
+# supervisor gave up. Everything else is someone else's job or a pure outage.
+assert_should_act 'exhausted → the healer restarts it'                         0 exhausted
+# process-compose still has budget and is already restarting a plain `down`;
+# racing it spawns writer-guard-refused duplicates that poison the bookkeeping.
+assert_should_act 'down (budget left) belongs to process-compose'              1 down
+# Still Running — a restart cannot reset the counter (measured 902264), so acting
+# would drop a serving indexer for nothing.
+assert_should_act 'no_budget is Running — restart resets nothing, do not act'   1 no_budget
+# A zombie behind Terminating needs a reap, not a start.
+assert_should_act 'wedged needs a zombie reap, not a restart'                   1 wedged
+assert_should_act 'ok never acts'                                              1 ok
+assert_should_act 'not_ready never acts'                                       1 not_ready
+assert_should_act 'disabled (config) never acts'                              1 disabled
+assert_should_act 'drift (serving) never acts'                                1 drift
+assert_should_act 'oneshot never acts'                                        1 oneshot
+assert_should_act 'empty verdict never acts'                                  1 ''
+
+printf '\naxon_self_heal_window_ok — REQ-AXO-902277 (temporal budget regeneration)\n'
+
+SELF_HEAL_WORK="$(mktemp -d)"
+trap 'rm -rf "$SELF_HEAL_WORK"' EXIT
+
+assert_window() {
+    local desc="$1" expected="$2"; shift 2
+    local rc
+    if axon_self_heal_window_ok "$@"; then rc=0; else rc=$?; fi
+    if [[ "$rc" == "$expected" ]]; then
+        printf '  PASS  %s\n' "$desc"; PASS=$(( PASS + 1 ))
+    else
+        printf '  FAIL  %s  (expected rc %s, got %s)\n' "$desc" "$expected" "$rc"; FAIL=$(( FAIL + 1 ))
+    fi
+}
+
+# now=10000, window=1800 → floor=8200; max=3.
+assert_window 'missing state file = full budget → restart permitted' \
+    0 "$SELF_HEAL_WORK/absent.log" 10000 1800 3
+
+sf="$SELF_HEAL_WORK/two.log"; printf '9900\n9950\n' > "$sf"
+assert_window 'two restarts in window (< max 3) → still permitted' \
+    0 "$sf" 10000 1800 3
+
+sf="$SELF_HEAL_WORK/three.log"; printf '9800\n9900\n9950\n' > "$sf"
+assert_window 'three restarts in window (= max 3) → crash-loop guard blocks' \
+    1 "$sf" 10000 1800 3
+
+sf="$SELF_HEAL_WORK/old.log"; printf '1000\n2000\n8000\n' > "$sf"
+assert_window 'all restarts aged out of the window → budget regenerated' \
+    0 "$sf" 10000 1800 3
+if [[ ! -s "$sf" ]]; then
+    printf '  PASS  %s\n' 'prune rewrites the state file (aged entries dropped)'; PASS=$(( PASS + 1 ))
+else
+    printf '  FAIL  prune did not clear aged entries (file: %s)\n' "$(tr '\n' ' ' < "$sf")"; FAIL=$(( FAIL + 1 ))
+fi
+
+sf="$SELF_HEAL_WORK/mixed.log"; printf '1000\n8000\n9900\n9950\n' > "$sf"
+assert_window 'mixed window keeps only in-window entries (2 < max) → permitted' \
+    0 "$sf" 10000 1800 3
+kept="$(wc -l < "$sf" | tr -d '[:space:]')"
+if [[ "$kept" == "2" ]]; then
+    printf '  PASS  %s\n' 'prune keeps exactly the in-window entries (2)'; PASS=$(( PASS + 1 ))
+else
+    printf '  FAIL  prune kept %s entries, expected 2\n' "$kept"; FAIL=$(( FAIL + 1 ))
+fi
+
+sf="$SELF_HEAL_WORK/garbage.log"; printf 'not-a-number\n\n9950\n' > "$sf"
+assert_window 'malformed lines are ignored (one valid recent entry → permitted)' \
+    0 "$sf" 10000 1800 3
+
+printf '\naxon_self_heal_record — REQ-AXO-902277\n'
+sf="$SELF_HEAL_WORK/rec.log"
+axon_self_heal_record "$sf" 12345
+axon_self_heal_record "$sf" 12346
+recn="$(wc -l < "$sf" | tr -d '[:space:]')"
+if [[ "$recn" == "2" ]]; then
+    printf '  PASS  %s\n' 'record appends one line per restart'; PASS=$(( PASS + 1 ))
+else
+    printf '  FAIL  record wrote %s lines, expected 2\n' "$recn"; FAIL=$(( FAIL + 1 ))
+fi
+
+printf '\naxon_self_heal_indexer — REQ-AXO-902277 wiring (stubbed survey + restart)\n'
+# Stub the two I/O calls the orchestrator delegates to, so the
+# decide → record → delegate wiring is exercised without a live supervisor. The
+# companion FUNCTIONAL test (tests/shell/test_role_restart_live.sh) exercises the
+# real supervisor; this pins the decision the healer relies on.
+STUB_VERDICT="exhausted"
+STUB_RESTART_RC=0
+RESTART_CALLS=0
+axon_role_survey() {
+    printf 'axon-brain|Running|Ready|0|3|-|ok\naxon-indexer|Completed|-|3|3|no|%s\ndashboard|Running|Ready|0|3|-|ok\n' "$STUB_VERDICT"
+}
+axon_restart_role_verified() { RESTART_CALLS=$(( RESTART_CALLS + 1 )); return "$STUB_RESTART_RC"; }
+export AXON_SELF_HEAL_WINDOW_S=1800 AXON_SELF_HEAL_MAX=3
+
+assert_orch() {
+    local desc="$1" want_rc="$2" want_calls="$3" want_records="$4"
+    local root="$5" verdict="$6" restart_rc="$7" now="$8"
+    STUB_VERDICT="$verdict"; STUB_RESTART_RC="$restart_rc"; RESTART_CALLS=0
+    local rc
+    if axon_self_heal_indexer "$root" live "$now" 5; then rc=0; else rc=$?; fi
+    local sfile="$root/.axon/self-heal-indexer-restarts.log" records=0
+    [[ -f "$sfile" ]] && records="$(grep -c . "$sfile" 2>/dev/null || echo 0)"
+    if [[ "$rc" == "$want_rc" && "$RESTART_CALLS" == "$want_calls" && "$records" == "$want_records" ]]; then
+        printf '  PASS  %s\n' "$desc"; PASS=$(( PASS + 1 ))
+    else
+        printf '  FAIL  %s  (rc=%s/%s calls=%s/%s records=%s/%s)\n' \
+            "$desc" "$rc" "$want_rc" "$RESTART_CALLS" "$want_calls" "$records" "$want_records"; FAIL=$(( FAIL + 1 ))
+    fi
+}
+
+R1="$SELF_HEAL_WORK/root_ok"; mkdir -p "$R1/.axon"
+assert_orch 'ok indexer → no restart, no record, rc 0' 0 0 0 "$R1" ok 0 10000
+
+R2="$SELF_HEAL_WORK/root_heal"; mkdir -p "$R2/.axon"
+assert_orch 'exhausted + fresh window → restart once, record once, rc 0' 0 1 1 "$R2" exhausted 0 10000
+
+R3="$SELF_HEAL_WORK/root_saturated"; mkdir -p "$R3/.axon"
+printf '9800\n9900\n9950\n' > "$R3/.axon/self-heal-indexer-restarts.log"
+assert_orch 'exhausted + saturated window → crash-loop guard, no restart, rc 1' 1 0 3 "$R3" exhausted 0 10000
+
+R4="$SELF_HEAL_WORK/root_failrestart"; mkdir -p "$R4/.axon"
+assert_orch 'exhausted + restart fails → recorded (counts vs window), rc 1' 1 1 1 "$R4" exhausted 1 10000
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

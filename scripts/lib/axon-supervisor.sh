@@ -801,3 +801,121 @@ axon_resume_live_indexer_after_dev() {
     fi
     rm -f "$marker" 2>/dev/null || true
 }
+
+# ---------------------------------------------------------------------------
+# REQ-AXO-902277 — autonomous indexer recovery after max_restarts exhaustion.
+#
+# process-compose 1.94.0's `max_restarts` budget is a HARD, TERMINAL ceiling
+# that NEVER regenerates (MEASURED, REQ-AXO-902264): after 3 TensorRT-hang exits
+# the supervisor abandons the indexer (`Completed`, verdict `exhausted`) and it
+# stays dead — ~2 days in the 2026-08-06 incident — until a human runs a full
+# stop/start. 902264 delivered the DETECTION; this delivers the CURE: a restart
+# budget that REGENERATES with time, owned by Axon, out-of-band of the very
+# supervisor that abandoned the role. `axon_restart_role_verified` already sends
+# the explicit `POST /process/start` that recovers a `Completed` role and
+# verifies it via /readyz, so recovery REUSES it; the new logic here is WHEN to
+# fire it: only on the abandoned class, and no more than N times per rolling
+# window. The window IS the temporal budget regeneration — after T min of health
+# the old restarts age out of the window and the budget is whole again.
+# ---------------------------------------------------------------------------
+
+# Rolling-window budget (env-overridable, single source). A poison chunk is
+# quarantined by the REQ-AXO-902277 B2 fix after 3 hangs, and transient GPU blips
+# clear in a few restarts; a role restarting MORE than this in the window is
+# crash-looping on something the healer cannot fix (bad build, host GPU wedge —
+# REQ-AXO-902285), so the healer stops hammering and leaves it abandoned +
+# VISIBLE (verdict `exhausted`) rather than masking a hard fault behind flaps.
+axon_self_heal_window_s()   { printf '%s\n' "${AXON_SELF_HEAL_WINDOW_S:-1800}"; }  # 30 min
+axon_self_heal_max()        { printf '%s\n' "${AXON_SELF_HEAL_MAX:-3}"; }
+axon_self_heal_state_file() { printf '%s\n' "${1:?project root required}/.axon/self-heal-indexer-restarts.log"; }
+
+# axon_self_heal_should_act <verdict>
+# Return 0 iff <verdict> is the ABANDONED class the healer OWNS. Deliberately
+# NARROW (advisor guidance — never fight process-compose's fast path):
+#   * `exhausted` → not Running, budget spent, supervisor gave up: HEALER'S JOB.
+#   * `down`      → not Running, budget LEFT: process-compose is already
+#                   restarting it; racing spawns writer-guard-refused duplicates.
+#   * `no_budget` → still Running: a restart cannot reset the counter (measured),
+#                   so acting would be a pure outage for nothing.
+#   * `wedged`    → needs a zombie reap (axon_reap_supervisor_tree), not a plain
+#                   restart — a different remediation.
+axon_self_heal_should_act() {
+    [[ "${1:-}" == "exhausted" ]]
+}
+
+# axon_self_heal_window_ok <state_file> <now_epoch> <window_s> <max_in_window>
+# Prune restart timestamps older than the window, REWRITE the pruned file (so it
+# cannot grow unbounded), and return 0 iff FEWER than <max_in_window> remain (a
+# fresh restart is permitted). The prune IS the temporal budget regeneration:
+# entries age out on their own, so a role healthy for the whole window starts the
+# next one with a full budget. Missing/empty state file = full budget.
+axon_self_heal_window_ok() {
+    local state_file="${1:?state file required}" now="${2:?now required}"
+    local window_s="${3:?window required}" max="${4:?max required}"
+    local floor=$(( now - window_s )) line
+    local -a kept=()
+    if [[ -f "$state_file" ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[0-9]+$ ]] || continue
+            (( line >= floor )) && kept+=("$line")
+        done < "$state_file"
+    fi
+    mkdir -p "$(dirname "$state_file")" 2>/dev/null || true
+    if (( ${#kept[@]} )); then
+        printf '%s\n' "${kept[@]}" > "$state_file" 2>/dev/null || true
+    else
+        : > "$state_file" 2>/dev/null || true
+    fi
+    (( ${#kept[@]} < max ))
+}
+
+# axon_self_heal_record <state_file> <now_epoch> — append one restart timestamp.
+axon_self_heal_record() {
+    local state_file="${1:?state file required}" now="${2:?now required}"
+    mkdir -p "$(dirname "$state_file")" 2>/dev/null || true
+    printf '%s\n' "$now" >> "$state_file"
+}
+
+# axon_self_heal_indexer <project_root> <instance_kind> [now_epoch] [restart_budget_s]
+#
+# The single entry point wired into ensure-axon-running.sh (event-driven: WSL
+# boot + MCP-triggered) and its --watch loop (periodic, for the operator-away
+# idle case the 2026-08-06 outage happened in). Surveys the indexer role; if it
+# is in the abandoned class AND the rolling window permits, restarts it (verified
+# via /readyz) and records the restart. A saturated window is a crash-loop the
+# healer refuses to mask. The restart is RECORDED before it is attempted, so a
+# failing restart still counts against the window (no infinite retry on a broken
+# build). Returns: 0 = healthy or recovered, 1 = acted-and-failed / crash-loop
+# guard tripped, 2 = no supervisor / no indexer row (caller decides).
+axon_self_heal_indexer() {
+    local project_root="${1:?project root required}" instance_kind="${2:?instance kind required}"
+    local now="${3:-}" budget_s="${4:-180}"
+    local survey name v verdict="" state_file window_s max
+    [[ -n "$now" ]] || now="$(date +%s)"
+
+    survey="$(axon_role_survey "$project_root" "$instance_kind")" || return 2
+    while IFS='|' read -r name _ _ _ _ _ v; do
+        [[ "$name" == "axon-indexer" ]] && verdict="$v"
+    done <<< "$survey"
+    [[ -n "$verdict" ]] || return 2
+
+    axon_self_heal_should_act "$verdict" || return 0   # ok / not our class → nothing to do
+
+    state_file="$(axon_self_heal_state_file "$project_root")"
+    window_s="$(axon_self_heal_window_s)"
+    max="$(axon_self_heal_max)"
+
+    if ! axon_self_heal_window_ok "$state_file" "$now" "$window_s" "$max"; then
+        _axon_sup_warn "[self-heal] axon-indexer '${verdict}' but ${max} restart(s) already in the last $((window_s / 60))min — crash-loop guard: NOT restarting (leaving abandoned + visible; check build / host GPU wedge REQ-AXO-902285)"
+        return 1
+    fi
+
+    _axon_sup_log "[self-heal] axon-indexer verdict='${verdict}' — supervisor abandoned it (max_restarts spent); autonomous restart within the rolling budget (REQ-AXO-902277)"
+    axon_self_heal_record "$state_file" "$now"
+    if axon_restart_role_verified "$instance_kind" "axon-indexer" "$budget_s"; then
+        _axon_sup_log "[self-heal] axon-indexer recovered"
+        return 0
+    fi
+    _axon_sup_warn "[self-heal] axon-indexer restart did not verify within ${budget_s}s — still abandoned"
+    return 1
+}
