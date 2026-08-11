@@ -760,20 +760,23 @@ impl McpServer {
                 };
                 let target_prefix: String = attach_to.split('-').next().unwrap_or("").to_string();
                 let policy = relation_policy_for_pair(source_prefix, &target_prefix);
-                // REQ-AXO-902283 (Lot F, item 1) — a MILESTONE create whose relation to its
-                // single legal target is wrong auto-canonizes to that relation, mirroring
-                // action=link (select_relation_type_for_link, REQ-901939). SCOPED to MIL so
-                // REQ-AXO-902247's deliberate corrected_call contract for every OTHER source
-                // kind is untouched — only the milestone orientation trou (MIL→REQ = TARGETS)
-                // is smoothed. A no-op when the supplied relation is already the legal one, so
-                // the match below still accepts as usual.
-                if source_prefix == "MIL" {
-                    if let Some(p) = &policy {
-                        if p.allowed.len() == 1
-                            && !p.allowed.iter().any(|a| *a == relation_type.as_str())
-                        {
-                            relation_type = p.allowed[0].to_string();
-                        }
+                // REQ-AXO-902288 — auto-canonize a wrong/guessed relation_type whenever the
+                // (source,target) pair admits exactly ONE canonical relation, for EVERY source
+                // kind (generalizes REQ-902283's MIL-only carve-out, mirroring action=link /
+                // select_relation_type_for_link, REQ-901939). Single-legal = the caller had no
+                // choice, so applying it is correct-by-construction and kills the #1 open
+                // friction (forbidden_relation_for_type: REQ→PIL, CPT→PIL, GUI→PIL … are all
+                // single-legal). NEVER auto-canonize to SUPERSEDES — it is DESTRUCTIVE (mutates
+                // the target to status='superseded', REQ-902098); those pairs stay a reject and
+                // require an explicit opt-in. Ambiguous pairs (>1 allowed) also stay a reject —
+                // picking for the caller would be guessing (REQ-902247). No-op when the supplied
+                // relation is already legal, so the match below accepts as usual.
+                if let Some(p) = &policy {
+                    if p.allowed.len() == 1
+                        && p.allowed[0] != "SUPERSEDES"
+                        && !p.allowed.iter().any(|a| *a == relation_type.as_str())
+                    {
+                        relation_type = p.allowed[0].to_string();
                     }
                 }
                 match &policy {
@@ -811,29 +814,14 @@ impl McpServer {
                             .join(", ");
                         let reverse_hint =
                             reverse_relation_hint_payload(source_prefix, &target_prefix);
-                        // REQ-AXO-902247 (GUI-AXO-1026 inv.5 — repair AS DATA) — when the
-                        // pair admits exactly ONE legal relation, the call is unambiguously
-                        // fixable, so hand back the corrected value instead of a list the
-                        // LLM must still reason over. This is the FREQUENT case (REQ → PIL
-                        // only admits BELONGS_TO) and `forbidden_relation_for_type` is the
-                        // top open friction in telemetry — a wasted round-trip on a choice
-                        // that had no choice (live count via `mcp_friction_report`, never
-                        // hardcoded: REQ-AXO-902283 / GUI-PRO-013 DRY).
-                        //
-                        // Deliberately a PATCH, not a reconstructed full call: the original
-                        // `data` payload is not faithfully reproducible here, and inventing
-                        // one would be worse than useless. When several relations are legal
-                        // we emit nothing — picking for the caller would be guessing.
-                        let corrected_call = match allowed.as_slice() {
-                            [only] => json!({
-                                "tool": "soll_manager",
-                                "patch": { "data.relation_type": only },
-                                "note": format!(
-                                    "{source_prefix} → {target_prefix} admits exactly one canonical relation; re-send the SAME call with this value."
-                                ),
-                            }),
-                            _ => Value::Null,
-                        };
+                        // REQ-AXO-902288 — no `corrected_call` here anymore: a single-legal
+                        // pair now AUTO-CANONIZES above (it never reaches this error branch),
+                        // so the only way to land here with exactly one allowed relation is a
+                        // single-SUPERSEDES pair — and suggesting a DESTRUCTIVE SUPERSEDES for
+                        // the LLM to blindly re-send is exactly what REQ-902098 guards against.
+                        // The branch now serves only ambiguous (>1) and no-legal (0) pairs, for
+                        // which `accepted_values` + `source_can_reach` + `reverse_direction` are
+                        // the correct repair (there is no single value to hand back).
                         // REQ-AXO-902283 (Lot F, item 2) — the milestone orientation hint.
                         // A MIL→PIL/VIS create lands here (no legal relation, so the MIL
                         // auto-canonize above could not fire): teach the mental model
@@ -873,10 +861,6 @@ impl McpServer {
                                     "reverse_direction": reverse_hint,
                                     "hint": "pick an allowed relation_type for this (source_type, target_type) pair, or change attach_to to a target whose type fits one of `source_can_reach`",
                                     "follow_up_tools": ["soll_relation_schema"],
-                                    // REQ-AXO-902247 — present ONLY when the fix is
-                                    // unambiguous (single legal relation). Absent otherwise,
-                                    // so its presence always means "apply this verbatim".
-                                    "corrected_call": corrected_call,
                                     // REQ-AXO-902283 (Lot F) — present (non-null) only for a
                                     // Milestone source; teaches MIL → TARGETS → REQ.
                                     "milestone_guidance": milestone_guidance,

@@ -181,12 +181,13 @@ pub(crate) struct SollManagerData {
     /// another REQ instead). Call `soll_relation_schema` to get the matrix for a
     /// kind BEFORE guessing — this is the top open friction in telemetry
     /// (`forbidden_relation_for_type`; live count via `mcp_friction_report`, never
-    /// hardcoded — REQ-AXO-902283 / GUI-PRO-013 DRY), and it is entirely
-    /// avoidable. On a rejection the error carries `parameter_repair`, plus a
-    /// ready-to-apply `corrected_call` whenever the pair admits a single relation.
-    /// REQ-AXO-902283 — a MILESTONE source is the exception: a MIL create whose
-    /// relation to its single legal target (REQ → TARGETS) is wrong auto-canonizes
-    /// to that relation instead of rejecting (mirrors action=link).
+    /// hardcoded — GUI-PRO-013 DRY). REQ-AXO-902288 — but it is now largely
+    /// SELF-HEALING: when the pair admits exactly ONE canonical relation (any
+    /// source kind — `REQ → PIL`, `CPT → PIL`, `GUI → PIL`, `MIL → REQ` …), a
+    /// wrong or guessed relation_type AUTO-CANONIZES to it instead of rejecting
+    /// (mirrors action=link; never to the destructive `SUPERSEDES`). Only
+    /// genuinely ambiguous pairs (several legal relations, e.g. `CPT → REQ`)
+    /// reject — the error's `parameter_repair.accepted_values` lists them.
     #[serde(default)]
     pub relation_type: Option<String>,
     /// Node id (update target). DB-allocated on create — forbidden there.

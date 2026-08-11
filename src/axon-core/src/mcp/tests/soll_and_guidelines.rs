@@ -5316,9 +5316,10 @@ fn test_axon_soll_manager_create_attached_validation_rejects_invalid_target_kind
     );
 }
 
-/// REQ-AXO-902283 (Lot F) — a MILESTONE create whose relation to a REQ is wrong (only TARGETS
-/// is legal) auto-canonizes to TARGETS instead of rejecting, mirroring action=link. SCOPED to
-/// MIL, so REQ-AXO-902247's corrected_call contract for every other source kind is untouched.
+/// REQ-AXO-902283 / REQ-AXO-902288 — a MILESTONE create whose relation to a REQ is wrong (only
+/// TARGETS is legal) auto-canonizes to TARGETS instead of rejecting, mirroring action=link.
+/// Since REQ-902288 this single-legal auto-canon applies to EVERY source kind (see
+/// test_soll_manager_create_auto_canonizes_single_legal_relation for the REQ→PIL case).
 #[test]
 fn test_soll_manager_create_milestone_autocanonizes_wrong_relation_to_targets() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
@@ -5509,12 +5510,15 @@ fn test_soll_get_returns_node_body_and_repairs_unknown_id() {
     );
 }
 
-/// REQ-AXO-902247 — `forbidden_relation_for_type` is the #1 open friction in
-/// telemetry (217 occurrences). When the (source, target) pair admits exactly ONE
-/// canonical relation, the caller had no real choice — so the rejection must hand
-/// back the corrected value, not just a list to reason over.
+/// REQ-AXO-902288 — a single-legal pair (`REQ → PIL` admits only `BELONGS_TO`)
+/// now AUTO-CANONIZES a wrong/guessed relation_type on CREATE instead of
+/// rejecting, generalizing REQ-902283's MIL-only behavior to every source kind
+/// (mirrors action=link). This is the inversion of the old REQ-902247
+/// corrected_call contract for this path: without the fix the call errors; with
+/// it, the REQ is created and its edge carries the one legal relation. Regression
+/// proof for the #1 open friction `forbidden_relation_for_type`.
 #[test]
-fn test_soll_manager_forbidden_relation_returns_corrected_call_when_unambiguous() {
+fn test_soll_manager_create_auto_canonizes_single_legal_relation() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
@@ -5533,31 +5537,38 @@ fn test_soll_manager_forbidden_relation_returns_corrected_call_when_unambiguous(
                 "entity": "requirement",
                 "data": {
                     "project_code": "AXO",
-                    "title": "902247 corrected-call probe",
+                    "title": "902288 auto-canon probe",
                     "description": "probe",
                     "attach_to": "PIL-AXO-002",
                     "relation_type": "REFINES"
                 }
             }
         })),
-        id: Some(json!(902_247)),
+        id: Some(json!(902_288)),
     };
     let response = server.handle_request(req).unwrap().result.unwrap();
-    assert_eq!(response.get("isError").and_then(|v| v.as_bool()), Some(true));
-
-    let repair = &response["data"]["parameter_repair"];
-    assert_eq!(repair["source_type"].as_str(), Some("REQ"));
-    assert_eq!(repair["target_type"].as_str(), Some("PIL"));
-
-    let corrected = &repair["corrected_call"];
-    assert!(
-        !corrected.is_null(),
-        "a single-legal-relation pair must yield a corrected_call, got {repair}"
+    assert_ne!(
+        response.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "single-legal pair must auto-canonize, not reject: {response}"
     );
-    assert_eq!(
-        corrected["patch"]["data.relation_type"].as_str(),
-        Some("BELONGS_TO"),
-        "the corrected value must be the one legal relation, got {corrected}"
+
+    // The edge to the pillar must carry the ONE legal relation (BELONGS_TO), not
+    // the wrong REFINES the caller guessed.
+    let rows_json = server
+        .graph_store
+        .query_json("SELECT relation_type FROM soll.Edge WHERE target_id = 'PIL-AXO-002'")
+        .unwrap();
+    let rows: Vec<Vec<String>> = serde_json::from_str(&rows_json).unwrap();
+    let relations: Vec<String> =
+        rows.into_iter().filter_map(|r| r.into_iter().next()).collect();
+    assert!(
+        relations.iter().any(|r| r == "BELONGS_TO"),
+        "the created edge must be auto-canonized to BELONGS_TO, got {relations:?}"
+    );
+    assert!(
+        !relations.iter().any(|r| r == "REFINES"),
+        "the guessed REFINES must NOT have been used, got {relations:?}"
     );
 }
 
@@ -10359,15 +10370,21 @@ fn test_skill_entity_type_create_with_canonical_inherit_from_guideline() {
     );
 }
 
-// REQ-AXO-91578 — SKI entity must reject create when no canonical relation
+// REQ-AXO-91578 — SKI entity must reject create when NO canonical relation
 // exists for (SKI, target_type). Validates closed-policy enforcement.
+// REQ-AXO-902288 — the target must be a genuinely no-policy pair: SKI→GUI is
+// single-legal (INHERITS_FROM) and now AUTO-CANONIZES a wrong relation, so it no
+// longer rejects. SKI→MIL has no policy at all (SKI reaches only PIL/GUI/SKI/PRT),
+// so a create against a Milestone still (correctly) rejects — any relation.
 #[test]
 fn test_skill_entity_rejects_non_canonical_attach_target() {
     let server = create_test_server();
+    // Seed a Milestone; (SKI, MIL) has no canonical relation policy.
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-PRO-001', 'Milestone', 'PRO', 'probe milestone', 'x', 'current', '{}')")
+        .unwrap();
 
-    // GUI-PRO-001 is seeded at bootstrap. SKI→GUI is allowed via
-    // INHERITS_FROM ; but trying COMPLIES_WITH should reject (not in
-    // the policy's allowed list for SKI→GUI).
     let req = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "tools/call",
@@ -10378,10 +10395,10 @@ fn test_skill_entity_rejects_non_canonical_attach_target() {
                 "entity": "skill",
                 "data": {
                     "project_code": "PRO",
-                    "title": "Test skill — should reject COMPLIES_WITH",
-                    "description": "SKI→GUI allows only INHERITS_FROM ; COMPLIES_WITH must reject.",
-                    "attach_to": "GUI-PRO-001",
-                    "relation_type": "COMPLIES_WITH",
+                    "title": "Test skill — SKI→MIL has no policy, must reject",
+                    "description": "SKI→MIL admits no canonical relation ; create must reject.",
+                    "attach_to": "MIL-PRO-001",
+                    "relation_type": "INHERITS_FROM",
                     "status": "current"
                 }
             }
