@@ -275,6 +275,13 @@ impl McpServer {
         if project.is_empty() {
             return Some(mbx_err("inbox project unresolved — pass `project`.", "input_invalid"));
         }
+        // REQ-AXO-902287 (M1) — disclose when the project was inferred from the cwd
+        // (no explicit `project=`), so a cross-project inbox read is never silently
+        // scoped to the caller's own project without a visible cue.
+        let project_inferred = !args
+            .get("project")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
         let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100);
         let mode = args.get("mode").and_then(Value::as_str).unwrap_or("unread");
         let since = args.get("since_id").and_then(Value::as_i64);
@@ -395,8 +402,13 @@ impl McpServer {
         }
 
         let report = format!(
-            "### 📥 mcp_inbox_read\n\n`{}` · mode={} · {} message(s){}{}",
+            "### 📥 mcp_inbox_read\n\n`{}`{} · mode={} · {} message(s){}{}",
             project,
+            if project_inferred {
+                " _(déduit du cwd — passe `project=` pour un autre)_"
+            } else {
+                ""
+            },
             mode,
             messages.len(),
             if mode == "unread" && max_id > floor {

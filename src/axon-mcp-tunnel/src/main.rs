@@ -83,6 +83,17 @@ fn main() {
     let default_timeout = env_timeout("AXON_MCP_TUNNEL_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
     let heavy_timeout = env_timeout("AXON_MCP_TUNNEL_HEAVY_TIMEOUT_SECS", HEAVY_TIMEOUT_SECS);
 
+    // REQ-AXO-902286 — the tunnel is spawned by the MCP client (Claude Code) IN the
+    // project directory, so its cwd IS the caller's project. The shared brain has no
+    // other way to know which project the caller works in (its own cwd is always the
+    // Axon repo). Forward the cwd on every request as `X-Axon-Client-Cwd`; the brain
+    // resolves project_code against it. Captured once — a tunnel process serves one
+    // client session from one directory.
+    let client_cwd = env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.trim().is_empty());
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -105,12 +116,12 @@ fn main() {
                     Ok(json_payload) => {
                         let timeout =
                             timeout_for_payload(&json_payload, default_timeout, heavy_timeout);
-                        match client
-                            .post(&mcp_url)
-                            .timeout(timeout)
-                            .json(&json_payload)
-                            .send()
-                        {
+                        let mut request = client.post(&mcp_url).timeout(timeout);
+                        if let Some(cwd) = client_cwd.as_deref() {
+                            // REQ-AXO-902286 — carry the caller's project directory.
+                            request = request.header("X-Axon-Client-Cwd", cwd);
+                        }
+                        match request.json(&json_payload).send() {
                             Ok(res) => {
                                 if let Ok(res_text) = res.text() {
                                     if res_text.trim() != "null" && !res_text.trim().is_empty() {

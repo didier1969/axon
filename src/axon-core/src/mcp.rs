@@ -6,6 +6,64 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::thread;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+// ── REQ-AXO-902286 — per-request client project context ──────────────────────
+// The live brain is a SHARED singleton whose own cwd is always the Axon repo, so
+// `auto_resolve_project_code_str` (and the mutation-path resolver) would resolve
+// every project-scoped call to AXO regardless of which project the calling agent
+// actually works in. The stdio tunnel (`axon-mcp-tunnel`, spawned by the client
+// IN the project directory) carries the client's cwd to the brain via the
+// `X-Axon-Client-Cwd` HTTP header; `mcp_http::handle_mcp_post` installs it here
+// for the duration of ONE synchronous `handle_request` on a blocking thread
+// (no await point inside → no thread migration → thread-local is race-free).
+thread_local! {
+    static REQUEST_CLIENT_CWD: std::cell::RefCell<Option<String>> =
+        std::cell::RefCell::new(None);
+}
+
+/// The client cwd carried by the current request, if the transport installed one.
+pub(crate) fn request_client_cwd() -> Option<String> {
+    REQUEST_CLIENT_CWD.with(|c| c.borrow().clone())
+}
+
+/// RAII guard that installs the per-request client cwd and clears it on drop.
+/// Drop runs even if `handle_request` panics, so a stale value never leaks to the
+/// next task that reuses the same blocking thread.
+pub(crate) struct ClientCwdGuard;
+
+impl ClientCwdGuard {
+    pub(crate) fn install(client_cwd: Option<String>) -> Self {
+        REQUEST_CLIENT_CWD.with(|c| *c.borrow_mut() = client_cwd);
+        ClientCwdGuard
+    }
+}
+
+impl Drop for ClientCwdGuard {
+    fn drop(&mut self) {
+        REQUEST_CLIENT_CWD.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+/// REQ-AXO-902286 — single source of the directory used to resolve the caller's
+/// `project_code`: the per-request client cwd (tunnel header) first, then the
+/// `AXON_PROJECT_ROOT` env, then the server process cwd. DRY — every project
+/// resolver (the `auto_resolve_project_code_str` read path AND the
+/// `validate_explicit_canonical_project_code` mutation path) MUST go through here
+/// so one mechanism carries the client's project everywhere. No header (SSE, an
+/// old tunnel, a direct call) → falls back to today's env/cwd behaviour → zero
+/// regression for AXO (REQ-AXO-902239 intact).
+pub(crate) fn effective_project_search_path() -> String {
+    request_client_cwd()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("AXON_PROJECT_ROOT").ok())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_default()
+}
+
 mod catalog;
 mod dispatch;
 mod format;
@@ -1589,7 +1647,7 @@ impl McpServer {
         // point, and LLMs do batch. All three paths (dispatch, batch, async mutation
         // jobs) converge on `execute_tool_direct`.
         let arguments = &*self.with_resolved_project_scope(normalized_name, arguments);
-        match normalized_name {
+        let result = match normalized_name {
             "help" => self.axon_help(arguments),
             "contradiction_check" => self.axon_contradiction_check(arguments),
             "promote_status" => self.axon_promote_status(arguments),
@@ -1729,7 +1787,39 @@ impl McpServer {
             _ => Some(
                 json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true }),
             ),
+        };
+        Self::disclose_cwd_provenance(arguments, result)
+    }
+
+    /// REQ-AXO-902287 (M1) — provenance disclosure. When the project scope was
+    /// auto-resolved from the caller's cwd (stamped `project_code_source=cwd_auto`
+    /// by `with_resolved_project_scope`), append a one-line note to the response so
+    /// the LLM knows the project was INFERRED, not chosen, and can override with
+    /// `project=`. Non-breaking: no stamp (explicit project, or a tool with no
+    /// project scope) → the result passes through untouched.
+    fn disclose_cwd_provenance(arguments: &Value, result: Option<Value>) -> Option<Value> {
+        let mut result = result?;
+        if arguments.get("project_code_source").and_then(Value::as_str) != Some("cwd_auto") {
+            return Some(result);
         }
+        let resolved = arguments
+            .get("project_code")
+            .or_else(|| arguments.get("project"))
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+        if let Some(text) = result
+            .get_mut("content")
+            .and_then(|c| c.get_mut(0))
+            .and_then(|e| e.get_mut("text"))
+        {
+            if let Some(s) = text.as_str() {
+                *text = Value::from(format!(
+                    "{s}\n\n_↳ projet `{resolved}` déduit du cwd (cwd_auto) — passe `project=` pour en cibler un autre._"
+                ));
+            }
+        }
+        Some(result)
     }
 
     pub(crate) fn now_unix_ms() -> i64 {

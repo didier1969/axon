@@ -124,12 +124,11 @@ impl McpServer {
                     return Ok(codes.into_iter().next().unwrap());
                 }
                 if codes.len() > 1 {
-                    // Try matching AXON_PROJECT_ROOT or cwd against registered project paths.
-                    let search_path = std::env::var("AXON_PROJECT_ROOT")
-                        .or_else(|_| {
-                            std::env::current_dir().map(|p| p.to_string_lossy().to_string())
-                        })
-                        .unwrap_or_default();
+                    // REQ-AXO-902286 — match the CALLER's directory (per-request client
+                    // cwd from the tunnel header, else AXON_PROJECT_ROOT / server cwd)
+                    // against registered project paths, so a SOLL mutation lands in the
+                    // project the agent is working in, not the shared brain's own (AXO).
+                    let search_path = crate::mcp::effective_project_search_path();
                     if !search_path.is_empty() {
                         let cwd_escaped = escape_sql(&search_path);
                         if let Ok(cwd_matches) = self.query_single_column(&format!(

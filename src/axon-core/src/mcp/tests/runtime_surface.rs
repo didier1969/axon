@@ -1362,6 +1362,81 @@ fn test_retrieve_context_auto_resolves_project_code_from_cwd() {
 }
 
 #[test]
+fn test_client_cwd_header_overrides_server_cwd_for_project_resolution() {
+    // REQ-AXO-902286 — the shared brain must resolve project_code against the
+    // CALLING agent's directory (carried by the tunnel's `X-Axon-Client-Cwd`
+    // header, installed as a per-request thread-local via `ClientCwdGuard`), NOT
+    // its own cwd. Without the fix, `auto_resolve_project_code_str` reads only
+    // AXON_PROJECT_ROOT / server cwd and returns the brain's own project (AXO) for
+    // every non-AXO caller — the silent wrong-project class this REQ closes.
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/test/axo-fixture"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry("TE2", Some("trader"), Some("/home/test/te2-fixture"))
+        .unwrap();
+    // The brain's own directory resolves to AXO.
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/home/test/axo-fixture");
+    }
+    // No client cwd installed → falls back to the server directory (AXO).
+    assert_eq!(
+        server.auto_resolve_project_code_str().as_deref(),
+        Some("AXO"),
+        "without a client cwd, resolution falls back to the server directory"
+    );
+    // Client cwd (a non-AXO project) installed for this request → MUST win.
+    {
+        let _cwd =
+            crate::mcp::ClientCwdGuard::install(Some("/home/test/te2-fixture".to_string()));
+        assert_eq!(
+            server.auto_resolve_project_code_str().as_deref(),
+            Some("TE2"),
+            "the per-request client cwd must override the server directory"
+        );
+    }
+    // Guard dropped → back to the server project, proving no cross-request leakage.
+    assert_eq!(
+        server.auto_resolve_project_code_str().as_deref(),
+        Some("AXO"),
+        "the client cwd must be cleared once the request guard drops"
+    );
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+    }
+}
+
+#[test]
+fn test_cwd_provenance_disclosed_only_when_auto_resolved() {
+    // REQ-AXO-902287 (M1) — an auto-resolved project scope gets a one-line
+    // provenance note so the LLM knows the project was inferred, not chosen; an
+    // explicit project passes through untouched.
+    let base = json!({ "content": [{ "type": "text", "text": "body" }] });
+    // Auto-resolved (stamped `cwd_auto`) → note appended, names the project.
+    let auto_args = json!({ "project_code": "AXO", "project_code_source": "cwd_auto" });
+    let out = crate::mcp::McpServer::disclose_cwd_provenance(&auto_args, Some(base.clone()))
+        .unwrap();
+    let text = out["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("déduit du cwd") && text.contains("AXO"),
+        "auto-resolved response must disclose cwd provenance: {text}"
+    );
+    // Explicit project (no stamp) → untouched.
+    let explicit_args = json!({ "project_code": "AXO" });
+    let out2 = crate::mcp::McpServer::disclose_cwd_provenance(&explicit_args, Some(base))
+        .unwrap();
+    assert_eq!(
+        out2["content"][0]["text"].as_str().unwrap(),
+        "body",
+        "explicit project must not get a provenance note"
+    );
+}
+
+#[test]
 fn test_status_brief_omits_public_tools_list_in_text() {
     // REQ-AXO-104 — status mode=brief (the default) must NOT inline the
     // 60-name public_tools list in the human-readable text. The list

@@ -149,6 +149,14 @@ async fn handle_mcp_post(
         let request_class = classify_mcp_request(&payload);
         mcp_request_started_with_class(request_class);
         let protocol_version = resolve_response_protocol_version(&headers, &payload);
+        // REQ-AXO-902286 — the stdio tunnel (spawned by the client IN its project
+        // directory) forwards its cwd here so the shared brain resolves project_code
+        // against the CALLER's project, not the brain's own (AXO) directory. Absent
+        // header (SSE, an old tunnel, a direct call) → today's env/cwd fallback.
+        let client_cwd = headers
+            .get("x-axon-client-cwd")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
 
         let response = if payload.id.is_none() {
             match tokio::task::spawn_blocking(move || server.handle_notification(payload)).await {
@@ -179,7 +187,15 @@ async fn handle_mcp_post(
         } else {
             // Offload C-FFI / DB work to a blocking thread pool safely
             // No more mcp_active_flag: Zero-Sleep MVCC architecture handles concurrency.
-            match tokio::task::spawn_blocking(move || server.handle_request(payload)).await {
+            // REQ-AXO-902286 — install the client cwd for the duration of this one
+            // synchronous dispatch; the RAII guard clears it (even on panic) before the
+            // blocking thread is reused.
+            match tokio::task::spawn_blocking(move || {
+                let _client_cwd_guard = crate::mcp::ClientCwdGuard::install(client_cwd);
+                server.handle_request(payload)
+            })
+            .await
+            {
                 Ok(Some(response)) => {
                     record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
                     Json(response).into_response()

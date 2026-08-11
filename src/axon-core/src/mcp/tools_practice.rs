@@ -568,6 +568,12 @@ impl McpServer {
     /// (trust × retrievability) and lightly reinforces the recalled ones (flux).
     pub(crate) fn axon_practice_recall(&self, args: &Value) -> Option<Value> {
         let scope = self.resolve_practice_scope(args);
+        // REQ-AXO-902287 (M1) — disclose when scope was inferred from the cwd
+        // (no explicit `scope=`) rather than chosen by the caller.
+        let scope_inferred = !args
+            .get("scope")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
         let query = args.get("query").and_then(Value::as_str).unwrap_or("").trim();
         let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(5).clamp(1, 50) as usize;
         if query.is_empty() {
@@ -671,8 +677,13 @@ impl McpServer {
         let body = render_practice_list(&practices);
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_recall — {} practice(s) · scope=`{scope}` (+global)\n\n{body}",
-                practices.len()
+                "### 🧠 practice_recall — {} practice(s) · scope=`{scope}`{prov} (+global)\n\n{body}",
+                practices.len(),
+                prov = if scope_inferred {
+                    " _(déduit du cwd — passe `scope=` pour un autre)_"
+                } else {
+                    ""
+                }
             )}],
             "data": {"status":"ok","scope":scope,"count":practices.len(),"practices":practices}
         }))

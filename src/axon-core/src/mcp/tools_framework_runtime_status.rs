@@ -1568,10 +1568,11 @@ impl McpServer {
     /// surrounding code reads only the first column so that's what we
     /// extract.
     pub(crate) fn auto_resolve_project_code_str(&self) -> Option<String> {
-        let search_path = std::env::var("AXON_PROJECT_ROOT")
-            .or_else(|_| std::env::current_dir().map(|p| p.to_string_lossy().to_string()))
-            .unwrap_or_default()
-            .replace('\'', "''");
+        // REQ-AXO-902286 — the search path is the per-request client cwd (tunnel
+        // header) when present, else AXON_PROJECT_ROOT / server cwd. This is what
+        // makes the auto-resolved scope follow the CALLING agent's project instead
+        // of the shared brain's own (AXO) directory.
+        let search_path = crate::mcp::effective_project_search_path().replace('\'', "''");
         if search_path.is_empty() {
             return None;
         }
