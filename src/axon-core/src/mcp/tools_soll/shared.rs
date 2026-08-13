@@ -409,6 +409,34 @@ pub(super) fn project_code_from_canonical_entity_id(entity_id: &str) -> Option<S
     }
 }
 
+/// REQ-AXO-902289 — the `soll_manager` entity implied by a canonical id.
+///
+/// The id format (DEC-AXO-085, `TYPE-PROJ-N`) makes the entity a FUNCTION of the
+/// prefix: the live graph holds twelve prefixes and each maps to exactly one
+/// node type, no overlap. So an `update`/`link` call that carries `data.id` and
+/// omits `entity` is not ambiguous — it is under-specified in a recoverable way.
+///
+/// Returns the lowercase entity name the tool's enum expects, or `None` for an
+/// unknown prefix (the caller then keeps the ordinary missing-field rejection —
+/// guessing past an unrecognised prefix is exactly what this must not do).
+pub(crate) fn soll_entity_from_canonical_id(entity_id: &str) -> Option<&'static str> {
+    match entity_id.split('-').next()?.trim() {
+        "VIS" => Some("vision"),
+        "PIL" => Some("pillar"),
+        "REQ" => Some("requirement"),
+        "DEC" => Some("decision"),
+        "CPT" => Some("concept"),
+        "GUI" => Some("guideline"),
+        "MIL" => Some("milestone"),
+        "VAL" => Some("validation"),
+        "STK" => Some("stakeholder"),
+        "SKI" => Some("skill"),
+        "PRT" => Some("prompt_template"),
+        "TMG" => Some("technology_migration"),
+        _ => None,
+    }
+}
+
 /// REQ-AXO-139 slice (`soll_attach_evidence`): per-kind required-field hint
 /// returned via `data.parameter_repair.required_field_hint` when an artifact
 /// is rejected for a missing `artifact_ref`. The kind values are the

@@ -1588,6 +1588,54 @@ impl McpServer {
         ("drift_history", "project"),
     ];
 
+    /// REQ-AXO-902289 — fill in a missing `soll_manager` `entity` from the
+    /// canonical id the call already carries.
+    ///
+    /// The friction signature (`soll_manager` / `invalid_arguments` / `entity`,
+    /// 43 occurrences) read as a vocabulary problem and was filed as an
+    /// unexplained RCA — `entity` HAS had a closed enum in the schema all along.
+    /// It is not a vocabulary problem: `field_in_error` carries the first
+    /// MISSING REQUIRED field (`dispatch.rs`), so those calls omitted `entity`
+    /// outright. And when `data.id` is present, the id format (DEC-AXO-085,
+    /// `TYPE-PROJ-N`) determines the entity — the caller was made to repeat
+    /// something the call already stated.
+    ///
+    /// Bounded on purpose: `soll_manager` only, only when `entity` is absent,
+    /// only for a recognised prefix. `create` has no id, so it keeps demanding
+    /// `entity` — there is nothing to infer from and inventing one would write
+    /// the wrong kind of node into a preserve-always graph.
+    fn with_inferred_soll_entity<'a>(
+        normalized_name: &str,
+        arguments: &'a Value,
+    ) -> std::borrow::Cow<'a, Value> {
+        if normalized_name != "soll_manager" {
+            return std::borrow::Cow::Borrowed(arguments);
+        }
+        let already_set = arguments
+            .get("entity")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.trim().is_empty());
+        if already_set {
+            return std::borrow::Cow::Borrowed(arguments);
+        }
+        let Some(entity) = arguments
+            .pointer("/data/id")
+            .and_then(Value::as_str)
+            .and_then(tools_soll::soll_entity_from_canonical_id)
+        else {
+            return std::borrow::Cow::Borrowed(arguments);
+        };
+        let mut patched = arguments.clone();
+        if let Some(obj) = patched.as_object_mut() {
+            obj.insert("entity".to_string(), Value::from(entity));
+        }
+        tracing::debug!(
+            entity,
+            "REQ-AXO-902289 — soll_manager entity inferred from canonical id"
+        );
+        std::borrow::Cow::Owned(patched)
+    }
+
     /// REQ-AXO-902239 — fill in the project scope for an allow-listed tool when the
     /// caller omitted it, mirroring what `query`/`inspect` have always done.
     ///
@@ -1647,6 +1695,9 @@ impl McpServer {
         // point, and LLMs do batch. All three paths (dispatch, batch, async mutation
         // jobs) converge on `execute_tool_direct`.
         let arguments = &*self.with_resolved_project_scope(normalized_name, arguments);
+        // REQ-AXO-902289 — same chokepoint, same reason: recover a call the
+        // caller could not have known to spell out, rather than bouncing it.
+        let arguments = &*Self::with_inferred_soll_entity(normalized_name, arguments);
         let result = match normalized_name {
             "help" => self.axon_help(arguments),
             "contradiction_check" => self.axon_contradiction_check(arguments),

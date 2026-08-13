@@ -3374,3 +3374,80 @@ fn test_job_status_wait_returns_partial_snapshot_on_timeout() {
         Some("continue_polling_until_terminal_state")
     );
 }
+
+// REQ-AXO-902289 — `entity` omitted with a canonical `data.id` is inferred,
+// not rejected.
+//
+// The friction signature (soll_manager / invalid_arguments / entity, 43 occ)
+// looked like a vocabulary problem, but `field_in_error` carries the first
+// MISSING REQUIRED field, not a rejected value: those calls omitted `entity`
+// entirely. The id format (DEC-AXO-085) makes it a function of the prefix, so
+// the call is under-specified in a recoverable way — same principle as
+// REQ-AXO-902288 for `relation_type`.
+fn soll_manager_call(server: &McpServer, arguments: Value, id: i64) -> Value {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({ "name": "soll_manager", "arguments": arguments })),
+        id: Some(json!(id)),
+    };
+    server.handle_request(req).unwrap().result.unwrap()
+}
+
+fn rejected_field(result: &Value) -> Option<String> {
+    result
+        .pointer("/data/parameter_repair/invalid_field")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+#[test]
+fn test_soll_manager_infers_entity_from_canonical_id_prefix() {
+    let server = create_test_server();
+
+    // A canonical id with no `entity`: the call must get PAST argument
+    // validation. It still fails — the node does not exist — and that is the
+    // point: the failure is about the target, not about a field the caller
+    // could not have known to repeat.
+    let inferred = soll_manager_call(
+        &server,
+        json!({
+            "action": "update",
+            "data": { "id": "REQ-AXO-999999", "status": "delivered" }
+        }),
+        7101,
+    );
+    assert_ne!(
+        rejected_field(&inferred).as_deref(),
+        Some("entity"),
+        "entity is derivable from the `REQ-` prefix — it must not be demanded back"
+    );
+
+    // VN — no id to infer from: the missing field is still reported.
+    let no_id = soll_manager_call(
+        &server,
+        json!({ "action": "update", "data": { "status": "delivered" } }),
+        7102,
+    );
+    assert_eq!(
+        rejected_field(&no_id).as_deref(),
+        Some("entity"),
+        "without an id there is nothing to infer from — reject as before"
+    );
+
+    // VN — unknown prefix: inference must not guess past a prefix it does not
+    // recognise, or a typo would silently mutate the wrong kind of node.
+    let unknown_prefix = soll_manager_call(
+        &server,
+        json!({
+            "action": "update",
+            "data": { "id": "XXX-AXO-1", "status": "delivered" }
+        }),
+        7103,
+    );
+    assert_eq!(
+        rejected_field(&unknown_prefix).as_deref(),
+        Some("entity"),
+        "an unrecognised prefix falls back to the ordinary rejection"
+    );
+}

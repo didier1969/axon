@@ -214,7 +214,11 @@ pub(crate) struct SollManagerData {
     /// section (rendered as `## <section_title>`); omit for a bare append.
     #[serde(default)]
     pub section_title: Option<String>,
-    /// Lifecycle status (e.g. "planned", "current", "delivered").
+    /// Lifecycle status. REQ-AXO-902289 — the closed vocabulary (DEC-PRO-100) is
+    /// attached to this field as an `enum` when the schema is assembled, from
+    /// `CANONICAL_NODE_STATUSES`; it is deliberately NOT re-listed here, where it
+    /// would drift. Anything outside it is rejected with the accepted values and
+    /// a suggested normalisation — no status is ever silently rewritten.
     #[serde(default)]
     pub status: Option<String>,
     /// Priority bucket P0..P3 (metadata-routed; consumed by soll_work_plan).
@@ -761,6 +765,22 @@ pub(crate) fn derived_input_schema(name: &str) -> Option<Value> {
         obj.remove("$defs");
         obj.remove("definitions");
     }
+    // REQ-AXO-902289 — publish the closed `data.status` vocabulary, DERIVED from
+    // its single source (`CANONICAL_NODE_STATUSES`, DEC-PRO-100) rather than
+    // retyped in a doc comment that would drift. `status` is a plain
+    // `Option<String>` in the input struct — it carries no Rust enum schemars
+    // could project — so the vocabulary is injected here, at the one place the
+    // advertised schema is assembled.
+    if name == "soll_manager" {
+        if let Some(status) = value.pointer_mut("/properties/data/properties/status") {
+            if let Some(obj) = status.as_object_mut() {
+                obj.insert(
+                    "enum".to_string(),
+                    Value::from(super::tools_soll::CANONICAL_NODE_STATUSES),
+                );
+            }
+        }
+    }
     // REQ-AXO-901990 — the ADVERTISED schema stays FLAT. The per-action
     // requiredness used to be injected here as a top-level `allOf` if/then
     // (REQ-AXO-901949 inv.2), which made soll_manager the ONLY tool with a
@@ -819,6 +839,30 @@ pub(crate) fn conditional_clauses_for(name: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // REQ-AXO-902289 — `data.status` announces its closed vocabulary.
+    //
+    // The signature (soll_manager / input_invalid / data.status, 57 occ) is not
+    // an aval problem: the rejection already lists the accepted values, hints a
+    // normalisation and shows a valid call. It is an AMONT one — the field was
+    // documented as `e.g. "planned", "current", "delivered"`, three of seven,
+    // with no enumeration, so the caller guessed before ever being corrected.
+    // The empirical proof of what gets guessed is the normalisation table in
+    // `manager.rs`: fifteen aliases, none of them legal.
+    #[test]
+    fn derived_schema_publishes_the_canonical_status_vocabulary() {
+        let schema = derived_input_schema("soll_manager").expect("soll_manager derived schema");
+        let values = schema
+            .pointer("/properties/data/properties/status/enum")
+            .and_then(Value::as_array)
+            .expect("data.status must advertise its closed enum");
+        let published: Vec<&str> = values.iter().filter_map(Value::as_str).collect();
+        assert_eq!(
+            published,
+            crate::mcp::tools_soll::CANONICAL_NODE_STATUSES,
+            "the published vocabulary is DERIVED from the single source, never retyped"
+        );
+    }
 
     #[test]
     fn derived_schema_present_for_tracer_tools() {

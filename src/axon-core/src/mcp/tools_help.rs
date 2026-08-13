@@ -217,6 +217,59 @@ impl McpServer {
     }
 }
 
+/// REQ-AXO-902289 — Levenshtein distance, iterative two-row form.
+///
+/// Small and local on purpose: the only caller compares one mistyped tool name
+/// against ~100 catalog entries, all short ASCII. A crate dependency for that
+/// would cost more than it saves.
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right_chars: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right_chars.len()).collect();
+    let mut current = vec![0usize; right_chars.len() + 1];
+    for (i, lc) in left.chars().enumerate() {
+        current[0] = i + 1;
+        for (j, rc) in right_chars.iter().enumerate() {
+            let substitution = previous[j] + usize::from(lc != *rc);
+            current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right_chars.len()]
+}
+
+/// REQ-AXO-902289 — the catalog names closest to what the caller asked for.
+///
+/// Substring containment ranks first: the common miss is a PARTIAL name
+/// (`friction_report` for `mcp_friction_report`), where edit distance alone
+/// would bury the right answer under same-length neighbours. Typos then fall
+/// back to edit distance, bounded so an unrelated word suggests nothing rather
+/// than something confidently wrong.
+fn closest_tool_names(requested: &str, limit: usize) -> Vec<String> {
+    let max_distance = 3.max(requested.len() / 3);
+    let mut scored: Vec<(usize, usize, String)> = tools_catalog(true)
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                .filter_map(|name| {
+                    let contains = name.contains(requested) || requested.contains(name);
+                    let distance = edit_distance(requested, name);
+                    if !contains && distance > max_distance {
+                        return None;
+                    }
+                    // Containment sorts ahead of pure edit-distance matches;
+                    // within a tier, closest first, then shortest name.
+                    Some((usize::from(!contains), distance, name.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.len().cmp(&b.2.len())));
+    scored.into_iter().take(limit).map(|(_, _, name)| name).collect()
+}
+
 fn tool_help_response(tool_name: &str) -> Value {
     let normalized = tool_name
         .strip_prefix("mcp_axon_")
@@ -233,17 +286,34 @@ fn tool_help_response(tool_name: &str) -> Value {
         .cloned();
 
     let Some(tool) = tool else {
+        // REQ-AXO-902289 — "call tools/list" was the whole repair, which asks an
+        // agent to re-read 100+ names to fix one word. Name the closest matches
+        // instead: a wrong tool name is nearly always a near-miss (a partial name
+        // like `friction_report`, or a typo), and the catalog knows the answer.
+        let suggestions = closest_tool_names(normalized, 3);
+        let suggestion_text = if suggestions.is_empty() {
+            String::new()
+        } else {
+            format!(" Closest: {}.", suggestions.join(", "))
+        };
         return json!({
             "content": [{
                 "type": "text",
-                "text": format!("Unknown MCP tool `{}`. Call `tools/list` or `help(topic=\"routing\")`.", normalized)
+                "text": format!(
+                    "Unknown MCP tool `{}`.{} Otherwise call `tools/list` or `help(topic=\"routing\")`.",
+                    normalized, suggestion_text
+                )
             }],
             "isError": true,
             "data": {
                 "problem_class": "unknown_tool",
                 "requested_tool": normalized,
                 "next_action": {"tool": "help", "arguments": {"topic": "routing"}},
-                "parameter_repair": "Use an exact tool name from `tools/list`."
+                "parameter_repair": {
+                    "invalid_field": "tool",
+                    "suggestions": suggestions,
+                    "hint": "retry `help(tool=…)` with one of `suggestions`, or list the surface with `tools/list`"
+                }
             }
         });
     };
@@ -423,5 +493,66 @@ fn next_action_for_tool(tool_name: &str) -> Value {
             "tool": tool_name,
             "arguments": {}
         }),
+    }
+}
+
+#[cfg(test)]
+mod unknown_tool_tests {
+    use super::*;
+
+    // REQ-AXO-902289 — `help unknown_tool` (23 occ) sent the caller back to
+    // `tools/list` to fix a single word. The catalog already knows the answer.
+    #[test]
+    fn unknown_tool_names_the_closest_catalog_entries() {
+        // Partial name — the common miss. Edit distance alone would rank
+        // same-length neighbours above the tool actually asked for.
+        let partial = tool_help_response("friction_report");
+        assert_eq!(partial["data"]["problem_class"].as_str(), Some("unknown_tool"));
+        let suggestions: Vec<&str> = partial["data"]["parameter_repair"]["suggestions"]
+            .as_array()
+            .expect("suggestions array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            suggestions.first(),
+            Some(&"mcp_friction_report"),
+            "a partial name must surface its containing tool first, got {suggestions:?}"
+        );
+        assert!(
+            partial["content"][0]["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("mcp_friction_report")),
+            "the suggestion belongs in the text channel too — curl clients read only that"
+        );
+
+        // Typo — one transposed character.
+        let typo = tool_help_response("inpsect");
+        let typo_suggestions: Vec<&str> = typo["data"]["parameter_repair"]["suggestions"]
+            .as_array()
+            .expect("suggestions array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(
+            typo_suggestions.contains(&"inspect"),
+            "a one-character typo must suggest the real tool, got {typo_suggestions:?}"
+        );
+
+        // A word unrelated to any tool suggests nothing rather than something
+        // confidently wrong.
+        let unrelated = tool_help_response("zzzzzzzzzzzzzzzzzzzz");
+        assert!(
+            unrelated["data"]["parameter_repair"]["suggestions"]
+                .as_array()
+                .is_some_and(|s| s.is_empty()),
+            "no near match — say nothing rather than guess"
+        );
+    }
+
+    #[test]
+    fn known_tool_still_answers_with_its_contract() {
+        let known = tool_help_response("query");
+        assert_ne!(known["data"]["problem_class"].as_str(), Some("unknown_tool"));
     }
 }

@@ -108,7 +108,7 @@ pub(super) fn is_terminal_status(status: &str) -> bool {
 /// REQ parked on an external factor has an honest status. Server-side
 /// validation (`soll_manager`) and the DB CHECK constraint
 /// (`soll_node_status_canonical`, 01_soll_schema.sql) must agree with THIS list.
-pub(super) const CANONICAL_NODE_STATUSES: &[&str] = &[
+pub(crate) const CANONICAL_NODE_STATUSES: &[&str] = &[
     "current",
     "planned",
     "delivered",

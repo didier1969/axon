@@ -70,6 +70,13 @@ use relation_policy::*;
 use shared::*;
 use storage::*;
 
+// REQ-AXO-902289 — the argument chokepoint in `mcp.rs` infers a missing
+// `entity` from the canonical id prefix, and the derived schema in
+// `tool_contracts.rs` publishes the status vocabulary. Both live outside this
+// module, which owns the sources; re-exported rather than duplicated.
+pub(crate) use inference::CANONICAL_NODE_STATUSES;
+pub(crate) use shared::soll_entity_from_canonical_id;
+
 #[allow(dead_code)]
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
     ("EPITOMIZES", "soll.EPITOMIZES"),
