@@ -921,14 +921,14 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "from": { "type": "string", "description": "Sender project code. Default: cwd-resolved." },
                         "idempotency_key": { "type": "string", "description": "Dedup anchor (required). Same key from same sender = no-op." },
                         "subject": { "type": "string", "description": "Short subject line." },
-                        "body_dense": { "type": "string", "description": "Dense body: point at SOLL ids / symbols / hashes, don't inline recoverable content." },
+                        "body_dense": { "type": "string", "description": "Dense body (REQUIRED, non-empty — REQ-AXO-902278). Point at SOLL ids / symbols / hashes; don't inline recoverable content. A subject with no body is refused: the recipient would read the claim and be unable to act on it." },
                         "ref_soll_ids": { "type": "array", "items": { "type": "string" }, "description": "SOLL ids referenced (stigmergic pointers)." },
                         "context_id": { "type": "string", "description": "Conversation/thread id (A2A contextId). Default: new thread." },
                         "in_reply_to": { "type": "string", "description": "messageId being replied to." },
                         "kind": { "type": "string", "description": "A2A kind. Default \"message\"." },
                         "priority": { "type": "string", "description": "normal|high|low. Default normal." }
                     },
-                    "required": ["idempotency_key"]
+                    "required": ["idempotency_key", "body_dense"]
                 }
             },
             {

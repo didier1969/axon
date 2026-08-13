@@ -30,6 +30,29 @@ pub(crate) struct SentMessage {
 }
 
 impl McpServer {
+    /// REQ-AXO-902278 — refuse a send whose `body_dense` is absent or blank.
+    ///
+    /// Returns the rejection envelope, or `None` when the body is usable. Kept
+    /// separate from the send path so the direct and fan-out branches cannot
+    /// drift apart: both are gated by this single call.
+    ///
+    /// Deliberately NOT a length threshold — "dense" is a judgement the sender
+    /// makes, and a minimum character count would only teach padding. The
+    /// contract enforced here is the one a reader can act on: there IS a body.
+    fn reject_body_less_send(args: &Value) -> Option<Value> {
+        let body = args.get("body_dense").and_then(Value::as_str).unwrap_or("");
+        if !body.trim().is_empty() {
+            return None;
+        }
+        Some(mbx_err(
+            "mcp_outbox_send requires a non-empty `body_dense`. A subject alone is a \
+             dead-end: the recipient reads the claim and cannot act on it (PIL-AXO-002). \
+             Write the body dense and pointer-bearing — SOLL ids, symbols, commit SHAs, \
+             a measured value — rather than inlining content they can retrieve.",
+            "input_invalid",
+        ))
+    }
+
     /// REQ-AXO-902113 (MBX-1) — send a message to another project's inbox.
     ///
     /// REQ-AXO-902119 (MBX-7) — also the fan-out entry point: when `to_topic`,
@@ -50,6 +73,21 @@ impl McpServer {
                 "sender project unresolved — pass `from` (cwd-resolution found none).",
                 "input_invalid",
             ));
+        }
+
+        // REQ-AXO-902278 — a message without a body is a dead-end (PIL-AXO-002).
+        //
+        // Message #5855 was delivered with `body_dense=""` under the subject
+        // "l'index est périmé de 2 jours et les outils structurels rendent FAUX".
+        // The recipient could read the alarm and act on nothing: no project, no
+        // magnitude, no cure. The sender was not at fault — THIS contract accepted
+        // it. `idempotency_key` and `to_project` were already refused when empty;
+        // the one field carrying the message's reason to exist was not.
+        //
+        // Checked BEFORE the fan-out branch on purpose: a broadcast is where a
+        // body-less message wastes the most readers.
+        if let Some(err) = Self::reject_body_less_send(args) {
+            return Some(err);
         }
 
         // MBX-7 fan-out detection. `to_topic` / `to_room` are mutually exclusive with

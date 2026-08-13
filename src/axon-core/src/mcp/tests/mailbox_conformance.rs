@@ -214,3 +214,59 @@ fn c5_unread_advances_cursor_then_second_read_is_empty() {
         "cursor is monotone — it does not regress on an empty read"
     );
 }
+
+// ── C6 — a body-less send is refused on every path (REQ-AXO-902278) ────────
+//
+// Message #5855 shipped an alarming subject ("l'index est périmé de 2 jours,
+// les outils structurels rendent FAUX") with `body_dense=""`. The recipient
+// could see the alarm and do nothing with it — the dead-end PIL-AXO-002 exists
+// to forbid. The defect is not in whoever sent it: the CONTRACT accepted it.
+// `idempotency_key` and `to_project` were already refused when empty; the one
+// field carrying the message's reason to exist was not.
+#[test]
+fn c6_body_less_send_is_refused_on_direct_and_fanout_paths() {
+    let server = create_test_server();
+
+    // VN — body_dense absent entirely.
+    let missing = send(
+        &server,
+        json!({ "from": FROM, "to_project": TO, "idempotency_key": "c6-k1", "subject": "alarm" }),
+    );
+    assert_eq!(missing["isError"].as_bool(), Some(true));
+    assert_eq!(missing["data"]["status"].as_str(), Some("input_invalid"));
+
+    // VN — body_dense present but whitespace-only: same dead-end for the reader.
+    let blank = send(
+        &server,
+        json!({
+            "from": FROM, "to_project": TO,
+            "idempotency_key": "c6-k2", "subject": "alarm", "body_dense": "   \n  "
+        }),
+    );
+    assert_eq!(blank["isError"].as_bool(), Some(true));
+    assert_eq!(blank["data"]["status"].as_str(), Some("input_invalid"));
+
+    // Nothing was delivered by either rejected send.
+    assert_eq!(inbox_count(&server, TO), 0, "a refused send delivers nothing");
+
+    // VN — the fan-out path must refuse too, or the gate is half-built: a
+    // broadcast is the case where a body-less message wastes the most readers.
+    let broadcast = send(
+        &server,
+        json!({ "from": FROM, "to_project": "*", "idempotency_key": "c6-k3", "subject": "alarm" }),
+    );
+    assert_eq!(broadcast["isError"].as_bool(), Some(true));
+    assert_eq!(broadcast["data"]["status"].as_str(), Some("input_invalid"));
+
+    // VP — the same send with a dense body goes through unchanged.
+    let ok = send(
+        &server,
+        json!({
+            "from": FROM, "to_project": TO,
+            "idempotency_key": "c6-k4", "subject": "alarm",
+            "body_dense": "BKS index périmé 2j — ref REQ-AXO-902264 ; cure: axon --instance live stop && start"
+        }),
+    );
+    assert_eq!(ok["data"]["status"].as_str(), Some("ok"));
+    assert_eq!(inbox_count(&server, TO), 1);
+}
