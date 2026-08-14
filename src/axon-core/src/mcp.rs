@@ -1773,6 +1773,92 @@ impl McpServer {
         )
     }
 
+    /// REQ-AXO-902303 — the `data` fields written at the TOP LEVEL.
+    ///
+    /// `soll_manager` accepts exactly three keys at the top level (`action`,
+    /// `entity`, `data`), so any of these found beside them belongs inside `data`
+    /// with no ambiguity. The `data` envelope is a convention of the contract, not
+    /// information the caller holds: writing `id=` next to `action=` is the natural
+    /// gesture, and it cost 11 rejections.
+    ///
+    /// Mirror image of REQ-AXO-902300: there `relations` was nested and had to come
+    /// out, here the fields are out and have to go in.
+    const SOLL_MANAGER_DATA_FIELDS: &'static [&'static str] = &[
+        "id",
+        "title",
+        "description",
+        "status",
+        "priority",
+        "tags",
+        "attach_to",
+        "relation_type",
+        "section",
+        "section_title",
+        "source_id",
+        "target_id",
+        "project_code",
+        "acceptance_criteria",
+    ];
+
+    /// REQ-AXO-902303 — move stray `data` fields into `data`, disclosing the move.
+    ///
+    /// An existing `data` always wins: a caller who built the envelope has decided,
+    /// and silently overwriting one of its fields from the top level would be a
+    /// mutation they did not ask for.
+    ///
+    /// Deliberately NOT extended to a missing `action`: that one is inferable too
+    /// (`data.id` alone suggests `update`, `source_id`+`target_id` suggests `link`)
+    /// but `soll_manager` WRITES. Getting the action wrong is not a lost round-trip,
+    /// it is an unintended write into a preserve-always graph. Moving a field does
+    /// not change the nature of the operation; guessing the action does.
+    fn with_hoisted_soll_data<'a>(
+        normalized_name: &str,
+        arguments: &'a Value,
+    ) -> (std::borrow::Cow<'a, Value>, Option<String>) {
+        if normalized_name != "soll_manager" {
+            return (std::borrow::Cow::Borrowed(arguments), None);
+        }
+        let Some(obj) = arguments.as_object() else {
+            return (std::borrow::Cow::Borrowed(arguments), None);
+        };
+        let existing_data = obj.get("data").and_then(Value::as_object);
+        let stray: Vec<&str> = Self::SOLL_MANAGER_DATA_FIELDS
+            .iter()
+            .copied()
+            .filter(|f| {
+                obj.contains_key(*f)
+                    && existing_data.is_none_or(|d| !d.contains_key(*f))
+            })
+            .collect();
+        if stray.is_empty() {
+            return (std::borrow::Cow::Borrowed(arguments), None);
+        }
+        let mut patched = arguments.clone();
+        let Some(patched_obj) = patched.as_object_mut() else {
+            return (std::borrow::Cow::Borrowed(arguments), None);
+        };
+        let mut data = patched_obj
+            .get("data")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for field in &stray {
+            if let Some(value) = patched_obj.remove(*field) {
+                data.insert((*field).to_string(), value);
+            }
+        }
+        patched_obj.insert("data".to_string(), Value::Object(data));
+        tracing::debug!(
+            moved = ?stray,
+            "REQ-AXO-902303 — top-level data fields moved into `data`"
+        );
+        let note = format!(
+            "champ(s) `{}` écrit(s) au niveau racine et déplacé(s) dans `data`",
+            stray.join("`, `")
+        );
+        (std::borrow::Cow::Owned(patched), Some(note))
+    }
+
     /// REQ-AXO-902289 — fill in a missing `soll_manager` `entity` from the
     /// canonical id the call already carries.
     ///
@@ -1880,6 +1966,11 @@ impl McpServer {
         // point, and LLMs do batch. All three paths (dispatch, batch, async mutation
         // jobs) converge on `execute_tool_direct`.
         let arguments = &*self.with_resolved_project_scope(normalized_name, arguments);
+        // REQ-AXO-902303 — FIRST: move stray `data` fields into `data`. It must run
+        // before the entity inference below, which reads `data.id` — an id written
+        // at the top level would otherwise stay invisible to it.
+        let (hoisted_data, data_note) = Self::with_hoisted_soll_data(normalized_name, arguments);
+        let arguments = &*hoisted_data;
         // REQ-AXO-902289 — same chokepoint, same reason: recover a call the
         // caller could not have known to spell out, rather than bouncing it.
         let arguments = &*Self::with_inferred_soll_entity(normalized_name, arguments);
@@ -2046,10 +2137,20 @@ impl McpServer {
             ),
             None => result,
         };
-        match list_note {
+        let result = match list_note {
             Some(note) => Self::append_disclosure(
                 result,
                 &format!("\n\n_↳ {note} (REQ-AXO-902302)._"),
+            ),
+            None => result,
+        };
+        match data_note {
+            Some(note) => Self::append_disclosure(
+                result,
+                &format!(
+                    "\n\n_↳ {note} (REQ-AXO-902303) — `soll_manager` n'accepte que \
+                     `action`, `entity` et `data` à la racine._"
+                ),
             ),
             None => result,
         }

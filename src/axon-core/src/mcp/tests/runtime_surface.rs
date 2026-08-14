@@ -3585,6 +3585,52 @@ fn a_tool_outside_the_alias_table_is_untouched() {
     assert_eq!(used, None);
 }
 
+// REQ-AXO-902303 — the `data` fields written at the top level.
+#[test]
+fn stray_top_level_fields_are_moved_into_data() {
+    let flat = json!({
+        "action": "update", "entity": "requirement",
+        "id": "REQ-AXO-999999", "status": "delivered",
+    });
+    let (patched, note) = McpServer::with_hoisted_soll_data("soll_manager", &flat);
+
+    assert_eq!(patched["data"]["id"].as_str(), Some("REQ-AXO-999999"));
+    assert_eq!(patched["data"]["status"].as_str(), Some("delivered"));
+    assert!(
+        patched.get("id").is_none(),
+        "the field must MOVE, not be duplicated at both levels: {patched}"
+    );
+    assert!(note.is_some(), "the move must be disclosed");
+}
+
+#[test]
+fn an_existing_data_field_is_never_overwritten_from_the_top_level() {
+    // A caller who built the envelope has decided. Overwriting one of its fields
+    // from the top level would be a mutation they did not ask for.
+    let both = json!({
+        "action": "update", "entity": "requirement",
+        "id": "REQ-AXO-000000",
+        "data": { "id": "REQ-AXO-999999", "status": "delivered" },
+    });
+    let (patched, _) = McpServer::with_hoisted_soll_data("soll_manager", &both);
+    assert_eq!(
+        patched["data"]["id"].as_str(),
+        Some("REQ-AXO-999999"),
+        "`data` wins over a stray top-level field: {patched}"
+    );
+}
+
+#[test]
+fn a_well_formed_soll_manager_call_is_untouched() {
+    let clean = json!({
+        "action": "update", "entity": "requirement",
+        "data": { "id": "REQ-AXO-999999" },
+    });
+    let (patched, note) = McpServer::with_hoisted_soll_data("soll_manager", &clean);
+    assert_eq!(patched.as_ref(), &clean, "zero-copy passthrough");
+    assert_eq!(note, None);
+}
+
 // REQ-AXO-902302 — a single value where the tool expects a list.
 #[test]
 fn a_scalar_is_read_as_a_one_element_list() {
