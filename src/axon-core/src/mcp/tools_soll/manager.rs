@@ -733,7 +733,7 @@ impl McpServer {
                                 "category": "attach_target_not_found",
                                 "invalid_field": "data.attach_to",
                                 "supplied_value": attach_to,
-                                "hint": "verify the parent id via `soll_query_context project_code=<code>` or `sql SELECT id FROM soll.Node WHERE id = '<id>'`",
+                                "hint": "verify the parent id via `soll_get(id=<id>)` (it repairs a near-miss id), or `soll_query_context project_code=<code>` for the project picture",
                                 "follow_up_tools": ["soll_query_context"],
                             },
                             "canonical_source": "MIL-AXO-020",
@@ -1360,12 +1360,28 @@ impl McpServer {
                                 }));
                             }
                             if tgt_status == "superseded" {
+                                // REQ-AXO-902299 — the server already knows who
+                                // retired this node; making the caller hunt for it
+                                // was the dead-end. One query answers it.
+                                let replacement = self
+                                    .query_single_column(&format!(
+                                        "SELECT source_id FROM soll.Edge \
+                                         WHERE target_id = '{}' AND relation_type = 'SUPERSEDES' \
+                                         LIMIT 1",
+                                        escape_sql(tgt)
+                                    ))
+                                    .ok()
+                                    .and_then(|rows| rows.into_iter().next());
+                                let replacement_note = match replacement.as_deref() {
+                                    Some(r) => format!(" It was replaced by `{r}` — supersede that one instead if this is a further revision."),
+                                    None => " No SUPERSEDES edge points at it, so its replacement is unrecorded; `soll_children` on it (direction=parents) shows what else links to it.".to_string(),
+                                };
                                 return Some(json!({
                                     "content": [{
                                         "type": "text",
                                         "text": format!(
-                                            "SUPERSEDES target `{}` is already retired (status=superseded).",
-                                            tgt
+                                            "SUPERSEDES target `{}` is already retired (status=superseded).{}",
+                                            tgt, replacement_note
                                         )
                                     }],
                                     "isError": true,
@@ -1381,8 +1397,13 @@ impl McpServer {
                                             "category": "supersedes_target_already_retired",
                                             "target_id": tgt,
                                             "target_status": "superseded",
-                                            "hint": "find the active replacement via soll_query_context or sql SELECT id FROM soll.Edge WHERE source_id = '<replacement>' AND target_id = '<tgt>' AND relation_type = 'SUPERSEDES'",
-                                            "follow_up_tools": ["soll_query_context"],
+                                            // REQ-AXO-902299 — the previous hint told the caller to run
+                                            // `sql SELECT id FROM soll.Edge WHERE source_id = '<replacement>' …`,
+                                            // filtering on the very thing they were looking for. It could
+                                            // not succeed. The answer is now supplied, not prescribed.
+                                            "replacement_id": replacement,
+                                            "hint": "the active replacement is in `replacement_id` — supersede THAT node if this is a further revision; `soll_get` reads either body, `soll_children direction=parents` shows what links to the retired one",
+                                            "follow_up_tools": ["soll_get", "soll_children"],
                                         },
                                         "canonical_source": "MIL-AXO-020",
                                     },
@@ -1507,7 +1528,7 @@ impl McpServer {
                                         "supplied_target_id": tgt,
                                         "supplied_relation_type": explicit_rel,
                                         "follow_up_tools": ["soll_relation_schema", "sql"],
-                                        "hint": "the link insert failed; verify both endpoints exist via `sql SELECT id FROM soll.Node WHERE id IN ('<src>','<tgt>')` and the relation_type is allowed via `soll_relation_schema`"
+                                        "hint": "the link insert failed; verify each endpoint via `soll_get(id=<src>)` / `soll_get(id=<tgt>)`, and the relation_type via `soll_relation_schema`"
                                     }));
                                     obj.insert(
                                         "diagnostic_excerpt".to_string(),
@@ -1593,7 +1614,7 @@ impl McpServer {
                                     "tool": "soll_manager",
                                     "category": "required_field_missing",
                                     "invalid_field": "data.relation_type",
-                                    "hint": "supply data.relation_type (e.g. INHERITS_FROM, BELONGS_TO). Use `sql SELECT relation_type FROM soll.Edge WHERE source_id='<src>' AND target_id='<tgt>'` to discover the existing label.",
+                                    "hint": "supply data.relation_type (e.g. INHERITS_FROM, BELONGS_TO). `soll_children(id=<src>)` lists the existing edges with their labels; `soll_relation_schema` gives the legal ones for the pair.",
                                 }
                             }
                         }));
@@ -1657,7 +1678,7 @@ impl McpServer {
                                 "source_id": src,
                                 "target_id": tgt,
                                 "relation_type": relation_type,
-                                "hint": "verify the edge exists via `sql SELECT * FROM soll.Edge WHERE source_id='<src>' AND target_id='<tgt>'`",
+                                "hint": "verify the edge exists via `soll_children(id=<src>)` — it lists what <src> points at, labels included",
                             }
                         }
                     }));

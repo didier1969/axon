@@ -1098,7 +1098,7 @@ impl McpServer {
                 "matches": matches,
                 "surfaces_used": ["soll_fts"],
                 "total_available": matches.len() as u64,
-                "next_call_hint": "read a match body via sql SELECT description FROM soll.Node WHERE id='<ID>'"
+                "next_call_hint": "read a match body via `soll_get(id='<ID>')` — REQ-AXO-902299: this prescribed the exact raw SQL that `soll_get` exists to replace"
             }
         })
     }

@@ -450,3 +450,60 @@ fn no_test_lock_is_minted_outside_test_support() {
         offenders.join("\n  ")
     );
 }
+
+/// REQ-AXO-902299 — no error hint may prescribe raw SQL when a tool answers the need.
+///
+/// REQ-AXO-902246 established that the `sql` traffic came from our OWN procedures
+/// prescribing raw SQL, and shipped `soll_get` / `soll_children` to replace it. The
+/// procedures were repointed; the PRODUCT's error messages were not. Nine hints
+/// still sent the caller to the SQL console, and the surface contradicted itself:
+/// the `soll_get` catalog entry says "use this INSTEAD OF
+/// `sql SELECT description FROM soll.Node WHERE id=…`" while another hint
+/// prescribed that exact query. One of them could not even work — it filtered on
+/// `source_id = '<replacement>'`, the very value the caller was looking for.
+///
+/// Scoped to hint-ish fields so a legitimate mention ("use X instead of sql …" in a
+/// tool description) is not caught. The allow-list carries a REASON, not just a
+/// name: `soll.Revision` has no read tool, so pointing at `sql` there is a
+/// deliberate answer rather than an oversight.
+#[test]
+fn no_error_hint_prescribes_raw_sql_when_a_tool_exists() {
+    // (file fragment, why it may keep prescribing SQL)
+    const ALLOWED: &[(&str, &str)] = &[(
+        "planning_revision.rs",
+        "soll.Revision has no dedicated read tool; the SQL pointer is the answer",
+    )];
+
+    let mut offenders: Vec<String> = Vec::new();
+    for (path, text) in crate_sources() {
+        // `crate_sources` yields paths RELATIVE to `src/` ("mcp/tools_soll/x.rs"),
+        // so a leading-slash filter matches nothing and the guard silently scans
+        // zero files. Caught by injecting a canary — which is the only way this
+        // class of mistake ever surfaces.
+        if !path.starts_with("mcp/") {
+            continue;
+        }
+        if ALLOWED.iter().any(|(frag, _)| path.contains(frag)) {
+            continue;
+        }
+        for (idx, line) in text.lines().enumerate() {
+            let lower = line.to_ascii_lowercase();
+            let is_hint = lower.contains("hint")
+                || lower.contains("next_action")
+                || lower.contains("recovery_hint");
+            if is_hint && lower.contains("sql select") {
+                offenders.push(format!("{}:{} — {}", path, idx + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these hints send an LLM to the raw SQL console instead of the tool that \
+         answers the need (REQ-AXO-902299). Point at `soll_get` (one node body), \
+         `soll_children` (edges), `soll_query_context` (project picture) or `query` \
+         (IST ids). If a need genuinely has no tool, add it to ALLOWED with the \
+         reason:\n  {}",
+        offenders.join("\n  ")
+    );
+}

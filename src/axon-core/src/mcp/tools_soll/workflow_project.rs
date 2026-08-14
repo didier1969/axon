@@ -2208,7 +2208,7 @@ impl McpServer {
         // REQ-AXO-341 — hint retargeted PG canonical post-MIL-AXO-017.
         let empty_input = accepted_ids.is_empty();
         let nothing_applied = applied.is_empty();
-        let recovery_hint = "discover valid IDs via sql SELECT id, title FROM soll.Node WHERE type='Guideline' AND project_code='PRO'";
+        let recovery_hint = "discover valid IDs via `soll_query_context project_code=PRO` (guidelines are listed there); `soll_get(id=<GUI-...>)` reads one body";
         // REQ-AXO-901613 — already_applied (idempotent no-op) is a SUCCESS
         // outcome, not an error ; failed (node/edge insert error) is.
         let suffix_already = if already_applied.is_empty() {

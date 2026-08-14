@@ -44,7 +44,7 @@ impl McpServer {
                             "stage": "rollback_operation",
                             "supplied_revision_id": revision_id,
                             "follow_up_tools": ["soll_validate", "sql"],
-                            "hint": "rollback operation failed mid-transaction; verify revision integrity via `sql SELECT * FROM soll.Revision WHERE revision_id='<id>'` and `soll_validate` post-rollback"
+                            "hint": "rollback failed mid-transaction; run `soll_validate` first. Revision rows have no dedicated read tool, so inspecting them still needs `sql SELECT * FROM soll.Revision WHERE revision_id='<id>'` — deliberate, not an oversight (REQ-AXO-902299)"
                         },
                         "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>()
                     }

@@ -61,7 +61,7 @@ impl McpServer {
                         "invalid_field": "data.source_id",
                         "source_id": source_id,
                         "follow_up_tools": ["sql", "soll_query_context"],
-                        "hint": "HAS_REMNANT edges originate from a TechnologyMigration (TMG-…). Verify via `sql SELECT id FROM soll.Node WHERE type='TechnologyMigration'`."
+                        "hint": "HAS_REMNANT edges originate from a TechnologyMigration (TMG-…). List them via `soll_query_context`, or read one body via `soll_get(id=<TMG-…>)`."
                     }
                 }
             }));
@@ -140,7 +140,7 @@ impl McpServer {
                         "invalid_field": "data.target_id",
                         "target_id": target_id,
                         "follow_up_tools": ["query", "sql"],
-                        "hint": "resolve the IST id first via `query symbol=<name>` (symbol id) or `sql SELECT path FROM ist.IndexedFile WHERE path LIKE '%<frag>%'` (file path)"
+                        "hint": "resolve the IST id first via `query symbol=<name>` for a symbol, or `query <path fragment>` for a file — both return the canonical id"
                     }
                 }
             }));

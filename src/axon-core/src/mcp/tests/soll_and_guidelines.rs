@@ -9200,11 +9200,33 @@ fn test_axon_commit_work_refuses_partial_diff_when_git_add_fails() {
         data.get("status").and_then(|v| v.as_str()),
         Some("input_invalid")
     );
+    // REQ-AXO-902296 — this used to assert `git_add_exit_code`, git's raw exit
+    // status, as the diagnostic. Since the paths are now classified BEFORE the
+    // index is touched, an impossible path never reaches `git add` and there is no
+    // exit code to report — by design: `git add` is atomic over its pathspecs, so
+    // letting it run staged NOTHING and named only the first offender.
+    //
+    // The requirement REQ-AXO-138 protects (a refusal the caller can act on) is
+    // asserted harder here than the old proxy did: the offending path itself, and
+    // its reason, must be named. `git_add_exit_code` is still surfaced on the path
+    // where `git add` does run and genuinely fails.
+    let rejected = data
+        .get("parameter_repair")
+        .and_then(|pr| pr.get("rejected_paths"))
+        .and_then(|v| v.as_array())
+        .expect("the rejected paths must be enumerated for repair");
+    assert_eq!(rejected.len(), 1, "exactly one path was impossible: {rejected:?}");
+    assert_eq!(
+        rejected[0].get("path").and_then(|v| v.as_str()),
+        Some("this/path/definitely/does/not/exist.rs"),
+        "the offending path must be named, not left to a raw stderr: {rejected:?}"
+    );
     assert!(
-        data.get("git_add_exit_code")
-            .and_then(|v| v.as_i64())
-            .is_some(),
-        "git_add_exit_code must be exposed for diagnostics"
+        rejected[0]
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .is_some_and(|r| r.contains("no such file")),
+        "each rejection carries its own actionable reason: {rejected:?}"
     );
     assert_eq!(
         data.get("parameter_repair")
