@@ -1619,6 +1619,79 @@ impl McpServer {
         ("detect_remnants", "project_code"),
     ];
 
+    /// REQ-AXO-902301 — the parameter carried under a NEIGHBOURING plausible name.
+    ///
+    /// `(tool, canonical, aliases)`. Reproduced live before writing this:
+    /// `query(symbol=…)` and `sql(query=…)` are rejected with the canonical field
+    /// reported missing — 42 + 86 occurrences, the two largest `invalid_arguments`
+    /// signatures once the log was cleaned (REQ-AXO-902297). The callers are not
+    /// passing a bad value; they pass the RIGHT value under another name.
+    ///
+    /// The vocabulary works against itself at the junction between two tools:
+    /// `inspect` takes `symbol` while `query` takes `query`, yet the documented
+    /// sequence is "query → inspect" — keeping `symbol=` across that hop is the
+    /// natural gesture. And for a SQL statement every instinct writes `query=`,
+    /// which happens to be the name of a DIFFERENT tool.
+    ///
+    /// Each alias is checked to be absent from the tool's own schema, so accepting
+    /// it can never shadow a legitimate parameter.
+    const PARAMETER_ALIASES: &'static [(&'static str, &'static str, &'static [&'static str])] = &[
+        ("query", "query", &["symbol", "q", "search", "term"]),
+        ("sql", "sql", &["query", "statement"]),
+    ];
+
+    /// REQ-AXO-902301 — accept the aliased parameter instead of bouncing the call.
+    ///
+    /// Applied ONLY when the canonical field is absent (a caller who filled it has
+    /// already decided) and exactly one alias carries a value. `soll_manager` has
+    /// long done this for its own fields (`title`/`name`, `description`/
+    /// `explanation`); the navigation tools simply never got it.
+    ///
+    /// Returns the patched arguments plus the alias that was honoured, so the
+    /// caller can be TOLD. Silently accepting would leave them repeating the same
+    /// mistake every session — that is the line between helping and hiding.
+    fn with_aliased_parameter<'a>(
+        normalized_name: &str,
+        arguments: &'a Value,
+    ) -> (std::borrow::Cow<'a, Value>, Option<(String, String)>) {
+        let Some((_, canonical, aliases)) = Self::PARAMETER_ALIASES
+            .iter()
+            .find(|(tool, _, _)| *tool == normalized_name)
+        else {
+            return (std::borrow::Cow::Borrowed(arguments), None);
+        };
+        let canonical_set = arguments
+            .get(*canonical)
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.trim().is_empty());
+        if canonical_set {
+            return (std::borrow::Cow::Borrowed(arguments), None);
+        }
+        let Some((alias, value)) = aliases.iter().find_map(|alias| {
+            arguments
+                .get(*alias)
+                .and_then(Value::as_str)
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| (*alias, v.to_string()))
+        }) else {
+            return (std::borrow::Cow::Borrowed(arguments), None);
+        };
+        let mut patched = arguments.clone();
+        if let Some(obj) = patched.as_object_mut() {
+            obj.insert((*canonical).to_string(), Value::from(value));
+        }
+        tracing::debug!(
+            tool = normalized_name,
+            alias,
+            canonical,
+            "REQ-AXO-902301 — parameter accepted under an alias"
+        );
+        (
+            std::borrow::Cow::Owned(patched),
+            Some((alias.to_string(), (*canonical).to_string())),
+        )
+    }
+
     /// REQ-AXO-902289 — fill in a missing `soll_manager` `entity` from the
     /// canonical id the call already carries.
     ///
@@ -1729,6 +1802,10 @@ impl McpServer {
         // REQ-AXO-902289 — same chokepoint, same reason: recover a call the
         // caller could not have known to spell out, rather than bouncing it.
         let arguments = &*Self::with_inferred_soll_entity(normalized_name, arguments);
+        // REQ-AXO-902301 — and the parameter that IS there, under a neighbouring
+        // name. Disclosed below, never silently.
+        let (aliased, alias_used) = Self::with_aliased_parameter(normalized_name, arguments);
+        let arguments = &*aliased;
         let result = match normalized_name {
             "help" => self.axon_help(arguments),
             "contradiction_check" => self.axon_contradiction_check(arguments),
@@ -1870,7 +1947,37 @@ impl McpServer {
                 json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true }),
             ),
         };
-        Self::disclose_cwd_provenance(arguments, result)
+        let result = Self::disclose_cwd_provenance(arguments, result);
+        // REQ-AXO-902301 — say that the alias was honoured. Accepting it silently
+        // would leave the caller repeating the same wrong name every session; the
+        // disclosure is what turns a rescue into a correction.
+        match alias_used {
+            Some((alias, canonical)) => Self::append_disclosure(
+                result,
+                &format!(
+                    "\n\n_↳ paramètre reçu sous `{alias}` et lu comme `{canonical}` \
+                     (REQ-AXO-902301) — le nom attendu par cet outil est `{canonical}`._"
+                ),
+            ),
+            None => result,
+        }
+    }
+
+    /// REQ-AXO-902301 — append a line to a response's text channel, the channel an
+    /// LLM actually reads. Same shape as the note `soll_apply_plan` adds when it
+    /// hoists a misplaced field (REQ-AXO-902300).
+    fn append_disclosure(response: Option<Value>, note: &str) -> Option<Value> {
+        let mut response = response?;
+        if let Some(text) = response
+            .get_mut("content")
+            .and_then(|c| c.get_mut(0))
+            .and_then(|entry| entry.get_mut("text"))
+        {
+            if let Some(existing) = text.as_str() {
+                *text = Value::from(format!("{existing}{note}"));
+            }
+        }
+        Some(response)
     }
 
     /// REQ-AXO-902287 (M1) — provenance disclosure. When the project scope was

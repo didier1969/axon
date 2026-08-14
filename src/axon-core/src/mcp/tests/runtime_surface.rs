@@ -3495,6 +3495,71 @@ fn single_project_readonly_tools_resolve_scope_from_cwd() {
     }
 }
 
+// REQ-AXO-902301 — the parameter carried under a neighbouring name.
+//
+// Reproduced live before the fix: `query(symbol=…)` and `sql(query=…)` were
+// rejected with the canonical field reported missing (42 + 86 occurrences). The
+// vocabulary works against itself at the junction of two tools — `inspect` takes
+// `symbol`, `query` takes `query`, and the documented sequence is "query →
+// inspect"; for a SQL statement every instinct writes `query=`.
+#[test]
+fn a_parameter_passed_under_a_neighbouring_name_is_accepted() {
+    let as_symbol = json!({ "symbol": "classify_diff_paths" });
+    let (patched, used) = McpServer::with_aliased_parameter("query", &as_symbol);
+    assert_eq!(
+        patched.get("query").and_then(Value::as_str),
+        Some("classify_diff_paths"),
+        "`symbol` is the natural carry-over from `inspect` — read it as `query`"
+    );
+    assert_eq!(used, Some(("symbol".to_string(), "query".to_string())));
+
+    let as_query = json!({ "query": "SELECT 1" });
+    let (patched, used) = McpServer::with_aliased_parameter("sql", &as_query);
+    assert_eq!(patched.get("sql").and_then(Value::as_str), Some("SELECT 1"));
+    assert_eq!(used, Some(("query".to_string(), "sql".to_string())));
+}
+
+#[test]
+fn an_explicit_canonical_parameter_always_wins_over_an_alias() {
+    // The caller who filled the canonical field has already decided; an alias
+    // must never overwrite it.
+    let both = json!({ "query": "chosen", "symbol": "ignored" });
+    let (patched, used) = McpServer::with_aliased_parameter("query", &both);
+    assert_eq!(patched.get("query").and_then(Value::as_str), Some("chosen"));
+    assert_eq!(used, None, "no alias was honoured, so nothing to disclose");
+}
+
+#[test]
+fn a_tool_outside_the_alias_table_is_untouched() {
+    let args = json!({ "symbol": "whatever" });
+    let (patched, used) = McpServer::with_aliased_parameter("inspect", &args);
+    assert_eq!(patched.as_ref(), &args, "zero-copy passthrough");
+    assert_eq!(used, None);
+}
+
+#[test]
+fn no_alias_shadows_a_real_parameter_of_its_own_tool() {
+    // The guard that keeps this safe as the table grows: an alias must NOT be a
+    // field the tool genuinely accepts, or honouring it would silently overwrite
+    // a legitimate argument.
+    let catalog = crate::mcp::catalog::tools_catalog(true);
+    let tools = catalog["tools"].as_array().expect("tools array");
+    for (tool, canonical, aliases) in McpServer::PARAMETER_ALIASES {
+        let schema = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(tool))
+            .map(|t| &t["inputSchema"]["properties"])
+            .unwrap_or_else(|| panic!("`{tool}` must exist in the catalog"));
+        for alias in *aliases {
+            assert!(
+                schema.get(alias).is_none(),
+                "`{tool}` genuinely accepts `{alias}`, so treating it as an alias for \
+                 `{canonical}` would shadow a real parameter"
+            );
+        }
+    }
+}
+
 #[test]
 fn rollup_tools_are_never_scope_injected() {
     let listed: std::collections::HashMap<&str, &str> =
