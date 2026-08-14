@@ -146,6 +146,11 @@ print(json.dumps({
     'to_project': '*', 'from': '${PROJECT_CODE}',
     'subject': sys.argv[1], 'body_dense': sys.argv[2],
     'idempotency_key': sys.argv[3], 'priority': 'high',
+    # REQ-AXO-902304 — ces avis sont périssables : « coupure dans 3 minutes » n'a
+    # aucune valeur le lendemain. Sans TTL ils s'empilaient à jamais (8217 messages
+    # depuis juillet, 118 par projet, 100% de l'inbox pour quatre d'entre eux) alors
+    # que `mailbox_sweep()` n'attendait que cette colonne pour les archiver.
+    'ttl_hours': 24,
 }))" "$subject" "$body" "$key" 2>/dev/null || true)"
   [[ -z "$args" ]] && return 0
   timeout 20 "$ROOT_DIR/scripts/axon" --instance live mcp-call call mcp_outbox_send \

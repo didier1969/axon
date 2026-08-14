@@ -926,7 +926,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "context_id": { "type": "string", "description": "Conversation/thread id (A2A contextId). Default: new thread." },
                         "in_reply_to": { "type": "string", "description": "messageId being replied to." },
                         "kind": { "type": "string", "description": "A2A kind. Default \"message\"." },
-                        "priority": { "type": "string", "description": "normal|high|low. Default normal." }
+                        "priority": { "type": "string", "description": "normal|high|low. Default normal." },
+                        "ttl_hours": { "type": "integer", "description": "REQ-AXO-902304 — retention horizon in hours: `mailbox_sweep` archives the message once past it. Omit to keep it indefinitely (right default for anything actionable later). SET IT for time-bound notices — a 'maintenance in 3 minutes' broadcast is worthless an hour on, and 8217 such messages had accumulated unpurgeable before this existed. Especially on a fan-out (`to_project='*'`/topic/room), where one send lands in every project." }
                     },
                     "required": ["idempotency_key", "body_dense"]
                 }

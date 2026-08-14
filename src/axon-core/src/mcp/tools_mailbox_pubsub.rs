@@ -201,6 +201,10 @@ impl McpServer {
         let kind = args.get("kind").and_then(Value::as_str).unwrap_or("message").to_string();
         let priority = args.get("priority").and_then(Value::as_str).unwrap_or("normal").to_string();
         let ref_soll_ids = args.get("ref_soll_ids").cloned().unwrap_or_else(|| json!([]));
+        // REQ-AXO-902304 — the fan-out path is where retention matters MOST: one
+        // send lands in every registered project. 8217 promote broadcasts had piled
+        // up here, 118 per project, none of them ever purgeable.
+        let ttl_hours = args.get("ttl_hours").and_then(Value::as_i64);
 
         // Resolve the recipient set + the fan-out scope key (for the shared thread).
         let (recipients, scope_key, scope_label, topic_stamp, room_stamp) =
@@ -259,6 +263,7 @@ impl McpServer {
                 &ref_soll_ids,
                 &topic_stamp,
                 &room_stamp,
+                ttl_hours,
             ) {
                 Ok(s) => {
                     if s.deduped {

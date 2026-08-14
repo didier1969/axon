@@ -153,6 +153,8 @@ impl McpServer {
             .to_string();
         let ref_soll_ids = args.get("ref_soll_ids").cloned().unwrap_or_else(|| json!([]));
         let context_in = args.get("context_id").and_then(Value::as_str).unwrap_or("");
+        // REQ-AXO-902304 — retention declared by the sender.
+        let ttl_hours = args.get("ttl_hours").and_then(Value::as_i64);
 
         let sent = match self.outbox_send_one(
             &from,
@@ -167,6 +169,7 @@ impl McpServer {
             &ref_soll_ids,
             "",
             "",
+            ttl_hours,
         ) {
             Ok(s) => s,
             Err(e) => return Some(mbx_err(&format!("mailbox send failed: {e}"), "degraded")),
@@ -218,7 +221,22 @@ impl McpServer {
         ref_soll_ids: &Value,
         topic: &str,
         room_id: &str,
+        ttl_hours: Option<i64>,
     ) -> Result<SentMessage, String> {
+        // REQ-AXO-902304 — retention horizon. `axon.mailbox_sweep()` archives on
+        // `ttl_at < now()` and has existed all along, but NOTHING ever wrote that
+        // column: a purge wired to a field nobody fills. Result: 8217 promote
+        // broadcasts accumulated since 2026-07-03, none archived, and twelve
+        // projects each carrying 118 of them — 100% of the inbox for four of them.
+        //
+        // A "MCP goes down in 3 minutes" notice is worthless an hour later, so the
+        // sender declares how long its message stays relevant. Absent (`None`), the
+        // message is kept indefinitely, which is the right default for anything a
+        // human or agent might act on later.
+        let ttl_sql = match ttl_hours.filter(|h| *h > 0) {
+            Some(hours) => format!("now() + interval '{hours} hours'"),
+            None => "NULL".to_string(),
+        };
         let message_id = mailbox::message_id(from, to, idempotency_key);
         let context_id = if context_in.is_empty() {
             message_id.clone()
@@ -270,8 +288,8 @@ impl McpServer {
 
         let sql = format!(
             "INSERT INTO axon.mailbox_message \
-             (message_id, context_id, from_project, to_project, kind, subject, body_dense, envelope, idempotency_key, in_reply_to, priority, sig, topic, room_id) \
-             VALUES ('{mid}','{ctx}','{from}','{to}','{kind}','{subj}','{body}','{env}'::jsonb,'{idem}','{irt}','{prio}','{sig}',NULLIF('{topic}','')::text,NULLIF('{room}','')::text) \
+             (message_id, context_id, from_project, to_project, kind, subject, body_dense, envelope, idempotency_key, in_reply_to, priority, sig, topic, room_id, ttl_at) \
+             VALUES ('{mid}','{ctx}','{from}','{to}','{kind}','{subj}','{body}','{env}'::jsonb,'{idem}','{irt}','{prio}','{sig}',NULLIF('{topic}','')::text,NULLIF('{room}','')::text,{ttl}) \
              ON CONFLICT (from_project, to_project, idempotency_key) DO NOTHING RETURNING id",
             mid = esc(&message_id),
             ctx = esc(&context_id),
@@ -285,6 +303,7 @@ impl McpServer {
             irt = esc(in_reply_to),
             prio = esc(priority),
             sig = esc(&sig),
+            ttl = ttl_sql,
             topic = esc(topic),
             room = esc(room_id),
         );

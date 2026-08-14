@@ -215,6 +215,58 @@ fn c5_unread_advances_cursor_then_second_read_is_empty() {
     );
 }
 
+// ── C7 — retention horizon (REQ-AXO-902304) ────────────────────────────────
+//
+// `axon.mailbox_sweep()` archives on `ttl_at < now()` and had existed all along,
+// but nothing ever wrote that column: a purge wired to a field nobody filled.
+// 8217 promote broadcasts piled up since 2026-07-03 — 118 per project, 100% of
+// the inbox for four of them, none ever purgeable.
+#[test]
+fn c7_ttl_is_recorded_when_declared_and_absent_otherwise() {
+    let server = create_test_server();
+
+    send(
+        &server,
+        json!({
+            "from": FROM, "to_project": TO,
+            "idempotency_key": "c7-perishable",
+            "subject": "maintenance", "body_dense": "coupure brève",
+            "ttl_hours": 24
+        }),
+    );
+    send(
+        &server,
+        json!({
+            "from": FROM, "to_project": TO,
+            "idempotency_key": "c7-durable",
+            "subject": "décision", "body_dense": "ref REQ-AXO-902304"
+        }),
+    );
+
+    let ttl_of = |key: &str| -> Option<String> {
+        server
+            .graph_store
+            .query_json_writer(&format!(
+                "SELECT COALESCE(ttl_at::text,'') FROM axon.mailbox_message \
+                 WHERE idempotency_key='{key}'"
+            ))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+            .and_then(|rows| rows.first().and_then(|r| r.first()).cloned())
+            .and_then(|v| v.as_str().map(str::to_string))
+    };
+
+    assert!(
+        ttl_of("c7-perishable").is_some_and(|t| !t.is_empty()),
+        "a declared ttl_hours must land in ttl_at, or the sweep can never reach it"
+    );
+    assert!(
+        ttl_of("c7-durable").is_some_and(|t| t.is_empty()),
+        "no ttl_hours means keep indefinitely — the right default for anything \
+         actionable later; only time-bound notices should expire"
+    );
+}
+
 // ── C6 — a body-less send is refused on every path (REQ-AXO-902278) ────────
 //
 // Message #5855 shipped an alarming subject ("l'index est périmé de 2 jours,
