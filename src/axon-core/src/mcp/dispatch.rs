@@ -147,10 +147,27 @@ impl McpServer {
                     .cloned()
                     .chain(conditional_missing.iter().map(|(p, _)| p.clone()))
                     .collect();
+                // REQ-AXO-902313 — when nothing REQUIRED is missing, name what actually
+                // broke instead of the catch-all `"arguments"`. That string was the #2 open
+                // friction signature (38 occurrences) and is unfixable by construction: it
+                // aggregates every distinct cause under one label. Same defect class as the
+                // counters REQ-AXO-902309/902310 repaired — a measure that cannot be acted
+                // upon. `"arguments"` now survives ONLY when the schema is genuinely
+                // satisfied and the handler still declined, which is a real, distinct
+                // signal rather than a bucket.
+                let schema_mismatch = schema
+                    .as_ref()
+                    .filter(|_| missing_required.is_empty())
+                    .and_then(|s| super::tool_contracts::first_schema_mismatch(s, arguments));
                 let first_invalid_field = missing_required
                     .first()
                     .cloned()
+                    .or_else(|| schema_mismatch.as_ref().map(|(f, _)| f.clone()))
                     .unwrap_or_else(|| "arguments".to_string());
+                let mismatch_reason = schema_mismatch
+                    .as_ref()
+                    .map(|(_, r)| r.clone())
+                    .unwrap_or_default();
 
                 // REQ-AXO-901949 — repair-as-data: hand the LLM the corrected
                 // call ready to emit, not a prose "compare and fix". Start from
@@ -222,6 +239,10 @@ impl McpServer {
                 let form_text = super::tool_contracts::render_parameter_form(&fields_form);
                 let parameter_repair = json!({
                     "invalid_field": first_invalid_field,
+                    // REQ-AXO-902313 — the WHY behind `invalid_field` when nothing was
+                    // missing (type_mismatch / enum_violation / unknown_property). Empty
+                    // means the schema was satisfied and the handler declined anyway.
+                    "invalid_reason": mismatch_reason,
                     "tool": normalized_name,
                     "missing_required_fields": missing_required,
                     "required_fields": required_fields,
@@ -237,12 +258,20 @@ impl McpServer {
                         normalized_name
                     ),
                 });
+                // REQ-AXO-902313 — lead with the named culprit when we have one. The
+                // caller reads the first line; burying "your `limit` is a string" under a
+                // full schema dump is why the generic form kept costing a round-trip.
+                let culprit_line = if mismatch_reason.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\n→ `{first_invalid_field}` — {mismatch_reason}")
+                };
                 json!({
                     "content": [{
                         "type": "text",
                         "text": format!(
-                            "Invalid arguments for tool `{}`.\n\nYou sent:\n```json\n{}\n```\n\nExpected schema:\n```json\n{}\n```\n\nFix: check required fields and types, then retry.{}",
-                            normalized_name, args_str, schema_str, form_text
+                            "Invalid arguments for tool `{}`.{}\n\nYou sent:\n```json\n{}\n```\n\nExpected schema:\n```json\n{}\n```\n\nFix: check required fields and types, then retry.{}",
+                            normalized_name, culprit_line, args_str, schema_str, form_text
                         )
                     }],
                     "isError": true,

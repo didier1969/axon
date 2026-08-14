@@ -700,6 +700,259 @@ fn the_sql_and_rust_failure_predicates_derive_from_one_list() {
     );
 }
 
+// ── REQ-AXO-902312 — `soll_manager create` déduit ce qui est déductible ─────
+//
+// Trois appels pour créer UN nœud, le 2026-08-14 : rejet sur `project_code`, puis
+// rejet sur `relation_type`, puis succès. Les deux champs manquants étaient
+// dérivables de `attach_to`, déjà présent dans la charge utile dès le 1er appel.
+fn create_call(server: &McpServer, data: Value) -> Value {
+    server
+        .execute_tool_direct(
+            "soll_manager",
+            &json!({ "action": "create", "entity": "requirement", "data": data }),
+        )
+        .expect("soll_manager returns a result")
+}
+
+fn seed_pillar(server: &McpServer, code: &str, id: &str, title: &str) {
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) \
+             VALUES ('{code}', 'AXON_GLOBAL', 9, 9, 9, 9) ON CONFLICT (project_code) DO NOTHING"
+        ))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('{id}', 'Pillar', '{code}', '{title}', '', 'current', '{{}}') \
+             ON CONFLICT (id) DO NOTHING"
+        ))
+        .unwrap();
+}
+
+#[test]
+fn create_infers_project_and_relation_from_the_named_parent() {
+    let server = create_test_server();
+    seed_pillar(&server, "TST", "PIL-TST-901", "Ancre 902311");
+
+    // Ni `project_code` ni `relation_type` : le parent porte les deux.
+    let res = create_call(
+        &server,
+        json!({ "title": "déduction 902311", "description": "corps", "attach_to": "PIL-TST-901" }),
+    );
+
+    assert_ne!(
+        res["isError"].as_bool(),
+        Some(true),
+        "un parent nommé suffit — les deux champs sont dérivables : {res}"
+    );
+    assert_eq!(res["data"]["project_code"], json!("TST"));
+    assert_eq!(res["data"]["applied_relation"], json!("BELONGS_TO"));
+    assert_eq!(res["data"]["project_code_inferred_from_parent"], json!(true));
+    assert_eq!(res["data"]["relation_type_inferred"], json!(true));
+
+    // Et la déduction est ANNONCÉE : un champ que l'appelant n'a pas écrit est un
+    // champ qu'il ne peut pas vérifier.
+    let text = res["content"][0]["text"].as_str().expect("texte");
+    assert!(
+        text.contains("`project_code` non fourni") && text.contains("`relation_type` non fourni"),
+        "les deux déductions doivent être divulguées : {text}"
+    );
+}
+
+#[test]
+fn create_still_refuses_when_the_pair_is_genuinely_ambiguous() {
+    // La frontière est inchangée : univoque → appliqué, ambigu → refusé. Déduire
+    // sur une paire à plusieurs relations légales serait deviner.
+    let server = create_test_server();
+    seed_pillar(&server, "TST", "PIL-TST-902", "Ancre ambiguë");
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('REQ-TST-902', 'Requirement', 'TST', 'cible', '', 'current', '{}') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .unwrap();
+
+    let res = server
+        .execute_tool_direct(
+            "soll_manager",
+            &json!({ "action": "create", "entity": "concept",
+                     "data": { "title": "ambigu", "description": "x", "attach_to": "REQ-TST-902" } }),
+        )
+        .expect("result");
+    assert_eq!(
+        res["isError"].as_bool(),
+        Some(true),
+        "CPT → REQ admet plusieurs relations : le refus doit tenir : {res}"
+    );
+}
+
+#[test]
+fn the_missing_parent_refusal_names_its_candidates() {
+    // Décision opérateur : le serveur ne devine JAMAIS le parent — deviner
+    // écrirait une arête SOLL que personne n'a demandée. Mais le refus doit
+    // cesser d'être un cul-de-sac : 154 occurrences disent que renvoyer vers un
+    // AUTRE outil ne marche pas.
+    let server = create_test_server();
+    seed_pillar(&server, "TST", "PIL-TST-903", "Pilier nommable");
+
+    let res = create_call(
+        &server,
+        json!({ "project_code": "TST", "title": "sans parent", "description": "x" }),
+    );
+    assert_eq!(res["isError"].as_bool(), Some(true), "le refus tient");
+
+    let text = res["content"][0]["text"].as_str().expect("texte");
+    assert!(
+        text.contains("PIL-TST-903") && text.contains("Pilier nommable"),
+        "le refus doit NOMMER les parents candidats, pas les décrire : {text}"
+    );
+    let candidates = res["data"]["parameter_repair"]["candidate_parents"]
+        .as_array()
+        .expect("candidate_parents");
+    assert!(
+        candidates.iter().any(|c| c["id"] == json!("PIL-TST-903")),
+        "les candidats doivent être exploitables en machine : {candidates:?}"
+    );
+    assert!(
+        res["data"]["parameter_repair"]["corrected_call"]["arguments"]["data"]["attach_to"]
+            .is_string(),
+        "un appel corrigé avec un seul blanc à remplir : {res}"
+    );
+}
+
+// REQ-AXO-902313 — `field_in_error = "arguments"` n'est pas une cause, c'est un
+// agrégat de causes non mesurées (38 occurrences, 2ᵉ signature ouverte). On ne
+// corrige pas ce qu'on ne nomme pas.
+#[test]
+fn an_invalid_argument_is_named_not_bucketed_under_arguments() {
+    use crate::mcp::tool_contracts::first_schema_mismatch;
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "limit": { "type": "integer" },
+            "mode": { "type": "string", "enum": ["brief", "verbose"] },
+            "project": { "type": "string" }
+        },
+        "required": []
+    });
+
+    let (field, reason) =
+        first_schema_mismatch(&schema, &json!({ "limit": "douze" })).expect("type mismatch");
+    assert_eq!(field, "limit");
+    assert!(reason.starts_with("type_mismatch"), "{reason}");
+
+    let (field, reason) =
+        first_schema_mismatch(&schema, &json!({ "mode": "bavard" })).expect("enum violation");
+    assert_eq!(field, "mode");
+    assert!(reason.contains("brief") && reason.contains("verbose"), "{reason}");
+
+    let (field, reason) =
+        first_schema_mismatch(&schema, &json!({ "porject": "AXO" })).expect("unknown property");
+    assert_eq!(field, "porject", "un nom mal orthographié doit être nommé tel quel");
+    assert_eq!(reason, "unknown_property");
+
+    // Le cas qui doit RESTER sans nom : les arguments satisfont le schéma. C'est
+    // alors un signal distinct (le handler a refusé pour sa propre raison), pas du
+    // bruit à agréger.
+    assert!(
+        first_schema_mismatch(&schema, &json!({ "limit": 12, "mode": "brief" })).is_none(),
+        "des arguments valides ne doivent produire aucun coupable"
+    );
+}
+
+// ── REQ-AXO-902314 — `soll_attach_evidence` : les deux plus gros clusters ───
+//
+// Rejouées sur le live le 2026-08-14 avant d'écrire une ligne : les deux cassent
+// encore. #5+#7 (158 occ.) = une chaîne nue dans `artifacts` ; #176+#437 (47 occ.)
+// = un `artifact_type` légal globalement mais pas pour CETTE entité.
+fn attach(server: &McpServer, entity_id: &str, artifacts: Value) -> Value {
+    server
+        .execute_tool_direct(
+            "soll_attach_evidence",
+            &json!({ "entity_type": "requirement", "entity_id": entity_id, "artifacts": artifacts }),
+        )
+        .expect("soll_attach_evidence returns a result")
+}
+
+fn seed_requirement(server: &McpServer, id: &str) {
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('{id}', 'Requirement', 'TST', 'cible evidence', '', 'current', '{{}}') \
+             ON CONFLICT (id) DO NOTHING"
+        ))
+        .unwrap();
+}
+
+#[test]
+fn a_bare_string_artifact_is_an_artifact_ref() {
+    let server = create_test_server();
+    seed_requirement(&server, "REQ-TST-914");
+
+    // Un symbole, pas un chemin : la validation d'existence de fichier
+    // (REQ-AXO-901619) est un contrôle SÉPARÉ et légitime, qu'on ne veut pas
+    // mélanger ici — ce test porte sur la seule coercition de forme.
+    let res = attach(&server, "REQ-TST-914", json!(["axon_soll_attach_evidence"]));
+    let text = res["content"][0]["text"].as_str().expect("texte");
+    assert!(
+        !text.contains("all rejected"),
+        "la forme abrégée `artifacts: [\"ref\"]` doit être acceptée : {text}"
+    );
+    assert_eq!(res["data"]["attached"].as_i64(), Some(1), "{res}");
+}
+
+#[test]
+fn an_artifact_type_illegal_for_the_entity_falls_back_to_what_the_ref_implies() {
+    let server = create_test_server();
+    seed_requirement(&server, "REQ-TST-915");
+
+    // `diff` est légal sur une décision, PAS sur une exigence. Le ref, lui, est un
+    // fichier — et le serveur sait déjà lire ça quand le champ est absent.
+    // La réparation produit le type `File`, qui déclenche la validation
+    // d'existence (REQ-AXO-901619) : le fichier doit donc exister sous la racine
+    // projet du serveur de test.
+    let root = std::path::Path::new("/tmp/TST/src");
+    std::fs::create_dir_all(root).expect("racine de test");
+    let probe = root.join("evidence_probe.rs");
+    std::fs::write(&probe, b"// sonde REQ-AXO-902314\n").expect("fichier sonde");
+
+    let res = attach(
+        &server,
+        "REQ-TST-915",
+        json!([{ "artifact_type": "diff", "artifact_ref": "src/evidence_probe.rs" }]),
+    );
+    assert_eq!(res["data"]["attached"].as_i64(), Some(1), "{res}");
+    let text = res["content"][0]["text"].as_str().expect("texte");
+    assert!(
+        text.contains("Diff") && text.contains("déduit"),
+        "la réparation doit être divulguée dans le TEXTE, pas seulement en data : {text}"
+    );
+}
+
+#[test]
+fn an_unrepairable_artifact_type_is_still_rejected() {
+    // La frontière tient — et c'est ce test qui l'a imposée. Écrite d'abord en
+    // réutilisant l'inférence générique, la réparation transformait SILENCIEUSEMENT
+    // tout type illégal en `Document` : cette fonction DÉFAUTE à `Document` quand le
+    // ref ne dit rien. Une règle de réparation sans contre-exemple ne se distingue
+    // pas d'une coercition aveugle.
+    let server = create_test_server();
+    seed_requirement(&server, "REQ-TST-916");
+
+    let res = attach(
+        &server,
+        "REQ-TST-916",
+        json!([{ "artifact_type": "rationale", "artifact_ref": "parce que" }]),
+    );
+    assert_eq!(res["data"]["attached"].as_i64(), Some(0), "{res}");
+}
+
 #[test]
 fn test_soll_manager_link_auto_canonizes_unambiguous_relation() {
     // REQ-AXO-901939 — a non-canonical relation on a pair with EXACTLY ONE

@@ -100,6 +100,18 @@ fn invalid_role_response(entity_type: &str, entity_id: &str, supplied: &Value) -
 /// was dominated by exactly the `{kind, ref}` shape — a contract that rejects
 /// the obvious synonym is the bug, not the call.
 fn resolve_artifact_ref_and_type(art: &Value) -> (&str, &str) {
+    // REQ-AXO-902314 — a bare string IS an artifact_ref.
+    //
+    // `artifacts: ["src/foo.rs"]` is the natural shorthand, and it was rejected:
+    // 158 occurrences across signatures #5 and #7, the largest single cluster in
+    // the friction log. There is nothing to disambiguate — the object form's only
+    // mandatory field is `artifact_ref`, and `artifact_type` is already inferred
+    // from it when omitted (`normalize_evidence_artifact_type`). Refusing the
+    // shorthand bought a round-trip and no safety. Same normalisation family as
+    // the scalar→array coercion of REQ-AXO-902303.
+    if let Some(bare) = art.as_str() {
+        return (bare, "");
+    }
     let artifact_ref = art
         .get("artifact_ref")
         .or_else(|| art.get("ref"))
@@ -309,6 +321,38 @@ impl McpServer {
                 artifact_diagnostics.push(diag);
                 continue;
             }
+            // REQ-AXO-902314 — a type illegal FOR THIS ENTITY falls back to the type
+            // the `artifact_ref` implies, when that one IS accepted.
+            //
+            // `artifact_type` is a two-level vocabulary: a global enum, then a per-entity
+            // subset (a `diff` is legal on a decision, not on a requirement). A caller who
+            // sends `diff` with `artifact_ref: "src/…/dispatch.rs"` has named a real file
+            // and mislabelled it — and the tool ALREADY knows how to read that ref, since
+            // it infers the type whenever the field is omitted. Running that same inference
+            // instead of rejecting turns a round-trip into a disclosed correction, and
+            // costs nothing: when the inference lands on a type that is ALSO not accepted,
+            // the rejection stands exactly as before. Frontier identical to REQ-AXO-902288 —
+            // unambiguous is repaired, ambiguous is refused.
+            let mut normalized_artifact_type = normalized_artifact_type;
+            let mut type_repaired_from = String::new();
+            if !artifact_schema_accepts(&normalized_entity_type, &normalized_artifact_type) {
+                // Only a POSITIVE signal repairs. `normalize_evidence_artifact_type` on an
+                // empty type DEFAULTS to `Document` when the ref says nothing — reusing it
+                // blindly would silently relabel every illegal type as a document, i.e.
+                // exactly the guessing this frontier exists to forbid. (Written that way
+                // first; the `rationale` + "parce que" test caught it. A repair rule needs
+                // its own counter-example or it is indistinguishable from a coercion.)
+                let looks_like_path =
+                    artifact_ref.contains('/') && artifact_ref.rsplit('/').next().is_some_and(|f| f.contains('.'));
+                if looks_like_path && artifact_schema_accepts(&normalized_entity_type, "File") {
+                    type_repaired_from = normalized_artifact_type.clone();
+                    normalized_artifact_type = "File".to_string();
+                    diagnostic_reasons.push(format!(
+                        "artifact_type_repaired_from_{}",
+                        type_repaired_from.to_ascii_lowercase()
+                    ));
+                }
+            }
             if !artifact_schema_accepts(&normalized_entity_type, &normalized_artifact_type) {
                 diagnostic_reasons.push("artifact_type_not_allowed_for_entity".to_string());
                 artifact_diagnostics.push(json!({
@@ -321,6 +365,12 @@ impl McpServer {
                     "accepted_artifact_schema": accepted_schema
                 }));
                 continue;
+            }
+            if !type_repaired_from.is_empty() {
+                fallback_guidance.push(format!(
+                    "`{type_repaired_from}` n'est pas accepté pour {normalized_entity_type} — \
+                     appliqué `{normalized_artifact_type}`, déduit de `{artifact_ref}`."
+                ));
             }
             let confidence = art
                 .get("confidence")
@@ -565,6 +615,17 @@ impl McpServer {
                 "Attached {} evidence item(s) to {}:{}",
                 attached, entity_type, entity_id
             ),
+        };
+
+        // REQ-AXO-902314 — a repair the caller did not ask for belongs in the TEXT
+        // channel, not only in `data`. HTTP/curl clients read `content[0].text` and
+        // nothing else, so a correction that lives only in the structured half is a
+        // correction nobody sees — the same silent-normalisation trap
+        // `disclose_cwd_provenance` exists to avoid.
+        let content_text = if fallback_guidance.is_empty() {
+            content_text
+        } else {
+            format!("{content_text}\n\nℹ️ {}", fallback_guidance.join("\n   "))
         };
 
         Some(json!({

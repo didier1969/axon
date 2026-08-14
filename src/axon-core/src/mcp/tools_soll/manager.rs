@@ -469,11 +469,25 @@ impl McpServer {
                     }));
                 }
 
-                let project_code_raw = args
+                // REQ-AXO-902312 — when the caller omits `project_code` but names a parent,
+                // the answer is IN the payload: a canonical id is `TYPE-CODE-N`, so
+                // `attach_to: "REQ-AXO-902306"` says AXO. Tried BEFORE the cwd fallback —
+                // a project the caller wrote down outranks the directory they happen to
+                // sit in, and it is the only source that survives a cross-project call.
+                // The old error listed 74 project codes for a question the arguments had
+                // already answered.
+                let inferred_from_parent: Option<String> = data
+                    .get("attach_to")
+                    .and_then(|v| v.as_str())
+                    .and_then(project_code_from_canonical_entity_id);
+                let explicit_code = args
                     .get("project_code")
                     .and_then(|v| v.as_str())
                     .or_else(|| data.get("project_code").and_then(|v| v.as_str()))
-                    .map(str::trim);
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let project_code_inferred = explicit_code.is_none() && inferred_from_parent.is_some();
+                let project_code_raw = explicit_code.or(inferred_from_parent.as_deref());
                 let project_code = match self.require_registered_mutation_project_code(
                     project_code_raw,
                     "soll_manager create",
@@ -664,20 +678,51 @@ impl McpServer {
                     .or_else(|| data.get("relation_hint").and_then(|v| v.as_str()))
                     .filter(|s| !s.trim().is_empty());
 
+                // REQ-AXO-902312 — a MISSING `relation_type` is no longer a reject when the
+                // parent is named. At this point the pair is fully determined (source kind
+                // from `entity`, target kind from the `attach_to` prefix), and the
+                // single-legal auto-canonicalisation of REQ-AXO-902288 lives ~80 lines
+                // below — it just was never reached, because this branch returned first.
+                // The asymmetry made no sense: a WRONG relation_type was repaired, an
+                // ABSENT one rejected, on identical information.
+                //
+                // An empty string flows into that logic and is filled when exactly one
+                // canonical relation exists. When the pair is ambiguous (>1) or
+                // SUPERSEDES-only, it stays empty and the policy `match` below rejects with
+                // its existing repair payload (accepted_values + source_can_reach) — the
+                // frontier is unchanged: unambiguous is applied, ambiguous is refused.
+                let relation_type_inferred = attach_to.is_some() && relation_type_raw.is_none();
                 let (attach_to, mut relation_type) = match (attach_to, relation_type_raw) {
                     (Some(a), Some(r)) => (a, r.to_uppercase()),
-                    (missing_attach, _) => {
-                        let missing_field = if missing_attach.is_none() {
-                            "attach_to"
+                    (Some(a), None) => (a, String::new()),
+                    (None, _) => {
+                        // REQ-AXO-902312 — the parent is the ONE thing the server must not
+                        // guess: picking a pillar for the caller writes a SOLL edge nobody
+                        // asked for. The refusal stands. What changes is that it stops
+                        // being a dead end.
+                        //
+                        // 154 occurrences say the previous hint did not work, and its core
+                        // move — "call `document_intent` instead" — is itself the friction:
+                        // answering a question with "use a different tool". So the error now
+                        // NAMES the candidate parents (the project's actual pillars, with
+                        // their titles) and hands back a `corrected_call` with one blank to
+                        // fill. Choosing from a list is a decision; inventing an id is a
+                        // round-trip.
+                        let candidates = self.candidate_parent_pillars(&project_code);
+                        let candidate_lines: String = candidates
+                            .iter()
+                            .map(|(id, title)| format!("\n  {id} — {title}"))
+                            .collect();
+                        let candidate_hint = if candidates.is_empty() {
+                            String::new()
                         } else {
-                            "relation_type"
+                            format!("\n\nParents plausibles dans `{project_code}` :{candidate_lines}")
                         };
                         return Some(json!({
                             "content": [{
                                 "type": "text",
                                 "text": format!(
-                                    "soll_manager create requires `{}`. Every non-Vision node must attach to a canonical parent in the same transaction (MIL-AXO-020).",
-                                    missing_field
+                                    "soll_manager create requires `attach_to`. Every non-Vision node must attach to a canonical parent in the same transaction (MIL-AXO-020).{candidate_hint}"
                                 )
                             }],
                             "isError": true,
@@ -691,9 +736,23 @@ impl McpServer {
                                 "parameter_repair": {
                                     "tool": "soll_manager",
                                     "category": "attach_required",
-                                    "invalid_field": format!("data.{}", missing_field),
-                                    "required_fields": ["attach_to", "relation_type"],
-                                    "hint": "supply canonical parent id and the relation type (e.g. REQ→PIL=BELONGS_TO, CPT→REQ=EXPLAINS, DEC→REQ=SOLVES, MIL→REQ=TARGETS, VAL→REQ=VERIFIES, GUI→PIL=BELONGS_TO). Use soll_relation_schema source_id=<your_type>-... for the full table. REQ-AXO-902082 — if the parent is UNKNOWN, call `document_intent` instead: it auto-infers the project's pillar as fallback parent (REQ-AXO-901615) and classifies the entity for you.",
+                                    "invalid_field": "data.attach_to",
+                                    "required_fields": ["attach_to"],
+                                    "candidate_parents": candidates
+                                        .iter()
+                                        .map(|(id, title)| json!({ "id": id, "title": title }))
+                                        .collect::<Vec<_>>(),
+                                    "corrected_call": {
+                                        "tool": "soll_manager",
+                                        "arguments": {
+                                            "action": "create",
+                                            "entity": entity,
+                                            "data": {
+                                                "attach_to": "<choisir dans candidate_parents>",
+                                            }
+                                        }
+                                    },
+                                    "hint": "REQ-AXO-902312 — `relation_type` n'est plus requis : il est déduit quand la paire (source, parent) n'admet qu'une seule relation canonique. Seul le PARENT reste à nommer, parce que le deviner écrirait une arête SOLL que personne n'a demandée. Si aucun parent de la liste ne convient, `document_intent` classe l'entité et retombe sur le pilier du projet (REQ-AXO-901615).",
                                     "follow_up_tools": ["soll_relation_schema", "document_intent"],
                                 },
                                 "canonical_source": "MIL-AXO-020",
@@ -904,6 +963,23 @@ impl McpServer {
                             "SOLL entity created: `{}`\nCanonical link applied: `{}` -> `{}` via `{}`",
                             created_id, created_id, attach_to, relation_type
                         );
+                        // REQ-AXO-902312 — say what was DEDUCED. A field the caller never
+                        // wrote is a field they cannot check; announcing it is the same
+                        // rule as `disclose_cwd_provenance` (mcp.rs). Silence here would
+                        // trade one round-trip for a node whose scope or relation nobody
+                        // ever validated — a worse deal than the round-trip.
+                        if project_code_inferred {
+                            report.push_str(&format!(
+                                "\nℹ️ `project_code` non fourni — déduit `{canonical_code}` du \
+                                 parent `{attach_to}`."
+                            ));
+                        }
+                        if relation_type_inferred {
+                            report.push_str(&format!(
+                                "\nℹ️ `relation_type` non fourni — appliqué `{relation_type}`, \
+                                 seule relation canonique pour cette paire."
+                            ));
+                        }
                         // REQ-AXO-901942 — proactive inline guard. A Requirement
                         // with no acceptance_criteria is flagged by soll_validate
                         // on a LATER pass; warn at creation so the LLM adds the
@@ -933,6 +1009,8 @@ impl McpServer {
                             "attached_to": attach_to,
                             "applied_relation": relation_type,
                             "attach_status": "attached",
+                            "project_code_inferred_from_parent": project_code_inferred,
+                            "relation_type_inferred": relation_type_inferred,
                             "acceptance_criteria_warning": missing_acceptance_criteria
                         });
 

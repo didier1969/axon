@@ -128,19 +128,30 @@ impl McpServer {
                     // cwd from the tunnel header, else AXON_PROJECT_ROOT / server cwd)
                     // against registered project paths, so a SOLL mutation lands in the
                     // project the agent is working in, not the shared brain's own (AXO).
+                    // REQ-AXO-902312 — the MOST SPECIFIC registered path wins, it is not
+                    // an ambiguity. Ancestor projects are legitimately registered
+                    // (/home/dstadel, /home/dstadel/projects, /home/dstadel/projects/axon):
+                    // a cwd sits inside ALL of them, so the old `len() == 1` guard bailed
+                    // out on the NORMAL case and demanded a `project_code` the server could
+                    // already derive — 69 occurrences of `wrong_project_scope`.
+                    //
+                    // REQ-AXO-902128 fixed exactly this in `auto_resolve_project_code_str`
+                    // (tools_framework_runtime_status.rs). It was never carried here, so the
+                    // two functions resolving ONE rule disagreed — the same divergence
+                    // pattern as the measurement defects of REQ-AXO-902309/902310. Same
+                    // ORDER BY, deliberately, so a future reader sees one rule twice rather
+                    // than two rules.
                     let search_path = crate::mcp::effective_project_search_path();
                     if !search_path.is_empty() {
                         let cwd_escaped = escape_sql(&search_path);
                         if let Ok(cwd_matches) = self.query_single_column(&format!(
-                            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND (project_path = '{}' OR starts_with('{}', project_path || '/'))",
+                            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path IS NOT NULL AND (project_path = '{}' OR starts_with('{}', project_path || '/')) ORDER BY length(project_path) DESC LIMIT 1",
                             cwd_escaped, cwd_escaped
                         )) {
-                            let cwd_matches: Vec<String> = cwd_matches
-                                .into_iter()
-                                .filter(|v| !v.trim().is_empty())
-                                .collect();
-                            if cwd_matches.len() == 1 {
-                                return Ok(cwd_matches.into_iter().next().unwrap());
+                            if let Some(code) =
+                                cwd_matches.into_iter().find(|v| !v.trim().is_empty())
+                            {
+                                return Ok(code);
                             }
                         }
                     }
@@ -167,6 +178,32 @@ impl McpServer {
         }
 
         Ok(raw.to_string())
+    }
+
+    /// REQ-AXO-902312 — the project's Pillars, as `(id, title)`, for an
+    /// `attach_required` refusal that names its candidates instead of describing
+    /// them. Pillars only: they are the canonical parent for the entity kinds that
+    /// hit this error (REQ/GUI/CPT → PIL is single-legal, so naming a pillar is
+    /// enough to complete the call). Best-effort — an empty list degrades to the
+    /// previous prose hint rather than failing the (already failing) call.
+    pub(super) fn candidate_parent_pillars(&self, project_code: &str) -> Vec<(String, String)> {
+        let escaped = escape_sql(project_code);
+        self.graph_store
+            .query_json(&format!(
+                "SELECT id, COALESCE(title, '') FROM soll.Node \
+                 WHERE type = 'Pillar' AND project_code = '{escaped}' \
+                   AND COALESCE(status, '') NOT IN ('superseded', 'rejected', 'archived') \
+                 ORDER BY id ASC LIMIT 12"
+            ))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|row| {
+                let mut it = row.into_iter();
+                Some((it.next()?, it.next().unwrap_or_default()))
+            })
+            .collect()
     }
 
     pub(super) fn require_registered_mutation_project_code(

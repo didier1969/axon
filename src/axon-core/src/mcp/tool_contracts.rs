@@ -699,6 +699,88 @@ pub(crate) fn closed_enum_values(spec: &Value) -> Option<Vec<Value>> {
     }
 }
 
+/// REQ-AXO-902313 — name the field that actually broke when NO required field is
+/// missing.
+///
+/// The dispatch used to fall back to the literal string `"arguments"` in that case,
+/// and `field_in_error = "arguments"` became the second-largest open friction
+/// signature (38 occurrences across `pre_flight_check`, `commit_work`,
+/// `soll_manager`). It is not a cause: it is an AGGREGATE of unmeasured causes, so
+/// it can never be fixed — the same shape as the counters REQ-AXO-902309/902310
+/// repaired. You cannot fix what you cannot name.
+///
+/// Checked in order of how much they tell the caller: a supplied value of the wrong
+/// JSON type → a value outside a closed enum → a property the schema does not
+/// declare (a typo or a missed alias). Returns `(field, reason)`; `None` means the
+/// arguments genuinely satisfy the schema and the handler refused for its own
+/// reason — which is then a DISTINCT signal worth its own signature, not noise.
+pub(crate) fn first_schema_mismatch(schema: &Value, arguments: &Value) -> Option<(String, String)> {
+    let props = schema.get("properties")?.as_object()?;
+    let supplied = arguments.as_object()?;
+
+    let type_name = |v: &Value| -> &'static str {
+        match v {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(n) => {
+                if n.is_i64() || n.is_u64() {
+                    "integer"
+                } else {
+                    "number"
+                }
+            }
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    };
+
+    // 1. Wrong type on a declared property.
+    for (key, value) in supplied {
+        let Some(spec) = props.get(key) else { continue };
+        let Some(expected) = spec.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let actual = type_name(value);
+        let compatible = expected == actual
+            || (expected == "number" && actual == "integer")
+            || value.is_null();
+        if !compatible {
+            return Some((
+                key.clone(),
+                format!("type_mismatch: attendu `{expected}`, reçu `{actual}`"),
+            ));
+        }
+    }
+
+    // 2. Value outside a closed enum.
+    for (key, value) in supplied {
+        let Some(spec) = props.get(key) else { continue };
+        let Some(allowed) = closed_enum_values(spec) else {
+            continue;
+        };
+        if !value.is_null() && !allowed.contains(value) {
+            let listed: Vec<String> = allowed
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            return Some((
+                key.clone(),
+                format!("enum_violation: valeurs acceptées {}", listed.join(" | ")),
+            ));
+        }
+    }
+
+    // 3. Property the schema does not declare — usually a near-miss name.
+    for key in supplied.keys() {
+        if !props.contains_key(key) {
+            return Some((key.clone(), "unknown_property".to_string()));
+        }
+    }
+
+    None
+}
+
 /// Render the field form into the inline text channel — HTTP/curl clients surface
 /// only `content[0].text`, so the enum vocabulary must live there too (AC#6), not
 /// just in `data.parameter_repair.fields`. Compact, one line per field.
