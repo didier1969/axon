@@ -1989,6 +1989,7 @@ impl McpServer {
             "mcp_outbox_send" => self.axon_mcp_outbox_send(arguments),
             "mcp_inbox_read" => self.axon_mcp_inbox_read(arguments),
             "mailbox_sweep" => self.axon_mailbox_sweep(arguments),
+            "mcp_inbox_archive" => self.axon_mcp_inbox_archive(arguments),
             "mcp_agent_card" => self.axon_mcp_agent_card(arguments),
             "mailbox_lease" => self.axon_mailbox_lease(arguments),
             "mailbox_render" => self.axon_mailbox_render(arguments),

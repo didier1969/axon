@@ -950,8 +950,20 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "mailbox_sweep",
-                "description": "[MAILBOX] REQ-AXO-902121 (MBX-9) — TTL/dead-letter sweep: soft-archive (archived_at) messages past their `ttl_at`. Returns the swept count. Run on demand (operator/cron). Archived messages drop out of inbox_read/unread.",
+                "description": "[MAILBOX] REQ-AXO-902121 (MBX-9) — TTL/dead-letter sweep: soft-archive (archived_at) messages past their `ttl_at`. Returns the swept count. Run on demand (operator/cron). Archived messages drop out of inbox_read/unread. REQ-AXO-902306 — `priority='high'` is EXEMPT (an important message never expires on its own); remove those with `mcp_inbox_archive`.",
                 "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            },
+            {
+                "name": "mcp_inbox_archive",
+                "description": "[MAILBOX] REQ-AXO-902308 — remove NAMED messages from the active inbox (soft-archive: `archived_at` stamped, the append-only log is preserved). This is the DELIBERATE gesture, and the only way an important message leaves: since REQ-AXO-902306 reading archives ordinary messages automatically and `priority='high'` is exempt from BOTH the read and the TTL sweep. Ids only — no bulk predicate, no `archive everything read`: what is kept on purpose must be released on purpose. Ids belonging to another project are refused, not skipped silently.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "message_ids": { "type": "array", "items": { "type": "integer" }, "description": "Inbox row ids to archive, as shown in `mcp_inbox_read` (the `[8879]` prefix). Required, non-empty." },
+                        "project": { "type": "string", "description": "Recipient project owning these messages. Default: cwd-resolved." }
+                    },
+                    "required": ["message_ids"]
+                }
             },
             {
                 "name": "mcp_agent_card",

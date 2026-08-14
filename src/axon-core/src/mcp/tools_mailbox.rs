@@ -528,7 +528,10 @@ impl McpServer {
             if cursor_advances && max_id > floor {
                 let kept = (messages.len() as i64 - archived_count).max(0);
                 let kept_note = if kept > 0 {
-                    format!(" · {kept} conservé(s) — important(s), à retirer délibérément")
+                    format!(
+                        " · {kept} conservé(s) — important(s), à retirer par \
+                         `mcp_inbox_archive message_ids=[…]`"
+                    )
                 } else {
                     String::new()
                 };
@@ -663,6 +666,10 @@ impl McpServer {
             "mcp_inbox_read",
             "inbox_read",
             "mailbox_sweep",
+            // REQ-AXO-902308 — an archive response already states the inbox state it
+            // just changed; stapling "📬 N non-lu(s) — relève avec mcp_inbox_read"
+            // onto it would invite the caller straight back into a destructive read.
+            "mcp_inbox_archive",
             "mailbox_render",
             "mailbox_tap",
         ];
@@ -733,6 +740,141 @@ impl McpServer {
                 "swept": swept,
             }
         }))
+    }
+
+    /// REQ-AXO-902308 — remove NAMED messages from the active inbox.
+    ///
+    /// The deliberate counterpart to REQ-AXO-902306's two automatic exits: reading
+    /// archives ordinary messages, the TTL sweep archives expired ones, and
+    /// `priority='high'` is exempt from BOTH. Without this verb `high` would be
+    /// unremovable by any tool — the very accumulation REQ-AXO-902304 measured,
+    /// displaced one notch. And the read banner already tells the caller an
+    /// important message is "à retirer délibérément"; a contract that names an exit
+    /// it does not offer is the dead end REQ-AXO-902278 closed elsewhere.
+    ///
+    /// Ids only, on purpose. A predicate ("archive everything read", "archive all
+    /// high older than X") would re-create the automatic removal this rule exists to
+    /// prevent: what is kept deliberately must be released deliberately.
+    ///
+    /// Ids that do not belong to `project` are REFUSED — the whole call, not a
+    /// silent per-row skip. A partially-applied archive whose report says "ok" is
+    /// how a caller learns to distrust the count.
+    pub(crate) fn axon_mcp_inbox_archive(&self, args: &Value) -> Option<Value> {
+        let project = args
+            .get("project")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| self.auto_resolve_project_code_str())
+            .unwrap_or_default();
+        if project.is_empty() {
+            return Some(mbx_err("inbox project unresolved — pass `project`.", "input_invalid"));
+        }
+
+        // Accept a bare integer as well as an array: a caller archiving ONE message
+        // naturally writes `message_ids: 8879`. Rejecting that would be a round-trip
+        // over a difference with no meaning (same normalisation family as
+        // SCALAR_TO_ARRAY_PARAMS in mcp.rs).
+        let raw = args.get("message_ids").or_else(|| args.get("ids"));
+        let ids: Vec<i64> = match raw {
+            Some(Value::Array(items)) => items.iter().filter_map(Value::as_i64).collect(),
+            Some(Value::Number(n)) => n.as_i64().into_iter().collect(),
+            Some(Value::String(s)) => s.parse::<i64>().ok().into_iter().collect(),
+            _ => Vec::new(),
+        };
+        if ids.is_empty() {
+            return Some(mbx_err(
+                "mcp_inbox_archive requires `message_ids` — the inbox row ids to remove, \
+                 as shown between brackets by `mcp_inbox_read` (e.g. `[8879]` → 8879). \
+                 There is no bulk form: an important message leaves one named gesture at a time.",
+                "input_invalid",
+            ));
+        }
+
+        let id_list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+
+        // Ownership check BEFORE the write: an id addressed to another project is a
+        // caller error worth naming, not a row to skip.
+        let owned: Vec<Vec<Value>> = match self.graph_store.query_json_writer(&format!(
+            "SELECT id FROM axon.mailbox_message WHERE id IN ({id_list}) AND to_project='{p}'",
+            p = esc(&project)
+        )) {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Err(e) => return Some(mbx_err(&format!("inbox archive failed: {e}"), "degraded")),
+        };
+        let owned_ids: Vec<i64> = owned
+            .iter()
+            .filter_map(|r| r.first())
+            .filter_map(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .collect();
+        let foreign: Vec<i64> = ids.iter().copied().filter(|i| !owned_ids.contains(i)).collect();
+        if !foreign.is_empty() {
+            let listed = foreign.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+            return Some(mbx_err(
+                &format!(
+                    "these ids are not in `{project}`'s inbox (unknown, or addressed to another \
+                     project): {listed}. Nothing was archived — pass `project=` for the recipient \
+                     that actually holds them."
+                ),
+                "input_invalid",
+            ));
+        }
+
+        // Soft-archive only: the append-only log (PIL-AXO-9004) stays intact, the rows
+        // just drop out of the live inbox view. `archived_at IS NULL` makes it
+        // idempotent — re-archiving reports 0, it does not restamp.
+        let before = self.mailbox_live_count(&project, &id_list);
+        if let Err(e) = self.graph_store.execute(&format!(
+            "UPDATE axon.mailbox_message SET archived_at = now() \
+             WHERE to_project='{p}' AND id IN ({id_list}) AND archived_at IS NULL",
+            p = esc(&project)
+        )) {
+            return Some(mbx_err(&format!("inbox archive failed: {e}"), "degraded"));
+        }
+        let after = self.mailbox_live_count(&project, &id_list);
+        let archived = (before - after).max(0);
+        let already = (ids.len() as i64 - before).max(0);
+
+        let already_note = if already > 0 {
+            format!(" · {already} déjà archivé(s), inchangé(s)")
+        } else {
+            String::new()
+        };
+        let report = format!(
+            "### 🗄️ mcp_inbox_archive\n\n`{project}` · {archived} message(s) retiré(s) de l'inbox \
+             active{already_note}.\n\nArchivage doux : les lignes restent dans le journal \
+             (`mode=all` les rend encore), elles ne comptent plus comme à traiter."
+        );
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "status": "ok",
+                "project": project,
+                "archived": archived,
+                "already_archived": already,
+                "message_ids": ids,
+            }
+        }))
+    }
+
+    /// Count of still-live (non-archived) rows among `id_list` for `project`.
+    /// Writer-side so it observes the same transaction as the UPDATE around it.
+    fn mailbox_live_count(&self, project: &str, id_list: &str) -> i64 {
+        self.graph_store
+            .query_json_writer(&format!(
+                "SELECT count(*) FROM axon.mailbox_message \
+                 WHERE to_project='{p}' AND id IN ({id_list}) AND archived_at IS NULL",
+                p = esc(project)
+            ))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<Vec<Value>>>(&s).ok())
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|row| row.into_iter().next())
+            .and_then(|cell| match cell {
+                Value::Number(n) => n.as_i64(),
+                Value::String(s) => s.parse::<i64>().ok(),
+                _ => None,
+            })
+            .unwrap_or(0)
     }
 
     // ===================================================================

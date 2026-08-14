@@ -30,6 +30,22 @@ fn read(server: &McpServer, args: Value) -> Value {
         .expect("mcp_inbox_read returns a result")
 }
 
+/// Ids of the still-live inbox rows for a recipient (ascending).
+fn message_ids(server: &McpServer, to: &str) -> Vec<i64> {
+    let raw = server
+        .graph_store
+        .query_json_writer(&format!(
+            "SELECT id FROM axon.mailbox_message WHERE to_project='{to}' AND archived_at IS NULL ORDER BY id"
+        ))
+        .expect("ids query");
+    serde_json::from_str::<Vec<Vec<Value>>>(&raw)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| r.into_iter().next())
+        .filter_map(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .collect()
+}
+
 /// Count of (non-archived) inbox rows for a recipient, straight from PG —
 /// independent of the read cursor, so it is a stable dedup oracle.
 fn inbox_count(server: &McpServer, to: &str) -> i64 {
@@ -306,6 +322,83 @@ fn c8_non_destructive_views_archive_nothing() {
     assert!(
         consumed_text.contains("1 archivé(s)"),
         "la lecture destructive doit annoncer son archivage : {consumed_text}"
+    );
+}
+
+// ── C9 — le retrait délibéré (REQ-AXO-902308) ──────────────────────────────
+//
+// C8 a rendu `high` inarchivable par les DEUX sorties automatiques. Sans un verbe
+// nommé, il devenait inretirable tout court — l'accumulation de REQ-AXO-902304
+// déplacée d'un cran — et le bandeau de lecture annonçait une issue inexistante.
+#[test]
+fn c9_an_important_message_survives_both_automatic_exits_then_leaves_when_named() {
+    let server = create_test_server();
+
+    send(&server, json!({
+        "from": FROM, "to_project": TO,
+        "idempotency_key": "c9-important", "subject": "décision",
+        "body_dense": "ref REQ-AXO-902308", "priority": "high",
+        "ttl_hours": 1
+    }));
+
+    // Sortie automatique 1 : la lecture. Sortie automatique 2 : le balayage TTL
+    // (horizon déjà passé — forcé en base pour ne pas dépendre de l'horloge).
+    read(&server, json!({ "project": TO, "mode": "unread" }));
+    server
+        .graph_store
+        .execute(&format!(
+            "UPDATE axon.mailbox_message SET ttl_at = now() - interval '1 hour' WHERE to_project='{TO}'"
+        ))
+        .expect("ttl backdate");
+    server
+        .execute_tool_direct("mailbox_sweep", &json!({}))
+        .expect("mailbox_sweep returns a result");
+
+    assert_eq!(
+        inbox_count(&server, TO),
+        1,
+        "ni la lecture ni l'expiration ne retirent un message important"
+    );
+
+    // Le geste délibéré, lui, le retire.
+    let ids = message_ids(&server, TO);
+    let archived = server
+        .execute_tool_direct("mcp_inbox_archive", &json!({ "project": TO, "message_ids": ids }))
+        .expect("mcp_inbox_archive returns a result");
+    assert_eq!(archived["data"]["archived"].as_i64(), Some(1));
+    assert_eq!(inbox_count(&server, TO), 0, "nommé, il sort");
+
+    // Idempotent : re-nommer n'invente pas un second retrait.
+    let again = server
+        .execute_tool_direct("mcp_inbox_archive", &json!({ "project": TO, "message_ids": ids }))
+        .expect("mcp_inbox_archive returns a result");
+    assert_eq!(again["data"]["archived"].as_i64(), Some(0));
+    assert_eq!(again["data"]["already_archived"].as_i64(), Some(1));
+}
+
+#[test]
+fn c9_archiving_refuses_ids_that_belong_to_another_inbox() {
+    // Un id étranger doit faire ÉCHOUER l'appel entier, pas être sauté en
+    // silence : un archivage partiel qui rapporte « ok » est la façon dont un
+    // appelant apprend à ne plus croire le compte.
+    let server = create_test_server();
+    send(&server, json!({
+        "from": FROM, "to_project": TO,
+        "idempotency_key": "c9-mine", "subject": "à moi",
+        "body_dense": "reste", "priority": "high"
+    }));
+    let mine = message_ids(&server, TO);
+    let mut mixed = mine.clone();
+    mixed.push(999_999);
+
+    let refused = server
+        .execute_tool_direct("mcp_inbox_archive", &json!({ "project": TO, "message_ids": mixed }))
+        .expect("mcp_inbox_archive returns a result");
+    assert_eq!(refused["isError"].as_bool(), Some(true), "l'appel entier échoue");
+    assert_eq!(
+        inbox_count(&server, TO),
+        1,
+        "et RIEN n'est archivé — pas même la part légitime"
     );
 }
 
