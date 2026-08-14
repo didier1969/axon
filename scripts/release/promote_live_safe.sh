@@ -181,6 +181,13 @@ on_promote_exit() {
       "Le brain live RÉPOND (/readyz ok). Si ton MCP est tombé c'était le restart de CE promote (${PROMOTE_TIMESTAMP}), PAS un incident à diagnostiquer. Reconnecte via /mcp. (Le promote a pu false-fail au qualify cold-start ; l'opérateur AXO vérifie.)" \
       "promote-clear-${PROMOTE_TIMESTAMP}"
   fi
+  # REQ-AXO-902304 — celui qui pollue nettoie. Le TTL ne sert à rien sans balayage
+  # périodique, et `mailbox_sweep` était documenté « on demand (operator/cron) »
+  # sans qu'aucun cron ne l'appelle : d'où 8217 avis accumulés. Le promote est le
+  # producteur de ces messages, c'est donc le bon endroit pour les faire expirer.
+  # Best-effort strict : un balayage qui échoue ne doit JAMAIS peser sur un promote.
+  timeout 20 "$ROOT_DIR/scripts/axon" --instance live mcp-call call mailbox_sweep \
+    --args '{}' --format text >> "$PROMOTE_LOG" 2>&1 || true
 }
 trap on_promote_exit EXIT
 
