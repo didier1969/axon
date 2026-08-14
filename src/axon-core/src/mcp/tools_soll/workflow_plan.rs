@@ -1004,6 +1004,13 @@ impl McpServer {
             .ok()?;
         let entity_count_rows: Vec<Vec<String>> =
             serde_json::from_str(&entity_counts_raw).unwrap_or_default();
+        // REQ-AXO-902305 — les mêmes comptes, gardés sous forme typée pour le rendu
+        // TEXTE. Ils n'étaient calculés que pour `data.*` et absents du résumé,
+        // d'où un projet fait de Guidelines/Skills qui se lisait « vide ».
+        let entity_count_pairs: Vec<(String, i64)> = entity_count_rows
+            .iter()
+            .filter_map(|row| Some((row.first()?.clone(), row.get(1)?.parse::<i64>().ok()?)))
+            .collect();
         let entity_counts = entity_count_rows
             .into_iter()
             .filter_map(|row| {
@@ -1072,6 +1079,7 @@ impl McpServer {
             &reqs,
             &decisions,
             &revisions,
+            &entity_count_pairs,
         );
         let response = json!({
             "content": [{"type":"text","text": text}],
@@ -1178,6 +1186,7 @@ pub(super) fn format_soll_query_context_summary(
     reqs: &[String],
     decisions: &[String],
     revisions: &[String],
+    entity_counts: &[(String, i64)],
 ) -> String {
     fn split_row(row: &str, max_parts: usize) -> Vec<&str> {
         row.splitn(max_parts, '|').collect()
@@ -1206,6 +1215,32 @@ pub(super) fn format_soll_query_context_summary(
 
     let mut out = String::new();
     out.push_str(&format!("SOLL context for {} :\n", project_code));
+
+    // REQ-AXO-902305 — the whole graph, by type, BEFORE the Vision/REQ/DEC detail.
+    //
+    // Those three were the only types rendered, so a project whose content is
+    // anything else read as empty. `PRO` — the namespace carrying the entire
+    // delivered methodology — reported "Vision: none, REQs: 0, DECs: 3" while
+    // holding 111 nodes: 41 Guidelines, 30 Skills, 26 PromptTemplates. An LLM
+    // discovering the product through this tool concluded there was nothing to
+    // inherit.
+    //
+    // The counts were ALREADY computed by the caller and dropped on the floor —
+    // same shape as REQ-AXO-902292 (`mcp_friction_report` announced a count and
+    // named nothing). Counts only, never bodies: REQ-AXO-901935 removed a full
+    // Vision dump from this very surface, and that lesson holds.
+    if !entity_counts.is_empty() {
+        let total: i64 = entity_counts.iter().map(|(_, n)| *n).sum();
+        let breakdown: Vec<String> = entity_counts
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(kind, n)| format!("{n} {kind}"))
+            .collect();
+        out.push_str(&format!(
+            "- Graph: {total} node(s) — {}\n",
+            breakdown.join(", ")
+        ));
+    }
 
     // Visions — print id + title for each (typically very few).
     if visions.is_empty() {
@@ -1367,7 +1402,7 @@ mod soll_query_context_summary_tests {
         let revisions = vec!["REV-001|migrated AGE→PG|author".to_string()];
 
         let text =
-            format_soll_query_context_summary("AXO", &visions, &reqs, &decisions, &revisions);
+            format_soll_query_context_summary("AXO", &visions, &reqs, &decisions, &revisions, &[]);
 
         // Canonical id surfaces (vision + REQ top + DEC top + revision id).
         assert!(text.contains("VIS-AXO-001"), "missing vision id: {text}");
@@ -1397,11 +1432,42 @@ mod soll_query_context_summary_tests {
     /// REQ-AXO-901616 — empty payloads produce the friendly fallback.
     #[test]
     fn summary_handles_empty_payload() {
-        let text = format_soll_query_context_summary("EMPTY", &[], &[], &[], &[]);
+        let text = format_soll_query_context_summary("EMPTY", &[], &[], &[], &[], &[]);
         assert!(text.contains("SOLL context for EMPTY"));
         assert!(text.contains("Vision: none"));
         assert!(text.contains("REQs: 0 total"));
         assert!(text.contains("DECs: 0 total"));
         assert!(text.contains("Revisions: none"));
+    }
+
+    /// REQ-AXO-902305 — un projet sans Vision/REQ/DEC n'est pas un projet vide.
+    ///
+    /// `PRO` — le namespace qui porte TOUTE la méthodologie livrée au client —
+    /// rendait « Vision: none, REQs: 0, DECs: 3 » alors qu'il compte 111 nœuds :
+    /// 41 Guidelines, 30 Skills, 26 PromptTemplates. Un LLM découvrant le produit
+    /// par cet outil concluait qu'il n'y avait rien à hériter. Les comptes étaient
+    /// déjà calculés pour `data.*` et jetés avant le rendu — même forme que
+    /// REQ-AXO-902292.
+    #[test]
+    fn summary_surfaces_a_project_made_of_guidelines_and_skills() {
+        let counts = vec![
+            ("Guideline".to_string(), 47i64),
+            ("Skill".to_string(), 30),
+            ("PromptTemplate".to_string(), 26),
+            ("Decision".to_string(), 3),
+        ];
+        let text = format_soll_query_context_summary("PRO", &[], &[], &[], &[], &counts);
+
+        assert!(
+            text.contains("106 node(s)"),
+            "le total doit être affiché, sinon « Vision: none / REQs: 0 » se lit \
+             comme un projet vide : {text}"
+        );
+        for kind in ["47 Guideline", "30 Skill", "26 PromptTemplate"] {
+            assert!(
+                text.contains(kind),
+                "le type porteur du contenu doit être nommé (`{kind}`) : {text}"
+            );
+        }
     }
 }
