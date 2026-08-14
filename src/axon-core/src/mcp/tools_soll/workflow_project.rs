@@ -145,6 +145,73 @@ pub(super) fn parse_commit_req_ids(message: &str) -> Vec<String> {
 }
 
 impl McpServer {
+    /// REQ-AXO-902296 — sort `diff_paths` into (stageable, already-staged, rejected)
+    /// BEFORE touching the index.
+    ///
+    /// `git add` is atomic over its pathspecs: one bad path stages nothing and the
+    /// stderr names only the first offender, so a multi-path commit was repaired one
+    /// round-trip at a time (friction #64, 68 occurrences). Worse, a path removed with
+    /// `git rm` is gone from BOTH worktree and index, so it matches no pathspec and
+    /// fails — even though its deletion is already staged and the commit would capture
+    /// it. That false negative is what forced every caller to learn the "pre-stage the
+    /// deletions, then omit them from diff_paths" dance by hand.
+    ///
+    /// git is the oracle for every verdict — `--dry-run` for stageability, the staged
+    /// diff for "already handled". Reimplementing gitignore/tracking semantics here
+    /// would drift from the git the user actually runs.
+    /// No `&self`: the verdict depends only on the paths and the repo directory,
+    /// so the classifier is testable against a throwaway git repo without booting
+    /// a server.
+    pub(crate) fn classify_diff_paths(
+        diff_paths: &[serde_json::Value],
+        project_dir: Option<&std::path::PathBuf>,
+    ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
+        let git = |args: &[&str]| -> Option<std::process::Output> {
+            let mut cmd = std::process::Command::new("git");
+            if let Some(dir) = project_dir {
+                cmd.current_dir(dir);
+            }
+            cmd.args(args).output().ok()
+        };
+
+        let (mut stageable, mut already_staged, mut rejected) = (vec![], vec![], vec![]);
+        for path in diff_paths.iter().filter_map(serde_json::Value::as_str) {
+            let dry = git(&["add", "-A", "--dry-run", "--", path]);
+            let ok = dry.as_ref().is_some_and(|o| o.status.success());
+            if ok {
+                stageable.push(path.to_string());
+                continue;
+            }
+            // Not addable. Already staged (the `git rm` case) is NOT an error:
+            // the index already carries it, so the commit takes it as-is.
+            let staged = git(&["diff", "--cached", "--name-only", "--", path])
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+            if staged {
+                already_staged.push(path.to_string());
+                continue;
+            }
+            let stderr = dry
+                .as_ref()
+                .map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string())
+                .unwrap_or_else(|| "git could not be invoked".to_string());
+            // Turn git's wording into the caller's actual repair.
+            let reason = if stderr.contains("ignored by one of your .gitignore") {
+                "ignored by .gitignore — remove it from `diff_paths` or unignore it".to_string()
+            } else if stderr.contains("did not match any files") {
+                "no such file, and nothing staged for it — check the path relative to the \
+                 repository root (a typo, or a file never created)"
+                    .to_string()
+            } else if stderr.is_empty() {
+                "git refused this pathspec".to_string()
+            } else {
+                stderr
+            };
+            rejected.push((path.to_string(), reason));
+        }
+        (stageable, already_staged, rejected)
+    }
+
     pub(crate) fn axon_commit_work(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         let diff_paths = args.get("diff_paths")?.as_array()?;
         let message = args.get("message")?.as_str()?;
@@ -427,33 +494,96 @@ impl McpServer {
         // the file (and its directory) are gone from the worktree, which blocked
         // committing a pure file deletion. `-A` still errors on a genuinely
         // never-tracked path, preserving the REQ-AXO-138 missing-path guard.
-        add_cmd.arg("add").arg("-A").arg("--");
-        for p in diff_paths {
-            if let Some(path_str) = p.as_str() {
-                add_cmd.arg(path_str);
-            }
-        }
-        let add_out = match add_cmd.output() {
-            Ok(output) => output,
-            Err(e) => {
-                return Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Git add spawn failed: {}", e) }],
-                    "isError": true,
-                    "data": {
-                        "status": "input_invalid",
-                        "next_action": {
-                            "kind": "verify_paths_then_retry",
-                            "tool": "axon_commit_work",
-                            "when": "after_paths_resolved"
-                        },
-                        "operator_guidance": {
-                            "problem_class": "git_invocation_failure",
-                            "follow_up_tools": ["axon_pre_flight_check"],
-                        }
+        //
+        // REQ-AXO-902296 — but `-A` does NOT cover the path already removed with
+        // `git rm`: that takes it out of the worktree AND the index, so no
+        // pathspec matches and git exits 128. Measured, against the claim above.
+        // Worse, `git add` is atomic over its pathspecs: ONE bad path stages
+        // NOTHING, and the stderr names only the first offender — so a 10-path
+        // commit was repaired one round-trip at a time. That is friction #64,
+        // 68 occurrences, still firing on today's build.
+        //
+        // So classify each path first, using git itself as the oracle rather
+        // than reimplementing gitignore/tracking semantics.
+        let (stageable, already_staged, rejected) =
+            Self::classify_diff_paths(diff_paths, resolved_project_path.as_ref());
+
+        if !rejected.is_empty() {
+            let detail = rejected
+                .iter()
+                .map(|(path, why)| format!("  · `{path}` — {why}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!(
+                    "Refusing to commit a partial diff: {} of {} `diff_paths` cannot be staged.\n{}\n\n\
+                     Fix those paths (or drop them from `diff_paths`) and retry. Paths are \
+                     resolved from the repository root.",
+                    rejected.len(), diff_paths.len(), detail
+                )}],
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "next_action": {
+                        "kind": "fix_path_then_retry",
+                        "tool": "axon_commit_work",
+                        "when": "after_paths_resolved"
+                    },
+                    "operator_guidance": {
+                        "problem_class": "git_add_rejected_paths",
+                        "follow_up_tools": ["axon_pre_flight_check"],
+                    },
+                    "parameter_repair": {
+                        "invalid_field": "diff_paths",
+                        // Every offender at once — the whole point: git named
+                        // only the first, so repair cost one round-trip each.
+                        "rejected_paths": rejected
+                            .iter()
+                            .map(|(p, why)| serde_json::json!({ "path": p, "reason": why }))
+                            .collect::<Vec<_>>(),
+                        "accepted_paths": stageable,
+                        "already_staged_paths": already_staged,
+                        "hint": "each rejected path is named above with its reason; a path already \
+                                 staged (e.g. by `git rm`) is NOT an error and needs no action"
                     }
-                }));
+                }
+            }));
+        }
+
+        add_cmd.arg("add").arg("-A").arg("--");
+        for path_str in &stageable {
+            add_cmd.arg(path_str);
+        }
+        // Everything the caller listed is either stageable or already staged. A
+        // run with nothing left to add MUST NOT invoke `git add -A --` with no
+        // pathspec: that stages the entire worktree. Skip it instead — the
+        // already-staged deletions are in the index and the commit will take them.
+        let add_out = if stageable.is_empty() {
+            None
+        } else {
+            match add_cmd.output() {
+                Ok(output) => Some(output),
+                Err(e) => {
+                    return Some(serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("Git add spawn failed: {}", e) }],
+                        "isError": true,
+                        "data": {
+                            "status": "input_invalid",
+                            "next_action": {
+                                "kind": "verify_paths_then_retry",
+                                "tool": "axon_commit_work",
+                                "when": "after_paths_resolved"
+                            },
+                            "operator_guidance": {
+                                "problem_class": "git_invocation_failure",
+                                "follow_up_tools": ["axon_pre_flight_check"],
+                            }
+                        }
+                    }));
+                }
             }
         };
+        if let Some(add_out) = add_out.as_ref() {
         if !add_out.status.success() {
             let stderr = String::from_utf8_lossy(&add_out.stderr);
             let stdout = String::from_utf8_lossy(&add_out.stdout);
@@ -484,6 +614,7 @@ impl McpServer {
                     }
                 }
             }));
+        }
         }
 
         let mut commit_cmd = std::process::Command::new("git");
@@ -2428,5 +2559,112 @@ mod commit_req_id_tests {
     #[test]
     fn empty_when_no_ids() {
         assert!(parse_commit_req_ids("chore: tidy up, no refs").is_empty());
+    }
+
+    // REQ-AXO-902296 — `diff_paths` classification, against a real throwaway repo.
+    //
+    // Friction #64 (68 occurrences, still firing on today's build): `git add` is
+    // atomic over its pathspecs, so one bad path staged NOTHING and named only the
+    // first offender. And a path removed with `git rm` matched no pathspec at all,
+    // even though its deletion was already staged — the false negative that forced
+    // every caller to learn the "pre-stage, then omit from diff_paths" dance.
+    mod diff_path_classification {
+        use crate::mcp::McpServer;
+        use serde_json::json;
+
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?} failed: {out:?}");
+        }
+
+        /// A repo with one committed file, one gitignored file, one untracked-new file.
+        fn repo() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let p = dir.path();
+            git(p, &["init", "-q", "."]);
+            git(p, &["config", "user.email", "t@t"]);
+            git(p, &["config", "user.name", "t"]);
+            std::fs::write(p.join("kept.txt"), "ok").unwrap();
+            std::fs::write(p.join(".gitignore"), "ignored.txt\n").unwrap();
+            std::fs::write(p.join("ignored.txt"), "no").unwrap();
+            git(p, &["add", "-A", "--", "kept.txt", ".gitignore"]);
+            git(p, &["commit", "-qm", "init"]);
+            dir
+        }
+
+        #[test]
+        fn a_path_already_removed_with_git_rm_is_not_an_error() {
+            let dir = repo();
+            let owned = dir.path().to_path_buf();
+            git(dir.path(), &["rm", "-q", "kept.txt"]);
+
+            let (stageable, already_staged, rejected) =
+                McpServer::classify_diff_paths(&[json!("kept.txt")], Some(&owned));
+
+            assert!(
+                rejected.is_empty(),
+                "a staged deletion must not be rejected — the commit already carries it: {rejected:?}"
+            );
+            assert_eq!(already_staged, vec!["kept.txt".to_string()]);
+            assert!(stageable.is_empty(), "nothing left to add for a staged deletion");
+        }
+
+        #[test]
+        fn every_bad_path_is_named_at_once_not_just_the_first() {
+            let dir = repo();
+            let owned = dir.path().to_path_buf();
+            std::fs::write(dir.path().join("new.rs"), "fn main() {}").unwrap();
+
+            let (stageable, _, rejected) = McpServer::classify_diff_paths(
+                &[json!("new.rs"), json!("nope_a.rs"), json!("nope_b.rs")],
+                Some(&owned),
+            );
+
+            assert_eq!(stageable, vec!["new.rs".to_string()], "the good path is still recognised");
+            let named: Vec<&str> = rejected.iter().map(|(p, _)| p.as_str()).collect();
+            assert_eq!(
+                named,
+                vec!["nope_a.rs", "nope_b.rs"],
+                "BOTH offenders must be named — git named only the first, costing one \
+                 round-trip per bad path"
+            );
+            assert!(
+                rejected.iter().all(|(_, why)| why.contains("no such file")),
+                "each rejection carries its own reason: {rejected:?}"
+            );
+        }
+
+        #[test]
+        fn an_ignored_path_is_rejected_with_the_gitignore_reason() {
+            let dir = repo();
+            let owned = dir.path().to_path_buf();
+
+            let (_, _, rejected) =
+                McpServer::classify_diff_paths(&[json!("ignored.txt")], Some(&owned));
+
+            assert_eq!(rejected.len(), 1, "{rejected:?}");
+            assert!(
+                rejected[0].1.contains("gitignore"),
+                "the reason must point at .gitignore, not echo a raw stderr: {:?}",
+                rejected[0]
+            );
+        }
+
+        #[test]
+        fn an_ordinary_modification_stages_normally() {
+            let dir = repo();
+            let owned = dir.path().to_path_buf();
+            std::fs::write(dir.path().join("kept.txt"), "changed").unwrap();
+
+            let (stageable, already_staged, rejected) =
+                McpServer::classify_diff_paths(&[json!("kept.txt")], Some(&owned));
+
+            assert_eq!(stageable, vec!["kept.txt".to_string()]);
+            assert!(already_staged.is_empty() && rejected.is_empty());
+        }
     }
 }
