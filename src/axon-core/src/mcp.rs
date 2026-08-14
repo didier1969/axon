@@ -1586,6 +1586,37 @@ impl McpServer {
         ("soll_roadmap", "project_code"),
         ("soll_id_registry", "project_code"),
         ("drift_history", "project"),
+        // REQ-AXO-902291 — second wave: the READ-ONLY tools that were answering
+        // from a hardcoded `"AXO"` instead of the caller's project.
+        //
+        // Measured: a tunnel launched from an AgriOptim cwd received
+        // `SOLL context for AXO`. Transport (REQ-AXO-902286) and chokepoint
+        // (REQ-AXO-902239) were both correct — these handlers were simply not on
+        // this list, so each fell back to its own literal.
+        //
+        // The determination demanded per candidate ("absent = THIS project" vs
+        // "absent = EVERY project") is answered by the handler itself: a tool
+        // that defaults to one hardcoded project is single-project BY
+        // CONSTRUCTION. Checked against the rollup family above — `audit`,
+        // `health`, `anomalies`, `embedding_status`, `semantic_clones`,
+        // `diagnose_indexing` carry NO literal default, precisely because absent
+        // means "all" for them. The criterion discriminates cleanly, and the
+        // pair of tests in `runtime_surface.rs` pins both directions.
+        //
+        // Deliberately still absent: `contradiction_check` and `contract_status`
+        // already call `auto_resolve_project_code_str()` themselves (their
+        // literal is a last resort, not the first answer), and every SOLL
+        // MUTATION — writing a node into a GUESSED project is irreversible.
+        ("soll_query_context", "project_code"),
+        ("soll_verify_requirements", "project_code"),
+        ("snapshot_history", "project_code"),
+        ("snapshot_diff", "project_code"),
+        ("project_status", "project_code"),
+        ("tech_debt_inventory", "project_code"),
+        ("data_catalog", "project_code"),
+        ("conception_view", "project_code"),
+        ("change_safety", "project_code"),
+        ("detect_remnants", "project_code"),
     ];
 
     /// REQ-AXO-902289 — fill in a missing `soll_manager` `entity` from the

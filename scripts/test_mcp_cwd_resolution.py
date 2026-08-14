@@ -61,12 +61,14 @@ SCOPED_TOOLS: list[tuple[str, dict]] = [
 ]
 
 # Outil -> REQ qui trace son défaut. Rouge attendu, vert = REQ livré.
-KNOWN_GAPS: dict[str, str] = {
-    # Repli littéral `.unwrap_or("AXO")` : le handler ne passe pas par le
-    # chokepoint `with_resolved_project_scope`, donc le cwd client n'est
-    # jamais consulté.
-    "soll_query_context": "REQ-AXO-902291",
-}
+#
+# Vide depuis REQ-AXO-902291 (2026-08-14) : `soll_query_context` y figurait
+# parce qu'il répondait `AXO` à un client d'un autre projet — son handler
+# repliait sur un littéral au lieu de passer par le chokepoint. Les dix outils
+# read-only de cette forme sont désormais dans `PROJECT_AUTORESOLVE_TOOLS`, et
+# le cas 1 ci-dessous le vérifie de bout en bout. Une entrée ici doit rester
+# l'exception tracée, jamais le rangement d'un cas gênant.
+KNOWN_GAPS: dict[str, str] = {}
 
 # Le projet résolu est imprimé sous des formes différentes selon l'outil ;
 # on lit CETTE déclaration, jamais le corps de la réponse (un message d'inbox

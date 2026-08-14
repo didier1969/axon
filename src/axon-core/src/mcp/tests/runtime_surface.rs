@@ -3451,3 +3451,71 @@ fn test_soll_manager_infers_entity_from_canonical_id_prefix() {
         "an unrecognised prefix falls back to the ordinary rejection"
     );
 }
+
+// REQ-AXO-902291 — the project scope of a READ-ONLY single-project tool must be
+// resolved from the client cwd, never left to the handler's literal "AXO".
+//
+// Measured before the fix: a tunnel launched from an AgriOptim cwd got
+// `SOLL context for AXO` — Axon's own SOLL served to another project's client,
+// silently. The transport (REQ-AXO-902286) and the chokepoint (REQ-AXO-902239)
+// both worked; these handlers simply were not on the list the chokepoint reads.
+//
+// The determination "absent means THIS project" vs "absent means EVERY project"
+// is the substance of this REQ, and the code answers it on its own: a tool that
+// defaults to one hardcoded project is single-project BY CONSTRUCTION, while a
+// rollup tool has no default to write. Both directions are pinned below — the
+// second matters most, because injecting a scope into a rollup tool would
+// SILENTLY NARROW its answer, strictly worse than today's visible wrong one.
+#[test]
+fn single_project_readonly_tools_resolve_scope_from_cwd() {
+    let listed: std::collections::HashMap<&str, &str> =
+        McpServer::PROJECT_AUTORESOLVE_TOOLS.iter().copied().collect();
+
+    // Each of these carried `args.get("project_code").unwrap_or("AXO")` in its
+    // handler — it answers about exactly one project.
+    for tool in [
+        "soll_query_context",
+        "soll_verify_requirements",
+        "snapshot_history",
+        "snapshot_diff",
+        "project_status",
+        "tech_debt_inventory",
+        "data_catalog",
+        "conception_view",
+        "change_safety",
+        "detect_remnants",
+    ] {
+        assert_eq!(
+            listed.get(tool),
+            Some(&"project_code"),
+            "`{tool}` answers about ONE project and must take its scope from the \
+             client cwd — otherwise a client working in another project silently \
+             reads AXO's data"
+        );
+    }
+}
+
+#[test]
+fn rollup_tools_are_never_scope_injected() {
+    let listed: std::collections::HashMap<&str, &str> =
+        McpServer::PROJECT_AUTORESOLVE_TOOLS.iter().copied().collect();
+
+    // For these, an absent project means EVERY project: they return a per-project
+    // rollup. Injecting a scope would narrow the answer with no error raised —
+    // the regression this allow-list exists to prevent.
+    for tool in [
+        "embedding_status",
+        "audit",
+        "health",
+        "anomalies",
+        "semantic_clones",
+        "diagnose_indexing",
+        "status",
+    ] {
+        assert!(
+            !listed.contains_key(tool),
+            "`{tool}` reports across ALL projects — injecting a scope would silently \
+             shrink its answer instead of failing visibly"
+        );
+    }
+}
