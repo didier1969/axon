@@ -1233,9 +1233,65 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         _ = telemetry_loop => {}
         _ = shutdown_signal() => {
             info!("🛑 Shutdown signal (SIGTERM/SIGINT) received — {:?} runtime unwinding for a clean exit (REQ-AXO-902233)", profile.role);
+            // REQ-AXO-902271 — the indexer leaves WITHOUT running the GPU
+            // teardown that wedges the WSL2 vmbus channel. Unwinding normally is
+            // what turns a stop into an unkillable `Terminating` process.
+            if should_hard_exit_on_shutdown(profile.role) {
+                info!(
+                    "⏭️  {:?} exiting hard — GPU teardown skipped on purpose (REQ-AXO-902271): \
+                     the deinit is a synchronous call on WSL2's single GPU channel and has \
+                     wedged this process unkillably; the driver reclaims the session anyway",
+                    profile.role
+                );
+                hard_exit_skipping_gpu_teardown();
+            }
         }
     }
     Ok(())
+}
+
+/// REQ-AXO-902271 — which role must exit WITHOUT letting the GPU destructors run.
+///
+/// REQ-AXO-902233 deliberately let `Drop` release the GPU session on stop,
+/// "instead of a hard kill". On WSL2 that good intention is the wedge: the
+/// CUDA/TensorRT deinit is a SYNCHRONOUS call onto the single serialised GPU
+/// vmbus channel (`dxgvmb_send_sync_msg`). When anything else touches the GPU in
+/// that window, the indexer's tokio worker blocks there in UNINTERRUPTIBLE sleep
+/// — unkillable (SIGKILL included), never reaped by process-compose, so the
+/// process sits in `Terminating` forever and only `wsl --shutdown` clears it.
+/// Measured: 4 wedges over 191 promotes, every one at the lifecycle gate.
+///
+/// The indexer can afford a hard exit and the brain cannot:
+///   * the indexer is a DERIVED, idempotent writer — the IST is rebuilt from
+///     source, so the worst case is re-scanning the in-flight batch;
+///   * the brain owns SOLL writes, which are preserve-always (PIL-AXO-003) —
+///     dropping one in flight is not recoverable by re-running anything.
+/// The brain is also not the offender: its D-thread on 2026-08-13 came from a
+/// query-embed issued while the channel was ALREADY wedged, not from its own
+/// teardown.
+///
+/// Releasing the GPU session on exit was never load-bearing: the driver reclaims
+/// every resource a process held when it dies. The teardown bought tidiness and
+/// cost availability.
+pub(crate) fn should_hard_exit_on_shutdown(role: RuntimeBootRole) -> bool {
+    matches!(role, RuntimeBootRole::Indexer)
+}
+
+/// REQ-AXO-902271 — leave the process NOW, skipping Rust destructors AND libc
+/// `atexit` handlers.
+///
+/// `std::process::exit` is not enough: it runs `atexit` hooks, and that is
+/// precisely where a GPU runtime registers its deinit (this crate already
+/// installs one in `test_support::test_db`). Only `_exit` — the raw
+/// `exit_group` syscall — guarantees no GPU call happens on the way out.
+/// stdout/stderr are flushed first by hand, since `_exit` skips that too.
+fn hard_exit_skipping_gpu_teardown() -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: `_exit` is async-signal-safe and terminates the process; nothing
+    // after it can observe the skipped destructors.
+    unsafe { libc::_exit(0) }
 }
 
 /// REQ-AXO-902233 — resolves on the first SIGTERM (process-compose stop, OS
@@ -1273,11 +1329,30 @@ mod tests {
         canonical_effective_embedding_lane_config, canonical_embedding_provider_request,
         graph_first_indexer_lane_sizing, parse_boot_warm_project_codes,
         classify_stale_socket, parse_build_info_identity, resource_release_identity,
-        RuntimeBootProfile, RuntimeBootRole, StaleSocketKind,
+        should_hard_exit_on_shutdown, RuntimeBootProfile, RuntimeBootRole, StaleSocketKind,
     };
     use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_capacity_profile::{EmbeddingLaneSizing, RuntimeProfile};
     use crate::runtime_writer_guard::WriterTarget;
+
+    // REQ-AXO-902271 — the indexer must NOT run its GPU teardown on SIGTERM.
+    //
+    // The exit itself cannot be unit-tested (it would kill the test runner),
+    // which is exactly why the DECISION is a separate pure predicate: the part
+    // that can be got wrong is the role split, and that part is pinned here.
+    #[test]
+    fn only_the_indexer_skips_gpu_teardown_on_shutdown() {
+        assert!(
+            should_hard_exit_on_shutdown(RuntimeBootRole::Indexer),
+            "the indexer is a derived idempotent writer and the process that wedges \
+             on dxgvmb — it exits hard rather than deinit the GPU synchronously"
+        );
+        assert!(
+            !should_hard_exit_on_shutdown(RuntimeBootRole::Brain),
+            "the brain owns preserve-always SOLL writes (PIL-AXO-003): an in-flight \
+             write is not recoverable by re-running anything, so it keeps unwinding"
+        );
+    }
 
     /// REQ-AXO-902256 — the real session-104 path: a restarting BRAIN finds
     /// `/tmp/axon-live-brain-telemetry.sock`. The old code called that a
