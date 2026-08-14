@@ -276,11 +276,36 @@ fn c8_non_destructive_views_archive_nothing() {
 
     read(&server, json!({ "project": TO, "mode": "all" }));
     read(&server, json!({ "project": TO, "mode": "since", "since_id": 0 }));
+    // `search` NE passe PAS `mode` : le défaut est `unread`, et c'est précisément
+    // le cas qui a menti en live (bandeau « cursor advanced » sur une vue qui
+    // n'avait rien consommé). Le contrat non-destructif tient au `view_only`, pas
+    // au mode déclaré — donc c'est CE cas qu'il faut épingler.
+    let searched = read(&server, json!({ "project": TO, "search": "archivé" }));
 
     assert_eq!(
         inbox_count(&server, TO),
         1,
         "une vue non destructive ne doit rien archiver"
+    );
+
+    // Et elle ne doit pas non plus PRÉTENDRE l'avoir fait : le rapport est la
+    // seule chose que l'appelant voit.
+    let text = searched["content"][0]["text"]
+        .as_str()
+        .expect("le rapport porte un texte");
+    assert!(
+        !text.contains("cursor advanced") && !text.contains("archivé(s)"),
+        "une vue ne doit annoncer ni avance de curseur ni archivage : {text}"
+    );
+
+    // Le pendant positif : la lecture destructive, elle, DIT ce qu'elle retire.
+    let consumed = read(&server, json!({ "project": TO, "mode": "unread" }));
+    let consumed_text = consumed["content"][0]["text"]
+        .as_str()
+        .expect("le rapport porte un texte");
+    assert!(
+        consumed_text.contains("1 archivé(s)"),
+        "la lecture destructive doit annoncer son archivage : {consumed_text}"
     );
 }
 

@@ -446,7 +446,8 @@ impl McpServer {
 
         // Advance the read cursor only in `unread` mode (so `since`/`all`/search/
         // thread are non-destructive views). UPSERT, monotonic.
-        if mode == "unread" && !view_only && max_id > floor {
+        let mut archived_count: i64 = 0;
+        if cursor_advances && max_id > floor {
             let _ = self.graph_store.execute(&format!(
                 "INSERT INTO axon.mailbox_cursor (project_code, last_read_id, updated_at) \
                  VALUES ('{p}', {mid}, now()) \
@@ -472,6 +473,32 @@ impl McpServer {
             //
             // Only this branch archives: `all` / `since` / search / thread views are
             // non-destructive by contract (test C4) and must stay so.
+            //
+            // Counted BEFORE the UPDATE (same predicate) so the report can SAY what it
+            // removed. Archiving on read is a state change the caller did not spell
+            // out; leaving it silent would be the same trust loss any undisclosed
+            // input normalisation is (cf. `disclose_cwd_provenance`, mcp.rs).
+            archived_count = self
+                .graph_store
+                .query_json(&format!(
+                    "SELECT count(*) FROM axon.mailbox_message \
+                     WHERE to_project='{p}' AND id <= {mid} AND id > {floor} \
+                       AND archived_at IS NULL AND COALESCE(priority,'') <> 'high'",
+                    p = esc(&project),
+                    mid = max_id,
+                    floor = floor
+                ))
+                .ok()
+                .and_then(|s| serde_json::from_str::<Vec<Vec<Value>>>(&s).ok())
+                .and_then(|rows| rows.into_iter().next())
+                .and_then(|row| row.into_iter().next())
+                .and_then(|cell| match cell {
+                    Value::Number(n) => n.as_i64(),
+                    Value::String(s) => s.parse::<i64>().ok(),
+                    _ => None,
+                })
+                .unwrap_or(0);
+
             let _ = self.graph_store.execute(&format!(
                 "UPDATE axon.mailbox_message SET archived_at = now() \
                  WHERE to_project='{p}' AND id <= {mid} AND id > {floor} \
@@ -492,8 +519,20 @@ impl McpServer {
             },
             mode,
             messages.len(),
-            if mode == "unread" && max_id > floor {
-                format!(" · cursor advanced to {max_id}")
+            // REQ-AXO-902306 — the banner states what the read actually DID, and only
+            // that. It used to key off `mode == "unread"` alone, so a search or thread
+            // view (mode defaults to `unread`, `view_only` true) announced a cursor
+            // advance that never happened — the reader believed the inbox consumed. It
+            // now keys off `cursor_advances`, the same flag the write path uses, and
+            // names the archived/kept split so "read = gone" is visible where it occurs.
+            if cursor_advances && max_id > floor {
+                let kept = (messages.len() as i64 - archived_count).max(0);
+                let kept_note = if kept > 0 {
+                    format!(" · {kept} conservé(s) — important(s), à retirer délibérément")
+                } else {
+                    String::new()
+                };
+                format!(" · cursor advanced to {max_id} · {archived_count} archivé(s){kept_note}")
             } else {
                 String::new()
             },
