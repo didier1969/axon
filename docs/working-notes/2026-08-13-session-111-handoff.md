@@ -1,6 +1,16 @@
-# Session 111 handoff (2026-08-13) — livré + INCIDENT promote (indexeur wedgé, VM à rebooter)
+# Session 111 handoff (2026-08-13) — livré + incident promote → ✅ RÉSOLU le 2026-08-14
 
-> Canonique = SOLL. Ce fichier = audit + séquence de reprise opérateur. Probe `CPT-AXO-052` + `git log` d'abord.
+> Canonique = SOLL. Ce fichier = audit. Probe `CPT-AXO-052` + `git log` d'abord.
+
+## ✅ CLÔTURE (2026-08-14) — incident résolu, cause traitée à la source, ne rien reprendre ici
+- **VM rebootée** → zombie disparu, canal `dxgvmb` libre.
+- **agent-deck a RELU sa config sans-gpu** (démarré 06:34:52, après le boot 06:33:14). Vérifié empiriquement : **0 `nvidia-smi` sur 25 s** (5 fenêtres de poll), descendants = clients tmux seuls.
+- **2 promotes réussis** : live = **v0.8.0-1454-ge3aabb67**, 4 rôles Ready. `d_state=0`, **teardown indexeur 65-66 ms** (contre blocage infini la veille), step 2d PASS en 19-22 s (contre 206 s d'échec) → la RCA de collision est confirmée par la mesure.
+- **Frictions 2 / 125 / 144 FERMÉES** sous REQ-902289, chacune avec preuve E2E live (entity inféré / enum status publié / help suggère).
+- **Fix durable livré `e3aabb67`** (REQ-902271 levier 3) : l'indexeur sort en `libc::_exit(0)` — aucun deinit GPU sur le chemin d'arrêt. Protège les arrêts FUTURS (le promote qui l'a déployé arrêtait encore l'ancien binaire).
+- **Levier 2 ABANDONNÉ** après vérification (REQ-902293, rétrogradé P3) : le « promote brain-only » n'existe pas — les 3 binaires partagent `axon-core` (empreinte `axon-indexer` CHANGÉE alors que le diff était 100 % `mcp/*`). Le redémarrage était légitime.
+
+> Ce qui suit est le compte rendu de l'incident, conservé pour la RCA. **La séquence de reprise §3 est CADUQUE** (exécutée avec succès).
 
 ## 1. Livré et POUSSÉ (origin/main jusqu'à `2080854c`)
 5 REQ clôturés `delivered`, 3 commits :
