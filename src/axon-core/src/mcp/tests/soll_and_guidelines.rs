@@ -798,6 +798,17 @@ fn test_axon_soll_manager_rejects_legacy_project_without_canonical_meta() {
 #[test]
 fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
     // REQ-AXO-91560 — per-test project_code isolation.
+    //
+    // REQ-AXO-902300 — this test READS `AXON_MCP_MUTATION_JOBS` (through the
+    // dispatch, which routes to an async job when it is on) but took no env lock,
+    // so a concurrent test flipping that var made it fail with "Mutation job
+    // accepted" instead of the inline result. Verified: green under
+    // `--test-threads=1`, red in parallel. The existing repo guard only covers
+    // tests that MUTATE the env, not those that merely depend on it.
+    let _guard = env_lock();
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
     let server = create_test_server();
     let code = "TST".to_string();
     let title = format!("Preview Commit Requirement {code}");
@@ -922,6 +933,15 @@ fn test_axon_soll_apply_plan_accepts_guidelines_stakeholders_validations() {
     // plan.stakeholders, plan.validations even though the storage layer
     // already supports all three. Adding them to the iteration list closes
     // the gap and makes soll_apply_plan symmetric with soll_manager.
+    //
+    // REQ-AXO-902300 — same env-race fix as the preview test above: this reads
+    // `AXON_MCP_MUTATION_JOBS` via the dispatch without holding the lock, so a
+    // concurrent flip turned the inline response into an async job envelope and
+    // the `operations` array was absent.
+    let _guard = env_lock();
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
     let server = create_test_server();
     let code = "TST".to_string();
 
@@ -1223,13 +1243,23 @@ fn test_soll_apply_plan_dry_run_surfaces_commit_blockers_for_missing_attach_to()
 }
 
 #[test]
-fn test_soll_apply_plan_rejects_relations_nested_inside_plan() {
-    // REQ-AXO-901625 — guard against the schema-drift mistake observed
-    // in the Pollux Cuisine session : `relations` nested inside `plan`
-    // instead of at the top level. Before the fix the array was silently
-    // dropped and zero edges were created. The fix surfaces an
-    // `input_invalid` envelope with `parameter_repair` so the caller
-    // recovers in one round-trip.
+fn test_soll_apply_plan_hoists_relations_nested_inside_plan() {
+    // REQ-AXO-901625 → REQ-AXO-902300 — the schema-drift mistake observed in the
+    // Pollux Cuisine session: `relations` nested inside `plan` instead of at the
+    // top level.
+    //
+    // History of this contract, because it moved twice: originally the array was
+    // SILENTLY DROPPED and the call reported `succeeded` with zero edges
+    // materialised. REQ-AXO-901625 turned that into an explicit rejection with a
+    // `corrected_call` — a real improvement, but still a round-trip. The code's own
+    // comment explains why callers keep making it: "the collection name reads
+    // naturally as part of the plan object". That is a contract ergonomics defect,
+    // not a caller error, and the correction is deterministic (same content, wrong
+    // slot). So it is now HOISTED and applied.
+    //
+    // This test therefore asserts the opposite of what it used to: success, not
+    // refusal. The refusal case moved to the genuinely ambiguous one (both slots
+    // filled) — see the test below.
     let _guard = env_lock();
     unsafe {
         std::env::remove_var("AXON_MCP_MUTATION_JOBS");
@@ -1263,25 +1293,123 @@ fn test_soll_apply_plan_rejects_relations_nested_inside_plan() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+
+    assert_ne!(
+        result["isError"].as_bool(),
+        Some(true),
+        "a nested-only `relations` is unambiguous — hoist it instead of spending a \
+         round-trip prescribing what we can already do: {text}"
+    );
+    assert!(
+        text.contains("hissé") || text.contains("REQ-AXO-902300"),
+        "the hoist MUST be disclosed in the text channel — a silent input \
+         normalisation is a loss of trust, not a convenience: {text}"
+    );
+    assert!(
+        result["data"]["preview_id"].as_str().is_some(),
+        "the dry-run must have produced a real preview, i.e. the relation was \
+         actually taken into account: {result}"
+    );
+}
+
+#[test]
+fn test_soll_apply_plan_refuses_relations_filled_in_both_places() {
+    // REQ-AXO-902300 — the frontier inherited from REQ-AXO-902288: unambiguous →
+    // auto-canonicalise, ambiguous → refuse. With BOTH slots filled, picking one
+    // would drop relations and merging would duplicate them; neither is ours to
+    // decide for the caller.
+    let _guard = env_lock();
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "dry_run": true,
+                "author": "test",
+                "plan": {
+                    "requirements": [{
+                        "logical_key": "req-902300-both",
+                        "title": "Both placements filled",
+                        "description": "Ambiguous: relations in plan AND at top level"
+                    }],
+                    "relations": [
+                        {"source_logical_key": "req-902300-both", "target_id": "PIL-AXO-001", "relation_type": "BELONGS_TO"}
+                    ]
+                },
+                "relations": [
+                    {"source_logical_key": "req-902300-both", "target_id": "PIL-AXO-002", "relation_type": "BELONGS_TO"}
+                ]
+            }
+        })),
+        id: Some(json!(902_300_01)),
+    };
+
+    let result = server.handle_request(req).unwrap().result.unwrap();
     assert_eq!(
         result["isError"].as_bool(),
         Some(true),
-        "misplaced relations must return isError=true"
-    );
-    assert_eq!(
-        result["data"]["status"].as_str(),
-        Some("input_invalid"),
-        "status must be input_invalid"
+        "two competing lists must refuse, not guess: {result}"
     );
     assert_eq!(
         result["data"]["parameter_repair"]["category"].as_str(),
-        Some("relations_misplaced_inside_plan"),
-        "parameter_repair must categorise the misplacement"
+        Some("relations_misplaced_inside_plan")
     );
     assert_eq!(
-        result["data"]["parameter_repair"]["items_silently_dropped"].as_u64(),
+        result["data"]["parameter_repair"]["nested_items"].as_u64(),
         Some(1),
-        "parameter_repair must report how many items were misplaced"
+        "the refusal still reports how many items sit in the wrong slot"
+    );
+}
+
+#[test]
+fn test_soll_apply_plan_hoists_when_top_level_relations_is_an_empty_array() {
+    // REQ-AXO-902300 — `relations: []` at the top level is not a competing list,
+    // it is the absence of one. Treating it as "both filled" would refuse a call
+    // that is in fact unambiguous.
+    let _guard = env_lock();
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "dry_run": true,
+                "author": "test",
+                "plan": {
+                    "requirements": [{
+                        "logical_key": "req-902300-empty",
+                        "title": "Empty top-level relations",
+                        "description": "Degenerate case"
+                    }],
+                    "relations": [
+                        {"source_logical_key": "req-902300-empty", "target_id": "PIL-AXO-001", "relation_type": "BELONGS_TO"}
+                    ]
+                },
+                "relations": []
+            }
+        })),
+        id: Some(json!(902_300_02)),
+    };
+
+    let result = server.handle_request(req).unwrap().result.unwrap();
+    assert_ne!(
+        result["isError"].as_bool(),
+        Some(true),
+        "an empty top-level array is not a competing list: {result}"
     );
 }
 

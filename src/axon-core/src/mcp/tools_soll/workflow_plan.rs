@@ -1,6 +1,27 @@
 use super::*;
 
 impl McpServer {
+    /// REQ-AXO-902300 — append a disclosure line to a tool response's text channel.
+    ///
+    /// Mirrors `disclose_cwd_provenance`: `content[0].text` is the channel an LLM
+    /// actually reads, and a silent input normalisation would be a loss of trust,
+    /// not a convenience. Applied to the response WHATEVER path produced it — the
+    /// dry-run envelope built here, or the one `soll_commit_revision` returns when
+    /// the call commits directly.
+    fn append_text_note(response: Option<Value>, note: &str) -> Option<Value> {
+        let mut response = response?;
+        if let Some(text) = response
+            .get_mut("content")
+            .and_then(|c| c.get_mut(0))
+            .and_then(|entry| entry.get_mut("text"))
+        {
+            if let Some(existing) = text.as_str() {
+                *text = Value::from(format!("{existing}{note}"));
+            }
+        }
+        Some(response)
+    }
+
     pub(crate) fn axon_soll_apply_plan(&self, args: &Value) -> Option<Value> {
         let project_code = match self.require_registered_mutation_project_code(
             args.get("project_code").and_then(|v| v.as_str()),
@@ -39,14 +60,51 @@ impl McpServer {
         // nor by the top-level relations loop), producing a "succeeded"
         // job that materialised zero edges. Surface the misplacement
         // explicitly so the operator can correct the call in one round-trip.
+        // REQ-AXO-902300 — when only ONE placement is filled, the correction is
+        // deterministic (same content, wrong slot): hoist it and carry on, rather
+        // than spend a round-trip prescribing what we can already do. Same frontier
+        // as REQ-AXO-902288 for `relation_type`: unambiguous → auto-canonicalise,
+        // ambiguous → refuse. The refusal below now fires ONLY when both slots are
+        // filled, where picking one (or merging into duplicates) would be guessing.
         if let Some(plan_obj) = args.get("plan").and_then(|v| v.as_object()) {
+            let both_filled = plan_obj.contains_key("relations")
+                && args
+                    .get("relations")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| !a.is_empty());
+            if plan_obj.contains_key("relations") && !both_filled {
+                let hoisted_len = plan_obj
+                    .get("relations")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let mut patched = args.clone();
+                if let Some(obj) = patched.as_object_mut() {
+                    let moved = obj
+                        .get_mut("plan")
+                        .and_then(|p| p.as_object_mut())
+                        .and_then(|p| p.remove("relations"))
+                        .unwrap_or_else(|| json!([]));
+                    obj.insert("relations".to_string(), moved);
+                }
+                tracing::debug!(
+                    hoisted_len,
+                    "REQ-AXO-902300 — hoisted plan.relations to top level"
+                );
+                let note = format!(
+                    "\n\n_↳ `relations` ({hoisted_len} item(s)) était imbriqué dans `plan` ; \
+                     hissé au niveau attendu et appliqué (REQ-AXO-902300). Le schéma le place \
+                     à côté de `plan`, pas dedans._"
+                );
+                return Self::append_text_note(self.axon_soll_apply_plan(&patched), &note);
+            }
             if let Some(misplaced) = plan_obj.get("relations") {
                 let len = misplaced.as_array().map(|a| a.len()).unwrap_or(0);
                 return Some(json!({
                     "content": [{
                         "type": "text",
                         "text": format!(
-                            "soll_apply_plan rejected: `relations` ({} item(s)) is nested inside `plan` but the schema places it at the top level next to `plan`. Move the array out of `plan` and retry.",
+                            "soll_apply_plan rejected: `relations` is filled in BOTH places — {} item(s) nested inside `plan`, and a non-empty top-level `relations`. A nested-only array is hoisted automatically (REQ-AXO-902300); with both filled, picking one would drop relations and merging would duplicate them. Keep a single list, at the top level next to `plan`.",
                             len
                         )
                     }],
@@ -64,8 +122,8 @@ impl McpServer {
                             "category": "relations_misplaced_inside_plan",
                             "invalid_field": "plan.relations",
                             "expected_field": "relations",
-                            "items_silently_dropped": len,
-                            "hint": "move `relations: [...]` out of `plan` so the call looks like `{project_code, plan:{requirements:[...]}, relations:[...]}`",
+                            "nested_items": len,
+                            "hint": "both placements are filled: merge them into ONE top-level `relations` array so the call looks like `{project_code, plan:{requirements:[...]}, relations:[...]}`. A nested-ONLY array needs no fix — it is hoisted for you.",
                             // REQ-AXO-902055 — inline minimal valid call so the LLM
                             // corrects in one round-trip (pattern: evidence repair).
                             "corrected_call": {
