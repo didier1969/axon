@@ -463,10 +463,10 @@ fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
         }
     });
     // 1 + aggregation: capture twice.
-    server.record_mcp_friction(tool, &problematic);
-    server.record_mcp_friction(tool, &problematic);
+    server.record_mcp_friction(tool, &json!({}), &problematic);
+    server.record_mcp_friction(tool, &json!({}), &problematic);
     // A terse success (no problem_class) must NOT be captured.
-    server.record_mcp_friction(tool, &json!({ "data": { "project_code": proj } }));
+    server.record_mcp_friction(tool, &json!({}), &json!({ "data": { "project_code": proj } }));
 
     // Privacy: the secret value must appear NOWHERE in the table.
     let dump = server
@@ -531,7 +531,7 @@ fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
     );
 
     // Regression: recurrence after resolution → regressed flag.
-    server.record_mcp_friction(tool, &problematic);
+    server.record_mcp_friction(tool, &json!({}), &problematic);
     let r3 = report(None);
     let regressed = r3["data"]["resolved_frictions"]
         .as_array()
@@ -541,6 +541,162 @@ fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
         regressed,
         "a recurrence after resolution must flag regression: {:?}",
         r3["data"]["resolved_frictions"]
+    );
+}
+
+// REQ-AXO-902309 — la signature doit porter le tenant qui l'a subie.
+//
+// Lire uniquement `data.project_code` laissait 47 signatures sur 68 sans projet :
+// une réponse d'ERREUR est précisément celle qui n'a pas eu le temps d'écho­er sa
+// portée. Conséquence mesurée le 2026-08-14 : `mcp_friction_report
+// project_code=AXO` annonçait « 0 ouvert » avec 24 ouvertes.
+#[test]
+fn friction_signature_falls_back_to_the_callers_project_scope() {
+    let server = create_test_server();
+    let proj = "FRIC902309";
+    let tool = "synthetic_scope_probe";
+    // La réponse ne dit PAS le projet — seul l'appelant le sait.
+    let problematic = json!({
+        "data": {
+            "operator_guidance": { "problem_class": "invalid_arguments" },
+            "parameter_repair": { "invalid_field": "target" }
+        }
+    });
+    server.record_mcp_friction(tool, &json!({ "project": proj }), &problematic);
+
+    let stamped = server
+        .graph_store
+        .query_json(&format!(
+            "SELECT COALESCE(project_code,'(vide)') FROM axon.mcp_friction WHERE tool='{tool}'"
+        ))
+        .unwrap();
+    assert!(
+        stamped.contains(proj) && !stamped.contains("(vide)"),
+        "la signature doit porter le projet de l'appelant, pas une chaîne vide : {stamped}"
+    );
+}
+
+// REQ-AXO-902309 — un rapport filtré ne doit jamais se présenter comme complet.
+#[test]
+fn a_filtered_friction_report_discloses_the_unattributed_backlog() {
+    let server = create_test_server();
+    // Une signature historique, sans tampon projet (ce que produisait l'ancien code).
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO axon.mcp_friction (project_code, tool, problem_class, field_in_error, contract_version) \
+             VALUES ('', 'legacy_unstamped_probe', 'invalid_arguments', 'target', 'test') \
+             ON CONFLICT (project_code, tool, problem_class, field_in_error) DO NOTHING",
+        )
+        .unwrap();
+
+    let text = server
+        .execute_tool_direct("mcp_friction_report", &json!({ "project_code": "FRIC902309B" }))
+        .expect("report")["content"][0]["text"]
+        .as_str()
+        .expect("texte")
+        .to_string();
+    assert!(
+        text.contains("NON attribuée"),
+        "le rapport filtré doit NOMMER le seau non attribué au lieu de l'omettre : {text}"
+    );
+}
+
+// REQ-AXO-902310 — une classe non-échec revue après fermeture n'est PAS une
+// régression. C'est le défaut symétrique de celui que REQ-AXO-902297 a fermé :
+// un mode dégradé légitime ne peut jamais RESTER « résolu », il continue d'être
+// observé — le signaler à chaque rapport rendrait l'indicateur inutilisable.
+#[test]
+fn a_non_failure_class_reobserved_after_closure_is_not_a_regression() {
+    let server = create_test_server();
+    let proj = "FRIC902310";
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO axon.mcp_friction \
+               (project_code, tool, problem_class, field_in_error, contract_version, \
+                status, resolved_at, resolved_by_req, last_observed_at) \
+             VALUES ('{proj}', 'degraded_probe', 'degraded', '', 'test', \
+                     'resolved', now() - interval '2 days', 'REQ-AXO-902297', now()), \
+                    ('{proj}', 'real_probe', 'invalid_arguments', 'target', 'test', \
+                     'resolved', now() - interval '2 days', 'REQ-AXO-902310', now())"
+        ))
+        .unwrap();
+
+    let res = server
+        .execute_tool_direct("mcp_friction_report", &json!({ "project_code": proj }))
+        .expect("report");
+    assert_eq!(
+        res["data"]["regressed_count"].as_i64(),
+        Some(1),
+        "seule la classe d'ÉCHEC compte comme régression : {:?}",
+        res["data"]
+    );
+    let text = res["content"][0]["text"].as_str().expect("texte");
+    assert!(
+        text.contains("RÉGRESSÉE") && text.contains("real_probe"),
+        "la régression doit être NOMMÉE, pas seulement comptée : {text}"
+    );
+    assert!(
+        !text.contains("degraded_probe ⚠️"),
+        "un mode dégradé légitime ne doit pas être marqué régressé : {text}"
+    );
+}
+
+// REQ-AXO-902310 — la régression est comptée sur toute la table, pas sur la page.
+// Même classe que REQ-AXO-902292, laissée en place sur ce seul champ.
+#[test]
+fn the_regression_count_is_not_capped_by_the_page_limit() {
+    let server = create_test_server();
+    let proj = "FRIC902310B";
+    for i in 0..4 {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO axon.mcp_friction \
+                   (project_code, tool, problem_class, field_in_error, contract_version, \
+                    status, resolved_at, resolved_by_req, last_observed_at, occurrence_count) \
+                 VALUES ('{proj}', 'probe_{i}', 'invalid_arguments', 'f{i}', 'test', \
+                         'resolved', now() - interval '2 days', 'REQ-AXO-902310', now(), {i})"
+            ))
+            .unwrap();
+    }
+    let res = server
+        .execute_tool_direct(
+            "mcp_friction_report",
+            &json!({ "project_code": proj, "limit": 1 }),
+        )
+        .expect("report");
+    assert_eq!(
+        res["data"]["regressed_count"].as_i64(),
+        Some(4),
+        "4 régressions doivent être comptées même avec limit=1 : {:?}",
+        res["data"]
+    );
+}
+
+// REQ-AXO-902310 — les deux lectures de `problem_class` (Rust et SQL) dérivent
+// d'une seule liste. Une seconde copie écrite à la main est exactement la façon
+// dont ce module a déjà vu deux lectures d'un champ diverger.
+#[test]
+fn the_sql_and_rust_failure_predicates_derive_from_one_list() {
+    use crate::mcp::tools_friction::{
+        failure_class_sql, problem_class_is_failure, NON_FAILURE_PROBLEM_CLASSES,
+    };
+    let sql = failure_class_sql();
+    for class in NON_FAILURE_PROBLEM_CLASSES {
+        assert!(
+            !problem_class_is_failure(class),
+            "`{class}` est dans la liste des non-échecs mais Rust le compte comme échec"
+        );
+        assert!(
+            sql.contains(&format!("'{class}'")),
+            "`{class}` manque au prédicat SQL : {sql}"
+        );
+    }
+    assert!(
+        problem_class_is_failure("invalid_arguments"),
+        "une classe inconnue doit rester un échec (elle doit remonter, pas être avalée)"
     );
 }
 

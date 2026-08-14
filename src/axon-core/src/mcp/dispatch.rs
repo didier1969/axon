@@ -272,7 +272,7 @@ impl McpServer {
         // chokepoint every tool response passes through. Best-effort, records
         // only the problem SHAPE (never arg content), only when the response
         // carries a non-null problem_class.
-        self.record_mcp_friction(normalized_name, &final_response);
+        self.record_mcp_friction(normalized_name, arguments, &final_response);
         // REQ-AXO-901961 S1 — per-call telemetry (every call, ok or error) with
         // latency, at the same chokepoint. Best-effort, signature-only.
         self.record_mcp_call(

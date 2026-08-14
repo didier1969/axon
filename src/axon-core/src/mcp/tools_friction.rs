@@ -33,7 +33,25 @@ const MCP_CALL_STAT_RETENTION_DAYS: i64 = 90;
 /// deliberately narrow — an UNKNOWN class still counts as a failure, because a
 /// new problem class must surface loudly rather than be silently swallowed.
 pub(crate) fn problem_class_is_failure(problem_class: &str) -> bool {
-    !matches!(problem_class, "" | "ok" | "none" | "degraded")
+    !NON_FAILURE_PROBLEM_CLASSES.contains(&problem_class)
+}
+
+/// The allow-list behind `problem_class_is_failure`, hoisted to a constant so the
+/// SQL half of the same rule (`failure_class_sql`) cannot drift from the Rust half.
+/// REQ-AXO-902310: the regression derivation runs in SQL, and a second hand-written
+/// copy of this list is exactly how one reading of a field diverges from another —
+/// which is the defect this module already documents above.
+pub(crate) const NON_FAILURE_PROBLEM_CLASSES: &[&str] = &["", "ok", "none", "degraded"];
+
+/// SQL predicate equivalent to `problem_class_is_failure`, derived from the same
+/// constant. Values are static and alphanumeric, so the quoting is total.
+pub(crate) fn failure_class_sql() -> String {
+    let list = NON_FAILURE_PROBLEM_CLASSES
+        .iter()
+        .map(|c| format!("'{c}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("COALESCE(problem_class, '') NOT IN ({list})")
 }
 
 /// REQ-AXO-902292 — render the friction signatures INTO the text channel.
@@ -54,7 +72,16 @@ fn render_friction_rows(rows: &[Value], total: i64, header: &str) -> String {
         return format!("\n**{header}:** none\n");
     }
     let mut out = format!("\n**{header}** (showing {} of {total}):\n\n", rows.len());
-    out.push_str("| id | tool | problem | field | count |\n|---|---|---|---|---|\n");
+    // REQ-AXO-902310 — the regression column exists only where regression is a
+    // meaningful state (the resolved section). Naming the row is the point: a bare
+    // "N regressed" count tells the reader something broke without telling them
+    // WHAT, so the next move is raw SQL — the very fallback this table retired.
+    let has_regressed = rows.iter().any(|r| r.get("regressed").is_some());
+    if has_regressed {
+        out.push_str("| id | tool | problem | field | count | état |\n|---|---|---|---|---|---|\n");
+    } else {
+        out.push_str("| id | tool | problem | field | count |\n|---|---|---|---|---|\n");
+    }
     for r in rows {
         let cell = |k: &str| -> String {
             match r.get(k) {
@@ -63,14 +90,25 @@ fn render_friction_rows(rows: &[Value], total: i64, header: &str) -> String {
                 _ => "—".to_string(),
             }
         };
-        out.push_str(&format!(
-            "| {} | `{}` | {} | `{}` | {} |\n",
+        let core = format!(
+            "| {} | `{}` | {} | `{}` | {} |",
             cell("id"),
             cell("tool"),
             cell("problem_class"),
             cell("field_in_error"),
             cell("occurrence_count"),
-        ));
+        );
+        if has_regressed {
+            let state = if r["regressed"].as_bool() == Some(true) {
+                let by = cell("resolved_by_req");
+                format!("⚠️ RÉGRESSÉE — revue depuis {by}")
+            } else {
+                "fermée".to_string()
+            };
+            out.push_str(&format!("{core} {state} |\n"));
+        } else {
+            out.push_str(&format!("{core}\n"));
+        }
     }
     if (rows.len() as i64) < total {
         out.push_str(&format!(
@@ -89,7 +127,7 @@ impl McpServer {
     /// your friction without ever seeing your data"). Failure-tolerant: a
     /// friction-log write must never affect the tool response. Terse successes
     /// (no `problem_class`) are not friction and are skipped.
-    pub(crate) fn record_mcp_friction(&self, tool: &str, response: &Value) {
+    pub(crate) fn record_mcp_friction(&self, tool: &str, arguments: &Value, response: &Value) {
         if tool == "mcp_friction_report" {
             return; // never self-loop on the friction surface itself
         }
@@ -113,10 +151,34 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or("");
         // project_code is signature metadata (which tenant hit it), not client data.
+        //
+        // REQ-AXO-902309 — resolved by CASCADE, not from the response alone. Reading
+        // only `data.project_code` left 47 of 68 signatures (2683 of ~2846
+        // occurrences) unattributed, because an ERROR response is precisely the one
+        // that does not get around to echoing the project scope. The consequence was
+        // not a cosmetic gap: `mcp_friction_report project_code=AXO` answered "Open
+        // signatures: 0" with 24 open — a filtered report that reads as a clean
+        // surface and CLOSES the investigation.
+        //
+        // The fallbacks are the same scope the tool itself ran under, in decreasing
+        // order of explicitness: what the response says → what the caller asked for →
+        // what the cwd resolves to. Still signature metadata only; no argument value
+        // is ever read here (PIL-AXO-9003).
         let project_code = data
             .get("project_code")
             .and_then(Value::as_str)
-            .unwrap_or("");
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                arguments
+                    .get("project_code")
+                    .or_else(|| arguments.get("project"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_string)
+            })
+            .or_else(|| self.auto_resolve_project_code_str())
+            .unwrap_or_default();
         let build_id =
             std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
         // Event-sourced upsert (PIL-AXO-9004): one row per distinct signature,
@@ -324,15 +386,27 @@ impl McpServer {
             })
             .collect();
 
+        // REQ-AXO-902310 — a regression is a signature declared fixed and observed
+        // AGAIN since, on a class that is genuinely a failure. Both halves matter:
+        // without the failure filter, a `degraded`/`none` signature can never stay
+        // "resolved" (it keeps being legitimately observed) and would raise a false
+        // alarm on every report — the symmetric defect of the one REQ-AXO-902297 fixed.
+        let regressed_sql = format!(
+            "(status = 'resolved' AND resolved_at IS NOT NULL \
+              AND last_observed_at > resolved_at AND {})",
+            failure_class_sql()
+        );
         let resolved_rows = self
             .graph_store
             .query_json_param(
-                "SELECT id, tool, problem_class, occurrence_count, COALESCE(resolved_by_req,''),
-                        COALESCE(resolved_by_val,''), (last_observed_at > resolved_at)
-                 FROM axon.mcp_friction
-                 WHERE status = 'resolved' AND (? = '' OR project_code = ?)
-                 ORDER BY occurrence_count DESC
-                 LIMIT ?",
+                &format!(
+                    "SELECT id, tool, problem_class, occurrence_count, COALESCE(resolved_by_req,''),
+                            COALESCE(resolved_by_val,''), {regressed_sql}, field_in_error
+                     FROM axon.mcp_friction
+                     WHERE status = 'resolved' AND (? = '' OR project_code = ?)
+                     ORDER BY {regressed_sql} DESC, occurrence_count DESC
+                     LIMIT ?"
+                ),
                 &json!([project_code, project_code, limit]),
             )
             .ok()
@@ -350,15 +424,12 @@ impl McpServer {
                     "resolved_by_req": r.get(4).cloned().unwrap_or(Value::Null),
                     "resolved_by_val": r.get(5).cloned().unwrap_or(Value::Null),
                     "regressed": regressed,
+                    "field_in_error": r.get(7).cloned().unwrap_or(Value::Null),
                 })
             })
             .collect();
 
         let open_count = open_frictions.len();
-        let regressed_count = resolved_frictions
-            .iter()
-            .filter(|f| f["regressed"].as_bool() == Some(true))
-            .count();
         // REQ-AXO-902292 — the true totals, not the page size. `open_count` is
         // `open_frictions.len()`, i.e. capped by LIMIT: reporting it as "Open
         // signatures: 15" told the reader there were exactly 15 when 15 was
@@ -383,14 +454,60 @@ impl McpServer {
         let total_open = total_of("open");
         let total_resolved = total_of("resolved");
 
+        // REQ-AXO-902310 — counted over the WHOLE table, not the page. The paged
+        // count was the same defect REQ-AXO-902292 fixed for the open/resolved
+        // totals, left behind on this one field: a regression sitting past `limit`
+        // was reported as "0 regressed", and 0 is the number that stops the reader.
+        let scalar = |sql: &str, params: Value| -> i64 {
+            self.graph_store
+                .query_json_param(sql, &params)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                .and_then(|rows| rows.first().and_then(|r| r.first()).and_then(Self::i64_cell))
+                .unwrap_or(-1)
+        };
+        let regressed_count = scalar(
+            &format!(
+                "SELECT count(*) FROM axon.mcp_friction \
+                 WHERE {regressed_sql} AND (? = '' OR project_code = ?)"
+            ),
+            json!([project_code, project_code]),
+        );
+
+        // REQ-AXO-902309 — a filtered report must never present itself as complete
+        // while signatures sit in the unattributed bucket. Historic rows (written
+        // before the project stamp was cascaded) carry an empty `project_code`; a
+        // per-tenant filter drops them silently, which is how "0 open" was read as
+        // a clean surface. They are counted and NAMED here instead.
+        let unattributed = if project_code.is_empty() {
+            0
+        } else {
+            scalar(
+                "SELECT count(*) FROM axon.mcp_friction \
+                 WHERE status = 'open' AND COALESCE(project_code, '') = ''",
+                json!([]),
+            )
+        };
+        let unattributed_note = if unattributed > 0 {
+            format!(
+                "\n⚠️ **{unattributed} signature(s) ouverte(s) NON attribuée(s)** — antérieures au \
+                 tampon projet (REQ-AXO-902309), donc invisibles pour ce filtre. Le total \
+                 ci-dessus n'est PAS la surface complète : rappeler sans `project_code` pour \
+                 les voir.\n"
+            )
+        } else {
+            String::new()
+        };
+
         let report = format!(
             "## 🔁 MCP Friction Report\n\n**Open signatures (rollout priorities):** {}\n\
              **Resolved:** {} ({} regressed since resolution)\n\
              **Privacy:** signature-only — no argument content is ever stored.\n\
-             {}{}\n_Table: `axon.mcp_friction`._\n",
+             {}{}{}\n_Table: `axon.mcp_friction`._\n",
             total_open,
             total_resolved,
             regressed_count,
+            unattributed_note,
             render_friction_rows(&open_frictions, total_open, "Open signatures"),
             render_friction_rows(&resolved_frictions, total_resolved, "Resolved"),
         );
@@ -407,7 +524,10 @@ impl McpServer {
                 "open_frictions": open_frictions,
                 "resolved_frictions": resolved_frictions,
                 "open_count": open_count,
+                "total_open": total_open,
+                "total_resolved": total_resolved,
                 "regressed_count": regressed_count,
+                "unattributed_open": unattributed,
                 "privacy": "signature-only — no argument content is ever stored",
             }
         }))
