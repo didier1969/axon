@@ -1389,7 +1389,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "mcp_friction_report",
-                "description": "[SYSTEM/SOLL] REQ-AXO-901957 — closed-loop MCP friction log. Returns top OPEN friction signatures by frequency (rollout priorities) + RESOLVED ones with their REQ/VAL links and regression flags. Signatures record only the problem SHAPE (project_code, tool, problem_class, field name) — NEVER any argument content. Optional `mark_resolved` closes a signature against the SOLL fix that resolved it.",
+                "description": "[SYSTEM/SOLL] REQ-AXO-901957 — closed-loop MCP friction log. Returns top OPEN friction signatures by frequency (rollout priorities) + RESOLVED ones with their REQ/VAL links and regression flags, ENUMERATED in the text (id/tool/problem/field/count), not just counted (REQ-AXO-902292) — no raw SQL needed to triage. Counts are the true totals; the listing discloses truncation against them. Signatures record only the problem SHAPE (project_code, tool, problem_class, field name) — NEVER any argument content. Optional `mark_resolved` closes a signature against the SOLL fix that resolved it. Backing table (for the rare case a query beats this tool): `axon.mcp_friction`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

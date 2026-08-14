@@ -9,6 +9,51 @@ use super::McpServer;
 /// than this so the table can never grow unbounded over time.
 const MCP_CALL_STAT_RETENTION_DAYS: i64 = 90;
 
+/// REQ-AXO-902292 — render the friction signatures INTO the text channel.
+///
+/// Same class REQ-AXO-902279 fixed for `wiring`/`orphan_clusters`: the rows were
+/// already assembled in `data`, and `content[0].text` printed only a count. The
+/// tool's own `next_action` says "fix a top-open signature" — which was
+/// impossible, because it never named one. An LLM reading the summary had to
+/// fall back to raw SQL on `axon.mcp_friction`, and `sql input_invalid` is the
+/// #1 open friction: the triage surface was feeding the very signature it exists
+/// to retire.
+///
+/// A table rather than `sample_identities` (the 902279 helper): a friction is
+/// four correlated fields, not a name, and priority only reads off the count.
+/// Truncation is ALWAYS disclosed against the true total, never the page size.
+fn render_friction_rows(rows: &[Value], total: i64, header: &str) -> String {
+    if rows.is_empty() {
+        return format!("\n**{header}:** none\n");
+    }
+    let mut out = format!("\n**{header}** (showing {} of {total}):\n\n", rows.len());
+    out.push_str("| id | tool | problem | field | count |\n|---|---|---|---|---|\n");
+    for r in rows {
+        let cell = |k: &str| -> String {
+            match r.get(k) {
+                Some(Value::String(s)) if !s.is_empty() => s.clone(),
+                Some(Value::Number(n)) => n.to_string(),
+                _ => "—".to_string(),
+            }
+        };
+        out.push_str(&format!(
+            "| {} | `{}` | {} | `{}` | {} |\n",
+            cell("id"),
+            cell("tool"),
+            cell("problem_class"),
+            cell("field_in_error"),
+            cell("occurrence_count"),
+        ));
+    }
+    if (rows.len() as i64) < total {
+        out.push_str(&format!(
+            "\n_{} more not shown — raise `limit` to see them._\n",
+            total - rows.len() as i64
+        ));
+    }
+    out
+}
+
 impl McpServer {
     /// REQ-AXO-901957 — best-effort friction capture, called for EVERY tool
     /// response on the dispatch chokepoint. Records ONLY the problem SHAPE
@@ -281,11 +326,40 @@ impl McpServer {
             .iter()
             .filter(|f| f["regressed"].as_bool() == Some(true))
             .count();
+        // REQ-AXO-902292 — the true totals, not the page size. `open_count` is
+        // `open_frictions.len()`, i.e. capped by LIMIT: reporting it as "Open
+        // signatures: 15" told the reader there were exactly 15 when 15 was
+        // merely the page. A count that silently equals the limit is worse than
+        // no count — it reads as complete.
+        let total_of = |status: &str| -> i64 {
+            self.graph_store
+                .query_json_param(
+                    "SELECT count(*) FROM axon.mcp_friction
+                     WHERE status = ? AND (? = '' OR project_code = ?)",
+                    &json!([status, project_code, project_code]),
+                )
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                .and_then(|rows| {
+                    rows.first()
+                        .and_then(|r| r.first())
+                        .and_then(Self::i64_cell)
+                })
+                .unwrap_or(-1)
+        };
+        let total_open = total_of("open");
+        let total_resolved = total_of("resolved");
+
         let report = format!(
-            "## 🔁 MCP Friction Report\n\n**Open signatures (rollout priorities):** {}\n**Resolved:** {} ({} regressed since resolution)\n**Privacy:** signature-only — no argument content is ever stored.\n",
-            open_count,
-            resolved_frictions.len(),
+            "## 🔁 MCP Friction Report\n\n**Open signatures (rollout priorities):** {}\n\
+             **Resolved:** {} ({} regressed since resolution)\n\
+             **Privacy:** signature-only — no argument content is ever stored.\n\
+             {}{}\n_Table: `axon.mcp_friction`._\n",
+            total_open,
+            total_resolved,
             regressed_count,
+            render_friction_rows(&open_frictions, total_open, "Open signatures"),
+            render_friction_rows(&resolved_frictions, total_resolved, "Resolved"),
         );
         Some(json!({
             "content": [{ "type": "text", "text": format_standard_contract(
@@ -438,6 +512,23 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902292 — same story for integers: a PG `count(*)` comes back as a
+    /// JSON number on one path and as text on another (bigint is rendered as a
+    /// string by several drivers). Reading only `as_i64` silently yielded `None`,
+    /// which a `unwrap_or(-1)` would then print as a total of -1.
+    fn i64_cell(cell: &Value) -> Option<i64> {
+        match cell {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.trim().parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn i64_cell_for_tests(cell: &Value) -> Option<i64> {
+        Self::i64_cell(cell)
+    }
+
     /// REQ-AXO-901961 S3/S4 — `mcp_telemetry_report`: usage + latency analytics
     /// projected from the `axon.mcp_call_stat` rollup. Answers "how is the
     /// system used / average latency / where are the errors" without an external
@@ -549,5 +640,66 @@ impl McpServer {
                 "privacy": "signature-only — no argument content is ever stored",
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod friction_rendering_tests {
+    use super::{render_friction_rows, McpServer};
+    use serde_json::json;
+
+    fn row(id: i64, tool: &str, problem: &str, field: &str, count: i64) -> serde_json::Value {
+        json!({
+            "id": id, "tool": tool, "problem_class": problem,
+            "field_in_error": field, "occurrence_count": count,
+        })
+    }
+
+    // REQ-AXO-902292 — the summary must NAME the signatures, not just count them.
+    #[test]
+    fn signatures_are_enumerated_in_the_text_channel() {
+        let rows = vec![
+            row(1, "sql", "input_invalid", "", 459),
+            row(2, "soll_manager", "input_invalid", "data.status", 57),
+        ];
+        let out = render_friction_rows(&rows, 2, "Open signatures");
+
+        for needle in ["sql", "soll_manager", "input_invalid", "data.status", "459", "57"] {
+            assert!(
+                out.contains(needle),
+                "the text channel must carry `{needle}` — an LLM that reads only \
+                 content[0].text cannot triage a count, and falls back to raw SQL"
+            );
+        }
+        assert!(!out.contains("more not shown"), "nothing was truncated here");
+    }
+
+    // Truncation is disclosed against the TRUE total, never the page size — the
+    // defect that made "Open signatures: 15" read as complete when 15 was the limit.
+    #[test]
+    fn truncation_is_disclosed_against_the_true_total() {
+        let rows = vec![row(1, "sql", "input_invalid", "", 459)];
+        let out = render_friction_rows(&rows, 40, "Open signatures");
+
+        assert!(out.contains("showing 1 of 40"), "the page must state its own bounds: {out}");
+        assert!(out.contains("39 more not shown"), "the remainder must be named: {out}");
+    }
+
+    #[test]
+    fn an_empty_section_says_none_rather_than_printing_an_empty_table() {
+        let out = render_friction_rows(&[], 0, "Open signatures");
+        assert!(out.contains("none"), "{out}");
+        assert!(!out.contains("| id |"), "no header for an empty set: {out}");
+    }
+
+    // A PG `count(*)` arrives as a JSON number on one path and as text on another;
+    // reading only `as_i64` yielded None and printed a total of -1.
+    #[test]
+    fn counts_parse_from_both_json_number_and_pg_text() {
+        assert_eq!(McpServer::i64_cell_for_tests(&json!(42)), Some(42));
+        assert_eq!(McpServer::i64_cell_for_tests(&json!("42")), Some(42));
+        assert_eq!(McpServer::i64_cell_for_tests(&json!("  42 ")), Some(42));
+        assert_eq!(McpServer::i64_cell_for_tests(&json!("oops")), None);
+        assert_eq!(McpServer::i64_cell_for_tests(&json!(null)), None);
     }
 }
