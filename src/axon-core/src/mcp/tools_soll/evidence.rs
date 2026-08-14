@@ -265,6 +265,40 @@ impl McpServer {
             }
         };
 
+        // REQ-AXO-902321 — an unknown `entity_type` was ACCEPTED and written through.
+        // `entity_type: "exigence"` inserted a `soll.Traceability` row typed
+        // `exigence`, which no query filtering on canonical kinds will ever return:
+        // the evidence exists, is unfindable, and the caller was told "Attached 1".
+        // Silently accepting an out-of-vocabulary kind is strictly worse than
+        // refusing it — a refusal costs a round-trip, this cost a lost trace and a
+        // false confirmation. Same reasoning as the `role` guard just above: reject
+        // the whole call up front, zero rows inserted.
+        if !is_canonical_traceability_entity_type(entity_type) {
+            return Some(json!({
+                "content": [{ "type": "text", "text": format!(
+                    "`entity_type` inconnu : `{entity_type}`. Aucune preuve attachée — une ligne \
+                     typée hors vocabulaire serait écrite mais introuvable. Valeurs acceptées : {}.",
+                    CANONICAL_TRACEABILITY_ENTITY_TYPES.join(", ")
+                )}],
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "operator_guidance": {
+                        "problem_class": "input_invalid",
+                        "follow_up_tools": ["soll_get", "soll_query_context"],
+                        "confidence": "high",
+                    },
+                    "parameter_repair": {
+                        "tool": "soll_attach_evidence",
+                        "invalid_field": "entity_type",
+                        "supplied_value": entity_type,
+                        "accepted_values": CANONICAL_TRACEABILITY_ENTITY_TYPES,
+                        "hint": "le préfixe de `entity_id` le donne : REQ-…→requirement, DEC-…→decision, CPT-…→concept, GUI-…→guideline, PIL-…→pillar, MIL-…→milestone, VAL-…→validation.",
+                    },
+                }
+            }));
+        }
+
         let mut attached = 0usize;
         let now = now_unix_ms();
         let normalized_entity_type = normalize_traceability_entity_type(entity_type);

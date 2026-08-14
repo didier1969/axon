@@ -1048,6 +1048,105 @@ fn marking_by_design_without_a_reason_is_refused() {
     );
 }
 
+// ── REQ-AXO-902321 — trouvés en REJOUANT les signatures dormantes ──────────
+
+#[test]
+fn an_unknown_entity_type_is_refused_instead_of_written_through() {
+    // Le pire des trois cas : `entity_type: "exigence"` était ACCEPTÉ et écrivait
+    // une ligne soll.Traceability typée `exigence`, qu'aucune requête filtrant sur
+    // les types canoniques ne retrouvera jamais. Une preuve qui existe et reste
+    // introuvable est pire qu'une preuve refusée — et l'appelant lisait « Attached 1 ».
+    let server = create_test_server();
+    seed_requirement(&server, "REQ-TST-920");
+
+    let res = server
+        .execute_tool_direct(
+            "soll_attach_evidence",
+            &json!({ "entity_type": "exigence", "entity_id": "REQ-TST-920",
+                     "artifacts": ["un_symbole"] }),
+        )
+        .expect("result");
+    assert_eq!(res["isError"].as_bool(), Some(true), "{res}");
+    assert_eq!(res["data"]["parameter_repair"]["invalid_field"], json!("entity_type"));
+
+    let written = server
+        .graph_store
+        .query_single_i64_writer(
+            "SELECT count(*) FROM soll.Traceability WHERE soll_entity_type = 'exigence'",
+        )
+        .unwrap()
+        .unwrap_or(0);
+    assert_eq!(written, 0, "aucune ligne hors vocabulaire ne doit être écrite");
+}
+
+#[test]
+fn a_create_carrying_an_unknown_id_drops_it_and_says_so() {
+    // Un id sans référent ne peut rien casser : le serveur alloue et REND l'id
+    // canonique. Le refuser coûtait un aller-retour pour aucune sûreté.
+    let server = create_test_server();
+    seed_pillar(&server, "TST", "PIL-TST-921", "Ancre 902320");
+
+    let res = create_call(
+        &server,
+        json!({ "id": "REQ-TST-999999", "title": "id fantôme", "description": "x",
+                "attach_to": "PIL-TST-921" }),
+    );
+    assert_ne!(res["isError"].as_bool(), Some(true), "{res}");
+    let text = res["content"][0]["text"].as_str().expect("texte");
+    assert!(
+        text.contains("REQ-TST-999999") && text.contains("ignoré"),
+        "le retrait de l'id doit être annoncé : {text}"
+    );
+}
+
+#[test]
+fn a_create_carrying_an_existing_id_is_refused_as_a_probable_update() {
+    // Le contre-exemple qui borne la règle précédente : ici l'id DÉSIGNE un nœud
+    // réel. Le retirer créerait un doublon de ce que l'appelant voulait modifier —
+    // le pire des trois résultats. Donc on refuse, en nommant l'intention.
+    let server = create_test_server();
+    seed_pillar(&server, "TST", "PIL-TST-922", "Ancre 902320b");
+    seed_requirement(&server, "REQ-TST-922");
+
+    let res = create_call(
+        &server,
+        json!({ "id": "REQ-TST-922", "title": "collision", "description": "x",
+                "attach_to": "PIL-TST-922" }),
+    );
+    assert_eq!(res["isError"].as_bool(), Some(true), "{res}");
+    assert_eq!(
+        res["data"]["parameter_repair"]["corrected_call"]["arguments"]["action"],
+        json!("update"),
+        "l'appel corrigé doit proposer update : {res}"
+    );
+}
+
+#[test]
+fn a_closed_enum_nested_in_a_one_of_is_still_a_closed_enum() {
+    // `soll_manager.action` est déclaré en `oneOf` : ne lire que le `enum` de
+    // premier niveau rendait la violation invisible, et `action: "creat"` retombait
+    // sur le seau « arguments » que REQ-AXO-902313 venait justement de retirer.
+    use crate::mcp::tool_contracts::{closed_enum_values, first_schema_mismatch};
+    let spec = json!({
+        "oneOf": [
+            { "type": "string", "enum": ["create", "update", "link", "unlink"] },
+            { "const": "append_section", "type": "string" }
+        ]
+    });
+    let values = closed_enum_values(&spec).expect("enum imbriqué");
+    assert!(values.contains(&json!("create")) && values.contains(&json!("append_section")));
+
+    // Une branche SANS enum rend l'union ouverte : pas de vocabulaire fermé.
+    let open = json!({ "oneOf": [{ "enum": ["a"] }, { "type": "string" }] });
+    assert!(closed_enum_values(&open).is_none(), "une union ouverte n'est pas un enum fermé");
+
+    let schema = json!({ "type": "object", "properties": { "action": spec }, "required": [] });
+    let (field, reason) =
+        first_schema_mismatch(&schema, &json!({ "action": "creat" })).expect("violation");
+    assert_eq!(field, "action");
+    assert!(reason.starts_with("enum_violation"), "{reason}");
+}
+
 #[test]
 fn test_soll_manager_link_auto_canonizes_unambiguous_relation() {
     // REQ-AXO-901939 — a non-canonical relation on a pair with EXACTLY ONE

@@ -335,6 +335,34 @@ pub(super) fn normalize_traceability_entity_type(entity_type: &str) -> String {
     }
 }
 
+/// REQ-AXO-902321 — the canonical SOLL entity kinds, i.e. exactly the values
+/// `normalize_traceability_entity_type` can RESOLVE. Its `other => other` arm is a
+/// deliberate passthrough (callers pass already-canonical strings), which meant an
+/// unknown kind travelled all the way into `soll.Traceability`: sending
+/// `entity_type: "exigence"` wrote a row typed `exigence`, invisible to every query
+/// that filters on the canonical kinds. Evidence that exists and cannot be found is
+/// worse than evidence that was refused. The list lives HERE so the guard and the
+/// normaliser cannot drift.
+pub(super) const CANONICAL_TRACEABILITY_ENTITY_TYPES: &[&str] = &[
+    "vision",
+    "pillar",
+    "requirement",
+    "concept",
+    "decision",
+    "milestone",
+    "validation",
+    "stakeholder",
+    "guideline",
+    "skill",
+    "prompt_template",
+];
+
+/// True when `entity_type` resolves to a canonical SOLL kind.
+pub(super) fn is_canonical_traceability_entity_type(entity_type: &str) -> bool {
+    CANONICAL_TRACEABILITY_ENTITY_TYPES
+        .contains(&normalize_traceability_entity_type(entity_type).as_str())
+}
+
 pub(super) fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'static str> {
     match normalize_traceability_entity_type(entity_type).as_str() {
         "requirement" => vec!["document", "file", "symbol", "test", "metric", "validation"],

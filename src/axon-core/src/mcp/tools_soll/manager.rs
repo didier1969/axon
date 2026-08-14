@@ -379,6 +379,38 @@ impl McpServer {
                     .get("reserved_id")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty());
+                // REQ-AXO-902321 — a caller-supplied id on `create` has TWO very
+                // different meanings, and the blanket rejection answered neither.
+                //
+                //  * the id EXISTS → the caller almost certainly meant `update` and
+                //    typed `create`. Stripping the id would silently create a DUPLICATE
+                //    of a node they wanted to modify — the worst outcome of the three.
+                //    So: still refuse, but name the real intent and hand back the
+                //    `action: "update"` call ready to send.
+                //  * the id does NOT exist → it is a planned or invented name with no
+                //    referent. Nothing can break by dropping it, the server allocates
+                //    and RETURNS the canonical id anyway. Refusing bought a round-trip
+                //    and no safety, so it is dropped and disclosed.
+                //
+                // Same frontier as everywhere else today: unambiguous is repaired,
+                // ambiguous is refused — except here "ambiguous" had to be discovered
+                // by asking the graph, not by reading the argument.
+                let mut id_dropped = String::new();
+                let mut caller_id = caller_id;
+                if let Some(supplied) = caller_id {
+                    let exists = self
+                        .graph_store
+                        .query_count_param(
+                            "SELECT count(*) FROM soll.Node WHERE id = ?",
+                            &json!([supplied]),
+                        )
+                        .unwrap_or(0)
+                        > 0;
+                    if !exists {
+                        id_dropped = supplied.to_string();
+                        caller_id = None;
+                    }
+                }
                 if caller_id.is_some() || (caller_reserved_id.is_some() && !allow_reserved_id) {
                     let supplied = caller_id.or(caller_reserved_id).unwrap_or("");
                     let invalid_field = if caller_id.is_some() {
@@ -386,6 +418,43 @@ impl McpServer {
                     } else {
                         "reserved_id"
                     };
+                    if caller_id.is_some() {
+                        return Some(json!({
+                            "content": [{ "type": "text", "text": format!(
+                                "`{supplied}` existe déjà. Un `create` portant l'id d'un nœud EXISTANT \
+                                 est presque toujours un `update` : le créer en dupliquerait le contenu. \
+                                 Renvoyer l'appel avec `action: \"update\"` (ci-dessous), ou retirer l'id \
+                                 pour créer un nœud réellement nouveau."
+                            )}],
+                            "isError": true,
+                            "data": {
+                                "status": "input_invalid",
+                                "operator_guidance": {
+                                    "problem_class": "id_field_forbidden",
+                                    "likely_cause": "create_on_existing_id_means_update",
+                                    "follow_up_tools": ["soll_manager", "soll_get"],
+                                    "confidence": "high",
+                                },
+                                "parameter_repair": {
+                                    "tool": "soll_manager",
+                                    "category": "id_field_forbidden",
+                                    "invalid_field": "data.id",
+                                    "supplied_value": supplied,
+                                    "corrected_call": {
+                                        "tool": "soll_manager",
+                                        "arguments": {
+                                            "action": "update",
+                                            "entity": entity,
+                                            "data": data.clone(),
+                                        }
+                                    },
+                                    "hint": "un id inexistant serait simplement ignoré (le serveur alloue) ; celui-ci désigne un nœud réel, donc l'intention est ambiguë et n'est pas devinée.",
+                                    "follow_up_tools": ["soll_manager"],
+                                },
+                                "canonical_source": "MIL-AXO-020",
+                            },
+                        }));
+                    }
                     return Some(json!({
                         "content": [{
                             "type": "text",
@@ -978,6 +1047,13 @@ impl McpServer {
                             report.push_str(&format!(
                                 "\nℹ️ `relation_type` non fourni — appliqué `{relation_type}`, \
                                  seule relation canonique pour cette paire."
+                            ));
+                        }
+                        if !id_dropped.is_empty() {
+                            report.push_str(&format!(
+                                "\nℹ️ `data.id` fourni (`{id_dropped}`) mais inexistant — ignoré. \
+                                 Le serveur alloue les ids canoniques : c'est `{created_id}` qui \
+                                 fait foi."
                             ));
                         }
                         // REQ-AXO-901942 — proactive inline guard. A Requirement

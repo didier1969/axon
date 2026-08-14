@@ -412,12 +412,23 @@ fn insert_revision_change_sql(rc: &SeedRevisionChange) -> String {
     )
 }
 
+/// REQ-AXO-902321 — `soll_entity_type` is written LOWERCASE here too.
+///
+/// The tool path (`soll_attach_evidence`) has always lowercased via
+/// `normalize_traceability_entity_type`; this import path did not, so the column
+/// ended up holding both `Decision` and `decision`. 18 rows out of 13 506 — small,
+/// but every one of them is invisible to a query filtering on the canonical form.
+/// Two consumers already defend with `lower()` (`graph_analytics.rs`,
+/// `soll_snapshot/snapshot.rs`), i.e. the divergence was being patched READER by
+/// READER instead of at the writer — the same shape as the two project-code
+/// resolvers of REQ-AXO-902312. Normalising here converges the writers; the
+/// readers' `lower()` stays as harmless belt-and-braces.
 fn insert_traceability_sql(t: &SeedTraceability) -> String {
     format!(
         "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at) \
          VALUES ({}, {}, {}, {}, {}, {}, {}, {}) ON CONFLICT (id) DO NOTHING",
         sql_quote(&t.id),
-        sql_quote(&t.soll_entity_type),
+        sql_quote(&t.soll_entity_type.to_ascii_lowercase()),
         sql_quote(&t.soll_entity_id),
         sql_quote(&t.artifact_type),
         sql_quote(&t.artifact_ref),

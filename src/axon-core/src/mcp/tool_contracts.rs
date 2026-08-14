@@ -690,13 +690,52 @@ fn field_type_label(spec: &Value) -> String {
 /// Closed-enum allowed values, dropping a `null` sentinel (an optional enum
 /// encodes the absent case as a `null` member). `None` when there is no enum.
 pub(crate) fn closed_enum_values(spec: &Value) -> Option<Vec<Value>> {
-    let arr = spec.get("enum").and_then(Value::as_array)?;
-    let values: Vec<Value> = arr.iter().filter(|v| !v.is_null()).cloned().collect();
-    if values.is_empty() {
-        None
-    } else {
-        Some(values)
+    // REQ-AXO-902321 — an enum nested in `oneOf`/`anyOf` is still a closed
+    // vocabulary. `soll_manager.action` is declared as a `oneOf` (one branch is the
+    // plain enum, another documents `append_section` separately), so reading only
+    // the top-level `enum` saw nothing: `action: "creat"` came back labelled
+    // `field_in_error = "arguments"` — the exact blind bucket REQ-AXO-902313 was
+    // meant to retire, still blind on the tool that generates most of the traffic.
+    // A branch WITHOUT an enum means the union is open, and then it is not a closed
+    // vocabulary at all — so every branch must carry one for the values to merge.
+    if let Some(arr) = spec.get("enum").and_then(Value::as_array) {
+        let values: Vec<Value> = arr.iter().filter(|v| !v.is_null()).cloned().collect();
+        if !values.is_empty() {
+            return Some(values);
+        }
     }
+    for key in ["oneOf", "anyOf"] {
+        let Some(branches) = spec.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        if branches.is_empty() {
+            continue;
+        }
+        let mut merged: Vec<Value> = Vec::new();
+        let mut every_branch_closed = true;
+        for branch in branches {
+            // A `const` branch is a one-value enum — that is how single alternatives
+            // are spelled in these schemas.
+            if let Some(c) = branch.get("const") {
+                if !c.is_null() {
+                    merged.push(c.clone());
+                    continue;
+                }
+            }
+            match branch.get("enum").and_then(Value::as_array) {
+                Some(arr) => merged.extend(arr.iter().filter(|v| !v.is_null()).cloned()),
+                None => {
+                    every_branch_closed = false;
+                    break;
+                }
+            }
+        }
+        if every_branch_closed && !merged.is_empty() {
+            merged.dedup();
+            return Some(merged);
+        }
+    }
+    None
 }
 
 /// REQ-AXO-902313 — name the field that actually broke when NO required field is
