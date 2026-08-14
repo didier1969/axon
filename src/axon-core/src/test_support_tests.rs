@@ -507,3 +507,70 @@ fn no_error_hint_prescribes_raw_sql_when_a_tool_exists() {
         offenders.join("\n  ")
     );
 }
+
+/// REQ-AXO-902274 — no test may touch the PROCESS-GLOBAL service state without
+/// holding the shared lock.
+///
+/// `service_guard`'s atomics and `UtilityFirstScheduler` are process-global. A
+/// test that resets or records into them while another test reads them corrupts
+/// that other test, not itself — which is why the symptom always appeared far
+/// from the cause: `semantic_policy` returned `gpu_cadence_refill` instead of
+/// `balanced_drain`, green in isolation, red in parallel, on code nobody had
+/// touched. Diagnosing it cost a full build gate twice in one session.
+///
+/// The sibling guard `no_test_mutates_process_env_without_the_lock` covers the
+/// ENV. This one covers the service state, and both share the same reasoning: one
+/// global resource ⇒ one lock, crate-wide.
+///
+/// Conformance is derived, not spelled: any body mentioning something whose call
+/// chain reaches the lock counts (`lock_for_tests`, `lock_service_guard`,
+/// `service_guard_test_lock`). Order matters elsewhere — every conforming site
+/// takes `env_lock` FIRST, then this one; keeping that order uniform is what
+/// prevents a deadlock.
+#[test]
+fn no_test_touches_global_service_state_without_the_lock() {
+    const TOUCHES: &[&str] = &[
+        "service_guard::reset_for_tests",
+        "service_guard::record_",
+        "reset_utility_first_scheduler_for_tests",
+    ];
+    const CONFORMING: &[&str] = &[
+        "lock_for_tests",
+        "lock_service_guard",
+        "service_guard_test_lock",
+        "_sg_guard",
+    ];
+
+    let mut offenders: Vec<String> = Vec::new();
+    for (path, text) in crate_sources() {
+        // Production code legitimately drives this state; only TESTS must queue.
+        if !path.contains("tests") {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        for (name, start, end, inside_impl) in fn_blocks(&lines) {
+            if inside_impl {
+                continue;
+            }
+            let body = lines[start..=end].join("\n");
+            if !TOUCHES.iter().any(|t| body.contains(t)) {
+                continue;
+            }
+            if CONFORMING.iter().any(|c| body.contains(c)) {
+                continue;
+            }
+            offenders.push(format!("{path}::{name}"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these tests mutate or read PROCESS-GLOBAL service state without holding \
+         `service_guard::lock_for_tests()` (REQ-AXO-902274). They corrupt OTHER \
+         tests, so the failure surfaces far from here and looks like a real \
+         regression. Take `env_lock()` first, then the service-guard lock — the \
+         order is uniform across the crate and that is what avoids a \
+         deadlock:\n  {}",
+        offenders.join("\n  ")
+    );
+}

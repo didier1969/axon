@@ -926,6 +926,12 @@ fn test_mcp_query_remains_available_in_graph_only() {
 #[test]
 fn test_status_graph_only_reports_semantic_drain_not_applicable() {
     let _guard = env_lock();
+    // REQ-AXO-902274 — ce test lit/écrit l'état PROCESS-GLOBAL (service_guard, UtilityFirstScheduler).
+    // Sans ce verrou, un test concurrent le réinitialise en plein milieu : `semantic_policy`
+    // rendait `gpu_cadence_refill` au lieu de `balanced_drain`, vert en isolation, rouge en
+    // parallèle. Ordre env → service_guard, identique partout (embedder/tests.rs) : c'est
+    // l'uniformité de l'ordre qui écarte le deadlock.
+    let _sg_guard = crate::service_guard::lock_for_tests();
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
     unsafe {
@@ -993,6 +999,12 @@ fn test_status_graph_only_reports_semantic_drain_not_applicable() {
 #[test]
 fn test_status_uses_ist_projection_freshness_label_and_field() {
     let _guard = env_lock();
+    // REQ-AXO-902274 — ce test lit/écrit l'état PROCESS-GLOBAL (service_guard, UtilityFirstScheduler).
+    // Sans ce verrou, un test concurrent le réinitialise en plein milieu : `semantic_policy`
+    // rendait `gpu_cadence_refill` au lieu de `balanced_drain`, vert en isolation, rouge en
+    // parallèle. Ordre env → service_guard, identique partout (embedder/tests.rs) : c'est
+    // l'uniformité de l'ordre qui écarte le deadlock.
+    let _sg_guard = crate::service_guard::lock_for_tests();
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
     unsafe {
@@ -1067,6 +1079,12 @@ fn test_status_uses_ist_projection_freshness_label_and_field() {
 #[test]
 fn test_status_exposes_subsystem_readiness_contract() {
     let _guard = env_lock();
+    // REQ-AXO-902274 — ce test lit/écrit l'état PROCESS-GLOBAL (service_guard, UtilityFirstScheduler).
+    // Sans ce verrou, un test concurrent le réinitialise en plein milieu : `semantic_policy`
+    // rendait `gpu_cadence_refill` au lieu de `balanced_drain`, vert en isolation, rouge en
+    // parallèle. Ordre env → service_guard, identique partout (embedder/tests.rs) : c'est
+    // l'uniformité de l'ordre qui écarte le deadlock.
+    let _sg_guard = crate::service_guard::lock_for_tests();
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
     crate::runtime_readiness::reset_for_tests();
@@ -1931,6 +1949,12 @@ fn test_pre_flight_check_alias_uses_dry_run_commit_work() {
 #[test]
 fn test_status_reports_public_surface_and_runtime_truth() {
     let _guard = env_lock();
+    // REQ-AXO-902274 — ce test lit/écrit l'état PROCESS-GLOBAL (service_guard, UtilityFirstScheduler).
+    // Sans ce verrou, un test concurrent le réinitialise en plein milieu : `semantic_policy`
+    // rendait `gpu_cadence_refill` au lieu de `balanced_drain`, vert en isolation, rouge en
+    // parallèle. Ordre env → service_guard, identique partout (embedder/tests.rs) : c'est
+    // l'uniformité de l'ordre qui écarte le deadlock.
+    let _sg_guard = crate::service_guard::lock_for_tests();
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
     unsafe {
@@ -2568,6 +2592,12 @@ fn test_status_reports_public_surface_and_runtime_truth() {
 #[test]
 fn test_initialize_reports_brain_server_identity_when_shadow_role_is_brain() {
     let _guard = env_lock();
+    // REQ-AXO-902274 — ce test lit/écrit l'état PROCESS-GLOBAL (service_guard, UtilityFirstScheduler).
+    // Sans ce verrou, un test concurrent le réinitialise en plein milieu : `semantic_policy`
+    // rendait `gpu_cadence_refill` au lieu de `balanced_drain`, vert en isolation, rouge en
+    // parallèle. Ordre env → service_guard, identique partout (embedder/tests.rs) : c'est
+    // l'uniformité de l'ordre qui écarte le deadlock.
+    let _sg_guard = crate::service_guard::lock_for_tests();
     service_guard::reset_for_tests();
     unsafe {
         std::env::set_var("AXON_RUNTIME_MODE", "brain_only");
@@ -2606,6 +2636,12 @@ fn test_initialize_reports_brain_server_identity_when_shadow_role_is_brain() {
 #[test]
 fn test_status_reports_brain_and_indexer_authorities() {
     let _guard = env_lock();
+    // REQ-AXO-902274 — ce test lit/écrit l'état PROCESS-GLOBAL (service_guard, UtilityFirstScheduler).
+    // Sans ce verrou, un test concurrent le réinitialise en plein milieu : `semantic_policy`
+    // rendait `gpu_cadence_refill` au lieu de `balanced_drain`, vert en isolation, rouge en
+    // parallèle. Ordre env → service_guard, identique partout (embedder/tests.rs) : c'est
+    // l'uniformité de l'ordre qui écarte le deadlock.
+    let _sg_guard = crate::service_guard::lock_for_tests();
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
     let _tempdir = tempdir().unwrap();
@@ -2709,6 +2745,12 @@ fn test_status_reports_brain_and_indexer_authorities() {
 #[test]
 fn test_status_exposes_tensorrt_ready_vector_pipeline_telemetry() {
     let _guard = env_lock();
+    // REQ-AXO-902274 — ce test lit/écrit l'état PROCESS-GLOBAL (service_guard, UtilityFirstScheduler).
+    // Sans ce verrou, un test concurrent le réinitialise en plein milieu : `semantic_policy`
+    // rendait `gpu_cadence_refill` au lieu de `balanced_drain`, vert en isolation, rouge en
+    // parallèle. Ordre env → service_guard, identique partout (embedder/tests.rs) : c'est
+    // l'uniformité de l'ordre qui écarte le deadlock.
+    let _sg_guard = crate::service_guard::lock_for_tests();
     service_guard::reset_for_tests();
     unsafe {
         std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
@@ -2818,6 +2860,12 @@ fn test_status_indexer_omits_soll_mcp_job_counts() {
 #[test]
 fn test_graph_backlog_blocks_vector_priority_until_graph_ready_advances() {
     let _guard = env_lock();
+    // REQ-AXO-902274 — ce test lit/écrit l'état PROCESS-GLOBAL (service_guard, UtilityFirstScheduler).
+    // Sans ce verrou, un test concurrent le réinitialise en plein milieu : `semantic_policy`
+    // rendait `gpu_cadence_refill` au lieu de `balanced_drain`, vert en isolation, rouge en
+    // parallèle. Ordre env → service_guard, identique partout (embedder/tests.rs) : c'est
+    // l'uniformité de l'ordre qui écarte le deadlock.
+    let _sg_guard = crate::service_guard::lock_for_tests();
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
 

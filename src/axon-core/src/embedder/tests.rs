@@ -155,6 +155,11 @@ fn test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog() {
 
 #[test]
 fn test_graph_projection_allowed_under_queue_pressure_when_service_is_healthy() {
+    // REQ-AXO-902274 — le scheduler est PROCESS-GLOBAL : le réinitialiser sans le
+    // verrou écrase l'état qu'un test `semantic_policy` vient de construire, deux
+    // lignes plus haut dans sa propre exécution. C'est ce test-ci qui corrompait
+    // l'autre, d'où un échec qui semblait venir de code non modifié.
+    let _guard_sg = lock_service_guard();
     reset_utility_first_scheduler_for_tests();
     assert!(graph_projection_allowed(
         2_000,
@@ -188,6 +193,8 @@ fn test_graph_projection_disallowed_when_service_is_not_healthy() {
 
 #[test]
 fn test_graph_projection_ignores_large_vector_backlog_on_cpu_only_hosts() {
+    // REQ-AXO-902274 — même scheduler global, même verrou (voir la note ci-dessus).
+    let _guard_sg = lock_service_guard();
     reset_utility_first_scheduler_for_tests();
     assert!(graph_projection_allowed(
         100,

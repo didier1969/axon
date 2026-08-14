@@ -2924,6 +2924,11 @@ fn test_retrieve_context_returns_evidence_packet_and_budget_diagnostics_for_wiri
 #[test]
 fn test_retrieve_context_uses_repo_literal_fallback_when_index_has_no_anchor() {
     let _guard = env_lock();
+    // REQ-AXO-902274 — `service_guard` est PROCESS-GLOBAL : le reset doit être
+    // sérialisé, sinon il efface l'état qu'un autre test vient de poser. Ordre
+    // env → service_guard, uniforme dans tout le crate (c'est l'uniformité de
+    // l'ordre qui écarte le deadlock).
+    let _sg_guard = crate::service_guard::lock_for_tests();
     service_guard::reset_for_tests();
     unsafe {
         std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
