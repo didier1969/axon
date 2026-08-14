@@ -456,6 +456,30 @@ impl McpServer {
                 p = esc(&project),
                 mid = max_id
             ));
+
+            // REQ-AXO-902306 — a message that has been READ leaves the inbox.
+            //
+            // Advancing the cursor alone left every read message sitting in the
+            // active inbox, so only the TTL ever removed anything. And the TTL is an
+            // ABSOLUTE clock: a project dormant for longer than the horizon lost a
+            // notice it had never seen. Archiving on read fixes both — the inbox
+            // reflects what is still to be dealt with.
+            //
+            // `priority='high'` is EXEMPT: an important message never disappears on
+            // its own, neither by reading nor by expiry. It takes a deliberate
+            // gesture. Wrong-way-safe by design — if this reading of the intent is
+            // off, we keep too much, never too little.
+            //
+            // Only this branch archives: `all` / `since` / search / thread views are
+            // non-destructive by contract (test C4) and must stay so.
+            let _ = self.graph_store.execute(&format!(
+                "UPDATE axon.mailbox_message SET archived_at = now() \
+                 WHERE to_project='{p}' AND id <= {mid} AND id > {floor} \
+                   AND archived_at IS NULL AND COALESCE(priority,'') <> 'high'",
+                p = esc(&project),
+                mid = max_id,
+                floor = floor
+            ));
         }
 
         let report = format!(

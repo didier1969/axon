@@ -145,7 +145,12 @@ import json, sys
 print(json.dumps({
     'to_project': '*', 'from': '${PROJECT_CODE}',
     'subject': sys.argv[1], 'body_dense': sys.argv[2],
-    'idempotency_key': sys.argv[3], 'priority': 'high',
+    # REQ-AXO-902306 — 'low' et non 'high'. Ces avis sont URGENTS à l'instant où ils
+    # arrivent, ils ne sont pas IMPORTANTS à conserver : deux notions que la priorité
+    # confondait. Depuis 902306 un message 'high' n'est JAMAIS archivé automatiquement
+    # (ni lecture ni TTL) ; les laisser en 'high' les rendrait immortels et recréerait
+    # exactement l'accumulation que REQ-AXO-902304 vient de résorber (8217 messages).
+    'idempotency_key': sys.argv[3], 'priority': 'low',
     # REQ-AXO-902304 — ces avis sont périssables : « coupure dans 3 minutes » n'a
     # aucune valeur le lendemain. Sans TTL ils s'empilaient à jamais (8217 messages
     # depuis juillet, 118 par projet, 100% de l'inbox pour quatre d'entre eux) alors

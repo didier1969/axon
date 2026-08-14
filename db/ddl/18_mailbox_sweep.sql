@@ -24,6 +24,16 @@ CREATE INDEX IF NOT EXISTS mailbox_message_live_idx
 -- horizon has passed and that is not already archived. Idempotent (a second
 -- call within the same instant archives nothing new) and returns the number of
 -- rows it archived this pass, so the `mailbox_sweep` tool can report a count.
+--
+-- REQ-AXO-902306 — `priority='high'` is EXEMPT. The TTL is an ABSOLUTE clock, so
+-- without this a project dormant longer than the horizon silently loses a notice
+-- it never read. An important message never disappears on its own: it takes a
+-- deliberate gesture. Ordinary messages keep expiring, which is what stops the
+-- accumulation REQ-AXO-902304 measured (8217 unpurgeable broadcasts).
+--
+-- Note for whoever adds a caller: "urgent on arrival" and "important to keep" are
+-- different things. Promote notices were sent `high` for the former reason and had
+-- to be downgraded here, or they would have become immortal.
 CREATE OR REPLACE FUNCTION axon.mailbox_sweep() RETURNS bigint AS $$
 DECLARE
     swept bigint;
@@ -34,6 +44,7 @@ BEGIN
          WHERE ttl_at IS NOT NULL
            AND ttl_at < now()
            AND archived_at IS NULL
+           AND COALESCE(priority, '') <> 'high'
         RETURNING 1
     )
     SELECT count(*) INTO swept FROM expired;

@@ -215,6 +215,75 @@ fn c5_unread_advances_cursor_then_second_read_is_empty() {
     );
 }
 
+// ── C8 — read empties the inbox, important messages survive (REQ-AXO-902306) ──
+//
+// Demande opérateur : « il faudrait que les messages lus disparaissent. les
+// messages importants ne doivent pas être enlevés [sans] lecture par le
+// destinataire. »
+//
+// Avancer le curseur ne retirait rien : seul le TTL finissait par archiver, et le
+// TTL est une horloge ABSOLUE — un projet dormant plus longtemps que l'horizon
+// perdait un avis jamais lu. La règle retenue satisfait les deux lectures de la
+// demande : un message important ne disparaît JAMAIS tout seul.
+#[test]
+fn c8_reading_archives_ordinary_messages_but_never_important_ones() {
+    let server = create_test_server();
+
+    send(&server, json!({
+        "from": FROM, "to_project": TO,
+        "idempotency_key": "c8-ordinary", "subject": "avis",
+        "body_dense": "transitoire", "priority": "low"
+    }));
+    send(&server, json!({
+        "from": FROM, "to_project": TO,
+        "idempotency_key": "c8-important", "subject": "décision",
+        "body_dense": "ref REQ-AXO-902306", "priority": "high"
+    }));
+
+    let first = read(&server, json!({ "project": TO, "mode": "unread" }));
+    assert_eq!(first["data"]["count"].as_i64(), Some(2), "les deux sont livrés");
+
+    // L'inbox active ne garde que l'important.
+    assert_eq!(
+        inbox_count(&server, TO),
+        1,
+        "le message ordinaire lu doit sortir de l'inbox, l'important doit rester"
+    );
+    let remaining = read(&server, json!({ "project": TO, "mode": "all" }));
+    let subjects: Vec<&str> = remaining["data"]["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter_map(|m| m["subject"].as_str())
+        .collect();
+    assert_eq!(
+        subjects,
+        vec!["décision"],
+        "seul l'important survit à la lecture : {subjects:?}"
+    );
+}
+
+#[test]
+fn c8_non_destructive_views_archive_nothing() {
+    // `all` / `since` / thread servent à RELIRE. Le contrat non-destructif est
+    // déjà pinné par C4 pour le curseur ; il vaut aussi pour l'archivage.
+    let server = create_test_server();
+    send(&server, json!({
+        "from": FROM, "to_project": TO,
+        "idempotency_key": "c8-view", "subject": "vue",
+        "body_dense": "ne doit pas être archivé par une vue", "priority": "low"
+    }));
+
+    read(&server, json!({ "project": TO, "mode": "all" }));
+    read(&server, json!({ "project": TO, "mode": "since", "since_id": 0 }));
+
+    assert_eq!(
+        inbox_count(&server, TO),
+        1,
+        "une vue non destructive ne doit rien archiver"
+    );
+}
+
 // ── C7 — retention horizon (REQ-AXO-902304) ────────────────────────────────
 //
 // `axon.mailbox_sweep()` archives on `ttl_at < now()` and had existed all along,
