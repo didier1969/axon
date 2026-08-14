@@ -1638,7 +1638,88 @@ impl McpServer {
     const PARAMETER_ALIASES: &'static [(&'static str, &'static str, &'static [&'static str])] = &[
         ("query", "query", &["symbol", "q", "search", "term"]),
         ("sql", "sql", &["query", "statement"]),
+        // REQ-AXO-902302 — the confusion runs BOTH ways across the prescribed
+        // `query` → `inspect` hop: 902301 handled `query(symbol=)`, these handle
+        // `inspect(query=)`. `name` is the other natural word for a symbol.
+        ("inspect", "symbol", &["query", "name"]),
+        ("impact", "symbol", &["query", "name"]),
+        ("path", "symbol", &["query", "name"]),
+        ("simulate_mutation", "symbol", &["query", "name"]),
     ];
+
+    /// REQ-AXO-902302 — a single value where the tool expects a list.
+    ///
+    /// `pre_flight_check(diff_paths="src/foo.rs")` instead of `["src/foo.rs"]`:
+    /// checking ONE file is the common case and nothing in the name imposes the
+    /// array. Wrapping a scalar in a one-element list is deterministic.
+    ///
+    /// These calls reported `invalid_field: "arguments"` — the catch-all used when
+    /// no missing required field can be named (`dispatch.rs`). The caller learnt
+    /// only that "the arguments" were wrong: the least actionable signature in the
+    /// log, and the reason this one sat at 22 occurrences.
+    const SCALAR_TO_ARRAY_PARAMS: &'static [(&'static str, &'static str, &'static [&'static str])] = &[
+        ("pre_flight_check", "diff_paths", &["files", "paths"]),
+        ("commit_work", "diff_paths", &["files", "paths"]),
+    ];
+
+    /// REQ-AXO-902302 — accept `files=`/`paths=` for a list parameter, and accept a
+    /// bare scalar where the list is expected. Same discipline as the string
+    /// aliases: only when the canonical field is unusable, and always disclosed.
+    fn with_normalised_list_parameter<'a>(
+        normalized_name: &str,
+        arguments: &'a Value,
+    ) -> (std::borrow::Cow<'a, Value>, Option<String>) {
+        let Some((_, canonical, aliases)) = Self::SCALAR_TO_ARRAY_PARAMS
+            .iter()
+            .find(|(tool, _, _)| *tool == normalized_name)
+        else {
+            return (std::borrow::Cow::Borrowed(arguments), None);
+        };
+
+        // A usable canonical value is a non-empty array: nothing to do.
+        let canonical_value = arguments.get(*canonical);
+        if canonical_value
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+        {
+            return (std::borrow::Cow::Borrowed(arguments), None);
+        }
+
+        // Otherwise: a scalar under the canonical name, or anything under an alias.
+        let (source, raw) = match canonical_value.filter(|v| v.is_string()) {
+            Some(scalar) => ((*canonical).to_string(), scalar.clone()),
+            None => {
+                let Some((alias, value)) = aliases
+                    .iter()
+                    .find_map(|a| arguments.get(*a).map(|v| (*a, v.clone())))
+                else {
+                    return (std::borrow::Cow::Borrowed(arguments), None);
+                };
+                (alias.to_string(), value)
+            }
+        };
+        let list = match raw {
+            Value::Array(items) if !items.is_empty() => Value::Array(items),
+            Value::String(s) if !s.trim().is_empty() => Value::Array(vec![Value::from(s)]),
+            _ => return (std::borrow::Cow::Borrowed(arguments), None),
+        };
+        let note = if source == *canonical {
+            format!("valeur unique reçue pour `{canonical}` et lue comme une liste d'un élément")
+        } else {
+            format!("paramètre reçu sous `{source}` et lu comme `{canonical}`")
+        };
+        let mut patched = arguments.clone();
+        if let Some(obj) = patched.as_object_mut() {
+            obj.insert((*canonical).to_string(), list);
+        }
+        tracing::debug!(
+            tool = normalized_name,
+            source = %source,
+            canonical,
+            "REQ-AXO-902302 — list parameter normalised"
+        );
+        (std::borrow::Cow::Owned(patched), Some(note))
+    }
 
     /// REQ-AXO-902301 — accept the aliased parameter instead of bouncing the call.
     ///
@@ -1805,7 +1886,11 @@ impl McpServer {
         // REQ-AXO-902301 — and the parameter that IS there, under a neighbouring
         // name. Disclosed below, never silently.
         let (aliased, alias_used) = Self::with_aliased_parameter(normalized_name, arguments);
-        let arguments = &*aliased;
+        // REQ-AXO-902302 — and the list parameter given as a bare scalar, or under
+        // `files=`/`paths=`.
+        let (listed, list_note) = Self::with_normalised_list_parameter(normalized_name, &aliased);
+        let normalised = listed.into_owned();
+        let arguments = &normalised;
         let result = match normalized_name {
             "help" => self.axon_help(arguments),
             "contradiction_check" => self.axon_contradiction_check(arguments),
@@ -1951,13 +2036,20 @@ impl McpServer {
         // REQ-AXO-902301 — say that the alias was honoured. Accepting it silently
         // would leave the caller repeating the same wrong name every session; the
         // disclosure is what turns a rescue into a correction.
-        match alias_used {
+        let result = match alias_used {
             Some((alias, canonical)) => Self::append_disclosure(
                 result,
                 &format!(
                     "\n\n_↳ paramètre reçu sous `{alias}` et lu comme `{canonical}` \
                      (REQ-AXO-902301) — le nom attendu par cet outil est `{canonical}`._"
                 ),
+            ),
+            None => result,
+        };
+        match list_note {
+            Some(note) => Self::append_disclosure(
+                result,
+                &format!("\n\n_↳ {note} (REQ-AXO-902302)._"),
             ),
             None => result,
         }

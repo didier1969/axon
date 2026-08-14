@@ -3537,6 +3537,39 @@ fn a_tool_outside_the_alias_table_is_untouched() {
     assert_eq!(used, None);
 }
 
+// REQ-AXO-902302 — a single value where the tool expects a list.
+#[test]
+fn a_scalar_is_read_as_a_one_element_list() {
+    let scalar = json!({ "diff_paths": "src/foo.rs" });
+    let (patched, note) = McpServer::with_normalised_list_parameter("pre_flight_check", &scalar);
+    assert_eq!(
+        patched["diff_paths"],
+        json!(["src/foo.rs"]),
+        "checking ONE file is the common case; nothing in the name imposes the array"
+    );
+    assert!(note.is_some(), "the normalisation must be disclosed");
+}
+
+#[test]
+fn a_list_parameter_is_accepted_under_files_or_paths() {
+    let as_files = json!({ "files": ["src/a.rs", "src/b.rs"] });
+    let (patched, note) = McpServer::with_normalised_list_parameter("commit_work", &as_files);
+    assert_eq!(patched["diff_paths"], json!(["src/a.rs", "src/b.rs"]));
+    assert!(note.is_some());
+}
+
+#[test]
+fn a_usable_canonical_list_is_left_untouched() {
+    let ok = json!({ "diff_paths": ["src/a.rs"], "files": ["ignored.rs"] });
+    let (patched, note) = McpServer::with_normalised_list_parameter("pre_flight_check", &ok);
+    assert_eq!(patched.as_ref(), &ok, "zero-copy when nothing needs fixing");
+    assert_eq!(note, None);
+    assert_eq!(
+        patched["diff_paths"], json!(["src/a.rs"]),
+        "an alias must never overwrite a usable canonical list"
+    );
+}
+
 #[test]
 fn no_alias_shadows_a_real_parameter_of_its_own_tool() {
     // The guard that keeps this safe as the table grows: an alias must NOT be a
@@ -3544,12 +3577,26 @@ fn no_alias_shadows_a_real_parameter_of_its_own_tool() {
     // a legitimate argument.
     let catalog = crate::mcp::catalog::tools_catalog(true);
     let tools = catalog["tools"].as_array().expect("tools array");
-    for (tool, canonical, aliases) in McpServer::PARAMETER_ALIASES {
+    // REQ-AXO-902302 — BOTH tables, or the guard covers half the surface and goes
+    // green while the other half shadows a real parameter.
+    let all = McpServer::PARAMETER_ALIASES
+        .iter()
+        .chain(McpServer::SCALAR_TO_ARRAY_PARAMS.iter());
+    for (tool, canonical, aliases) in all {
+        // Two namespaces, deliberately: the catalog advertises `axon_commit_work`
+        // / `axon_pre_flight_check`, while dispatch strips the `axon_` prefix — and
+        // the alias tables are keyed on the DISPATCH name (which is also what the
+        // friction log records). Look the tool up under both, or the guard panics
+        // on a name that is perfectly correct where it is used.
+        let prefixed = format!("axon_{tool}");
         let schema = tools
             .iter()
-            .find(|t| t["name"].as_str() == Some(tool))
+            .find(|t| {
+                let name = t["name"].as_str();
+                name == Some(tool) || name == Some(prefixed.as_str())
+            })
             .map(|t| &t["inputSchema"]["properties"])
-            .unwrap_or_else(|| panic!("`{tool}` must exist in the catalog"));
+            .unwrap_or_else(|| panic!("`{tool}` must exist in the catalog (bare or axon_-prefixed)"));
         for alias in *aliases {
             assert!(
                 schema.get(alias).is_none(),
