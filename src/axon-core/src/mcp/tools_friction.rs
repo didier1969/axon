@@ -9,6 +9,33 @@ use super::McpServer;
 /// than this so the table can never grow unbounded over time.
 const MCP_CALL_STAT_RETENTION_DAYS: i64 = 90;
 
+/// REQ-AXO-902297 — is this `problem_class` an actual FAILURE?
+///
+/// Both the friction log and the per-call telemetry read the same field, and
+/// both used to treat "non-empty and not `ok`" as an error. That swept in two
+/// classes that are not failures at all:
+///
+///   * `degraded` (1003 occurrences, all from `query`) — `guidance.rs` emits it
+///     with `next_best_actions: ["treat_result_as_partial"]`: the answer IS
+///     served, only its quality is flagged. It fires while the index rebuilds
+///     after a promote, so a week with six promotes looked like a broken tool.
+///   * `none` (157 occurrences) — `cycle_audit.rs` literally emits
+///     `if cycle_count == 0 { "none" }`: the PERFECT result. A SOLL audit
+///     finding no cycle was being logged as friction and counted as an error.
+///
+/// Together ~41% of the friction log — the surface used to PRIORITISE work was
+/// two fifths noise, and its top entry by volume was not a defect. It also
+/// explains the "regressed since resolution" count: a legitimate degraded mode
+/// can never stay "resolved", it just keeps being observed.
+///
+/// Shared by `record_mcp_call` and `record_mcp_friction` on purpose: the two
+/// diverging readings of one field are what let this live. The allow-list is
+/// deliberately narrow — an UNKNOWN class still counts as a failure, because a
+/// new problem class must surface loudly rather than be silently swallowed.
+pub(crate) fn problem_class_is_failure(problem_class: &str) -> bool {
+    !matches!(problem_class, "" | "ok" | "none" | "degraded")
+}
+
 /// REQ-AXO-902292 — render the friction signatures INTO the text channel.
 ///
 /// Same class REQ-AXO-902279 fixed for `wiring`/`orphan_clusters`: the rows were
@@ -74,7 +101,9 @@ impl McpServer {
             .or_else(|| data.get("problem_class"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if problem_class.is_empty() || problem_class == "ok" {
+        // REQ-AXO-902297 — a served-but-degraded answer and a clean audit are not
+        // frictions; logging them buried the real ones under 41% noise.
+        if !problem_class_is_failure(problem_class) {
             return;
         }
         // field NAME only — never its value.
@@ -128,11 +157,15 @@ impl McpServer {
             })
             .and_then(Value::as_str)
             .unwrap_or("");
+        // REQ-AXO-902297 — same predicate as the friction log, so the two can no
+        // longer disagree about what "error" means. `degraded` / `none` are not
+        // failures: counting them made `query` read as 22.3% broken while it was
+        // serving answers normally.
         let is_error = response
             .get("isError")
             .and_then(Value::as_bool)
             .unwrap_or(false)
-            || (!problem_class.is_empty() && problem_class != "ok");
+            || problem_class_is_failure(problem_class);
         let status = if is_error { "error" } else { "ok" };
         let project_code = data
             .and_then(|d| d.get("project_code"))
@@ -640,6 +673,58 @@ impl McpServer {
                 "privacy": "signature-only — no argument content is ever stored",
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod failure_classification_tests {
+    use super::problem_class_is_failure;
+
+    // REQ-AXO-902297 — a served answer and a clean audit are not failures.
+    #[test]
+    fn served_but_degraded_is_not_a_failure() {
+        assert!(
+            !problem_class_is_failure("degraded"),
+            "`degraded` ships the answer and only flags its quality \
+             (guidance.rs: treat_result_as_partial) — counting it as an error made \
+             `query` read as 22.3% broken while it was working"
+        );
+    }
+
+    #[test]
+    fn the_literal_none_class_is_not_a_failure() {
+        assert!(
+            !problem_class_is_failure("none"),
+            "`cycle_audit.rs` emits \"none\" when it finds ZERO cycles — the perfect \
+             result. It was being logged as friction and counted as an error"
+        );
+    }
+
+    #[test]
+    fn absent_and_ok_are_not_failures() {
+        assert!(!problem_class_is_failure(""));
+        assert!(!problem_class_is_failure("ok"));
+    }
+
+    #[test]
+    fn real_problem_classes_still_count_as_failures() {
+        for pc in [
+            "input_invalid",
+            "invalid_arguments",
+            "unknown_tool",
+            "wrong_project_scope",
+            "git_add_rejected_paths",
+            "cycle_present_in_soll",
+        ] {
+            assert!(problem_class_is_failure(pc), "`{pc}` is a genuine failure");
+        }
+    }
+
+    #[test]
+    fn an_unknown_class_is_treated_as_a_failure() {
+        // The allow-list is narrow ON PURPOSE: a problem class nobody has
+        // classified yet must surface loudly, never be swallowed as benign.
+        assert!(problem_class_is_failure("some_future_class"));
     }
 }
 
