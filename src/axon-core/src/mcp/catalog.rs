@@ -1402,7 +1402,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "mcp_friction_report",
-                "description": "[SYSTEM/SOLL] REQ-AXO-901957 — closed-loop MCP friction log. Returns top OPEN friction signatures by frequency (rollout priorities) + RESOLVED ones with their REQ/VAL links and regression flags, ENUMERATED in the text (id/tool/problem/field/count), not just counted (REQ-AXO-902292) — no raw SQL needed to triage. Counts are the true totals; the listing discloses truncation against them. Signatures record only the problem SHAPE (project_code, tool, problem_class, field name) — NEVER any argument content. Optional `mark_resolved` closes a signature against the SOLL fix that resolved it. Backing table (for the rare case a query beats this tool): `axon.mcp_friction`.",
+                "description": "[SYSTEM/SOLL] REQ-AXO-901957 — closed-loop MCP friction log. Returns top OPEN friction signatures by frequency (rollout priorities) + RESOLVED ones with their REQ/VAL links and regression flags, ENUMERATED in the text (id/tool/problem/field/count), not just counted (REQ-AXO-902292) — no raw SQL needed to triage. Counts are the true totals; the listing discloses truncation against them. Signatures record only the problem SHAPE (project_code, tool, problem_class, field name) — NEVER any argument content. Optional `mark_resolved` closes a signature against the SOLL fix that resolved it; optional `mark_by_design` records a refusal that is correct and permanent (REQ-AXO-902319) — neither open nor resolved, kept visible with its stated reason but out of the fix-me ranking and out of the regression rule. Backing table (for the rare case a query beats this tool): `axon.mcp_friction`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1418,6 +1418,16 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                                 "note": { "type": "string" }
                             },
                             "required": ["id"]
+                        },
+                        "mark_by_design": {
+                            "type": "object",
+                            "description": "REQ-AXO-902319 — record a refusal that is CORRECT and PERMANENT: {id, note, resolved_by_req?}. Use it when no code change will ever remove the rejection — a required field that cannot be derived, a deliberate contract. It is neither `open` (nothing to fix, yet it would sit atop the rollout priorities forever) nor `resolved` (a false claim, and every recurrence would then trip the regression flag). `note` is REQUIRED: it states WHY, and it is printed in the report so the judgement stays challengeable.",
+                            "properties": {
+                                "id": { "type": "integer" },
+                                "note": { "type": "string", "description": "Why the refusal is correct and permanent. Required." },
+                                "resolved_by_req": { "type": "string", "description": "Optional SOLL id documenting the decision." }
+                            },
+                            "required": ["id", "note"]
                         }
                     },
                     "required": []

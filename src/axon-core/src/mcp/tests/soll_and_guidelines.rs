@@ -953,6 +953,101 @@ fn an_unrepairable_artifact_type_is_still_rejected() {
     assert_eq!(res["data"]["attached"].as_i64(), Some(0), "{res}");
 }
 
+// ── REQ-AXO-902319 — le troisième état : refus correct et permanent ────────
+//
+// `open` et `resolved` ne pouvaient pas être tous deux faux, et pourtant ils
+// l'étaient pour un refus définitif : `open` le laisse en tête des priorités de
+// correction sans rien à corriger, `resolved` ment ET fait crier au loup la règle
+// de régression de REQ-AXO-902310 à chaque récurrence.
+#[test]
+fn a_by_design_refusal_leaves_the_fix_me_list_without_faking_a_fix() {
+    let server = create_test_server();
+    let proj = "FRI319";
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO axon.mcp_friction \
+               (project_code, tool, problem_class, field_in_error, contract_version, \
+                status, occurrence_count, last_observed_at) \
+             VALUES ('{proj}', 'probe_by_design', 'attach_required', 'data.attach_to', 'test', \
+                     'open', 154, now())"
+        ))
+        .unwrap();
+    let id = server
+        .graph_store
+        .query_single_i64_writer(&format!(
+            "SELECT id FROM axon.mcp_friction WHERE project_code='{proj}' AND tool='probe_by_design'"
+        ))
+        .unwrap()
+        .unwrap();
+
+    let res = server
+        .execute_tool_direct(
+            "mcp_friction_report",
+            &json!({ "project_code": proj, "mark_by_design": {
+                "id": id, "note": "attach_to n'est pas déductible : deviner un parent écrirait une arête SOLL non demandée." } }),
+        )
+        .expect("report");
+
+    assert_eq!(res["data"]["total_open"].as_i64(), Some(0), "hors priorités : {res}");
+    assert_eq!(res["data"]["total_resolved"].as_i64(), Some(0), "et surtout PAS résolu : {res}");
+    assert_eq!(res["data"]["total_by_design"].as_i64(), Some(1));
+
+    // Visible, avec sa raison : « par conception » doit rester contestable.
+    let text = res["content"][0]["text"].as_str().expect("texte");
+    assert!(
+        text.contains("Par conception") && text.contains("arête SOLL non demandée"),
+        "la raison doit être imprimée, pas seulement stockée : {text}"
+    );
+}
+
+#[test]
+fn a_by_design_signature_never_trips_the_regression_flag() {
+    // Le cœur du REQ : une re-observation est ATTENDUE (le refus est permanent),
+    // donc elle ne doit jamais compter comme régression.
+    let server = create_test_server();
+    let proj = "FRI319B";
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO axon.mcp_friction \
+               (project_code, tool, problem_class, field_in_error, contract_version, \
+                status, resolved_at, occurrence_count, last_observed_at) \
+             VALUES ('{proj}', 'probe_perm', 'attach_required', 'data.attach_to', 'test', \
+                     'by_design', now() - interval '2 days', 200, now())"
+        ))
+        .unwrap();
+
+    let res = server
+        .execute_tool_direct("mcp_friction_report", &json!({ "project_code": proj }))
+        .expect("report");
+    assert_eq!(
+        res["data"]["regressed_count"].as_i64(),
+        Some(0),
+        "un refus par conception revu depuis sa décision n'est PAS une régression : {:?}",
+        res["data"]
+    );
+}
+
+#[test]
+fn marking_by_design_without_a_reason_is_refused() {
+    // Cet état retire une signature de la vue pour de bon. Sans raison écrite, il
+    // ne se distingue pas d'un abandon — donc `note` est obligatoire ici, alors
+    // qu'elle est facultative sur `mark_resolved`.
+    let server = create_test_server();
+    let res = server
+        .execute_tool_direct(
+            "mcp_friction_report",
+            &json!({ "mark_by_design": { "id": 999_999 } }),
+        )
+        .expect("report");
+    assert_eq!(res["isError"].as_bool(), Some(true), "{res}");
+    assert_eq!(
+        res["data"]["parameter_repair"]["invalid_field"],
+        json!("mark_by_design.note")
+    );
+}
+
 #[test]
 fn test_soll_manager_link_auto_canonizes_unambiguous_relation() {
     // REQ-AXO-901939 — a non-canonical relation on a pair with EXACTLY ONE

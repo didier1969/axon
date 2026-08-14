@@ -43,6 +43,16 @@ pub(crate) fn problem_class_is_failure(problem_class: &str) -> bool {
 /// which is the defect this module already documents above.
 pub(crate) const NON_FAILURE_PROBLEM_CLASSES: &[&str] = &["", "ok", "none", "degraded"];
 
+/// REQ-AXO-902319 — the third signature state, next to `open` and `resolved`.
+///
+/// A signature in this state describes a refusal that is CORRECT and PERMANENT:
+/// the tool is right to reject, the caller is right to be told, and no code change
+/// will ever make it go away. `open` would keep it at the top of the rollout
+/// priorities forever; `resolved` would claim a fix that does not exist AND make
+/// the regression rule (REQ-AXO-902310) raise a false alarm on every recurrence.
+/// The column has no CHECK constraint, so this needs no DDL migration.
+pub(crate) const BY_DESIGN_STATUS: &str = "by_design";
+
 /// SQL predicate equivalent to `problem_class_is_failure`, derived from the same
 /// constant. Values are static and alphanumeric, so the quoting is total.
 pub(crate) fn failure_class_sql() -> String {
@@ -336,6 +346,9 @@ impl McpServer {
     /// (traceability), regressions surfaced (resolved but observed since).
     /// Optional `mark_resolved = {id, resolved_by_req, resolved_by_val, note}`
     /// closes a signature against the SOLL fix that resolved it.
+    ///
+    /// REQ-AXO-902319 — optional `mark_by_design = {id, note}` records the THIRD
+    /// state: a refusal that is correct and permanent. See `BY_DESIGN_STATUS`.
     pub(crate) fn axon_mcp_friction_report(&self, args: &Value) -> Option<Value> {
         if let Some(mr) = args.get("mark_resolved") {
             if let Some(id) = mr.get("id").and_then(Value::as_i64) {
@@ -348,6 +361,59 @@ impl McpServer {
                      WHERE id=?",
                     &json!([req, val, note, id]),
                 );
+            }
+        }
+        // REQ-AXO-902319 — the third state. `open` and `resolved` could not both be
+        // wrong, yet for a permanent refusal they were: `open` keeps a signature at
+        // the top of the fix-me list forever with nothing to fix, and `resolved` is
+        // a false claim that ALSO makes the regression rule of REQ-AXO-902310 cry
+        // wolf on every re-observation — inside the very indicator that REQ just
+        // made trustworthy. A required field that cannot be derived (`attach_to` on
+        // soll_manager create: guessing a parent would write a SOLL edge nobody
+        // asked for) is not friction to eliminate. It is a contract, and the log
+        // now has a word for it.
+        //
+        // A `note` is REQUIRED here, unlike on mark_resolved: "by design" without a
+        // stated reason is indistinguishable from giving up, and this state is the
+        // one that removes a signature from view permanently.
+        if let Some(md) = args.get("mark_by_design") {
+            let id = md.get("id").and_then(Value::as_i64);
+            let note = md
+                .get("note")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            match (id, note) {
+                (Some(id), Some(note)) => {
+                    let req = md.get("resolved_by_req").and_then(Value::as_str).unwrap_or("");
+                    let _ = self.graph_store.execute_param(
+                        &format!(
+                            "UPDATE axon.mcp_friction SET status='{BY_DESIGN_STATUS}', resolved_at=now(),
+                               resolved_by_req=NULLIF(?,''), resolution_note=NULLIF(?,'')
+                             WHERE id=?"
+                        ),
+                        &json!([req, note, id]),
+                    );
+                }
+                (Some(_), None) => {
+                    return Some(json!({
+                        "content": [{ "type": "text", "text":
+                            "mark_by_design requires a `note`: state WHY the refusal is correct and \
+                             permanent. This state hides the signature from the fix-me list for good — \
+                             without a reason it is indistinguishable from giving up." }],
+                        "isError": true,
+                        "data": {
+                            "status": "input_invalid",
+                            "operator_guidance": { "problem_class": "input_invalid" },
+                            "parameter_repair": {
+                                "tool": "mcp_friction_report",
+                                "invalid_field": "mark_by_design.note",
+                                "required_fields": ["mark_by_design.id", "mark_by_design.note"],
+                            },
+                        }
+                    }));
+                }
+                _ => {}
             }
         }
         let project_code = args
@@ -453,6 +519,70 @@ impl McpServer {
         };
         let total_open = total_of("open");
         let total_resolved = total_of("resolved");
+        let total_by_design = total_of(BY_DESIGN_STATUS);
+
+        // REQ-AXO-902319 — listed, not hidden. The point of the third state is to
+        // take these OUT of the fix-me ranking, not out of sight: a reader must be
+        // able to check that "by design" was a judgement someone wrote down, and
+        // challenge it. Hence the note travels with the row.
+        let by_design_rows: Vec<Vec<Value>> = self
+            .graph_store
+            .query_json_param(
+                &format!(
+                    "SELECT id, tool, problem_class, field_in_error, occurrence_count, \
+                            COALESCE(resolution_note,''), COALESCE(resolved_by_req,'') \
+                     FROM axon.mcp_friction \
+                     WHERE status = '{BY_DESIGN_STATUS}' AND (? = '' OR project_code = ?) \
+                     ORDER BY occurrence_count DESC LIMIT ?"
+                ),
+                &json!([project_code, project_code, limit]),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+            .unwrap_or_default();
+        let by_design_frictions: Vec<Value> = by_design_rows
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "id": r.first().cloned().unwrap_or(Value::Null),
+                    "tool": r.get(1).cloned().unwrap_or(Value::Null),
+                    "problem_class": r.get(2).cloned().unwrap_or(Value::Null),
+                    "field_in_error": r.get(3).cloned().unwrap_or(Value::Null),
+                    "occurrence_count": r.get(4).cloned().unwrap_or(Value::Null),
+                    "reason": r.get(5).cloned().unwrap_or(Value::Null),
+                    "resolved_by_req": r.get(6).cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
+        let by_design_section = if by_design_frictions.is_empty() {
+            String::new()
+        } else {
+            let mut out = format!(
+                "\n**Par conception** (refus corrects et permanents — hors priorités de correction ; \
+                 showing {} of {total_by_design}):\n\n",
+                by_design_frictions.len()
+            );
+            out.push_str("| id | tool | problem | field | count | pourquoi |\n|---|---|---|---|---|---|\n");
+            for f in &by_design_frictions {
+                let cell = |k: &str| -> String {
+                    match f.get(k) {
+                        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+                        Some(Value::Number(n)) => n.to_string(),
+                        _ => "—".to_string(),
+                    }
+                };
+                out.push_str(&format!(
+                    "| {} | `{}` | {} | `{}` | {} | {} |\n",
+                    cell("id"),
+                    cell("tool"),
+                    cell("problem_class"),
+                    cell("field_in_error"),
+                    cell("occurrence_count"),
+                    cell("reason"),
+                ));
+            }
+            out
+        };
 
         // REQ-AXO-902310 — counted over the WHOLE table, not the page. The paged
         // count was the same defect REQ-AXO-902292 fixed for the open/resolved
@@ -499,17 +629,24 @@ impl McpServer {
             String::new()
         };
 
+        let by_design_line = if total_by_design > 0 {
+            format!("\n**Par conception:** {total_by_design} (refus corrects, rien à corriger)")
+        } else {
+            String::new()
+        };
         let report = format!(
             "## 🔁 MCP Friction Report\n\n**Open signatures (rollout priorities):** {}\n\
-             **Resolved:** {} ({} regressed since resolution)\n\
+             **Resolved:** {} ({} regressed since resolution){}\n\
              **Privacy:** signature-only — no argument content is ever stored.\n\
-             {}{}{}\n_Table: `axon.mcp_friction`._\n",
+             {}{}{}{}\n_Table: `axon.mcp_friction`._\n",
             total_open,
             total_resolved,
             regressed_count,
+            by_design_line,
             unattributed_note,
             render_friction_rows(&open_frictions, total_open, "Open signatures"),
             render_friction_rows(&resolved_frictions, total_resolved, "Resolved"),
+            by_design_section,
         );
         Some(json!({
             "content": [{ "type": "text", "text": format_standard_contract(
@@ -517,15 +654,17 @@ impl McpServer {
                 "friction signatures assembled (no argument content stored)",
                 "scope:mcp_surface",
                 &report,
-                &["fix a top-open signature, then call mcp_friction_report mark_resolved={id, resolved_by_req, resolved_by_val} to close the loop"],
+                &["fix a top-open signature, then call mcp_friction_report mark_resolved={id, resolved_by_req, resolved_by_val} to close the loop — or mark_by_design={id, note} when the refusal is correct and permanent"],
                 "high",
             )}],
             "data": {
                 "open_frictions": open_frictions,
                 "resolved_frictions": resolved_frictions,
+                "by_design_frictions": by_design_frictions,
                 "open_count": open_count,
                 "total_open": total_open,
                 "total_resolved": total_resolved,
+                "total_by_design": total_by_design,
                 "regressed_count": regressed_count,
                 "unattributed_open": unattributed,
                 "privacy": "signature-only — no argument content is ever stored",
