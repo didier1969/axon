@@ -157,10 +157,63 @@ impl McpServer {
              LIMIT $limit"
                 .to_string()
         };
-        self.graph_store
+        let substring_hits = self
+            .graph_store
             .query_json_param(
                 &query,
                 &json!({ "pat": format!("%{}%", needle), "limit": limit as u64 }),
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        if substring_hits.trim() != "[]" {
+            return substring_hits;
+        }
+
+        // REQ-AXO-902298 — a substring match can NEVER return a name SHORTER than
+        // the needle. So `%needle%` rescues a TRUNCATED name (`classify_diff_path`
+        // → `classify_diff_paths`) and nothing else: one extra character, a typo
+        // in the middle, a transposition — all yield "No results found".
+        //
+        // Measured live: `inspect`/`impact` both suggest for the truncated case and
+        // both fail for `reject_body_less_sends` → `reject_body_less_send`. It is
+        // not an asymmetry between tools (they share this function); the mechanism
+        // only ever handled one class of mistake.
+        //
+        // That dead-end lands on the exact path GUI-PRO-112/114 push agents onto
+        // instead of grep — `query`/`inspect`/`impact`/`path` all resolve through
+        // here, and `impact` is mandatory before any structural refactor.
+        //
+        // Trigram fallback, fired ONLY when the substring pass found nothing: the
+        // existing behaviour is untouched and the extra cost is paid on a path that
+        // was already failing. The threshold is written into the WHERE rather than
+        // left to `pg_trgm.similarity_threshold`, a session GUC that would make the
+        // same call answer differently depending on the connection.
+        //
+        // `pg_trgm` is OPTIONAL by design (db/ddl/00_extensions.sql keeps booting
+        // without it on installs lacking contrib privileges). If it is absent,
+        // `similarity()` does not resolve, the query errors, and the `unwrap_or_else`
+        // below yields `[]` — i.e. exactly today's behaviour. The fallback can only
+        // ever add suggestions, never remove or break one.
+        let fuzzy = if project.is_some() {
+            format!(
+                "SELECT name, kind, COALESCE(project_code, 'unknown') \
+                 FROM Symbol \
+                 WHERE similarity(lower(name), lower($needle)) >= 0.4{project_filter} \
+                 ORDER BY similarity(lower(name), lower($needle)) DESC, length(name), name \
+                 LIMIT $limit",
+                project_filter = Self::sql_project_filter_for_fields(project, &["project_code"])
+            )
+        } else {
+            "SELECT name, kind, COALESCE(project_code, 'unknown') \
+             FROM Symbol \
+             WHERE similarity(lower(name), lower($needle)) >= 0.4 \
+             ORDER BY similarity(lower(name), lower($needle)) DESC, length(name), name \
+             LIMIT $limit"
+                .to_string()
+        };
+        self.graph_store
+            .query_json_param(
+                &fuzzy,
+                &json!({ "needle": needle, "limit": limit as u64 }),
             )
             .unwrap_or_else(|_| "[]".to_string())
     }

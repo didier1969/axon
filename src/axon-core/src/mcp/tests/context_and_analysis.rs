@@ -5172,3 +5172,96 @@ fn test_god_objects_score_reads_complexity_and_fanout_from_ram() {
 
     std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
 }
+
+// REQ-AXO-902298 — symbol suggestions must survive an EXTRA character, not just
+// a truncated name.
+//
+// `suggest_scoped_symbols_canonical` filtered on `lower(name) LIKE %needle%`, and
+// a substring can never match a name SHORTER than the needle. So a truncated name
+// was rescued (`classify_diff_path` -> `classify_diff_paths`) while one extra
+// character produced "No results found" — measured live on both `inspect` and
+// `impact`, which share this resolver. That dead-end sends an agent back to grep,
+// on the very path GUI-PRO-112/114 exist to keep it off.
+#[test]
+fn suggests_a_shorter_symbol_when_the_needle_has_an_extra_character() {
+    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(
+        crate::test_support::ist_fixtures::IstSeed::new().symbol(
+            crate::test_support::ist_fixtures::SymbolFixture::new(
+                "axon::reject_body_less_send",
+                "reject_body_less_send",
+                "method",
+                "AXO",
+            ),
+        ),
+    )
+    .unwrap();
+
+    // Trailing "s" the caller did not mean to type.
+    let raw = harness
+        .server
+        .suggest_scoped_symbols_canonical("reject_body_less_sends", Some("AXO"), 8);
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    let names: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r.first().and_then(serde_json::Value::as_str))
+        .collect();
+
+    assert!(
+        names.contains(&"reject_body_less_send"),
+        "one extra character must still surface the symbol; got {names:?}"
+    );
+}
+
+#[test]
+fn truncated_needle_still_resolves_through_the_substring_pass() {
+    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(
+        crate::test_support::ist_fixtures::IstSeed::new().symbol(
+            crate::test_support::ist_fixtures::SymbolFixture::new(
+                "axon::classify_diff_paths",
+                "classify_diff_paths",
+                "method",
+                "AXO",
+            ),
+        ),
+    )
+    .unwrap();
+
+    let raw = harness
+        .server
+        .suggest_scoped_symbols_canonical("classify_diff_path", Some("AXO"), 8);
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    let names: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r.first().and_then(serde_json::Value::as_str))
+        .collect();
+
+    assert!(
+        names.contains(&"classify_diff_paths"),
+        "the pre-existing substring behaviour must be untouched; got {names:?}"
+    );
+}
+
+#[test]
+fn an_unrelated_needle_suggests_nothing_rather_than_a_random_neighbour() {
+    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(
+        crate::test_support::ist_fixtures::IstSeed::new().symbol(
+            crate::test_support::ist_fixtures::SymbolFixture::new(
+                "axon::reject_body_less_send",
+                "reject_body_less_send",
+                "method",
+                "AXO",
+            ),
+        ),
+    )
+    .unwrap();
+
+    let raw = harness
+        .server
+        .suggest_scoped_symbols_canonical("zzzzzzzzzzzzzzzzzzzzzz", Some("AXO"), 8);
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+
+    assert!(
+        rows.is_empty(),
+        "below the similarity threshold, say nothing rather than guess: {rows:?}"
+    );
+}
