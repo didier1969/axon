@@ -883,9 +883,45 @@ impl McpServer {
                 "use_count": r.get(2).cloned().unwrap_or(Value::Null)
             }))
             .collect();
+        // REQ-AXO-902325 — the tool's own description promises "top practices by trust",
+        // and `top` was computed, put in `data`, and never rendered. Most MCP client
+        // renderings (including the bare HTTP path) surface only `content[0].text`, so
+        // the advertised half of this tool was invisible to the caller who asked for it —
+        // the same defect REQ-AXO-901949 inv.2 fixed for the `sql` repair envelope.
+        let top_lines = if top.is_empty() {
+            "\n* (no active practice in this scope)".to_string()
+        } else {
+            top.iter()
+                .map(|t| {
+                    let text = t
+                        .get("practice")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .chars()
+                        .take(110)
+                        .collect::<String>();
+                    // The SQL gateway hands numbers back as JSON STRINGS, so `to_string()`
+                    // renders `trust "0.91"` — quotes and all, which reads like a label
+                    // rather than a measurement. Unwrap the string form when present.
+                    let cell = |k: &str| {
+                        t.get(k)
+                            .map(|v| {
+                                v.as_str()
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| v.to_string())
+                            })
+                            .unwrap_or_default()
+                    };
+                    let trust = cell("trust");
+                    let uses = cell("use_count");
+                    format!("\n* trust {trust} · {uses} use(s) — {text}")
+                })
+                .collect::<String>()
+        };
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_card `{scope}` — {active} active, {prunedc} pruned, mean trust {:.2}", mean_trust
+                "### 🧠 practice_card `{scope}` — {active} active, {prunedc} pruned, mean trust {:.2}\n\n**Top by trust**{top_lines}",
+                mean_trust
             )}],
             "data": {"status":"ok","scope":scope,"active":active,"pruned":prunedc,"mean_trust":mean_trust,"top":top}
         }))

@@ -1,5 +1,106 @@
 use super::*;
 
+/// REQ-AXO-902325 — `run_query_count` must decode the WHOLE numeric family, not just
+/// `int8`.
+///
+/// `count(*)` is `int8`, so counts were always right and the helper read as healthy.
+/// Aggregates are not: `round(avg(x)*1000)` over a `REAL` column is `double precision`
+/// (measured with `pg_typeof`), and `sum`/`avg` over integers is `numeric`. Both failed
+/// `try_get::<_, i64>`, and the `unwrap_or(0)` behind it turned that type error into the
+/// plausible value 0 — which is how `practice_card` reported `mean trust 0.00` on a store
+/// whose real mean is 0.53.
+///
+/// No table: the aggregates run over inline VALUES, so this pins the DECODER and nothing
+/// else. The `int8` case is asserted alongside deliberately — it is the one that always
+/// worked, and it is what made the bug invisible.
+#[test]
+fn query_count_decodes_float_and_numeric_aggregates_not_just_bigint() {
+    let server = create_test_server();
+
+    let n = server
+        .graph_store
+        .query_count("SELECT count(*) FROM (VALUES (1),(2),(3)) AS t(v)")
+        .expect("count(*) is int8");
+    assert_eq!(n, 3, "int8 was never the broken case");
+
+    // `double precision` — the shape that actually produced `mean trust 0.00`.
+    let f = server
+        .graph_store
+        .query_count("SELECT round(avg(v)*1000) FROM (VALUES (0.5::real),(0.9::real)) AS t(v)")
+        .expect("float8 aggregate must decode");
+    assert_eq!(
+        f, 700,
+        "avg over REAL is double precision; decoding it as i64-only yields a silent 0"
+    );
+
+    // `numeric` — the sibling shape (sum/avg over integers), same failure mode.
+    let d = server
+        .graph_store
+        .query_count("SELECT round(avg(v)*1000) FROM (VALUES (1::int),(2::int)) AS t(v)")
+        .expect("numeric aggregate must decode");
+    assert_eq!(d, 1500, "avg over int is numeric; it must not collapse to 0");
+
+    // Rounded, not truncated: a caller scaling by 1000 to keep three decimals is
+    // asking for the nearest integer, and truncation would quietly bias every mean low.
+    let r = server
+        .graph_store
+        .query_count("SELECT 2.6::float8")
+        .expect("float8 scalar must decode");
+    assert_eq!(r, 3, "the numeric family is rounded, not truncated");
+}
+
+/// REQ-AXO-902325 — the tool advertises "top practices by trust". It computed them,
+/// put them in `data`, and never rendered them. Most MCP clients (including the bare
+/// HTTP path) surface only `content[0].text`, so the advertised half was invisible to
+/// the caller who asked for it.
+#[test]
+fn practice_card_renders_its_advertised_top_and_a_real_mean() {
+    let server = create_test_server();
+    for (scope, practice, trust, uses) in [
+        ("AXO", "verifier ce que compte un chiffre avant de decider", 0.91_f32, 12),
+        ("AXO", "falsifier un gate avant de le committer", 0.72_f32, 5),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO axon.practice (scope, context, practice, trust, use_count, status) \
+                 VALUES ('{scope}', 'ctx', '{practice}', {trust}, {uses}, 'active')"
+            ))
+            .unwrap();
+    }
+
+    let resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({ "name": "practice_card", "arguments": { "scope": "AXO" } })),
+            id: Some(json!(902_325)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let text = resp["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("Top by trust"),
+        "the advertised top must reach the TEXT channel, not only `data`: {text}"
+    );
+    assert!(
+        text.contains("falsifier un gate") || text.contains("verifier ce que compte"),
+        "at least one practice must be named in the rendered top: {text}"
+    );
+    assert!(
+        !text.contains("mean trust 0.00"),
+        "a store holding practices at trust 0.72 and 0.91 cannot have a mean of 0.00: {text}"
+    );
+
+    let mean = resp["data"]["mean_trust"].as_f64().unwrap_or(0.0);
+    assert!(
+        mean > 0.5,
+        "mean_trust must reflect the stored values, got {mean}"
+    );
+}
+
 #[test]
 fn test_mcp_tools_list() {
     let server = create_test_server();

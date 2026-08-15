@@ -328,7 +328,7 @@ impl NativePgCtx {
                 return 0;
             }
             match conn.query_opt(&sql, &[]).await {
-                Ok(Some(row)) => row.try_get::<_, i64>(0).unwrap_or(0),
+                Ok(Some(row)) => scalar_cell_to_i64(&row, &sql),
                 _ => 0,
             }
         })
@@ -798,6 +798,94 @@ fn render_pg_value(row: &tokio_postgres::Row, col: usize) -> String {
         }
     }
     format!("<unsupported type {}>", ty.name())
+}
+
+/// REQ-AXO-902325 — decode a single scalar cell as `i64` across the whole numeric
+/// family, instead of `try_get::<_, i64>` alone.
+///
+/// What the narrow version cost. `run_query_count` backs 143 call sites, and it read
+/// ONLY `int8`. `count(*)` is `int8`, so counts were right and the helper looked
+/// healthy. Aggregates are not: measured with `pg_typeof`, not assumed —
+/// `round(avg(trust)*1000)` over `trust REAL` is **`double precision`**, and
+/// `sum`/`avg` over integer columns is **`numeric`**. `try_get::<_, i64>` fails on
+/// both, so `.unwrap_or(0)` turned a TYPE ERROR into the perfectly plausible value **0**.
+///
+/// Observed: `practice_card` reported `mean trust 0.00` on a store whose real mean is
+/// 0.53, on every scope, for as long as the tool has existed — while the same SQL run
+/// through the `sql` tool returned 530. The KPI of the governed memory read flat, so a
+/// healthy store and a degraded one were indistinguishable from that surface.
+///
+/// The caller could not even notice: `run_query_count` returns `i64`, never an error,
+/// so the `unwrap_or(500)` fallback that `practice_card` had written for exactly this
+/// case was UNREACHABLE. A signature with no error channel converts every failure into
+/// a number somebody will read as a measurement.
+///
+/// Same root cause as REQ-AXO-901905 (numeric unreadable through the `sql` gateway),
+/// which was fixed for the cell RENDERER above and missed here — one decoder learned
+/// about `numeric`, its sibling did not.
+fn scalar_cell_to_i64(row: &tokio_postgres::Row, sql: &str) -> i64 {
+    use tokio_postgres::types::Type;
+    let Some(col) = row.columns().first() else {
+        return 0;
+    };
+    let ty = col.type_().clone();
+    if ty == Type::INT8 {
+        return row.try_get::<_, Option<i64>>(0).ok().flatten().unwrap_or(0);
+    }
+    if ty == Type::INT4 {
+        return row
+            .try_get::<_, Option<i32>>(0)
+            .ok()
+            .flatten()
+            .map(i64::from)
+            .unwrap_or(0);
+    }
+    if ty == Type::INT2 {
+        return row
+            .try_get::<_, Option<i16>>(0)
+            .ok()
+            .flatten()
+            .map(i64::from)
+            .unwrap_or(0);
+    }
+    if ty == Type::NUMERIC {
+        // `avg` / `round` / `sum(int)` land here. Rounded, not truncated: a caller
+        // scaling by 1000 to keep 3 decimals wants the nearest integer.
+        if let Ok(Some(d)) = row.try_get::<_, Option<rust_decimal::Decimal>>(0) {
+            return rust_decimal::prelude::ToPrimitive::to_i64(&d.round()).unwrap_or(0);
+        }
+        return 0;
+    }
+    if ty == Type::FLOAT8 {
+        return row
+            .try_get::<_, Option<f64>>(0)
+            .ok()
+            .flatten()
+            .map(|v| v.round() as i64)
+            .unwrap_or(0);
+    }
+    if ty == Type::FLOAT4 {
+        return row
+            .try_get::<_, Option<f32>>(0)
+            .ok()
+            .flatten()
+            .map(|v| v.round() as i64)
+            .unwrap_or(0);
+    }
+    // Anything else: try the historical path, then say so. The signature cannot carry
+    // an error, so the log line is the ONLY way this stops being a silent zero — and a
+    // silent zero here is a measurement nobody can question.
+    match row.try_get::<_, i64>(0) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!(
+                pg_type = %ty.name(),
+                sql = %sql.chars().take(160).collect::<String>(),
+                "run_query_count: scalar cell is not decodable as i64 — returning 0, which is INDISTINGUISHABLE from a real zero (REQ-AXO-902325)"
+            );
+            0
+        }
+    }
 }
 
 #[cfg(test)]
