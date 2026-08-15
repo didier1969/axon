@@ -31,8 +31,21 @@ pub fn measured_symbol_token_count(content: &str) -> Option<usize> {
     token_count_for_text(content).ok()
 }
 
+/// REQ-AXO-902340 — chars per token assumed by [`fallback_estimated_token_count`].
+///
+/// Named because it must be the SAME number used to size a chunk. It was not:
+/// sizing used `SAFE_CHARS_PER_TOKEN` (4) while labelling used 3, so a chunk
+/// aimed at `target_chunk_tokens` was measured at **4/3 of it** — 33 % over, by
+/// construction, every time. Two constants for one physical quantity is how a
+/// bound that reads as respected is systematically exceeded (GUI-PRO-013).
+const FALLBACK_CHARS_PER_TOKEN: usize = 3;
+
 fn fallback_estimated_token_count(content: &str) -> usize {
-    content.chars().count().div_ceil(3).max(1)
+    content
+        .chars()
+        .count()
+        .div_ceil(FALLBACK_CHARS_PER_TOKEN)
+        .max(1)
 }
 
 fn estimated_token_count(content: &str) -> usize {
@@ -75,6 +88,22 @@ const MAX_CHUNKS_PER_SYMBOL: usize = 4 * MAX_PRECISE_ENCODE_CHUNKS;
 /// Conservative chars-per-token proxy for byte-based chunk sizing on the
 /// degenerate fast path (BGE on source/log text rarely exceeds ~4 chars/token).
 const SAFE_CHARS_PER_TOKEN: usize = 4;
+
+/// REQ-AXO-902340 — fan-out ceiling for [`coarse_byte_window_chunks`], where
+/// chunks are one model window each and the COUNT therefore scales with the
+/// file.
+///
+/// Deliberately NOT [`MAX_PRECISE_ENCODE_CHUNKS`]: that one bounds tokenizer
+/// encode time on the precise path, and the coarse path runs no tokenizer.
+/// Reusing it capped 256 chunks per body, which on anything past ~393 KB was
+/// paid by growing each chunk beyond the model window — content the embedder
+/// then truncated away, silently, at 100 % reported coverage.
+///
+/// 8 192 windows ≈ 12.6 MB. Measured against the live corpus: that covers every
+/// indexed file in full except two OptaPlanner benchmark blobs (49 MB / 33 MB of
+/// plain numbers). When it does bind, the drop is logged with the byte count —
+/// a declared partial index, not an invisible one.
+const MAX_COARSE_CHUNKS_PER_SYMBOL: usize = 8192;
 
 /// REQ-AXO-901902/901906 — body byte length above which `build_symbol_chunks`
 /// abandons the precise code-oriented path entirely (see
@@ -716,39 +745,126 @@ fn coarse_byte_window_chunks(
         return Vec::new();
     }
     let body_bytes: usize = lines[start..end].iter().map(|l| l.len() + 1).sum();
-    // Target ~one model window of bytes per chunk, but never exceed the cap.
-    let by_window = profile
+    // REQ-AXO-902340 — ONE model window of bytes per chunk. Full stop.
+    //
+    // This used to be `by_window.max(body_bytes / MAX_PRECISE_ENCODE_CHUNKS)`,
+    // so past 256 windows (~393 KB) the COUNT cap won and the chunk size grew
+    // linearly with the file. Measured on the live index: `model_b_9.txt`
+    // (3.4 MB) emitted 247 chunks of **4 934 tokens** against a 384-token
+    // window, and a 348 KB Swiss tax law 33 chunks of 3 744 — the embedder
+    // truncates at `model_max_tokens`, so **~90 % of those files was never
+    // vectorised** while `embedding_status` reported 100 % coverage.
+    //
+    // The count cap was bought with content, and the trade was never written
+    // down. Worse, it was borrowed: `MAX_PRECISE_ENCODE_CHUNKS` bounds encode
+    // TIME on the precise path, and this path runs no tokenizer at all
+    // (`fallback_estimated_token_count` is a byte estimate). It inherited a
+    // ceiling it never needed.
+    // Size the BODY so the ASSEMBLED chunk — prefix included — fits the window
+    // under the SAME estimator that will label it. Sizing the body alone, with a
+    // different chars-per-token than the estimator, is what left every chunk over
+    // its own target: `symbol:` / `kind:` / `part: i/N` are prepended afterwards
+    // and counted afterwards.
+    let overhead_chars = format_chunk_content(symbol, "", "", 1, 2).chars().count();
+    let bytes_per_chunk = profile
         .target_chunk_tokens
-        .saturating_mul(SAFE_CHARS_PER_TOKEN)
+        .saturating_mul(FALLBACK_CHARS_PER_TOKEN)
+        .saturating_sub(overhead_chars)
         .max(1);
-    let by_cap = body_bytes.div_ceil(MAX_PRECISE_ENCODE_CHUNKS).max(1);
-    let bytes_per_chunk = by_window.max(by_cap);
 
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    // REQ-AXO-902340 — pack whole lines up to one window, and CHAR-WINDOW any
+    // single line that alone exceeds it. Line packing cannot bound a body whose
+    // line IS the body: an ~8 KB serialized blob on one line yielded one 3 080-
+    // token chunk however small the byte target was. `BodySegment` already
+    // carries both shapes for the precise path (`split_giant_lines`); reusing it
+    // here means one materialisation rule, not two.
+    let mut ranges: Vec<BodySegment> = Vec::new();
     let mut seg_start = start;
     let mut acc = 0usize;
     for cursor in start..end {
-        acc += lines[cursor].len() + 1;
+        let line_bytes = lines[cursor].len() + 1;
+        if line_bytes > bytes_per_chunk {
+            if seg_start < cursor {
+                ranges.push(BodySegment::LineRange {
+                    start: seg_start,
+                    end: cursor,
+                });
+            }
+            let char_len = lines[cursor].chars().count();
+            let mut cs = 0usize;
+            while cs < char_len {
+                let ce = (cs + bytes_per_chunk).min(char_len);
+                ranges.push(BodySegment::CharWindow {
+                    line: cursor,
+                    char_start: cs,
+                    char_end: ce,
+                });
+                cs = ce;
+            }
+            seg_start = cursor + 1;
+            acc = 0;
+            continue;
+        }
+        acc += line_bytes;
         if acc >= bytes_per_chunk {
-            ranges.push((seg_start, cursor + 1));
+            ranges.push(BodySegment::LineRange {
+                start: seg_start,
+                end: cursor + 1,
+            });
             seg_start = cursor + 1;
             acc = 0;
         }
     }
     if seg_start < end {
-        ranges.push((seg_start, end));
+        ranges.push(BodySegment::LineRange {
+            start: seg_start,
+            end,
+        });
     }
     if ranges.is_empty() {
-        ranges.push((start, end));
+        ranges.push(BodySegment::LineRange { start, end });
+    }
+
+    // REQ-AXO-902340 — fan-out ceiling, DECLARED rather than paid in silence.
+    //
+    // Sizing chunks by the window makes the count grow with the file, so a
+    // ceiling is still needed. The difference from the old one is what happens
+    // when it binds: the covered prefix is fully embeddable and the dropped
+    // tail is NAMED, instead of every chunk being quietly truncated at embed
+    // time. Unindexed content must be declared, never guessed.
+    //
+    // 8 192 windows ≈ 12.6 MB, which covers every file in the corpus except
+    // two OptaPlanner benchmark blobs (49 MB and 33 MB of plain numbers) —
+    // measured, not assumed.
+    if ranges.len() > MAX_COARSE_CHUNKS_PER_SYMBOL {
+        let dropped_bytes: usize = ranges[MAX_COARSE_CHUNKS_PER_SYMBOL..]
+            .iter()
+            .map(|seg| seg.snippet(lines).len())
+            .sum();
+        tracing::warn!(
+            target: "pipeline::chunk",
+            symbol = %symbol.name,
+            kind = %symbol.kind,
+            start_line = symbol.start_line,
+            body_bytes,
+            emitted_chunks = MAX_COARSE_CHUNKS_PER_SYMBOL,
+            would_have_emitted = ranges.len(),
+            dropped_bytes,
+            "REQ-AXO-902340 body exceeds the coarse fan-out ceiling — this file is \
+             PARTIALLY indexed: the covered prefix is fully embeddable, the tail is not \
+             indexed at all. Narrow the indexing scope (.axonignore) if this file is \
+             not worth retrieving"
+        );
+        ranges.truncate(MAX_COARSE_CHUNKS_PER_SYMBOL);
     }
 
     let part_count = ranges.len();
     ranges
         .into_iter()
         .enumerate()
-        .map(|(i, (s, e))| {
+        .map(|(i, seg)| {
             let part_index = i + 1;
-            let snippet = lines[s..e].join("\n");
+            let snippet = seg.snippet(lines);
             let content = format_chunk_content(symbol, "", &snippet, part_index, part_count);
             DerivedCodeChunk {
                 estimated_tokens: fallback_estimated_token_count(&content),
@@ -756,8 +872,8 @@ fn coarse_byte_window_chunks(
                 part_index,
                 part_count,
                 chunk_path: format!("{}/{}", part_index, part_count),
-                start_line: s + 1,
-                end_line: e,
+                start_line: seg.start_line(),
+                end_line: seg.end_line(),
             }
         })
         .collect()
@@ -1762,21 +1878,48 @@ mod tests {
         );
         // Root fix bounds the fan-out: pre-fix this body produced ~28 769
         // micro-chunks (body_budget floored), then `fuse_small_chunks` choked.
+        //
+        // REQ-AXO-902340 moved the bound: the coarse path now sizes chunks by the
+        // model window, so the COUNT scales with the body and `MAX_PRECISE_ENCODE_CHUNKS`
+        // (an encode-TIME budget for the precise path) is no longer the observable.
+        // The old ceiling was met by growing each chunk past the window — content
+        // the embedder truncated away. Bounding a visible number by an invisible
+        // loss is the trade this test must no longer certify.
         assert!(
-            chunks.len() <= MAX_PRECISE_ENCODE_CHUNKS + 1,
-            "degenerate body fan-out must be capped, got {} chunks",
+            chunks.len() <= MAX_COARSE_CHUNKS_PER_SYMBOL,
+            "degenerate body fan-out must stay bounded, got {} chunks",
             chunks.len()
+        );
+        // The harm the count bound used to stand in for, asserted directly.
+        let worst = chunks
+            .iter()
+            .map(|c| fallback_estimated_token_count(&c.content))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            worst <= active_chunk_profile().model_max_tokens,
+            "REQ-AXO-902340: a chunk of {worst} tokens exceeds the model window — the \
+             embedder truncates it, so that content is indexed and unretrievable"
         );
         assert!(
             chunks.len() > 1,
             "a 640 KB body must still split into multiple chunks"
         );
         // Contiguous, gap-free coverage.
+        //
+        // REQ-AXO-902340 — two legal shapes now, not one. A line longer than the
+        // model window is CHAR-windowed, so several consecutive chunks share that
+        // line and `start_line == end_line` for each: the next chunk then repeats
+        // the line number instead of advancing. Requiring a strict +1 would forbid
+        // the only construction that can bound a giant line — which is precisely
+        // the shape this test feeds (an ~8 KB single line). What must still hold
+        // is that coverage never SKIPS a line.
         for w in chunks.windows(2) {
-            assert_eq!(
-                w[0].end_line + 1,
-                w[1].start_line,
-                "coarse chunks must be contiguous: {:?} then {:?}",
+            let prev_end = w[0].end_line;
+            let next_start = w[1].start_line;
+            assert!(
+                next_start == prev_end + 1 || next_start == prev_end,
+                "coarse chunks must not skip lines: {:?} then {:?}",
                 (w[0].start_line, w[0].end_line),
                 (w[1].start_line, w[1].end_line)
             );
@@ -1962,6 +2105,81 @@ mod tests {
                 content.len()
             );
         }
+    }
+
+    /// REQ-AXO-902340 — a large body must never emit a chunk the embedder will
+    /// truncate.
+    ///
+    /// The coarse path used to size chunks as `max(one_window,
+    /// body_bytes / MAX_PRECISE_ENCODE_CHUNKS)`, so past ~393 KB the COUNT cap
+    /// won and the chunk size grew **linearly with the file**. Measured on the
+    /// live index: `model_b_9.txt` (3.4 MB) → 247 chunks of **4 934 tokens**
+    /// against a 384-token window; a 348 KB Swiss tax law → 33 chunks of 3 744.
+    /// The embedder truncates at `model_max_tokens`, so ~90 % of those files was
+    /// never vectorised — while coverage reported 100 %.
+    ///
+    /// Note the amplification of those files was **1.4×**: the chunks partitioned
+    /// them correctly. No duplication-based check could ever have seen this, which
+    /// is exactly why the assertion below is on the per-chunk SIZE.
+    #[test]
+    fn coarse_windows_never_exceed_the_model_window() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("AXON_TARGET_CHUNK_TOKENS", "384");
+        }
+        let profile = active_chunk_profile();
+
+        // Comfortably past DEGENERATE_BODY_BYTES so the coarse path is taken,
+        // and past 256 windows so the old count cap would have bound.
+        let mut content = String::with_capacity(700_000);
+        let mut i = 0u64;
+        while content.len() < 650_000 {
+            content.push_str(&format!(
+                "row {} value {} tag {}\n",
+                i,
+                i.wrapping_mul(2654435761) % 100000,
+                i % 977
+            ));
+            i += 1;
+        }
+        assert!(
+            content.len() > DEGENERATE_BODY_BYTES,
+            "must take the coarse path to exercise the window bound"
+        );
+
+        let line_count = content.lines().count();
+        let symbol = synthetic_symbol("document_body", line_count.max(1));
+        let chunks = build_symbol_chunks(&symbol, &content);
+
+        assert!(chunks.len() > 1, "a 650 KB body must split");
+        let worst = chunks
+            .iter()
+            .map(|c| fallback_estimated_token_count(&c.content))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            worst <= profile.model_max_tokens,
+            "REQ-AXO-902340: a coarse chunk of {worst} tokens exceeds the model window \
+             ({}) — the embedder truncates it, so that content is indexed and \
+             unretrievable. Pre-fix this body produced ~2 500-token chunks.",
+            profile.model_max_tokens
+        );
+        // Coverage must stay contiguous and gap-free: bounding the SIZE must not
+        // silently drop lines, which would trade one invisible loss for another.
+        for w in chunks.windows(2) {
+            assert_eq!(
+                w[0].end_line + 1,
+                w[1].start_line,
+                "coarse chunks must stay contiguous: {:?} then {:?}",
+                (w[0].start_line, w[0].end_line),
+                (w[1].start_line, w[1].end_line)
+            );
+        }
+        assert_eq!(
+            chunks.last().map(|c| c.end_line),
+            Some(line_count),
+            "the body must be covered to its last line"
+        );
     }
 
     /// REQ-AXO-902335 — the body-budget floor, on the case NO other guard sees.
