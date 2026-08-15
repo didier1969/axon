@@ -191,6 +191,48 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// REQ-AXO-902326 — EVERY test in this module calls `a2_transform`, which
+    /// READS `AXON_A_PARSE_TIMEOUT_MS`. Two of them WRITE it, and one
+    /// deliberately installs a **1 ms** budget to exercise the timeout path.
+    ///
+    /// A lock protects only those who take it. Eight of the ten tests were pure
+    /// READERS and took nothing, so they parsed with whatever budget happened to
+    /// be installed at that instant — 1 ms whenever they interleaved with the
+    /// timeout test — got a deliberately CLEAN zero-symbol result back
+    /// (REQ-AXO-901895), and reported it as a parser regression.
+    ///
+    /// Observed 2026-08-15: two consecutive full-suite runs, two DIFFERENT
+    /// failure sets, every one of them green in isolation. That is the signature
+    /// of shared global state, not of a broken parser — and it is the same class
+    /// as REQ-AXO-902261. REQ-AXO-902252 already fixed the symptom on ONE test by
+    /// widening its budget; widening does nothing for a reader that never held
+    /// the lock.
+    ///
+    /// The global `PARSE_TIMEOUTS` counter is the second half of the same
+    /// hazard: an unlocked test timing out increments it under another test's
+    /// before/after comparison. Holding this lock for the whole body closes both.
+    ///
+    /// Both guards must be bound for the WHOLE test body — the budget has to
+    /// still be installed when `a2_transform` reads it, not merely when it was
+    /// set. `EnvVarGuard` restores on Drop, so a panicking test can no longer
+    /// leak its budget onto the next one.
+    fn parse_budget(
+        ms: &str,
+    ) -> (
+        std::sync::MutexGuard<'static, ()>,
+        crate::test_support::EnvVarGuard,
+    ) {
+        let lock = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let env = crate::test_support::EnvVarGuard::set("AXON_A_PARSE_TIMEOUT_MS", ms);
+        (lock, env)
+    }
+
+    /// A budget no unit test can exhaust, so an assertion about PARSER WIRING
+    /// measures the parser and never the host's load (REQ-AXO-902252).
+    const GENEROUS_PARSE_BUDGET_MS: &str = "600000";
+
     fn prep_with(path: &str, content: &str) -> PreparedFile {
         PreparedFile {
             path: PathBuf::from(path),
@@ -217,20 +259,11 @@ mod tests {
         // expire in a unit test, so the assertion measures only what it claims to. The
         // env lock is mandatory here — a bare `set_var` is the flake class of
         // REQ-AXO-902261.
-        let _env = crate::test_support::env_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("AXON_A_PARSE_TIMEOUT_MS").ok();
-        std::env::set_var("AXON_A_PARSE_TIMEOUT_MS", "600000");
+        let _budget = parse_budget(GENEROUS_PARSE_BUDGET_MS);
 
         let before_timeouts = super::parse_timeouts();
         let prep = prep_with("/tmp/demo.rs", "fn main() { println!(\"hi\"); }\n");
         let parsed = a2_transform(prep).await.unwrap();
-
-        match prev {
-            Some(v) => std::env::set_var("AXON_A_PARSE_TIMEOUT_MS", v),
-            None => std::env::remove_var("AXON_A_PARSE_TIMEOUT_MS"),
-        }
 
         assert_eq!(parsed.path, PathBuf::from("/tmp/demo.rs"));
         // Distinguish the two ways this test can see zero symbols. Without this, a timeout
@@ -254,21 +287,15 @@ mod tests {
     /// load-dependent.
     #[tokio::test]
     async fn a2_transform_counts_a_parse_timeout_instead_of_failing_silently() {
-        let _env = crate::test_support::env_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("AXON_A_PARSE_TIMEOUT_MS").ok();
-        std::env::set_var("AXON_A_PARSE_TIMEOUT_MS", "1");
+        // REQ-AXO-902326 — this is the WRITER whose 1ms budget was leaking onto
+        // every unlocked reader in this module. The guard now restores the prior
+        // value even if the body panics.
+        let _budget = parse_budget("1");
 
         let before = super::parse_timeouts();
         // Enough content that a 1ms budget cannot cover the parse.
         let big = "fn f() {}\n".repeat(20_000);
         let parsed = a2_transform(prep_with("/tmp/slow.rs", &big)).await.unwrap();
-
-        match prev {
-            Some(v) => std::env::set_var("AXON_A_PARSE_TIMEOUT_MS", v),
-            None => std::env::remove_var("AXON_A_PARSE_TIMEOUT_MS"),
-        }
 
         // The contract of the timeout branch: a CLEAN zero-symbol skip (never an Err —
         // an Err would leave the file unmarked and re-queued forever, REQ-AXO-901885).
@@ -287,6 +314,7 @@ mod tests {
         // DB URL, generic token) but was never invoked by any parser (dead
         // code, zero real-world findings). A2 must now run it unconditionally
         // per-file, alongside the language parser AND phantom_extract.
+        let _budget = parse_budget(GENEROUS_PARSE_BUDGET_MS);
         let prep = prep_with(
             "/tmp/demo.rs",
             "fn main() { let key = \"AKIAABCDEFGHIJKLMNOP\"; }\n",
@@ -308,6 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn a2_transform_preserves_pivot_metadata_from_prepared_file() {
+        let _budget = parse_budget(GENEROUS_PARSE_BUDGET_MS);
         let prep = prep_with("/tmp/demo.rs", "fn one() {}\nfn two() {}\n");
         let parsed = a2_transform(prep).await.unwrap();
         assert_eq!(parsed.content_hash, "deadbeef");
@@ -327,6 +356,7 @@ mod tests {
     /// write and caused an unbounded re-parse loop.
     #[tokio::test]
     async fn a2_transform_marks_unparseable_file_done_with_zero_symbols() {
+        let _budget = parse_budget(GENEROUS_PARSE_BUDGET_MS);
         let prep = prep_with("/tmp/file.unknownext", "anything goes");
         let parsed = a2_transform(prep)
             .await
@@ -341,6 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn a2_transform_handles_empty_file_without_panicking() {
+        let _budget = parse_budget(GENEROUS_PARSE_BUDGET_MS);
         let prep = prep_with("/tmp/empty.rs", "");
         let parsed = a2_transform(prep).await.unwrap();
         // No symbols expected from an empty file — but the call must succeed.
@@ -353,6 +384,7 @@ mod tests {
     /// pool ; the fast-path now short-circuits before parser dispatch.
     #[tokio::test]
     async fn a2_transform_empty_file_with_unknown_extension_yields_zero_symbols() {
+        let _budget = parse_budget(GENEROUS_PARSE_BUDGET_MS);
         let prep = prep_with("/tmp/empty.unknown_ext_xyzzy", "");
         let parsed = a2_transform(prep).await.unwrap();
         assert!(parsed.symbols.is_empty());
@@ -367,6 +399,7 @@ mod tests {
     /// Python, TS) to ensure they never see empty input.
     #[tokio::test]
     async fn a2_transform_empty_rust_file_uses_fast_path() {
+        let _budget = parse_budget(GENEROUS_PARSE_BUDGET_MS);
         let prep = prep_with("/tmp/empty.rs", "");
         let parsed = a2_transform(prep).await.unwrap();
         assert!(parsed.symbols.is_empty());
@@ -379,6 +412,7 @@ mod tests {
     /// counts this as a stage error and moves on.
     #[tokio::test]
     async fn a2_transform_binary_garbage_content_does_not_panic() {
+        let _budget = parse_budget(GENEROUS_PARSE_BUDGET_MS);
         let garbage = "\x00\x01\x02\x7F random garbage \x0B\x0C not valid code";
         let prep = prep_with("/tmp/garbage.rs", garbage);
         let result = a2_transform(prep).await;
@@ -400,6 +434,7 @@ mod tests {
     /// cause a stack overflow or timeout in the tree-sitter parser.
     #[tokio::test]
     async fn a2_transform_deeply_nested_content_completes() {
+        let _budget = parse_budget(GENEROUS_PARSE_BUDGET_MS);
         let depth = 100;
         let mut code = String::new();
         for i in 0..depth {

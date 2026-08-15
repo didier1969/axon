@@ -288,6 +288,69 @@ fn test_sql_tool_is_read_only_rejects_mutations() {
     );
 }
 
+/// REQ-AXO-902323 — two DIFFERENT causes must produce two DIFFERENT
+/// `problem_class` values, because the friction signature keys on
+/// `(project, tool, problem_class, field)` and `sql` never carries a `field`.
+///
+/// Pre-fix both answered the hardcoded `input_invalid`, so a wrong table name, a
+/// wrong column name and a genuine contract defect all bumped ONE counter — and
+/// any caller typo could flip a legitimately resolved signature to "regressed"
+/// (observed on #3187, 2026-08-15). The precise class was already computed by
+/// `pg_error_repair` and already printed in the text; only the field the
+/// friction recorder reads still said `input_invalid`.
+#[test]
+fn test_sql_errors_carry_their_real_cause_not_a_single_generic_class() {
+    let server = create_test_server();
+    let ask = |sql: &str, id: i64| -> Value {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": "sql", "arguments": { "sql": sql } })),
+                id: Some(json!(id)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    let bad_column = ask("SELECT no_such_column FROM soll.Node", 902_323_1);
+    assert_eq!(
+        bad_column["data"]["operator_guidance"]["problem_class"].as_str(),
+        Some("undefined_column"),
+        "a wrong column must be classified as such: {}",
+        bad_column["data"]
+    );
+
+    let bad_table = ask("SELECT id FROM soll.NoSuchRelation", 902_323_2);
+    assert_eq!(
+        bad_table["data"]["operator_guidance"]["problem_class"].as_str(),
+        Some("undefined_table"),
+        "a wrong relation must be classified as such: {}",
+        bad_table["data"]
+    );
+
+    // The point of the split: the two causes no longer share a signature key.
+    assert_ne!(
+        bad_column["data"]["operator_guidance"]["problem_class"],
+        bad_table["data"]["operator_guidance"]["problem_class"],
+        "two unrelated causes must not collapse into one friction signature"
+    );
+
+    // An error the repair cannot classify keeps the generic class — the fallback
+    // must stay, otherwise this trades one blind spot for another. Division by
+    // zero (22012) is a genuine EXECUTION error: it passes the read-only guard
+    // (a malformed verb like `SELEC` never reaches PG, it is rejected upstream as
+    // a non-read) and `classify_pg_undefined` returns None for it.
+    let unclassifiable = ask("SELECT 1/0", 902_323_3);
+    assert_eq!(
+        unclassifiable["data"]["operator_guidance"]["problem_class"].as_str(),
+        Some("input_invalid"),
+        "an unclassifiable error must keep the generic class: {}",
+        unclassifiable["data"]
+    );
+}
+
 #[test]
 fn test_mcp_feedback_records_voluntary_doleance() {
     // REQ-AXO-901966 — voluntary content-rich LLM feedback persists one row;

@@ -1028,13 +1028,31 @@ impl McpServer {
                     ),
                     None => format!("SQL Error: {}", raw),
                 };
+                // REQ-AXO-902323 — `pg_error_repair` has ALREADY classified this
+                // error precisely (`undefined_column` / `undefined_table`), and the
+                // class is rendered in the text above. Hardcoding `input_invalid`
+                // here threw that class away for the one consumer that needs it: the
+                // friction signature keys on `(project, tool, problem_class, field)`,
+                // and `sql` never carries a `field`. So EVERY input error on the
+                // most-called tool collapsed into ONE signature — a wrong table name,
+                // a wrong column name and a genuine contract defect all bumping the
+                // same counter, and any caller typo "regressing" a signature that was
+                // legitimately resolved. Observed 2026-08-15 on signature #3187.
+                //
+                // Computed, rendered, then discarded before the surface that decides
+                // rollout priorities. Same shape as REQ-AXO-902244.
+                let problem_class = repair
+                    .as_ref()
+                    .and_then(|r| r.get("problem_class"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("input_invalid");
                 Some(json!({
                     "content": [{ "type": "text", "text": text }],
                     "isError": true,
                     "data": {
                         "status": "input_invalid",
                         "operator_guidance": {
-                            "problem_class": "input_invalid",
+                            "problem_class": problem_class,
                             "follow_up_tools": ["schema_overview", "query_examples"],
                         },
                         "diagnostic_excerpt": raw.chars().take(240).collect::<String>(),
