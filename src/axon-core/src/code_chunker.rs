@@ -91,13 +91,64 @@ const SAFE_CHARS_PER_TOKEN: usize = 4;
 /// precise chunking.
 const DEGENERATE_BODY_BYTES: usize = 512 * 1024;
 
-/// REQ-AXO-901902/901906 — cap on the `repeated_context` prepended to EVERY
-/// emitted chunk. A context larger than this is both useless (it would alone
-/// overflow the model window) and a per-chunk encode hazard: a `document_body`
-/// whose header heuristic swallowed most of the file made the overhead encode
-/// run on hundreds of KB. Real structural headers (a function signature, a class
-/// preamble) are well under this; only a degenerate "header" is truncated.
+/// REQ-AXO-901902/901906 — outer cap on the `repeated_context` prepended to
+/// EVERY emitted chunk. Bounds the *encode cost* of the overhead measurement on
+/// a degenerate "header" that swallowed hundreds of KB.
+///
+/// ⚠️ It does NOT bound `body_budget`, and was mistaken for a guard that did
+/// (REQ-AXO-902335): 8 KiB ≈ 2 048–2 730 tokens, while `target_chunk_tokens`
+/// defaults to 384 — this cap admits a prefix **6.5× larger than a whole chunk**.
+/// The budget invariant is enforced by [`MAX_PREFIX_OVERHEAD_DIVISOR`] below,
+/// on the MEASURED overhead. Keep both: this one is about time, that one is
+/// about budget.
 const MAX_REPEATED_CONTEXT_CHARS: usize = 8 * 1024;
+
+/// REQ-AXO-902335 — the body budget floor that must hold:
+/// `body_budget >= target_chunk_tokens / MIN_BODY_BUDGET_DIVISOR`.
+///
+/// `body_budget = target_chunk_tokens - prefix_overhead`, and the prefix
+/// (`symbol:` / `kind:` / docstring / `part: i/N` / `context:`) is prepended to
+/// EVERY emitted chunk. When the prefix approaches the window, that subtraction
+/// saturates and `.max(8)` hands back **8 tokens**: one line per segment, so the
+/// fan-out becomes the LINE COUNT of the body.
+///
+/// # Why a fraction, and why on the measured budget
+/// The three pre-existing guards (`DEGENERATE_BODY_BYTES` 512 KiB,
+/// `MAX_REPEATED_CONTEXT_CHARS` 8 KiB, `MAX_CHUNKS_PER_SYMBOL` 1024) are all
+/// absolute, and all three missed the same live file: a **7 411-byte** `.txt`
+/// whose `TextParser` docstring is the whole document. Prefix = 2 506 tokens
+/// against a 384-token window ⇒ `384.saturating_sub(2506).max(8)` = **8** ⇒
+/// **945 chunks, each holding 7 517 bytes** — the file, 945 times. The body was
+/// 7 KB (not 512 KiB), the docstring was never looked at by the 8 KiB context
+/// cap, and the fan-out (945) slid under the 1024 ceiling by 79.
+///
+/// Corpus-wide that put **453 files (0.9 %)** at ≥100× amplification, consuming
+/// **999 M of 1 178 M tokens — 85 % of all embedding work**.
+///
+/// A divisor, not a byte count: `target_chunk_tokens` is model-dependent and
+/// runtime-configurable (`AXON_TARGET_CHUNK_TOKENS`), so any absolute ceiling is
+/// a second number silently coupled to a first — the same shape as the
+/// idle-drop threshold against `AXON_RECONCILE_SWEEP_SECS` (DEC-AXO-901670).
+///
+/// Expressed on the RESULT (`body_budget`) rather than on the inputs: bounding
+/// `repeated_context` alone provably does not bound the prefix, since the
+/// docstring is the half that actually overflowed here. It also stays inert for
+/// legitimate structural context — a function signature repeated across chunks
+/// costs a few tokens and never approaches this floor.
+const MIN_BODY_BUDGET_DIVISOR: usize = 4;
+
+/// REQ-AXO-902335 — cap on the docstring, in `target_chunk_tokens /
+/// DOCSTRING_BUDGET_DIVISOR` tokens' worth of chars. Deliberately looser than
+/// [`MIN_BODY_BUDGET_DIVISOR`] so real doc comments survive intact; the budget
+/// floor above is the backstop that catches whatever this lets through.
+const DOCSTRING_BUDGET_DIVISOR: usize = 2;
+
+/// REQ-AXO-902335 — bounded shrink attempts in [`fit_repeated_context`].
+/// `SAFE_CHARS_PER_TOKEN` is a *floor* on density, so the first char-estimate
+/// can still overshoot on token-dense context (CJK, base64, dense tables); each
+/// attempt halves. Four halvings take any 8 KiB context under any sane ceiling,
+/// and the loop returns an empty context rather than iterating unbounded.
+const CONTEXT_FIT_ATTEMPTS: usize = 4;
 
 /// Token estimate for the *single-chunk keep/split* decision that NEVER feeds an
 /// arbitrarily large body to the tokenizer (see [`MAX_PRECISE_ENCODE_BYTES`]).
@@ -209,6 +260,79 @@ fn format_chunk_content(
 \n{}{}",
         symbol.name, symbol.kind, docstring, part, repeated_context, snippet
     )
+}
+
+/// REQ-AXO-902335 — tokens the per-chunk prefix costs, measured on the ASSEMBLED
+/// content with an empty snippet.
+///
+/// Measured, never inferred from the inputs: the prefix also carries
+/// `symbol.name`, `symbol.kind`, the **docstring** and the `part: i/N` line, so
+/// bounding `repeated_context` alone does not bound this. A symbol with an 8 KB
+/// docstring and an empty context floors `body_budget` exactly the same way.
+fn prefix_overhead_tokens(symbol: &Symbol, repeated_context: &str) -> usize {
+    content_token_count(&format_chunk_content(symbol, repeated_context, "", 1, 2))
+}
+
+/// REQ-AXO-902335 — return a copy of `symbol` whose docstring fits the prefix
+/// ceiling, or `None` when it already does (the overwhelming common case — real
+/// doc comments are a few hundred bytes, and this path allocates nothing).
+///
+/// The docstring is the *unbounded* half of the per-chunk prefix: `TextParser`
+/// stores the whole file in it (`parser/text.rs`), and every chunk of that
+/// symbol then carries a full copy of the document. Truncating it is what keeps
+/// `body_budget` off its floor — bounding `repeated_context` alone cannot, since
+/// `format_chunk_content` prepends both.
+///
+/// The cap is in CHARS derived from the token ceiling: `content_token_count` is
+/// a tokenizer encode, and running it in a shrink loop on a 512 KiB docstring is
+/// the very cost the surrounding guards exist to avoid. `SAFE_CHARS_PER_TOKEN`
+/// under-estimates density, so the residue may still exceed the ceiling — the
+/// caller re-measures and routes on the measured value, never on this estimate.
+fn cap_symbol_docstring(symbol: &Symbol, profile: EmbeddingChunkProfile) -> Option<Symbol> {
+    let docstring = symbol.docstring.as_deref()?;
+    let max_chars = (profile.target_chunk_tokens / DOCSTRING_BUDGET_DIVISOR)
+        .saturating_mul(SAFE_CHARS_PER_TOKEN)
+        .max(1);
+    if docstring.chars().count() <= max_chars {
+        return None;
+    }
+    tracing::warn!(
+        target: "pipeline::chunk",
+        symbol = %symbol.name,
+        kind = %symbol.kind,
+        start_line = symbol.start_line,
+        docstring_bytes = docstring.len(),
+        max_chars,
+        "REQ-AXO-902335 docstring capped — it is prepended to EVERY chunk of this \
+         symbol, so an unbounded one collapses body_budget and fans the symbol out \
+         into one chunk per line"
+    );
+    let mut capped = symbol.clone();
+    capped.docstring = Some(docstring.chars().take(max_chars).collect());
+    Some(capped)
+}
+
+/// REQ-AXO-902335 — shrink `context` until [`prefix_overhead_tokens`] fits
+/// `ceiling_tokens`, so `body_budget` cannot collapse.
+///
+/// One cheap char-estimate first (`ceiling × SAFE_CHARS_PER_TOKEN`), then
+/// *verify* and halve — the estimate is a floor, not a bound, so trusting it
+/// once would leave a token-dense context over ceiling. Returns an empty context
+/// when even that does not fit; the caller then decides whether the residue is
+/// the symbol header itself.
+fn fit_repeated_context(symbol: &Symbol, context: String, ceiling_tokens: usize) -> String {
+    if prefix_overhead_tokens(symbol, &context) <= ceiling_tokens {
+        return context;
+    }
+    let mut take_chars = ceiling_tokens.saturating_mul(SAFE_CHARS_PER_TOKEN);
+    for _ in 0..CONTEXT_FIT_ATTEMPTS {
+        let candidate: String = context.chars().take(take_chars).collect();
+        if prefix_overhead_tokens(symbol, &candidate) <= ceiling_tokens {
+            return candidate;
+        }
+        take_chars /= 2;
+    }
+    String::new()
 }
 
 /// REQ-AXO-901894 — A segment of a symbol body the chunker will emit.
@@ -352,8 +476,17 @@ fn dp_segment_body(
 
     // --- Fixed per-chunk prefix overhead (symbol/kind/docstring/part/context,
     // empty snippet). Subtracted from the model budget so the BODY itself
-    // fits with the prefix that will be prepended to every chunk. ---
-    let overhead = content_token_count(&format_chunk_content(symbol, repeated_context, "", 1, 2));
+    // fits with the prefix that will be prepended to every chunk.
+    //
+    // REQ-AXO-902335 — this subtraction is where the fan-out explodes when the
+    // prefix is large: `384.saturating_sub(2506).max(8)` = 8, so every segment
+    // becomes one line and a 7 411-byte file emitted 945 chunks, each carrying
+    // the whole file. The caller GUARANTEES `repeated_context` was fitted to
+    // `target_chunk_tokens / MAX_PREFIX_OVERHEAD_DIVISOR` before we get here
+    // (see `fit_repeated_context`), which is what keeps `body_budget` off its
+    // floor. Enforced at the caller because the fitted context must govern the
+    // EMITTED content too, not merely this arithmetic. ---
+    let overhead = prefix_overhead_tokens(symbol, repeated_context);
     let body_budget = profile.target_chunk_tokens.saturating_sub(overhead).max(8);
 
     // --- GIANT-LINE fallback (minified / generated code): if the body is a
@@ -721,6 +854,27 @@ pub fn build_symbol_chunks_with_lines(
     file_content: &str,
 ) -> Vec<DerivedCodeChunk> {
     let profile = active_chunk_profile();
+
+    // REQ-AXO-902335 — cap the DOCSTRING before anything measures or emits it.
+    // `format_chunk_content` prepends it to EVERY chunk, and `TextParser` sets
+    // `docstring = the entire file` (parser/text.rs), so a 7 411-byte `.txt`
+    // gave every chunk a 2 506-token prefix against a 384-token window:
+    // `body_budget` floored at 8, one line per segment, **945 chunks each
+    // holding the whole file** (×960 amplification, measured byte-for-byte).
+    //
+    // Placed at the TOP so the capped symbol governs every downstream path —
+    // the coarse fast path, the keep-single decision, `dp_segment_body`'s
+    // arithmetic AND the emit loop. Capping any single one of them would fix an
+    // instance and leave the class open; they all read `symbol`.
+    let capped;
+    let symbol = match cap_symbol_docstring(symbol, profile) {
+        Some(capped_symbol) => {
+            capped = capped_symbol;
+            &capped
+        }
+        None => symbol,
+    };
+
     let start = symbol.start_line.saturating_sub(1).min(lines.len());
     let end = symbol.end_line.min(lines.len()).max(start);
 
@@ -804,6 +958,62 @@ pub fn build_symbol_chunks_with_lines(
             end_line: symbol.end_line,
         }];
     }
+
+    // REQ-AXO-902335 — BODY-BUDGET FLOOR. Enforced HERE, past the keep-single
+    // return, for two reasons: the fitted context must govern the EMITTED chunk
+    // content (not merely `dp_segment_body`'s arithmetic), and a single-chunk
+    // symbol never pays the extra encode.
+    //
+    // Inert in the normal case, by construction: a real structural context (a
+    // function signature) costs a few tokens and leaves the budget far above the
+    // floor, so nothing below runs. It bites only when the prefix is about to
+    // eat the window — which is the state that turns fan-out into the line count.
+    let min_body_budget = (profile.target_chunk_tokens / MIN_BODY_BUDGET_DIVISOR).max(1);
+    let overhead = prefix_overhead_tokens(symbol, &repeated_context);
+    let repeated_context = if profile.target_chunk_tokens.saturating_sub(overhead) < min_body_budget
+    {
+        let context_bytes_before = repeated_context.len();
+        // Fit to `min_body_budget`, NOT to `target - min_body_budget`: the loose
+        // ceiling would satisfy the floor while leaving a prefix that costs 3×
+        // the body it introduces, repeated on every chunk — the amplification
+        // this REQ exists to kill, merely reduced. A prefix may never cost more
+        // than the body budget it guards.
+        let ceiling = min_body_budget;
+        let fitted = fit_repeated_context(symbol, repeated_context, ceiling);
+        if prefix_overhead_tokens(symbol, &fitted) > ceiling {
+            // An EMPTY context still overflows, so the excess is the symbol
+            // header itself — name / kind / a docstring past its own cap. No
+            // context truncation can shrink that. The coarse path prepends no
+            // context and sizes its windows in BYTES, so its fan-out is bounded
+            // by `MAX_PRECISE_ENCODE_CHUNKS` whatever the header costs.
+            tracing::warn!(
+                target: "pipeline::chunk",
+                symbol = %symbol.name,
+                kind = %symbol.kind,
+                start_line = symbol.start_line,
+                overhead_tokens = overhead,
+                target_chunk_tokens = profile.target_chunk_tokens,
+                "REQ-AXO-902335 per-chunk prefix eats the model window even with an EMPTY \
+                 context — the symbol header (docstring?) alone overflows it; coarse \
+                 byte-windows to bound fan-out. INVESTIGATE this symbol"
+            );
+            return coarse_byte_window_chunks(symbol, lines, start, end, profile);
+        }
+        tracing::warn!(
+            target: "pipeline::chunk",
+            symbol = %symbol.name,
+            kind = %symbol.kind,
+            start_line = symbol.start_line,
+            context_bytes_before,
+            context_bytes_after = fitted.len(),
+            min_body_budget,
+            "REQ-AXO-902335 repeated context truncated to keep body_budget off its floor — \
+             a structural-header heuristic that swallows the body is the usual cause"
+        );
+        fitted
+    } else {
+        repeated_context
+    };
 
     // REQ-AXO-901906 — defense-in-depth TEMPORAL safety. The Knuth-Plass DP is
     // O(N) and fast (200k lines ≈ 4.5 s release), but an as-yet-unidentified
@@ -1624,12 +1834,37 @@ mod tests {
         let chunks = build_symbol_chunks(&symbol, &content);
         let encodes = crate::embedding_profile::encode_counter::get();
 
-        // Pre-fix this floored-budget body fanned out into thousands of micro
-        // chunks; the coarse fallback now bounds the COUNT.
+        // REQ-AXO-901921 pre-fix: this floored-budget body fanned out into
+        // THOUSANDS of micro chunks, and the coarse fallback bounded the count at
+        // `MAX_PRECISE_ENCODE_CHUNKS + 1` by re-chunking.
+        //
+        // REQ-AXO-902335 changed which mechanism answers: the budget floor now
+        // PREVENTS the collapse, so this body keeps the precise path and emits
+        // ~415 real chunks instead of being re-chunked coarsely into ≤257. The
+        // coarse ceiling is therefore no longer the observable — the count bound
+        // below is `MAX_CHUNKS_PER_SYMBOL`, the guard that still fires if the
+        // budget floor is ever removed.
+        //
+        // Loosening a count bound is exactly the move that hides a regression, so
+        // the HARM is asserted directly underneath: 901921's pathology was never
+        // the count per se, it was "pure embedding noise" — a prefix duplicated
+        // across chunks until stored bytes dwarf the body. That ratio is what
+        // must not regress, and it is measured, not assumed.
         assert!(
-            chunks.len() <= MAX_PRECISE_ENCODE_CHUNKS + 1,
-            "REQ-AXO-901921: a budget-collapsed sub-512KB body must be count-bounded, got {} chunks",
+            chunks.len() <= MAX_CHUNKS_PER_SYMBOL,
+            "REQ-AXO-901921/902335: a budget-collapsed sub-512KB body must stay count-bounded, \
+             got {} chunks (pre-901921 was ~28 000)",
             chunks.len()
+        );
+        let stored: usize = chunks.iter().map(|c| c.content.len()).sum();
+        assert!(
+            stored < content.len() * 3,
+            "REQ-AXO-902335: budget-collapsed body amplified — {} chunks storing {stored} bytes \
+             for a {}-byte body ({}×). A repeated prefix that outweighs its own body is the \
+             defect; the count bound above cannot see it.",
+            chunks.len(),
+            content.len(),
+            stored / content.len().max(1)
         );
         assert!(
             chunks.len() > 1,
@@ -1651,6 +1886,160 @@ mod tests {
                 (w[1].start_line, w[1].end_line)
             );
         }
+    }
+
+    /// REQ-AXO-902335 — a whole-file docstring must not be duplicated into every
+    /// chunk.
+    ///
+    /// `TextParser` sets `docstring = the entire file` (`parser/text.rs`), and
+    /// `format_chunk_content` prepends the docstring to EVERY chunk. On a live
+    /// 7 411-byte `.txt` that made the prefix cost **2 506 tokens** against a
+    /// 384-token window, so `384.saturating_sub(2506).max(8)` floored
+    /// `body_budget` at **8**: one line per segment, **945 chunks, each holding
+    /// 7 517 bytes** — the whole file, 945 times (measured in `ist.chunk`).
+    ///
+    /// The three pre-existing guards all missed it on absolute thresholds: the
+    /// body was 7 KB (vs `DEGENERATE_BODY_BYTES` 512 KiB), the fan-out was 945
+    /// (vs `MAX_CHUNKS_PER_SYMBOL` 1024, missed by 79), and the context cap
+    /// never looked at the docstring at all. Note every OTHER test here builds
+    /// its symbol via `synthetic_symbol`, which leaves `docstring: None` — which
+    /// is precisely why a green suite never saw this.
+    ///
+    /// The assertion is on STORED BYTES, not on the chunk count: a future change
+    /// that re-duplicates the prefix while keeping the fan-out low would still
+    /// redden. Pre-fix this ratio was ~960×.
+    #[test]
+    fn whole_file_docstring_is_not_duplicated_into_every_chunk() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // Mirror the real culprit: ~7.4 KB of short line-oriented data rows, no
+        // syntactic structure — an OptaPlanner benchmark dataset shape.
+        let mut content = String::with_capacity(8_000);
+        let mut i = 0u64;
+        while content.len() < 7_400 {
+            content.push_str(&format!(
+                "{} {} {} {}\n",
+                i,
+                i.wrapping_mul(2654435761) % 100000,
+                i.wrapping_mul(40503) % 9973,
+                i % 97
+            ));
+            i += 1;
+        }
+        let line_count = content.lines().count();
+
+        let mut symbol = synthetic_symbol("document_body", line_count.max(1));
+        symbol.kind = "markdown_content".to_string();
+        // THE defect trigger — exactly what TextParser stores.
+        symbol.docstring = Some(content.clone());
+
+        let chunks = build_symbol_chunks(&symbol, &content);
+        let stored: usize = chunks.iter().map(|c| c.content.len()).sum();
+
+        assert!(
+            !chunks.is_empty(),
+            "a 7.4 KB body must still produce chunks"
+        );
+        assert!(
+            stored < content.len() * 10,
+            "REQ-AXO-902335: whole-file docstring duplicated into every chunk — \
+             {} chunks storing {stored} bytes for a {}-byte body ({}× amplification; \
+             pre-fix was 945 chunks / ~960×, and 0.9 % of files in that state \
+             consumed 85 % of all embedding work)",
+            chunks.len(),
+            content.len(),
+            stored / content.len().max(1)
+        );
+        // No SINGLE chunk may carry the whole document either — the ratio above
+        // could be met by few chunks that each still embed the full file.
+        for chunk in &chunks {
+            assert!(
+                chunk.content.len() < content.len(),
+                "REQ-AXO-902335: chunk {}/{} holds {} bytes for a {}-byte file — \
+                 it carries the whole document",
+                chunk.part_index,
+                chunk.part_count,
+                chunk.content.len(),
+                content.len()
+            );
+        }
+    }
+
+    /// REQ-AXO-902335 — the body-budget floor, on the case NO other guard sees.
+    ///
+    /// Written because the floor was, on first measurement, **vacuous**: the
+    /// whole `code_chunker` suite stayed green with `min_body_budget` forced to
+    /// 0. A guard nobody can falsify is one a later session deletes as dead
+    /// weight, so it needs the shape only it catches.
+    ///
+    /// That shape is a large `repeated_context` (NOT a docstring, so
+    /// `cap_symbol_docstring` is inert) over a body of a few hundred SHORT
+    /// lines. Pre-fix the prefix floors `body_budget` at 8, the DP emits one
+    /// chunk per line — a few hundred, which slips under `MAX_CHUNKS_PER_SYMBOL`
+    /// (1024), so REQ-AXO-901921's coarse re-chunk never fires — and every one
+    /// of those chunks carries the full 8 KB context. Bytes stored explode while
+    /// every count-based guard reports normal. Exactly the live defect's shape.
+    ///
+    /// Lines are kept under `body_budget × 4` chars so the giant-line fallback
+    /// does not pre-empt the DP; that path is covered by its own tests and would
+    /// mask what this one measures.
+    #[test]
+    fn large_repeated_context_over_short_lines_does_not_amplify() {
+        let _env = env_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("AXON_TARGET_CHUNK_TOKENS", "384");
+            std::env::remove_var("AXON_SMALL_SYMBOL_CHAR_FAST_PATH");
+            std::env::remove_var("AXON_GRAY_ZONE_CHAR_THRESHOLD");
+        }
+        // 6 header lines the structural-header probe accepts (no `{`, no `:`,
+        // none blank) → ~8 KB of repeated context on EVERY chunk.
+        let mut content = String::with_capacity(40_000);
+        for h in 0..6u64 {
+            let mut line = String::with_capacity(1_500);
+            let mut k = 0u64;
+            while line.len() < 1_400 {
+                line.push_str(&format!("hdr{h}_{k}_{} ", k.wrapping_mul(2654435761) % 99991));
+                k += 1;
+            }
+            content.push_str(&line);
+            content.push('\n');
+        }
+        // ~500 SHORT body rows: one chunk per line pre-fix ⇒ ~500 < 1024, so the
+        // fan-out ceiling stays silent and only the budget floor can see this.
+        let mut i = 0u64;
+        for _ in 0..500 {
+            content.push_str(&format!("r{i} {}\n", i.wrapping_mul(40503) % 9973));
+            i += 1;
+        }
+        assert!(
+            content.len() < DEGENERATE_BODY_BYTES,
+            "must stay on the precise path to exercise the budget floor"
+        );
+
+        let line_count = content.lines().count();
+        let symbol = synthetic_symbol("document_body", line_count.max(1));
+        assert!(
+            symbol.docstring.is_none(),
+            "the docstring cap must stay inert here — this test targets the floor"
+        );
+
+        let chunks = build_symbol_chunks(&symbol, &content);
+        let stored: usize = chunks.iter().map(|c| c.content.len()).sum();
+
+        assert!(
+            chunks.len() < MAX_CHUNKS_PER_SYMBOL,
+            "precondition: the fan-out must stay UNDER the 901921 ceiling, else that \
+             guard answers instead of the floor and this test proves nothing (got {})",
+            chunks.len()
+        );
+        assert!(
+            stored < content.len() * 3,
+            "REQ-AXO-902335: an 8 KB repeated context was duplicated across {} chunks — \
+             {stored} bytes stored for a {}-byte body ({}×) while every count-based guard \
+             reported normal",
+            chunks.len(),
+            content.len(),
+            stored / content.len().max(1)
+        );
     }
 
     /// REQ-AXO-901894 (b) — a single ~200k-char minified line is char-windowed
