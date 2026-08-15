@@ -311,17 +311,63 @@ apply_canonical_ddl() {
     local file applied=0
     local ddl_log="/tmp/axon-ddl-apply.${instance}.log"
     : > "$ddl_log"
+    # REQ-AXO-902328 — a lock timeout is RETRYABLE and says NOTHING about the schema.
+    #
+    # `03_ist_schema.sql` sets `lock_timeout = '3s'` on purpose (REQ-AXO-901897): fail
+    # fast rather than let a boot head-of-line block behind an open connection. That
+    # intent is right for a BOOT. It is wrong for a PROMOTE, where step 5b runs
+    # immediately after the cutover has just started the indexer — so the promote
+    # creates the very writer whose silence it needs. On 2026-08-15 the promote failed
+    # on `ALTER TABLE ist.Symbol ADD COLUMN IF NOT EXISTS cyclomatic_complexity`, a
+    # NO-OP on an existing column that still demands ACCESS EXCLUSIVE. The schema was
+    # in fact already complete (the cutover's brain re-bootstraps the DDL itself), so
+    # the promote reported FAILED on a correct database — a verdict that does not
+    # reflect state, which is the defect class this repo keeps paying for.
+    #
+    # The division of labour that fixes it: keep the 3s fail-fast PER ATTEMPT (it still
+    # protects against head-of-line blocking) and retry a bounded number of times with
+    # backoff. Indexer transactions are short, so a window opens quickly. Only a lock
+    # timeout is retried — any other DDL error is a real defect and fails immediately.
+    local max_attempts="${AXON_DDL_LOCK_RETRIES:-5}"
+    local attempt_log
+    attempt_log="$(mktemp)"
     for file in "$ddl_root"/[0-9][0-9]_*.sql; do
         [[ -f "$file" ]] || continue
-        if ! "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon \
-                -d "$dbname" -v ON_ERROR_STOP=1 -f "$file" >>"$ddl_log" 2>&1; then
+        local attempt=1 ok=0
+        while (( attempt <= max_attempts )); do
+            if "$PSQL_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -U axon \
+                    -d "$dbname" -v ON_ERROR_STOP=1 -f "$file" >"$attempt_log" 2>&1; then
+                cat "$attempt_log" >>"$ddl_log"
+                ok=1
+                break
+            fi
+            cat "$attempt_log" >>"$ddl_log"
+            if grep -qi 'lock timeout' "$attempt_log" && (( attempt < max_attempts )); then
+                # Loud, never silent: a retry that nobody sees is indistinguishable
+                # from a first-try success, and the count is what tells an operator
+                # the promote is racing its own indexer.
+                echo "⏳ ${dbname}: $(basename "$file") lost a lock race (attempt ${attempt}/${max_attempts}) — retrying in $(( attempt * 2 ))s" >&2
+                sleep $(( attempt * 2 ))
+                attempt=$(( attempt + 1 ))
+                continue
+            fi
             echo "❌ ${dbname}: applying canonical DDL $(basename "$file") failed." >&2
             echo "   psql stderr/stdout captured at ${ddl_log}" >&2
+            if grep -qi 'lock timeout' "$attempt_log"; then
+                echo "   Cause: could not acquire the lock after ${max_attempts} attempts." >&2
+                echo "   This says NOTHING about whether the schema is correct — it says another" >&2
+                echo "   connection (typically the indexer the cutover just started) held the table." >&2
+                echo "   Check the column/index the failing statement targets before treating this" >&2
+                echo "   as a broken release (REQ-AXO-902328)." >&2
+            fi
             tail -20 "$ddl_log" >&2
+            rm -f "$attempt_log"
             return 1
-        fi
+        done
+        (( ok == 1 )) || { rm -f "$attempt_log"; return 1; }
         applied=$((applied + 1))
     done
+    rm -f "$attempt_log"
     if [[ "$applied" -gt 0 ]]; then
         echo "✅ ${dbname}: applied ${applied} canonical DDL file(s) from db/ddl/"
     fi
