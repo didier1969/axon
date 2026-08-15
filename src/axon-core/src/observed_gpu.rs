@@ -29,10 +29,19 @@ fn embedder_gpu_resident_min_mib() -> u64 {
 /// DEC-AXO-901626 — the embedder-owning process (indexer) observes whether a
 /// model is resident on the GPU and publishes the binary verdict to PG.
 ///
-/// Reads **device-level** VRAM through the precise `gpu_telemetry` path (NVML
-/// driver API, or `nvidia-smi --query-gpu` device-level). This is WSL2-robust:
-/// WSL2 masks per-process `--query-compute-apps` memory as `[N/A]`, but
-/// device-level memory reports correctly. Returns `(compute, compute_source)`:
+/// Reads **device-level** VRAM through the precise `gpu_telemetry` path, which is
+/// **NVML only** — `GpuTelemetryBackend` has exactly two variants, `None` and
+/// `Nvml`, and no CLI fallback exists. This comment used to add "or `nvidia-smi
+/// --query-gpu` device-level"; that path was retired and the sentence outlived it
+/// (REQ-AXO-902271). It is not a harmless stale word: REQ-AXO-902271 spent its
+/// point 2 designing a circuit-breaker for a synchronous `nvidia-smi` probe that
+/// this comment implied still ran in-process — a component that no longer exists.
+/// A retired mechanism described as live tells a reader where to look, and it is
+/// wrong.
+///
+/// Why device-level and not per-process: WSL2 masks per-process
+/// `--query-compute-apps` memory as `[N/A]`, but device-level memory reports
+/// correctly. Returns `(compute, compute_source)`:
 ///   * device VRAM ≥ resident threshold → `("GPU", "device_vram")`
 ///   * device VRAM below threshold       → `("CPU", "device_vram")`
 ///   * GPU telemetry unavailable          → `("CPU", "unknown")`
