@@ -138,28 +138,119 @@ require_gpu_channel_free() {
 # broadcast (to_project='*') leaves an explanatory trace so peers find "planned
 # promote, not a crash" on reconnect instead of burning tokens on a false RCA.
 # STRICTLY best-effort: a missing/slow mailbox must NEVER fail a promote.
-broadcast_promote() {
-  local subject="$1" body="$2" key="$3" args
-  args="$(python3 -c "
+# REQ-AXO-902327 — la source python vit dans une VARIABLE, remplie par un heredoc à
+# délimiteur QUOTÉ (`<<'PY'`), et n'est plus écrite littéralement dans un `$( ... )`.
+#
+# Motif : à l'intérieur d'une substitution de commande, bash développe encore les
+# backticks et les `$` — y compris entre guillemets doubles. Le commentaire python qui
+# citait `mailbox_sweep()` entre backticks était donc lu comme une substitution de
+# commande et EXÉCUTÉ à chaque promote. Il échouait sur `()`, d'où le
+# `syntax error: unexpected end of file` en fin de chaque promote ; le JSON survivait
+# parce qu'un commentaire amputé reste un commentaire. Le défaut n'était pas le message
+# d'erreur : c'était qu'un COMMENTAIRE pilotait une exécution. Un jour où le texte cité
+# aurait été une commande valide, elle aurait tourné.
+#
+# `<<'PY'` désactive toute expansion. `${PROJECT_CODE}` passe donc par argv, comme les
+# trois autres valeurs — plus aucune interpolation shell dans du code python.
+read -r -d '' _BROADCAST_PY <<'PY' || true
 import json, sys
+project, subject, body, key = sys.argv[1:5]
 print(json.dumps({
-    'to_project': '*', 'from': '${PROJECT_CODE}',
-    'subject': sys.argv[1], 'body_dense': sys.argv[2],
+    'to_project': '*', 'from': project,
+    'subject': subject, 'body_dense': body,
     # REQ-AXO-902306 — 'low' et non 'high'. Ces avis sont URGENTS à l'instant où ils
     # arrivent, ils ne sont pas IMPORTANTS à conserver : deux notions que la priorité
     # confondait. Depuis 902306 un message 'high' n'est JAMAIS archivé automatiquement
     # (ni lecture ni TTL) ; les laisser en 'high' les rendrait immortels et recréerait
     # exactement l'accumulation que REQ-AXO-902304 vient de résorber (8217 messages).
-    'idempotency_key': sys.argv[3], 'priority': 'low',
+    'idempotency_key': key, 'priority': 'low',
     # REQ-AXO-902304 — ces avis sont périssables : « coupure dans 3 minutes » n'a
     # aucune valeur le lendemain. Sans TTL ils s'empilaient à jamais (8217 messages
     # depuis juillet, 118 par projet, 100% de l'inbox pour quatre d'entre eux) alors
     # que `mailbox_sweep()` n'attendait que cette colonne pour les archiver.
     'ttl_hours': 24,
-}))" "$subject" "$body" "$key" 2>/dev/null || true)"
+}))
+PY
+
+broadcast_promote() {
+  local subject="$1" body="$2" key="$3" args
+  args="$(python3 -c "$_BROADCAST_PY" "$PROJECT_CODE" "$subject" "$body" "$key" 2>/dev/null || true)"
   [[ -z "$args" ]] && return 0
   timeout 20 "$ROOT_DIR/scripts/axon" --instance live mcp-call call mcp_outbox_send \
     --args "$args" --format text >> "$PROMOTE_LOG" 2>&1 || true
+}
+
+# REQ-AXO-902327 — ce bloc était DÉFINI ~400 lignes plus bas, alors que le trap EXIT
+# ci-dessous l'APPELLE. Tout échec antérieur à l'ancienne définition sortait sur
+# `_report_mcp_outage: command not found` — donc la mesure de coupure MCP que
+# REQ-AXO-902256 rend obligatoire manquait précisément sur les échecs précoces.
+# Vécu deux fois le 2026-08-15 : échec step 2d (avant la définition) → message perdu ;
+# échec step 5b (après) → rapport correct. Définir AVANT le trap rend l'invariant
+# structurel au lieu de positionnel.
+# --- MCP availability sampler (REQ-AXO-902256) ---
+# The promote used to report step 5 as "done in 35s" — a figure that measures the binary
+# copy and EXCLUDES the indexer coming back and any step-6c recovery. On promote 1399 the
+# real MCP outage was ~3m53s while the reported number was 35s, so the operator was told
+# the interruption was negligible when third-party clients were self-restarting. Estimates
+# are not good enough here: sample the endpoint other clients actually call, once a second,
+# across steps 5→6c, then report the measured worst contiguous gap.
+MCP_SAMPLE_FILE="$LOG_DIR/mcp-availability-${PROMOTE_TIMESTAMP}.csv"
+MCP_SAMPLER_PID=""
+_start_mcp_sampler() {
+  : > "$MCP_SAMPLE_FILE"
+  (
+    while :; do
+      # Two bugs lived on this line; both are worth naming because they broke in OPPOSITE
+      # directions and each looked like a green result.
+      #  v1: `... || echo 000` — `-w '%{http_code}'` ALREADY prints 000 on a refused
+      #      connection, so the fallback appended a SECOND one → code="000000" → the
+      #      `== "000"` test never matched and EVERY sample was classified `up`. It
+      #      reported "0s outage" across a promote that demonstrably restarted the brain.
+      #  v2: dropping the fallback fixed the value but exposed curl's non-zero exit to
+      #      `set -e`, which killed the sampler subshell at the FIRST outage — 4 samples
+      #      then silence, i.e. it died exactly when it had something to record.
+      # `|| true` is what both needed: the substitution still captures the "000" that -w
+      # printed, and the exit status is neutralised so `set -e` leaves the loop alone.
+      code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:${AXON_BRAIN_PORT:-44129}/mcp" \
+        -H 'content-type: application/json' \
+        -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' 2>/dev/null)" || true
+      # Any real HTTP status means the endpoint answered; 000 (or empty, if curl itself
+      # could not run) = connection refused/timeout — exactly what a third-party MCP
+      # client experiences as "server down".
+      if [[ -z "$code" || "$code" == "000" ]]; then
+        printf '%s,down\n' "$(date -u +%s)"
+      else
+        printf '%s,up\n' "$(date -u +%s)"
+      fi
+      sleep 1
+    done
+  ) >> "$MCP_SAMPLE_FILE" 2>/dev/null &
+  MCP_SAMPLER_PID=$!
+}
+_report_mcp_outage() {
+  [[ -n "$MCP_SAMPLER_PID" ]] || return 0
+  kill "$MCP_SAMPLER_PID" 2>/dev/null || true
+  wait "$MCP_SAMPLER_PID" 2>/dev/null || true
+  MCP_SAMPLER_PID=""
+  local worst total n span res
+  read -r worst total n span res < <(python3 "$ROOT_DIR/scripts/release/mcp_outage_report.py" "$MCP_SAMPLE_FILE" 2>/dev/null || echo "0 0 0 0 0")
+  promote_log ""
+  promote_log "== MCP availability (measured across steps 5→6c) =="
+  # A silent instrument reads exactly like a green result: publish the sample count and the
+  # covered span so "0 outage" can never be confused with "measured nothing".
+  if [[ "$n" -lt 5 ]]; then
+    promote_log "   ⚠️ NOT MEASURED — only ${n} sample(s) collected. Treat the figures below as UNKNOWN, not as zero."
+  fi
+  promote_log "   worst contiguous outage: ${worst}s · total unreachable: ${total}s"
+  # The resolution is MEASURED from the samples, not asserted. It is the number that says
+  # how finely this instrument may be quoted — a sub-second claim from a ~3s instrument is
+  # not a measurement.
+  promote_log "   ${n} samples over ${span}s · measured resolution ${res}s (a blip shorter than that can fall between two samples)"
+  promote_log "   samples: $MCP_SAMPLE_FILE"
+  if [[ "${worst:-0}" -gt 60 ]]; then
+    promote_log "   ⚠️ outage > 60s — third-party MCP clients may have declared a crash and self-restarted (REQ-AXO-902256 acceptance breach)."
+  fi
 }
 
 # All-clear on ANY exit (success OR the step-6 cold-start false-fail where the script
@@ -552,71 +643,6 @@ fi
 manifest_path="$(realpath "$manifest_path")"
 promote_log "   ✅ step 4 (manifest) done — $manifest_path"
 
-# --- MCP availability sampler (REQ-AXO-902256) ---
-# The promote used to report step 5 as "done in 35s" — a figure that measures the binary
-# copy and EXCLUDES the indexer coming back and any step-6c recovery. On promote 1399 the
-# real MCP outage was ~3m53s while the reported number was 35s, so the operator was told
-# the interruption was negligible when third-party clients were self-restarting. Estimates
-# are not good enough here: sample the endpoint other clients actually call, once a second,
-# across steps 5→6c, then report the measured worst contiguous gap.
-MCP_SAMPLE_FILE="$LOG_DIR/mcp-availability-${PROMOTE_TIMESTAMP}.csv"
-MCP_SAMPLER_PID=""
-_start_mcp_sampler() {
-  : > "$MCP_SAMPLE_FILE"
-  (
-    while :; do
-      # Two bugs lived on this line; both are worth naming because they broke in OPPOSITE
-      # directions and each looked like a green result.
-      #  v1: `... || echo 000` — `-w '%{http_code}'` ALREADY prints 000 on a refused
-      #      connection, so the fallback appended a SECOND one → code="000000" → the
-      #      `== "000"` test never matched and EVERY sample was classified `up`. It
-      #      reported "0s outage" across a promote that demonstrably restarted the brain.
-      #  v2: dropping the fallback fixed the value but exposed curl's non-zero exit to
-      #      `set -e`, which killed the sampler subshell at the FIRST outage — 4 samples
-      #      then silence, i.e. it died exactly when it had something to record.
-      # `|| true` is what both needed: the substitution still captures the "000" that -w
-      # printed, and the exit status is neutralised so `set -e` leaves the loop alone.
-      code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
-        "http://127.0.0.1:${AXON_BRAIN_PORT:-44129}/mcp" \
-        -H 'content-type: application/json' \
-        -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' 2>/dev/null)" || true
-      # Any real HTTP status means the endpoint answered; 000 (or empty, if curl itself
-      # could not run) = connection refused/timeout — exactly what a third-party MCP
-      # client experiences as "server down".
-      if [[ -z "$code" || "$code" == "000" ]]; then
-        printf '%s,down\n' "$(date -u +%s)"
-      else
-        printf '%s,up\n' "$(date -u +%s)"
-      fi
-      sleep 1
-    done
-  ) >> "$MCP_SAMPLE_FILE" 2>/dev/null &
-  MCP_SAMPLER_PID=$!
-}
-_report_mcp_outage() {
-  [[ -n "$MCP_SAMPLER_PID" ]] || return 0
-  kill "$MCP_SAMPLER_PID" 2>/dev/null || true
-  wait "$MCP_SAMPLER_PID" 2>/dev/null || true
-  MCP_SAMPLER_PID=""
-  local worst total n span res
-  read -r worst total n span res < <(python3 "$ROOT_DIR/scripts/release/mcp_outage_report.py" "$MCP_SAMPLE_FILE" 2>/dev/null || echo "0 0 0 0 0")
-  promote_log ""
-  promote_log "== MCP availability (measured across steps 5→6c) =="
-  # A silent instrument reads exactly like a green result: publish the sample count and the
-  # covered span so "0 outage" can never be confused with "measured nothing".
-  if [[ "$n" -lt 5 ]]; then
-    promote_log "   ⚠️ NOT MEASURED — only ${n} sample(s) collected. Treat the figures below as UNKNOWN, not as zero."
-  fi
-  promote_log "   worst contiguous outage: ${worst}s · total unreachable: ${total}s"
-  # The resolution is MEASURED from the samples, not asserted. It is the number that says
-  # how finely this instrument may be quoted — a sub-second claim from a ~3s instrument is
-  # not a measurement.
-  promote_log "   ${n} samples over ${span}s · measured resolution ${res}s (a blip shorter than that can fall between two samples)"
-  promote_log "   samples: $MCP_SAMPLE_FILE"
-  if [[ "${worst:-0}" -gt 60 ]]; then
-    promote_log "   ⚠️ outage > 60s — third-party MCP clients may have declared a crash and self-restarted (REQ-AXO-902256 acceptance breach)."
-  fi
-}
 
 # --- Step 5: promote (copy + restart) ---
 # REQ-AXO-902285 — last GPU-wedge check, immediately before the destructive cutover and
