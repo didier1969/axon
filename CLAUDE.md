@@ -25,6 +25,15 @@ those 9 tests are `#[ignore = "requires docker"]`, so running them without `--ig
 nothing and with `--ignored` the gate would depend on a Docker daemon.
 Binaries: `axon-brain` (MCP) · `axon-indexer` (IST writer) · `axonctl` (supervisor).
 
+⚠️ **Check the host before the full `--lib` run** (DEC-AXO-901670). On 2026-08-15 it drove
+load to **105**, the suite went 570s → 1857s (×3), OPV's postgres was SIGKILLed twice, and
+the live indexer died **three times** (SIGSEGV in `libnvinfer`) before a `dxgvmb` wedge took
+MCP down for 6 min. **No promote was involved** — the suite alone did it. The guard prints
+the numbers and asks; skip it only when you have read them:
+```
+bash scripts/check-host-before-suite.sh    # load, live roles, dxgvmb, recent libnvinfer
+```
+
 ## Architecture
 | Component | Path | Note |
 |---|---|---|
