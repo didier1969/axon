@@ -152,3 +152,106 @@ jeu de cas-tests réels, attendus **avant** le code, et la réponse est partie
    critères en attente.
 3. **REQ-902332** — capturer stdout/stderr par rôle. C'est le préalable à tout diagnostic
    futur, et la journée vient de montrer ce qu'il coûte de ne pas l'avoir.
+
+---
+
+# CLÔTURE RÉELLE (append, 2026-08-15 23:55) — l'incident s'est résolu, la session a continué
+
+> ⚠️ **Tout ce qui précède le §4 reste vrai ; le §4 (« INCIDENT EN COURS ») et le §5
+> (« REQ à recréer ») sont CADUCS.** Ne pas exécuter la séquence de reprise du §4 : le canal
+> `dxgvmb` s'est libéré seul, `wsl --shutdown` n'a **jamais** été nécessaire.
+
+## 1. Ce qui s'est passé après le §4
+
+Le brain s'est relevé seul. Aucun `wsl --shutdown`. La séquence de reprise prescrite était
+correcte en principe et **inutile en fait** — ce qui est en soi une leçon : un remède écrit
+sous incident se lit ensuite comme une obligation.
+
+Les deux REQ « à recréer » l'ont été : `REQ-AXO-902333` (promote), et le second était en
+réalité une note sur `REQ-AXO-902332`, désormais **corrigée** (voir §4 ci-dessous).
+
+## 2. Le vrai défaut de la journée, trouvé à 21 h sur une question de l'opérateur
+
+> « L'indexeur est très chargé. Qu'est-ce qu'il indexe ? Est-ce normal ? »
+
+Non. La cause n'était ni WSL, ni le GPU, ni le promote — les trois pistes proposées.
+
+`parser/text.rs:23` met **le fichier entier** dans `Symbol.docstring`, et
+`format_chunk_content` prepend la docstring à **chaque** morceau. Arithmétique exacte :
+
+```
+overhead     = 2 506 jetons        (le fichier entier)
+target       =   384 jetons        (la fenêtre du modèle)
+body_budget  = 384.saturating_sub(2506).max(8) = 8      ← le plancher
+```
+
+Une ligne par morceau. Un fichier de **7 411 octets → 945 morceaux de 7 517 octets** chacun :
+le document complet, 945 fois. Sur le corpus : **453 fichiers (0,9 %) consommaient 999 M de
+1 178 M jetons — 85 % de tout le travail de vectorisation.**
+
+Les trois gardes existantes rataient toutes le cas, **toutes calibrées en absolu** : corps de
+7 Ko (seuil 512 Ko), plafond de contexte qui ne regarde jamais la docstring, éventail de 945
+sous le plafond de 1024 — **de 79**.
+
+## 3. Puis le défaut symétrique, trouvé en calibrant la purge
+
+En cherchant le seuil de la seconde passe, j'ai utilisé le **chunker corrigé comme oracle**.
+Il produisait encore des morceaux de **4 934 jetons** contre une fenêtre de 384 — mais avec
+une amplification de **1,4×** : les morceaux partitionnaient correctement le fichier.
+
+`coarse_byte_window_chunks` bornait le NOMBRE de morceaux (256) en laissant leur TAILLE
+croître avec le fichier. L'embedder tronque : **~90 % de 161 fichiers n'était jamais
+vectorisé**, pendant que `coverage` affichait 100 %. Une loi fiscale jurassienne de 348 Ko,
+indexée et invisible aux neuf dixièmes.
+
+*Le plafond d'éventail était payé en contenu perdu, et le troc n'était écrit nulle part.*
+
+## 4. Trois corrections de prémisse (les miennes)
+
+| Où | Ce qui était affirmé | Ce qui est vrai |
+|---|---|---|
+| `REQ-902332` | « la sortie de l'indexeur n'est capturée nulle part » | `.axon/run-{brain,indexer}/errors.*.log` existent, rotation horaire — **c'est là que la tempête a été trouvée**. Le vrai trou : un processus tué par un signal n'écrit rien, par construction → persister le motif de sortie côté superviseur |
+| `check-host-before-suite.sh` | « GPU channel ALREADY jammed » | 1 échantillon sur 5, TID différent — trafic normal. Corrigé (`REQ-902334`) |
+| Mon 1er garde de purge | « live MCP down? » | Le live répondait `readyz`. L'appel HTTP brut ne rend que le markdown ; `structuredContent` n'est visible que d'un client MCP |
+
+## 5. Deux incidents que j'ai provoqués
+
+1. **`bin/axon-indexer --version` a fait redémarrer l'indexeur LIVE.** Ce drapeau n'existe
+   pas ; l'argument est ignoré et le binaire démarre un rôle d'ingestion complet, qui a
+   contesté le verrou d'écrivain. Sans dommage durable — par chance. → `REQ-AXO-902338`.
+2. **La suite `--lib` complète a été lancée pendant que le live tournait**, une deuxième
+   fois. Corrigé en cours de route : arrêter l'indexeur d'abord fait tomber la charge de
+   24 à 10 et la suite de 1857 s à 663 s, sans tuer personne.
+
+## 6. Livré cette nuit (4 commits, poussés)
+
+| Commit | Objet |
+|---|---|
+| `cf2762f3` | Le préfixe par-morceau borné en fraction de la fenêtre (docstring + contexte) |
+| `24ad3d31` | Script de purge, garde d'ordre falsifiable dans les deux sens |
+| `3f93a514` | Le morceau grossier borné par la fenêtre + `FALLBACK_CHARS_PER_TOKEN` partagé + char-windowing des lignes géantes |
+| `f7742c5e` | Sonde `dxgvmb` multi-échantillons à TID stable + corroboration |
+
+**Promote** `v0.8.0-1482` → **`v0.8.0-1493-g24ad3d31`**, interruption MCP mesurée : 42 s au
+pire. **Purge** : 456 fichiers, 150 365 morceaux supprimés et reconstruits.
+
+## 7. Ce que la mesure dit à la fin
+
+| | Avant | Après |
+|---|---|---|
+| Fichiers ≥100× d'amplification | 456 | **0** |
+| Morceaux fautifs | 150 365 (23,2 % de l'index) | **0** |
+| Valeurs TOAST cassées | 24 | **0** |
+| `5-galaxy38.txt` | 945 morceaux | **10** |
+| Charge hôte | 24–35 | ~16 |
+
+La corruption TOAST a été **emportée par la purge** — hypothèse annoncée avant d'agir,
+confirmée après. Preuve indépendante : un `GROUP BY length(content)` sur toute la table
+s'exécute désormais ; il mourait systématiquement en `XX001`.
+
+## 8. Observation non instruite, pour la prochaine session
+
+`batch` refuse `soll_manager` (`unknown_tool` : « tool not recognized by the canonical
+dispatcher »). Rencontré en voulant créer 15 liens milestone→REQ d'un coup ; fait un par un.
+À vérifier avant d'en faire un REQ : est-ce délibéré (protéger les mutations SOLL d'un
+batch) ou une lacune du dispatcher ? Si c'est délibéré, le message devrait le dire.
