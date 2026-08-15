@@ -185,6 +185,15 @@ CREATE TABLE IF NOT EXISTS ist.Chunk (
     -- at the cap the chunk flips embed_status='failed' so the sorted drain
     -- (WHERE embed_status='pending') stops re-feeding it (anti poison-pill).
     embed_attempts   INTEGER NOT NULL DEFAULT 0,
+    -- REQ-AXO-902260 (Q2) — when this chunk row was FIRST written. The table
+    -- carried no temporal column at all, which is why Q2 is undecidable: when
+    -- LLL stalled at 25 of 434 files, nothing could tell whether those 25 formed
+    -- one contiguous window (an interrupted batch) or a scatter (a poison item).
+    -- NULLABLE on purpose: rows written before this column exist have no honest
+    -- value, and a backfill would invent one. NULL reads as "unknown", which is
+    -- the truth. ON CONFLICT DO UPDATE never touches it, so a re-chunk preserves
+    -- first-seen time.
+    created_at_ms    BIGINT DEFAULT (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT,
     CONSTRAINT chunk_embed_status_check CHECK (embed_status IN ('pending', 'embedded', 'failed'))
 );
 -- REQ-AXO-902012 — additive for live DBs whose ist.Chunk predates the column
@@ -192,8 +201,26 @@ CREATE TABLE IF NOT EXISTS ist.Chunk (
 ALTER TABLE ist.Chunk
     ADD COLUMN IF NOT EXISTS embed_attempts INTEGER NOT NULL DEFAULT 0;
 
+-- REQ-AXO-902260 — additive in TWO statements, deliberately, and the order is
+-- the whole point. `ADD COLUMN ... DEFAULT <volatile expr>` makes PostgreSQL
+-- rewrite the table and evaluate now() PER EXISTING ROW: on a live IST that is
+-- both a full-table lock and a fabricated timestamp on every historical chunk.
+-- Adding the column bare is instant and leaves them NULL; SET DEFAULT then
+-- applies to FUTURE inserts only. Fresh installs get the same nullable column
+-- with the same default from the CREATE above — one schema, not two.
+ALTER TABLE ist.Chunk
+    ADD COLUMN IF NOT EXISTS created_at_ms BIGINT;
+ALTER TABLE ist.Chunk
+    ALTER COLUMN created_at_ms SET DEFAULT (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT;
+
 CREATE INDEX IF NOT EXISTS idx_chunk_pending_embed
     ON ist.Chunk (token_count) WHERE embed_status = 'pending';
+
+-- REQ-AXO-902260 — the chunk time window is a DIAGNOSTIC read (diagnose_indexing)
+-- over a multi-million-row table; without this, every MIN/MAX is a seq scan and
+-- the tool that exists to explain a stall becomes a reason not to run it.
+CREATE INDEX IF NOT EXISTS idx_chunk_created_at
+    ON ist.Chunk (project_code, created_at_ms);
 
 -- FTS tsvector. 06_pgmq_tsv_async.sql may DROP the GENERATED expression on
 -- the canonical install so a worker populates it out-of-band.

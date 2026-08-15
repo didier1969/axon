@@ -105,9 +105,18 @@ impl McpServer {
                      search and FTS are blind to them (structural tools still answer wherever \
                      symbols were extracted)"
                 ),
-                "restart axon-indexer — a RUNNING indexer does not drain a pre-existing \
-                 'discovered' backlog, only a fresh boot does (REQ-AXO-902253); then re-run \
-                 diagnose_indexing and expect coverage to climb",
+                // REQ-AXO-902260 — this hint used to justify itself with "a RUNNING
+                // indexer does not drain a pre-existing 'discovered' backlog, only a
+                // fresh boot does". That mechanism was RETIRED by REQ-AXO-901916: the
+                // reconciliation walk enumerates every eligible file on a timer. The
+                // restart is still the fast cure, but the honest reason is different —
+                // and citing a component that no longer exists is what sent the LLL
+                // investigation looking in the wrong place for a day.
+                "wait one reconciliation sweep (AXON_RECONCILE_SWEEP_SECS, default 900s) — \
+                 the walk re-enumerates every eligible file and re-feeds pipeline A. If \
+                 coverage has not climbed after a sweep, restart axon-indexer to force a \
+                 full walk immediately, then re-run diagnose_indexing. Read coverage from \
+                 CHUNK PRESENCE below, never from ist.IndexedFile.status",
             ))
         } else if pct < 90.0 {
             Some((
@@ -328,10 +337,18 @@ impl McpServer {
         // root would blow the gateway budget).
         let scope_section = self.scope_explanation_section(project);
 
+        // REQ-AXO-902260 (Q2) — the chunk time window. `ist.Chunk` carried NO
+        // temporal column at all, and that absence is exactly why Q2 has stayed
+        // unanswered: when LLL stalled at 25 of 434 files, nothing could say
+        // whether those 25 were one contiguous batch (an interrupted walk) or a
+        // scatter (a poison item). Three scalars, index-backed
+        // (idx_chunk_created_at). `unknown` counts rows written before the column
+        // existed — reported, never guessed.
+        let chunk_window_section = self.chunk_time_window_section(project);
+
         // REQ-AXO-901893 (LEGACY FEED PURGE) — the ingress drain + periodic
         // sweep diagnosis blocks were ripped with the ingress_buffer. Watchman
-        // feeds pipeline A directly; DBQ-A drains the backlog. Use
-        // `pipeline_status` / `stock_a` (discovered backlog) for feed health.
+        // feeds pipeline A directly.
         format!(
             "### 🔎 Day-1 Indexing Diagnosis ({})\n\n\
              **Scope facts**\n\
@@ -346,15 +363,18 @@ impl McpServer {
              **Likely root causes**\n{}\n\n\
              **Top status reasons**\n{}\n\n\
              **Top parser/runtime errors**\n{}\n\n\
-             ### File source — Watchman + DBQ-A (REQ-AXO-901893 / REQ-AXO-901897)\n\
+             {}\n\
+             ### File source — Watchman + reconciliation walk (REQ-AXO-901893 / REQ-AXO-901916)\n\
              * Watchman clock/cursor deltas feed pipeline A directly (legacy ingress drain + periodic sweep RIPPED)\n\
-             * DBQ-A claim feeder drains the 'discovered' backlog by construction\n\n\
+             * a periodic reconciliation walk (`AXON_RECONCILE_SWEEP_SECS`, default 900s) re-enumerates every eligible file and pushes it straight into pipeline A\n\
+             * there is NO claim feeder and nothing reads `ist.IndexedFile.status='discovered'` — that column is dead weight (REQ-AXO-901916 replaced the machine, REQ-AXO-902260 removed the claim). Coverage truth is CHUNK PRESENCE, above\n\n\
              **Remediation hints**\n\
              * validate project code and scope (`project_code`) used in calls\n\
              * check watch root and ignored paths\n\
              * inspect parser support and `last_error_reason`\n\
              * if symbols > 0 but calls = 0, run bridge refinement and inspect FFI boundaries\n\
-             * if the 'discovered' backlog (stock_a in `pipeline_status`) stays high, check the indexer is running and the Watchman daemon is reachable\
+             * if coverage stays below 100% across two reconciliation sweeps, the walk is not running: check the indexer is alive and the Watchman daemon is reachable\n\
+             * ⚠️ `rescan_project full=true` wipes chunks AND IndexedFile rows, but the RAM dedup cache is hydrated once at boot — without an indexer restart right after, every file is skipped as unchanged and the chunks are never rebuilt (REQ-AXO-902260, observed on LLL: 434/434 → 2/438)\
              {}",
             project,
             enrolled,
@@ -370,8 +390,37 @@ impl McpServer {
             cause_lines,
             reason_lines,
             error_lines,
+            chunk_window_section,
             scope_section,
         )
+    }
+
+    /// REQ-AXO-902260 (Q2) — render the chunk time window for a project.
+    ///
+    /// The question this exists to make answerable: when a project stalls
+    /// part-way through indexing, were the chunks it DID get written in one
+    /// contiguous burst (a walk that was interrupted) or spread over time (an
+    /// item that poisons its batch)? Until `ist.Chunk.created_at_ms` existed,
+    /// neither could be told from the other and the hypotheses stayed
+    /// hypotheses.
+    ///
+    /// Empty string for `*` (global): a cross-project min/max mixes tenants and
+    /// answers nothing.
+    fn chunk_time_window_section(&self, project: &str) -> String {
+        if project == "*" {
+            return String::new();
+        }
+        let escaped = project.replace('\'', "''");
+        let oldest = self.sql_scalar(&format!(
+            "SELECT COALESCE(MIN(created_at_ms), 0)::BIGINT FROM ist.Chunk WHERE project_code = '{escaped}'"
+        ));
+        let newest = self.sql_scalar(&format!(
+            "SELECT COALESCE(MAX(created_at_ms), 0)::BIGINT FROM ist.Chunk WHERE project_code = '{escaped}'"
+        ));
+        let unknown = self.sql_scalar(&format!(
+            "SELECT count(*)::BIGINT FROM ist.Chunk WHERE project_code = '{escaped}' AND created_at_ms IS NULL"
+        ));
+        format_chunk_time_window(oldest, newest, unknown)
     }
 
     /// REQ-AXO-901932 F2 — render the `scope_explanation` block: walk the
@@ -1815,6 +1864,44 @@ fn format_diagnose_cause_line(id: &str, explain: &str, remediation: &str) -> Str
     format!("* **{id}**: {explain}\n  * remediation: {remediation}")
 }
 
+/// REQ-AXO-902260 (Q2) — PURE rendering of the chunk time window, split from the
+/// three scalars that feed it so the contract is testable without a database
+/// (same split as `chunk_coverage_cause` / `format_diagnose_cause_line`, and the
+/// rule REQ-AXO-902275 states: a function testable without launching a process
+/// belongs in typed, unit-tested code).
+///
+/// `oldest`/`newest` are epoch ms, 0 when the project has no timestamped chunk.
+/// `unknown` counts rows written before the column existed. Empty string when
+/// there is nothing to say — a section of zeroes is noise, and noise is what
+/// teaches readers to skip a section.
+fn format_chunk_time_window(oldest: i64, newest: i64, unknown: i64) -> String {
+    if oldest == 0 && newest == 0 && unknown == 0 {
+        return String::new();
+    }
+    let span_line = if oldest > 0 && newest >= oldest {
+        let span_s = (newest - oldest) as f64 / 1000.0;
+        format!("* span: {span_s:.1}s between the oldest and the newest chunk\n")
+    } else {
+        String::new()
+    };
+    // A row predating the column is `unknown` — never 0, never now(). An
+    // invented timestamp here would defeat the entire point of the column.
+    let unknown_line = if unknown > 0 {
+        format!(
+            "* {unknown} chunk(s) predate the column and carry NO timestamp — unknown, not old\n"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "**Chunk time window (REQ-AXO-902260)**\n\
+         * oldest: {oldest} ms · newest: {newest} ms (epoch)\n\
+         {span_line}{unknown_line}\
+         * a SHORT span on an incomplete project points at one interrupted walk; a LONG \
+         span with a gap points at an item that poisoned its batch\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1833,6 +1920,74 @@ mod tests {
         assert!(explain.contains("409 file(s)"), "the gap must be stated: {explain}");
         // The remediation must name the actual cure found in session 104.
         assert!(fix.contains("restart axon-indexer"), "got: {fix}");
+    }
+
+    // --- REQ-AXO-902260 (Q2) chunk time window -----------------------------------
+
+    /// The LLL shape: 25 chunks written inside one short burst. That is the
+    /// signature of an interrupted walk, and before `created_at_ms` existed it
+    /// could not be told apart from a scatter.
+    #[test]
+    fn chunk_window_reports_a_short_span_as_one_burst() {
+        let section = format_chunk_time_window(1_754_000_000_000, 1_754_000_012_400, 0);
+        assert!(section.contains("span: 12.4s"), "got: {section}");
+        assert!(
+            section.contains("interrupted walk"),
+            "the reading of a short span must be stated: {section}"
+        );
+        assert!(
+            !section.contains("predate the column"),
+            "no unknown rows here: {section}"
+        );
+    }
+
+    /// Rows written before the column existed are `unknown`. They must never be
+    /// rendered as 0 or as "now" — a fabricated timestamp on historical rows is
+    /// precisely the thing this column exists to avoid.
+    #[test]
+    fn chunk_window_names_untimestamped_rows_as_unknown_not_old() {
+        let section = format_chunk_time_window(1_754_000_000_000, 1_754_000_000_000, 2_644);
+        assert!(
+            section.contains("2644 chunk(s) predate the column"),
+            "got: {section}"
+        );
+        assert!(section.contains("unknown, not old"), "got: {section}");
+    }
+
+    /// A project with nothing to say gets no section at all. A block of zeroes
+    /// is the kind of permanent noise readers learn to skip — and a section
+    /// everyone skips is worse than no section.
+    #[test]
+    fn chunk_window_is_silent_when_there_is_nothing_to_report() {
+        assert_eq!(format_chunk_time_window(0, 0, 0), "");
+    }
+
+    /// REQ-AXO-902260 — anti-recidive. A sentence asserting that the retired
+    /// DBQ-A component empties the `discovered` backlog "by construction"
+    /// described a mechanism removed by REQ-AXO-901916, and the REQ body names it
+    /// as what sent the LLL investigation looking in the wrong place for a day.
+    /// Session 105 purged it from the contract surfaces and from five comments —
+    /// but it SURVIVED inside the rendered report itself, the one place an LLM
+    /// actually reads it. Pin it so a third resurrection is impossible.
+    ///
+    /// The needles are assembled at RUNTIME on purpose: spelled out here, this
+    /// test's own text would be the match it forbids — a guard that fails on
+    /// itself is a guard nobody keeps.
+    #[test]
+    fn diagnosis_never_claims_a_dbq_a_claim_feeder_again() {
+        let source = include_str!("tools_governance.rs");
+        // The retired component may be NAMED in a comment explaining its removal;
+        // what must never come back is the ASSERTION that it drains anything.
+        for needle in [
+            format!("claim feeder {}", "drains"),
+            format!("DBQ-A {}", "drains"),
+        ] {
+            assert!(
+                !source.contains(&needle),
+                "`{needle}` is back in the rendered diagnosis — it describes a component \
+                 removed by REQ-AXO-901916 and it is what derailed the LLL investigation"
+            );
+        }
     }
 
     #[test]
