@@ -84,6 +84,9 @@ pub(super) fn build_top_recommendations(waves: &[WorkPlanWave], top: usize) -> V
                 "entity_type": item.entity_type.label(),
                 "title": item.title,
                 "score": item.score,
+                // REQ-AXO-902295 — the hygiene axis travels beside the
+                // execution score on every surface, never folded into it.
+                "proof_gap_score": item.proof_gap_score,
                 "wave_index": wave.wave_index,
                 "kind": recommendation_kind(item),
                 "reason": recommendation_reason(item),

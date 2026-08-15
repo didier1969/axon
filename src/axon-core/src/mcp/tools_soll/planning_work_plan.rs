@@ -135,16 +135,29 @@ fn actionable_priority_rank(priority: &str) -> u8 {
     super::inference::priority_level(priority).map_or(9, |level| level)
 }
 
-/// REQ-AXO-346 Slice 2 — build a single synthetic wave of open
-/// Requirement leaves ordered by `(parent_score DESC, priority ASC,
-/// score DESC, id ASC)`. Used when caller passes `actionable=true` so
-/// the LLM gets the *work* (REQs) directly instead of the *intent*
-/// (Decisions / Milestones). Parents are found by walking incoming
-/// edges in the snapshot, filtered to the broader filiation set so a
-/// REQ reached via SOLVES, TARGETS, or REFINES contributes a parent
-/// score. When a REQ has no schedulable parent, `parent_score` falls
-/// back to the REQ's own score so isolated leaves don't sink to the
-/// bottom.
+/// REQ-AXO-346 Slice 2 — build a single synthetic wave of open Requirement
+/// leaves. Used when caller passes `actionable=true` so the LLM gets the *work*
+/// (REQs) directly instead of the *intent* (Decisions / Milestones). Parents are
+/// found by walking incoming edges in the snapshot, filtered to the broader
+/// filiation set so a REQ reached via SOLVES, TARGETS, or REFINES contributes a
+/// parent score. When a REQ has no schedulable parent, `parent_score` falls back
+/// to the REQ's own score so isolated leaves don't sink to the bottom.
+///
+/// REQ-AXO-902295 / DEC-AXO-901668 — ordering was
+/// `(parent_score DESC, priority ASC, score DESC, id ASC)`. A LEXICOGRAPHIC
+/// primary key crushes every other dimension by construction: the leaf's own
+/// priority was only a third-order tie-break, so a P3 sitting under a fat parent
+/// outranked a P1. Measured on the AXO board of 2026-08-15, that put a P3 with
+/// an own score of 7 at position 1, above a P1 scoring 15.
+///
+/// The parent still PULLS its leaf up — that was REQ-AXO-346 slice 2's intent
+/// and it is legitimate — but as a BOUNDED contribution (≤ +10) inside a single
+/// blended rank, so it can no longer impose the order on its own. Negative
+/// parent scores are clamped to 0: a parent may help a leaf, never penalise it.
+fn actionable_leaf_rank(own_score: i64, parent_score: i64) -> i64 {
+    own_score + parent_score.clamp(0, 40) / 4
+}
+
 fn build_actionable_leaves_wave(
     nodes: &HashMap<String, WorkPlanNode>,
     snapshot: &SollSnapshot,
@@ -205,11 +218,15 @@ fn build_actionable_leaves_wave(
         } else {
             Some(crumbs.join(" → "))
         };
+        let rank = actionable_leaf_rank(node.score, effective_parent_score);
         leaf.reasons.insert(
             0,
-            format!("actionable_leaf (parent_score={})", effective_parent_score),
+            format!(
+                "actionable_leaf (rank={}, score={}, parent_score={}, proof_gap={})",
+                rank, node.score, effective_parent_score, node.proof_gap_score
+            ),
         );
-        items_with_parent.push((leaf, effective_parent_score));
+        items_with_parent.push((leaf, rank));
     }
     items_with_parent.sort_by(|a, b| {
         b.1.cmp(&a.1)
@@ -217,7 +234,6 @@ fn build_actionable_leaves_wave(
                 actionable_priority_rank(&a.0.priority)
                     .cmp(&actionable_priority_rank(&b.0.priority))
             })
-            .then_with(|| b.0.score.cmp(&a.0.score))
             .then_with(|| a.0.id.cmp(&b.0.id))
     });
     let items: Vec<WorkPlanNode> = items_with_parent.into_iter().map(|(n, _)| n).collect();
@@ -411,9 +427,12 @@ impl McpServer {
             .unwrap_or(DEFAULT_DECAY_HALF_LIFE_DAYS);
         // REQ-AXO-346 Slice 2 + REQ-AXO-901617 — default-on REQ-leaf surface.
         // When true (default since REQ-AXO-901617), the returned waves
-        // contain open Requirements (status non-terminal) ordered by
-        // `(parent_score DESC, priority ASC, score DESC)` instead of the
-        // parent Decisions/Milestones. The default flipped to `true` after
+        // contain open Requirements (status non-terminal) instead of the
+        // parent Decisions/Milestones, ordered by the blended rank of
+        // `actionable_leaf_rank` (REQ-AXO-902295 — was
+        // `parent_score DESC, priority ASC, score DESC`, a lexicographic key
+        // on the PARENT that made a leaf's own urgency a third-order
+        // tie-break). The default flipped to `true` after
         // observation that wave-1 was dominated by accepted Decisions whose
         // children are delivered (cosmetic "no evidence attached" boosts)
         // ahead of genuinely actionable Requirements. Pass `actionable=false`
@@ -541,9 +560,10 @@ impl McpServer {
             } else {
                 None
             };
-            let (score, reasons, gates) =
+            let (score, proof_gap_score, reasons, gates) =
                 score_node(node, include_ist, include_decay, half_life_days, now_ms);
             node.score = score;
+            node.proof_gap_score = proof_gap_score;
             node.reasons = reasons;
             node.validation_gates = gates;
         }
@@ -826,6 +846,7 @@ impl McpServer {
                             ist_degraded_links: 0,
                             backlog_visible: false,
                             score: 0,
+                            proof_gap_score: 0,
                             reasons: Vec::new(),
                             validation_gates: Vec::new(),
                             ist_signals: Vec::new(),
@@ -851,6 +872,7 @@ impl McpServer {
                             ist_degraded_links: 0,
                             backlog_visible: false,
                             score: 0,
+                            proof_gap_score: 0,
                             reasons: Vec::new(),
                             validation_gates: Vec::new(),
                             ist_signals: Vec::new(),
@@ -877,6 +899,7 @@ impl McpServer {
                             ist_degraded_links: 0,
                             backlog_visible: false,
                             score: 0,
+                            proof_gap_score: 0,
                             reasons: Vec::new(),
                             validation_gates: Vec::new(),
                             ist_signals: Vec::new(),
@@ -1527,8 +1550,12 @@ mod tests {
     /// emits Requirements, drops terminal ones, and inherits the
     /// strongest parent_score among schedulable parents. Two DEC parents
     /// at scores 100 & 60 on the same REQ → expected parent_score = 100.
+    ///
+    /// REQ-AXO-902295 — the parent no longer DICTATES the order, it only pulls
+    /// (bounded, ≤ +10). The expected order changes accordingly; see the
+    /// per-node arithmetic at the assertion below.
     #[test]
-    fn actionable_wave_returns_open_reqs_sorted_by_parent_score() {
+    fn actionable_wave_ranks_own_score_with_bounded_parent_pull() {
         use crate::soll_snapshot::{SnapshotEdge, SnapshotNode};
 
         fn mk_node(id: &str, t: &str, status: &str) -> (String, SnapshotNode) {
@@ -1591,6 +1618,7 @@ mod tests {
                     ist_degraded_links: 0,
                     backlog_visible: false,
                     score,
+                    proof_gap_score: 0,
                     reasons: Vec::new(),
                     validation_gates: Vec::new(),
                     ist_signals: Vec::new(),
@@ -1686,12 +1714,17 @@ mod tests {
         }
 
         let ids: Vec<&str> = wave.items.iter().map(|n| n.id.as_str()).collect();
-        // Expected order:
-        //   REQ-AXO-1  : parent_score=100 (DEC-100 wins over DEC-200)
-        //   REQ-AXO-4  : parent_score=70 (no parent → falls back to own score 70)
-        //   REQ-AXO-2  : parent_score=60 (DEC-200)
-        // ... so REQ-1 first, REQ-4 second (70 > 60), REQ-2 last.
-        assert_eq!(ids, vec!["REQ-AXO-1", "REQ-AXO-4", "REQ-AXO-2"]);
+        // REQ-AXO-902295 — rank = own_score + clamp(parent_score, 0..=40) / 4.
+        //   REQ-AXO-4 : own 70 + (no parent → own 70, clamped 40)/4 = 10 → 80
+        //   REQ-AXO-1 : own 50 + (parent 100, clamped 40)/4        = 10 → 60
+        //   REQ-AXO-2 : own 40 + (parent  60, clamped 40)/4        = 10 → 50
+        //
+        // The strongest parent still wins the parent_score contest (DEC-100's 100
+        // over DEC-200's 60), but it is CAPPED, so it can no longer carry REQ-1 —
+        // own score 50 — over REQ-4's own 70. Pre-fix, `parent_score DESC` was the
+        // lexicographic primary key and REQ-1 led on its parent alone: exactly the
+        // defect where a leaf's own urgency is only a third-order tie-break.
+        assert_eq!(ids, vec!["REQ-AXO-4", "REQ-AXO-1", "REQ-AXO-2"]);
 
         // REQ-3 (delivered) must NOT be in output.
         assert!(!ids.contains(&"REQ-AXO-3"));
@@ -1721,6 +1754,7 @@ mod tests {
                 ist_degraded_links: 0,
                 backlog_visible: false,
                 score: 42,
+                proof_gap_score: 0,
                 reasons: Vec::new(),
                 validation_gates: Vec::new(),
                 ist_signals: Vec::new(),

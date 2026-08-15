@@ -1656,6 +1656,94 @@ fn test_soll_work_plan_actionable_defaults_true_emits_req_leaves() {
     );
 }
 
+/// REQ-AXO-902295 / DEC-AXO-901668 — end-to-end through the real `soll_work_plan`
+/// tool, on the SHAPE of the AXO board of 2026-08-15 that exposed the defect:
+/// three P3 leaves sat above three P1 leaves, and the leaf somebody had actually
+/// STARTED was not in the top six.
+///
+/// - `REQ-AXO-001` is `current` (engaged) and P1, with no parent and no children.
+/// - `REQ-AXO-002` is `planned` and P3, but hangs under a high-scoring Decision.
+/// - `REQ-AXO-003` is `planned` and P2, unparented.
+///
+/// Pre-fix, `parent_score DESC` was the LEXICOGRAPHIC primary sort key, so the
+/// P3 (002) led on its parent's score alone and the engaged P1 (001) came second
+/// — the leaf's own priority was only a third-order tie-break. The parent must
+/// still pull, but bounded.
+#[test]
+fn test_soll_work_plan_ranks_engaged_leaf_above_a_p3_under_a_fat_parent() {
+    let server = create_test_server();
+    for stmt in [
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'engaged work', '', 'current', '{\"priority\":\"P1\"}')",
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'well-parented backlog', '', 'planned', '{\"priority\":\"P3\"}')",
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-003', 'Requirement', 'AXO', 'orphan backlog', '', 'planned', '{\"priority\":\"P2\"}')",
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'fat parent', '', 'current', '{}')",
+        "INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-001', 'REQ-AXO-002', 'SOLVES')",
+    ] {
+        server.graph_store.execute(stmt).unwrap();
+    }
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_code": "AXO", "format": "json" }
+        })),
+        id: Some(json!(902295)),
+    };
+    let data = server
+        .handle_request(req)
+        .unwrap()
+        .result
+        .expect("result")
+        .get("data")
+        .cloned()
+        .expect("data");
+
+    let items: Vec<&serde_json::Value> = data["ordered_waves"]
+        .as_array()
+        .expect("waves")
+        .iter()
+        .flat_map(|w| w["items"].as_array().unwrap().iter())
+        .collect();
+    let ids: Vec<&str> = items.iter().filter_map(|i| i["id"].as_str()).collect();
+
+    assert_eq!(
+        ids,
+        vec!["REQ-AXO-001", "REQ-AXO-002", "REQ-AXO-003"],
+        "the engaged P1 leaf must lead; pre-fix the P3 under the fat parent did: {ids:?}"
+    );
+
+    // The two numbers are published side by side and never summed again.
+    let engaged = items[0];
+    assert!(
+        engaged["proof_gap_score"].as_i64().is_some(),
+        "proof_gap_score must be exposed beside score: {engaged:?}"
+    );
+    assert!(
+        engaged["reasons"]
+            .as_array()
+            .expect("reasons")
+            .iter()
+            .any(|r| r.as_str() == Some("work in progress (status=current)")),
+        "engagement must be disclosed as a reason: {engaged:?}"
+    );
+
+    // What RANKS the node must be what the "Immediate actions" line SAYS.
+    // Pre-fix this leaf would have been labelled `[proof_gap]` — the hygiene
+    // axis that no longer decides the order.
+    let top = data["top_recommendations"]
+        .as_array()
+        .expect("top_recommendations");
+    let first = &top[0];
+    assert_eq!(first["id"].as_str(), Some("REQ-AXO-001"));
+    assert_eq!(
+        first["kind"].as_str(),
+        Some("in_progress"),
+        "the engaged leaf must be labelled by what ranked it: {first:?}"
+    );
+}
+
 #[test]
 fn test_soll_work_plan_orders_decision_requirement_milestone_chain() {
     let server = create_test_server();

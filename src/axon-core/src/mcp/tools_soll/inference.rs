@@ -41,6 +41,15 @@ pub(super) struct WorkPlanNode {
     pub(super) ist_degraded_links: usize,
     pub(super) backlog_visible: bool,
     pub(super) score: i64,
+    /// REQ-AXO-902295 / DEC-AXO-901668 — SOLL hygiene debt, kept STRICTLY
+    /// out of `score`. `score` answers "what do I start next?"; this one
+    /// answers "where are the proof holes?". Fused into one integer, they
+    /// contradict each other: an unproven REQ is urgent for hygiene and NOT
+    /// ready for execution — and the fused number made "unproven and
+    /// incomplete" worth 69% of a REQ's points, so attaching evidence
+    /// LOWERED its rank. Published in `data`/`reasons`/`validation_gates`
+    /// (nothing is hidden) but never part of the ordering key.
+    pub(super) proof_gap_score: i64,
     pub(super) reasons: Vec<String>,
     pub(super) validation_gates: Vec<String>,
     pub(super) ist_signals: Vec<String>,
@@ -184,14 +193,45 @@ pub(super) fn priority_level(priority: &str) -> Option<u8> {
     }
 }
 
+/// REQ-AXO-902295 / DEC-AXO-901668 — bonus for work somebody has ALREADY
+/// STARTED. Before this, `status` carried NO weight at all: moving a node to
+/// `current` — the one unambiguous signal of engagement — changed its rank by
+/// exactly zero.
+///
+/// The value is not arbitrary, it is bracketed by the `descendants * 40` term:
+/// **strictly above one descendant (40)** so an engaged terminal leaf beats a
+/// not-yet-started single unblocker (finish what is open before opening more),
+/// and **below two descendants (80)** so a genuinely structural unblocker still
+/// leads. Change either side of that bracket and the rule stops holding.
+pub(super) const ENGAGEMENT_BONUS: i64 = 50;
+
+/// REQ-AXO-902295 — `current` is the canonical "work in progress" status
+/// (DEC-PRO-100). `planned` is intent, terminal states are done, and
+/// `blocked`/`deferred` never reach the actionable wave at all.
+pub(super) fn is_engaged_status(status: &str) -> bool {
+    status.trim().to_ascii_lowercase() == "current"
+}
+
+/// Returns `(score, proof_gap_score, reasons, validation_gates)`.
+///
+/// REQ-AXO-902295 / DEC-AXO-901668 — the two numbers answer two DIFFERENT
+/// questions and must never be summed again:
+/// - `score` = execution urgency (descendants, priority, engagement,
+///   centrality, temporal decay);
+/// - `proof_gap_score` = SOLL hygiene debt (missing proof, missing criteria,
+///   degraded IST scope, visible backlog).
+///
+/// Every reason and every gate is still emitted on the same vectors — the
+/// split changes what ORDERS the plan, not what it discloses.
 pub(super) fn score_node(
     node: &WorkPlanNode,
     include_ist: bool,
     include_decay: bool,
     half_life_days: f64,
     now_ms: i64,
-) -> (i64, Vec<String>, Vec<String>) {
+) -> (i64, i64, Vec<String>, Vec<String>) {
     let mut score = (node.descendants as i64) * 40;
+    let mut proof_gap_score = 0i64;
     let mut reasons = vec![format!("unblocks {} descendant(s)", node.descendants)];
     let mut validation_gates = Vec::new();
 
@@ -210,15 +250,21 @@ pub(super) fn score_node(
         reasons.push(format!("priority P{level}"));
     }
 
+    // REQ-AXO-902295 / DEC-AXO-901668 — the four blocks below feed
+    // `proof_gap_score`, NOT `score`. They used to be worth up to +38 of
+    // execution urgency, which inverted the incentive: attaching evidence
+    // cost 10 points and writing acceptance criteria cost 7. Measured on the
+    // AXO board of 2026-08-15, they accounted for 18 of REQ-AXO-902295's own
+    // 26 points (69%) — the plan was ranking REQs for being unfinished.
     if let Some(state) = node.requirement_state.as_deref() {
         match state {
             "missing" => {
-                score += 15;
+                proof_gap_score += 15;
                 reasons.push("requirement missing".to_string());
                 validation_gates.push("define acceptance criteria and evidence".to_string());
             }
             "partial" => {
-                score += 8;
+                proof_gap_score += 8;
                 reasons.push("requirement partial".to_string());
                 validation_gates.push("complete missing proof or acceptance criteria".to_string());
             }
@@ -227,19 +273,19 @@ pub(super) fn score_node(
     }
 
     if node.evidence_count == 0 {
-        score += 10;
+        proof_gap_score += 10;
         reasons.push("no evidence attached".to_string());
         validation_gates.push("attach evidence".to_string());
     }
 
     if include_ist && node.ist_degraded_links > 0 {
-        score += 8;
+        proof_gap_score += 8;
         reasons.push("IST scope degraded".to_string());
         validation_gates.push("reindex degraded scope".to_string());
     }
 
     if node.backlog_visible {
-        score += 5;
+        proof_gap_score += 5;
         reasons.push("project backlog visible".to_string());
         validation_gates.push("reduce project backlog before closure".to_string());
     }
@@ -281,7 +327,24 @@ pub(super) fn score_node(
         }
     }
 
-    (score, reasons, validation_gates)
+    // REQ-AXO-902295 / DEC-AXO-901668 — engagement is added AFTER the decay
+    // multiplier, deliberately. Decay models "nobody has touched this in a
+    // long time"; `status=current` is the human assertion of the OPPOSITE.
+    // Letting decay erode the very signal that refutes it would be
+    // incoherent — and the data says it would also be ineffective:
+    // REQ-AXO-902260 is P1 AND `current` yet scored 8, i.e. P1(+15) x 0.53.
+    // A bonus applied before the multiplier would be halved on exactly the
+    // node it exists to lift.
+    //
+    // Accepted risk, stated rather than hidden: a `current` abandoned for
+    // months keeps its bonus. That is the intended reading — an abandoned
+    // WIP is itself a defect worth SEEING, not one to bury under decay.
+    if is_engaged_status(&node.status) {
+        score += ENGAGEMENT_BONUS;
+        reasons.push("work in progress (status=current)".to_string());
+    }
+
+    (score, proof_gap_score, reasons, validation_gates)
 }
 
 pub(super) fn apply_wave_limit(
@@ -335,6 +398,9 @@ pub(super) fn wave_to_json(wave: &WorkPlanWave) -> Value {
                 "entity_type": item.entity_type.label(),
                 "title": item.title,
                 "score": item.score,
+                // REQ-AXO-902295 — hygiene debt, published beside the
+                // execution score instead of being summed into it.
+                "proof_gap_score": item.proof_gap_score,
                 "reasons": item.reasons,
                 "validation_gates": item.validation_gates,
                 "ist_signals": item.ist_signals,
@@ -347,6 +413,13 @@ pub(super) fn wave_to_json(wave: &WorkPlanWave) -> Value {
 pub(super) fn recommendation_kind(node: &WorkPlanNode) -> &'static str {
     if node.descendants > 0 {
         "unblocker"
+    // REQ-AXO-902295 — engagement now RANKS the node, so it must also be what
+    // the "Immediate actions" line SAYS. Otherwise an engaged P1 would be
+    // listed as `[proof_gap] : close proof gap (partial)` — a label describing
+    // the hygiene axis that no longer decides the order, i.e. the operator
+    // reads a reason that is not the reason.
+    } else if is_engaged_status(&node.status) {
+        "in_progress"
     } else if node
         .requirement_state
         .as_deref()
@@ -363,6 +436,9 @@ pub(super) fn recommendation_kind(node: &WorkPlanNode) -> &'static str {
 pub(super) fn recommendation_reason(node: &WorkPlanNode) -> String {
     if node.descendants > 0 {
         format!("unblocks {} descendant(s)", node.descendants)
+    } else if is_engaged_status(&node.status) {
+        // REQ-AXO-902295 — finish what is already open before opening more.
+        "work in progress — finish before starting new work".to_string()
     } else if node
         .requirement_state
         .as_deref()
@@ -457,14 +533,14 @@ mod tests {
         assert_eq!(priority_level("P1"), priority_level("high"));
     }
 
-    // Isolate the priority contribution: 0 descendants, no proof gap, evidence present,
-    // no backlog, no decay — so score_node's only non-zero term is the priority bonus.
-    fn scored(priority: &str) -> (i64, Vec<String>) {
-        let node = super::WorkPlanNode {
+    /// Build a bare Requirement node; callers tweak only the fields their
+    /// assertion is about, so every test states its own inputs explicitly.
+    fn node(status: &str, priority: &str) -> super::WorkPlanNode {
+        super::WorkPlanNode {
             id: "REQ-AXO-TEST".to_string(),
             title: "t".to_string(),
             entity_type: super::WorkPlanEntityType::Requirement,
-            status: "planned".to_string(),
+            status: status.to_string(),
             priority: priority.to_string(),
             requirement_state: None,
             evidence_count: 1,
@@ -472,14 +548,22 @@ mod tests {
             ist_degraded_links: 0,
             backlog_visible: false,
             score: 0,
+            proof_gap_score: 0,
             reasons: Vec::new(),
             validation_gates: Vec::new(),
             ist_signals: Vec::new(),
             updated_at_ms: None,
             centrality: None,
             breadcrumb: None,
-        };
-        let (score, reasons, _gates) = super::score_node(&node, false, false, 30.0, 0);
+        }
+    }
+
+    // Isolate the priority contribution: 0 descendants, no proof gap, evidence present,
+    // no backlog, no decay, status `planned` (no engagement bonus) — so score_node's
+    // only non-zero term is the priority bonus.
+    fn scored(priority: &str) -> (i64, Vec<String>) {
+        let (score, _proof_gap, reasons, _gates) =
+            super::score_node(&node("planned", priority), false, false, 30.0, 0);
         (score, reasons)
     }
 
@@ -507,5 +591,128 @@ mod tests {
         assert_eq!(p2, 8);
         // Legacy vocabulary is scored like its canonical twin.
         assert_eq!(scored("high").0, p1, "legacy 'high' scores as P1");
+    }
+
+    // --- REQ-AXO-902295 / DEC-AXO-901668 — execution urgency vs proof gap ----------------
+
+    fn exec_score(node: &super::WorkPlanNode, include_decay: bool, now_ms: i64) -> i64 {
+        super::score_node(node, false, include_decay, 30.0, now_ms).0
+    }
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+    /// THE regression this REQ exists for, in its original SWT shape: a leaf that
+    /// somebody has STARTED, is P0, carries 7 evidence items and has no descendants
+    /// must outrank an untouched P0 that merely unblocks one child.
+    ///
+    /// Pre-fix this was impossible by construction: the engaged leaf scored 20
+    /// (priority only) against 40 + 20 + 10 = 70 — and each of the 7 evidence items
+    /// it had EARNED was worth -10 to it in aggregate.
+    #[test]
+    fn engaged_proven_leaf_outranks_untouched_single_unblocker() {
+        let mut engaged = node("current", "P0");
+        engaged.evidence_count = 7;
+        engaged.descendants = 0;
+
+        let mut untouched = node("planned", "P0");
+        untouched.evidence_count = 0;
+        untouched.descendants = 1;
+
+        let engaged_score = exec_score(&engaged, false, 0);
+        let untouched_score = exec_score(&untouched, false, 0);
+        assert!(
+            engaged_score > untouched_score,
+            "engaged+proven leaf must outrank an untouched unblocker: {engaged_score} vs {untouched_score}"
+        );
+    }
+
+    /// Proving your work must never cost you rank. Two otherwise identical REQs —
+    /// one fully proven, one with neither criteria nor evidence — must score the SAME
+    /// execution urgency; only `proof_gap_score` may differ.
+    #[test]
+    fn attaching_evidence_never_lowers_execution_score() {
+        let mut proven = node("current", "P1");
+        proven.evidence_count = 7;
+        proven.requirement_state = Some("done".to_string());
+
+        let mut unproven = node("current", "P1");
+        unproven.evidence_count = 0;
+        unproven.requirement_state = Some("missing".to_string());
+
+        let (proven_score, proven_gap, ..) = super::score_node(&proven, false, false, 30.0, 0);
+        let (unproven_score, unproven_gap, ..) = super::score_node(&unproven, false, false, 30.0, 0);
+
+        assert_eq!(
+            proven_score, unproven_score,
+            "proof state must not move execution urgency at all"
+        );
+        assert_eq!(proven_gap, 0, "a fully proven REQ has no proof gap");
+        assert_eq!(
+            unproven_gap, 25,
+            "missing criteria (15) + no evidence (10) land on the hygiene axis"
+        );
+    }
+
+    /// REQ-AXO-902295 — the engagement bonus is added AFTER the decay multiplier.
+    /// Discriminating case: a low-priority item engaged 60 days ago (decay 0.135)
+    /// must still outrank a fresh, untouched P0. Fold the bonus into the decayed
+    /// base instead and it collapses to ~7 against 20 — this test goes red.
+    #[test]
+    fn engagement_bonus_is_not_eroded_by_temporal_decay() {
+        let now_ms = 100 * DAY_MS;
+        let mut stale_engaged = node("current", "P3");
+        stale_engaged.updated_at_ms = Some(now_ms - 60 * DAY_MS);
+
+        let mut fresh_untouched = node("planned", "P0");
+        fresh_untouched.updated_at_ms = Some(now_ms);
+
+        let engaged_score = exec_score(&stale_engaged, true, now_ms);
+        let untouched_score = exec_score(&fresh_untouched, true, now_ms);
+        assert!(
+            engaged_score > untouched_score,
+            "engagement must survive decay: {engaged_score} vs {untouched_score}"
+        );
+    }
+
+    /// The bracket that sizes ENGAGEMENT_BONUS is load-bearing (see its doc
+    /// comment). Pin it so a later tweak of either term cannot silently break the
+    /// "finish what is open" rule or drown genuine structural unblockers.
+    #[test]
+    fn engagement_bonus_sits_between_one_and_two_descendants() {
+        let engaged = node("current", "");
+        let mut one_child = node("planned", "");
+        one_child.descendants = 1;
+        let mut two_children = node("planned", "");
+        two_children.descendants = 2;
+
+        let engaged_score = exec_score(&engaged, false, 0);
+        assert!(
+            engaged_score > exec_score(&one_child, false, 0),
+            "engagement must beat a single unblocker"
+        );
+        assert!(
+            engaged_score < exec_score(&two_children, false, 0),
+            "engagement must NOT outrank a two-descendant structural unblocker"
+        );
+    }
+
+    /// Nothing is hidden by the split: every hygiene signal still emits its reason
+    /// and its validation gate, exactly as before — only the ordering key changed.
+    #[test]
+    fn hygiene_signals_still_disclose_reasons_and_gates() {
+        let mut gapped = node("planned", "P2");
+        gapped.evidence_count = 0;
+        gapped.requirement_state = Some("partial".to_string());
+        gapped.backlog_visible = true;
+
+        let (_, proof_gap, reasons, gates) = super::score_node(&gapped, false, false, 30.0, 0);
+        assert_eq!(proof_gap, 8 + 10 + 5);
+        for expected in ["requirement partial", "no evidence attached", "project backlog visible"] {
+            assert!(
+                reasons.iter().any(|r| r == expected),
+                "reason `{expected}` must still be disclosed: {reasons:?}"
+            );
+        }
+        assert_eq!(gates.len(), 3, "one gate per hygiene signal: {gates:?}");
     }
 }
