@@ -67,7 +67,23 @@ const RULESETS: &[RemnantRuleset] = &[
     RemnantRuleset {
         detect_key: "nvidia_smi_to_nvml",
         symbol_name_regex: None,
-        chunk_content_regex: Some(r"nvidia[_-]smi"),
+        // REQ-AXO-902331 — require an INVOCATION context, not the bare token.
+        //
+        // The retired thing is a subprocess CALL, so that is what must be matched.
+        // A bare `nvidia[_-]smi` matched prose, and comment-stripping does not save
+        // it: a Python DOCSTRING is a string expression, not a comment, so
+        // `"""nvidia-smi retired"""` survived and was reported as residue — a
+        // sentence documenting the REMOVAL counted as the thing itself. Same for a
+        // Rust help string, and for this detector's own catalog entry (the literal
+        // `nvidia_smi_to_nvml` in `detect_remnants`' tool description). Seven
+        // remnants reported, zero real, "74% migrated" on a finished migration.
+        //
+        // The right shape was already in this module's positive test:
+        // `Command::new("nvidia-smi").arg(…)`. The rule was simply wider than the
+        // test that certified it.
+        chunk_content_regex: Some(
+            r"(?:command::new|subprocess|popen|os\.system|check_output|spawn|exec)[^\n]{0,40}nvidia[_-]smi",
+        ),
     },
 ];
 
@@ -312,8 +328,30 @@ impl McpServer {
     /// case-insensitive), restricted to CODE kinds so doc/section headings
     /// (which document a migration, not its residue) are excluded.
     fn scan_symbol_names(&self, project_code: &str, pattern: &str) -> Vec<String> {
+        // REQ-AXO-902331 — a symbol that is still CALLED is not residue, whatever
+        // its name looks like.
+        //
+        // The `pipeline_v1_to_v2` rule comments itself as matching "dead `_v1`
+        // leaves only" and cites `compose_dashboard_state_v1` as its example. The
+        // call graph refutes that: it has THREE callers and composes the
+        // `dashboard_state_v1` JSON envelope the Elixir LiveViews consume. `_v1`
+        // there is CONTRACT VERSIONING — the case GUI-PRO-108 separates explicitly
+        // from the forbidden internal suffix, and a name regex cannot tell them
+        // apart. Three of the four TMG-AXO-001 "remnants" were that one symbol and
+        // its two tests, so the migration read "0% migrated" while being clean.
+        //
+        // Deadness is not guessable from a name, but the IST already knows it. The
+        // rule's own INTENT is deadness, so the query now asserts it instead of
+        // hoping the name implies it. A dead-but-called-by-dead leaf can slip
+        // through; that is the direction this module already chose — "over-stripping
+        // only RISKS missing a residue, never inventing one".
         let sql = format!(
-            "SELECT id FROM ist.Symbol WHERE project_code = '{}' AND kind IN ({}) AND name ~* '{}'",
+            "SELECT s.id FROM ist.Symbol s \
+             WHERE s.project_code = '{}' AND s.kind IN ({}) AND s.name ~* '{}' \
+             AND NOT EXISTS ( \
+                SELECT 1 FROM ist.Edge e \
+                WHERE e.target_id = s.id AND e.relation_type IN ('CALLS', 'CALLS_NIF') \
+             )",
             escape_sql(project_code),
             code_kinds_in_clause(),
             escape_sql(pattern),
@@ -520,38 +558,102 @@ mod tests {
         assert!(sql.contains("'A''X'"));
     }
 
+    /// REQ-AXO-902331 — the retired token is ASSEMBLED at runtime in every fixture
+    /// below, never written as one literal.
+    ///
+    /// Reason: these fixtures live in `ist.Chunk` like any other code, so a literal
+    /// made this detector report ITSELF as residue — two of the seven TMG-AXO-002
+    /// "remnants" were this test module. A guard that accuses its own test data
+    /// teaches everyone to skip its output, which is the one thing an advisory
+    /// cannot afford.
+    fn smi() -> String {
+        format!("nvidia{}smi", "-")
+    }
+
     #[test]
     fn strip_comments_removes_line_markers() {
-        let src = "let x = nvidia_smi();  // legacy nvidia-smi note\n# nvidia-smi in a hash comment\nactual_code();";
-        let out = strip_comments(src);
+        let smi = smi();
+        let src = format!(
+            "let x = nvidia_smi();  // legacy {smi} note\n# {smi} in a hash comment\nactual_code();"
+        );
+        let out = strip_comments(&src);
         assert!(out.contains("nvidia_smi()"), "code kept");
-        assert!(!out.contains("legacy nvidia-smi note"), "// comment stripped");
+        assert!(!out.contains("legacy"), "// comment stripped");
         assert!(!out.contains("hash comment"), "# comment stripped");
     }
 
     #[test]
     fn strip_comments_removes_block_comments() {
-        let src = "code_a();\n/* a block\n mentioning nvidia-smi */\ncode_b();";
-        let out = strip_comments(src);
+        let src = format!("code_a();\n/* a block\n mentioning {} */\ncode_b();", smi());
+        let out = strip_comments(&src);
         assert!(out.contains("code_a()") && out.contains("code_b()"));
         assert!(!out.contains("mentioning"), "block comment stripped");
     }
 
+    /// The canonical POSITIVE case: a real subprocess call. This is the shape the
+    /// ruleset must match, and REQ-AXO-902331 narrowed the rule to exactly it.
     #[test]
     fn non_comment_match_true_for_real_code_call() {
-        let re = Regex::new(r"(?i)nvidia[_-]smi").unwrap();
-        let code = r#"Command::new("nvidia-smi").arg("--query");"#;
-        assert!(chunk_has_non_comment_match(code, &re));
+        let re = nvidia_rule_regex();
+        let code = format!(r#"Command::new("{}").arg("--query");"#, smi());
+        assert!(chunk_has_non_comment_match(&code, &re));
     }
 
     #[test]
     fn non_comment_match_false_when_only_in_comment() {
-        let re = Regex::new(r"(?i)nvidia[_-]smi").unwrap();
-        let only_comment = "// historical: replaced nvidia-smi with NVML\nlet gpu = nvml_probe();";
+        let re = nvidia_rule_regex();
+        let only_comment = format!(
+            "// historical: replaced {} with NVML\nlet gpu = nvml_probe();",
+            smi()
+        );
         assert!(
-            !chunk_has_non_comment_match(only_comment, &re),
+            !chunk_has_non_comment_match(&only_comment, &re),
             "a token only in a comment must NOT be flagged as residue"
         );
+    }
+
+    /// REQ-AXO-902331 — the four shapes that produced 7 false positives for 0 real
+    /// residue. Each one DOCUMENTS the removal or merely names the tool; none of
+    /// them calls it. Comment-stripping cannot help: a Python docstring is a string
+    /// expression, and a Rust help string is code.
+    #[test]
+    fn nvidia_rule_ignores_prose_that_documents_the_removal() {
+        let re = nvidia_rule_regex();
+        let smi = smi();
+        for (label, src) in [
+            (
+                "python docstring announcing the retirement",
+                format!("def gpu_status():\n    \"\"\"NVML-only telemetry. {smi} retired.\"\"\"\n    return probe()"),
+            ),
+            (
+                "python docstring describing what it replaced",
+                format!("def read():\n    \"\"\"Replaces the {smi} subprocess probe.\"\"\"\n    return nvml()"),
+            ),
+            (
+                "operator help text naming another tool's probe",
+                format!("msg = f\"the blocked thread sits behind an `{smi}` from another tool\""),
+            ),
+            (
+                "this detector's own catalog description",
+                "\"description\": \"detect_key (pipeline_v1_to_v2 | nvidia_smi_to_nvml | duckdb_to_pg)\"".to_string(),
+            ),
+        ] {
+            assert!(
+                !chunk_has_non_comment_match(&src, &re),
+                "{label}: prose about the retired tool is not residue"
+            );
+        }
+    }
+
+    /// Build the LIVE `nvidia_smi_to_nvml` regex from the ruleset itself, so these
+    /// tests can never certify a pattern the detector no longer uses.
+    fn nvidia_rule_regex() -> Regex {
+        let pat = RULESETS
+            .iter()
+            .find(|r| r.detect_key == "nvidia_smi_to_nvml")
+            .and_then(|r| r.chunk_content_regex)
+            .expect("the nvidia ruleset carries a chunk regex");
+        Regex::new(&format!("(?i){pat}")).expect("live ruleset regex compiles")
     }
 
     #[test]
