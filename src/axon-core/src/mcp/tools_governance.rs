@@ -411,6 +411,24 @@ impl McpServer {
             return String::new();
         }
         let escaped = project.replace('\'', "''");
+        // `sql_scalar` collapses any Err into 0. Without this probe, a database
+        // whose schema predates the column would render EXACTLY the same empty
+        // string as a project that simply has no chunks — one branch serving both
+        // "no data" and "I could not read it". That conflation is the defect this
+        // whole section exists to remove, so it is refused here explicitly.
+        let column_present = self.sql_scalar(
+            "SELECT count(*)::BIGINT FROM information_schema.columns \
+             WHERE table_schema = 'ist' AND table_name = 'chunk' \
+             AND column_name = 'created_at_ms'",
+        ) > 0;
+        if !column_present {
+            return "**Chunk time window (REQ-AXO-902260)**\n\
+                    * `ist.Chunk.created_at_ms` is ABSENT from this database — the window \
+                    cannot be read (this is NOT \"no chunks\")\n\
+                    * cure: restart the brain so the canonical DDL applies the additive \
+                    column, then re-run this diagnosis\n"
+                .to_string();
+        }
         let oldest = self.sql_scalar(&format!(
             "SELECT COALESCE(MIN(created_at_ms), 0)::BIGINT FROM ist.Chunk WHERE project_code = '{escaped}'"
         ));
@@ -1975,18 +1993,30 @@ mod tests {
     /// itself is a guard nobody keeps.
     #[test]
     fn diagnosis_never_claims_a_dbq_a_claim_feeder_again() {
-        let source = include_str!("tools_governance.rs");
+        // Both surfaces the claim historically lived on. Guarding only this file
+        // would kill the instance, not the class — and the class is what came
+        // back: the contract file is exactly where session 105 purged it before
+        // it reappeared here.
+        let sources = [
+            ("tools_governance.rs", include_str!("tools_governance.rs")),
+            (
+                "tools_framework_runtime_contracts.rs",
+                include_str!("tools_framework_runtime_contracts.rs"),
+            ),
+        ];
         // The retired component may be NAMED in a comment explaining its removal;
         // what must never come back is the ASSERTION that it drains anything.
         for needle in [
             format!("claim feeder {}", "drains"),
             format!("DBQ-A {}", "drains"),
         ] {
-            assert!(
-                !source.contains(&needle),
-                "`{needle}` is back in the rendered diagnosis — it describes a component \
-                 removed by REQ-AXO-901916 and it is what derailed the LLL investigation"
-            );
+            for (name, source) in sources {
+                assert!(
+                    !source.contains(&needle),
+                    "`{needle}` is back in {name} — it describes a component removed by \
+                     REQ-AXO-901916 and it is what derailed the LLL investigation"
+                );
+            }
         }
     }
 

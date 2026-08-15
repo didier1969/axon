@@ -205,11 +205,24 @@ pub(super) fn priority_level(priority: &str) -> Option<u8> {
 /// leads. Change either side of that bracket and the rule stops holding.
 pub(super) const ENGAGEMENT_BONUS: i64 = 50;
 
-/// REQ-AXO-902295 — `current` is the canonical "work in progress" status
-/// (DEC-PRO-100). `planned` is intent, terminal states are done, and
-/// `blocked`/`deferred` never reach the actionable wave at all.
-pub(super) fn is_engaged_status(status: &str) -> bool {
-    status.trim().to_ascii_lowercase() == "current"
+/// REQ-AXO-902295 — engagement is `status='current'` **on a Requirement, and
+/// only there**.
+///
+/// The status string alone is not the signal: `current` means a different thing
+/// per entity kind. On a Requirement it means somebody started this piece of
+/// work. On a **Decision** it means the decision is IN FORCE (as opposed to
+/// `superseded`) — 24 of AXO's 40 Decisions are `current` and none of them is
+/// "in progress". On a **Milestone** it means open, which is the default state
+/// of every milestone that is not delivered, so it discriminates nothing.
+///
+/// Granting the bonus to those two would have inflated nearly every non-terminal
+/// Decision by the same amount — no reordering, just noise — while printing the
+/// sentence "work in progress (status=current)" about nodes nobody is working
+/// on. A false statement rendered to the operator is the exact defect class this
+/// REQ exists to remove; widening the bonus would have re-created it one layer up.
+pub(super) fn is_engaged(node: &WorkPlanNode) -> bool {
+    matches!(node.entity_type, WorkPlanEntityType::Requirement)
+        && node.status.trim().eq_ignore_ascii_case("current")
 }
 
 /// Returns `(score, proof_gap_score, reasons, validation_gates)`.
@@ -339,7 +352,7 @@ pub(super) fn score_node(
     // Accepted risk, stated rather than hidden: a `current` abandoned for
     // months keeps its bonus. That is the intended reading — an abandoned
     // WIP is itself a defect worth SEEING, not one to bury under decay.
-    if is_engaged_status(&node.status) {
+    if is_engaged(node) {
         score += ENGAGEMENT_BONUS;
         reasons.push("work in progress (status=current)".to_string());
     }
@@ -418,7 +431,7 @@ pub(super) fn recommendation_kind(node: &WorkPlanNode) -> &'static str {
     // listed as `[proof_gap] : close proof gap (partial)` — a label describing
     // the hygiene axis that no longer decides the order, i.e. the operator
     // reads a reason that is not the reason.
-    } else if is_engaged_status(&node.status) {
+    } else if is_engaged(node) {
         "in_progress"
     } else if node
         .requirement_state
@@ -436,7 +449,7 @@ pub(super) fn recommendation_kind(node: &WorkPlanNode) -> &'static str {
 pub(super) fn recommendation_reason(node: &WorkPlanNode) -> String {
     if node.descendants > 0 {
         format!("unblocks {} descendant(s)", node.descendants)
-    } else if is_engaged_status(&node.status) {
+    } else if is_engaged(node) {
         // REQ-AXO-902295 — finish what is already open before opening more.
         "work in progress — finish before starting new work".to_string()
     } else if node
@@ -693,6 +706,59 @@ mod tests {
         assert!(
             engaged_score < exec_score(&two_children, false, 0),
             "engagement must NOT outrank a two-descendant structural unblocker"
+        );
+    }
+
+    /// REQ-AXO-902295 — `current` means a DIFFERENT thing per entity kind, so the
+    /// engagement bonus is a Requirement-only signal.
+    ///
+    /// On a Decision, `current` means IN FORCE (vs `superseded`) — 24 of AXO's 40
+    /// Decisions carry it and none is "in progress". On a Milestone it means open,
+    /// the default of everything not delivered. Granting the bonus there would
+    /// have inflated nearly every non-terminal parent by the same amount — no
+    /// reordering, pure noise — while printing "work in progress" about nodes
+    /// nobody is working on. Caught in review AFTER the first commit; a status
+    /// string read without its entity kind is the same shape of defect as a
+    /// counter read without what it counts.
+    #[test]
+    fn engagement_is_a_requirement_only_signal() {
+        let mut current_decision = node("current", "");
+        current_decision.entity_type = super::WorkPlanEntityType::Decision;
+        let mut current_milestone = node("current", "");
+        current_milestone.entity_type = super::WorkPlanEntityType::Milestone;
+        let planned_decision = {
+            let mut n = node("planned", "");
+            n.entity_type = super::WorkPlanEntityType::Decision;
+            n
+        };
+
+        assert_eq!(
+            exec_score(&current_decision, false, 0),
+            exec_score(&planned_decision, false, 0),
+            "an in-force Decision must not be scored as work in progress"
+        );
+
+        for (label, n) in [
+            ("Decision", &current_decision),
+            ("Milestone", &current_milestone),
+        ] {
+            let (_, _, reasons, _) = super::score_node(n, false, false, 30.0, 0);
+            assert!(
+                !reasons.iter().any(|r| r.contains("work in progress")),
+                "a `current` {label} must not be described as work in progress: {reasons:?}"
+            );
+            assert_ne!(
+                super::recommendation_kind(n),
+                "in_progress",
+                "a `current` {label} must not be labelled in_progress"
+            );
+        }
+
+        // The Requirement, unchanged: it IS the engaged one.
+        let engaged_req = node("current", "");
+        assert!(
+            exec_score(&engaged_req, false, 0) > exec_score(&node("planned", ""), false, 0),
+            "a `current` Requirement must still earn the engagement bonus"
         );
     }
 
