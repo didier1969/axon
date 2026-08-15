@@ -89,9 +89,46 @@ cleanup() {
     if _axon_role_serving "$INSTANCE" "$PROC"; then
         [[ "$st" != "Running" ]] && printf '  ℹ️  cleanup: %s reports "%s" but IS SERVING — supervisor tracks a refused duplicate; no start sent\n' "$PROC" "$st"
     elif [[ "$st" != "Running" ]]; then
-        printf '  ⚠️  cleanup: %s is "%s" and not serving — sending start so live is not left without it\n' "$PROC" "${st:-unreachable}"
+        # REQ-AXO-902293 — this branch used to fire `start` immediately and announce
+        # "so live is not left without it", then exit WITHOUT ever checking. On
+        # 2026-08-15 it printed exactly that while leaving the live indexer down: the
+        # role was "Terminating", and REQ-AXO-902271 already established that
+        # process-compose IGNORES a start in that state. The message asserted an
+        # outcome it never verified — the same defect class the gate itself exists to
+        # catch, sitting in the gate's own safety net.
+        #
+        # Three things, in order, because the order is what was missing:
+        #   1. WAIT for `Terminating` to settle. A start sent into it is inert by
+        #      contract, so sending one there is not a recovery attempt, it is noise.
+        #   2. start.
+        #   3. VERIFY it is serving again, and say so — or say plainly that it is NOT
+        #      and hand over the exact command, instead of implying a restoration.
+        local settle_budget="${CLEANUP_SETTLE_S:-120}" waited=0
+        while [[ "$st" == "Terminating" ]] && (( waited < settle_budget )); do
+            [[ "$waited" -eq 0 ]] && printf '  ⏳ cleanup: %s is "Terminating" — a start is INERT in this state (REQ-AXO-902271); waiting up to %ss for it to settle\n' "$PROC" "$settle_budget"
+            sleep 5
+            waited=$(( waited + 5 ))
+            st="$(_axon_role_field "$PC_PORT" "$PROC" status)"
+        done
+
+        printf '  ⚠️  cleanup: %s is "%s" and not serving — sending start\n' "$PROC" "${st:-unreachable}"
         curl -s -m 30 -o /dev/null -X POST \
             "http://127.0.0.1:${PC_PORT}/process/start/${PROC}" >/dev/null 2>&1 || true
+
+        local verify_budget="${CLEANUP_VERIFY_S:-60}" elapsed=0 restored=0
+        while (( elapsed < verify_budget )); do
+            if _axon_role_serving "$INSTANCE" "$PROC"; then restored=1; break; fi
+            sleep 5
+            elapsed=$(( elapsed + 5 ))
+        done
+        if (( restored == 1 )); then
+            printf '  ✅ cleanup: %s is serving again after %ss — live was NOT left degraded\n' "$PROC" "$elapsed"
+        else
+            st="$(_axon_role_field "$PC_PORT" "$PROC" status)"
+            printf '  ❌ cleanup: %s STILL not serving after %ss (status="%s") — LIVE IS DEGRADED, this gate did it\n' "$PROC" "$elapsed" "${st:-unreachable}"
+            printf '     recover with: curl -X POST http://127.0.0.1:%s/process/start/%s\n' "$PC_PORT" "$PROC"
+            printf '     if that is inert, the role is wedged: ps -eLo stat,tid,wchan | grep -E "^D" (REQ-AXO-902271)\n'
+        fi
     fi
     exit "$rc"
 }
