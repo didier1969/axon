@@ -141,34 +141,78 @@ impl McpServer {
         // gateway is the canonical structured fallback for the code graph — but
         // only if its schema is discoverable here. ('main' was the retired
         // DuckDB schema, gone post-MIL-AXO-017.)
+        // REQ-AXO-902329 — the schema set is DERIVED (exclude the system schemas), not
+        // enumerated. It used to be a hardcoded `IN ('ist', 'soll')`, duplicated in the
+        // two queries below, and it hid **36 of the product's 61 tables** — every one of
+        // `axon.*` (31) and `pgmq.*` (5).
+        //
+        // That is not a cosmetic gap. This tool is what the `sql` contract tells a caller
+        // to consult BEFORE writing a query ("Use only after `schema_overview` or
+        // `query_examples`"). Meanwhile `mcp_friction_report` prints
+        // "_Table: `axon.mcp_friction`._" and its own published description names that
+        // table as the backing store — so the product pointed an LLM at a table its own
+        // inventory reported as non-existent. Measured cost, on this very defect: the
+        // author of REQ-AXO-902325 abandoned an audit of `axon.practice` ("verification
+        // tentée et BLOQUÉE") and stopped at a hypothesis that turned out to be wrong;
+        // the real cause was one query away.
+        //
+        // An allow-list also fails silently forward: every schema added after it was
+        // written is invisible until somebody notices. Excluding the two system schemas
+        // inverts that — a new product schema shows up on its own.
+        const PRODUCT_SCHEMAS: &str =
+            "table_schema NOT IN ('pg_catalog', 'information_schema') \
+             AND table_schema NOT LIKE 'pg_toast%' AND table_schema NOT LIKE 'pg_temp%'";
         let tables = self
             .graph_store
-            .query_json(
+            .query_json(&format!(
                 "SELECT table_schema, table_name \
                  FROM information_schema.tables \
-                 WHERE table_schema IN ('ist', 'soll') \
-                 ORDER BY table_schema, table_name",
-            )
+                 WHERE table_type = 'BASE TABLE' AND {PRODUCT_SCHEMAS} \
+                 ORDER BY table_schema, table_name"
+            ))
             .unwrap_or_else(|_| "[]".to_string());
         let columns = self
             .graph_store
-            .query_json(
-                "SELECT table_schema, table_name, COUNT(*) \
-                 FROM information_schema.columns \
-                 WHERE table_schema IN ('ist', 'soll') \
+            .query_json(&format!(
+                "SELECT c.table_schema, c.table_name, COUNT(*) \
+                 FROM information_schema.columns c \
+                 JOIN information_schema.tables t \
+                   ON t.table_schema = c.table_schema AND t.table_name = c.table_name \
+                 WHERE t.table_type = 'BASE TABLE' AND c.{PRODUCT_SCHEMAS} \
                  GROUP BY 1,2 \
-                 ORDER BY 1,2",
-            )
+                 ORDER BY 1,2"
+            ))
             .unwrap_or_else(|_| "[]".to_string());
+
+        // Publish the totals. A caller who knows the inventory holds N tables across M
+        // schemas can SEE a future hole as a number; a bare list makes an omission look
+        // exactly like a complete answer — which is how 36 missing tables went unnoticed.
+        let (table_count, schema_list) = serde_json::from_str::<Vec<Vec<Value>>>(&tables)
+            .map(|rows| {
+                let mut schemas: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| r.first().and_then(Value::as_str).map(str::to_string))
+                    .collect();
+                schemas.sort();
+                schemas.dedup();
+                (rows.len(), schemas.join(", "))
+            })
+            .unwrap_or((0, String::new()));
 
         let report = format!(
             "## 🧭 Axon Schema Overview\n\n\
-             **Tables (ist + soll):**\n{}\n\n\
+             **{table_count} base table(s) across {} schema(s): {schema_list}** \
+             (every non-system schema — REQ-AXO-902329)\n\n\
+             **Tables:**\n{}\n\n\
              **Column count by table:**\n{}\n",
+            schema_list.split(", ").filter(|s| !s.is_empty()).count(),
             format_table_from_json(&tables, &["Schema", "Table"]),
             format_table_from_json(&columns, &["Schema", "Table", "Columns"])
         );
-        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {"status":"ok","table_count":table_count,"schemas":schema_list}
+        }))
     }
 
     pub(crate) fn axon_query_examples(&self, _args: &Value) -> Option<Value> {

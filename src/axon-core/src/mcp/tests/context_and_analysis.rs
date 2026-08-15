@@ -466,16 +466,95 @@ fn test_schema_overview_exposes_ist_code_graph_tables() {
         .unwrap();
 
     let text = response["content"][0]["text"].as_str().unwrap();
+    // REQ-AXO-902329 — this assertion used to require the literal "ist + soll", which
+    // PINNED the very incompleteness it was meant to guard: the header advertised two
+    // schemas because the query only read two, and the test locked that in. It now
+    // requires the ist schema to be PRESENT, which is what REQ-AXO-901956 actually
+    // wanted, without forbidding the rest of the database from appearing.
+    let lower = text.to_lowercase();
     assert!(
-        text.contains("ist + soll"),
-        "schema_overview must advertise the ist schema: {text}"
+        lower.contains("| ist |"),
+        "schema_overview must expose the ist schema: {text}"
     );
     // the canonical IST code-graph tables must be listed (not just soll.*).
     // PG folds unquoted identifiers to lowercase, so match case-insensitively.
-    let lower = text.to_lowercase();
     assert!(
         lower.contains("symbol"),
         "IST symbol table must be discoverable via schema_overview: {text}"
+    );
+}
+
+/// REQ-AXO-902329 — the inventory must equal the database, table for table.
+///
+/// `schema_overview` is what the `sql` contract tells a caller to consult BEFORE writing
+/// a query. It read a hardcoded `IN ('ist','soll')` and therefore hid **36 of the 61
+/// product tables** — all of `axon.*` and `pgmq.*` — while `mcp_friction_report` printed
+/// "_Table: `axon.mcp_friction`._" and its published description named that same table as
+/// its backing store. The product pointed an LLM at a table its own inventory declared
+/// non-existent, and the cost was measured on REQ-AXO-902325: an audit of `axon.practice`
+/// was abandoned as impossible, and the investigation settled on a hypothesis that was
+/// wrong.
+///
+/// An allow-list fails SILENTLY FORWARD — every schema added later is invisible until
+/// somebody notices. So the assertion is parity with `information_schema`, not a list of
+/// expected names: there is nothing to keep in sync, and a new schema cannot go missing.
+#[test]
+fn schema_overview_lists_every_product_table_not_an_allow_list() {
+    let server = create_test_server();
+
+    let expected: Vec<(String, String)> = serde_json::from_str::<Vec<Vec<Value>>>(
+        &server
+            .graph_store
+            .query_json(
+                "SELECT table_schema, table_name FROM information_schema.tables \
+                 WHERE table_type = 'BASE TABLE' \
+                 AND table_schema NOT IN ('pg_catalog', 'information_schema') \
+                 AND table_schema NOT LIKE 'pg\\_toast%' AND table_schema NOT LIKE 'pg\\_temp%' \
+                 ORDER BY 1, 2",
+            )
+            .expect("information_schema is readable"),
+    )
+    .expect("rows parse")
+    .iter()
+    .filter_map(|r| {
+        Some((
+            r.first()?.as_str()?.to_string(),
+            r.get(1)?.as_str()?.to_string(),
+        ))
+    })
+    .collect();
+    assert!(
+        expected.len() > 25,
+        "sanity: the test database must hold more than the ist+soll tables, got {}",
+        expected.len()
+    );
+
+    let text = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({ "name": "schema_overview", "arguments": {} })),
+            id: Some(json!(902_329)),
+        })
+        .unwrap()
+        .result
+        .unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|(s, t)| !text.contains(&format!("| {s} | {t} |")))
+        .map(|(s, t)| format!("{s}.{t}"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{} of {} product tables are absent from the inventory the `sql` contract makes \
+         mandatory reading — an omission here reads exactly like a complete answer:\n  {}",
+        missing.len(),
+        expected.len(),
+        missing.join("\n  ")
     );
 }
 
