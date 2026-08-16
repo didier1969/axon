@@ -42,6 +42,10 @@ pub mod pipeline_runtime;
 pub mod postgres;
 pub mod project_meta;
 pub mod queue;
+// REQ-AXO-902338 — analyse d'arguments commune aux binaires de rôle : un
+// drapeau inconnu doit être REFUSÉ, jamais ignoré (un argument ignoré démarre
+// le rôle).
+pub mod role_cli;
 pub mod runtime_boot;
 pub mod runtime_command_proxy;
 pub mod runtime_config;
