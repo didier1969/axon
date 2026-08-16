@@ -328,6 +328,23 @@ apply_canonical_ddl() {
     # protects against head-of-line blocking) and retry a bounded number of times with
     # backoff. Indexer transactions are short, so a window opens quickly. Only a lock
     # timeout is retried — any other DDL error is a real defect and fails immediately.
+    #
+    # REQ-AXO-902339 (session 114) — CE RETRY EST JUSTE, SA PRÉMISSE NE L'ÉTAIT PAS.
+    # « Une course perdable, donc rejouable » suppose que le verrou se libère. Face à un
+    # indexeur qui écrit en continu, un ACCESS EXCLUSIVE ne se libère jamais : c'était
+    # une FAMINE, et les 5 tentatives ont échoué les deux fois (11:33 et 20:33 le
+    # 2026-08-15). Le retry ne pouvait pas gagner ; il n'a jamais été en cause.
+    #
+    # La cause était en amont, dans le DDL : 28 énoncés réclamaient leur verrou AVANT de
+    # tester s'ils avaient quelque chose à faire. Ils passent désormais par les gardes
+    # catalogue de `db/ddl/00_extensions.sql` (add_column_if_absent /
+    # set_column_default_if_absent / create_index_if_absent / create_trigger_if_absent),
+    # qui ne verrouillent rien sur le chemin no-op.
+    #
+    # Conséquence pour ce bloc : il reste EN PLACE et devient enfin ce qu'il prétendait
+    # être. Ce qui atteint encore le verrou est une vraie migration — un cas où attendre
+    # est légitime et où une fenêtre s'ouvre réellement. Le retry est le bon outil pour
+    # ça. Ne pas le retirer : il couvre le premier boot d'une base qui doit migrer.
     local max_attempts="${AXON_DDL_LOCK_RETRIES:-5}"
     local attempt_log
     attempt_log="$(mktemp)"

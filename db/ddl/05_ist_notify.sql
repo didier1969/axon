@@ -48,9 +48,15 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE TRIGGER trg_ist_notify_symbol
-AFTER INSERT OR UPDATE OR DELETE ON ist.symbol
-FOR EACH ROW EXECUTE FUNCTION ist.fn_ist_notify_symbol();
+-- REQ-AXO-902339 — ACCESS EXCLUSIVE sur ist.symbol à chaque boot, y compris
+-- quand le trigger est déjà en place à l'identique. Le corps reste
+-- chaud-modifiable par le CREATE OR REPLACE FUNCTION ci-dessus.
+SELECT public.create_trigger_if_absent(
+    'ist', 'symbol', 'trg_ist_notify_symbol', $trg$
+    CREATE TRIGGER trg_ist_notify_symbol
+    AFTER INSERT OR UPDATE OR DELETE ON ist.symbol
+    FOR EACH ROW EXECUTE FUNCTION ist.fn_ist_notify_symbol()
+$trg$);
 
 -- ── edge ─────────────────────────────────────────────────────────────
 
@@ -83,6 +89,9 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE TRIGGER trg_ist_notify_edge
-AFTER INSERT OR UPDATE OR DELETE ON ist.edge
-FOR EACH ROW EXECUTE FUNCTION ist.fn_ist_notify_edge();
+SELECT public.create_trigger_if_absent(
+    'ist', 'edge', 'trg_ist_notify_edge', $trg$
+    CREATE TRIGGER trg_ist_notify_edge
+    AFTER INSERT OR UPDATE OR DELETE ON ist.edge
+    FOR EACH ROW EXECUTE FUNCTION ist.fn_ist_notify_edge()
+$trg$);

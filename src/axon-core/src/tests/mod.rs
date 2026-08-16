@@ -19,3 +19,6 @@ pub mod rescan_project_tests;
 pub mod reindex_purge_tests;
 // REQ-AXO-901757 slice B — SOLL node-description embedding storage.
 pub mod soll_embedding_tests;
+// REQ-AXO-902339 — le DDL canonique ne prend aucun verrou bloquant sur le
+// chemin no-op (+ contrôle négatif prouvant que le harnais mesure vraiment).
+pub mod ddl_lock_tests;

@@ -94,7 +94,23 @@ BEGIN
     --    verbatim (PG ALTER TABLE ... DROP EXPRESSION semantics).
     --    Post-migration, new INSERTs land with content_tsv = NULL until
     --    the worker fills them.
-    EXECUTE 'ALTER TABLE ist.Chunk ALTER COLUMN content_tsv DROP EXPRESSION IF EXISTS';
+    --
+    --    REQ-AXO-902339 — `DROP EXPRESSION IF EXISTS` prend ACCESS EXCLUSIVE
+    --    sur ist.Chunk AVANT de constater qu'il n'y a plus d'expression à
+    --    retirer : rejoué à chaque boot contre l'indexeur, c'est une famine
+    --    pour un no-op. `attgenerated` répond depuis le catalogue, sans verrou.
+    IF EXISTS (
+        SELECT 1
+          FROM pg_attribute  a
+          JOIN pg_class      c ON c.oid = a.attrelid
+          JOIN pg_namespace  n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'ist'
+           AND c.relname = 'chunk'
+           AND a.attname = 'content_tsv'
+           AND a.attgenerated <> ''
+    ) THEN
+        EXECUTE 'ALTER TABLE ist.Chunk ALTER COLUMN content_tsv DROP EXPRESSION';
+    END IF;
 
     -- 6. Trigger function : fires AFTER INSERT or AFTER UPDATE OF
     --    content. Targeting OF content (not all UPDATE) so the worker's
@@ -125,7 +141,13 @@ BEGIN
     --    ré-index même si content n'a pas bougé. content_hash (déjà
     --    filé par A3) est l'invariant qui distingue real-change vs
     --    no-op. INSERT enqueue toujours.
-    EXECUTE 'CREATE OR REPLACE TRIGGER trg_chunk_enqueue_tsv_insert AFTER INSERT ON ist.Chunk FOR EACH ROW EXECUTE FUNCTION ist.fn_chunk_enqueue_tsv()';
-    EXECUTE 'CREATE OR REPLACE TRIGGER trg_chunk_enqueue_tsv_update AFTER UPDATE OF content ON ist.Chunk FOR EACH ROW WHEN (NEW.content_hash IS DISTINCT FROM OLD.content_hash) EXECUTE FUNCTION ist.fn_chunk_enqueue_tsv()';
+    --    REQ-AXO-902339 — `CREATE OR REPLACE TRIGGER` verrouille ist.Chunk en
+    --    ACCESS EXCLUSIVE à chaque boot, trigger déjà identique ou non.
+    PERFORM public.create_trigger_if_absent(
+        'ist', 'chunk', 'trg_chunk_enqueue_tsv_insert',
+        'CREATE TRIGGER trg_chunk_enqueue_tsv_insert AFTER INSERT ON ist.Chunk FOR EACH ROW EXECUTE FUNCTION ist.fn_chunk_enqueue_tsv()');
+    PERFORM public.create_trigger_if_absent(
+        'ist', 'chunk', 'trg_chunk_enqueue_tsv_update',
+        'CREATE TRIGGER trg_chunk_enqueue_tsv_update AFTER UPDATE OF content ON ist.Chunk FOR EACH ROW WHEN (NEW.content_hash IS DISTINCT FROM OLD.content_hash) EXECUTE FUNCTION ist.fn_chunk_enqueue_tsv()');
 END;
 $migration$;

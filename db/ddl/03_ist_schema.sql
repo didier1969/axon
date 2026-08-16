@@ -64,12 +64,14 @@ CREATE TABLE IF NOT EXISTS ist.IndexedFile (
 -- (scripts/lib/ensure-runtime.sh runs every db/ddl/NN_*.sql with
 -- ON_ERROR_STOP=1, so each statement below MUST be safe to re-run).
 --
--- 1. lease_until_ms column — ADD COLUMN IF NOT EXISTS is a PG-catalog-only
---    metadata change in PG11+ when a non-volatile DEFAULT is given (no table
---    rewrite, no row-by-row lock on the 30k rows): the default is folded into
---    the catalog and materialised lazily on read. Non-blocking.
-ALTER TABLE ist.IndexedFile
-    ADD COLUMN IF NOT EXISTS lease_until_ms BIGINT NOT NULL DEFAULT 0;
+-- 1. lease_until_ms column. Le DEFAULT non volatile évite la RÉÉCRITURE de la
+--    table (PG11+ : le défaut est replié dans le catalogue et matérialisé à la
+--    lecture). Ce que cela n'évite PAS, et que ce fichier a longtemps prétendu
+--    « non-blocking » : le VERROU. `ADD COLUMN IF NOT EXISTS` prend ACCESS
+--    EXCLUSIVE avant de tester l'existence — donc même quand il n'a rien à
+--    faire. REQ-AXO-902339 : passer par la garde catalogue.
+SELECT public.add_column_if_absent(
+    'ist', 'indexedfile', 'lease_until_ms', 'BIGINT NOT NULL DEFAULT 0');
 
 -- REQ-AXO-901897 hardening — bound the brief ACCESS EXCLUSIVE lock the CONSTRAINT
 -- DROP/ADD below takes, so a live boot's apply_canonical_ddl can't head-of-line
@@ -77,47 +79,76 @@ ALTER TABLE ist.IndexedFile
 -- (3s) rather than stall the boot. Applies to the rest of this psql session.
 SET lock_timeout = '3s';
 
--- 2. Widen the status CHECK to the full A-lifecycle vocabulary. DROP+ADD the
---    NAMED constraint inside a DO block guarded on existence so re-running is
---    a no-op. Adding a CHECK takes a brief ACCESS EXCLUSIVE lock to validate
---    existing rows once; after step 3 below every legacy value already
---    satisfies the new set, so validation passes. (On a busy table this is a
---    short metadata lock, not a rewrite.)
-DO $$
+-- 2. Widen the status CHECK to the full A-lifecycle vocabulary.
+--    REQ-AXO-902339 — l'ancienne forme gardait le DROP sur l'existence de la
+--    contrainte, mais rejouait DROP+ADD à CHAQUE boot dès qu'elle existait :
+--    deux ACCESS EXCLUSIVE sur une table écrite en continu, pour un vocabulaire
+--    déjà correct. La garde porte désormais sur le CONTENU : on ne touche à la
+--    contrainte que si un des 8 statuts canoniques lui manque. Quand c'est le
+--    cas, attendre le verrou est légitime — c'est une vraie migration.
+DO $status_check$
+DECLARE
+    v_def   text;
+    v_value text;
+    v_stale boolean := false;
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'indexedfile_status_check'
-          AND conrelid = 'ist.indexedfile'::regclass
-    ) THEN
+    SELECT pg_get_constraintdef(oid) INTO v_def
+      FROM pg_constraint
+     WHERE conname  = 'indexedfile_status_check'
+       AND conrelid = 'ist.indexedfile'::regclass;
+
+    IF v_def IS NOT NULL THEN
+        FOREACH v_value IN ARRAY ARRAY[
+            'discovered', 'parsing', 'parsed', 'ready',
+            'parse_failed', 'skipped', 'deleted', 'indexed'
+        ] LOOP
+            IF position('''' || v_value || '''' IN v_def) = 0 THEN
+                v_stale := true;
+            END IF;
+        END LOOP;
+
+        IF NOT v_stale THEN
+            RETURN;  -- vocabulaire déjà complet : aucun verrou pris
+        END IF;
+
         ALTER TABLE ist.IndexedFile DROP CONSTRAINT indexedfile_status_check;
     END IF;
-END $$;
 
--- 3. Migrate legacy status values to the new vocabulary BEFORE re-adding the
---    CHECK (idempotent: the UPDATEs match nothing once already migrated).
---    'indexed'→'ready' would be the eventual target, but 'indexed' is kept
---    transitional in the CHECK set so a half-rolled-out binary that still
---    writes 'indexed' does not violate the constraint. We only normalise the
---    retired 'failed' value (not in the new core set except as legacy).
-UPDATE ist.IndexedFile SET status = 'parse_failed' WHERE status = 'failed';
+    -- 3. Migrer les valeurs héritées AVANT de (re)poser le CHECK (idempotent :
+    --    l'UPDATE ne matche plus rien une fois la migration faite).
+    UPDATE ist.IndexedFile SET status = 'parse_failed' WHERE status = 'failed';
 
-ALTER TABLE ist.IndexedFile
-    ADD CONSTRAINT indexedfile_status_check
-    CHECK (status IN (
-        'discovered', 'parsing', 'parsed', 'ready',
-        'parse_failed', 'skipped', 'deleted', 'indexed'
-    ));
+    ALTER TABLE ist.IndexedFile
+        ADD CONSTRAINT indexedfile_status_check
+        CHECK (status IN (
+            'discovered', 'parsing', 'parsed', 'ready',
+            'parse_failed', 'skipped', 'deleted', 'indexed'
+        ));
+END
+$status_check$;
+
+-- NOTE sur l'étape 3 (migration des valeurs héritées) : elle a été déplacée
+-- DANS le bloc ci-dessus. Elle n'a de sens qu'au moment où la contrainte est
+-- effectivement reposée ; hors de là, c'est un balayage séquentiel de la table
+-- à chaque boot pour zéro ligne. 'indexed'→'ready' serait la cible finale, mais
+-- 'indexed' reste transitoire dans le CHECK pour qu'un binaire à moitié déployé
+-- qui l'écrit encore ne viole pas la contrainte.
 
 -- REQ-AXO-901897 — claimable partial index. Replaces the discovered-only
 -- index: the A claimer's hot predicate is `status IN ('discovered','parsing')`
 -- (a stale-lease 'parsing' row is reclaimable), ordered by discovered_ms.
+-- `DROP INDEX IF EXISTS` résout le nom AVANT de verrouiller : sur un index
+-- absent il ne prend rien, il reste donc tel quel (REQ-AXO-902339).
 DROP INDEX IF EXISTS ist.idx_indexedfile_discovered;
-CREATE INDEX IF NOT EXISTS idx_indexedfile_claimable
-    ON ist.IndexedFile (discovered_ms) INCLUDE (path, content_hash, retry_count, lease_until_ms)
-    WHERE status IN ('discovered', 'parsing');
-CREATE INDEX IF NOT EXISTS idx_indexedfile_project_status
-    ON ist.IndexedFile (project_code, status);
+SELECT public.create_index_if_absent('ist', 'idx_indexedfile_claimable', $idx$
+    CREATE INDEX idx_indexedfile_claimable
+        ON ist.IndexedFile (discovered_ms) INCLUDE (path, content_hash, retry_count, lease_until_ms)
+        WHERE status IN ('discovered', 'parsing')
+$idx$);
+SELECT public.create_index_if_absent('ist', 'idx_indexedfile_project_status', $idx$
+    CREATE INDEX idx_indexedfile_project_status
+        ON ist.IndexedFile (project_code, status)
+$idx$);
 
 -- DEC-AXO-901620: NOTIFY pipeline A when new files are discovered.
 CREATE OR REPLACE FUNCTION ist.fn_notify_file_discovered() RETURNS TRIGGER AS $$
@@ -129,10 +160,19 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_notify_file_discovered ON ist.IndexedFile;
-CREATE TRIGGER trg_notify_file_discovered
-    AFTER INSERT OR UPDATE ON ist.IndexedFile
-    FOR EACH ROW EXECUTE FUNCTION ist.fn_notify_file_discovered();
+-- REQ-AXO-902339 — l'ancien couple DROP+CREATE prenait DEUX fois ACCESS
+-- EXCLUSIVE à chaque boot : sur une base déjà bootstrappée le trigger existe,
+-- donc le DROP verrouille pour de bon, et le CREATE reverrouille derrière.
+-- (Mesuré : `DROP TRIGGER IF EXISTS` sur un trigger ABSENT, lui, ne verrouille
+-- rien — il résout le trigger avant la table. C'est l'existence qui coûte.)
+-- Le corps du trigger reste chaud-modifiable via le CREATE OR REPLACE FUNCTION
+-- ci-dessus, qui ne verrouille aucune table.
+SELECT public.create_trigger_if_absent(
+    'ist', 'indexedfile', 'trg_notify_file_discovered', $trg$
+    CREATE TRIGGER trg_notify_file_discovered
+        AFTER INSERT OR UPDATE ON ist.IndexedFile
+        FOR EACH ROW EXECUTE FUNCTION ist.fn_notify_file_discovered()
+$trg$);
 
 -- ── Symbols ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS ist.Symbol (
@@ -153,15 +193,15 @@ CREATE TABLE IF NOT EXISTS ist.Symbol (
 -- table already exists). NULL = not yet computed by this parser/language
 -- (pre-migration rows, or a language whose counting slice hasn't landed
 -- yet) — treated as "not god-object" by the SHI classifier, never as 0.
-ALTER TABLE ist.Symbol
-    ADD COLUMN IF NOT EXISTS cyclomatic_complexity INTEGER;
+SELECT public.add_column_if_absent(
+    'ist', 'symbol', 'cyclomatic_complexity', 'INTEGER');
 -- REQ-AXO-902227 (@impl entry-points) — additive for live DBs whose ist.Symbol
 -- predates the column. Structural entry-point flag set by the parser (@impl
 -- annotation / framework callback / NIF), consumed by orphan_clusters/wiring
 -- reachability seeding so runtime-invoked callbacks aren't false orphans.
 -- Default FALSE; repopulated on reindex.
-ALTER TABLE ist.Symbol
-    ADD COLUMN IF NOT EXISTS is_entry_point BOOLEAN NOT NULL DEFAULT FALSE;
+SELECT public.add_column_if_absent(
+    'ist', 'symbol', 'is_entry_point', 'BOOLEAN NOT NULL DEFAULT FALSE');
 
 -- ── Chunks (1 symbol → 1+ chunks) ────────────────────────────────────
 -- file_path FK to IndexedFile: a chunk cannot outlive its file.
@@ -198,8 +238,8 @@ CREATE TABLE IF NOT EXISTS ist.Chunk (
 );
 -- REQ-AXO-902012 — additive for live DBs whose ist.Chunk predates the column
 -- (CREATE TABLE IF NOT EXISTS above is a no-op when the table already exists).
-ALTER TABLE ist.Chunk
-    ADD COLUMN IF NOT EXISTS embed_attempts INTEGER NOT NULL DEFAULT 0;
+SELECT public.add_column_if_absent(
+    'ist', 'chunk', 'embed_attempts', 'INTEGER NOT NULL DEFAULT 0');
 
 -- REQ-AXO-902260 — additive in TWO statements, deliberately, and the order is
 -- the whole point. `ADD COLUMN ... DEFAULT <volatile expr>` makes PostgreSQL
@@ -208,30 +248,34 @@ ALTER TABLE ist.Chunk
 -- Adding the column bare is instant and leaves them NULL; SET DEFAULT then
 -- applies to FUTURE inserts only. Fresh installs get the same nullable column
 -- with the same default from the CREATE above — one schema, not two.
-ALTER TABLE ist.Chunk
-    ADD COLUMN IF NOT EXISTS created_at_ms BIGINT;
-ALTER TABLE ist.Chunk
-    ALTER COLUMN created_at_ms SET DEFAULT (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT;
+SELECT public.add_column_if_absent(
+    'ist', 'chunk', 'created_at_ms', 'BIGINT');
+SELECT public.set_column_default_if_absent(
+    'ist', 'chunk', 'created_at_ms', '(EXTRACT(EPOCH FROM now()) * 1000)::BIGINT');
 
-CREATE INDEX IF NOT EXISTS idx_chunk_pending_embed
-    ON ist.Chunk (token_count) WHERE embed_status = 'pending';
+SELECT public.create_index_if_absent('ist', 'idx_chunk_pending_embed', $idx$
+    CREATE INDEX idx_chunk_pending_embed
+        ON ist.Chunk (token_count) WHERE embed_status = 'pending'
+$idx$);
 
 -- REQ-AXO-902260 — the chunk time window is a DIAGNOSTIC read (diagnose_indexing)
 -- over a multi-million-row table; without this, every MIN/MAX is a seq scan and
 -- the tool that exists to explain a stall becomes a reason not to run it.
-CREATE INDEX IF NOT EXISTS idx_chunk_created_at
-    ON ist.Chunk (project_code, created_at_ms);
+SELECT public.create_index_if_absent('ist', 'idx_chunk_created_at', $idx$
+    CREATE INDEX idx_chunk_created_at
+        ON ist.Chunk (project_code, created_at_ms)
+$idx$);
 
 -- FTS tsvector. 06_pgmq_tsv_async.sql may DROP the GENERATED expression on
 -- the canonical install so a worker populates it out-of-band.
-ALTER TABLE ist.Chunk
-    ADD COLUMN IF NOT EXISTS content_tsv tsvector
-    GENERATED ALWAYS AS (
+SELECT public.add_column_if_absent('ist', 'chunk', 'content_tsv', $col$
+    tsvector GENERATED ALWAYS AS (
         setweight(to_tsvector('simple',  coalesce(chunk_path, '')), 'A') ||
         setweight(to_tsvector('simple',  coalesce(kind,       '')), 'A') ||
         setweight(to_tsvector('english', coalesce(content,    '')), 'B') ||
         setweight(to_tsvector('simple',  coalesce(file_path,  '')), 'C')
-    ) STORED;
+    ) STORED
+$col$);
 
 -- ── Chunk embeddings (pgvector 1024-d cosine, HNSW) ──────────────────
 -- PK (chunk_id, model_id) so multiple models co-exist during migrations.
@@ -328,49 +372,83 @@ CREATE TABLE IF NOT EXISTS ist.HourlyVectorizationRollup (
 );
 
 -- ── Indexes ──────────────────────────────────────────────────────────
-CREATE INDEX IF NOT EXISTS symbol_project_kind_idx
-    ON ist.Symbol (project_code, kind);
-CREATE INDEX IF NOT EXISTS symbol_project_name_idx
-    ON ist.Symbol (project_code, name);
-CREATE INDEX IF NOT EXISTS symbol_embedding_present_idx
-    ON ist.Symbol (project_code) WHERE embedding IS NOT NULL;
+-- REQ-AXO-902339 — `CREATE INDEX IF NOT EXISTS` prend un SHARE sur la TABLE
+-- avant de constater que l'index est déjà là. SHARE entre en conflit avec le
+-- ROW EXCLUSIVE de l'indexeur : rejoué sur une base à jour, chacun de ces
+-- énoncés attend un écrivain continu pour ne rien faire. `create_index_if_absent`
+-- lit d'abord `pg_class`.
+--
+-- Sémantiquement identique à l'ancienne forme : PostgreSQL ne compare que le
+-- NOM de l'index, jamais sa définition — changer la définition en gardant le nom
+-- était déjà sans effet. Le nom passé en 2e argument DOIT donc rester en phase
+-- avec celui du CREATE ; c'est la seule contrainte de cohérence de cette forme,
+-- et `ddl_lock_tests::every_declared_index_exists_after_bootstrap` la vérifie.
+SELECT public.create_index_if_absent('ist', 'symbol_project_kind_idx', $idx$
+    CREATE INDEX symbol_project_kind_idx ON ist.Symbol (project_code, kind)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'symbol_project_name_idx', $idx$
+    CREATE INDEX symbol_project_name_idx ON ist.Symbol (project_code, name)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'symbol_embedding_present_idx', $idx$
+    CREATE INDEX symbol_embedding_present_idx
+        ON ist.Symbol (project_code) WHERE embedding IS NOT NULL
+$idx$);
 
-CREATE INDEX IF NOT EXISTS chunk_project_source_idx
-    ON ist.Chunk (project_code, source_type, source_id);
-CREATE INDEX IF NOT EXISTS chunk_project_file_idx
-    ON ist.Chunk (project_code, file_path);
-CREATE INDEX IF NOT EXISTS chunk_content_hash_idx
-    ON ist.Chunk (content_hash);
-CREATE INDEX IF NOT EXISTS idx_chunk_project_code
-    ON ist.Chunk (project_code);
-CREATE INDEX IF NOT EXISTS idx_chunk_token_count
-    ON ist.Chunk (token_count);
-CREATE INDEX IF NOT EXISTS idx_chunk_content_tsv
-    ON ist.Chunk USING GIN (content_tsv);
+SELECT public.create_index_if_absent('ist', 'chunk_project_source_idx', $idx$
+    CREATE INDEX chunk_project_source_idx
+        ON ist.Chunk (project_code, source_type, source_id)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'chunk_project_file_idx', $idx$
+    CREATE INDEX chunk_project_file_idx ON ist.Chunk (project_code, file_path)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'chunk_content_hash_idx', $idx$
+    CREATE INDEX chunk_content_hash_idx ON ist.Chunk (content_hash)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'idx_chunk_project_code', $idx$
+    CREATE INDEX idx_chunk_project_code ON ist.Chunk (project_code)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'idx_chunk_token_count', $idx$
+    CREATE INDEX idx_chunk_token_count ON ist.Chunk (token_count)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'idx_chunk_content_tsv', $idx$
+    CREATE INDEX idx_chunk_content_tsv ON ist.Chunk USING GIN (content_tsv)
+$idx$);
 
-CREATE INDEX IF NOT EXISTS chunk_embedding_project_idx
-    ON ist.ChunkEmbedding (project_code);
-CREATE INDEX IF NOT EXISTS chunk_embedding_source_hash_idx
-    ON ist.ChunkEmbedding (source_hash);
-CREATE INDEX IF NOT EXISTS chunk_embedding_embedded_at_idx
-    ON ist.ChunkEmbedding (embedded_at_ms);
-CREATE INDEX IF NOT EXISTS chunk_embedding_hnsw_idx
-    ON ist.ChunkEmbedding USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
+SELECT public.create_index_if_absent('ist', 'chunk_embedding_project_idx', $idx$
+    CREATE INDEX chunk_embedding_project_idx ON ist.ChunkEmbedding (project_code)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'chunk_embedding_source_hash_idx', $idx$
+    CREATE INDEX chunk_embedding_source_hash_idx ON ist.ChunkEmbedding (source_hash)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'chunk_embedding_embedded_at_idx', $idx$
+    CREATE INDEX chunk_embedding_embedded_at_idx ON ist.ChunkEmbedding (embedded_at_ms)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'chunk_embedding_hnsw_idx', $idx$
+    CREATE INDEX chunk_embedding_hnsw_idx
+        ON ist.ChunkEmbedding USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64)
+$idx$);
 
-CREATE INDEX IF NOT EXISTS edge_fwd_idx
-    ON ist.Edge (source_id, relation_type, target_id);
-CREATE INDEX IF NOT EXISTS edge_rev_idx
-    ON ist.Edge (target_id, relation_type, source_id);
-CREATE INDEX IF NOT EXISTS edge_proj_idx
-    ON ist.Edge (project_code, relation_type);
+SELECT public.create_index_if_absent('ist', 'edge_fwd_idx', $idx$
+    CREATE INDEX edge_fwd_idx ON ist.Edge (source_id, relation_type, target_id)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'edge_rev_idx', $idx$
+    CREATE INDEX edge_rev_idx ON ist.Edge (target_id, relation_type, source_id)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'edge_proj_idx', $idx$
+    CREATE INDEX edge_proj_idx ON ist.Edge (project_code, relation_type)
+$idx$);
 -- No GIN on ist.Edge.metadata: the column is unpopulated and no query filters
 -- on it (jsonb_path_ops idx_scan=0) — audited + EXPLAIN-proven (REQ-AXO-901881).
 
-CREATE INDEX IF NOT EXISTS file_lifecycle_project_at_idx
-    ON ist.FileLifecycleEvent (project_code, at_ms);
-CREATE INDEX IF NOT EXISTS file_lifecycle_stage_status_idx
-    ON ist.FileLifecycleEvent (stage, status);
+SELECT public.create_index_if_absent('ist', 'file_lifecycle_project_at_idx', $idx$
+    CREATE INDEX file_lifecycle_project_at_idx
+        ON ist.FileLifecycleEvent (project_code, at_ms)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'file_lifecycle_stage_status_idx', $idx$
+    CREATE INDEX file_lifecycle_stage_status_idx
+        ON ist.FileLifecycleEvent (stage, status)
+$idx$);
 
 -- ── FK-covering indexes (REQ-AXO-901860) ─────────────────────────────
 -- PostgreSQL does NOT auto-index the referencing side of a FOREIGN KEY.
@@ -379,14 +457,19 @@ CREATE INDEX IF NOT EXISTS file_lifecycle_stage_status_idx
 -- unindexed. project_code FKs on the big tables (Symbol/Chunk/Edge/
 -- ChunkEmbedding) are already covered by their project-leading indexes
 -- above; these fill the remaining gaps.
-CREATE INDEX IF NOT EXISTS idx_chunk_file_path
-    ON ist.Chunk (file_path);
-CREATE INDEX IF NOT EXISTS idx_graph_projection_project
-    ON ist.GraphProjection (project_code);
-CREATE INDEX IF NOT EXISTS idx_graph_projection_state_project
-    ON ist.GraphProjectionState (project_code);
-CREATE INDEX IF NOT EXISTS idx_graph_embedding_project
-    ON ist.GraphEmbedding (project_code);
+SELECT public.create_index_if_absent('ist', 'idx_chunk_file_path', $idx$
+    CREATE INDEX idx_chunk_file_path ON ist.Chunk (file_path)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'idx_graph_projection_project', $idx$
+    CREATE INDEX idx_graph_projection_project ON ist.GraphProjection (project_code)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'idx_graph_projection_state_project', $idx$
+    CREATE INDEX idx_graph_projection_state_project
+        ON ist.GraphProjectionState (project_code)
+$idx$);
+SELECT public.create_index_if_absent('ist', 'idx_graph_embedding_project', $idx$
+    CREATE INDEX idx_graph_embedding_project ON ist.GraphEmbedding (project_code)
+$idx$);
 
 -- ── NOTIFY chunk pending (vectorization signalling) ──────────────────
 CREATE OR REPLACE FUNCTION ist.fn_notify_chunk_pending() RETURNS TRIGGER AS $$
@@ -396,9 +479,15 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE TRIGGER trg_chunk_notify_pending
-    AFTER INSERT OR UPDATE OF content_hash ON ist.Chunk
-    FOR EACH ROW EXECUTE FUNCTION ist.fn_notify_chunk_pending();
+-- REQ-AXO-902339 — `CREATE OR REPLACE TRIGGER` est atomique, mais il prend
+-- ACCESS EXCLUSIVE sur ist.Chunk à chaque boot, y compris quand le trigger est
+-- déjà identique. Le corps reste chaud-modifiable via la fonction ci-dessus.
+SELECT public.create_trigger_if_absent(
+    'ist', 'chunk', 'trg_chunk_notify_pending', $trg$
+    CREATE TRIGGER trg_chunk_notify_pending
+        AFTER INSERT OR UPDATE OF content_hash ON ist.Chunk
+        FOR EACH ROW EXECUTE FUNCTION ist.fn_notify_chunk_pending()
+$trg$);
 
 -- ── Canonical per-project telemetry view (the ONE source) ────────────
 -- The single projection that dashboard + MCP tools read — NOT in-memory
@@ -484,5 +573,7 @@ CREATE TABLE IF NOT EXISTS ist.drift_history (
     ewma         DOUBLE PRECISION NOT NULL,
     alert        BOOLEAN     NOT NULL DEFAULT false
 );
-CREATE INDEX IF NOT EXISTS idx_drift_history_lookup
-    ON ist.drift_history (project_code, layer_pair, wave_ts DESC);
+SELECT public.create_index_if_absent('ist', 'idx_drift_history_lookup', $idx$
+    CREATE INDEX idx_drift_history_lookup
+        ON ist.drift_history (project_code, layer_pair, wave_ts DESC)
+$idx$);
