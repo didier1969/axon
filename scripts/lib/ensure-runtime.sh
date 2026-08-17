@@ -57,10 +57,19 @@ axon_pg_port_listener_pid() {
     ss -tnlp 2>/dev/null \
         | awk -v p="$axon_canonical_pg_port" '
             $1 == "LISTEN" {
-                split($4, addr_parts, ":")
-                if (addr_parts[length(addr_parts)] != p) next
-                match($0, /pid=([0-9]+)/, m)
-                if (m[1] != "") { print m[1]; exit }
+                n = split($4, addr_parts, ":")
+                if (addr_parts[n] != p) next
+                # REQ-AXO-902346 — 2-arg match() + RSTART/RLENGTH is POSIX.
+                # The 3-arg form match(s, re, arr) is a GNU awk EXTENSION and
+                # is a hard syntax error under mawk (Ubuntu default awk),
+                # which this runs under: ensure_runtime_ready() executes in
+                # start.sh own shell, NOT inside run_devenv, so it gets the
+                # system awk rather than the devenv gawk. Mirrors the already
+                # portable axon_port_listener_pids() in axon-supervisor.sh.
+                if (match($0, /pid=[0-9]+/)) {
+                    print substr($0, RSTART + 4, RLENGTH - 4)
+                    exit
+                }
             }'
 }
 

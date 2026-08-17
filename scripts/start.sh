@@ -178,7 +178,18 @@ fi
 
 # 2. Devenv shell helper
 run_devenv() {
-    devenv shell --no-reload --no-tui -- bash -lc "$1"
+    # Migration WSL->Ubuntu, 2026-08-17. `axon_resolve_ort_runtime` (l. 323) puis
+    # l'eval de PRELAUNCH_LD_LIBRARY_PATH_EXPORT (l. 326-328) placent les libs CUDA
+    # de l'ONNX Runtime en TETE de LD_LIBRARY_PATH, pour que les enfants
+    # process-compose les trouvent. Effet de bord : le binaire `devenv` (Nix) appele
+    # ensuite charge alors ces libs a la place des siennes et meurt avec
+    #   devenv: symbol lookup error: .../libnixutil.so.2.34:
+    #   undefined symbol: blake3_hasher_update_tbb        (exit 127)
+    # Comme l'appel est masque par `2>/dev/null` l. 355, PC_BIN se retrouvait vide
+    # et le start echouait au stage [resolve_pc_bin] sans motif lisible.
+    # On neutralise donc LD_LIBRARY_PATH pour le binaire devenv LUI-MEME : le shell
+    # qu'il ouvre recoit de toute facon celui declare dans devenv.nix.
+    env -u LD_LIBRARY_PATH devenv shell --no-reload --no-tui -- bash -lc "$1"
 }
 
 # 3. Validate devenv
@@ -300,6 +311,23 @@ if [[ -z "${AXON_WATCHMAN_BIN:-}" ]]; then
         export AXON_WATCHMAN_BIN="$PROJECT_ROOT/.devenv/profile/bin/watchman"
     else
         export AXON_WATCHMAN_BIN="$(command -v watchman 2>/dev/null || echo watchman)"
+    fi
+fi
+# REQ-AXO-902345 — same treatment for the dashboard's `elixir`, and for the same
+# reason as watchman just above: process-compose children inherit start.sh's
+# NON-devenv PATH, so a bare `elixir` in the yaml only ever worked when the host
+# happened to ship one system-wide. After the 2026-08-17 WSL->Ubuntu migration it
+# did not, and the dashboard died with `exec: elixir: not found` — three times,
+# exhausting its restart budget, which is why the whole instance reported
+# DEGRADED while brain and indexer were healthy.
+# The devenv profile symlink is stable and carries NO nix-store hash (that
+# indirection is deliberate — never persist /nix/store/<hash> paths). The nix
+# elixir wrapper locates its own `erl`, so no PATH surgery is needed.
+if [[ -z "${AXON_ELIXIR_BIN:-}" ]]; then
+    if [[ -x "$PROJECT_ROOT/.devenv/profile/bin/elixir" ]]; then
+        export AXON_ELIXIR_BIN="$PROJECT_ROOT/.devenv/profile/bin/elixir"
+    else
+        export AXON_ELIXIR_BIN="$(command -v elixir 2>/dev/null || echo elixir)"
     fi
 fi
 # Use COPY BINARY for PG writes instead of INSERT VALUES SQL text.

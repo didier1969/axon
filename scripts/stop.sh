@@ -225,12 +225,15 @@ collect_canonical_listener_pids() {
         # tripping `set -euo pipefail`.
         port_pids="$(ss -ltnp 2>/dev/null | awk -v p="$port" '
             $1 == "LISTEN" {
-                split($4, addr_parts, ":")
-                if (addr_parts[length(addr_parts)] != p) {
+                n = split($4, addr_parts, ":")
+                if (addr_parts[n] != p) {
                     next
                 }
-                match($0, /pid=([0-9]+)/, m)
-                if (m[1] != "") print m[1]
+                # REQ-AXO-902346 — POSIX 2-arg match(); the 3-arg form is a
+                # GNU awk extension and a syntax error under mawk.
+                if (match($0, /pid=[0-9]+/)) {
+                    print substr($0, RSTART + 4, RLENGTH - 4)
+                }
             }' 2>/dev/null || true)"
         if [ -n "$port_pids" ]; then
             pids="$pids
@@ -252,12 +255,15 @@ collect_listener_pids() {
     for port in "${AXON_TCP_PORTS[@]}"; do
         port_pids="$(ss -ltnp 2>/dev/null | awk -v p="$port" '
             $1 == "LISTEN" {
-                split($4, addr_parts, ":")
-                if (addr_parts[length(addr_parts)] != p) {
+                n = split($4, addr_parts, ":")
+                if (addr_parts[n] != p) {
                     next
                 }
-                match($0, /pid=([0-9]+)/, m)
-                if (m[1] != "") print m[1]
+                # REQ-AXO-902346 — POSIX 2-arg match(); the 3-arg form is a
+                # GNU awk extension and a syntax error under mawk.
+                if (match($0, /pid=[0-9]+/)) {
+                    print substr($0, RSTART + 4, RLENGTH - 4)
+                }
             }' || true)"
         if [ -n "$port_pids" ]; then
             pids="$pids

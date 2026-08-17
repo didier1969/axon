@@ -6,6 +6,63 @@ axon_manifest_value() {
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$manifest_path" "$key" 2>/dev/null || true
 }
 
+# REQ-AXO-902344 — resolve the nix-store libstdc++ directory DETERMINISTICALLY.
+# Nix-built libonnxruntime carries CXXABI/GLIBCXX requirements only a recent
+# libstdc++ satisfies: ORT 1.27.1's libonnxruntime_providers_cuda.so needs
+# CXXABI_1.3.15, i.e. gcc >= 14.
+#
+# The previous `find ... | head -1` returned whatever the /nix/store directory
+# order happened to be, and that order is NOT stable. On 2026-08-17 (live AXO,
+# post WSL->Ubuntu migration) it yielded gcc-13.4.0 — whose libstdc++ stops at
+# CXXABI_1.3.14 — while the same store also held gcc-15.3.0. The CUDA EP then
+# failed to dlopen and the embedder fell back to CPU with NO error channel:
+# `embedding_status` reported compute=CPU and the brain's query-embed worker
+# went unavailable, all while the runtime declared itself HEALTHY.
+#
+# libstdc++ is forward-compatible — the newest lib satisfies every older
+# consumer — so max-version is both the correct and the stable choice.
+# Prints the lib dir on stdout; prints NOTHING when the store holds no
+# gcc-*-lib (the old form degenerated to the literal "/lib", which exists on
+# Ubuntu and would have been prepended to LD_LIBRARY_PATH).
+axon_resolve_nix_gcc_lib_dir() {
+    local newest
+    newest="$(find /nix/store -maxdepth 1 -name '*-gcc-*-lib' -type d 2>/dev/null \
+        | sed -E 's|^.*-gcc-([0-9]+(\.[0-9]+)*)-lib$|\1\t&|' \
+        | sort -t$'\t' -k1,1 -V \
+        | tail -n 1 \
+        | cut -f2-)"
+    if [[ -n "$newest" && -d "$newest/lib" ]]; then
+        printf '%s\n' "$newest/lib"
+    fi
+}
+
+# REQ-AXO-902347 — locate the NVIDIA *driver* library directory.
+#
+# `libcuda.so.1` ships with the DRIVER, not with the CUDA toolkit: it is not in
+# the nix store and appears in no RPATH. Nix-built binaries run under the nix
+# dynamic loader, which does NOT search /usr/lib/x86_64-linux-gnu, so without an
+# explicit LD_LIBRARY_PATH segment `libonnxruntime_providers_cuda.so` fails to
+# dlopen with:
+#     libcuda.so.1: cannot open shared object file: No such file or directory
+# and the embedder falls back to CPU. Under WSL2 the `/usr/lib/wsl/lib` segment
+# happened to cover this; native Linux had no equivalent, which is what broke
+# GPU embedding after the 2026-08-17 WSL->Ubuntu migration.
+#
+# ⚠️ `ldd` does NOT reveal this: it resolves through the SYSTEM loader (which
+# reads /etc/ld.so.conf and does find libcuda.so.1), so a clean `ldd` is a FALSE
+# NEGATIVE for a nix-loaded process. Trust the runtime dlopen error, not ldd.
+#
+# Prints the directory on stdout, or nothing when no driver lib is installed.
+axon_resolve_nvidia_driver_lib_dir() {
+    local dir
+    for dir in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
+        if [[ -e "$dir/libcuda.so.1" ]]; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+    done
+}
+
 axon_resolve_ort_runtime() {
     local project_root="${1:?project root required}"
     local embedding_provider_request="${2:?embedding provider required}"
@@ -162,16 +219,25 @@ axon_resolve_ort_runtime() {
         if [[ -n "${TENSORRT_LIB_DIR:-}" && -d "$TENSORRT_LIB_DIR" ]]; then
             cuda_ld_path_segments+=("$TENSORRT_LIB_DIR")
         fi
+        # WSL2 paravirtualised driver libs — absent on native Linux.
         if [[ -d "/usr/lib/wsl/lib" ]]; then
             cuda_ld_path_segments+=("/usr/lib/wsl/lib")
+        fi
+        # REQ-AXO-902347 — native NVIDIA driver libs (libcuda.so.1). See the
+        # helper's header: without this the CUDA EP cannot dlopen and the
+        # embedder degrades to CPU silently.
+        local nvidia_driver_lib
+        nvidia_driver_lib="$(axon_resolve_nvidia_driver_lib_dir)"
+        if [[ -n "$nvidia_driver_lib" ]]; then
+            cuda_ld_path_segments+=("$nvidia_driver_lib")
         fi
         # REQ-AXO-181: Nix gcc-cc.lib provides libstdc++.so.6 with GLIBCXX
         # symbols required by Nix-built libonnxruntime.so. Mirrors
         # scripts/dev/embed-bench.sh:64. Without this, indexer subprocess
         # dlopen fails against system /lib/x86_64-linux-gnu/libstdc++.
         local nix_gcc_lib
-        nix_gcc_lib="$(find /nix/store -maxdepth 1 -name '*-gcc-*-lib' -type d 2>/dev/null | head -1)/lib"
-        if [[ -n "$nix_gcc_lib" && -d "$nix_gcc_lib" ]]; then
+        nix_gcc_lib="$(axon_resolve_nix_gcc_lib_dir)"
+        if [[ -n "$nix_gcc_lib" ]]; then
             cuda_ld_path_segments+=("$nix_gcc_lib")
         fi
         if [[ ${#cuda_ld_path_segments[@]} -gt 0 ]]; then

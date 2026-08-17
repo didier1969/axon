@@ -99,11 +99,16 @@ if [[ "$EMBEDDER_MODE" != "noop" ]]; then
         exit 1
     fi
     ORT_LIB_DIR="$(dirname "$CORE_LIB")"
-    NIX_GCC_LIB="$(find /nix/store -maxdepth 1 -name '*-gcc-*-lib' -type d 2>/dev/null | head -1)/lib"
+    # REQ-AXO-902344 — shared deterministic gcc-lib pick (see axon-ort-runtime.sh).
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/axon-ort-runtime.sh"
+    NIX_GCC_LIB="$(axon_resolve_nix_gcc_lib_dir)"
     LDP="$ORT_LIB_DIR"
     [[ -n "$TENSORRT_DIR" && -d "$TENSORRT_DIR" ]] && LDP="$LDP:$TENSORRT_DIR"
     [[ -d /usr/lib/wsl/lib ]] && LDP="$LDP:/usr/lib/wsl/lib"
-    [[ -d "$NIX_GCC_LIB" ]] && LDP="$LDP:$NIX_GCC_LIB"
+    # REQ-AXO-902347 — native NVIDIA driver libs (libcuda.so.1); see helper header.
+    NVIDIA_DRIVER_LIB="$(axon_resolve_nvidia_driver_lib_dir)"
+    [[ -n "$NVIDIA_DRIVER_LIB" ]] && LDP="$LDP:$NVIDIA_DRIVER_LIB"
+    [[ -n "$NIX_GCC_LIB" ]] && LDP="$LDP:$NIX_GCC_LIB"
     [[ -n "${LD_LIBRARY_PATH:-}" ]] && LDP="$LDP:$LD_LIBRARY_PATH"
     export ORT_STRATEGY=system
     export ORT_DYLIB_PATH="$CORE_LIB"

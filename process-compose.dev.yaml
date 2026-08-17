@@ -157,7 +157,7 @@ processes:
       cd src/dashboard
       find _build -name 'compile.lock' -delete 2>/dev/null || true
       mix compile >/dev/null 2>&1 || true
-      exec elixir \
+      exec "${AXON_ELIXIR_BIN:-elixir}" \
         --name "${ELIXIR_NODE_NAME:-axon_dev}@127.0.0.1" \
         --cookie "${AXON_ERLANG_COOKIE}" \
         -S mix phx.server
