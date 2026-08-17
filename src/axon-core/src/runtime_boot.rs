@@ -765,6 +765,37 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         runtime_profile.max_blocking_threads,
         runtime_profile.queue_capacity
     );
+
+    // REQ-AXO-902341 — acquire writer ownership HERE, at the earliest point after
+    // db_root is resolved and identity is logged, and BEFORE any observable state
+    // is written (no env mutation, no worker spawn, no report_subsystem_state, no
+    // role heartbeats — all of which follow below). A second process that does not
+    // own the lock is refused right here and exits having announced NOTHING; the
+    // supervisor and watchdog therefore never see a phantom "Ready" / heartbeat
+    // from an imposter. The guards are held in `_writer_guards` for the whole boot
+    // scope, so the lock is released at process exit exactly as before — only the
+    // ACQUISITION moves earlier, not the release.
+    let mut acquired_writer_guards = Vec::new();
+    for target in profile.writer_targets() {
+        let result = match target {
+            crate::runtime_writer_guard::WriterTarget::Soll => WriterGuard::acquire_soll(db_root),
+            crate::runtime_writer_guard::WriterTarget::Ist => WriterGuard::acquire_ist(db_root),
+        };
+        match result {
+            Ok(guard) => acquired_writer_guards.push(guard),
+            Err(err) => {
+                error!("Runtime writer ownership enforcement refused startup: {err:#}");
+                return Err(err);
+            }
+        }
+    }
+    let _writer_guards = acquired_writer_guards;
+    info!(
+        "Writer ownership acquired for {:?} under {}",
+        profile.writer_targets(),
+        std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown-runtime".to_string())
+    );
+
     if !profile.promotable {
         info!("Split runtime is shadow-only and explicitly non-promotable before Task 6 gates.");
     }
@@ -865,26 +896,13 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     // have wired their heartbeaters. Idempotent across re-init.
     crate::runtime_watchdog::spawn_watchdog_task(crate::runtime_watchdog::DEFAULT_TICK_INTERVAL_MS);
 
-    let mut acquired_writer_guards = Vec::new();
-    for target in profile.writer_targets() {
-        let result = match target {
-            crate::runtime_writer_guard::WriterTarget::Soll => WriterGuard::acquire_soll(db_root),
-            crate::runtime_writer_guard::WriterTarget::Ist => WriterGuard::acquire_ist(db_root),
-        };
-        match result {
-            Ok(guard) => acquired_writer_guards.push(guard),
-            Err(err) => {
-                error!("Runtime writer ownership enforcement refused startup: {err:#}");
-                return Err(err);
-            }
-        }
-    }
-    let _writer_guards = acquired_writer_guards;
-    info!(
-        "Writer ownership acquired for {:?} under {}",
-        profile.writer_targets(),
-        std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown-runtime".to_string())
-    );
+    // REQ-AXO-902341 — writer-guard acquisition moved UP, to right after the
+    // identity logging (see `_writer_guards` above). It used to sit HERE, AFTER
+    // report_subsystem_state + wire_*_role_heartbeats above: a second, correctly
+    // REFUSED process had by then already announced its subsystems Ready and
+    // emitted role heartbeats — signals the supervisor and watchdog consume to
+    // judge the LIVE role's health. A refused process must leave NO trace in
+    // observable state; its only legitimate output is the refusal.
 
     let graph_store_result = match profile.role {
         RuntimeBootRole::Brain => GraphStore::new_brain_reader_soll_writer(db_root),
