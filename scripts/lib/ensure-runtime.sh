@@ -160,6 +160,65 @@ EOF
     return 1
 }
 
+# REQ-AXO-902350 — direct pg_ctl fallback when `devenv up postgres -d` is a NO-OP.
+#
+# devenv up exits 0 WITHOUT starting PG when a process-compose instance is already
+# running without postgres in its process list — it cannot add a process to a live
+# pc instance, so it prints nothing and returns 0. The 2026-08-17 OOM incident hit
+# exactly this: PG was OOM-killed while process-compose stayed up with
+# [brain, dashboard], and every `devenv up postgres -d` returned 0 silently while
+# start.sh failed at pg_bootstrap on a header-only log. `axon_run_logged` DOES
+# capture stderr (2>&1) — the log was empty because devenv emitted nothing, not
+# because output was dropped. The manual recovery that worked was `pg_ctl` on the
+# datadir; this wires it in. `-o "-p <port>"` forces the canonical port so a
+# drifted postgresql.conf (observed binding 44145 that night) cannot re-bind the
+# wrong one. The postgresql.conf drift root-cause is tracked separately in
+# REQ-AXO-902350 as a residual — forcing the port here makes start self-recover now.
+# Args (all optional — defaults target the live devenv PG; parameterised so the
+# recovery path is FALSIFIABLE against a throwaway datadir without touching a live PG):
+#   $1 datadir   (default: $PROJECT_ROOT/.devenv/state/postgres)
+#   $2 port      (default: $axon_canonical_pg_port)
+_axon_pg_ctl_fallback() {
+    local proj datadir port pgctl
+    proj="${PROJECT_ROOT:-${PWD}}"
+    datadir="${1:-$proj/.devenv/state/postgres}"
+    port="${2:-$axon_canonical_pg_port}"
+    if [[ ! -d "$datadir" ]]; then
+        axon_log_fail "pg_ctl fallback: datadir ${datadir} missing — cannot recover PG"
+        return 1
+    fi
+    pgctl="$(axon_resolve_pg_bin pg_ctl || true)"
+    if [[ -z "$pgctl" ]]; then
+        axon_log_fail "pg_ctl fallback: pg_ctl binary not resolvable"
+        return 1
+    fi
+    # A stale postmaster.pid from an OOM-killed PG blocks pg_ctl start.
+    local pid_file="$datadir/postmaster.pid" recorded_pid
+    if [[ -f "$pid_file" ]]; then
+        recorded_pid="$(head -n 1 "$pid_file" 2>/dev/null | tr -d ' \t')"
+        if [[ -n "$recorded_pid" ]] && ! kill -0 "$recorded_pid" 2>/dev/null; then
+            echo "🧹 pg_ctl fallback: purging stale postmaster.pid (PID=${recorded_pid} not running)"
+            rm -f "$pid_file"
+        fi
+    fi
+    axon_log_step "devenv up was a no-op (process-compose already running without postgres) — recovering PG via pg_ctl on :${port} (REQ-AXO-902350)"
+    if ! "$pgctl" -D "$datadir" -o "-p ${port}" \
+            -l "$datadir/startup.log" start >/dev/null 2>&1; then
+        axon_log_fail_with_tail "pg_ctl fallback: start failed" "$datadir/startup.log" 30
+        return 1
+    fi
+    local deadline=$(( SECONDS + 20 ))
+    while (( SECONDS < deadline )); do
+        if "$PG_ISREADY_BIN" -h 127.0.0.1 -p "${port}" -q 2>/dev/null; then
+            axon_log_ok "PG recovered via pg_ctl on :${port}"
+            return 0
+        fi
+        sleep 1
+    done
+    axon_log_fail_with_tail "pg_ctl fallback: PG not serving within 20s" "$datadir/startup.log" 30
+    return 1
+}
+
 ensure_devenv_pg_running() {
     # REQ-AXO-901740 — every branch emits exactly one outcome marker
     # (success OR failure) so the operator never sees opaque silence.
@@ -197,7 +256,11 @@ ensure_devenv_pg_running() {
         return 1
     fi
 
-    local deadline=$(( SECONDS + 60 ))
+    # REQ-AXO-902350 — a legitimate devenv PG boot serves in a few seconds; the
+    # no-op case (devenv returned 0 without starting anything) would otherwise burn
+    # the full grace before the pg_ctl fallback gets its turn. 20s is ample for a
+    # real boot and keeps recovery fast when devenv did nothing.
+    local deadline=$(( SECONDS + 20 ))
     while (( SECONDS < deadline )); do
         if axon_pg_port_listener_pid >/dev/null \
            && "$PG_ISREADY_BIN" -h 127.0.0.1 -p "$axon_canonical_pg_port" -q 2>/dev/null; then
@@ -208,7 +271,13 @@ ensure_devenv_pg_running() {
         fi
         sleep 1
     done
-    axon_log_fail_with_tail "PG did not become ready within 60s after devenv up" "$log_path" 50
+    # devenv up returned 0 but PG is not serving — the no-op case. Recover directly
+    # instead of failing start on a mute log (REQ-AXO-902350).
+    axon_log_warn "PG not serving ${axon_canonical_pg_port} within 20s of devenv up (returned 0 without starting it) — attempting pg_ctl fallback."
+    if _axon_pg_ctl_fallback; then
+        return 0
+    fi
+    axon_log_fail_with_tail "PG did not become ready after devenv up + pg_ctl fallback" "$log_path" 50
     return 1
 }
 
