@@ -313,23 +313,13 @@ if [[ -z "${AXON_WATCHMAN_BIN:-}" ]]; then
         export AXON_WATCHMAN_BIN="$(command -v watchman 2>/dev/null || echo watchman)"
     fi
 fi
-# REQ-AXO-902345 — same treatment for the dashboard's `elixir`, and for the same
-# reason as watchman just above: process-compose children inherit start.sh's
-# NON-devenv PATH, so a bare `elixir` in the yaml only ever worked when the host
-# happened to ship one system-wide. After the 2026-08-17 WSL->Ubuntu migration it
-# did not, and the dashboard died with `exec: elixir: not found` — three times,
-# exhausting its restart budget, which is why the whole instance reported
-# DEGRADED while brain and indexer were healthy.
-# The devenv profile symlink is stable and carries NO nix-store hash (that
-# indirection is deliberate — never persist /nix/store/<hash> paths). The nix
-# elixir wrapper locates its own `erl`, so no PATH surgery is needed.
-if [[ -z "${AXON_ELIXIR_BIN:-}" ]]; then
-    if [[ -x "$PROJECT_ROOT/.devenv/profile/bin/elixir" ]]; then
-        export AXON_ELIXIR_BIN="$PROJECT_ROOT/.devenv/profile/bin/elixir"
-    else
-        export AXON_ELIXIR_BIN="$(command -v elixir 2>/dev/null || echo elixir)"
-    fi
-fi
+# NOTE (REQ-AXO-902345): there is deliberately NO `AXON_ELIXIR_BIN` here. An
+# earlier pass added one, mirroring AXON_WATCHMAN_BIN above — and it did not
+# work, because `elixir -S mix` resolves `mix` through the PATH by design. That
+# dead end is what proved the per-binary approach wrong; the class is now solved
+# once, at the process-compose launch site, by putting the devenv profile on the
+# children's PATH. AXON_WATCHMAN_BIN survives only because the indexer reads it
+# from Rust; retiring it is tracked in REQ-AXO-902345.
 # Use COPY BINARY for PG writes instead of INSERT VALUES SQL text.
 export AXON_BULK_WRITER_ENABLED="${AXON_BULK_WRITER_ENABLED:-1}"
 # Absolute path to this Axon repo root.
@@ -432,6 +422,31 @@ fi
 if [[ "$AUTO_PAUSE_LIVE" -eq 1 ]]; then
     _axon_stage="auto_pause_live"
     axon_auto_pause_live_indexer_for_dev "$PROJECT_ROOT" "$PC_BIN" "$RUNTIME_MODE"
+fi
+
+# REQ-AXO-902345 — ONE mechanism for the whole "resolved by NAME" class.
+#
+# process-compose is launched from THIS shell (next line), so its children
+# inherit THIS PATH — the non-devenv one. Every dependency a role resolves by
+# name therefore had to be worked around one at a time: watchman got
+# AXON_WATCHMAN_BIN, the dashboard's `elixir` got AXON_ELIXIR_BIN… and `mix`
+# broke anyway, because `elixir -S mix` is a PATH lookup BY DESIGN that no
+# absolute-binary variable can satisfy. The cost is linear in the number of
+# dependencies and it is paid IN PRODUCTION: on 2026-08-17 the dashboard died
+# with `exec: elixir: not found`, burned its 3 restarts, and left the instance
+# DEGRADED while brain and indexer were perfectly healthy.
+#
+# Prepending the devenv profile bin directory kills the CLASS rather than the
+# instance: elixir, mix, watchman — and tomorrow's node/esbuild/tailwind for the
+# dashboard assets — resolve with no per-binary knob. Exported HERE and not
+# earlier on purpose: the profile carries 528 entries including bash/sh/env, so
+# the blast radius is deliberately confined to process-compose and its children
+# rather than to the rest of this script. The symlink is stable and carries NO
+# nix-store hash (never persist /nix/store/<hash> paths); `devenv` itself is not
+# in the profile, so it cannot shadow the launcher the operator's
+# `env -u LD_LIBRARY_PATH devenv shell` fix relies on.
+if [[ -d "$PROJECT_ROOT/.devenv/profile/bin" ]]; then
+    export PATH="$PROJECT_ROOT/.devenv/profile/bin:$PATH"
 fi
 
 _axon_stage="pc_up"

@@ -63,6 +63,53 @@ axon_resolve_nvidia_driver_lib_dir() {
     done
 }
 
+# REQ-AXO-902345 — compose the COMPLETE LD_LIBRARY_PATH prefix that an ORT/CUDA
+# consumer needs, in ONE place.
+#
+# The individual segment lookups were already shared helpers, but the ASSEMBLY
+# stayed duplicated three times — this resolver plus both dev benches — with the
+# same segments in the same order, i.e. three chances to drift apart. That is how
+# the driver-lib segment came to be missing from the runtime while the benches
+# were being fixed separately. Any segment added here is inherited by every
+# consumer, which is the whole point.
+#
+#   $1 = ORT lib directory (dirname of the manifest's core_lib) — required
+#   $2 = TensorRT lib directory — optional
+#
+# Prints the ':'-joined prefix on stdout. Does NOT append the caller's inherited
+# LD_LIBRARY_PATH: the caller decides where its own value goes.
+axon_compose_ort_ld_library_path() {
+    local ort_lib_dir="${1:-}"
+    local tensorrt_lib_dir="${2:-}"
+    local -a segments=()
+    local resolved
+
+    if [[ -n "$ort_lib_dir" && -d "$ort_lib_dir" ]]; then
+        segments+=("$ort_lib_dir")
+    fi
+    if [[ -n "$tensorrt_lib_dir" && -d "$tensorrt_lib_dir" ]]; then
+        segments+=("$tensorrt_lib_dir")
+    fi
+    # WSL2 paravirtualised driver libs. Kept for hosts still on WSL2; on native
+    # Linux the directory is simply absent and the next segment covers it.
+    if [[ -d "/usr/lib/wsl/lib" ]]; then
+        segments+=("/usr/lib/wsl/lib")
+    fi
+    resolved="$(axon_resolve_nvidia_driver_lib_dir)"
+    if [[ -n "$resolved" ]]; then
+        segments+=("$resolved")
+    fi
+    resolved="$(axon_resolve_nix_gcc_lib_dir)"
+    if [[ -n "$resolved" ]]; then
+        segments+=("$resolved")
+    fi
+
+    if [[ ${#segments[@]} -gt 0 ]]; then
+        (IFS=:; printf '%s\n' "${segments[*]}")
+    fi
+    return 0
+}
+
 axon_resolve_ort_runtime() {
     local project_root="${1:?project root required}"
     local embedding_provider_request="${2:?embedding provider required}"
@@ -210,38 +257,13 @@ axon_resolve_ort_runtime() {
     if [[ "$embedding_provider_request" == "cuda" || "$embedding_provider_request" == "tensorrt" ]]; then
         local ort_lib_dir
         local cuda_ld_prefix
-        local -a cuda_ld_path_segments=()
 
+        # REQ-AXO-902345 — the segment list (ORT libs, TensorRT libs, WSL2 libs,
+        # NVIDIA driver libs, nix libstdc++) is assembled ONCE, in
+        # axon_compose_ort_ld_library_path, and shared with both dev benches.
         ort_lib_dir="$(dirname "$ORT_DYLIB_PATH")"
-        if [[ -d "$ort_lib_dir" ]]; then
-            cuda_ld_path_segments+=("$ort_lib_dir")
-        fi
-        if [[ -n "${TENSORRT_LIB_DIR:-}" && -d "$TENSORRT_LIB_DIR" ]]; then
-            cuda_ld_path_segments+=("$TENSORRT_LIB_DIR")
-        fi
-        # WSL2 paravirtualised driver libs — absent on native Linux.
-        if [[ -d "/usr/lib/wsl/lib" ]]; then
-            cuda_ld_path_segments+=("/usr/lib/wsl/lib")
-        fi
-        # REQ-AXO-902347 — native NVIDIA driver libs (libcuda.so.1). See the
-        # helper's header: without this the CUDA EP cannot dlopen and the
-        # embedder degrades to CPU silently.
-        local nvidia_driver_lib
-        nvidia_driver_lib="$(axon_resolve_nvidia_driver_lib_dir)"
-        if [[ -n "$nvidia_driver_lib" ]]; then
-            cuda_ld_path_segments+=("$nvidia_driver_lib")
-        fi
-        # REQ-AXO-181: Nix gcc-cc.lib provides libstdc++.so.6 with GLIBCXX
-        # symbols required by Nix-built libonnxruntime.so. Mirrors
-        # scripts/dev/embed-bench.sh:64. Without this, indexer subprocess
-        # dlopen fails against system /lib/x86_64-linux-gnu/libstdc++.
-        local nix_gcc_lib
-        nix_gcc_lib="$(axon_resolve_nix_gcc_lib_dir)"
-        if [[ -n "$nix_gcc_lib" ]]; then
-            cuda_ld_path_segments+=("$nix_gcc_lib")
-        fi
-        if [[ ${#cuda_ld_path_segments[@]} -gt 0 ]]; then
-            cuda_ld_prefix="$(IFS=:; echo "${cuda_ld_path_segments[*]}")"
+        cuda_ld_prefix="$(axon_compose_ort_ld_library_path "$ort_lib_dir" "${TENSORRT_LIB_DIR:-}")"
+        if [[ -n "$cuda_ld_prefix" ]]; then
             if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
                 PRELAUNCH_LD_LIBRARY_PATH_EXPORT="export LD_LIBRARY_PATH=\"$cuda_ld_prefix:$LD_LIBRARY_PATH\"; "
             else

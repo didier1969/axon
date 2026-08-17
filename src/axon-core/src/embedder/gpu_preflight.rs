@@ -30,6 +30,52 @@ const PROBE_ERROR_MARKER: &str = "GPU_LIB_PROBE_ERROR:";
 /// truncated / placeholder file, not a usable `.so`.
 const MIN_PLAUSIBLE_SO_BYTES: u64 = 4096;
 
+/// How strictly a library's dlopen failure is judged (REQ-AXO-902345).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeMode {
+    /// The ORT CORE loads standalone, so ANY dlopen failure is a real defect.
+    Strict,
+    /// An ORT PROVIDER (`libonnxruntime_providers_{cuda,tensorrt}.so`)
+    /// legitimately carries undefined symbols (`Provider_GetHost`) that the core
+    /// resolves at runtime through ORT's provider bridge, so that ONE failure
+    /// class is expected and benign. Every other failure — above all a missing
+    /// `DT_NEEDED` dependency such as the driver's `libcuda.so.1` — is real.
+    TolerateUndefinedSymbols,
+}
+
+/// Why a probe failed. TYPED rather than a bare string so a crash can never be
+/// softened: only [`ProbeFailure::Dlopen`] is ever eligible for tolerance.
+#[derive(Debug)]
+enum ProbeFailure {
+    /// The probe child could not even be spawned.
+    Spawn(String),
+    /// The child died on a signal — corrupt / ABI-incompatible library.
+    Crashed(String),
+    /// The child reported a catchable load error.
+    Dlopen(String),
+}
+
+impl ProbeFailure {
+    fn reason(&self) -> &str {
+        match self {
+            Self::Spawn(r) | Self::Crashed(r) | Self::Dlopen(r) => r,
+        }
+    }
+}
+
+/// PURE — does this dlopen reason denote the benign "the ORT provider bridge
+/// resolves it at runtime" case?
+///
+/// Kept as a separate string-level predicate precisely so it can be falsified in
+/// unit tests against the EXACT messages observed in the field, rather than
+/// trusted by inspection. The two real messages from 2026-08-17, same machine,
+/// same provider, only `LD_LIBRARY_PATH` differing:
+///   defect : `libcuda.so.1: cannot open shared object file: No such file or directory`
+///   benign : `…/libonnxruntime_providers_cuda.so: undefined symbol: Provider_GetHost`
+fn dlopen_reason_is_undefined_symbol(reason: &str) -> bool {
+    reason.contains("undefined symbol")
+}
+
 /// Parse the probe target out of an argv iterator. Pure → unit-testable.
 /// Returns the path that follows [`GPU_LIB_PROBE_FLAG`], if present.
 pub(crate) fn parse_probe_arg<I: IntoIterator<Item = String>>(args: I) -> Option<PathBuf> {
@@ -123,12 +169,12 @@ fn check_static(path: &Path) -> Result<(), String> {
 /// Probe one library in a throwaway subprocess. `Ok(())` when the child loaded
 /// it cleanly; `Err(reason)` when the child crashed (signal — corrupt/
 /// incompatible) or reported a load error.
-fn probe_in_subprocess(self_exe: &Path, lib: &Path) -> Result<(), String> {
+fn probe_in_subprocess(self_exe: &Path, lib: &Path) -> Result<(), ProbeFailure> {
     let output = Command::new(self_exe)
         .arg(GPU_LIB_PROBE_FLAG)
         .arg(lib)
         .output()
-        .map_err(|err| format!("could not spawn dlopen probe: {err}"))?;
+        .map_err(|err| ProbeFailure::Spawn(format!("could not spawn dlopen probe: {err}")))?;
     if output.status.success() {
         return Ok(());
     }
@@ -136,10 +182,10 @@ fn probe_in_subprocess(self_exe: &Path, lib: &Path) -> Result<(), String> {
     {
         use std::os::unix::process::ExitStatusExt;
         if let Some(sig) = output.status.signal() {
-            return Err(format!(
+            return Err(ProbeFailure::Crashed(format!(
                 "dlopen crashed the probe with signal {sig} — library is corrupt or \
                  ABI-incompatible (would have SIGSEGV'd the indexer)"
-            ));
+            )));
         }
     }
     // Non-zero exit: surface the child's reported libloading error if present.
@@ -149,33 +195,51 @@ fn probe_in_subprocess(self_exe: &Path, lib: &Path) -> Result<(), String> {
         .find_map(|l| l.trim().strip_prefix(PROBE_ERROR_MARKER))
         .map(|r| r.trim().to_string())
         .unwrap_or_else(|| format!("probe exited with {}", output.status));
-    Err(format!("dlopen failed: {reason}"))
+    Err(ProbeFailure::Dlopen(format!("dlopen failed: {reason}")))
 }
 
 /// The libraries to vet before a CUDA/TensorRT embedder session is built.
-/// Returns `(label, path, dlopen_probe)`. `dlopen_probe` is true ONLY for the
-/// ORT CORE lib — the provider libs are static-checked only (REQ-AXO-902040):
-/// an isolated `dlopen` of `libonnxruntime_providers_{cuda,tensorrt}.so` reports
-/// `undefined symbol: Provider_GetHost`, because that symbol is EXPORTED by the
-/// core and resolved at runtime through ORT's provider bridge (and the providers
-/// are linked BIND_NOW, so RTLD_LAZY doesn't help). Probing them in isolation
-/// therefore FALSE-POSITIVES on a perfectly healthy provider, spamming an ERROR
-/// at every GPU start. The core loads cleanly on its own, so it is the only one
-/// worth a dlopen probe; missing/truncated providers are still caught by the
-/// static (exists/size/ELF) check.
-fn gpu_libraries_to_check() -> Vec<(&'static str, PathBuf, bool)> {
+/// Returns `(label, path, ProbeMode)` — every library IS dlopen-probed; the mode
+/// says how its failure is judged.
+///
+/// REQ-AXO-902345 — the provider libs used to be static-checked ONLY, on the
+/// grounds that probing them in isolation false-positives with
+/// `undefined symbol: Provider_GetHost` (REQ-AXO-902040). That reasoning was
+/// sound but the remedy was too blunt, and it cost a real outage on 2026-08-17:
+/// after the WSL->Ubuntu migration the driver's `libcuda.so.1` was no longer on
+/// `LD_LIBRARY_PATH`, so `libonnxruntime_providers_cuda.so` could not be loaded
+/// at all. The FILE was present and well-formed, so the static check passed, the
+/// CUDA EP failed at session build, the embedder fell back to CPU — and the
+/// instance still reported HEALTHY while every semantic query was degraded.
+///
+/// Both failures are dlopen failures, but they are DISTINGUISHABLE, and the
+/// distinction was verified on the real binaries before this change (same host,
+/// same provider, only `LD_LIBRARY_PATH` differing):
+///   without the driver dir → `libcuda.so.1: cannot open shared object file`
+///   with    the driver dir → `undefined symbol: Provider_GetHost`
+/// So the providers are probed with [`ProbeMode::TolerateUndefinedSymbols`]:
+/// the benign class is ignored, the missing-dependency class fails loud.
+fn gpu_libraries_to_check() -> Vec<(&'static str, PathBuf, ProbeMode)> {
     let mut out = Vec::new();
     if let Some(core) = std::env::var("ORT_DYLIB_PATH")
         .ok()
         .filter(|v| !v.trim().is_empty())
     {
-        out.push(("onnxruntime core", PathBuf::from(core), true));
+        out.push(("onnxruntime core", PathBuf::from(core), ProbeMode::Strict));
     }
     if let Some(cuda) = super::ort_cuda_provider_library_path() {
-        out.push(("onnxruntime CUDA provider", cuda, false));
+        out.push((
+            "onnxruntime CUDA provider",
+            cuda,
+            ProbeMode::TolerateUndefinedSymbols,
+        ));
     }
     if let Some(trt) = super::gpu_backend::ort_tensorrt_provider_library_path() {
-        out.push(("onnxruntime TensorRT provider", trt, false));
+        out.push((
+            "onnxruntime TensorRT provider",
+            trt,
+            ProbeMode::TolerateUndefinedSymbols,
+        ));
     }
     out
 }
@@ -192,18 +256,26 @@ pub(crate) fn preflight_gpu_libraries() -> Result<(), String> {
     if libs.is_empty() {
         return Ok(()); // no GPU libs configured → nothing to vet
     }
-    for (label, path, dlopen_probe) in libs {
+    for (label, path, mode) in libs {
         if let Err(reason) = check_static(&path) {
             let msg = format!("{label} at {}: {reason}", path.display());
             tracing::error!(target: "embedder::gpu_preflight", lib = label, path = %path.display(), reason = %reason, "GPU library pre-flight FAILED (static)");
             return Err(msg);
         }
-        // REQ-AXO-902040 — only the ORT core is dlopen-probed; the provider libs
-        // can't be dlopen'd in isolation without false-positiving on the core's
-        // runtime-resolved symbols (see gpu_libraries_to_check), so for them the
-        // static check above is the whole vet.
-        if dlopen_probe {
-            if let Err(reason) = probe_in_subprocess(&self_exe, &path) {
+        // REQ-AXO-902345 — every configured lib is dlopen-probed. Only ONE
+        // failure class is softened, and only for the provider libs: an
+        // `undefined symbol` they legitimately carry (resolved at runtime by
+        // ORT's provider bridge). A missing DT_NEEDED dependency, a corrupt lib
+        // or a crashed probe still fails loud — the whole point, since a
+        // silently unloadable CUDA provider is what let the embedder degrade to
+        // CPU under a HEALTHY banner on 2026-08-17.
+        if let Err(failure) = probe_in_subprocess(&self_exe, &path) {
+            let tolerated = mode == ProbeMode::TolerateUndefinedSymbols
+                && matches!(&failure, ProbeFailure::Dlopen(r) if dlopen_reason_is_undefined_symbol(r));
+            if tolerated {
+                tracing::debug!(target: "embedder::gpu_preflight", lib = label, path = %path.display(), reason = %failure.reason(), "GPU provider carries runtime-resolved symbols — expected, not a defect");
+            } else {
+                let reason = failure.reason();
                 let msg = format!("{label} at {}: {reason}", path.display());
                 tracing::error!(target: "embedder::gpu_preflight", lib = label, path = %path.display(), reason = %reason, "GPU library pre-flight FAILED (dlopen probe)");
                 return Err(msg);
@@ -218,6 +290,74 @@ pub(crate) fn preflight_gpu_libraries() -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// REQ-AXO-902345 — the two messages below are VERBATIM from the real
+    /// binaries on 2026-08-17: same host, same `libonnxruntime_providers_cuda.so`,
+    /// the ONLY difference being whether the NVIDIA driver directory was on
+    /// `LD_LIBRARY_PATH`. They are the ground truth this classifier exists to
+    /// separate, which is why they are pinned here rather than paraphrased.
+    const REAL_MISSING_DEP: &str =
+        "dlopen failed: libcuda.so.1: cannot open shared object file: No such file or directory";
+    const REAL_RUNTIME_RESOLVED: &str = "dlopen failed: /nix/store/x-onnxruntime-1.27.1/lib/\
+         libonnxruntime_providers_cuda.so: undefined symbol: Provider_GetHost";
+
+    #[test]
+    fn missing_dependency_is_never_treated_as_a_runtime_resolved_symbol() {
+        // The 2026-08-17 outage. If this ever returns true the pre-flight goes
+        // blind again to exactly the defect it was extended to catch.
+        assert!(!dlopen_reason_is_undefined_symbol(REAL_MISSING_DEP));
+    }
+
+    #[test]
+    fn runtime_resolved_symbol_is_recognised_so_a_healthy_provider_is_not_refused() {
+        assert!(dlopen_reason_is_undefined_symbol(REAL_RUNTIME_RESOLVED));
+    }
+
+    #[test]
+    fn only_the_provider_libs_tolerate_an_undefined_symbol() {
+        // The core loads standalone: an undefined symbol there IS a defect.
+        // Mirrors the `tolerated` predicate in preflight_gpu_libraries.
+        let tolerated = |mode: ProbeMode, reason: &str| {
+            mode == ProbeMode::TolerateUndefinedSymbols && dlopen_reason_is_undefined_symbol(reason)
+        };
+        assert!(tolerated(
+            ProbeMode::TolerateUndefinedSymbols,
+            REAL_RUNTIME_RESOLVED
+        ));
+        assert!(!tolerated(ProbeMode::Strict, REAL_RUNTIME_RESOLVED));
+        assert!(!tolerated(
+            ProbeMode::TolerateUndefinedSymbols,
+            REAL_MISSING_DEP
+        ));
+    }
+
+    #[test]
+    fn a_crash_is_never_tolerated_even_if_its_text_mentions_undefined_symbol() {
+        // Guards the reason the failure type is an enum and not a bare string:
+        // a SIGSEGV must stay fatal no matter what the message happens to read.
+        let crashed = ProbeFailure::Crashed("undefined symbol".to_string());
+        assert!(
+            !matches!(&crashed, ProbeFailure::Dlopen(r) if dlopen_reason_is_undefined_symbol(r)),
+            "a crashed probe must never match the tolerated branch"
+        );
+    }
+
+    #[test]
+    fn every_configured_gpu_library_is_dlopen_probed() {
+        // REQ-AXO-902345 — the providers were static-checked ONLY, which is how
+        // an unloadable CUDA provider reached production. No entry may be
+        // probe-exempt: the mode says how a failure is judged, never whether the
+        // probe runs at all.
+        for (label, _path, mode) in gpu_libraries_to_check() {
+            assert!(
+                matches!(
+                    mode,
+                    ProbeMode::Strict | ProbeMode::TolerateUndefinedSymbols
+                ),
+                "{label} must be dlopen-probed"
+            );
+        }
+    }
 
     #[test]
     fn parse_probe_arg_extracts_path() {

@@ -60,19 +60,12 @@ if [[ ! -f "$CORE_LIB" ]]; then
 fi
 ORT_LIB_DIR="$(dirname "$CORE_LIB")"
 
-# Build LD_LIBRARY_PATH: ORT lib dir + TensorRT lib dir + WSL CUDA + nix gcc-cc.lib + existing
-# REQ-AXO-902344 — the gcc-lib pick is shared with the runtime resolver (was
-# duplicated here as `find | head -1`, which selects an arbitrary gcc and broke
-# the CUDA EP when the store held one older than the CXXABI the ORT build needs).
+# REQ-AXO-902345 — the LD_LIBRARY_PATH prefix (ORT libs + TensorRT libs + WSL2
+# libs + NVIDIA driver libs + nix libstdc++) is assembled by the SAME function the
+# runtime resolver uses. This chain used to be duplicated here segment by segment,
+# which is how the bench and the runtime drifted apart.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/axon-ort-runtime.sh"
-NIX_GCC_LIB="$(axon_resolve_nix_gcc_lib_dir)"
-LDP="$ORT_LIB_DIR"
-[[ -n "$TENSORRT_DIR" && -d "$TENSORRT_DIR" ]] && LDP="$LDP:$TENSORRT_DIR"
-[[ -d /usr/lib/wsl/lib ]] && LDP="$LDP:/usr/lib/wsl/lib"
-# REQ-AXO-902347 — native NVIDIA driver libs (libcuda.so.1); see helper header.
-NVIDIA_DRIVER_LIB="$(axon_resolve_nvidia_driver_lib_dir)"
-[[ -n "$NVIDIA_DRIVER_LIB" ]] && LDP="$LDP:$NVIDIA_DRIVER_LIB"
-[[ -n "$NIX_GCC_LIB" ]] && LDP="$LDP:$NIX_GCC_LIB"
+LDP="$(axon_compose_ort_ld_library_path "$ORT_LIB_DIR" "$TENSORRT_DIR")"
 [[ -n "${LD_LIBRARY_PATH:-}" ]] && LDP="$LDP:$LD_LIBRARY_PATH"
 
 export ORT_STRATEGY=system
