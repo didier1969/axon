@@ -60,6 +60,19 @@ fn sql_shape_hash(shape: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// REQ-AXO-902345 residual — does a resolved GPU embed provider run on a non-GPU
+/// worker? `effective_provider` is the OUTPUT of `query_embed_effective_provider`,
+/// which already folds in GPU presence + provider-lib availability, so `cuda` /
+/// `tensorrt` mean GPU was intended AND resolvable. If the worker's observed
+/// compute is nonetheless not GPU, the execution provider failed to load and the
+/// embedder fell back to CPU silently — the 2026-08-17 defect where compute=CPU
+/// was reported under a HEALTHY banner. `cpu`→CPU is consistent (no mismatch);
+/// a non-GPU provider running on GPU is not a defect either. Pure → unit-testable.
+fn embed_provider_compute_mismatch(effective_provider: &str, observed_compute: &str) -> bool {
+    let provider_intends_gpu = matches!(effective_provider, "cuda" | "tensorrt" | "gpu");
+    provider_intends_gpu && !observed_compute.eq_ignore_ascii_case("GPU")
+}
+
 impl McpServer {
     pub(crate) fn axon_resume_vectorization(&self, _args: &Value) -> Option<Value> {
         let runtime_mode = AxonRuntimeMode::from_env();
@@ -745,6 +758,26 @@ impl McpServer {
                 .unwrap_or("unknown")
                 .to_string(),
         };
+        // REQ-AXO-902345 residual — a RESOLVED GPU provider whose worker actually
+        // runs on CPU is a SILENT fallback. The 2026-08-17 migration left the CUDA
+        // EP unloadable (libcuda.so.1 off LD_LIBRARY_PATH); the worker fell to CPU
+        // and embedding_status reported compute=CPU while the runtime read HEALTHY.
+        // `query_embed_effective_provider` already folds in GPU presence + provider
+        // lib availability, so an effective `cuda`/`tensorrt` means GPU was INTENDED
+        // and resolvable — if the observed compute is nonetheless not GPU, the EP
+        // died at load time. Make that mismatch a FIRST-CLASS field instead of a
+        // two-field cross-reference nobody was making.
+        let effective_embed_provider = crate::embedder::query_embed_effective_provider();
+        let provider_compute_mismatch =
+            embed_provider_compute_mismatch(&effective_embed_provider, &observed_compute);
+        let provider_mismatch_line = if provider_compute_mismatch {
+            format!(
+                "\n             - ⚠️ PROVIDER/COMPUTE MISMATCH: resolved embed provider is `{effective_embed_provider}` (GPU intended + resolvable) but the worker runs on {observed_compute} — the GPU execution provider failed to load and the embedder fell back to CPU SILENTLY. This is NOT healthy: query / why / retrieve_context embed at ~seconds, not ~ms. Check LD_LIBRARY_PATH (libcuda.so.1) and the brain log for 'CUDA init failed' (REQ-AXO-902345)."
+            )
+        } else {
+            String::new()
+        };
+
         let indexer_build_id = indexer_heartbeat
             .as_ref()
             .and_then(|row| row.build_id.clone());
@@ -883,7 +916,7 @@ impl McpServer {
              - B fed via:        sorted-drain (ORDER BY token_count, reservoir + channel backpressure, 200ms→30s idle backoff) — DEC-AXO-901631\n\
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
              - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\
-             - Compute (observed): {observed_compute}  (source={observed_compute_source}) — DEC-AXO-901626, same canonical signal as status.embedder_runtime + dashboard\n\
+             - Compute (observed): {observed_compute}  (source={observed_compute_source}) — DEC-AXO-901626, same canonical signal as status.embedder_runtime + dashboard{provider_mismatch_line}\n\
              {b3_health_line}\n\n\
              ### File source — Watchman + DBQ-A (REQ-AXO-901893 / REQ-AXO-901897)\n\
              - Feed: Watchman clock/cursor deltas → pipeline A input_tx (legacy ingress drain + periodic sweep RIPPED)\n\
@@ -963,6 +996,9 @@ impl McpServer {
                 // source as status.embedder_runtime + the dashboard).
                 "compute": observed_compute,
                 "compute_source": observed_compute_source,
+                // REQ-AXO-902345 residual — silent GPU→CPU fallback made loud.
+                "effective_embed_provider": effective_embed_provider,
+                "provider_compute_mismatch": provider_compute_mismatch,
                 "indexer_build_id": indexer_build_id,
                 // REQ-AXO-902198 residual — process-global count of rows dropped by the
                 // bulk-writer's poison-row bisection (chunks/symbols/edges/indexed_files/
@@ -1581,6 +1617,35 @@ fn rescan_error_envelope(project_code: &str, code: &str, message: &str) -> Value
         },
         "isError": true,
     })
+}
+
+#[cfg(test)]
+mod provider_compute_mismatch_tests {
+    //! REQ-AXO-902345 residual — the silent GPU→CPU fallback detector. Cases
+    //! anchored on the REAL 2026-08-17 defect: effective `cuda`, worker `CPU`.
+    use super::embed_provider_compute_mismatch as m;
+
+    #[test]
+    fn resolved_gpu_provider_on_cpu_worker_is_a_mismatch() {
+        // The 2026-08-17 defect: CUDA EP failed to load, worker fell to CPU,
+        // compute=CPU reported under HEALTHY. This MUST flag.
+        assert!(m("cuda", "CPU"));
+        assert!(m("tensorrt", "CPU"));
+        assert!(m("cuda", "unknown")); // not-GPU of any spelling flags
+    }
+
+    #[test]
+    fn matching_states_are_not_a_mismatch() {
+        assert!(!m("cuda", "GPU")); // healthy GPU path
+        assert!(!m("cuda", "gpu")); // case-insensitive
+        assert!(!m("cpu", "CPU")); // no GPU intended — consistent
+    }
+
+    #[test]
+    fn a_cpu_provider_on_gpu_is_not_a_defect() {
+        // The GPU being better than the resolved intent is not a silent fallback.
+        assert!(!m("cpu", "GPU"));
+    }
 }
 
 #[cfg(test)]
