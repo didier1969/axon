@@ -919,3 +919,141 @@ axon_self_heal_indexer() {
     _axon_sup_warn "[self-heal] axon-indexer restart did not verify within ${budget_s}s — still abandoned"
     return 1
 }
+
+# REQ-AXO-902348/902332 — human interpretation of a process-compose exit code.
+# process-compose reports exit_code; -1 is its marker for death by signal. The
+# specific signal (SIGSEGV vs SIGKILL) is NOT in the API — it lives in the kernel
+# log — so we name the CLASS honestly rather than guess the signal.
+axon_exit_code_reason() {
+    case "${1:-}" in
+        -1)  printf 'death by signal (external kill — OOM killer or a native SIGSEGV, e.g. libnvinfer; the signal itself is only in dmesg)\n' ;;
+        75)  printf 'self-exit for supervisor restart (TensorRT B2 hang, REQ-AXO-902033)\n' ;;
+        137) printf 'SIGKILL (128+9 — OOM killer or forced kill)\n' ;;
+        143) printf 'SIGTERM (128+15 — shutdown signal not handled cleanly)\n' ;;
+        *)   printf 'exit code %s\n' "${1:-?}" ;;
+    esac
+}
+
+# axon_persist_role_exit_events <project_root> <instance_kind>
+#
+# REQ-AXO-902348/902332 — record WHY each supervised role exited, from the layer
+# that SURVIVES the role's death (this runs in the self-heal watcher; the dying
+# role cannot write its own SIGKILL). One row per DISTINCT exit — deduped on
+# (exit_code, restarts) vs the role's last recorded event — so a role that stays
+# Completed does not spam a row every tick. A CLEAN exit (exit_code 0) records
+# NOTHING: that is the negative control (a graceful stop must not read as a fault).
+# Best-effort and non-fatal: any failure (no supervisor, no psql, PG down) is a
+# silent no-op — this is observability, it must never break the heal loop.
+# KNOWN BOUND: polling means a crash that restarts between two ticks can be missed.
+axon_persist_role_exit_events() {
+    local project_root="${1:?project root required}" instance_kind="${2:?instance kind required}"
+    local pc_port body now psql dbname
+
+    # AXON_PC_PROCESSES_BODY_OVERRIDE lets a test substitute the /processes body
+    # (the function's real input) so the persist+dedup path is falsifiable without
+    # a running supervisor — the "a guard whose input isn't substitutable can't be
+    # falsified" rule. Unset in production → the real curl poll runs.
+    if [[ -n "${AXON_PC_PROCESSES_BODY_OVERRIDE:-}" ]]; then
+        body="$AXON_PC_PROCESSES_BODY_OVERRIDE"
+    else
+        pc_port="$(axon_pc_port_for_instance "$instance_kind")"
+        axon_supervisor_healthy "$pc_port" || return 0
+        body="$(curl -s -m 8 "http://127.0.0.1:${pc_port}/processes" 2>/dev/null)" || return 0
+    fi
+    [[ -n "$body" ]] || return 0
+
+    # The detached watcher may not carry the devenv PATH; resolve psql explicitly.
+    psql="$(command -v psql 2>/dev/null || true)"
+    [[ -z "$psql" && -x "$project_root/.devenv/profile/bin/psql" ]] && psql="$project_root/.devenv/profile/bin/psql"
+    [[ -n "$psql" ]] || return 0
+    case "$instance_kind" in
+        live) dbname="axon_live" ;;
+        dev)  dbname="axon_dev" ;;
+        *)    dbname="axon_${instance_kind}" ;;
+    esac
+    local pgport="${PGPORT:-44144}"
+
+    # Wall-clock ms. NOT `date +%s%3N`: on this host's coreutils `%3N` does not
+    # truncate to 3 digits, it appends all 9 nanosecond digits (a 19-digit value
+    # that overflows to_timestamp downstream). Take the ns epoch and divide.
+    now="$(( $(date +%s%N) / 1000000 ))"
+    local rows
+    rows="$(AXON_PC_JSON="$body" python3 - <<'PY'
+import json, os, sys
+try:
+    body = json.loads(os.environ.get("AXON_PC_JSON", ""))
+except Exception:
+    sys.exit(0)
+procs = body.get("data", body) if isinstance(body, dict) else body
+if not isinstance(procs, list):
+    sys.exit(0)
+for p in procs:
+    name = str(p.get("name", "")).strip()
+    if not name:
+        continue
+    try:
+        code = int(p.get("exit_code", 0))
+    except Exception:
+        code = 0
+    if code == 0:   # a clean / running role is not an exit event
+        continue
+    status = str(p.get("status", "")).strip() or "?"
+    try:
+        restarts = int(p.get("restarts", 0))
+    except Exception:
+        restarts = 0
+    print("|".join([name, str(code), status, str(restarts)]))
+PY
+)"
+    [[ -n "$rows" ]] || return 0
+
+    local role code status restarts last reason esc_role
+    while IFS='|' read -r role code status restarts; do
+        [[ -n "$role" ]] || continue
+        esc_role="${role//\'/\'\'}"
+        # Only a NEW exit (differs from the last recorded (code,restarts)) is written.
+        last="$("$psql" -h 127.0.0.1 -p "$pgport" -U axon -d "$dbname" -tAXc \
+            "SELECT exit_code || '|' || restarts FROM axon.role_exit_event \
+             WHERE role='${esc_role}' AND instance_kind='${instance_kind}' \
+             ORDER BY observed_ms DESC LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
+        [[ "$last" == "${code}|${restarts}" ]] && continue
+        reason="$(axon_exit_code_reason "$code")"
+        reason="${reason//\'/\'\'}"
+        "$psql" -h 127.0.0.1 -p "$pgport" -U axon -d "$dbname" -tAXc \
+            "INSERT INTO axon.role_exit_event (role, instance_kind, observed_ms, exit_code, pc_status, restarts, reason) \
+             VALUES ('${esc_role}', '${instance_kind}', ${now}, ${code}, '${status//\'/\'\'}', ${restarts}, '${reason}')" \
+            >/dev/null 2>&1 || true
+        _axon_sup_log "[exit-ledger] ${role} exit_code=${code} restarts=${restarts} — ${reason}"
+    done <<< "$rows"
+    return 0
+}
+
+# axon_recent_role_exits <project_root> <instance_kind> [window_hours]
+#
+# REQ-AXO-902348/902332 — the READ side: the most recent recorded exit per role
+# within the window, for `axon status` to answer WHY a role fell (not merely
+# THAT it fell). One line per role, pipe-separated:
+#   role|iso_utc|exit_code|reason
+# Empty output (no rows / no psql / PG down) is normal and expected on a clean
+# runtime — the caller renders nothing. Best-effort, never fails the caller.
+axon_recent_role_exits() {
+    local project_root="${1:?project root required}" instance_kind="${2:?instance kind required}"
+    local window_h="${3:-24}" psql dbname
+    psql="$(command -v psql 2>/dev/null || true)"
+    [[ -z "$psql" && -x "$project_root/.devenv/profile/bin/psql" ]] && psql="$project_root/.devenv/profile/bin/psql"
+    [[ -n "$psql" ]] || return 0
+    case "$instance_kind" in
+        live) dbname="axon_live" ;;
+        dev)  dbname="axon_dev" ;;
+        *)    dbname="axon_${instance_kind}" ;;
+    esac
+    local pgport="${PGPORT:-44144}"
+    local floor_ms=$(( ( $(date +%s) - window_h * 3600 ) * 1000 ))
+    "$psql" -h 127.0.0.1 -p "$pgport" -U axon -d "$dbname" -tAF'|' -c \
+        "SELECT DISTINCT ON (role) role, \
+                to_char(to_timestamp(observed_ms/1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), \
+                exit_code, reason \
+         FROM axon.role_exit_event \
+         WHERE instance_kind='${instance_kind//\'/\'\'}' AND observed_ms >= ${floor_ms} \
+         ORDER BY role, observed_ms DESC" 2>/dev/null || true
+}

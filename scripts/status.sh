@@ -103,6 +103,12 @@ if [[ -n "$AXON_ROLE_SURVEY" ]]; then
 fi
 export AXON_ROLE_SURVEY_RENDER AXON_ROLE_SURVEY_DEGRADED
 
+# REQ-AXO-902348/902332 — WHY a role fell, from the persisted exit ledger (written
+# by the self-heal survey that survives the death). Best-effort; empty on a clean
+# runtime. Rendered as an informational section under the roles.
+AXON_ROLE_EXITS="$(axon_recent_role_exits "$ROOT_DIR" "$AXON_INSTANCE_KIND" 24 2>/dev/null || true)"
+export AXON_ROLE_EXITS
+
 # ---------------------------------------------------------------------------
 # Format human-readable output from JSON
 # ---------------------------------------------------------------------------
@@ -229,6 +235,19 @@ if survey_render:
     print()
     print("Supervisor roles")
     print(survey_render)
+
+# REQ-AXO-902348/902332 — the exit ledger: WHY a role fell, not just THAT it did.
+# One line per role that has a recorded exit in the window; empty on a clean run.
+role_exits = os.environ.get("AXON_ROLE_EXITS", "").strip()
+if role_exits:
+    print()
+    print("Recent role exits (why a role fell — axon.role_exit_event)")
+    for line in role_exits.splitlines():
+        parts = line.split("|")
+        if len(parts) < 4:
+            continue
+        role, iso, code, reason = parts[0], parts[1], parts[2], "|".join(parts[3:])
+        print(f"  {role:16} {iso}  exit={code}  {reason}")
 
 # REQ-AXO-901735 — dead-brain condition computed in shell (supervisor up but
 # canonical brain port not listening). This is a runtime failure the supervisor

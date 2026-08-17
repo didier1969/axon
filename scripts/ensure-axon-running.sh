@@ -58,6 +58,9 @@ if [[ "${1:-}" == "--watch" ]]; then
         # A DOWN supervisor yields rc 2 (no-op): the watcher never fights an
         # intentional stop, it only restarts a role the supervisor abandoned.
         axon_self_heal_indexer "$PROJECT_ROOT" live >>"$LOG" 2>&1 || true
+        # REQ-AXO-902348/902332 — same survey layer records WHY any role exited,
+        # so `axon status` can report the cause. Best-effort, never breaks the loop.
+        axon_persist_role_exit_events "$PROJECT_ROOT" live >>"$LOG" 2>&1 || true
         sleep "$WATCH_INTERVAL"
     done
 fi
@@ -84,6 +87,8 @@ heal_indexer_once() {
     # shellcheck source=lib/axon-supervisor.sh
     source "$SUPERVISOR_LIB" 2>>"$LOG" || return 0
     axon_self_heal_indexer "$PROJECT_ROOT" live >>"$LOG" 2>&1 || true
+    # REQ-AXO-902348/902332 — record WHY any role exited (survives the role's death).
+    axon_persist_role_exit_events "$PROJECT_ROOT" live >>"$LOG" 2>&1 || true
 }
 
 # Serialize concurrent invocations (WSL boot and an MCP reconnect can race).

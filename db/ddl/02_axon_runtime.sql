@@ -294,7 +294,32 @@ CREATE TABLE IF NOT EXISTS axon.watchman_clock (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- REQ-AXO-902348/902332 — WHY a supervised role exited, persisted by the layer
+-- that SURVIVES the role's death (the self-heal survey), so `axon status` can
+-- report the cause and not merely the fact. A role killed by a signal (SIGSEGV
+-- in libnvinfer, SIGKILL from the OOM killer) writes NOTHING itself — it is gone
+-- before any in-process logger runs — so the supervisor records the exit it
+-- observes. `indexer_runtime_truth` (above) is the wrong home: it is a heartbeat
+-- table written by the LIVE process, upserted one row per role. This one is an
+-- append-only exit LEDGER. One row per distinct exit (deduped on (exit_code,
+-- restarts) vs the last recorded event for the role); a clean exit (exit_code 0)
+-- records nothing — the negative control. Polling means a fast crash-restart
+-- between survey ticks can be missed; that is a known bound, documented at the
+-- writer, not hidden.
+CREATE TABLE IF NOT EXISTS axon.role_exit_event (
+    id            BIGSERIAL PRIMARY KEY,
+    role          TEXT    NOT NULL,               -- 'axon-brain' / 'axon-indexer' / 'dashboard'
+    instance_kind TEXT    NOT NULL,               -- 'live' / 'dev'
+    observed_ms   BIGINT  NOT NULL,               -- when the supervisor observed the exit (wall-clock ms)
+    exit_code     INTEGER NOT NULL,               -- process-compose exit_code (-1 = death by signal)
+    pc_status     TEXT    NOT NULL,               -- process-compose status at observation (Completed/Restarting/…)
+    restarts      INTEGER NOT NULL DEFAULT 0,     -- consumed restart count at observation
+    reason        TEXT                            -- human interpretation (signal / TensorRT-hang / exit N)
+);
+
 -- ── Indexes ──────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_role_exit_event_role_ms
+    ON axon.role_exit_event (role, observed_ms DESC);
 
 CREATE INDEX IF NOT EXISTS vector_persist_outbox_status_idx
     ON axon.VectorPersistOutbox (status, queued_at_ms);
