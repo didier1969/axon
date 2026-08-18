@@ -79,6 +79,16 @@ impl McpServer {
                     "validation_count": entry.validation_count,
                     "has_criteria": entry.has_criteria,
                     "broken_file_evidence_count": entry.broken_file_evidence_count,
+                    // REQ-AXO-902337 piste 1 — name the offenders so no raw
+                    // SQL on soll.Traceability is needed to find what to purge.
+                    "broken_file_evidence_offenders": entry
+                        .broken_file_evidence
+                        .iter()
+                        .map(|b| json!({
+                            "traceability_id": b.traceability_id,
+                            "path": b.artifact_ref
+                        }))
+                        .collect::<Vec<_>>(),
                     "missing_dimensions": entry.missing_dimensions,
                     "missing_dimensions_detailed": missing_dimensions_detailed,
                     "suggested_next_actions": entry.suggested_next_actions,
@@ -125,8 +135,42 @@ impl McpServer {
                 )
             })
             .unwrap_or_default();
+        // REQ-AXO-902337 piste 1 — name the broken file-evidence offenders in
+        // the text surface (bounded) so an LLM sees WHICH references to purge
+        // without dropping to raw SQL on soll.Traceability. Full list is
+        // always in structuredContent.details[].broken_file_evidence_offenders.
+        const BROKEN_OFFENDER_TEXT_CAP: usize = 15;
+        let broken_lines: Vec<String> = summary
+            .entries
+            .iter()
+            .flat_map(|e| {
+                e.broken_file_evidence.iter().map(move |b| {
+                    format!("  {} → {} (trc {})", e.id, b.artifact_ref, b.traceability_id)
+                })
+            })
+            .collect();
+        let broken_section = if broken_lines.is_empty() {
+            String::new()
+        } else {
+            let total = broken_lines.len();
+            let shown: Vec<String> = broken_lines
+                .into_iter()
+                .take(BROKEN_OFFENDER_TEXT_CAP)
+                .collect();
+            let footer = match total.saturating_sub(shown.len()) {
+                0 => String::new(),
+                more => format!(
+                    "\n  (+{more} more — full list in structuredContent.details[].broken_file_evidence_offenders)"
+                ),
+            };
+            format!(
+                "\n\nBroken file evidence ({total} reference(s) to repair or remove):\n{}{}",
+                shown.join("\n"),
+                footer
+            )
+        };
         let text = format!(
-            "Requirement verification: done={}, partial={}, missing={}\n\nTop gaps:\n{}{}",
+            "Requirement verification: done={}, partial={}, missing={}\n\nTop gaps:\n{}{}{}",
             summary.done,
             summary.partial,
             summary.missing,
@@ -135,7 +179,8 @@ impl McpServer {
             } else {
                 top_gaps.join("\n")
             },
-            next_to_close
+            next_to_close,
+            broken_section
         );
 
         // REQ-AXO-91527 (MIL-AXO-019 Tier B) — tri-modal envelope.

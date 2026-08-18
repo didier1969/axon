@@ -1,5 +1,15 @@
 use super::*;
 
+/// REQ-AXO-902337 piste 1 — one broken file-evidence reference, named.
+/// A count alone forced SWT to `SELECT ... FROM soll.Traceability` to find
+/// what to purge; carrying the offending traceability id + path makes the
+/// signal actionable without leaving the tool.
+#[derive(Clone, Debug)]
+pub(super) struct BrokenFileEvidence {
+    pub(super) traceability_id: String,
+    pub(super) artifact_ref: String,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct RequirementCoverageEntry {
     pub(super) id: String,
@@ -8,6 +18,9 @@ pub(super) struct RequirementCoverageEntry {
     pub(super) validation_count: usize,
     pub(super) has_criteria: bool,
     pub(super) broken_file_evidence_count: usize,
+    /// REQ-AXO-902337 piste 1 — the named offenders behind
+    /// `broken_file_evidence_count` (empty when the count is 0).
+    pub(super) broken_file_evidence: Vec<BrokenFileEvidence>,
     pub(super) state: String,
     pub(super) missing_dimensions: Vec<String>,
     pub(super) suggested_next_actions: Vec<String>,

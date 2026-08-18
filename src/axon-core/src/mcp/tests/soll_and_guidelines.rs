@@ -7807,6 +7807,70 @@ fn test_soll_verify_requirements_returns_missing_dimensions_and_actions() {
 }
 
 #[test]
+fn test_soll_verify_requirements_names_broken_file_evidence_offenders() {
+    // REQ-AXO-902337 piste 1 — a broken file-evidence reference must be
+    // NAMED (node id + traceability id + path) in the output, not merely
+    // counted. SWT had to drop to raw SQL on soll.Traceability precisely
+    // because only the count was surfaced.
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-902337', 'Requirement', 'AXO', 'Offender naming', 'A broken evidence path must be named', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+    // Absolute path that does not exist → the freshness sweep stat()s it and
+    // records artifact_status='broken'. Absolute so resolution never depends
+    // on the project root.
+    let broken_path = "/nonexistent/axon/req_902337_broken_offender.rs";
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-AXO-902337', 'requirement', 'REQ-AXO-902337', 'file', '{broken_path}', 1.0, 0)"))
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_verify_requirements",
+                "arguments": { "project_code": "AXO" }
+            })),
+            id: Some(json!(902337)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let details = result["data"]["details"].as_array().expect("details");
+    let entry = details
+        .iter()
+        .find(|value| value["id"].as_str() == Some("REQ-AXO-902337"))
+        .expect("requirement entry");
+    assert_eq!(entry["broken_file_evidence_count"].as_u64(), Some(1));
+    let offenders = entry["broken_file_evidence_offenders"]
+        .as_array()
+        .expect("broken_file_evidence_offenders array");
+    assert_eq!(offenders.len(), 1, "exactly one broken offender");
+    let offender = &offenders[0];
+    assert_eq!(offender["path"].as_str(), Some(broken_path));
+    assert_eq!(
+        offender["traceability_id"].as_str(),
+        Some("TRC-AXO-902337")
+    );
+
+    // The path must also appear in the human/LLM text surface, so no raw
+    // SQL is needed to identify what to purge.
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains(broken_path),
+        "text must name the broken evidence path, got: {text}"
+    );
+    assert!(
+        text.contains("REQ-AXO-902337"),
+        "text must name the offending requirement, got: {text}"
+    );
+}
+
+#[test]
 fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_complete() {
     let server = create_test_server();
     let code = "TST".to_string();

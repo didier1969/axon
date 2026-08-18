@@ -1,7 +1,8 @@
 use super::*;
 
 impl McpServer {
-    /// Batched broken-file-evidence count map keyed by requirement_id.
+    /// Batched broken-file-evidence map keyed by requirement_id, carrying the
+    /// NAMED offenders (traceability id + artifact path), not just a count.
     ///
     /// REQ-AXO-320 — Reads from `soll.Traceability.artifact_status` (sweeper
     /// column) instead of `Path::exists()` syscalls in app code. Lazy
@@ -10,10 +11,16 @@ impl McpServer {
     /// unique path) and persisted via one UPDATE. Subsequent calls within
     /// the TTL window are pure SQL and read from index
     /// `soll_traceability_status_idx`.
-    fn broken_file_evidence_counts_by_requirement(
+    ///
+    /// REQ-AXO-902337 piste 1 — the sweep already knows each broken path;
+    /// return the offenders so `soll_verify_requirements` can name them
+    /// instead of forcing raw SQL on `soll.Traceability`. Requirements with
+    /// no broken reference are absent from the map (callers use
+    /// `.get(id)` with a `unwrap_or_default`).
+    fn broken_file_evidence_by_requirement(
         &self,
         project_code: &str,
-    ) -> HashMap<String, usize> {
+    ) -> HashMap<String, Vec<BrokenFileEvidence>> {
         // 5-min TTL: balances staleness (artifacts referenced from SOLL rarely
         // disappear between minutes) against refresh cost (single batched
         // sweep per window).
@@ -128,8 +135,10 @@ impl McpServer {
             fresh
         };
 
-        // Phase 3: fold per-requirement broken counts using freshest status.
-        let mut by_req: HashMap<String, usize> = HashMap::new();
+        // Phase 3: fold the NAMED broken offenders per requirement using the
+        // freshest status. Requirements with only healthy evidence never
+        // enter the map (REQ-AXO-902337 contract) — callers unwrap_or_default.
+        let mut by_req: HashMap<String, Vec<BrokenFileEvidence>> = HashMap::new();
         for row in &all_rows {
             let effective_status: &str = if row.stale {
                 fresh_status
@@ -140,9 +149,13 @@ impl McpServer {
                 row.status.as_str()
             };
             if effective_status == "broken" {
-                *by_req.entry(row.req_id.clone()).or_insert(0) += 1;
-            } else {
-                by_req.entry(row.req_id.clone()).or_insert(0);
+                by_req
+                    .entry(row.req_id.clone())
+                    .or_default()
+                    .push(BrokenFileEvidence {
+                        traceability_id: row.traceability_id.clone(),
+                        artifact_ref: row.artifact_ref.clone(),
+                    });
             }
         }
         by_req
@@ -163,12 +176,12 @@ impl McpServer {
         let val_prefix = format!("VAL-{}-", project_code);
         let mut summary = RequirementCoverageSummary::default();
 
-        // broken_file_evidence_counts_by_requirement still drives the
-        // filesystem freshness sweep (REQ-AXO-320) — keep that SQL path
-        // since it owns the stat() + UPDATE flow. Hot-path callers
-        // already pay this only once per work_plan invocation (cached
-        // upstream by REQ-AXO-319).
-        let broken_counts = self.broken_file_evidence_counts_by_requirement(&project_code);
+        // broken_file_evidence_by_requirement still drives the filesystem
+        // freshness sweep (REQ-AXO-320) — keep that SQL path since it owns
+        // the stat() + UPDATE flow. Hot-path callers already pay this only
+        // once per work_plan invocation (cached upstream by REQ-AXO-319).
+        // REQ-AXO-902337 — it now returns the named offenders per requirement.
+        let broken_by_req = self.broken_file_evidence_by_requirement(&project_code);
 
         // Stable iteration order by id so callers comparing snapshots
         // across calls (tests, diff tooling) see deterministic output.
@@ -194,7 +207,8 @@ impl McpServer {
             let evidence_count = snapshot.traceability_rows_for("requirement", id).count();
             let validation_count =
                 snapshot.count_incoming_edges_with(id, "VERIFIES", Some(&val_prefix));
-            let broken_file_evidence_count = broken_counts.get(id).copied().unwrap_or(0);
+            let broken_file_evidence = broken_by_req.get(id).cloned().unwrap_or_default();
+            let broken_file_evidence_count = broken_file_evidence.len();
 
             let state = requirement_state_from(
                 status.as_str(),
@@ -224,6 +238,7 @@ impl McpServer {
                 validation_count,
                 has_criteria,
                 broken_file_evidence_count,
+                broken_file_evidence,
                 state: state.to_string(),
                 missing_dimensions,
                 suggested_next_actions,
