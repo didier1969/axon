@@ -8820,7 +8820,7 @@ fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
         "entry_points must list the cold-start reading order; got {} steps",
         entry_points.len()
     );
-    // Verify the four canonical kinds are represented.
+    // file + mcp must be represented; `sql` is now FORBIDDEN (REQ-AXO-902355).
     let kinds: std::collections::HashSet<&str> = entry_points
         .iter()
         .filter_map(|e| e.get("kind").and_then(|v| v.as_str()))
@@ -8833,9 +8833,23 @@ fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
         kinds.contains("mcp"),
         "entry_points must include `mcp` steps: {kinds:?}"
     );
+    // REQ-AXO-902355 — the cold-start reading order must NOT prescribe raw SQL:
+    // Vision/Pillar bodies are PUSHED in soll_skeleton (and inlined in the
+    // Continuation block); Decisions pull via soll_get. This assertion used to
+    // REQUIRE a `sql` step — it enforced the very defect VPC filed (inbox 10520);
+    // inverting it prevents the defect's return instead.
     assert!(
-        kinds.contains("sql"),
-        "entry_points must include `sql` steps: {kinds:?}"
+        !kinds.contains("sql"),
+        "entry_points must NOT prescribe raw `sql` reads (REQ-AXO-902355): {kinds:?}"
+    );
+
+    // REQ-AXO-902355 — lock all three residual `SELECT description` prescriptions
+    // (entry_points, soll_skeleton.pull_note, default_kickoff_prompt) at once:
+    // no cold-start read path may hand an LLM a raw soll.Node SELECT.
+    let bundle_str = serde_json::to_string(bundle).unwrap();
+    assert!(
+        !bundle_str.contains("SELECT description"),
+        "kickoff_bundle must not prescribe `SELECT description FROM soll.Node` anywhere (REQ-AXO-902248/902355)"
     );
 
     let content = result["content"][0]["text"].as_str().unwrap();

@@ -873,7 +873,7 @@ impl McpServer {
             // Bodies for the indexed Decisions/Guidelines are intentionally
             // omitted (PULL on demand) to keep the bundle lean.
             "pull_with": "soll_query_context",
-            "pull_note": "decisions_index/guidelines_index list id+title only — fetch a body on demand via soll_query_context(question=<ID>) or sql SELECT description FROM soll.Node WHERE id='<ID>'.",
+            "pull_note": "decisions_index/guidelines_index list id+title only — fetch a body on demand via soll_get(id=<ID>) (canonical, REQ-AXO-902248) or soll_query_context(question=<ID>).",
         })
     }
 
@@ -923,9 +923,9 @@ impl McpServer {
             { "step": 3, "kind": "file", "target": "<persistent_memory>/MEMORY.md", "purpose": "accumulated session memory and active handoff pointer" },
             { "step": 4, "kind": "mcp", "target": "mcp__axon__help", "purpose": "confirm MCP reachable, return Axon identity and tool routing" },
             { "step": 5, "kind": "mcp", "target": "mcp__axon__status mode=brief", "purpose": "runtime instance, profile, freshness, vector backlog" },
-            { "step": 6, "kind": "sql", "target": "SELECT id, title, description FROM soll.Node WHERE project_code = '<CODE>' AND type = 'Vision'", "purpose": "project Vision in full" },
-            { "step": 7, "kind": "sql", "target": "SELECT id, title, description FROM soll.Node WHERE project_code = '<CODE>' AND type = 'Pillar' ORDER BY id", "purpose": "every Pillar description in full" },
-            { "step": 8, "kind": "sql", "target": "SELECT id, title FROM soll.Node WHERE project_code = '<CODE>' AND type IN ('Decision','Milestone') AND status IN ('accepted','delivered','completed') ORDER BY id DESC LIMIT 30", "purpose": "already-completed work" },
+            { "step": 6, "kind": "bundle", "target": "kickoff_bundle.soll_skeleton.vision — also inlined in full in the Continuation block at the top of this response", "purpose": "project Vision in full — already PUSHED, no read needed (REQ-AXO-902355)" },
+            { "step": 7, "kind": "bundle", "target": "kickoff_bundle.soll_skeleton.pillars — bodies inlined in the Continuation block up to a byte budget; any budget-truncated pillar is listed there with its id", "purpose": "every Pillar description — PUSHED; fetch a truncated body via soll_get(id=<ID>) (REQ-AXO-902355)" },
+            { "step": 8, "kind": "mcp", "target": "mcp__axon__soll_get(id=<ID>) for a Decision/Milestone body — ids are in kickoff_bundle.soll_skeleton.decisions_index (id+title)", "purpose": "already-completed work — indexed in soll_skeleton, pull a body on demand (REQ-AXO-902248/902355)" },
             { "step": 9, "kind": "mcp", "target": "mcp__axon__soll_validate project_code=<CODE>", "purpose": "current SOLL invariant violations (target zero)" },
             { "step": 10, "kind": "mcp", "target": "mcp__axon__soll_work_plan project_code=<CODE> format=brief top=5 limit=15", "purpose": "scored topological order of unblockers; wave 1 score is authoritative" }
         ])
@@ -936,7 +936,7 @@ impl McpServer {
     }
 
     fn default_kickoff_prompt() -> &'static str {
-        "Bootstrap prompt seed not yet in SOLL. Run mcp__axon__sql with SELECT description FROM soll.Node WHERE id = 'DEC-PRO-001' once it is seeded. In the meantime, follow entry_points in the bundle in order, then enter the operational loop in methodology_summary."
+        "Bootstrap prompt seed not yet in SOLL. Run mcp__axon__soll_get(id='DEC-PRO-001') once it is seeded (canonical, REQ-AXO-902248). In the meantime, follow entry_points in the bundle in order, then enter the operational loop in methodology_summary."
     }
 
     /// REQ-AXO-143 — validate a session_pointer JSON object supplied via
@@ -1354,6 +1354,18 @@ impl McpServer {
         })
     }
 
+    /// REQ-AXO-902355 — total byte budget for Pillar bodies inlined into
+    /// `content.text` by `render_continuation_block`. Measured 2026-08-18 with
+    /// `length(description)` over `type IN ('Vision','Pillar') AND status='current'`:
+    /// AXO = 14 pillars ≈ 42 KB (Σ), largest single body 8.2 KB, Vision 5.7 KB;
+    /// VPC = 5 pillars ≈ 4.7 KB (Σ), Vision 0.55 KB. 12 KB clears every non-AXO
+    /// corpus measured by an order of magnitude (0 reads for a normal consumer
+    /// like the VPC complainant) and caps AXO's inline at ~¼ of its bulk; the
+    /// remainder degrades to an id+title index carrying a `soll_get` hint. Vision
+    /// (one mandatory node, ≤ 5.7 KB observed) is rendered in full OUTSIDE this
+    /// budget. Change the number only against a fresh measurement.
+    pub(crate) const PILLAR_INLINE_BUDGET_BYTES: usize = 12 * 1024;
+
     /// REQ-AXO-902172 — render the essential Continuation block for `content.text`.
     /// The kickoff bundle is rich but lived ONLY in `data.kickoff_bundle`; an LLM client
     /// reading content alone saw the pointer sentence, never the orientation itself
@@ -1429,6 +1441,71 @@ impl McpServer {
                 .collect();
             if !items.is_empty() {
                 out.push_str(&format!("**Derniers commits REQ:** {}\n", items.join(" · ")));
+            }
+        }
+
+        // REQ-AXO-902355 — PUSH the Vision (full) + Pillar bodies INLINE into
+        // content.text. soll_skeleton already carries them in
+        // data.kickoff_bundle (REQ-AXO-902078), but a client reading content.text
+        // alone never saw them and paid one soll_get per node (VPC inbox 10520):
+        // the "0 read" promise of GUI-PRO-102 (MAJ session 104) only holds if the
+        // bodies reach content.text. Vision is unconditional (one mandatory node);
+        // Pillars inline in id order under PILLAR_INLINE_BUDGET_BYTES, the
+        // remainder degrades to an id+title index with a soll_get hint so the
+        // truncation is LOUD — silent truncation is the exact bug class filed.
+        // The `unavailable` skeleton shape (no vision/pillars keys) and an empty
+        // body both fall through to no dangling block / an explicit note.
+        if let Some(sk) = bundle.get("soll_skeleton") {
+            let node_parts = |n: &serde_json::Value| -> (String, String, Option<String>) {
+                let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                let title = n.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let body = n
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.to_string());
+                (id, title, body)
+            };
+
+            // Vision — full body, unconditional (one mandatory node).
+            if let Some(vision) = sk.get("vision").and_then(|v| v.as_array()) {
+                for v in vision {
+                    let (id, title, body) = node_parts(v);
+                    match body {
+                        Some(b) => out.push_str(&format!("\n### {id} — {title}\n{b}\n")),
+                        None => out.push_str(&format!(
+                            "\n### {id} — {title}\n_(corps vide/illisible — soll_get(id={id}))_\n"
+                        )),
+                    }
+                }
+            }
+
+            // Pillars — full bodies in id order under the byte budget; overflow
+            // and body-less nodes fall to an index carrying a soll_get hint.
+            if let Some(pillars) = sk.get("pillars").and_then(|v| v.as_array()) {
+                if !pillars.is_empty() {
+                    out.push_str("\n**Pillars (PUSH):**\n");
+                    let mut spent = 0usize;
+                    let mut indexed: Vec<String> = Vec::new();
+                    for p in pillars {
+                        let (id, title, body) = node_parts(p);
+                        match body {
+                            Some(b) if spent + b.len() <= Self::PILLAR_INLINE_BUDGET_BYTES => {
+                                spent += b.len();
+                                out.push_str(&format!("\n#### {id} — {title}\n{b}\n"));
+                            }
+                            _ => indexed.push(format!("{id} — {title}")),
+                        }
+                    }
+                    if !indexed.is_empty() {
+                        out.push_str(&format!(
+                            "\n_{} pillar(s) indexé(s) seulement (budget {} Ko atteint) — corps via soll_get(id=…) ou data.kickoff_bundle.soll_skeleton.pillars:_ {}\n",
+                            indexed.len(),
+                            Self::PILLAR_INLINE_BUDGET_BYTES / 1024,
+                            indexed.join(" · ")
+                        ));
+                    }
+                }
             }
         }
 
@@ -2053,7 +2130,7 @@ impl McpServer {
         // sees that the structured bundle is available in data.
         let bundle = self.axon_init_project_bundle(&project_code, project_path);
         response_text.push_str(
-            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, derived_session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, soll_skeleton, capabilities_map, session_toolset_hint). derived_session_pointer (REQ-AXO-902160) auto-orients a fresh session from git HEAD + in-progress REQs + recent REQ commits — no hand-write ; `.explicit` carries the operator-set session_pointer when present. soll_skeleton PUSHES Vision+Pillar bodies and INDEXES Decisions/Guidelines (id+title, pull via soll_query_context); capabilities_map lists the live tool surface; session_toolset_hint is a ready ToolSearch select. Use it to onboard yourself or any future LLM session before doing project-specific work.",
+            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, derived_session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, soll_skeleton, capabilities_map, session_toolset_hint). derived_session_pointer (REQ-AXO-902160) auto-orients a fresh session from git HEAD + in-progress REQs + recent REQ commits — no hand-write ; `.explicit` carries the operator-set session_pointer when present. soll_skeleton's Vision + Pillar bodies are INLINED in full in the Continuation block ABOVE (Pillars up to a byte budget; any overflow is listed there by id with a soll_get hint) and mirrored here for programmatic use — no read needed; Decisions/Guidelines are INDEXED (id+title — pull a body via soll_get(id=<ID>)); capabilities_map lists the live tool surface; session_toolset_hint is a ready ToolSearch select. Use it to onboard yourself or any future LLM session before doing project-specific work.",
         );
 
         // REQ-AXO-902172 — lead with the essential Continuation block INLINE so a client
@@ -2531,6 +2608,88 @@ mod continuation_block_tests {
         assert!(b.contains("Continuation"), "header present: {b}");
         assert!(!b.contains("Session pointer** (`none`"), "no explicit pointer line: {b}");
         assert!(b.contains("no git HEAD"), "derived summary shown: {b}");
+    }
+
+    // REQ-AXO-902355 — soll_skeleton Vision+Pillar bodies must be INLINED in
+    // content.text (VPC inbox 10520: they lived only in data → 6 soll_get).
+    #[test]
+    fn inlines_vision_and_pillar_bodies_under_budget() {
+        let bundle = json!({
+            "session_pointer": {"kind": "none"},
+            "soll_skeleton": {
+                "vision": [{"id": "VIS-VPC-001", "title": "Control plane", "body": "VISION BODY TEXT"}],
+                "pillars": [
+                    {"id": "PIL-VPC-001", "title": "P1", "body": "PILLAR ONE BODY"},
+                    {"id": "PIL-VPC-002", "title": "P2", "body": "PILLAR TWO BODY"},
+                ],
+            },
+        });
+        let b = McpServer::render_continuation_block(&bundle);
+        assert!(b.contains("VIS-VPC-001") && b.contains("VISION BODY TEXT"), "vision inlined: {b}");
+        assert!(b.contains("PIL-VPC-001") && b.contains("PILLAR ONE BODY"), "pillar 1 inlined: {b}");
+        assert!(b.contains("PIL-VPC-002") && b.contains("PILLAR TWO BODY"), "pillar 2 inlined: {b}");
+        // Everything fit → no truncation notice.
+        assert!(!b.contains("indexé(s) seulement"), "no budget notice when all fit: {b}");
+    }
+
+    // REQ-AXO-902355 — over budget, the remainder must degrade to a LOUD id+title
+    // index (silent truncation is the exact class VPC filed).
+    #[test]
+    fn pillars_over_budget_degrade_to_loud_index() {
+        let big = "x".repeat(5000);
+        let bundle = json!({
+            "session_pointer": {"kind": "none"},
+            "soll_skeleton": {
+                "vision": [],
+                "pillars": [
+                    {"id": "PIL-AXO-001", "title": "A", "body": big},
+                    {"id": "PIL-AXO-002", "title": "B", "body": big},
+                    {"id": "PIL-AXO-003", "title": "C", "body": big},
+                ],
+            },
+        });
+        // 5000*2 = 10000 ≤ 12288 budget; the third (→15000) overflows.
+        assert!(2 * 5000 <= McpServer::PILLAR_INLINE_BUDGET_BYTES);
+        assert!(3 * 5000 > McpServer::PILLAR_INLINE_BUDGET_BYTES);
+        let b = McpServer::render_continuation_block(&bundle);
+        assert!(b.contains("#### PIL-AXO-001") && b.contains("#### PIL-AXO-002"), "first two inlined: {b}");
+        assert!(b.contains("indexé(s) seulement"), "loud budget notice present: {b}");
+        assert!(b.contains("PIL-AXO-003"), "overflow pillar id listed in index: {b}");
+        assert!(b.contains("soll_get"), "index carries a pull hint: {b}");
+    }
+
+    // REQ-AXO-902355 — the `unavailable` skeleton shape (no vision/pillars keys)
+    // must not panic nor emit a dangling Pillars header.
+    #[test]
+    fn handles_unavailable_skeleton_shape() {
+        let bundle = json!({
+            "session_pointer": {"kind": "none"},
+            "derived_session_pointer": {"summary": "no git HEAD"},
+            "soll_skeleton": {"status": "unavailable", "note": "no snapshot"},
+        });
+        let b = McpServer::render_continuation_block(&bundle);
+        assert!(b.contains("Continuation"), "base block still renders: {b}");
+        assert!(!b.contains("Pillars (PUSH)"), "no dangling pillars header: {b}");
+    }
+
+    // REQ-AXO-902355 — a pillar whose body is absent/empty must fall to the index,
+    // not render as an empty inline block.
+    #[test]
+    fn bodyless_pillar_falls_to_index() {
+        let bundle = json!({
+            "session_pointer": {"kind": "none"},
+            "soll_skeleton": {
+                "vision": [],
+                "pillars": [
+                    {"id": "PIL-AXO-009", "title": "no body"},
+                    {"id": "PIL-AXO-010", "title": "empty", "body": "   "},
+                ],
+            },
+        });
+        let b = McpServer::render_continuation_block(&bundle);
+        assert!(b.contains("indexé(s) seulement"), "bodyless pillars degrade to index: {b}");
+        assert!(b.contains("PIL-AXO-009") && b.contains("PIL-AXO-010"), "both listed in index: {b}");
+        assert!(!b.contains("#### PIL-AXO-009"), "no empty inline block for bodyless pillar: {b}");
     }
 }
 
