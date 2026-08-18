@@ -5903,6 +5903,69 @@ fn test_tech_debt_inventory_lists_migrations_and_remnants() {
     assert_eq!(migration["by_target_kind"]["ist:indexed_file"].as_i64(), Some(1));
 }
 
+// REQ-AXO-902331 (résidu final) — a TEST function whose name carries the legacy
+// token is NOT migration debt: it exercises the old contract on purpose and is
+// structurally dead (the test harness is not a CALLS edge), so the name scan used
+// to flag it. The IST `tested` marker now excludes it while a real production
+// residue with the same name shape is still reported.
+#[test]
+fn test_detect_remnants_excludes_test_functions_from_name_scan() {
+    let server = create_test_server();
+    // TMG bound to the pipeline ruleset by detect_key (find_tmg_by_detect_key).
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('TMG-AXO-091', 'TechnologyMigration', 'AXO', 'pipeline v1 -> v2', 'residue', 'active', '{\"detect_key\":\"pipeline_v1_to_v2\",\"from_tech\":\"pipeline_v1\",\"to_tech\":\"pipeline_v2\",\"debt_policy\":\"full_clean\"}')")
+        .unwrap();
+    // Two symbols, both matching `_v1([^0-9a-z]|$)` and both structurally dead
+    // (no incoming CALLS edge). Only `tested` differs.
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Symbol (id, name, kind, project_code) VALUES ('AXO::prod::legacy_compose_v1', 'legacy_compose_v1', 'function', 'AXO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Symbol (id, name, kind, project_code, tested) VALUES ('AXO::test::legacy_compose_v1_roundtrip', 'legacy_compose_v1_roundtrip', 'function', 'AXO', true)")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "detect_remnants",
+                "arguments": { "project_code": "AXO", "detect_key": "pipeline_v1_to_v2" }
+            })),
+            id: Some(json!(902331)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    // The production residue is counted; the test function is not.
+    assert_eq!(
+        response["structuredContent"]["total_remnants"].as_i64(),
+        Some(1),
+        "only the production symbol is residue, not the test fn"
+    );
+    // Ground truth on the persisted edges: prod linked, test excluded.
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Edge WHERE relation_type='HAS_REMNANT' AND target_id='AXO::prod::legacy_compose_v1'")
+            .unwrap(),
+        1,
+        "production residue is linked as a remnant"
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Edge WHERE relation_type='HAS_REMNANT' AND target_id='AXO::test::legacy_compose_v1_roundtrip'")
+            .unwrap(),
+        0,
+        "test fn matching the legacy name is NOT flagged as debt"
+    );
+}
+
 // REQ-AXO-902032 (N4) — pre-flight residue helper resolves a file path (exact
 // or repo-relative suffix) back to its migration.
 #[test]

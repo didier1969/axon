@@ -345,9 +345,20 @@ impl McpServer {
         // hoping the name implies it. A dead-but-called-by-dead leaf can slip
         // through; that is the direction this module already chose — "over-stripping
         // only RISKS missing a residue, never inventing one".
+        // REQ-AXO-902331 (résidu final) — a TEST function is never migration debt,
+        // even when its name carries the legacy token: a test EXERCISES the old
+        // contract on purpose, and the detector's own fixture (`pipeline_v1_...`)
+        // is one such name. Tests are structurally dead by the CALLS filter above
+        // (the harness is not an IST edge), so the deadness heuristic alone can't
+        // spare them. The IST already marks them: `tested = true` flags test fns +
+        // fixtures (the `tests_for` marker), distinct from production symbols
+        // (`tested = false`). Excluding them is a principled structural filter, not
+        // a file-exemption list — and `IS NOT TRUE` keeps NULL/false in the scan, so
+        // it can only MISS a residue, never invent one (this module's stated bias).
         let sql = format!(
             "SELECT s.id FROM ist.Symbol s \
              WHERE s.project_code = '{}' AND s.kind IN ({}) AND s.name ~* '{}' \
+             AND s.tested IS NOT TRUE \
              AND NOT EXISTS ( \
                 SELECT 1 FROM ist.Edge e \
                 WHERE e.target_id = s.id AND e.relation_type IN ('CALLS', 'CALLS_NIF') \
