@@ -20,7 +20,7 @@ ORT_TENSORRT_BUILD_PROFILE="${AXON_ORT_TENSORRT_BUILD_PROFILE:-axon_embedding}"
 # TensorRT hard-cut depends on the current ORT/CUDA pair, which the repo pin may
 # intentionally lag. Keep the source explicit and fail fast if versions drift.
 NIXPKGS_SOURCE="${AXON_NIXPKGS_SOURCE:-global}"
-EXPECTED_ORT_VERSION="${AXON_EXPECTED_ORT_VERSION:-1.24.4}"
+EXPECTED_ORT_VERSION="${AXON_EXPECTED_ORT_VERSION:-1.27.1}"
 EXPECTED_CUDA_VERSION="${AXON_EXPECTED_CUDA_VERSION:-12.9}"
 CUDA_ARCHITECTURES="${AXON_CUDA_ARCHITECTURES:-}"
 TENSORRT_PRECHECK_ONLY="${AXON_TENSORRT_PRECHECK_ONLY:-0}"
@@ -158,18 +158,25 @@ CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES//,/;}"
 ORT_TENSORRT_EXTRA_CMAKE_FLAGS=""
 ORT_TENSORRT_DISABLED_FEATURES_JSON="[]"
 if [[ "$ORT_TENSORRT_BUILD_PROFILE" == "axon_embedding" ]]; then
-  # Axon vectorization needs TensorRT/CUDA execution providers, not generative
-  # attention kernels or multi-GPU collectives. Disabling these avoids compiling
-  # many expensive nvcc FlashAttention/NCCL sources while preserving TensorRT EP.
+  # Axon vectorization needs the TensorRT/CUDA execution providers. Unit tests,
+  # NCCL, NHWC ops and traditional ML ops stay OFF (lean build). But the
+  # attention pair MUST stay ON (REQ-AXO-902354): ORT 1.27.1
+  # core/providers/cuda/llm/attention.cc:166 references
+  # onnxruntime::contrib::cuda::kCutlassSafeMaskFilterValue UNCONDITIONALLY, and
+  # that constant is defined only under `#if USE_MEMORY_EFFICIENT_ATTENTION`
+  # (contrib_ops/cuda/bert/cutlass_fmha/memory_efficient_attention.h:21).
+  # Disabling the attention pair broke the compile at 67%; the `full` profile
+  # fails even earlier at the unit-tests CMake ALIAS step. Attention ON + tests
+  # OFF is the only combination that both CONFIGURES and COMPILES on ORT 1.27.1.
   ORT_TENSORRT_EXTRA_CMAKE_FLAGS='
       (lib.cmakeBool "onnxruntime_BUILD_UNIT_TESTS" false)
       (lib.cmakeBool "onnxruntime_ENABLE_CUDA_EP_INTERNAL_TESTS" false)
-      (lib.cmakeBool "onnxruntime_USE_FLASH_ATTENTION" false)
-      (lib.cmakeBool "onnxruntime_USE_MEMORY_EFFICIENT_ATTENTION" false)
+      (lib.cmakeBool "onnxruntime_USE_FLASH_ATTENTION" true)
+      (lib.cmakeBool "onnxruntime_USE_MEMORY_EFFICIENT_ATTENTION" true)
       (lib.cmakeBool "onnxruntime_USE_NCCL" false)
       (lib.cmakeBool "onnxruntime_USE_CUDA_NHWC_OPS" false)
       (lib.cmakeBool "onnxruntime_DISABLE_ML_OPS" true)'
-  ORT_TENSORRT_DISABLED_FEATURES_JSON='["unit_tests","cuda_ep_internal_tests","flash_attention","memory_efficient_attention","nccl","cuda_nhwc_ops","traditional_ml_ops"]'
+  ORT_TENSORRT_DISABLED_FEATURES_JSON='["unit_tests","cuda_ep_internal_tests","nccl","cuda_nhwc_ops","traditional_ml_ops"]'
 fi
 
 case "$NIXPKGS_SOURCE" in
