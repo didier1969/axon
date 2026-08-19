@@ -514,18 +514,25 @@ if [[ "$SKIP_BUILD" -ne 1 ]]; then
   run_step 1 build "$ROOT_DIR/scripts/axon" setup --artifact-only
 fi
 
-# --- Step 4 (manifest) launched EARLY, in background (REQ-AXO-902188) ---
-# The manifest (sha + archive of bin/*) depends ONLY on the build (step 1), NOT on the
-# dev_gate (step 2, read-only on bin/*) nor preflight (step 3). Run it CONCURRENTLY with
-# the dev_gate to take ~10-30s off the critical path; joined at step 4 below (before the
-# step-5 swap, which needs manifest_path). Both sides are read-only on bin/* → no write
-# race. If HEAD moves meanwhile, the ensure_head_stable guards at steps 3/5 fail-close
-# before the (now-stale) manifest is ever used.
+# --- Step 4 (manifest): SYNCHRONOUS at step 4 by default (REQ-AXO-902359) ---
+# The optimisation of REQ-AXO-902188 launched the manifest EARLY, concurrently with
+# the dev_gate, to shave ~2s off the critical path. Its comment reasoned only about
+# WRITE races ("both sides read-only on bin/* → no write race") and missed the SIGNAL
+# dimension: the manifest's release preflight sha256's the release binaries, and a
+# subprocess of it is SIGTERM'd (exit 143) by step 2's dev restart/stop lifecycle —
+# DETERMINISTICALLY (3/3 promotes aborted here, before cutover; standalone the manifest
+# passes in ~2s). ~2s of overlap is not worth a promote that never reaches step 5, so
+# the manifest now runs SYNCHRONOUSLY at step 4 (the existing fallback path there), when
+# no dev lifecycle op runs concurrently. Set PROMOTE_MANIFEST_BG=1 to restore the overlap
+# once the exact signal source is separately root-caused. `manifest_bg_pid` left empty
+# routes step 4 through its synchronous branch.
 manifest_bg_out="$(mktemp)"
 manifest_bg_pid=""
-( "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified ) > "$manifest_bg_out" 2>&1 &
-manifest_bg_pid=$!
-promote_log "== step 4: manifest launched in background (∥ step 2 dev_gate — REQ-AXO-902188) pid=${manifest_bg_pid} =="
+if [[ "${PROMOTE_MANIFEST_BG:-0}" == "1" ]]; then
+  ( "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified ) > "$manifest_bg_out" 2>&1 &
+  manifest_bg_pid=$!
+  promote_log "== step 4: manifest launched in background (∥ step 2 dev_gate — REQ-AXO-902188, opt-in) pid=${manifest_bg_pid} =="
+fi
 
 # --- Step 2: dev gate ---
 # After building, restart dev with the new binary so validate_dev_healthy
