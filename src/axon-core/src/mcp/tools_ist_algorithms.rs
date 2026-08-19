@@ -141,6 +141,16 @@ fn short_symbol_label(id: &str) -> String {
     }
 }
 
+/// REQ-AXO-902361 — a symbol whose id sits in a test/script path is not production
+/// duplication worth acting on; the `dry` digest excludes such pairs (noise, not debt).
+/// Ids embed the path with either `::` (real IST ids) or `/` (some fixtures) separators.
+fn is_test_id(id: &str) -> bool {
+    const FRAG: &[&str] = &[
+        "::tests::", "::test::", "::scripts::", "/tests/", "/test/", "/scripts/",
+    ];
+    FRAG.iter().any(|f| id.contains(f))
+}
+
 fn orphan_intent_over_snapshot(snap: &crate::soll_snapshot::SollSnapshot) -> (usize, usize) {
     let mut orphan = 0usize;
     let mut total = 0usize;
@@ -1269,7 +1279,7 @@ impl McpServer {
                 "counts": counts,
                 "sections": sections,
                 "surfaces_used": ["graph_ram", "soll_ram"],
-                "note": "REQ-AXO-902360 — RAM-native debt digest with an extensible section registry (add a category in collect_debt_sections). dry = SIMILAR_TO near-duplicate pairs (semantic_clones for the token diff); unlinked_soll = intent with 0 traceability (soll_attach_evidence); unlinked_code = wiring_orphans (0 prod caller) + dead orphan_clusters. Ranked by PageRank centrality. Distinct from tech_debt_inventory (migration remnants) and structural_health_worklist (SHI axes)."
+                "note": "REQ-AXO-902360/902361 — RAM-native ACTIONABLE debt digest with an extensible section registry (add a category in collect_debt_sections). dry = SIMILAR_TO near-duplicate pairs excl. test/script (semantic_clones for the token diff); unlinked_soll = OPEN Requirements/Validations with 0 evidence — excludes doc Decisions/Concepts + terminal states (the punch-list, not the raw total; soll_attach_evidence to close); unlinked_code = wiring_orphans (0 prod caller) + dead orphan_clusters. top-N ranked by PageRank centrality. Distinct from tech_debt_inventory (migration remnants) and structural_health_worklist (SHI axes)."
             }
         }))
     }
@@ -1298,7 +1308,6 @@ impl McpServer {
             Vec::new()
         };
         let pr: HashMap<&str, f64> = ranked.iter().map(|(id, s)| (id.as_str(), *s as f64)).collect();
-        let soll_snap = self.soll_cache().snapshot(project);
 
         let mut counts = serde_json::Map::new();
         let mut sections: Vec<Value> = Vec::new();
@@ -1314,6 +1323,11 @@ impl McpServer {
                         if seen.insert(key) {
                             let a = snapshot.id_of(i).to_string();
                             let b = snapshot.id_of(t).to_string();
+                            // REQ-AXO-902361 — a pair touching a test/script/fixture is not
+                            // production duplication to act on; drop it (actionable, not raw).
+                            if is_test_id(&a) || is_test_id(&b) {
+                                continue;
+                            }
                             let score = pr
                                 .get(a.as_str())
                                 .copied()
@@ -1346,40 +1360,53 @@ impl McpServer {
             }));
         }
 
-        // 2) unlinked_soll — intent nodes (REQ/DEC/CPT/VAL) with ZERO traceability evidence.
+        // 2) unlinked_soll — ACTIONABLE only (REQ-AXO-902361): OPEN Requirements + Validations
+        // with zero evidence. Decisions/Concepts are documentation (no code traceability is
+        // expected of them) and terminal states (rejected/superseded/deferred/delivered) are
+        // not to-link — BOTH are excluded (they inflated the v1 count from ~24 to 583). The raw
+        // total stays reachable via soll_verify_requirements; this section is the punch-list,
+        // not the thermometer. Status lives in PG (the RAM snapshot exposes only ids by type),
+        // so this section is a single small indexed query — same posture as the handoff gates.
         if want("unlinked_soll") {
-            let mut orphans: Vec<Value> = Vec::new();
-            let mut total = 0usize;
-            if let Ok(snap) = soll_snap.as_ref() {
-                for ty in ["Requirement", "Decision", "Concept", "Validation"] {
-                    let lower = ty.to_ascii_lowercase();
-                    for id in snap.node_ids_of_type(ty) {
-                        if snap.traceability_count_for(&lower, id) == 0 {
-                            total += 1;
-                            if orphans.len() < top {
-                                orphans.push(json!({
-                                    "id": id,
-                                    "type": ty,
-                                    "remediation": "soll_attach_evidence, or link the intent (soll_manager link)"
-                                }));
-                            }
-                        }
-                    }
-                }
-            }
+            let esc = project.replace('\'', "''");
+            let rows: Vec<Vec<Value>> = self
+                .graph_store
+                .execute_raw_sql_gateway(&format!(
+                    "SELECT n.id, n.type FROM soll.Node n \
+                       WHERE n.project_code = '{esc}' AND n.type IN ('Requirement','Validation') \
+                         AND n.status IN ('current','planned') \
+                         AND NOT EXISTS (SELECT 1 FROM soll.Traceability t WHERE t.soll_entity_id = n.id) \
+                       ORDER BY n.type, n.id"
+                ))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                .unwrap_or_default();
+            let total = rows.len();
+            let offenders: Vec<Value> = rows
+                .iter()
+                .take(top)
+                .map(|r| {
+                    json!({
+                        "id": r.first().and_then(Value::as_str).unwrap_or(""),
+                        "type": r.get(1).and_then(Value::as_str).unwrap_or(""),
+                        "remediation": "soll_attach_evidence, or link/supersede the intent (soll_manager)"
+                    })
+                })
+                .collect();
             counts.insert("unlinked_soll".into(), json!(total));
             sections.push(json!({
                 "key": "unlinked_soll",
-                "description": "SOLL intent nodes with zero traceability evidence",
+                "description": "OPEN Requirements/Validations with zero evidence (actionable — excludes doc Decisions/Concepts and terminal states)",
                 "total_available": total,
-                "offenders": orphans
+                "offenders": offenders
             }));
         }
 
         // 3) unlinked_code — unwired symbols (wiring_orphans) + dead clusters (orphan_clusters).
         if want("unlinked_code") {
-            let declared: HashSet<String> = soll_snap
-                .as_ref()
+            let declared: HashSet<String> = self
+                .soll_cache()
+                .snapshot(project)
                 .map(|snap| {
                     snap.traceability
                         .iter()

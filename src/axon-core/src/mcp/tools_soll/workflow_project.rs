@@ -1696,10 +1696,12 @@ impl McpServer {
         })
     }
 
-    /// REQ-AXO-902360 — the counts-only debt surface pushed into the kickoff bundle at init
-    /// (mirrored at handoff by `axon_handoff_check`). RAM-native, no ranking (top=0 skips
-    /// PageRank); a cold IST snapshot degrades to `available:false` rather than blocking or
-    /// slowing init. Single source with the `debt_digest` tool via `collect_debt_sections`.
+    /// REQ-AXO-902360 / REQ-AXO-902361 — the ACTIONABLE debt surface pushed into the kickoff
+    /// bundle at init (mirrored at handoff by `axon_handoff_check`): counts + the **top 10
+    /// actionable offenders per section**, so a session opens/closes on a concrete punch-list,
+    /// not a bare number. RAM-native (single PageRank + one small SOLL query); a cold IST
+    /// snapshot degrades to `available:false` rather than blocking init. Single source with the
+    /// `debt_digest` tool via `collect_debt_sections`.
     pub(crate) fn debt_digest_kickoff(&self, project_code: &str) -> serde_json::Value {
         let cold = || {
             serde_json::json!({
@@ -1715,11 +1717,12 @@ impl McpServer {
             Some(s) => s,
             None => return cold(),
         };
-        let (counts, _sections) = self.collect_debt_sections(&snapshot, project_code, 0, None);
+        let (counts, sections) = self.collect_debt_sections(&snapshot, project_code, 10, None);
         serde_json::json!({
             "available": true,
             "counts": counts,
-            "hint": "call `debt_digest` for the ranked offenders per section (dry/unlinked_soll/unlinked_code)",
+            "sections": sections,
+            "hint": "top 10 actionable offenders per section are inline above; call `debt_digest top=N` for a deeper list",
         })
     }
 

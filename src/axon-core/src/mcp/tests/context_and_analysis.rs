@@ -5081,8 +5081,12 @@ fn test_debt_digest_orchestrates_ranked_sections_and_filter() {
     let iso = format!("{module}::isolated");
     server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{iso}', 'isolated', 'function', false, true, false, '{code}')")).unwrap();
 
-    // unlinked_soll — a Requirement with zero traceability evidence.
+    // unlinked_soll — an OPEN Requirement with zero evidence (actionable → counted).
     server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-{code}-001', 'Requirement', '{code}', 'orphan req', 'x', 'current', '{{}}')")).unwrap();
+    // REQ-AXO-902361 — these two must be EXCLUDED by the actionable filter: a Decision is
+    // documentation (no code evidence expected), and a `rejected` Requirement is terminal.
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-{code}-001', 'Decision', '{code}', 'doc decision', 'x', 'current', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-{code}-002', 'Requirement', '{code}', 'dead req', 'x', 'rejected', '{{}}')")).unwrap();
 
     assert!(server.ensure_ram_snapshot_warm(&code));
 
@@ -5117,6 +5121,20 @@ fn test_debt_digest_orchestrates_ranked_sections_and_filter() {
         dry["offenders"][0]["pair"].as_array().map_or(false, |p| p.len() == 2),
         "dry offender carries a 2-symbol pair: {dry:?}"
     );
+
+    // REQ-AXO-902361 — the actionable filter: the OPEN REQ is listed; the Decision (doc) and
+    // the rejected REQ (terminal) are NOT.
+    let usoll = sections
+        .iter()
+        .find(|s| s["key"] == "unlinked_soll")
+        .expect("unlinked_soll section");
+    let usoll_ids: std::collections::HashSet<&str> = usoll["offenders"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|o| o["id"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(usoll_ids.contains(format!("REQ-{code}-001").as_str()), "open REQ must be actionable: {usoll:?}");
+    assert!(!usoll_ids.contains(format!("DEC-{code}-001").as_str()), "Decision (doc) must be excluded: {usoll:?}");
+    assert!(!usoll_ids.contains(format!("REQ-{code}-002").as_str()), "rejected REQ (terminal) must be excluded: {usoll:?}");
 
     // `sections=` filter — only `dry` is computed.
     let filtered = call(json!({ "project_code": code, "sections": ["dry"] }));

@@ -573,13 +573,16 @@ impl McpServer {
             "check": "debt_digest",
             "status": if debt_available && debt_total > 0 { "warn" } else { "pass" },
             "detail": if debt_available {
-                format!("{debt_total} structural debt item(s): {} dry, {} unlinked_soll, {} unlinked_code",
+                format!("{debt_total} actionable debt item(s): {} dry, {} unlinked_soll, {} unlinked_code — top 10 per section in `sections`",
                     n_of("dry"), n_of("unlinked_soll"), n_of("unlinked_code"))
             } else {
                 "IST snapshot cold — debt digest not computed".to_string()
             },
             "counts": debt_counts,
-            "remediation": if debt_available && debt_total > 0 { "call `debt_digest` for the ranked offenders (advisory — not a release gate)" } else { "" }
+            // REQ-AXO-902361 — surface the top-10 actionable offenders per section, not just
+            // the counts, so a handoff closes on a concrete punch-list.
+            "sections": debt.get("sections").cloned().unwrap_or_else(|| json!([])),
+            "remediation": if debt_available && debt_total > 0 { "call `debt_digest top=N` for a deeper list (advisory — not a release gate)" } else { "" }
         }));
 
         let overall = if fails > 0 {
