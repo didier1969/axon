@@ -86,6 +86,34 @@ axon_pc_supervisor_pids() {
     pgrep -f "process-compose.*${cfg}" 2>/dev/null | awk 'NF' | sort -u || true
 }
 
+# _axon_filter_pids_running_exe <exe_regex> <pids...> — of the candidate PIDs,
+# keep ONLY those actually EXECUTING a binary whose path matches <exe_regex>
+# (via /proc/<pid>/exe), dropping any that merely REFERENCE the path in their
+# argv. REQ-AXO-902359: `pgrep -f "<binary path>"` matches every cmdline that
+# CONTAINS the path — including an innocent `sha256sum .../cargo-target/release/
+# axon-brain` that the release preflight (create_manifest.py → preflight.sh) runs
+# CONCURRENTLY during a promote. Reaping caught that sha256sum with SIGTERM →
+# the background manifest job failed (exit 143) → the whole promote aborted at
+# step 4, deterministically, before cutover. `/proc/<pid>/exe` is the executable
+# the process is actually running, so it separates "orphan brain" (exe IS the
+# binary → reap) from "reader of the binary path" (exe is sha256sum/cp → spare).
+# A trailing " (deleted)" (binary replaced mid-run) is stripped before matching.
+# Unreadable /proc (permission/race) → PID dropped (the port-anchored SIGKILL
+# escalation in axon_reap_supervisor_tree remains the backstop for the brain).
+_axon_filter_pids_running_exe() {
+    local exe_regex="$1"; shift
+    local pid exe
+    for pid in "$@"; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+        exe="${exe% (deleted)}"
+        [[ -n "$exe" ]] || continue
+        if printf '%s' "$exe" | grep -Eq "$exe_regex"; then
+            printf '%s\n' "$pid"
+        fi
+    done
+}
+
 # axon_repo_runtime_child_pids <project_root> <instance_kind> [node_name] — PIDs
 # of axon-brain / axon-indexer / dashboard BEAM children that belong to THIS repo
 # AND THIS instance. Scoped to "${project_root}" so other clones / projects are
@@ -93,8 +121,10 @@ axon_pc_supervisor_pids() {
 # reaps `live` and vice-versa (the bug: a repo-wide bin/+cargo-target match
 # killed the live brain/indexer during a dev stop). Canonical invariant
 # (CLAUDE.md deployment): live runs the promoted RELEASE binaries under bin/
-# ONLY ; dev runs cargo-target builds (debug or release) ONLY. Empty stdout +
-# rc 0 when none. Belt-and-suspenders sweep after the supervisor is down.
+# ONLY ; dev runs cargo-target builds (debug or release) ONLY. A candidate is
+# kept only if /proc/<pid>/exe IS that binary (REQ-AXO-902359 — a concurrent
+# reader of the path, e.g. the release preflight's sha256sum, is NOT a runtime
+# child and must never be reaped). Empty stdout + rc 0 when none.
 axon_repo_runtime_child_pids() {
     local project_root="${1:?project root required}"
     local instance_kind="${2:?instance kind required}"
@@ -113,6 +143,12 @@ axon_repo_runtime_child_pids() {
             ;;
     esac
     add="$(pgrep -f "$bin_pat" 2>/dev/null || true)"
+    if [[ -n "$add" ]]; then
+        # REQ-AXO-902359 — drop path-referencers (e.g. the promote's concurrent
+        # `sha256sum .../cargo-target/release/axon-brain`); keep only real runtimes.
+        # shellcheck disable=SC2086
+        add="$(_axon_filter_pids_running_exe "$bin_pat" $add)"
+    fi
     [[ -n "$add" ]] && out="$out
 $add"
     # Dashboard BEAM: matched by Erlang node name (cmdline loses project_root).
