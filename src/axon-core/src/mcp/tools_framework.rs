@@ -528,6 +528,35 @@ impl McpServer {
             "remediation": if n_mil > 0 { "soll_manager update status=delivered on each, or justify in the body" } else { "" }
         }));
 
+        // Gate 3 — REQ-AXO-902358 (Originator VPC, inbox msg 10522): the COUVERTURE
+        // half of Step 3, previously the ONLY one of the three still hand-typed. Every
+        // OPEN requirement must hang off a milestone via `MIL --TARGETS--> REQ`; an
+        // orphan REQ has no schedulable parent and silently drops out of the work
+        // plan. Without this gate `axon_handoff_check` returned PASS on a handoff that
+        // left an open REQ parentless — a partial gate presented as covering is worse
+        // than an absent one, it authorises not looking. Canonical query from
+        // GUI-PRO-028 Step 3, verbatim in intent.
+        let orphan_req = rows_of(&format!(
+            "SELECT n.id FROM soll.Node n \
+               WHERE n.type = 'Requirement' AND n.project_code = '{project_code}' \
+                 AND n.status IN ('current','planned') \
+                 AND NOT EXISTS (SELECT 1 FROM soll.Edge e \
+                                 WHERE e.relation_type = 'TARGETS' \
+                                   AND e.target_id = n.id AND e.source_id LIKE 'MIL-%') \
+               LIMIT 50"
+        ));
+        let n_orphan = orphan_req.len();
+        if n_orphan > 0 {
+            warns += 1;
+        }
+        checks.push(json!({
+            "check": "requirement_without_milestone",
+            "status": if n_orphan == 0 { "pass" } else { "warn" },
+            "detail": format!("{n_orphan} open REQ(s) carry no milestone parent"),
+            "offenders": orphan_req.iter().filter_map(|r| r.first().cloned()).collect::<Vec<_>>(),
+            "remediation": if n_orphan > 0 { "soll_manager action=link source_id=<MIL> relation_type=TARGETS target_id=<REQ>, or create a milestone" } else { "" }
+        }));
+
         let overall = if fails > 0 {
             "fail"
         } else if warns > 0 {
@@ -547,11 +576,13 @@ impl McpServer {
                 "status": "ok",
                 "overall": overall,
                 "checks": checks,
-                // REQ-AXO-902250 — the two SOLL hard gates moved OUT of this list
-                // and INTO the automated checks above; what remains here is only
-                // what genuinely cannot be machine-checked.
+                // REQ-AXO-902250 + REQ-AXO-902358 — the THREE SOLL hard gates of
+                // GUI-PRO-028 Step 3 moved OUT of this list and INTO the automated
+                // checks above; what remains here is only what genuinely cannot be
+                // machine-checked.
                 "manual_reminders": [
-                    "GUI-PRO-028 manual steps not auto-checked: practice_put the session's learnings, update the rolling session_pointer (CPT-{P}-052), prune boot docs, audit docs/working-notes, run `cargo test --lib` if runtime logic changed"
+                    "GUI-PRO-028 manual steps not auto-checked: practice_put the session's learnings, update the rolling session_pointer (CPT-{P}-052), prune boot docs, audit docs/working-notes, run `cargo test --lib` if runtime logic changed",
+                    "REQ-AXO-902358 — relève l'inbox (`mcp_inbox_read mode=unread`) en DERNIER geste avant d'annoncer la clôture : une session peut recevoir du courrier pendant qu'elle travaille (symétrique du step 3c de l'init)"
                 ],
                 "follow_up_tools": ["axon_commit_work", "soll_validate", "status"]
             }

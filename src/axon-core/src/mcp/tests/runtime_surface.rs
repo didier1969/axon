@@ -1659,10 +1659,12 @@ fn test_status_brief_text_surfaces_trust_boundary_and_next_best_action() {
     );
 }
 
-/// REQ-AXO-902250 — GUI-PRO-028's two SOLL hard gates now run INSIDE
-/// `axon_handoff_check` instead of being raw SQL the LLM must retype at every
-/// handoff of every project (session 104 mistyped one: `column e.src does not
-/// exist`).
+/// REQ-AXO-902250 + REQ-AXO-902358 — GUI-PRO-028's THREE SOLL hard gates now run
+/// INSIDE `axon_handoff_check` instead of being raw SQL the LLM must retype at
+/// every handoff of every project (session 104 mistyped one: `column e.src does
+/// not exist`). Gate 3 (`requirement_without_milestone`, the couverture half) was
+/// the last one still hand-typed: without it the tool returned PASS while an open
+/// REQ had no milestone parent (Originator VPC, inbox msg 10522).
 ///
 /// The case this pins is the DELIBERATE DIVERGENCE from the prescribed query:
 /// that query only excludes delivered/completed/superseded, so it re-flags
@@ -1684,6 +1686,12 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
     // NOT be flagged (the divergence under test).
     exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HND-900', 'Milestone', 'HND', 'rejected mil', 'x', 'rejected', '{}')");
     exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('MIL-HND-900', 'REQ-HND-002', 'TARGETS', 'HND')");
+    // REQ-AXO-902358 — Gate 3 (couverture): an OPEN REQ with NO milestone parent
+    // must be flagged; an OPEN REQ WITH one (MIL --TARGETS--> REQ) must not.
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-003', 'Requirement', 'HND', 'orphan open req', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-004', 'Requirement', 'HND', 'covered open req', 'x', 'planned', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HND-901', 'Milestone', 'HND', 'live mil', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('MIL-HND-901', 'REQ-HND-004', 'TARGETS', 'HND')");
 
     let result = server
         .axon_handoff_check(&json!({ "project_code": "HND" }))
@@ -1720,6 +1728,22 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
         !mil_offenders.contains(&"MIL-HND-900".to_string()),
         "a REJECTED milestone is a deliberate decision — greening a gate must never \
          push the operator to falsify it; got {mil_offenders:?}"
+    );
+
+    // REQ-AXO-902358 — Gate 3: the couverture check that used to be PASS-invisible.
+    let orphan = find("requirement_without_milestone");
+    let orphan_offenders: Vec<String> = orphan["offenders"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    assert!(
+        orphan_offenders.contains(&"REQ-HND-003".to_string()),
+        "an OPEN REQ with no milestone parent must be flagged, got {orphan_offenders:?}"
+    );
+    assert!(
+        !orphan_offenders.contains(&"REQ-HND-004".to_string()),
+        "an OPEN REQ WITH a milestone parent (MIL --TARGETS--> REQ) must not be flagged, \
+         got {orphan_offenders:?}"
     );
 }
 
