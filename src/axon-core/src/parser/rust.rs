@@ -740,13 +740,52 @@ impl RustParser {
         current_function: &str,
     ) {
         if let Some(name_node) = self.find_child_by_type(node, "identifier") {
-            let name = format!("{}!", name_node.utf8_text(source).unwrap_or(""));
+            let ident = name_node.utf8_text(source).unwrap_or("");
+            let name = format!("{}!", ident);
             result.relations.push(Relation {
                 from: current_function.to_string(),
-                to: name,
+                to: name.clone(),
                 rel_type: "calls".to_string(),
                 properties: HashMap::new(),
             });
+            // REQ-AXO-902361 — a `todo!()` / `unimplemented!()` macro is a
+            // placeholder: code that compiles but panics at runtime = not
+            // delivered. Emit a `STUB` marker symbol, in the SAME shape as
+            // `extract_comment` emits `TODO` — the parser is the single source
+            // of "incompleteness markers", so `debt_digest`/anomalies read the
+            // indexed `kind` instead of re-detecting (DRY) and, because this
+            // fires on the macro's AST node (not a text scan), zero false
+            // positives. Name = `<fn> (todo!)` so the id
+            // (`{proj}::{path}::{name}`) can NEVER collide with the enclosing
+            // function's own id (graph_ingestion dedups on symbol_id).
+            if ident == "todo" || ident == "unimplemented" {
+                // `current_function` is `Class::method` for methods. A `::`/`.` in
+                // the symbol NAME makes graph_ingestion treat it as already-qualified
+                // and DROP the file path from the id (`{proj}::{name}`), so two files
+                // with the same `Foo::bar` stub would collide. Sanitize the separators
+                // → the name stays path-namespaced (`{proj}::{path}::{name}`), unique
+                // per file, and still readable.
+                let fq = current_function.replace("::", "_").replace('.', "_");
+                let marker = if fq.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{} ({})", fq, name)
+                };
+                result.symbols.push(Symbol {
+                    name: marker,
+                    kind: "STUB".to_string(),
+                    start_line: node.start_position().row + 1,
+                    end_line: node.end_position().row + 1,
+                    docstring: None,
+                    is_public: false,
+                    is_entry_point: false,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: HashMap::new(),
+                    embedding: None,
+                });
+            }
         }
         // CPT-AXO-90050 — capture function calls NESTED inside the macro's
         // arguments. tree-sitter does not expand macros, so the args are a raw
@@ -954,6 +993,53 @@ mod tests {
         let println_call: Vec<&&Relation> = cs.iter().filter(|c| c.to == "println!").collect();
         assert_eq!(println_call.len(), 1);
         assert_eq!(println_call[0].from, "alpha");
+    }
+
+    #[test]
+    fn todo_and_unimplemented_macros_emit_stub_marker_symbols() {
+        // REQ-AXO-902361 — the parser is the single source of "stub" detection:
+        // a `todo!()`/`unimplemented!()` macro AST node → a `kind='STUB'` marker
+        // symbol. debt_digest reads the indexed kind (DRY) instead of scanning
+        // content (which matched string literals + the detector's own source).
+        let p = parser();
+        let result = p.parse(
+            "fn done() { let _ = 1; } fn pending() { todo!() } fn later() { unimplemented!(\"x\") } impl Widget { fn build() { todo!() } }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let stubs: Vec<&Symbol> = result.symbols.iter().filter(|s| s.kind == "STUB").collect();
+        assert_eq!(stubs.len(), 3, "one STUB per placeholder macro, got {:?}", stubs);
+        // The enclosing function is named in the marker so the operator can act.
+        assert!(
+            stubs.iter().any(|s| s.name.contains("pending") && s.name.contains("todo!")),
+            "todo!() marker names its fn: {:?}",
+            stubs
+        );
+        assert!(
+            stubs.iter().any(|s| s.name.contains("later") && s.name.contains("unimplemented!")),
+            "unimplemented!() marker names its fn: {:?}",
+            stubs
+        );
+        // A method stub: `current_function` is `Widget::build` — the `::` MUST be
+        // sanitized so the id keeps its file path (no cross-file collision).
+        let method_stub = stubs
+            .iter()
+            .find(|s| s.name.contains("build"))
+            .expect("method stub present");
+        assert!(
+            method_stub.name.contains("Widget_build") && !method_stub.name.contains("::"),
+            "method marker sanitizes `::` to stay path-namespaced: {:?}",
+            method_stub
+        );
+        // A non-stub macro (println!/assert!) must NOT produce a STUB, and a
+        // delivered fn (`done`) must not be flagged.
+        assert!(
+            !stubs.iter().any(|s| s.name.contains("done")),
+            "delivered fn is not a stub: {:?}",
+            stubs
+        );
     }
 
     #[test]

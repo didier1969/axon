@@ -5087,6 +5087,17 @@ fn test_debt_digest_orchestrates_ranked_sections_and_filter() {
     // documentation (no code evidence expected), and a `rejected` Requirement is terminal.
     server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-{code}-001', 'Decision', '{code}', 'doc decision', 'x', 'current', '{{}}')")).unwrap();
     server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-{code}-002', 'Requirement', '{code}', 'dead req', 'x', 'rejected', '{{}}')")).unwrap();
+    // REQ-AXO-902361 — a CURRENT Validation is actionable (counted); a PLANNED Validation is a
+    // MISSING check still to write (operator: "je veux que tu inclues ces validations
+    // manquantes") → also included as actionable open intent.
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-{code}-001', 'Validation', '{code}', 'current val', 'x', 'current', '{{}}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-{code}-002', 'Validation', '{code}', 'planned val', 'x', 'planned', '{{}}')")).unwrap();
+
+    // stubs — the parser emits a `kind='STUB'` marker symbol for a todo!()/unimplemented!()
+    // macro (parser/rust.rs::extract_macro_invocation), name = `<fn> (todo!)`. The digest reads
+    // that indexed kind (not a content scan), so the fixture is exactly what a re-index produces.
+    let stub = format!("{module}::stub_fn (todo!)");
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{stub}', 'stub_fn (todo!)', 'STUB', false, false, false, '{code}')")).unwrap();
 
     assert!(server.ensure_ram_snapshot_warm(&code));
 
@@ -5108,6 +5119,7 @@ fn test_debt_digest_orchestrates_ranked_sections_and_filter() {
     assert!(counts["dry"].as_u64().unwrap_or(0) >= 1, "SIMILAR_TO pair must be counted: {resp:?}");
     assert!(counts["unlinked_code"].as_u64().unwrap_or(0) >= 1, "isolated symbol must be counted: {resp:?}");
     assert!(counts["unlinked_soll"].as_u64().unwrap_or(0) >= 1, "orphan requirement must be counted: {resp:?}");
+    assert!(counts["stubs"].as_u64().unwrap_or(0) >= 1, "todo!() stub must be counted: {resp:?}");
 
     let sections = resp["data"]["sections"].as_array().cloned().unwrap_or_default();
     let keys: std::collections::HashSet<&str> =
@@ -5133,8 +5145,18 @@ fn test_debt_digest_orchestrates_ranked_sections_and_filter() {
         .map(|a| a.iter().filter_map(|o| o["id"].as_str()).collect())
         .unwrap_or_default();
     assert!(usoll_ids.contains(format!("REQ-{code}-001").as_str()), "open REQ must be actionable: {usoll:?}");
+    assert!(usoll_ids.contains(format!("VAL-{code}-001").as_str()), "current Validation must be actionable: {usoll:?}");
+    assert!(usoll_ids.contains(format!("VAL-{code}-002").as_str()), "planned Validation (missing check) must be included: {usoll:?}");
     assert!(!usoll_ids.contains(format!("DEC-{code}-001").as_str()), "Decision (doc) must be excluded: {usoll:?}");
     assert!(!usoll_ids.contains(format!("REQ-{code}-002").as_str()), "rejected REQ (terminal) must be excluded: {usoll:?}");
+
+    // REQ-AXO-902361 — the stubs section lists the todo!() placeholder.
+    let stubs = sections.iter().find(|s| s["key"] == "stubs").expect("stubs section");
+    let has_stub = stubs["offenders"]
+        .as_array()
+        .map(|a| a.iter().any(|o| o["id"].as_str().map_or(false, |id| id.contains("stub_fn"))))
+        .unwrap_or(false);
+    assert!(has_stub, "todo!() stub must be listed in the stubs section: {stubs:?}");
 
     // `sections=` filter — only `dry` is computed.
     let filtered = call(json!({ "project_code": code, "sections": ["dry"] }));

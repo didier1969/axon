@@ -1264,11 +1264,12 @@ impl McpServer {
 
         let count_of = |k: &str| counts.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
         let summary = format!(
-            "debt_digest {} : {} dry (SIMILAR_TO pairs) · {} unlinked_soll (intent w/o evidence) · {} unlinked_code (unwired symbols/clusters). Top {} per section ranked by centrality in data.sections.",
+            "debt_digest {} : {} dry (SIMILAR_TO pairs) · {} unlinked_soll (open intent w/o evidence, incl. missing validations) · {} unlinked_code (unwired symbols/clusters) · {} stubs (todo!/unimplemented!). Top {} per section ranked by centrality in data.sections.",
             project,
             count_of("dry"),
             count_of("unlinked_soll"),
             count_of("unlinked_code"),
+            count_of("stubs"),
             top
         );
         Some(json!({
@@ -1396,7 +1397,7 @@ impl McpServer {
             counts.insert("unlinked_soll".into(), json!(total));
             sections.push(json!({
                 "key": "unlinked_soll",
-                "description": "OPEN Requirements/Validations with zero evidence (actionable — excludes doc Decisions/Concepts and terminal states)",
+                "description": "Actionable open intent with zero evidence: OPEN Requirements + OPEN Validations (current/planned). A planned Validation = a MISSING check to write (kept, it is real work). Excludes doc Decisions/Concepts and terminal states.",
                 "total_available": total,
                 "offenders": offenders
             }));
@@ -1477,6 +1478,62 @@ impl McpServer {
                 "total_available": n_symbols + n_clusters,
                 "unwired_symbols": n_symbols,
                 "dead_clusters": n_clusters,
+                "offenders": offenders
+            }));
+        }
+
+        // 4) stubs — placeholder / unfinished code: a `todo!()` / `unimplemented!()`
+        // macro compiles but panics at runtime = not delivered. REQ-AXO-902361
+        // (operator: "je déteste les stubs"). DETECTION IS THE PARSER'S JOB, NOT the
+        // digest's: `parser/rust.rs::extract_macro_invocation` emits a `kind='STUB'`
+        // marker symbol on the macro's AST node (single source, DRY). So this section
+        // just reads the indexed kind — an exact, correct-by-construction query. (The
+        // previous `content LIKE '%todo!(%'` scan was BROKEN: it matched string
+        // literals, tests, and the detector's OWN source — 5/5 false positives on AXO.)
+        // The RAM CSR can't serve this: `NodeKind` is a fixed enum, so 'STUB' collapses
+        // to `Other`/"" and is indistinguishable there — hence the PG read on the
+        // indexed column, same posture as unlinked_soll.
+        if want("stubs") {
+            let esc = project.replace('\'', "''");
+            let rows: Vec<Vec<Value>> = self
+                .graph_store
+                .execute_raw_sql_gateway(&format!(
+                    "SELECT id FROM ist.Symbol \
+                       WHERE project_code = '{esc}' AND kind = 'STUB' LIMIT 500"
+                ))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                .unwrap_or_default();
+            // A stub inside a test/script/fixture is not production debt to act on
+            // (same actionable filter as `dry`).
+            let mut ranked_stubs: Vec<(String, f64)> = rows
+                .iter()
+                .filter_map(|r| r.first().and_then(Value::as_str).map(str::to_string))
+                .filter(|id| !is_test_id(id))
+                .map(|id| {
+                    let s = pr.get(id.as_str()).copied().unwrap_or(0.0);
+                    (id, s)
+                })
+                .collect();
+            let total = ranked_stubs.len();
+            ranked_stubs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let offenders: Vec<Value> = ranked_stubs
+                .iter()
+                .take(top)
+                .map(|(id, s)| {
+                    json!({
+                        "id": id,
+                        "label": short_symbol_label(id),
+                        "score": s,
+                        "remediation": "implement it — a todo!()/unimplemented!() placeholder is not delivered"
+                    })
+                })
+                .collect();
+            counts.insert("stubs".into(), json!(total));
+            sections.push(json!({
+                "key": "stubs",
+                "description": "placeholder code: todo!()/unimplemented!() macros (AST-detected, kind=STUB) — deliver or delete",
+                "total_available": total,
                 "offenders": offenders
             }));
         }

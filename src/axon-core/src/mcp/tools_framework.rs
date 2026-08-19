@@ -565,7 +565,7 @@ impl McpServer {
         let debt_available = debt.get("available").and_then(Value::as_bool).unwrap_or(false);
         let debt_counts = debt.get("counts").cloned().unwrap_or_else(|| json!({}));
         let n_of = |k: &str| debt_counts.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let debt_total = n_of("dry") + n_of("unlinked_soll") + n_of("unlinked_code");
+        let debt_total = n_of("dry") + n_of("unlinked_soll") + n_of("unlinked_code") + n_of("stubs");
         if debt_available && debt_total > 0 {
             warns += 1;
         }
@@ -573,8 +573,8 @@ impl McpServer {
             "check": "debt_digest",
             "status": if debt_available && debt_total > 0 { "warn" } else { "pass" },
             "detail": if debt_available {
-                format!("{debt_total} actionable debt item(s): {} dry, {} unlinked_soll, {} unlinked_code — top 10 per section in `sections`",
-                    n_of("dry"), n_of("unlinked_soll"), n_of("unlinked_code"))
+                format!("{debt_total} actionable debt item(s): {} dry, {} unlinked_soll, {} unlinked_code, {} stubs — top 10 per section in `sections`",
+                    n_of("dry"), n_of("unlinked_soll"), n_of("unlinked_code"), n_of("stubs"))
             } else {
                 "IST snapshot cold — debt digest not computed".to_string()
             },
