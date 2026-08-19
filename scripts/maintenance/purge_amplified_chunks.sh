@@ -75,6 +75,26 @@ case "${1:-}" in
     *)            printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
 esac
 
+# REQ-AXO-902340 — the designation criterion is selectable via AXON_PURGE_CRITERION.
+# `amplification` (default) catches prefix-DUPLICATED chunks (REQ-AXO-902335): each
+# chunk re-contains the file, amplification ≫ 1. `oversized` catches chunks LARGER
+# than the model window (max token_count > WINDOW): they partition the file fine
+# (amplification ~1.4×) but the embedder TRUNCATES each to 512 tokens, so ~90 % of a
+# big file is never vectorised — indexed, shown 100 % covered, invisible to search.
+# Same delete + RAM-invalidate machinery; only the WHERE changes, kept DRY by
+# parameterising the single designation CTE.
+CRITERION="${AXON_PURGE_CRITERION:-amplification}"
+WINDOW="${AXON_CHUNK_WINDOW:-512}"
+case "$CRITERION" in
+    amplification) SQL_WHERE="amplification >= $AMPLIFICATION_FLOOR"
+                   CRIT_DESC="Σ(token_count) × 4 / file size  >=  ${AMPLIFICATION_FLOOR}×"
+                   METRIC_ORDER="amplification"; METRIC_UNIT="×" ;;
+    oversized)     SQL_WHERE="max_tok > $WINDOW"
+                   CRIT_DESC="max(token_count per file)  >  ${WINDOW} tokens (embedder truncation)"
+                   METRIC_ORDER="max_tok"; METRIC_UNIT=" tok" ;;
+    *)             printf 'unknown AXON_PURGE_CRITERION: %s (want amplification|oversized)\n' "$CRITERION" >&2; exit 2 ;;
+esac
+
 psql_q() { psql "$DB_URL" -At -F'|' -v ON_ERROR_STOP=1 -c "$1"; }
 
 # --- The designation, defined ONCE and reused by report / count / delete ------
@@ -82,7 +102,7 @@ psql_q() { psql "$DB_URL" -At -F'|' -v ON_ERROR_STOP=1 -c "$1"; }
 # drift apart, and the delete is the one you cannot take back.
 read -r -d '' DOOMED_CTE <<'SQL' || true
 WITH per_file AS (
-    SELECT file_path, count(*) AS chunks, sum(token_count) AS tokens
+    SELECT file_path, count(*) AS chunks, sum(token_count) AS tokens, max(token_count) AS max_tok
     FROM ist.chunk
     GROUP BY file_path
 ),
@@ -92,13 +112,14 @@ judged AS (
            f.size_bytes,
            p.chunks,
            p.tokens,
+           p.max_tok,
            (p.tokens * 4.0) / f.size_bytes AS amplification
     FROM per_file p
     JOIN ist.indexedfile f ON f.path = p.file_path
     WHERE f.size_bytes > 0
 ),
 doomed AS (
-    SELECT * FROM judged WHERE amplification >= :floor
+    SELECT * FROM judged WHERE :where
 )
 SQL
 
@@ -176,38 +197,38 @@ print(((d.get('artifacts') or {}).get('axon-indexer') or {}).get('sha256') or ''
 
 # --- Report -------------------------------------------------------------------
 report() {
-    printf '\n== amplified chunks — designation report (REQ-AXO-902335) ==\n\n'
-    printf '  criterion          : Σ(token_count) × 4 / file size  >=  %s×\n' "$AMPLIFICATION_FLOOR"
+    printf '\n== chunk purge — designation report (criterion: %s) ==\n\n' "$CRITERION"
+    printf '  criterion          : %s\n' "$CRIT_DESC"
     printf '  database           : %s\n\n' "$DB_URL"
 
     printf -- '--- corpus totals ---\n'
     psql_q "
-${DOOMED_CTE//:floor/$AMPLIFICATION_FLOOR}
+${DOOMED_CTE//:where/$SQL_WHERE}
 SELECT 'files designated:  ' || count(*)
      || E'\n' || 'chunks to delete:  ' || coalesce(sum(chunks), 0)
      || E'\n' || 'tokens reclaimed:  ' || coalesce(sum(tokens), 0)
-     || E'\n' || 'worst file:        ' || coalesce(round(max(amplification))::text, 'n/a') || '×'
+     || E'\n' || 'worst file:        ' || coalesce(round(max($METRIC_ORDER))::text, 'n/a') || '$METRIC_UNIT'
 FROM doomed;"
 
     printf -- '\n--- by project ---\n'
     psql_q "
-${DOOMED_CTE//:floor/$AMPLIFICATION_FLOOR}
+${DOOMED_CTE//:where/$SQL_WHERE}
 SELECT rpad(project_code, 6) || lpad(count(*)::text, 6) || ' files' ||
        lpad(sum(chunks)::text, 10) || ' chunks' ||
-       lpad(round(max(amplification))::text, 8) || '× worst'
+       lpad(round(max($METRIC_ORDER))::text, 8) || '$METRIC_UNIT worst'
 FROM doomed GROUP BY project_code ORDER BY sum(chunks) DESC;"
 
     printf -- '\n--- 10 worst files ---\n'
     psql_q "
-${DOOMED_CTE//:floor/$AMPLIFICATION_FLOOR}
+${DOOMED_CTE//:where/$SQL_WHERE}
 SELECT rpad(project_code, 5) || lpad(size_bytes::text, 10) || 'B ' ||
-       lpad(chunks::text, 6) || ' chunks ' || lpad(round(amplification)::text, 7) || '×  ' ||
+       lpad(chunks::text, 6) || ' chunks ' || lpad(round($METRIC_ORDER)::text, 7) || '$METRIC_UNIT  ' ||
        split_part(file_path, '/', -1)
-FROM doomed ORDER BY amplification DESC LIMIT 10;"
+FROM doomed ORDER BY $METRIC_ORDER DESC LIMIT 10;"
 
     printf -- '\n--- share of the index ---\n'
     psql_q "
-${DOOMED_CTE//:floor/$AMPLIFICATION_FLOOR}
+${DOOMED_CTE//:where/$SQL_WHERE}
 SELECT 'designated chunks are ' ||
        round(100.0 * coalesce((SELECT sum(chunks) FROM doomed), 0)
              / (SELECT count(*) FROM ist.chunk), 2) || '% of the index';"
@@ -218,7 +239,7 @@ SELECT 'designated chunks are ' ||
 execute() {
     local pct affected prefixes
     pct="$(psql_q "
-${DOOMED_CTE//:floor/$AMPLIFICATION_FLOOR}
+${DOOMED_CTE//:where/$SQL_WHERE}
 SELECT round(100.0 * coalesce((SELECT sum(chunks) FROM doomed), 0)
              / (SELECT count(*) FROM ist.chunk), 2);")"
 
@@ -236,12 +257,12 @@ SELECT round(100.0 * coalesce((SELECT sum(chunks) FROM doomed), 0)
     # listener purges by prefix, and one NOTIFY per file would be thousands of
     # round-trips for the same effect.
     prefixes="$(psql_q "
-${DOOMED_CTE//:floor/$AMPLIFICATION_FLOOR}
+${DOOMED_CTE//:where/$SQL_WHERE}
 SELECT DISTINCT regexp_replace(file_path, '/[^/]+\$', '') FROM doomed;")"
 
     printf -- '\n--- deleting (cascades to ist.chunk and ist.chunkembedding) ---\n'
     affected="$(psql "$DB_URL" -At -v ON_ERROR_STOP=1 -c "
-${DOOMED_CTE//:floor/$AMPLIFICATION_FLOOR}
+${DOOMED_CTE//:where/$SQL_WHERE}
 , gone AS (
     DELETE FROM ist.indexedfile f
     USING doomed d
