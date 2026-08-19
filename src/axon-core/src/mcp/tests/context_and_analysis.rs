@@ -5060,6 +5060,71 @@ fn test_structural_health_worklist_ranks_all_categories_by_roi() {
     std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
 }
 
+/// REQ-AXO-902360 — `debt_digest` orchestrates the RAM-native engines into ranked sections
+/// (dry / unlinked_soll / unlinked_code) in ONE call, and honours the `sections=` filter.
+/// Fixture: a SIMILAR_TO pair (dry), a Requirement with zero traceability (unlinked_soll),
+/// and an isolated function with no caller (unlinked_code).
+#[test]
+fn test_debt_digest_orchestrates_ranked_sections_and_filter() {
+    let _guard = env_lock();
+    let server = create_test_server();
+    let code = "TST".to_string();
+    let module = format!("{code}::src/lib.rs");
+
+    // dry — two symbols joined by a SIMILAR_TO edge.
+    let (dup_a, dup_b) = (format!("{module}::dup_a"), format!("{module}::dup_b"));
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{dup_a}', 'dup_a', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{dup_b}', 'dup_b', 'function', false, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{dup_a}', '{dup_b}', 'SIMILAR_TO', '{code}', 0)")).unwrap();
+
+    // unlinked_code — an isolated function with no caller at all.
+    let iso = format!("{module}::isolated");
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{iso}', 'isolated', 'function', false, true, false, '{code}')")).unwrap();
+
+    // unlinked_soll — a Requirement with zero traceability evidence.
+    server.graph_store.execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-{code}-001', 'Requirement', '{code}', 'orphan req', 'x', 'current', '{{}}')")).unwrap();
+
+    assert!(server.ensure_ram_snapshot_warm(&code));
+
+    let call = |args: Value| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": "debt_digest", "arguments": args })),
+                id: Some(json!(902360)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    let resp = call(json!({ "project_code": code, "top": 10 }));
+    let counts = &resp["data"]["counts"];
+    assert!(counts["dry"].as_u64().unwrap_or(0) >= 1, "SIMILAR_TO pair must be counted: {resp:?}");
+    assert!(counts["unlinked_code"].as_u64().unwrap_or(0) >= 1, "isolated symbol must be counted: {resp:?}");
+    assert!(counts["unlinked_soll"].as_u64().unwrap_or(0) >= 1, "orphan requirement must be counted: {resp:?}");
+
+    let sections = resp["data"]["sections"].as_array().cloned().unwrap_or_default();
+    let keys: std::collections::HashSet<&str> =
+        sections.iter().filter_map(|s| s["key"].as_str()).collect();
+    assert!(
+        keys.contains("dry") && keys.contains("unlinked_soll") && keys.contains("unlinked_code"),
+        "all three sections present: {keys:?}"
+    );
+    let dry = sections.iter().find(|s| s["key"] == "dry").expect("dry section");
+    assert!(
+        dry["offenders"][0]["pair"].as_array().map_or(false, |p| p.len() == 2),
+        "dry offender carries a 2-symbol pair: {dry:?}"
+    );
+
+    // `sections=` filter — only `dry` is computed.
+    let filtered = call(json!({ "project_code": code, "sections": ["dry"] }));
+    let fsections = filtered["data"]["sections"].as_array().cloned().unwrap_or_default();
+    assert_eq!(fsections.len(), 1, "filter yields exactly one section: {fsections:?}");
+    assert_eq!(fsections[0]["key"].as_str(), Some("dry"), "filtered section is dry: {fsections:?}");
+}
+
 // REQ-AXO-902185 slice 1 — the `duplication` sub-score must read `SIMILAR_TO` edges
 // straight from the warm RAM CSR (a plain relation-type count), exactly like the other
 // 5 axes never round-trip PG per call. This test seeds the edge directly (bypassing

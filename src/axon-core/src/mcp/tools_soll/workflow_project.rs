@@ -1662,6 +1662,10 @@ impl McpServer {
         let soll_skeleton = self.soll_skeleton(project_code);
         let capabilities_map = Self::capabilities_map();
         let session_toolset_hint = "select:query,inspect,retrieve_context,impact,soll_query_context,soll_work_plan,soll_manager,document_intent,axon_pre_flight_check,axon_commit_work";
+        // REQ-AXO-902360 — debt_digest at init: counts + pointer ONLY (the "score+pointer"
+        // surface). RAM-native and cheap (no ranking); a cold IST snapshot degrades to
+        // available:false and never blocks init.
+        let debt_digest = self.debt_digest_kickoff(project_code);
         serde_json::json!({
             "kickoff_prompt": kickoff_prompt,
             "kickoff_prompt_source": "soll://Node/DEC-PRO-001",
@@ -1673,6 +1677,9 @@ impl McpServer {
             "active_handoff": active_handoff_alias,
             "in_progress_requirements": in_progress_requirements,
             "wave_1_unblockers": wave_1_unblockers,
+            // REQ-AXO-902360 — worst structural debt at a glance (counts + pointer); pull the
+            // ranked offenders on demand via the `debt_digest` tool.
+            "debt_digest": debt_digest,
             // REQ-AXO-902114 (MBX-2) — unread mailbox at wake: a session onboarding
             // sees pending inter-project messages alongside its SOLL backlog.
             "inbox_unread": self.mailbox_unread_count(project_code),
@@ -1686,6 +1693,33 @@ impl McpServer {
             "soll_skeleton": soll_skeleton,
             "capabilities_map": capabilities_map,
             "session_toolset_hint": session_toolset_hint,
+        })
+    }
+
+    /// REQ-AXO-902360 — the counts-only debt surface pushed into the kickoff bundle at init
+    /// (mirrored at handoff by `axon_handoff_check`). RAM-native, no ranking (top=0 skips
+    /// PageRank); a cold IST snapshot degrades to `available:false` rather than blocking or
+    /// slowing init. Single source with the `debt_digest` tool via `collect_debt_sections`.
+    pub(crate) fn debt_digest_kickoff(&self, project_code: &str) -> serde_json::Value {
+        let cold = || {
+            serde_json::json!({
+                "available": false,
+                "reason": "IST snapshot cold — call `debt_digest` once warm (ist_snapshot_warm)",
+            })
+        };
+        let view = crate::ist_snapshot::process_view();
+        if !view.is_warm(project_code) {
+            return cold();
+        }
+        let snapshot = match view.cache_handle().get(project_code) {
+            Some(s) => s,
+            None => return cold(),
+        };
+        let (counts, _sections) = self.collect_debt_sections(&snapshot, project_code, 0, None);
+        serde_json::json!({
+            "available": true,
+            "counts": counts,
+            "hint": "call `debt_digest` for the ranked offenders per section (dry/unlinked_soll/unlinked_code)",
         })
     }
 

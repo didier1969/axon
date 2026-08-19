@@ -1223,6 +1223,240 @@ impl McpServer {
         }))
     }
 
+    /// REQ-AXO-902360 — `debt_digest`: ONE RAM-native call for the worst structural debt,
+    /// across categories, ranked by centrality (a central offender outweighs a leaf). DRY by
+    /// construction — it ORCHESTRATES the existing engines (SIMILAR_TO edges / SOLL orphan
+    /// intent / `wiring_orphans` / `orphan_clusters`), never re-deriving their logic
+    /// (GUI-PRO-013). Extensible: add a category to `collect_debt_sections` — no new tool, no
+    /// contract change. Surfaced at every init (`kickoff_bundle.debt_digest`, counts+pointer)
+    /// and handoff (`axon_handoff_check`). Distinct from `tech_debt_inventory` (migration
+    /// remnants) and `structural_health_worklist` (SHI axes). Requires `ist_snapshot_warm`.
+    pub(crate) fn axon_debt_digest(&self, args: &Value) -> Option<Value> {
+        let project = match self.ist_resolve_project(args, "debt_digest") {
+            Ok(p) => p,
+            Err(e) => return Some(e),
+        };
+        let view = process_view();
+        if !view.is_warm(&project) {
+            return Some(ist_cache_miss_error("debt_digest", &project));
+        }
+        let snapshot = match view.cache_handle().get(&project) {
+            Some(s) => s,
+            None => return Some(ist_cache_miss_error("debt_digest", &project)),
+        };
+        let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(10).clamp(1, 200) as usize;
+        let wanted: Option<HashSet<String>> = args
+            .get("sections")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect());
+        let (counts, sections) =
+            self.collect_debt_sections(&snapshot, &project, top, wanted.as_ref());
+
+        let count_of = |k: &str| counts.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let summary = format!(
+            "debt_digest {} : {} dry (SIMILAR_TO pairs) · {} unlinked_soll (intent w/o evidence) · {} unlinked_code (unwired symbols/clusters). Top {} per section ranked by centrality in data.sections.",
+            project,
+            count_of("dry"),
+            count_of("unlinked_soll"),
+            count_of("unlinked_code"),
+            top
+        );
+        Some(json!({
+            "content": [{ "type": "text", "text": summary }],
+            "data": {
+                "status": "ok",
+                "project_code": project,
+                "counts": counts,
+                "sections": sections,
+                "surfaces_used": ["graph_ram", "soll_ram"],
+                "note": "REQ-AXO-902360 — RAM-native debt digest with an extensible section registry (add a category in collect_debt_sections). dry = SIMILAR_TO near-duplicate pairs (semantic_clones for the token diff); unlinked_soll = intent with 0 traceability (soll_attach_evidence); unlinked_code = wiring_orphans (0 prod caller) + dead orphan_clusters. Ranked by PageRank centrality. Distinct from tech_debt_inventory (migration remnants) and structural_health_worklist (SHI axes)."
+            }
+        }))
+    }
+
+    /// REQ-AXO-902360 — the shared RAM-native debt collection behind `debt_digest` AND its
+    /// counts-only surfacing at init/handoff (single source — GUI-PRO-013). `top` bounds each
+    /// section's offender list; `counts` are always the TRUE totals (full RAM scan). `wanted`
+    /// = optional section-key filter. The `if want(..)` blocks ARE the registry: add a
+    /// category here and it appears everywhere the digest is consumed (tool + kickoff +
+    /// handoff), no contract change.
+    pub(crate) fn collect_debt_sections(
+        &self,
+        snapshot: &IstGraph,
+        project: &str,
+        top: usize,
+        wanted: Option<&HashSet<String>>,
+    ) -> (serde_json::Map<String, Value>, Vec<Value>) {
+        let want = |k: &str| wanted.map_or(true, |w| w.contains(k));
+        let total_nodes = snapshot.node_count();
+        // PageRank (O(V+E)) is the severity weight — only needed when we actually emit ranked
+        // offenders. Counts-only callers (init/handoff surfacing, top=0) skip it so the
+        // digest never lengthens init/handoff (REQ-AXO-902360 "must not slow init").
+        let ranked = if top > 0 {
+            pagerank_top(snapshot, 0.85, 50, total_nodes.max(1))
+        } else {
+            Vec::new()
+        };
+        let pr: HashMap<&str, f64> = ranked.iter().map(|(id, s)| (id.as_str(), *s as f64)).collect();
+        let soll_snap = self.soll_cache().snapshot(project);
+
+        let mut counts = serde_json::Map::new();
+        let mut sections: Vec<Value> = Vec::new();
+
+        // 1) dry — near-duplicate SIMILAR_TO pairs, ranked by the more-central endpoint.
+        if want("dry") {
+            let mut seen: HashSet<(u32, u32)> = HashSet::new();
+            let mut pairs: Vec<(String, String, f64)> = Vec::new();
+            for i in 0..total_nodes as u32 {
+                for (t, rel) in snapshot.forward_neighbors(i) {
+                    if matches!(rel, crate::ist_snapshot::RelationType::SimilarTo) {
+                        let key = if i <= t { (i, t) } else { (t, i) };
+                        if seen.insert(key) {
+                            let a = snapshot.id_of(i).to_string();
+                            let b = snapshot.id_of(t).to_string();
+                            let score = pr
+                                .get(a.as_str())
+                                .copied()
+                                .unwrap_or(0.0)
+                                .max(pr.get(b.as_str()).copied().unwrap_or(0.0));
+                            pairs.push((a, b, score));
+                        }
+                    }
+                }
+            }
+            let total = pairs.len();
+            pairs.sort_by(|x, y| y.2.partial_cmp(&x.2).unwrap_or(std::cmp::Ordering::Equal));
+            let offenders: Vec<Value> = pairs
+                .iter()
+                .take(top)
+                .map(|(a, b, s)| {
+                    json!({
+                        "pair": [a, b],
+                        "score": s,
+                        "remediation": "factor the shared logic; `semantic_clones` for the token-level diff"
+                    })
+                })
+                .collect();
+            counts.insert("dry".into(), json!(total));
+            sections.push(json!({
+                "key": "dry",
+                "description": "near-duplicate SIMILAR_TO pairs (semantic clones), most-central first",
+                "total_available": total,
+                "offenders": offenders
+            }));
+        }
+
+        // 2) unlinked_soll — intent nodes (REQ/DEC/CPT/VAL) with ZERO traceability evidence.
+        if want("unlinked_soll") {
+            let mut orphans: Vec<Value> = Vec::new();
+            let mut total = 0usize;
+            if let Ok(snap) = soll_snap.as_ref() {
+                for ty in ["Requirement", "Decision", "Concept", "Validation"] {
+                    let lower = ty.to_ascii_lowercase();
+                    for id in snap.node_ids_of_type(ty) {
+                        if snap.traceability_count_for(&lower, id) == 0 {
+                            total += 1;
+                            if orphans.len() < top {
+                                orphans.push(json!({
+                                    "id": id,
+                                    "type": ty,
+                                    "remediation": "soll_attach_evidence, or link the intent (soll_manager link)"
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+            counts.insert("unlinked_soll".into(), json!(total));
+            sections.push(json!({
+                "key": "unlinked_soll",
+                "description": "SOLL intent nodes with zero traceability evidence",
+                "total_available": total,
+                "offenders": orphans
+            }));
+        }
+
+        // 3) unlinked_code — unwired symbols (wiring_orphans) + dead clusters (orphan_clusters).
+        if want("unlinked_code") {
+            let declared: HashSet<String> = soll_snap
+                .as_ref()
+                .map(|snap| {
+                    snap.traceability
+                        .iter()
+                        .filter(|t| t.artifact_type == "Symbol")
+                        .map(|t| t.artifact_ref.to_ascii_lowercase())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let orphans =
+                crate::ist_snapshot::code_smells::wiring_orphans(snapshot, project, &declared, 1000);
+            let n_symbols = orphans.len();
+            let mut symbol_offenders: Vec<(Value, f64)> = orphans
+                .iter()
+                .map(|o| {
+                    let s = pr.get(o.id.as_str()).copied().unwrap_or(0.0);
+                    (
+                        json!({
+                            "kind": "unwired_symbol",
+                            "id": o.id,
+                            "name": o.name,
+                            "category": o.category,
+                            "score": s,
+                            "remediation": "wire into a prod caller, or declare the entry (soll_attach_evidence role=entry)"
+                        }),
+                        s,
+                    )
+                })
+                .collect();
+            symbol_offenders
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Dead clusters use the NARROW role='entry' convention (same as the S3 gate /
+            // `orphan_clusters` tool), not the broad `declared` set — a small indexed query.
+            let entry_raw = self
+                .graph_store
+                .query_json(
+                    "SELECT artifact_ref FROM soll.Traceability \
+                     WHERE artifact_type = 'Symbol' AND metadata->>'role' = 'entry'",
+                )
+                .unwrap_or_else(|_| "[]".to_string());
+            let declared_entries: HashSet<String> = serde_json::from_str::<Vec<Vec<String>>>(&entry_raw)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|r| r.into_iter().next())
+                .map(|s| s.to_ascii_lowercase())
+                .collect();
+            let report = crate::ist_snapshot::code_smells::orphan_clusters(
+                snapshot,
+                project,
+                &declared_entries,
+            );
+            let n_clusters = report.clusters.len();
+
+            let mut offenders: Vec<Value> =
+                symbol_offenders.into_iter().take(top).map(|(v, _)| v).collect();
+            for c in report.clusters.iter().take(top.saturating_sub(offenders.len())) {
+                offenders.push(json!({
+                    "kind": "dead_cluster",
+                    "size": c.len(),
+                    "nodes": c.iter().take(8).collect::<Vec<_>>(),
+                    "remediation": "the whole group is unreachable from any root — delete it, or wire an entry"
+                }));
+            }
+            counts.insert("unlinked_code".into(), json!(n_symbols + n_clusters));
+            sections.push(json!({
+                "key": "unlinked_code",
+                "description": "unwired symbols (0 prod caller) + dead clusters (unreachable from any root)",
+                "total_available": n_symbols + n_clusters,
+                "unwired_symbols": n_symbols,
+                "dead_clusters": n_clusters,
+                "offenders": offenders
+            }));
+        }
+
+        (counts, sections)
+    }
+
     pub(crate) fn axon_ist_shortest_path(&self, args: &Value) -> Option<Value> {
         let project = match self.ist_resolve_project(args, "ist_shortest_path") {
             Ok(p) => p,

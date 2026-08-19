@@ -557,6 +557,31 @@ impl McpServer {
             "remediation": if n_orphan > 0 { "soll_manager action=link source_id=<MIL> relation_type=TARGETS target_id=<REQ>, or create a milestone" } else { "" }
         }));
 
+        // REQ-AXO-902360 — mirror the structural debt digest at handoff (counts + pointer,
+        // the same RAM-native surface init shows in kickoff_bundle.debt_digest). ADVISORY:
+        // >0 debt = warn, never fail — a release is not blocked on latent duplication/orphans.
+        let debt_project = args.get("project_code").and_then(Value::as_str).unwrap_or("");
+        let debt = self.debt_digest_kickoff(debt_project);
+        let debt_available = debt.get("available").and_then(Value::as_bool).unwrap_or(false);
+        let debt_counts = debt.get("counts").cloned().unwrap_or_else(|| json!({}));
+        let n_of = |k: &str| debt_counts.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let debt_total = n_of("dry") + n_of("unlinked_soll") + n_of("unlinked_code");
+        if debt_available && debt_total > 0 {
+            warns += 1;
+        }
+        checks.push(json!({
+            "check": "debt_digest",
+            "status": if debt_available && debt_total > 0 { "warn" } else { "pass" },
+            "detail": if debt_available {
+                format!("{debt_total} structural debt item(s): {} dry, {} unlinked_soll, {} unlinked_code",
+                    n_of("dry"), n_of("unlinked_soll"), n_of("unlinked_code"))
+            } else {
+                "IST snapshot cold — debt digest not computed".to_string()
+            },
+            "counts": debt_counts,
+            "remediation": if debt_available && debt_total > 0 { "call `debt_digest` for the ranked offenders (advisory — not a release gate)" } else { "" }
+        }));
+
         let overall = if fails > 0 {
             "fail"
         } else if warns > 0 {

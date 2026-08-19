@@ -600,6 +600,19 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "debt_digest",
+                "description": "[GOVERNANCE] REQ-AXO-902360 — ONE fast RAM-native digest of the worst STRUCTURAL DEBT, ranked by centrality (a central offender outweighs a leaf). Three sections in one call: `dry` = near-duplicate SIMILAR_TO pairs (semantic clones) · `unlinked_soll` = SOLL intent (REQ/DEC/CPT/VAL) with zero traceability evidence · `unlinked_code` = unwired symbols (0 prod caller) + dead clusters (unreachable from any root). Orchestrates the existing engines (does NOT duplicate them). DISTINCT from `tech_debt_inventory` (incomplete-migration remnants) and `structural_health_worklist` (SHI axes: coverage/coupling/resilience/acyclicity). Surfaced at init (`axon_init_project.kickoff_bundle.debt_digest`, counts only) + handoff (`axon_handoff_check`). Extensible (section registry). Requires `ist_snapshot_warm`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." },
+                        "top": { "type": "integer", "description": "Max offenders per section (default 10, max 200). Counts are always the true totals." },
+                        "sections": { "type": "array", "items": { "type": "string", "enum": ["dry", "unlinked_soll", "unlinked_code"] }, "description": "Optional filter: only compute these section keys. Omit for all." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "wiring",
                 "description": "[GOVERNANCE] REQ-AXO-902192 (volet 1a, CPT-AXO-90056) — WIRING orphans: defined callables (function/method, INCLUDING public — the gap anomalies/orphan_code skips) that NO production caller reaches via CALLS. `test_only` = reached ONLY by #[test]s = delivered + green test but never wired into prod (the recurring OPV cost: a module that passes its own tests yet nothing in the app calls it). `isolated` = no caller at all (advisory: may be an undetected entry point). Mirror of the `covered` flag (reachable FROM a test). Requires `ist_snapshot_warm`. Slice 1b = a fail-closed gate in axon_pre_flight_check on deliverable-tagged orphans.",
                 "inputSchema": {
