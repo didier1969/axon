@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
 # REQ-AXO-902365 — requeue chunks stuck in embed_status='failed', IN PACED BATCHES.
 #
-# WHY THIS EXISTS: ~233k chunks sat in embed_status='failed' with no vector.
+# WHY THIS EXISTS: ~229k chunks sit in embed_status='failed' with no vector.
 #
-# THE POISON (measured 2026-08-20): BGE-Large has max_position_embeddings=512. A chunk
-# above that is OUT OF CONTRACT, not merely expensive — the ORT run fails on
-# `/embeddings/word_embeddings/Gather` (out-of-range index), and stage_b2 fails the
-# WHOLE batch. So ONE oversized chunk kills its 64 healthy neighbours. The arithmetic
-# closes: 3640 oversized x 64 = 232960 vs 232879 failed measured (one partial batch).
-# Confirmed the other way round: no chunk >512 has EVER embedded (embedded max = 512).
+# 'failed' IS TERMINAL. Nothing in the runtime ever retries it — the sorted-drain
+# reservoir only ever SELECTs embed_status='pending' (graph_ingestion.rs,
+# select_chunks_with_content_needing_embedding). So a transient incident condemns
+# every chunk it touched, permanently, until this script moves them back.
+# That missing bounded-retry policy is REQ-AXO-902382; this script is its manual
+# stand-in, not its replacement.
 #
-# Hence the requeue EXCLUDES oversized chunks and SAYS how many it skipped. Requeueing
-# them re-poisons the queue and re-creates the incident. They stay failed until the
-# chunker stops emitting them (REQ-AXO-902364) — that REQ is the CAUSE of this one.
+# THE CAUSE (measured 2026-08-20): VRAM oversubscription. The indexer sized its GPU
+# budget from the card TOTAL as if it were alone while the brain held ~1.5 GiB; the
+# ORT arena saturated and every batch died in BFCArena::Alloc, failing all 64 healthy
+# chunks with it (REQ-AXO-902373, fixed). Post-fix the batch no longer dies — it falls
+# back to CPU, which is ~100x slower and silent (REQ-AXO-902387).
 #
-# An earlier, DIFFERENT failure mode on the same day (REQ-AXO-902365): the mass reindex
-# triggered an autovacuum storm and the embedder's own status UPDATE blew its
-# statement_timeout (57014). Real, but not what keeps chunks failed now. Both guards
-# below are kept — the autovacuum precondition was manual in the REQ, here it is WIRED
-# (GUI-PRO-118: a hand gesture is not delivered).
+# THE >512-TOKEN EXCLUSION, on independent grounds: BGE-Large has
+# max_position_embeddings=512. No chunk above it has EVER embedded (measured: the max
+# token_count among embedded rows is exactly 512). Requeueing them is guaranteed waste,
+# so they are excluded AND counted out loud. They stay failed until the chunker stops
+# emitting them (REQ-AXO-902364).
+#
+# A same-day autovacuum storm also blew the embedder's status UPDATE past its
+# statement_timeout (57014). Not what keeps chunks failed now, but the precondition is
+# WIRED below rather than left to the operator (GUI-PRO-118).
 #
 # Reports by default; mutates only with --execute.
 #
@@ -160,7 +166,8 @@ while true; do
          WHERE c.id = b.id
         RETURNING 1;" | wc -l)"
 
-    psql_q "SELECT pg_notify('chunk_pending_embed', 'recovery-batch-${batch_no}')" >/dev/null
+    # No NOTIFY: there is no such channel. The sorted-drain reservoir polls
+    # embed_status='pending' on a 200ms->30s backoff, so requeueing IS the signal.
 
     printf 'batch %s: requeued %s (requeueable left: %s) | %s\n' \
         "$batch_no" "$moved" "$(count_eligible)" "$(counts)"
