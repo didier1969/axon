@@ -592,14 +592,52 @@ impl McpServer {
         } else {
             "pass"
         };
-        Some(json!({
-            "content": [{
-                "type": "text",
-                "text": format!(
-                    "Handoff check: {} — {} check(s), {} warn, {} fail",
-                    overall.to_uppercase(), checks.len(), warns, fails
+        // REQ-AXO-902381 — the text used to be the roll-up ALONE: "WARN — 8 check(s),
+        // 3 warn, 0 fail", with WHICH checks warned left in `data.checks`, which the
+        // Claude Code client does not expose. Verified first-hand this session: the
+        // call returned exactly that and there was no way to learn what was wrong
+        // without a second tool. A handoff verdict whose reasons are unreachable
+        // cannot be acted on — the dead end PIL-AXO-002 forbids, and the same shape
+        // as `runtime_filesystem_health` (REQ-AXO-902378) and `debt_digest`
+        // (REQ-AXO-902371).
+        let offender_lines: Vec<String> = checks
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.get("status").and_then(|v| v.as_str()),
+                    Some("warn") | Some("fail")
                 )
-            }],
+            })
+            .map(|c| {
+                format!(
+                    "  - {} **{}** — {}",
+                    match c.get("status").and_then(|v| v.as_str()) {
+                        Some("fail") => "⛔",
+                        _ => "⚠️",
+                    },
+                    c.get("check").and_then(|v| v.as_str()).unwrap_or("?"),
+                    c.get("detail")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(no detail)")
+                )
+            })
+            .collect();
+        let text = if offender_lines.is_empty() {
+            format!(
+                "Handoff check: {} — {} contrôle(s), aucun problème.",
+                overall.to_uppercase(),
+                checks.len()
+            )
+        } else {
+            format!(
+                "Handoff check: {} — {} contrôle(s), {warns} warn, {fails} fail :\n\n{}",
+                overall.to_uppercase(),
+                checks.len(),
+                offender_lines.join("\n")
+            )
+        };
+        Some(json!({
+            "content": [{ "type": "text", "text": text }],
             "data": {
                 "status": "ok",
                 "overall": overall,

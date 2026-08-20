@@ -1264,7 +1264,7 @@ impl McpServer {
 
         let count_of = |k: &str| counts.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
         let summary = format!(
-            "debt_digest {} : {} dry (SIMILAR_TO pairs) · {} unlinked_soll (open intent w/o evidence, incl. missing validations) · {} unlinked_code (unwired symbols/clusters) · {} stubs (todo!/unimplemented!). Top {} per section ranked by centrality in data.sections.",
+            "debt_digest {} : {} dry (SIMILAR_TO pairs) · {} unlinked_soll (open intent w/o evidence, incl. missing validations) · {} unlinked_code (unwired symbols/clusters) · {} stubs (todo!/unimplemented!). Top {} par section, classés par centralité :",
             project,
             count_of("dry"),
             count_of("unlinked_soll"),
@@ -1272,6 +1272,58 @@ impl McpServer {
             count_of("stubs"),
             top
         );
+        // REQ-AXO-902371 — the text used to END on "Top N per section ranked by
+        // centrality **in data.sections**", i.e. it named the actionable list and put
+        // it out of reach: the Claude Code client does not expose `data`. Verified
+        // first-hand this session — the call returned "2089 dry" and there was no way
+        // to learn WHICH pairs without a second tool. Counts alone are not
+        // actionable; the whole point of ranking by centrality is to say what to fix
+        // FIRST. Same shape as `axon_handoff_check` (REQ-AXO-902381) and
+        // `runtime_filesystem_health` (REQ-AXO-902378).
+        let mut body = String::new();
+        for section in &sections {
+            let offenders = section
+                .get("offenders")
+                .and_then(|v| v.as_array())
+                .filter(|a| !a.is_empty());
+            let Some(offenders) = offenders else { continue };
+            body.push_str(&format!(
+                "\n\n**{}** ({} au total, {} affiché(s)) — {}\n",
+                section.get("key").and_then(|v| v.as_str()).unwrap_or("?"),
+                section
+                    .get("total_available")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                offenders.len(),
+                section
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            ));
+            for off in offenders {
+                // Offender shape varies by section (`pair` for dry, `id`/`name`
+                // elsewhere); render whichever identity it carries rather than
+                // forcing one schema on four different kinds of debt.
+                let label = off
+                    .get("pair")
+                    .and_then(|v| v.as_array())
+                    .map(|p| {
+                        p.iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join("  ↔  ")
+                    })
+                    .or_else(|| off.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                    .or_else(|| off.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                    .unwrap_or_else(|| "?".to_string());
+                body.push_str(&format!("  - `{label}`\n"));
+            }
+            if let Some(first) = offenders.first().and_then(|o| o.get("remediation")).and_then(|v| v.as_str()) {
+                body.push_str(&format!("  _→ {first}_\n"));
+            }
+        }
+        let summary = format!("{summary}{body}");
+
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
             "data": {

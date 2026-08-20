@@ -609,7 +609,43 @@ impl McpServer {
             .graph_store
             .query_json(&query)
             .unwrap_or_else(|_| "[]".to_string());
-        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+
+        // REQ-AXO-902368 — `project_path` matched by EQUALITY only, so a path INSIDE a
+        // project resolved to nothing. Verified first-hand:
+        //   /home/dstadel/projects/aps3d            -> APS
+        //   /home/dstadel/projects/aps3d/lib/aps3d  -> "No canonical project found"
+        // An agent working in a subdirectory — the normal case — could not resolve its
+        // own project, while `detect_project` walks ancestors for exactly this reason.
+        // The two resolvers disagreed on what "this path belongs to project X" means.
+        //
+        // Fall back to the DEEPEST registered ancestor: with nested projects the most
+        // specific one wins, which is the only answer that can be right. The trailing
+        // separator matters — `/proj/axon-tools` must not resolve to `/proj/axon`.
+        let mut path_resolved_by_ancestor: Option<String> = None;
+        if rows.is_empty() {
+            if let Some(path) = project_path {
+                let ancestor_sql = format!(
+                    "SELECT project_code, COALESCE(project_name,''), COALESCE(project_path,'') \
+                     FROM soll.ProjectCodeRegistry \
+                     WHERE project_path <> '' \
+                       AND ('{p}' = project_path OR '{p}' LIKE project_path || '/%') \
+                     ORDER BY length(project_path) DESC \
+                     LIMIT 1",
+                    p = escape_sql(path)
+                );
+                let ancestor_raw = self
+                    .graph_store
+                    .query_json(&ancestor_sql)
+                    .unwrap_or_else(|_| "[]".to_string());
+                let ancestor_rows: Vec<Vec<String>> =
+                    serde_json::from_str(&ancestor_raw).unwrap_or_default();
+                if let Some(row) = ancestor_rows.into_iter().next() {
+                    path_resolved_by_ancestor = row.get(2).cloned();
+                    rows = vec![row];
+                }
+            }
+        }
         let matches: Vec<serde_json::Value> = rows
             .iter()
             .filter(|row| row.len() >= 3)
@@ -628,8 +664,15 @@ impl McpServer {
             .unwrap_or_else(|| serde_json::json!({}));
         let found = !matches.is_empty();
         let content = if found {
+            // Say WHICH path answered when it is not the one asked for — a silent
+            // ancestor match would read as an exact hit.
+            let ancestor_note = path_resolved_by_ancestor
+                .as_deref()
+                .filter(|root| Some(*root) != project_path)
+                .map(|root| format!(" — résolu par le projet englobant `{root}`"))
+                .unwrap_or_default();
             format!(
-                "Canonical project found: {} ({})",
+                "Canonical project found: {} ({}){ancestor_note}",
                 first
                     .get("project_name")
                     .and_then(|value| value.as_str())
@@ -647,6 +690,7 @@ impl McpServer {
             "content": [{ "type": "text", "text": content }],
             "data": {
                 "found": found,
+                "resolved_by_ancestor_path": path_resolved_by_ancestor,
                 "ambiguous": matches.len() > 1,
                 "project_code": first.get("project_code").cloned().unwrap_or(serde_json::json!(null)),
                 "project_name": first.get("project_name").cloned().unwrap_or(serde_json::json!(null)),
@@ -870,5 +914,73 @@ mod tests_req_axo_323 {
             sql.ends_with("WHERE project_code = 'PRO'"),
             "must scope WHERE to the project's registry row: {sql}"
         );
+    }
+}
+
+#[cfg(test)]
+mod req_902368_ancestor_path_tests {
+    /// REQ-AXO-902368 — la règle de préfixe, isolée de PG pour être falsifiable.
+    /// Miroir exact du prédicat SQL : `'{p}' = project_path OR '{p}' LIKE project_path || '/%'`.
+    fn path_belongs_to(candidate: &str, project_root: &str) -> bool {
+        candidate == project_root || candidate.starts_with(&format!("{project_root}/"))
+    }
+
+    /// Le plus PROFOND ancêtre l'emporte (projets imbriqués) — miroir de
+    /// `ORDER BY length(project_path) DESC LIMIT 1`.
+    fn deepest<'a>(candidate: &str, roots: &[&'a str]) -> Option<&'a str> {
+        roots
+            .iter()
+            .filter(|r| path_belongs_to(candidate, r))
+            .max_by_key(|r| r.len())
+            .copied()
+    }
+
+    #[test]
+    fn a_subdirectory_resolves_to_its_project() {
+        // Le cas constaté : le chemin racine résolvait, le sous-répertoire non.
+        assert!(path_belongs_to(
+            "/home/dstadel/projects/aps3d/lib/aps3d",
+            "/home/dstadel/projects/aps3d"
+        ));
+        assert!(path_belongs_to(
+            "/home/dstadel/projects/aps3d",
+            "/home/dstadel/projects/aps3d"
+        ));
+    }
+
+    #[test]
+    fn a_sibling_sharing_a_prefix_is_not_a_match() {
+        // LA falsification. Un préfixe nu ferait résoudre `axon-tools` vers `axon` :
+        // le séparateur est ce qui sépare « à l'intérieur de » de « commence pareil ».
+        assert!(!path_belongs_to(
+            "/home/dstadel/projects/axon-tools",
+            "/home/dstadel/projects/axon"
+        ));
+        assert!(!path_belongs_to(
+            "/home/dstadel/projects/axonium/src",
+            "/home/dstadel/projects/axon"
+        ));
+    }
+
+    #[test]
+    fn the_deepest_ancestor_wins_for_nested_projects() {
+        // Un dépôt imbriqué dans un autre : seul le plus spécifique peut être juste.
+        let roots = ["/home/dstadel/projects", "/home/dstadel/projects/axon"];
+        assert_eq!(
+            deepest("/home/dstadel/projects/axon/src/axon-core", &roots),
+            Some("/home/dstadel/projects/axon")
+        );
+        assert_eq!(
+            deepest("/home/dstadel/projects/autre/lib", &roots),
+            Some("/home/dstadel/projects")
+        );
+    }
+
+    #[test]
+    fn an_unregistered_path_still_resolves_to_nothing() {
+        // La branche « pas trouvé » reste ATTEIGNABLE : le repli élargit la
+        // résolution, il ne la rend pas complaisante.
+        let roots = ["/home/dstadel/projects/axon"];
+        assert_eq!(deepest("/var/tmp/ailleurs", &roots), None);
     }
 }
