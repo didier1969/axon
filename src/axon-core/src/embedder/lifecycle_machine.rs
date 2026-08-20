@@ -182,6 +182,12 @@ pub struct LifecycleHeartbeatSnapshot {
     /// verdict in one MCP call without log access (the REQ-AXO-902046 incident
     /// took gdb + 4 h to diagnose because the error was process-local).
     pub b3: crate::pipeline::stage_health::StageHealthSnapshot,
+    /// REQ-AXO-902387 — B2 (GPU embed) VRAM pressure. Published for the SAME
+    /// reason as `b3` and against the opposite failure: B3 surfaces a stage that
+    /// FAILS LOUDLY, B2 surfaces one that SUCCEEDS SLOWLY. On 2026-08-20 every
+    /// batch fell back to the CPU lane, dividing throughput by ~100 while every
+    /// existing signal stayed green — because nothing was failing.
+    pub b2: crate::pipeline::embed_pressure::EmbedPressureSnapshot,
 }
 
 impl LifecycleHeartbeatSnapshot {
@@ -204,6 +210,7 @@ impl LifecycleHeartbeatSnapshot {
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
             b3: crate::pipeline::stage_health::b3_health().snapshot(),
+            b2: crate::pipeline::embed_pressure::b2_pressure().snapshot(),
         }
     }
 }

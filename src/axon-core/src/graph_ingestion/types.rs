@@ -157,6 +157,20 @@ pub struct EmbedderLifecycleHeartbeatRecord {
     pub b3_last_error: Option<String>,
     pub b3_last_error_count: i64,
     pub b3_last_error_last_seen_ms: i64,
+    /// REQ-AXO-902387 — B2 (GPU embed) VRAM pressure, published by the indexer.
+    /// `b2_window_observed` is the DENOMINATOR: 0 means the gauge is NOT ARMED
+    /// (nothing measured yet), never "no pressure" — a verdict without its
+    /// denominator is what let the 2026-08-20 incident stay invisible.
+    pub b2_window_observed: i64,
+    pub b2_window_cpu_fallbacks: i64,
+    /// Largest batch the GPU currently accepts; 0 = no ceiling learned.
+    pub b2_gpu_batch_cap: i64,
+    pub b2_resizes: i64,
+    pub b2_gpu_batches_total: i64,
+    pub b2_cpu_batches_total: i64,
+    /// Combien de fois la session ORT a été recréée pour rendre son arène
+    /// saturée. Un compte qui monte tout seul = budget VRAM trop serré.
+    pub b2_session_recycles: i64,
 }
 
 /// REQ-AXO-901854 — cross-process indexer runtime truth row read from / written

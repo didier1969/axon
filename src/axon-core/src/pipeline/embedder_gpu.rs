@@ -36,6 +36,7 @@ use tracing::{info, warn};
 use crate::embedder::lifecycle_machine::process_lifecycle;
 use crate::embedder::OrtGpuFirstTextEmbedding;
 
+use super::embed_pressure::{b2_pressure, MIN_GPU_BATCH};
 use super::stage_b2::B2Embedder;
 
 /// Wraps a single [`OrtGpuFirstTextEmbedding`] instance behind the
@@ -175,13 +176,12 @@ impl GpuB2Embedder {
     }
 }
 
-impl B2Embedder for GpuB2Embedder {
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            // Empty batch: no work, no wake, no activity bump — an idle GPU
-            // stays droppable.
-            return Ok(Vec::new());
-        }
+impl GpuB2Embedder {
+    /// REQ-AXO-902387 — one inference on the resident session, no resizing and no
+    /// fallback. The session lock is taken and released HERE so that a caller that
+    /// goes on to split the batch, or to recompute it on the CPU, never holds it
+    /// during the (much longer) slow path.
+    fn embed_slice_resident(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let mut guard = self.inner.lock().map_err(|e| {
             anyhow::anyhow!(
                 "GpuB2Embedder mutex poisoned (lane={}, worker={}): {e}",
@@ -205,29 +205,185 @@ impl B2Embedder for GpuB2Embedder {
         process_lifecycle().mark_used();
         // DEC-AXO-901631 — one inference for the whole length-homogeneous
         // batch (sorted-drain guarantees the ordering ; no micro-batching).
-        let outcome = guard
+        guard
             .as_mut()
             .expect("session present after wake-on-demand rebuild")
-            .embed_texts(texts);
+            .embed_texts(texts)
+    }
 
-        match outcome {
-            Ok(vectors) => Ok(vectors),
-            Err(err) if self.use_gpu && is_gpu_allocation_failure(&err.to_string()) => {
-                // REQ-AXO-902373 — the GPU arena is full. Release the session lock
-                // BEFORE the CPU recompute so the idle watchdog and any sibling
-                // worker are not blocked for the (much longer) CPU pass.
-                drop(guard);
+    /// REQ-AXO-902387 — embed one slice, HALVING it and retrying on the GPU when
+    /// the arena refuses its size.
+    ///
+    /// This replaces "arena full → straight to CPU" (REQ-AXO-902373). That version
+    /// lost no chunk and cost a factor of ~100 in throughput, silently: on
+    /// 2026-08-20 every 64-chunk batch asked ORT for a 1.44 GiB arena extension,
+    /// failed, and ran on the CPU while the GPU sat idle. The discriminating
+    /// observation was that SMALL batches from the live feed embedded fine on the
+    /// SAME arena — so the problem is per-batch demand, not the budget.
+    ///
+    /// The CPU lane stays as the floor: it is taken only when a single-text batch
+    /// cannot allocate, which is no longer a sizing problem.
+    fn embed_slice_resizing(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        embed_resizing_with(
+            texts,
+            b2_pressure(),
+            &|slice| self.embed_slice_resident(slice),
+            &|slice| self.embed_batch_on_cpu(slice),
+            // `drop_session` frees the saturated arena; the next
+            // `embed_slice_resident` rebuilds from the on-disk TensorRT engine
+            // cache (~1-3 s warm). Returns false when nothing was resident.
+            &|| self.drop_session(),
+        )
+    }
+}
+
+/// REQ-AXO-902387 — the resizing loop, free of ORT so it can be FALSIFIED.
+///
+/// The acceptance criterion is "a deliberately tiny VRAM budget never fails a
+/// batch — it resizes it". That property is untestable while the loop is welded to
+/// a live CUDA session, and an untestable criterion is one nobody checks. Here the
+/// GPU and CPU lanes are closures, so a test can make the GPU refuse anything above
+/// N and assert that every text still comes back, in order.
+///
+/// `record_gpu_batch` is called only for a batch the GPU actually served; a batch
+/// that had to be split records a `resize` and is counted through its halves.
+fn embed_resizing_with<F, C, R>(
+    texts: &[String],
+    pressure: &super::embed_pressure::EmbedPressure,
+    embed_gpu: &F,
+    embed_cpu: &C,
+    recycle: &R,
+) -> Result<Vec<Vec<f32>>>
+where
+    F: Fn(&[String]) -> Result<Vec<Vec<f32>>>,
+    C: Fn(&[String]) -> Result<Vec<Vec<f32>>>,
+    R: Fn() -> bool,
+{
+    // ONE recycle token for the whole call tree, not one per branch: a batch that
+    // splits would otherwise rebuild the session once per half, and a genuinely
+    // full device would loop through rebuilds instead of falling back. Caught by
+    // `a_genuinely_full_device_recycles_once_then_gives_up_to_cpu`.
+    let token = std::cell::Cell::new(true);
+    embed_resizing_inner(texts, pressure, embed_gpu, embed_cpu, recycle, &token)
+}
+
+/// `recycle_token` is SHARED across the whole split tree and spent by the first
+/// recycle, so a genuinely exhausted device cannot rebuild the session repeatedly.
+fn embed_resizing_inner<F, C, R>(
+    texts: &[String],
+    pressure: &super::embed_pressure::EmbedPressure,
+    embed_gpu: &F,
+    embed_cpu: &C,
+    recycle: &R,
+    recycle_token: &std::cell::Cell<bool>,
+) -> Result<Vec<Vec<f32>>>
+where
+    F: Fn(&[String]) -> Result<Vec<Vec<f32>>>,
+    C: Fn(&[String]) -> Result<Vec<Vec<f32>>>,
+    R: Fn() -> bool,
+{
+    match embed_gpu(texts) {
+        Ok(vectors) => {
+            pressure.record_gpu_batch(texts.len());
+            Ok(vectors)
+        }
+        Err(err) if is_gpu_allocation_failure(&err.to_string()) => {
+            if texts.len() <= MIN_GPU_BATCH {
+                // REQ-AXO-902387 — the arena is exhausted, not merely tight: at one
+                // text per inference there is nothing left to resize. Measured
+                // 2026-08-20 19:27, with batches already down to 8:
+                //   `bfc_arena.cc:358 ... Available memory of 19968 is smaller than
+                //    requested bytes of 1572864`
+                // 19.5 KB free. ORT's BFC arena grows MONOTONICALLY and never
+                // returns memory to the device, so once it saturates no batch size
+                // helps — only a NEW session does. `drop_session` + the lazy rebuild
+                // in `embed_batch` (REQ-AXO-902220) already do exactly that for the
+                // idle case; here the same lever is pulled under pressure.
+                // Bounded to once per batch: on a genuinely full device this must
+                // fall through to the CPU, not rebuild in a loop.
+                if recycle_token.get() && recycle() {
+                    recycle_token.set(false);
+                    pressure.record_session_recycle();
+                    info!(
+                        error = %err,
+                        "GPU arena exhausted — recycling the ORT session to return its \
+                         VRAM, then retrying on GPU (REQ-AXO-902387). A rising \
+                         session_recycles count means the budget is too tight for the \
+                         load: free VRAM or raise AXON_GPU_RESERVE_MB."
+                    );
+                    return embed_resizing_inner(
+                        texts,
+                        pressure,
+                        embed_gpu,
+                        embed_cpu,
+                        recycle,
+                        recycle_token,
+                    );
+                }
+                pressure.record_cpu_batch();
                 warn!(
-                    lane = %self.lane,
-                    worker = self.worker_idx,
                     batch = texts.len(),
                     error = %err,
-                    "GPU could not allocate — recomputing this batch on CPU                      (slower, but no chunk is lost). Raise AXON_GPU_RESERVE_MB or                      lower AXON_CUDA_MEMORY_LIMIT_MB if this repeats."
+                    "GPU cannot allocate a single-text batch even after recycling the \
+                     session — recomputing on CPU (slower, but no chunk is lost). The \
+                     device is genuinely out of memory: free VRAM or raise \
+                     AXON_GPU_RESERVE_MB. Watch b2_cpu_fallback_ratio in \
+                     `embedding_status`."
                 );
-                self.embed_batch_on_cpu(texts)
+                return embed_cpu(texts);
             }
-            Err(err) => Err(err),
+            let half = texts.len() / 2;
+            pressure.record_resize(half);
+            info!(
+                from = texts.len(),
+                to = half,
+                "GPU refused this batch size — halving and retrying on GPU \
+                 (REQ-AXO-902387). The cap is remembered for subsequent batches."
+            );
+            let mut out = embed_resizing_inner(
+                &texts[..half],
+                pressure,
+                embed_gpu,
+                embed_cpu,
+                recycle,
+                recycle_token,
+            )?;
+            out.extend(embed_resizing_inner(
+                &texts[half..],
+                pressure,
+                embed_gpu,
+                embed_cpu,
+                recycle,
+                recycle_token,
+            )?);
+            Ok(out)
         }
+        Err(err) => Err(err),
+    }
+}
+
+impl B2Embedder for GpuB2Embedder {
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            // Empty batch: no work, no wake, no activity bump — an idle GPU
+            // stays droppable.
+            return Ok(Vec::new());
+        }
+        if !self.use_gpu {
+            return self.embed_slice_resident(texts);
+        }
+        // Pre-split at the largest size the GPU is known to accept, so a learned
+        // ceiling is applied BEFORE paying for a failure instead of rediscovering
+        // it batch after batch.
+        let cap = b2_pressure().effective_batch_cap(texts.len());
+        if cap >= texts.len() {
+            return self.embed_slice_resizing(texts);
+        }
+        let mut out = Vec::with_capacity(texts.len());
+        for slice in texts.chunks(cap) {
+            out.extend(self.embed_slice_resizing(slice)?);
+        }
+        Ok(out)
     }
 }
 
@@ -547,6 +703,177 @@ mod tests {
 #[cfg(test)]
 mod req_902373_tests {
     use super::is_gpu_allocation_failure;
+    use super::embed_resizing_with;
+    use super::super::embed_pressure::EmbedPressure;
+    use std::cell::RefCell;
+
+    /// L'erreur ORT VERBATIM de l'incident du 2026-08-20, tronquée au cadre
+    /// allocateur — c'est elle que la boucle doit reconnaître.
+    const ARENA_FULL: &str = "Non-zero status code returned while running Add node. \
+        Name:'/encoder/layer.0/attention/self/query/Add' Status Message: \
+        bfc_arena.cc:358 void* onnxruntime::BFCArena::Alloc";
+
+    /// Un GPU factice qui refuse tout lot strictement plus grand que `budget`,
+    /// exactement comme une arène saturée. Enregistre les tailles tentées.
+    fn gpu_with_budget(
+        budget: usize,
+        seen: &RefCell<Vec<usize>>,
+    ) -> impl Fn(&[String]) -> anyhow::Result<Vec<Vec<f32>>> + '_ {
+        move |texts: &[String]| {
+            seen.borrow_mut().push(texts.len());
+            if texts.len() > budget {
+                anyhow::bail!("{ARENA_FULL}");
+            }
+            Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
+        }
+    }
+
+    fn texts(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("texte-{i}")).collect()
+    }
+
+    #[test]
+    fn a_tiny_budget_resizes_and_never_loses_a_chunk() {
+        // Le critère d'acceptation central de REQ-AXO-902387, rendu falsifiable :
+        // un budget minuscule ne doit JAMAIS faire échouer un lot.
+        let seen = RefCell::new(Vec::new());
+        let pressure = EmbedPressure::new();
+        let batch = texts(64);
+        let out = embed_resizing_with(
+            &batch,
+            &pressure,
+            &gpu_with_budget(4, &seen),
+            &|_| panic!("le lane CPU ne doit PAS être touché : 4 par lot passe sur GPU"),
+            &|| panic!("aucun recyclage nécessaire : le retaillage suffit"),
+        )
+        .expect("un budget contraint retaille, il n'échoue pas");
+
+        assert_eq!(out.len(), 64, "aucun morceau perdu");
+        // Et dans l'ORDRE : le vecteur i doit correspondre au texte i.
+        for (i, vector) in out.iter().enumerate() {
+            assert_eq!(vector[0], batch[i].len() as f32, "morceau {i} désordonné");
+        }
+        let snap = pressure.snapshot();
+        assert_eq!(snap.cpu_batches_total, 0, "aucune bascule CPU");
+        assert!(snap.resizes > 0, "le lot a bien été retaillé");
+        assert_eq!(snap.gpu_batch_cap, Some(4), "le plafond appris est retenu");
+        assert_eq!(snap.verdict(), "healthy");
+    }
+
+    #[test]
+    fn the_cpu_lane_is_the_floor_not_the_first_move() {
+        // Le régime du 2026-08-20 : un lot de 64 partait DIRECTEMENT sur CPU.
+        // Désormais le CPU n'est touché que si un lot d'UN SEUL texte échoue.
+        let seen = RefCell::new(Vec::new());
+        let pressure = EmbedPressure::new();
+        let cpu_calls = RefCell::new(0usize);
+        let out = embed_resizing_with(
+            &texts(8),
+            &pressure,
+            &gpu_with_budget(0, &seen), // même un texte seul est refusé
+            &|slice| {
+                *cpu_calls.borrow_mut() += 1;
+                Ok(slice.iter().map(|t| vec![t.len() as f32]).collect())
+            },
+            &|| false, // rien de résident à recycler
+        )
+        .expect("le CPU rattrape ce que le GPU refuse");
+
+        assert_eq!(out.len(), 8);
+        assert_eq!(*cpu_calls.borrow(), 8, "un appel CPU par texte, pas avant");
+        // Le GPU a bien été RÉESSAYÉ en descendant, pas contourné d'emblée.
+        assert!(
+            seen.borrow().contains(&8) && seen.borrow().contains(&1),
+            "la descente doit passer par 8 puis 1 : {:?}",
+            seen.borrow()
+        );
+        assert_eq!(pressure.snapshot().verdict(), "critical");
+    }
+
+    #[test]
+    fn an_exhausted_arena_is_recycled_before_falling_back_to_cpu() {
+        // Le régime mesuré à 19:27 : « Available memory of 19968 is smaller than
+        // requested bytes of 1572864 ». L'arène BFC ne rend jamais sa mémoire,
+        // donc aucune taille de lot ne passe plus — seule une session neuve aide.
+        let pressure = EmbedPressure::new();
+        let recycled = RefCell::new(false);
+        let out = embed_resizing_with(
+            &texts(4),
+            &pressure,
+            &|slice: &[String]| {
+                if *recycled.borrow() {
+                    Ok(slice.iter().map(|t| vec![t.len() as f32]).collect())
+                } else {
+                    anyhow::bail!("{ARENA_FULL}")
+                }
+            },
+            &|_| panic!("le CPU ne doit être touché QU'APRÈS un recyclage infructueux"),
+            &|| {
+                *recycled.borrow_mut() = true;
+                true
+            },
+        )
+        .expect("une session neuve rend l'arène et le lot passe");
+
+        assert_eq!(out.len(), 4, "aucun morceau perdu");
+        let snap = pressure.snapshot();
+        assert_eq!(snap.session_recycles, 1, "un seul recyclage a suffi");
+        assert_eq!(snap.cpu_batches_total, 0, "le CPU n'a pas été touché");
+    }
+
+    #[test]
+    fn a_genuinely_full_device_recycles_once_then_gives_up_to_cpu() {
+        // La borne : sur un appareil réellement plein, le recyclage ne doit PAS
+        // boucler. Une tentative, puis le CPU.
+        let pressure = EmbedPressure::new();
+        let recycles = RefCell::new(0usize);
+        let cpu_calls = RefCell::new(0usize);
+        let out = embed_resizing_with(
+            &texts(2),
+            &pressure,
+            &|_: &[String]| anyhow::bail!("{ARENA_FULL}"),
+            &|slice: &[String]| {
+                *cpu_calls.borrow_mut() += 1;
+                Ok(slice.iter().map(|t| vec![t.len() as f32]).collect())
+            },
+            &|| {
+                *recycles.borrow_mut() += 1;
+                true
+            },
+        )
+        .expect("le CPU reste le plancher");
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            *recycles.borrow(),
+            1,
+            "un recyclage par lot, jamais une boucle de reconstruction"
+        );
+        assert_eq!(*cpu_calls.borrow(), 2);
+        assert_eq!(pressure.snapshot().verdict(), "critical");
+    }
+
+    #[test]
+    fn a_real_model_error_is_never_mistaken_for_vram_pressure() {
+        // Garde-fou : une erreur de modèle doit REMONTER, jamais partir en CPU —
+        // sinon un vrai bug se cache derrière un ralentissement.
+        let pressure = EmbedPressure::new();
+        let err = embed_resizing_with(
+            &texts(8),
+            &pressure,
+            &|_| anyhow::bail!("input tensor rank mismatch: expected 2, got 3"),
+            &|_| panic!("une erreur de modèle ne doit PAS toucher le lane CPU"),
+            &|| panic!("une erreur de modèle ne doit PAS recycler la session"),
+        )
+        .expect_err("l'erreur doit remonter");
+        assert!(err.to_string().contains("rank mismatch"));
+        assert_eq!(
+            pressure.snapshot().verdict(),
+            "not_armed",
+            "rien n'a été servi : la jauge reste non armée"
+        );
+    }
+
 
     /// The VERBATIM error from the 2026-08-20 incident. Kept literal: the guard has to
     /// recognise what the GPU actually emits, not a paraphrase of it.

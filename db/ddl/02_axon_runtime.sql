@@ -229,6 +229,30 @@ ALTER TABLE axon.EmbedderLifecycleHeartbeat
 ALTER TABLE axon.EmbedderLifecycleHeartbeat
     ADD COLUMN IF NOT EXISTS b3_last_error_last_seen_ms BIGINT NOT NULL DEFAULT 0;
 
+-- REQ-AXO-902387: cross-process B2 (GPU embed) VRAM pressure. Symmetric to the
+-- B3 block above and aimed at the OPPOSITE failure mode. B3 surfaces a stage
+-- that FAILS LOUDLY; B2 surfaces one that SUCCEEDS SLOWLY. On 2026-08-20 every
+-- 64-chunk batch asked ORT for a 1.44 GiB arena extension, failed, and was
+-- recomputed on the CPU lane: throughput fell by ~100x while `b3_health` stayed
+-- HEALTHY and `embedding_status` reported zero failures -- because there were
+-- none. `b2_window_observed` is the DENOMINATOR of the ratio: 0 means NOT
+-- ARMED (nothing measured), never "no pressure". Idempotent for existing
+-- instances; a publisher predating these columns reads back as 0 / not armed.
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b2_window_observed         BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b2_window_cpu_fallbacks    BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b2_gpu_batch_cap           BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b2_resizes                 BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b2_gpu_batches_total       BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b2_cpu_batches_total       BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.EmbedderLifecycleHeartbeat
+    ADD COLUMN IF NOT EXISTS b2_session_recycles        BIGINT NOT NULL DEFAULT 0;
+
 -- REQ-AXO-901854: cross-process indexer runtime truth. Rates/workers/queues
 -- were previously sourced from a brain-LOCAL telemetry snapshot (empty under
 -- brain_only — the indexer, not the brain, runs the pipeline). The indexer

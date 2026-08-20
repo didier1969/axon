@@ -42,8 +42,17 @@ source "$_LIB_DIR/axon-pg-port.sh"
 
 DB_URL="${AXON_LIVE_DATABASE_URL:-postgres://axon@127.0.0.1:${AXON_CANONICAL_PG_PORT:?axon-pg-port.sh not sourced}/axon_live}"
 BATCH="${AXON_RESET_BATCH_SIZE:-20000}"
-DRAIN_FLOOR="${AXON_RESET_DRAIN_FLOOR:-2000}"
-DRAIN_TIMEOUT="${AXON_RESET_DRAIN_TIMEOUT:-900}"
+# Top the queue back up while it still holds work, instead of waiting for it to
+# run dry: the sorted-drain reservoir must never idle mid-recovery. Measured
+# 2026-08-20, draining ~200k chunks: a floor of 2000 with a 900s timeout aborted
+# the run on its own guard after two batches (pending=8108, "stacking work") while
+# the drain was in fact healthy. The floor is a REFILL trigger, not a hard stop.
+DRAIN_FLOOR="${AXON_RESET_DRAIN_FLOOR:-8000}"
+# Embed throughput varies by an order of magnitude with chunk length (the reservoir
+# is ORDER BY token_count, so batches get longer as the drain progresses). A timeout
+# tight enough to catch a real stall on short chunks aborts a healthy run on long
+# ones. 3600s tolerates the slow tail; a genuine stall still trips it.
+DRAIN_TIMEOUT="${AXON_RESET_DRAIN_TIMEOUT:-3600}"
 # Model context window. Chunks above it cannot embed and poison their whole batch.
 MAX_TOKENS="${AXON_EMBED_MAX_TOKENS:-512}"
 MODE="report"
@@ -105,14 +114,23 @@ wait_for_quiet_autovacuum() {
 }
 
 # Wait for the embedder to work the batch off before queueing the next one.
+# Returns 0 when the queue is low enough to refill, 1 only when it is genuinely
+# STUCK — i.e. the timeout elapsed AND the queue did not shrink. A slow drain is
+# not a stalled drain, and aborting one abandons the recovery mid-way.
 wait_for_drain() {
-    local deadline=$(( SECONDS + DRAIN_TIMEOUT )) pending
+    local deadline=$(( SECONDS + DRAIN_TIMEOUT )) pending start
+    start="$(count_of pending)"
     while true; do
         pending="$(count_of pending)"
         (( pending <= DRAIN_FLOOR )) && return 0
         if (( SECONDS >= deadline )); then
-            printf '  ! drain timeout (%ss, pending=%s) — stopping to avoid stacking work.\n' \
-                "$DRAIN_TIMEOUT" "$pending"
+            if (( pending < start )); then
+                printf '  . slow drain (%ss, pending %s -> %s) — still progressing, topping up.\n' \
+                    "$DRAIN_TIMEOUT" "$start" "$pending"
+                return 0
+            fi
+            printf '  ! drain STUCK (%ss, pending %s -> %s, no progress) — stopping.\n' \
+                "$DRAIN_TIMEOUT" "$start" "$pending"
             return 1
         fi
         sleep 15

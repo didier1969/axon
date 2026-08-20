@@ -182,7 +182,8 @@ impl GraphStore {
         let table_ref = self.axon_table_ref("EmbedderLifecycleHeartbeat");
         let raw = self.query_json_writer(&format!(
             "SELECT process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms, compute, compute_source, build_id, \
-                    b3_consecutive_failures, b3_total_failures, b3_total_successes, b3_last_error, b3_last_error_count, b3_last_error_last_seen_ms \
+                    b3_consecutive_failures, b3_total_failures, b3_total_successes, b3_last_error, b3_last_error_count, b3_last_error_last_seen_ms, \
+                    b2_window_observed, b2_window_cpu_fallbacks, b2_gpu_batch_cap, b2_resizes, b2_gpu_batches_total, b2_cpu_batches_total, b2_session_recycles \
              FROM {table_ref} \
              WHERE process_role = '{}' \
              LIMIT 1",
@@ -242,6 +243,16 @@ impl GraphStore {
                 .map(str::to_string),
             b3_last_error_count: row.get(14).and_then(parse_i64_field).unwrap_or_default(),
             b3_last_error_last_seen_ms: row.get(15).and_then(parse_i64_field).unwrap_or_default(),
+            // REQ-AXO-902387 — B2 pressure (additive ALTER ; an older publisher
+            // reads back as 0, which `b2_window_observed == 0` renders as NOT
+            // ARMED rather than as a clean bill of health).
+            b2_window_observed: row.get(16).and_then(parse_i64_field).unwrap_or_default(),
+            b2_window_cpu_fallbacks: row.get(17).and_then(parse_i64_field).unwrap_or_default(),
+            b2_gpu_batch_cap: row.get(18).and_then(parse_i64_field).unwrap_or_default(),
+            b2_resizes: row.get(19).and_then(parse_i64_field).unwrap_or_default(),
+            b2_gpu_batches_total: row.get(20).and_then(parse_i64_field).unwrap_or_default(),
+            b2_cpu_batches_total: row.get(21).and_then(parse_i64_field).unwrap_or_default(),
+            b2_session_recycles: row.get(22).and_then(parse_i64_field).unwrap_or_default(),
         }))
     }
 
@@ -353,8 +364,9 @@ fn build_lifecycle_heartbeat_upsert_sql(
     format!(
         "INSERT INTO axon.EmbedderLifecycleHeartbeat \
          (process_role, phase, last_used_ms, wake_count, sleep_count, pending_count, heartbeat_ms, compute, compute_source, build_id, \
-          b3_consecutive_failures, b3_total_failures, b3_total_successes, b3_last_error, b3_last_error_count, b3_last_error_last_seen_ms) \
-         VALUES ('{}', '{}', {}, {}, {}, {}, {}, '{}', '{}', {}, {}, {}, {}, {}, {}, {}) \
+          b3_consecutive_failures, b3_total_failures, b3_total_successes, b3_last_error, b3_last_error_count, b3_last_error_last_seen_ms, \
+          b2_window_observed, b2_window_cpu_fallbacks, b2_gpu_batch_cap, b2_resizes, b2_gpu_batches_total, b2_cpu_batches_total, b2_session_recycles) \
+         VALUES ('{}', '{}', {}, {}, {}, {}, {}, '{}', '{}', {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}) \
          ON CONFLICT (process_role) DO UPDATE SET \
             phase = EXCLUDED.phase, last_used_ms = EXCLUDED.last_used_ms, \
             wake_count = EXCLUDED.wake_count, sleep_count = EXCLUDED.sleep_count, \
@@ -365,7 +377,14 @@ fn build_lifecycle_heartbeat_upsert_sql(
             b3_total_successes = EXCLUDED.b3_total_successes, \
             b3_last_error = EXCLUDED.b3_last_error, \
             b3_last_error_count = EXCLUDED.b3_last_error_count, \
-            b3_last_error_last_seen_ms = EXCLUDED.b3_last_error_last_seen_ms",
+            b3_last_error_last_seen_ms = EXCLUDED.b3_last_error_last_seen_ms, \
+            b2_window_observed = EXCLUDED.b2_window_observed, \
+            b2_window_cpu_fallbacks = EXCLUDED.b2_window_cpu_fallbacks, \
+            b2_gpu_batch_cap = EXCLUDED.b2_gpu_batch_cap, \
+            b2_resizes = EXCLUDED.b2_resizes, \
+            b2_gpu_batches_total = EXCLUDED.b2_gpu_batches_total, \
+            b2_cpu_batches_total = EXCLUDED.b2_cpu_batches_total, \
+            b2_session_recycles = EXCLUDED.b2_session_recycles",
         GraphStore::escape_sql(process_role),
         snapshot.phase.as_str(),
         snapshot.last_used_ms,
@@ -382,6 +401,13 @@ fn build_lifecycle_heartbeat_upsert_sql(
         b3_last_error_sql,
         b3_last_error_count,
         b3_last_error_last_seen_ms,
+        snapshot.b2.observed,
+        snapshot.b2.cpu_fallbacks,
+        snapshot.b2.gpu_batch_cap.unwrap_or(0),
+        snapshot.b2.resizes,
+        snapshot.b2.gpu_batches_total,
+        snapshot.b2.cpu_batches_total,
+        snapshot.b2.session_recycles,
     )
 }
 
@@ -588,6 +614,16 @@ mod tests {
                     last_seen_ms: 1_700_000_004_000,
                 }),
             },
+            // REQ-AXO-902387 — B2 pressure sous un régime NON trivial (des
+            // bascules ET un plafond appris), pour que le test de forme couvre
+            // vraiment le transport des six colonnes plutôt que des zéros.
+            b2: {
+                let p = crate::pipeline::embed_pressure::EmbedPressure::new();
+                p.record_resize(8);
+                p.record_cpu_batch();
+                p.record_gpu_batch(8);
+                p.snapshot()
+            },
         };
         let sql = super::build_lifecycle_heartbeat_upsert_sql("indexer", &snapshot);
         // Shape contract.
@@ -609,6 +645,13 @@ mod tests {
             "b3_last_error",
             "b3_last_error_count",
             "b3_last_error_last_seen_ms",
+            "b2_window_observed",
+            "b2_window_cpu_fallbacks",
+            "b2_gpu_batch_cap",
+            "b2_resizes",
+            "b2_gpu_batches_total",
+            "b2_cpu_batches_total",
+            "b2_session_recycles",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),
@@ -700,19 +743,27 @@ mod tests {
             compute_source: "unknown".to_string(),
             build_id: None,
             b3: Default::default(),
+            b2: crate::pipeline::embed_pressure::EmbedPressure::new().snapshot(),
         };
         let sql = super::build_lifecycle_heartbeat_upsert_sql("indexer", &snapshot);
         // No quoted build_id literal; the NULL keyword carries the absence.
         assert!(sql.contains("'CPU'"));
         assert!(sql.contains("'unknown'"));
-        // The UPSERT tail now ends with the last B3 column (slice 1b).
-        assert!(sql
-            .trim_end()
-            .ends_with("b3_last_error_last_seen_ms = EXCLUDED.b3_last_error_last_seen_ms"));
+        // The UPSERT tail must be a complete assignment — no trailing comma, which
+        // is what this assertion has always really been guarding. Pinning it to
+        // whichever column happens to be LAST makes every future additive column
+        // break a test that has nothing to say about it (REQ-AXO-902387 hit
+        // exactly that), so assert the invariant instead of the current tail.
+        let tail = sql.trim_end();
+        assert!(
+            !tail.ends_with(',') && tail.contains(" = EXCLUDED."),
+            "UPSERT tail should end on a complete assignment: {tail}"
+        );
         // Both the absent build_id AND the absent B3 last_error render as NULL.
         assert!(sql.contains("NULL"));
-        // With no B3 failure yet, the row carries a NULL error then zero counts.
-        assert!(sql.contains("NULL, 0, 0)"));
+        // With no B3 failure yet, the row carries a NULL error then zero counts —
+        // followed by the six zeroed B2 columns (gauge NOT ARMED at boot).
+        assert!(sql.contains("NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0)"));
     }
 
     #[test]
@@ -729,6 +780,7 @@ mod tests {
             compute_source: "unknown".to_string(),
             build_id: None,
             b3: Default::default(),
+            b2: crate::pipeline::embed_pressure::EmbedPressure::new().snapshot(),
         };
         // Pathological role containing single quote must be escaped.
         let sql = super::build_lifecycle_heartbeat_upsert_sql("ind'exer", &snapshot);

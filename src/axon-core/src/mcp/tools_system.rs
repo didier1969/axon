@@ -849,6 +849,69 @@ impl McpServer {
         } else {
             "- B3 health: HEALTHY — no persist failure observed".to_string()
         };
+        // REQ-AXO-902387 — B2 (GPU embed) VRAM pressure, published by the indexer
+        // in the same heartbeat row. Answers the question no existing signal could
+        // on 2026-08-20: "is the GPU lane actually serving, or is every batch
+        // silently taking the CPU path at 1/100th the throughput?". The ratio is
+        // over a rolling window of recent batches — a cumulative count cannot
+        // express a regime, and a total since boot drowns a fresh incident.
+        let b2_observed = indexer_heartbeat
+            .as_ref()
+            .map(|row| row.b2_window_observed)
+            .unwrap_or(0);
+        let b2_cpu_fallbacks = indexer_heartbeat
+            .as_ref()
+            .map(|row| row.b2_window_cpu_fallbacks)
+            .unwrap_or(0);
+        let b2_batch_cap = indexer_heartbeat
+            .as_ref()
+            .map(|row| row.b2_gpu_batch_cap)
+            .unwrap_or(0);
+        let b2_resizes = indexer_heartbeat
+            .as_ref()
+            .map(|row| row.b2_resizes)
+            .unwrap_or(0);
+        let b2_recycles = indexer_heartbeat
+            .as_ref()
+            .map(|row| row.b2_session_recycles)
+            .unwrap_or(0);
+        // An empty window is NOT zero pressure. Rendering it as 0.0 would be the
+        // vacuous verdict this codebase keeps paying for (REQ-AXO-902384), so the
+        // ratio stays absent and the verdict says NOT ARMED.
+        let b2_ratio = (b2_observed > 0).then(|| b2_cpu_fallbacks as f64 / b2_observed as f64);
+        let b2_verdict = match b2_ratio {
+            None => "not_armed",
+            Some(r) if r >= crate::pipeline::embed_pressure::CRITICAL_RATIO => "critical",
+            Some(r) if r >= crate::pipeline::embed_pressure::DEGRADED_RATIO => "degraded",
+            Some(_) => "healthy",
+        };
+        let b2_cap_suffix = if b2_batch_cap > 0 {
+            format!(
+                ", lot GPU plafonné à {b2_batch_cap} ({b2_resizes} retaillages, {b2_recycles} recyclages de session)"
+            )
+        } else {
+            String::new()
+        };
+        let b2_health_line = match b2_ratio {
+            None => "- B2 VRAM pressure: NON ARMÉ — aucun lot d'embed observé depuis le \
+                     démarrage de l'indexeur. Ce n'est PAS « pas de pression » : rien n'a \
+                     été mesuré."
+                .to_string(),
+            Some(ratio) => format!(
+                "- B2 VRAM pressure: {} — b2_cpu_fallback_ratio={:.2} ({b2_cpu_fallbacks}/{b2_observed} lots récents recalculés sur CPU faute de VRAM){b2_cap_suffix}.{}",
+                match b2_verdict {
+                    "critical" => "⚠️ CRITIQUE",
+                    "degraded" => "⚠️ DÉGRADÉ",
+                    _ => "SAIN",
+                },
+                ratio,
+                if b2_verdict == "healthy" {
+                    ""
+                } else {
+                    " Le débit d'embed est effondré SANS qu'aucun lot n'échoue — libérez de la VRAM, augmentez AXON_GPU_RESERVE_MB, ou baissez AXON_B2_BATCH_SIZE."
+                }
+            ),
+        };
         // ── Per-project breakdown text ──────────────────────────
         let breakdown_text = if project == "*" {
             if let Some(arr) = per_project_breakdown.as_array() {
@@ -917,7 +980,8 @@ impl McpServer {
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
              - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\
              - Compute (observed): {observed_compute}  (source={observed_compute_source}) — DEC-AXO-901626, same canonical signal as status.embedder_runtime + dashboard{provider_mismatch_line}\n\
-             {b3_health_line}\n\n\
+             {b3_health_line}\n\
+             {b2_health_line}\n\n\
              ### File source — Watchman + DBQ-A (REQ-AXO-901893 / REQ-AXO-901897)\n\
              - Feed: Watchman clock/cursor deltas → pipeline A input_tx (legacy ingress drain + periodic sweep RIPPED)\n\
              - Backlog drainer: DBQ-A claim feeder (discovered stock below)\n\n\
@@ -979,6 +1043,17 @@ impl McpServer {
                 // call gives an LLM the systemic-failure verdict, the REAL PG
                 // error (root + SQLSTATE), the error rate, and a recovery hint —
                 // no log access, no gdb (the REQ-AXO-902046 incident).
+                "b2_pressure": {
+                    "verdict": b2_verdict,
+                    "cpu_fallback_ratio": b2_ratio,
+                    "window_observed": b2_observed,
+                    "window_cpu_fallbacks": b2_cpu_fallbacks,
+                    "gpu_batch_cap": (b2_batch_cap > 0).then_some(b2_batch_cap),
+                    "resizes": b2_resizes,
+                    "session_recycles": b2_recycles,
+                    "degraded_threshold": crate::pipeline::embed_pressure::DEGRADED_RATIO,
+                    "critical_threshold": crate::pipeline::embed_pressure::CRITICAL_RATIO,
+                },
                 "b3_health": {
                     "verdict": b3_verdict,
                     "systemically_failing": b3_systemically_failing,
