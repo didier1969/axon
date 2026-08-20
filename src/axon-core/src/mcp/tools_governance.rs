@@ -1238,14 +1238,33 @@ impl McpServer {
 
         let mut report = if !display_rows.is_empty() {
             format!(
-                "### 👯 Semantic Clones detected for '{}'\n\n{}",
+                "### 👯 Clones sémantiques pour '{}'\n\n\
+                 _Distance cosinus : **0 = identique**, 1 = orthogonal. Seuil appliqué \
+                 < {:.2}, donc toute ligne ci-dessous est à plus de {:.0} % de \
+                 similarité. `✓ VF2` = confirmé structurellement (isomorphisme de \
+                 sous-graphe), le signal le plus fort._\n\n{}",
                 symbol,
-                format_table_from_json(&display_json, &["Name", "Type", "Cosine", "Structural"])
+                crate::duplication_scan::DUPLICATION_CLONE_THRESHOLD,
+                (1.0 - crate::duplication_scan::DUPLICATION_CLONE_THRESHOLD) * 100.0,
+                format_table_from_json(
+                    &display_json,
+                    // REQ-AXO-902385 — the header used to read `Cosine`, and the
+                    // value under it is pgvector's `<=>`, a cosine DISTANCE:
+                    // 0 = identical, 1 = orthogonal. APS read 0.06 as "6% similar,
+                    // essentially orthogonal", concluded the DRY axis was
+                    // unusable, and abandoned a duplication audit that was in fact
+                    // reporting 94%-similar pairs (inbox 11931). The scale must
+                    // travel WITH the number — a bare `Cosine` invites exactly
+                    // that inversion.
+                    &["Name", "Type", "Distance (0=identique)", "Structural"],
+                )
             )
         } else {
             format!(
-                "✅ No obvious semantic clone (cosine < 0.10) found for '{}'.",
-                symbol
+                "✅ Aucun clone sémantique pour '{}' : aucun symbole à une distance \
+                 cosinus < {:.2} (0 = identique, 1 = orthogonal). Seuil appliqué à la \
+                 requête ANN — ce n'est pas une absence de mesure.",
+                symbol, crate::duplication_scan::DUPLICATION_CLONE_THRESHOLD
             )
         };
         if let Some(section) = self.build_graph_clone_section(symbol) {
@@ -1278,6 +1297,9 @@ impl McpServer {
                 "surfaces_degraded": surfaces_degraded,
                 "structural_confirmed": structural_flags.iter().filter(|f| **f).count(),
                 "vf2_attempted": vf2_attempted,
+                "score_unit": "cosine_distance",
+                "score_scale": "0 = identical, 1 = orthogonal (pgvector `<=>`)",
+                "threshold_applied": crate::duplication_scan::DUPLICATION_CLONE_THRESHOLD,
                 "truncation_strategy": "pgvector_topk_then_vf2",
                 "truncation_applied": pre_filter_k < total_available as usize,
                 "next_call_hint": next_call_hint,

@@ -30,33 +30,48 @@ use crate::mcp::McpServer;
 /// One code-anchored detection ruleset, keyed by the TMG node's
 /// `metadata.detect_key`. Migrations are seeded as `TechnologyMigration`
 /// (TMG-…) nodes carrying that key; the detector binds rule→node by it.
+#[derive(Clone)]
 struct RemnantRuleset {
-    detect_key: &'static str,
+    detect_key: String,
     /// PG POSIX regex matched case-insensitively (`~*`) against
     /// `ist.Symbol.name` — comment-free by construction. `None` = no symbol scan.
-    symbol_name_regex: Option<&'static str>,
+    symbol_name_regex: Option<String>,
     /// Rust regex matched against COMMENT-STRIPPED `ist.Chunk.content` — for
     /// string-literal residue that is not a symbol name. `None` = no chunk scan.
+    chunk_content_regex: Option<String>,
+    /// REQ-AXO-902377 — where this rule came from. Rendered in the output so a
+    /// reader can tell "your own migration" from "Axon's built-in ones", and so
+    /// `0` from a tenant with no rules is never mistaken for `0` residue.
+    source: &'static str,
+}
+
+/// A ruleset written INTO this binary. REQ-AXO-902377 — these describe Axon's OWN
+/// migrations, so on any other tenant they can only ever return 0. Kept as the
+/// literal table they always were, and joined at runtime with the rules a tenant
+/// declares on its own `TechnologyMigration` nodes.
+struct BuiltInRuleset {
+    detect_key: &'static str,
+    symbol_name_regex: Option<&'static str>,
     chunk_content_regex: Option<&'static str>,
 }
 
 /// The seeded migrations (TMG-AXO-001..004). Pipeline v1→v2 + nvidia-smi→NVML
 /// carry live residue; DuckDB→PG + AGE are proof-of-closure (expect ~0 once
 /// comments are excluded).
-const RULESETS: &[RemnantRuleset] = &[
-    RemnantRuleset {
+const BUILT_IN_RULESETS: &[BuiltInRuleset] = &[
+    BuiltInRuleset {
         detect_key: "pipeline_v1_to_v2",
         // Dead `_v1` leaves only (e.g. `compose_dashboard_state_v1`); the
         // char-class after `_v1` avoids `_v12…` and never matches `_v2`.
         symbol_name_regex: Some("_v1([^0-9a-z]|$)"),
         chunk_content_regex: None,
     },
-    RemnantRuleset {
+    BuiltInRuleset {
         detect_key: "duckdb_to_pg",
         symbol_name_regex: Some("duckdb"),
         chunk_content_regex: None,
     },
-    RemnantRuleset {
+    BuiltInRuleset {
         detect_key: "age_to_pg",
         // AGE-specific API tokens ONLY. NOT the bare word "age" (→ page/storage/…)
         // and NOT "cypher" — Cypher is the legitimate CURRENT query language of
@@ -64,7 +79,7 @@ const RULESETS: &[RemnantRuleset] = &[
         symbol_name_regex: Some("ag_catalog|agtype"),
         chunk_content_regex: None,
     },
-    RemnantRuleset {
+    BuiltInRuleset {
         detect_key: "nvidia_smi_to_nvml",
         symbol_name_regex: None,
         // REQ-AXO-902331 — require an INVOCATION context, not the bare token.
@@ -178,14 +193,19 @@ impl McpServer {
         let mut summaries: Vec<Value> = Vec::new();
         let mut total_remnants = 0usize;
 
-        for rule in RULESETS {
+        let rulesets = self.resolve_rulesets(&project_code);
+        let tenant_declared = rulesets
+            .iter()
+            .filter(|r| r.source == "tenant_declared")
+            .count();
+        for rule in &rulesets {
             if let Some(k) = only_key {
                 if k != rule.detect_key {
                     continue;
                 }
             }
             let Some((tmg_id, has_baseline)) =
-                self.find_tmg_by_detect_key(&project_code, rule.detect_key)
+                self.find_tmg_by_detect_key(&project_code, &rule.detect_key)
             else {
                 summaries.push(json!({
                     "detect_key": rule.detect_key,
@@ -200,12 +220,12 @@ impl McpServer {
 
             // Collect (target_id, target_kind) matches.
             let mut targets: Vec<(String, &'static str)> = Vec::new();
-            if let Some(pat) = rule.symbol_name_regex {
+            if let Some(pat) = rule.symbol_name_regex.as_deref() {
                 for id in self.scan_symbol_names(&project_code, pat) {
                     targets.push((id, "ist:symbol"));
                 }
             }
-            if let Some(pat) = rule.chunk_content_regex {
+            if let Some(pat) = rule.chunk_content_regex.as_deref() {
                 if let Ok(re) = Regex::new(&format!("(?i){pat}")) {
                     for (id, content) in self.scan_chunk_candidates(&project_code, pat) {
                         if chunk_has_non_comment_match(&content, &re) {
@@ -287,8 +307,38 @@ impl McpServer {
                 }
             })
             .collect();
+        // REQ-AXO-902377 — the DENOMINATOR of this scan: how many rulesets actually
+        // ran, and how many of them describe THIS project's migrations rather than
+        // Axon's own. Without it, `Total remnants linked: 0` reads "clean" when it
+        // may mean "nothing was looked for" — the whole ruleset table used to be
+        // Axon-internal, so that is exactly what every consumer project got.
+        let armed = rulesets
+            .iter()
+            .filter(|r| only_key.is_none_or(|k| k == r.detect_key))
+            .count();
+        let coverage_line = if armed == 0 {
+            "⚠️ **NON ARMÉ** — aucun ruleset applicable : ce `0` signifie « rien cherché », \
+             pas « aucun résidu »."
+                .to_string()
+        } else if tenant_declared == 0 && project_code != "AXO" {
+            format!(
+                "⚠️ **NON ARMÉ POUR CE PROJET** — {armed} ruleset(s) exécuté(s), mais tous \
+                 décrivent les migrations internes d'Axon (pipeline v1→v2, DuckDB→PG, AGE→PG, \
+                 nvidia-smi→NVML). Un `0` ici ne dit RIEN de vos propres migrations. Déclarez \
+                 les vôtres : `soll_manager action=create entity=technology_migration \
+                 data={{project_code:'{project_code}', title, attach_to, \
+                 relation_type:'BELONGS_TO', metadata:{{detect_key, symbol_name_regex, \
+                 chunk_content_regex, from_tech, to_tech}}}}`."
+            )
+        } else {
+            format!(
+                "Rulesets exécutés : {armed} ({tenant_declared} déclaré(s) par ce projet, \
+                 {} intégré(s) à Axon).",
+                armed.saturating_sub(tenant_declared)
+            )
+        };
         let report = format!(
-            "## detect_remnants — project {project_code}\n\nAdvisory residue scan (code-anchored; comments excluded). Surfaces via `tech_debt_inventory` + pre-flight + work-plan.\n\n{}\n\nTotal remnants linked: {total_remnants}. No-phantom sweep: {orphaned_pruned} orphaned edge(s) pruned.",
+            "## detect_remnants — project {project_code}\n\nAdvisory residue scan (code-anchored; comments excluded). Surfaces via `tech_debt_inventory` + pre-flight + work-plan.\n\n{coverage_line}\n\n{}\n\nTotal remnants linked: {total_remnants}. No-phantom sweep: {orphaned_pruned} orphaned edge(s) pruned.",
             lines.join("\n")
         );
 
@@ -297,6 +347,11 @@ impl McpServer {
             "structuredContent": {
                 "project_code": project_code,
                 "total_remnants": total_remnants,
+                // The denominator travels WITH the count (REQ-AXO-902384).
+                "rulesets_armed": armed,
+                "rulesets_tenant_declared": tenant_declared,
+                "rulesets_built_in": armed.saturating_sub(tenant_declared),
+                "armed_for_this_project": tenant_declared > 0 || project_code == "AXO",
                 "orphaned_pruned": orphaned_pruned,
                 "migrations": summaries,
             }
@@ -305,6 +360,78 @@ impl McpServer {
 
     /// Find the TMG node bound to a ruleset by `metadata.detect_key`. Returns
     /// `(tmg_id, has_baseline)`.
+    /// REQ-AXO-902377 — every ruleset that applies to `project_code`: Axon's
+    /// built-in table PLUS whatever the tenant declared on its own
+    /// `TechnologyMigration` nodes (`metadata.symbol_name_regex` /
+    /// `metadata.chunk_content_regex`).
+    ///
+    /// Before this, the table was the WHOLE vocabulary and every entry described an
+    /// internal Axon migration (pipeline v1→v2, DuckDB→PG, AGE→PG, nvidia-smi→NVML).
+    /// A consumer project therefore got `0 remnants` — not because it had none, but
+    /// because nothing had been looked for. `detect_remnants` promised "the
+    /// pre-flight surfaces your residue" and delivered that promise to tenant zero
+    /// only. Same class as `b3_health: HEALTHY` while B2 was dying: a `0` that means
+    /// "not measured" reads exactly like a `0` that means "clean".
+    ///
+    /// A tenant rule is bound to its node by `detect_key`, like the built-ins — so
+    /// baseline tracking, phantom pruning and `reset_baseline` work unchanged.
+    fn resolve_rulesets(&self, project_code: &str) -> Vec<RemnantRuleset> {
+        let mut rules: Vec<RemnantRuleset> = BUILT_IN_RULESETS
+            .iter()
+            .map(|r| RemnantRuleset {
+                detect_key: r.detect_key.to_string(),
+                symbol_name_regex: r.symbol_name_regex.map(str::to_string),
+                chunk_content_regex: r.chunk_content_regex.map(str::to_string),
+                source: "built_in",
+            })
+            .collect();
+
+        let sql = format!(
+            "SELECT metadata->>'detect_key', metadata->>'symbol_name_regex', \
+                    metadata->>'chunk_content_regex' \
+             FROM soll.Node \
+             WHERE type = 'TechnologyMigration' AND project_code = '{}' \
+               AND metadata->>'detect_key' IS NOT NULL \
+               AND (metadata->>'symbol_name_regex' IS NOT NULL \
+                    OR metadata->>'chunk_content_regex' IS NOT NULL) \
+             ORDER BY id",
+            escape_sql(project_code)
+        );
+        let Ok(raw) = self.graph_store.query_json(&sql) else {
+            return rules;
+        };
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        for row in rows {
+            let Some(key) = row.first().and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let key = key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            // A tenant rule OVERRIDES a built-in of the same key: on its own project
+            // the tenant is the authority on what its migration looks like.
+            let text = |i: usize| {
+                row.get(i)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && *s != "null")
+                    .map(str::to_string)
+            };
+            let resolved = RemnantRuleset {
+                detect_key: key.to_string(),
+                symbol_name_regex: text(1),
+                chunk_content_regex: text(2),
+                source: "tenant_declared",
+            };
+            match rules.iter().position(|r| r.detect_key == key) {
+                Some(idx) => rules[idx] = resolved,
+                None => rules.push(resolved),
+            }
+        }
+        rules
+    }
+
     fn find_tmg_by_detect_key(&self, project_code: &str, detect_key: &str) -> Option<(String, bool)> {
         let sql = format!(
             "SELECT id, (metadata ? 'baseline_remnants') FROM soll.Node \
@@ -659,7 +786,7 @@ mod tests {
     /// Build the LIVE `nvidia_smi_to_nvml` regex from the ruleset itself, so these
     /// tests can never certify a pattern the detector no longer uses.
     fn nvidia_rule_regex() -> Regex {
-        let pat = RULESETS
+        let pat = BUILT_IN_RULESETS
             .iter()
             .find(|r| r.detect_key == "nvidia_smi_to_nvml")
             .and_then(|r| r.chunk_content_regex)
@@ -699,6 +826,47 @@ mod tests {
             assert!(
                 !clause.contains(excluded),
                 "code-kind allowlist must exclude {excluded}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod req_902377_ruleset_agnosticism_tests {
+    use super::*;
+
+    #[test]
+    fn every_built_in_ruleset_describes_an_axon_internal_migration() {
+        // Le constat qui fonde REQ-AXO-902377 : la table ENTIÈRE décrit les
+        // migrations d'Axon. Sur n'importe quel autre tenant elle ne peut rendre
+        // que 0 — et ce 0 se lit « propre » alors qu'il veut dire « rien cherché ».
+        //
+        // Ce test échouera si quelqu'un ajoute un ruleset ici : c'est voulu. Un
+        // nouveau ruleset intégré doit être un choix conscient, pas la voie par
+        // défaut pour répondre au besoin d'un tenant — le tenant déclare le sien.
+        let keys: Vec<&str> = BUILT_IN_RULESETS.iter().map(|r| r.detect_key).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "pipeline_v1_to_v2",
+                "duckdb_to_pg",
+                "age_to_pg",
+                "nvidia_smi_to_nvml"
+            ],
+            "table intégrée modifiée — vérifier que ce n'est pas un besoin tenant \
+             traité en dur (REQ-AXO-902377)"
+        );
+    }
+
+    #[test]
+    fn a_built_in_ruleset_carries_at_least_one_pattern() {
+        // Une règle sans motif n'apparie rien et rendrait un 0 silencieux : c'est
+        // la forme dégénérée du verdict vacuous (REQ-AXO-902384).
+        for rule in BUILT_IN_RULESETS {
+            assert!(
+                rule.symbol_name_regex.is_some() || rule.chunk_content_regex.is_some(),
+                "{} n'a aucun motif : il ne peut que rendre 0",
+                rule.detect_key
             );
         }
     }
