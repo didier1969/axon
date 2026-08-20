@@ -114,23 +114,35 @@ wait_for_quiet_autovacuum() {
 }
 
 # Wait for the embedder to work the batch off before queueing the next one.
-# Returns 0 when the queue is low enough to refill, 1 only when it is genuinely
-# STUCK — i.e. the timeout elapsed AND the queue did not shrink. A slow drain is
-# not a stalled drain, and aborting one abandons the recovery mid-way.
+# Returns 0 when the queue is low enough to refill, 1 only when the embedder is
+# genuinely STUCK.
+#
+# "Stuck" is decided on `embedded` GOING UP, never on `pending` going down.
+# Measured 2026-08-21: this guard aborted a perfectly healthy recovery because
+# `pending` had RISEN 27 481 -> 57 903, while `embedded` climbed 470 068 -> 495 327
+# in the same window. The queue grew because a purge+reindex was refilling it from
+# the other end — a legitimate second producer the guard knew nothing about.
+#
+# `pending` is a LEVEL fed by two independent sources (this requeue, and the
+# indexer's own walk); it says nothing about whether the embedder is working.
+# `embedded` is a MONOTONIC COUNTER of work actually completed. Only the second
+# can answer "is the embedder alive?" — the first answers "is the queue big?",
+# which is a different question that nobody asked.
 wait_for_drain() {
-    local deadline=$(( SECONDS + DRAIN_TIMEOUT )) pending start
-    start="$(count_of pending)"
+    local deadline=$(( SECONDS + DRAIN_TIMEOUT )) pending done_start done_now
+    done_start="$(count_of embedded)"
     while true; do
         pending="$(count_of pending)"
         (( pending <= DRAIN_FLOOR )) && return 0
         if (( SECONDS >= deadline )); then
-            if (( pending < start )); then
-                printf '  . slow drain (%ss, pending %s -> %s) — still progressing, topping up.\n' \
-                    "$DRAIN_TIMEOUT" "$start" "$pending"
+            done_now="$(count_of embedded)"
+            if (( done_now > done_start )); then
+                printf '  . slow drain (%ss, embedded %s -> %s, +%s) — progressing, topping up.\n' \
+                    "$DRAIN_TIMEOUT" "$done_start" "$done_now" "$(( done_now - done_start ))"
                 return 0
             fi
-            printf '  ! drain STUCK (%ss, pending %s -> %s, no progress) — stopping.\n' \
-                "$DRAIN_TIMEOUT" "$start" "$pending"
+            printf '  ! embedder STUCK (%ss, embedded frozen at %s, pending=%s) — stopping.\n' \
+                "$DRAIN_TIMEOUT" "$done_now" "$pending"
             return 1
         fi
         sleep 15
