@@ -469,12 +469,61 @@ const CHEAP_WINDOW_LINES: usize = 200;
 /// Cheap O(N) fixed line-window segmentation (no tokenizer encodes). Contiguous,
 /// gap-free `[body_start, end)` in `window`-line slabs. The defense fallback for
 /// pathological bodies that slipped the upstream directory/minified/size filters.
-fn cheap_line_window_segments(body_start: usize, end: usize, window: usize) -> Vec<BodySegment> {
+/// REQ-AXO-902364 — the deadline fallback, bounded by the TOKEN BUDGET as well as
+/// by a line count.
+///
+/// It used to cut every `window` lines and nothing else, so the size of an emitted
+/// chunk was a function of the file's line density — a quantity it never looked at.
+/// Measured on the live index: `wegleitung_nw_2024_unterjaehrig.pdf.txt` (a 335 KB
+/// PDF-to-text with short lines) produced chunks of **1 414 tokens against a
+/// 384-token window**, and 3 657 chunks across the corpus ended up above the
+/// model's 512-token limit — permanently unembeddable, because the embedder
+/// rejects them outright.
+///
+/// The DP above is correct and refuses any segment over `body_budget`. This path
+/// is what runs when the wall-clock deadline expires, and it inherited none of
+/// that discipline: a fallback for SPEED silently became a fallback for
+/// CORRECTNESS too.
+///
+/// Bounding by characters rather than by measured tokens is deliberate — the whole
+/// point of this path is that the tokenizer is too slow here. `FALLBACK_CHARS_PER_TOKEN`
+/// is the SAME estimator that will label the chunk afterwards, so the bound and
+/// the label agree by construction (the two-constants trap of REQ-AXO-902340).
+///
+/// The line count stays as a second ceiling: on a file of very short lines the
+/// char budget alone would emit thousands of tiny segments.
+fn cheap_line_window_segments(
+    body_start: usize,
+    end: usize,
+    window: usize,
+    lines: &[&str],
+    body_budget_tokens: usize,
+) -> Vec<BodySegment> {
     let window = window.max(1);
+    let char_budget = body_budget_tokens
+        .saturating_mul(FALLBACK_CHARS_PER_TOKEN)
+        .max(1);
     let mut segments = Vec::new();
     let mut cursor = body_start;
     while cursor < end {
-        let next = (cursor + window).min(end);
+        let mut next = cursor;
+        let mut chars = 0usize;
+        while next < end && next - cursor < window {
+            // `+ 1` for the newline the joined snippet will carry, matching
+            // `body_cost` in the DP.
+            let line_chars = lines.get(next).map_or(0, |l| l.chars().count()) + 1;
+            // Always take at least one line: a single line over budget is handled
+            // by `split_giant_lines`, not here, and emitting an empty segment
+            // would loop forever.
+            if chars > 0 && chars + line_chars > char_budget {
+                break;
+            }
+            chars += line_chars;
+            next += 1;
+        }
+        if next == cursor {
+            next = (cursor + 1).min(end);
+        }
         segments.push(BodySegment::LineRange {
             start: cursor,
             end: next,
@@ -538,7 +587,13 @@ fn dp_segment_body(
     for (i, line) in body_lines.iter().enumerate() {
         if i % 2048 == 0 && std::time::Instant::now() >= deadline {
             return (
-                cheap_line_window_segments(body_start, body_end, CHEAP_WINDOW_LINES),
+                cheap_line_window_segments(
+                    body_start,
+                    body_end,
+                    CHEAP_WINDOW_LINES,
+                    lines,
+                    body_budget,
+                ),
                 true,
             );
         }
@@ -614,7 +669,13 @@ fn dp_segment_body(
         // window scan with no bail. Cheap fixed line-windows on overrun.
         if e % 4096 == 0 && std::time::Instant::now() >= deadline {
             return (
-                cheap_line_window_segments(body_start, body_end, CHEAP_WINDOW_LINES),
+                cheap_line_window_segments(
+                    body_start,
+                    body_end,
+                    CHEAP_WINDOW_LINES,
+                    lines,
+                    body_budget,
+                ),
                 true,
             );
         }
@@ -2475,5 +2536,95 @@ mod tests {
             std::env::remove_var("AXON_SMALL_SYMBOL_CHAR_FAST_PATH");
             std::env::remove_var("AXON_GRAY_ZONE_CHAR_THRESHOLD");
         }
+    }
+}
+
+#[cfg(test)]
+mod req_902364_cheap_window_budget_tests {
+    use super::*;
+
+    /// La forme EXACTE du fichier fautif : `wegleitung_nw_2024_unterjaehrig.pdf.txt`,
+    /// un PDF converti en texte, 335 KB, lignes courtes.
+    fn pdf_like_lines(count: usize, chars_per_line: usize) -> Vec<String> {
+        (0..count).map(|_| "a".repeat(chars_per_line)).collect()
+    }
+
+    #[test]
+    fn a_short_line_document_no_longer_blows_the_token_budget() {
+        // AVANT : 200 lignes par fenêtre, quelle que soit leur longueur. Sur ce
+        // fichier (~21 caractères par ligne en moyenne) cela donnait 4 242
+        // caractères = 1 414 jetons estimés, contre une fenêtre de 384 — donc des
+        // morceaux que l'embedder REFUSE, définitivement non vectorisables.
+        let owned = pdf_like_lines(2000, 20);
+        let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let body_budget = 350;
+
+        let segments = cheap_line_window_segments(0, lines.len(), CHEAP_WINDOW_LINES, &lines, body_budget);
+
+        assert!(!segments.is_empty(), "le corps doit être couvert");
+        for seg in &segments {
+            let BodySegment::LineRange { start, end } = seg else {
+                panic!("ce chemin n'émet que des LineRange");
+            };
+            let chars: usize = lines[*start..*end]
+                .iter()
+                .map(|l| l.chars().count() + 1)
+                .sum();
+            let tokens = chars.div_ceil(FALLBACK_CHARS_PER_TOKEN);
+            assert!(
+                tokens <= body_budget,
+                "segment [{start}..{end}) = {tokens} jetons > budget {body_budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_whole_body_is_still_covered_exactly_once() {
+        // Un découpage qui respecte le budget mais perd des lignes serait pire que
+        // le bug : le contenu disparaîtrait de l'index sans que rien ne le dise.
+        let owned = pdf_like_lines(517, 37);
+        let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let segments = cheap_line_window_segments(0, lines.len(), CHEAP_WINDOW_LINES, &lines, 350);
+
+        let mut cursor = 0usize;
+        for seg in &segments {
+            let BodySegment::LineRange { start, end } = seg else { unreachable!() };
+            assert_eq!(*start, cursor, "segments contigus, sans trou ni recouvrement");
+            assert!(end > start, "aucun segment vide (sinon boucle infinie)");
+            cursor = *end;
+        }
+        assert_eq!(cursor, lines.len(), "le corps est couvert jusqu'au bout");
+    }
+
+    #[test]
+    fn the_line_ceiling_still_applies_to_very_short_lines() {
+        // Le garde inverse : sur des lignes d'un caractère, le seul budget de
+        // caractères produirait des segments énormes en nombre de lignes. Le
+        // plafond de lignes reste la seconde borne.
+        let owned = pdf_like_lines(1000, 1);
+        let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let segments = cheap_line_window_segments(0, lines.len(), CHEAP_WINDOW_LINES, &lines, 100_000);
+
+        for seg in &segments {
+            let BodySegment::LineRange { start, end } = seg else { unreachable!() };
+            assert!(
+                end - start <= CHEAP_WINDOW_LINES,
+                "segment de {} lignes > plafond {CHEAP_WINDOW_LINES}",
+                end - start
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_over_budget_line_is_emitted_alone_not_dropped() {
+        // Une ligne qui dépasse à elle seule est du ressort de `split_giant_lines`.
+        // Ici elle doit sortir SEULE — jamais être perdue, jamais boucler.
+        let owned = vec!["x".repeat(5000), "court".to_string()];
+        let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let segments = cheap_line_window_segments(0, 2, CHEAP_WINDOW_LINES, &lines, 100);
+
+        assert_eq!(segments.len(), 2, "la ligne géante est isolée : {segments:?}");
+        let BodySegment::LineRange { start, end } = &segments[0] else { unreachable!() };
+        assert_eq!((*start, *end), (0, 1));
     }
 }
