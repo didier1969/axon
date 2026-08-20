@@ -524,7 +524,8 @@ impl McpServer {
             .graph_store
             .execute_raw_sql_gateway(&format!(
                 "SELECT project_code, files_total, files_chunked, symbols, \
-                        chunks_total, chunks_embedded, chunks_pending, edges \
+                        chunks_total, chunks_embedded, chunks_pending, edges, \
+                        chunks_failed \
                  FROM axon.project_telemetry{} ORDER BY chunks_total DESC",
                 where_project
             ))
@@ -549,17 +550,32 @@ impl McpServer {
         let mut embedded_chunks = 0i64;
         let mut symbols = 0i64;
         let mut edges = 0i64;
+        // REQ-AXO-902382 — read the two states SEPARATELY from the view instead of
+        // deriving one by subtraction.
+        //
+        // `pending_chunks` was `total - embedded`, which merges an ACTIVE queue with
+        // a TERMINAL population: nothing in the runtime ever retries `failed` (the
+        // sorted-drain reservoir only SELECTs `embed_status='pending'`). Measured
+        // 2026-08-21 on PRP: the view says `chunks_pending = 0` while the
+        // subtraction yielded 25 194 — every one of them dead, none waiting.
+        //
+        // VPC read the aggregate as a queue that was not being served, and went
+        // looking for a service mechanism that does not exist (inbox 11935/12086).
+        // The view already computed both counts correctly; this code skipped column
+        // 6 to recompute a worse answer.
+        let mut pending_chunks = 0i64;
+        let mut failed_chunks = 0i64;
         for row in &view_rows {
             indexed_files += col_i64(row, 1);
             files_chunked += col_i64(row, 2);
             symbols += col_i64(row, 3);
             total_chunks += col_i64(row, 4);
             embedded_chunks += col_i64(row, 5);
+            pending_chunks += col_i64(row, 6);
             edges += col_i64(row, 7);
+            failed_chunks += col_i64(row, 8);
         }
         let projects = view_rows.len() as i64;
-        // pending = chunks − embedded (matches dashboard_totals exactly).
-        let pending_chunks = (total_chunks - embedded_chunks).max(0);
         let coverage_pct = if total_chunks > 0 {
             (embedded_chunks as f64 / total_chunks as f64) * 100.0
         } else {
@@ -589,6 +605,12 @@ impl McpServer {
                         "indexed_files": ft,
                         "chunks": ch,
                         "embeddings": emb,
+                        // REQ-AXO-902382 — per-project too: this breakdown is what an
+                        // operator reads to decide WHERE to act, and "11 projects below
+                        // 25% coverage" means something different when the shortfall is
+                        // dead rather than queued.
+                        "pending": col_i64(row, 6),
+                        "failed": col_i64(row, 8),
                         "coverage_pct": (cov * 100.0).round() / 100.0,
                     }))
                 })
@@ -996,6 +1018,15 @@ impl McpServer {
                 "total_chunks": total_chunks,
                 "embedded_chunks": embedded_chunks,
                 "pending_chunks": pending_chunks,
+                // REQ-AXO-902382 — TERMINAL, and nothing retries it. Rendered next to
+                // `pending` precisely so the two can never be read as one number again.
+                "failed_chunks": failed_chunks,
+                "failed_is_terminal": true,
+                "failed_recovery": if failed_chunks > 0 {
+                    Some("`failed` chunks are NEVER retried by the runtime — the drain only reads `pending`. Requeue with `bash scripts/maintenance/reset_failed_embeddings.sh --execute` (paced, autovacuum-guarded). Chunks above the model window stay failed until REQ-AXO-902364.")
+                } else {
+                    None
+                },
                 "coverage_pct": coverage_pct,
                 "edges": edges,
                 "indexed_files": indexed_files,

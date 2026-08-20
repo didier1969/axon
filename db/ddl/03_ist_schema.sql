@@ -526,6 +526,14 @@ SELECT
     COALESCE(c.chunks_total, 0)     AS chunks_total,
     COALESCE(c.chunks_embedded, 0)  AS chunks_embedded,
     COALESCE(c.chunks_pending, 0)   AS chunks_pending,
+    -- REQ-AXO-902382: 'failed' is TERMINAL and nothing in the runtime retries it —
+    -- the sorted-drain reservoir only ever SELECTs embed_status='pending'. Consumers
+    -- were deriving "pending" as total-embedded, which silently merged a dead
+    -- population into an active queue: on 2026-08-21 that read 228 968 "pending"
+    -- where the truth was 228 942 dead + 140 waiting, and sent an operator hunting
+    -- for a service mechanism that does not exist. Exposed so the two can never be
+    -- summed by accident again.
+    COALESCE(c.chunks_failed, 0)    AS chunks_failed,
     COALESCE(c.chunks_fts, 0)       AS chunks_fts,
     COALESCE(e.edges, 0)            AS edges
 FROM axon.Project p
@@ -551,6 +559,7 @@ LEFT JOIN (
            count(*)                                          AS chunks_total,
            count(*) FILTER (WHERE embed_status = 'embedded') AS chunks_embedded,
            count(*) FILTER (WHERE embed_status = 'pending')  AS chunks_pending,
+           count(*) FILTER (WHERE embed_status = 'failed')    AS chunks_failed,
            count(*) FILTER (WHERE content_tsv IS NOT NULL)   AS chunks_fts
     FROM ist.Chunk GROUP BY project_code
 ) c ON c.project_code = p.code
