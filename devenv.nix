@@ -12,6 +12,10 @@ let
   ]);
 
   beamPackages = pkgs.beam.packages.erlang_27;
+
+  # REQ-AXO-902350 — THE canonical PG port. devenv exports it as PGPORT;
+  # scripts/lib/axon-pg-port.sh is the shell-side mirror. One place to change.
+  pgPort = 44144;
 in
 {
   # Nix Sovereign Architect: Multi-language support with proper modularity
@@ -51,7 +55,7 @@ in
       { name = "axon_live"; }
     ];
     listen_addresses = "127.0.0.1";
-    port = 44144;
+    port = pgPort;
     settings = {
       # Axon's hot path benefits from generous shared_buffers; client tunes
       # for their own scale via standard PG ops procedures (CPT-AXO-038).
@@ -190,8 +194,8 @@ in
     # the `axon` user — PostgreSQL rejects user-less URLs because the OS
     # user `dstadel` is not a PG role. The live brain already runs with
     # this exact form (env captured from a live process).
-    AXON_LIVE_DATABASE_URL = "postgres://axon@127.0.0.1:44144/axon_live";
-    AXON_DEV_DATABASE_URL = "postgres://axon@127.0.0.1:44144/axon_dev";
+    AXON_LIVE_DATABASE_URL = "postgres://axon@127.0.0.1:${toString pgPort}/axon_live";
+    AXON_DEV_DATABASE_URL = "postgres://axon@127.0.0.1:${toString pgPort}/axon_dev";
     # PGHOST used by psql CLI and sqlx-cli for hand operations.
     # PGPORT is auto-exported by the devenv postgres module from
     # services.postgres.port (int). Declaring it again here as a string
@@ -265,7 +269,7 @@ in
     echo "Plane A (Visualization): Elixir $(elixir --version | awk '/Elixir/ {print $2}')" >&2
     echo "Plane B (Runtime + Postgres): Rust $(rustc --version | awk '{print $2}')" >&2
     echo "Support Tooling:         Python $(python --version | awk '/Python/ {print $2}')" >&2
-    echo "Storage:                 PostgreSQL 17 + pgvector + pgmq @ 127.0.0.1:44144" >&2
+    echo "Storage:                 PostgreSQL 17 + pgvector + pgmq @ 127.0.0.1:${toString pgPort}" >&2
     echo "---------------------------------------" >&2
 
     # Daily SOLL backup: fire-and-forget, idempotent (1×/UTC-day max).

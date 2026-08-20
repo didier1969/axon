@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+# shellcheck source=scripts/lib/axon-pg-port.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/axon-pg-port.sh"
 # REQ-AXO-255 / DEC-AXO-076 — automated /tmp test-fixture cleanup.
 # Sourced by scripts/axon (clean-tmp verb) and invoked as a hook before start.sh.
 # CPT-AXO-047 explains the lifecycle hygiene rationale.
@@ -196,7 +199,7 @@ _axon_test_db_is_reclaimable() {
 #   axon-cleanup-db: dropped=N skipped=M dry_run=B
 axon_cleanup_orphan_test_databases() {
     local dry_run=0 quiet=0
-    local url="${AXON_CLEANUP_DB_URL:-postgres://axon@127.0.0.1:44144/postgres}"
+    local url="${AXON_CLEANUP_DB_URL:-postgres://axon@127.0.0.1:${AXON_CANONICAL_PG_PORT}/postgres}"
 
     while (( $# > 0 )); do
         case "$1" in

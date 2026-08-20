@@ -25,8 +25,10 @@ set -u
 _AXON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/axon-log.sh
 source "$_AXON_LIB_DIR/axon-log.sh"
+# shellcheck source=scripts/lib/axon-pg-port.sh
+source "$_AXON_LIB_DIR/axon-pg-port.sh"
 
-axon_canonical_pg_port="${PGPORT:-44144}"
+axon_canonical_pg_port="$AXON_CANONICAL_PG_PORT"
 axon_backup_dir="${AXON_SOLL_BACKUP_DIR:-${HOME}/backups/soll}"
 # Minimum SOLL nodes required to consider a DB "seeded". 50 is comfortably
 # below any real project (axon itself has 849); a fresh empty DB has 0.
@@ -179,10 +181,14 @@ EOF
 #   $1 datadir   (default: $PROJECT_ROOT/.devenv/state/postgres)
 #   $2 port      (default: $axon_canonical_pg_port)
 _axon_pg_ctl_fallback() {
-    local proj datadir port pgctl
+    local proj datadir port pgctl reason
     proj="${PROJECT_ROOT:-${PWD}}"
     datadir="${1:-$proj/.devenv/state/postgres}"
     port="${2:-$axon_canonical_pg_port}"
+    # $3 — why we are recovering. Defaulted so the original no-op caller is
+    # unchanged; the port-drift guard passes its own so the operator never
+    # reads "devenv up was a no-op" for a drift that was NOT a no-op.
+    reason="${3:-devenv up was a no-op (process-compose already running without postgres)}"
     if [[ ! -d "$datadir" ]]; then
         axon_log_fail "pg_ctl fallback: datadir ${datadir} missing — cannot recover PG"
         return 1
@@ -201,7 +207,7 @@ _axon_pg_ctl_fallback() {
             rm -f "$pid_file"
         fi
     fi
-    axon_log_step "devenv up was a no-op (process-compose already running without postgres) — recovering PG via pg_ctl on :${port} (REQ-AXO-902350)"
+    axon_log_step "${reason} — recovering PG via pg_ctl on :${port} (REQ-AXO-902350)"
     if ! "$pgctl" -D "$datadir" -o "-p ${port}" \
             -l "$datadir/startup.log" start >/dev/null 2>&1; then
         axon_log_fail_with_tail "pg_ctl fallback: start failed" "$datadir/startup.log" 30
@@ -219,7 +225,64 @@ _axon_pg_ctl_fallback() {
     return 1
 }
 
+# REQ-AXO-902350 — port a LIVE postmaster is actually bound to, for $1 datadir.
+# Returns 1 when no live postmaster owns it. postmaster.pid line 4 IS the port
+# (stable PG format) — no psql, no network, nothing to interrogate.
+axon_pg_running_port() {
+    local datadir pidfile pid port
+    datadir="${1:-${PROJECT_ROOT:-${PWD}}/.devenv/state/postgres}"
+    pidfile="$datadir/postmaster.pid"
+    [[ -f "$pidfile" ]] || return 1
+    pid="$(sed -n '1p' "$pidfile" 2>/dev/null | tr -d ' \t')"
+    port="$(sed -n '4p' "$pidfile" 2>/dev/null | tr -d ' \t')"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    # A stale pidfile (dead PID) is NOT drift — purge_stale_postmaster_pid owns it.
+    kill -0 "$pid" 2>/dev/null || return 1
+    printf '%s\n' "$port"
+}
+
+# REQ-AXO-902350 — re-bind a PG that came up on the wrong port.
+#
+# The hole: ensure_devenv_pg_running only probed the CANONICAL port, so a PG alive
+# on ANOTHER port read as "nothing there" — 20s burned, mislabelled a "no-op", then
+# pg_ctl could not start a 2nd postmaster on that datadir. The operator got an opaque
+# `PG bootstrap failed` naming neither port. Seen 2026-08-20 after a reboot: PG on
+# :44145 while every client URL targets :44144.
+#
+# Why re-bind instead of fixing the conf: devenv rewrites $PGDATA/postgresql.conf
+# from the store at EVERY start, so editing the datadir conf never sticks.
+#
+# Args ($1 datadir, $2 expected port) — parameterised so this is falsifiable against
+# a throwaway datadir/port, same discipline as _axon_pg_ctl_fallback.
+axon_assert_pg_canonical_port() {
+    local datadir want actual pgctl
+    datadir="${1:-${PROJECT_ROOT:-${PWD}}/.devenv/state/postgres}"
+    want="${2:-$axon_canonical_pg_port}"
+
+    actual="$(axon_pg_running_port "$datadir" || true)"
+    # No live postmaster on this datadir → nothing to assert; the boot path owns it.
+    [[ -n "$actual" ]] || return 0
+    [[ "$actual" != "$want" ]] || return 0
+
+    axon_log_warn "PG port drift: ${datadir} serves :${actual}, canonical is :${want} — re-binding on :${want}."
+    pgctl="$(axon_resolve_pg_bin pg_ctl || true)"
+    if [[ -z "$pgctl" ]]; then
+        axon_log_fail "PG port drift :${actual} != :${want} — pg_ctl not resolvable. Fix upstream: \`pgPort\` in devenv.nix, then force a real re-eval (change the value, devenv up postgres -d, change it back)."
+        return 1
+    fi
+    if ! "$pgctl" -D "$datadir" -m fast stop >/dev/null 2>&1; then
+        axon_log_fail "PG port drift :${actual} != :${want} — could not stop the drifted postmaster."
+        return 1
+    fi
+    _axon_pg_ctl_fallback "$datadir" "$want" "PG was bound to :${actual} instead of canonical :${want}"
+}
+
 ensure_devenv_pg_running() {
+    # REQ-AXO-902350 — re-bind a wrong-port PG BEFORE probing the canonical port,
+    # otherwise every check below reads "nothing there" and fails opaquely.
+    axon_assert_pg_canonical_port || return 1
+
     # REQ-AXO-901740 — every branch emits exactly one outcome marker
     # (success OR failure) so the operator never sees opaque silence.
     # Cause root of the 2026-05-24 PG-after-reboot incident : ce
