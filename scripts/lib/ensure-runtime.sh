@@ -28,7 +28,7 @@ source "$_AXON_LIB_DIR/axon-log.sh"
 # shellcheck source=scripts/lib/axon-pg-port.sh
 source "$_AXON_LIB_DIR/axon-pg-port.sh"
 
-axon_canonical_pg_port="$AXON_CANONICAL_PG_PORT"
+axon_canonical_pg_port="${AXON_CANONICAL_PG_PORT:?axon-pg-port.sh not sourced}"
 axon_backup_dir="${AXON_SOLL_BACKUP_DIR:-${HOME}/backups/soll}"
 # Minimum SOLL nodes required to consider a DB "seeded". 50 is comfortably
 # below any real project (axon itself has 849); a fresh empty DB has 0.

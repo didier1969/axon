@@ -1010,7 +1010,7 @@ axon_persist_role_exit_events() {
         dev)  dbname="axon_dev" ;;
         *)    dbname="axon_${instance_kind}" ;;
     esac
-    local pgport="$AXON_CANONICAL_PG_PORT"
+    local pgport="${AXON_CANONICAL_PG_PORT:?axon-pg-port.sh not sourced}"
 
     # Wall-clock ms. NOT `date +%s%3N`: on this host's coreutils `%3N` does not
     # truncate to 3 digits, it appends all 9 nanosecond digits (a 19-digit value
@@ -1086,7 +1086,7 @@ axon_recent_role_exits() {
         dev)  dbname="axon_dev" ;;
         *)    dbname="axon_${instance_kind}" ;;
     esac
-    local pgport="$AXON_CANONICAL_PG_PORT"
+    local pgport="${AXON_CANONICAL_PG_PORT:?axon-pg-port.sh not sourced}"
     local floor_ms=$(( ( $(date +%s) - window_h * 3600 ) * 1000 ))
     "$psql" -h 127.0.0.1 -p "$pgport" -U axon -d "$dbname" -tAF'|' -c \
         "SELECT DISTINCT ON (role) role, \

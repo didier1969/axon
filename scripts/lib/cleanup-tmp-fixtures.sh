@@ -199,7 +199,7 @@ _axon_test_db_is_reclaimable() {
 #   axon-cleanup-db: dropped=N skipped=M dry_run=B
 axon_cleanup_orphan_test_databases() {
     local dry_run=0 quiet=0
-    local url="${AXON_CLEANUP_DB_URL:-postgres://axon@127.0.0.1:${AXON_CANONICAL_PG_PORT}/postgres}"
+    local url="${AXON_CLEANUP_DB_URL:-postgres://axon@127.0.0.1:${AXON_CANONICAL_PG_PORT:?axon-pg-port.sh not sourced}/postgres}"
 
     while (( $# > 0 )); do
         case "$1" in
