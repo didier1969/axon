@@ -8,6 +8,11 @@ source "$ROOT_DIR/scripts/lib/axon-instance.sh"
 # shellcheck source=scripts/lib/axon-gpu-detect.sh
 # REQ-AXO-902285 — `gpu_wedged_pids` for the fail-fast GPU-wedge gate below.
 source "$ROOT_DIR/scripts/lib/axon-gpu-detect.sh"
+# REQ-AXO-902350 — THE canonical PG port. Sourced rather than defaulted inline: an
+# inline `:-44144` is exactly the duplicated literal that let the 2026-08-20 drift
+# survive across reboots.
+# shellcheck source=scripts/lib/axon-pg-port.sh
+source "$ROOT_DIR/scripts/lib/axon-pg-port.sh"
 AXON_INSTANCE_KIND=live
 axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
 
@@ -759,11 +764,74 @@ print(f'{ph}|{fg}')" 2>/dev/null || true)"
 # indexer_alive) up to ~120s; only run the qualify scenarios once clean. If the runtime
 # never reaches clean within budget, SKIP qualify and DEFER to step 6c — which owns the
 # auto-recovery + authoritative fail-closed verdict — so cold-start can never preempt it.
-if [[ "$SKIP_QUALIFY" -ne 1 ]]; then
+# REQ-AXO-902383 — WHICH qualifications ran, and which did not.
+#
+# Seven `qualify_*.py` live in scripts/; this step ran ONE. A promote therefore went
+# green having tested only the brain's MCP surface — the script says so itself, in the
+# step-6c comment below: "step-6 qualify tests only the brain (surface=core)". The
+# partial coverage was known, documented, and compensated by another gate rather than
+# closed. `qualify_indexer_truth` — the one that would have covered the 2026-08-20
+# embed incident — never ran on any promote that day.
+#
+# ONE is added here: `qualify_indexer_truth`, which verifies the index says true
+# things. It runs AFTER the cutover, so a red result lands on a runtime that
+# `axonctl cutover` can still roll back natively.
+#
+# It was BROKEN and that is almost certainly why it was never wired: every table it
+# queried read `public.*`, gone since the IST moved to `ist.*`, so it crashed on its
+# first query; and it counted files by `status='indexed'`, a value the vocabulary no
+# longer contains (live rows are `parsed` or `discovered`, `indexed` matches zero).
+# Two independent breakages, both silent, on the one gate that would have covered the
+# 2026-08-20 embed incident. Repaired and verified green before wiring:
+#   MIL-AXO-032 verrou PASS — AXO syms=12389 files=897 ratio=13.81
+#
+# The others stay OUT, each for a stated reason — an inventory of gates that cannot
+# run is what created this problem:
+#   qualify_runtime        targets the DEV instance (:44139). Verified: it fails with
+#                          "MCP runtime not ready after 120s" when dev is down, which
+#                          is the normal state during a live promote. Wiring it would
+#                          add a gate that always reds — the same disease, inverted.
+#   qualify_ingestion_run  needs a corpus to ingest.
+#   qualify_mcp_*          overlap surface=core, already covered by step 6.
+# Widening further is a decision, not a default that grows.
+#
+# QUALIFY_RAN / QUALIFY_SKIPPED are echoed in the final summary. A gate nobody crossed
+# reads exactly like a gate that passed, which is how VPC read "6 passed, 0 failed"
+# (the restart gate's assertion count) as "6 qualifies out of 7".
+QUALIFY_RAN=()
+QUALIFY_SKIPPED=()
+
+if [[ "$SKIP_QUALIFY" -eq 1 ]]; then
+  QUALIFY_SKIPPED+=("all (--skip-qualify)")
+else
   ensure_head_stable
   if _poll_promote_clean 24; then
     run_step 6 qualify_mcp "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE"
+    QUALIFY_RAN+=("qualify_mcp(surface=core)")
+
+    # Advisory: a red result here must SURFACE, not abort a cutover that already
+    # succeeded — step 6c owns the fail-closed verdict. Recording the outcome is the
+    # point; swallowing it silently is what this REQ exists to stop.
+    QUALIFY_SKIPPED+=("qualify_runtime (targets dev :44139, down during a live promote)")
+    QUALIFY_SKIPPED+=("qualify_ingestion_run (needs a corpus)")
+    QUALIFY_SKIPPED+=("qualify_mcp_guidance/robustness/retrieval_context (overlap surface=core)")
+    for extra in qualify_indexer_truth; do
+      if [[ ! -f "$ROOT_DIR/scripts/${extra}.py" ]]; then
+        QUALIFY_SKIPPED+=("${extra} (script absent)")
+        continue
+      fi
+      # The gate needs PG; the live URL is the one that describes what just shipped.
+      if AXON_DEV_DATABASE_URL="${AXON_LIVE_DATABASE_URL:-postgres://axon@127.0.0.1:${AXON_CANONICAL_PG_PORT:?axon-pg-port.sh not sourced}/axon_live}" \
+         python3 "$ROOT_DIR/scripts/${extra}.py" >>"$PROMOTE_LOG" 2>&1; then
+        QUALIFY_RAN+=("${extra}")
+        promote_log "   ✅ ${extra}: pass"
+      else
+        QUALIFY_RAN+=("${extra}:FAIL")
+        promote_log "   ⚠️ ${extra}: FAIL — see log above (advisory; step 6c owns the fail-closed verdict)"
+      fi
+    done
   else
+    QUALIFY_SKIPPED+=("all (runtime not clean after ~120s warmup, phase=${recon_phase:-unreachable})")
     promote_log "   ⚠️ step 6: runtime not clean after ~120s warmup (phase=${recon_phase:-unreachable}) — SKIP qualify, DEFER to step 6c recovery gate (REQ-AXO-902189: cold-start must not preempt the fail-closed verdict)."
   fi
 fi
@@ -917,6 +985,11 @@ except: print('unknown')
 
 promote_log ""
 promote_log "✅ PROMOTE COMPLETE"
+# REQ-AXO-902383 — name what was verified AND what was not. A summary that lists only
+# successes cannot be told apart from one where nothing ran.
+promote_log "   qualify_ran=${QUALIFY_RAN[*]:-(none)}"
+promote_log "   qualify_skipped=${QUALIFY_SKIPPED[*]:-(none)}"
+promote_log "   note: 'N passed, M failed' lines above come from the RESTART GATE (pid/ready/availability assertions), NOT from qualify — do not read them as a qualify count."
 promote_log "   build_id=${final_build_id}"
 promote_log "   sha=${start_head:0:12}"
 promote_log "   bin/axon-brain md5=${final_md5}"
