@@ -337,7 +337,10 @@ impl McpServer {
     }
 
     /// All registered project codes (registry-wide broadcast target).
-    fn all_project_codes(&self) -> Vec<String> {
+    /// REQ-AXO-902386 — also the recipient allow-list for `mcp_outbox_send`, hence
+    /// `pub(crate)`: the fan-out and the validation must agree on what "registered"
+    /// means, and two independent readings of the registry would drift.
+    pub(crate) fn all_project_codes(&self) -> Vec<String> {
         self.pubsub_codes(
             "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_code <> '' ORDER BY project_code ASC",
         )

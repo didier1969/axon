@@ -13,6 +13,46 @@ fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+/// REQ-AXO-902386 — nearest canonical project code to a mistyped one.
+///
+/// Pure so the matching rules are testable without a registry. Deliberately
+/// CONSERVATIVE: it suggests only when the answer is fairly obvious, because a
+/// wrong suggestion on a mailbox recipient is worse than none — it would invite
+/// the sender to deliver to the wrong project.
+///
+/// Codes are 3 characters (DEC-AXO-085), so the realistic typos are: extra
+/// character (`AXON` → `AXO`), missing one, wrong case, or one substituted letter.
+fn nearest_project_code(supplied: &str, known: &[String]) -> Option<String> {
+    let needle = supplied.trim().to_ascii_uppercase();
+    if needle.is_empty() {
+        return None;
+    }
+    // 1. Case only.
+    if let Some(hit) = known.iter().find(|c| c.eq_ignore_ascii_case(&needle)) {
+        return Some(hit.clone());
+    }
+    // 2. Prefix either way — the APS case (`AXON` starts with `AXO`).
+    if let Some(hit) = known
+        .iter()
+        .find(|c| needle.starts_with(c.as_str()) || c.starts_with(&needle))
+    {
+        return Some(hit.clone());
+    }
+    // 3. A single substituted character, same length. Two differences on a
+    //    3-character code is not a typo, it is a different code — no guess.
+    known
+        .iter()
+        .find(|c| {
+            c.len() == needle.len()
+                && c.chars()
+                    .zip(needle.chars())
+                    .filter(|(a, b)| !a.eq_ignore_ascii_case(b))
+                    .count()
+                    == 1
+        })
+        .cloned()
+}
+
 pub(crate) fn mbx_err(msg: &str, status: &str) -> Value {
     json!({
         "content": [{ "type": "text", "text": msg }],
@@ -61,6 +101,48 @@ impl McpServer {
     /// materialised row is delivered per recipient (see `outbox_fanout`). The
     /// concrete-`to_project` path below is the default point-to-point case and is
     /// preserved verbatim.
+    /// REQ-AXO-902386 — reject a `to_project` absent from `ProjectCodeRegistry`,
+    /// naming the field and suggesting the nearest canonical code.
+    ///
+    /// Returns `None` when the recipient is valid, or when the registry cannot be
+    /// read at all — an unreachable registry must not silently block the mailbox,
+    /// which is the channel used to REPORT that kind of outage.
+    fn reject_unknown_recipient(&self, to: &str) -> Option<Value> {
+        let known = self.all_project_codes();
+        if known.is_empty() || known.iter().any(|c| c == to) {
+            return None;
+        }
+        let suggestion = nearest_project_code(to, &known);
+        let hint = match suggestion.as_deref() {
+            Some(near) => format!(
+                "`{to}` is not a canonical project code. Did you mean `{near}`? \
+                 Confirm with `project_registry_lookup project_code=\"{near}\"`."
+            ),
+            None => format!(
+                "`{to}` is not a canonical project code. List the valid ones with \
+                 `project_registry_lookup`, or use `to_project=\"*\"` to broadcast."
+            ),
+        };
+        let mut repair = json!({
+            "invalid_field": "to_project",
+            "supplied_value": to,
+            "follow_up_tools": ["project_registry_lookup"],
+            "hint": hint,
+        });
+        if let Some(near) = &suggestion {
+            repair["did_you_mean"] = json!(near);
+        }
+        Some(json!({
+            "content": [{ "type": "text", "text": hint }],
+            "isError": true,
+            "data": {
+                "status": "input_invalid",
+                "delivered": false,
+                "parameter_repair": repair,
+            }
+        }))
+    }
+
     pub(crate) fn axon_mcp_outbox_send(&self, args: &Value) -> Option<Value> {
         let from = args
             .get("from")
@@ -109,6 +191,27 @@ impl McpServer {
             Some(t) => t.to_string(),
             None => return Some(mbx_err("mcp_outbox_send requires `to_project` (or `to_topic`/`to_room`).", "input_invalid")),
         };
+
+        // REQ-AXO-902386 — the recipient must EXIST before we answer `delivered`.
+        //
+        // APS addressed two messages to `to_project="AXON"` (a typo for the canonical
+        // `AXO`). The server answered `delivered` twice, with no warning, and stored
+        // them in a mailbox for a project ABSENT from the registry. Worse, the same
+        // response then advertised "📬 2 unread from APS — read with mcp_inbox_read
+        // project=AXON" while `project_registry_lookup` said no such project existed:
+        // two surfaces of one server contradicting each other in a single reply.
+        //
+        // Those two lost messages were their most serious findings of the session.
+        // A sender who makes this typo believes they have communicated, and nothing
+        // tells them otherwise — the dead end PIL-AXO-002 forbids, on the channel VPC
+        // made the SINGLE route for inter-project requests on 2026-08-20.
+        //
+        // The bricks existed on both sides: the registry knows how to say no, and
+        // `parameter_repair` knows how to suggest. Only the wiring at the entry point
+        // was missing.
+        if let Some(err) = self.reject_unknown_recipient(&to) {
+            return Some(err);
+        }
 
         // REQ-AXO-902117 (MBX-5) — ACL gate (MECHANISM, default-open). A `deny`
         // rule for (from → to) blocks the send ONLY when AXON_MAILBOX_ACL_ENFORCE
@@ -992,5 +1095,70 @@ mod mbx5_tests {
         // Deny rule present: blocks under enforce, observe-only when not.
         assert!(acl_should_block(true, true));
         assert!(!acl_should_block(false, true));
+    }
+}
+
+#[cfg(test)]
+mod req_902386_recipient_validation_tests {
+    use super::nearest_project_code;
+
+    fn registry() -> Vec<String> {
+        ["AXO", "APS", "VPC", "NEX", "OPV", "KKI", "BKS"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_aps_typo_suggests_the_canonical_code() {
+        // Le cas EXACT : APS a écrit `AXON`, le serveur a répondu « delivered », et
+        // leurs deux signalements les plus graves ont disparu dans une boîte
+        // fantôme (inbox 11934).
+        assert_eq!(
+            nearest_project_code("AXON", &registry()),
+            Some("AXO".to_string())
+        );
+    }
+
+    #[test]
+    fn case_alone_resolves() {
+        assert_eq!(nearest_project_code("axo", &registry()), Some("AXO".to_string()));
+        assert_eq!(nearest_project_code("Vpc", &registry()), Some("VPC".to_string()));
+    }
+
+    #[test]
+    fn a_truncated_code_resolves() {
+        // L'autre sens du préfixe : `AX` est le début de `AXO`.
+        assert_eq!(nearest_project_code("AX", &registry()), Some("AXO".to_string()));
+    }
+
+    #[test]
+    fn one_substituted_character_resolves() {
+        assert_eq!(nearest_project_code("AXQ", &registry()), Some("AXO".to_string()));
+    }
+
+    #[test]
+    fn two_differences_suggest_nothing_at_all() {
+        // LA garde. Sur un code de 3 caractères, deux différences ne sont pas une
+        // faute de frappe : c'est un autre code. Suggérer ici enverrait le message
+        // au MAUVAIS projet — pire que ne rien suggérer, puisque l'expéditeur
+        // suivrait la suggestion avec confiance.
+        assert_eq!(nearest_project_code("XYZ", &registry()), None);
+        assert_eq!(nearest_project_code("ZZZ", &registry()), None);
+    }
+
+    #[test]
+    fn an_exact_code_is_returned_by_the_case_rule() {
+        // Un code valide n'atteint jamais cette fonction en production (l'appelant
+        // vérifie l'appartenance d'abord), mais la fonction doit rester correcte
+        // isolément — elle est publique dans le module et testable seule.
+        assert_eq!(nearest_project_code("NEX", &registry()), Some("NEX".to_string()));
+    }
+
+    #[test]
+    fn an_empty_registry_suggests_nothing() {
+        // Registre illisible : l'appelant laisse passer le message plutôt que de
+        // bloquer le canal qui sert justement à SIGNALER ce genre de panne.
+        assert_eq!(nearest_project_code("AXON", &[]), None);
     }
 }
