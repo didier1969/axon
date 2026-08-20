@@ -1224,6 +1224,13 @@ impl McpServer {
                 let trimmed = artifact_ref.trim();
                 if trimmed.is_empty() {
                     true
+                } else if !evidence_ref_is_disk_checkable(&artifact_type, trimmed) {
+                    // REQ-AXO-902390 — the declared type said `file`/`document` but
+                    // the ref is a commit hash, a SOLL id or a URL. A disk check
+                    // cannot decide anything about it, so it is NOT broken: it is
+                    // MIS-TYPED. Deleting it destroys valid evidence — APS came
+                    // within one call of losing 21 rows this way (inbox 12093).
+                    false
                 } else {
                     let p = std::path::Path::new(trimmed);
                     let candidate = if p.is_absolute() {

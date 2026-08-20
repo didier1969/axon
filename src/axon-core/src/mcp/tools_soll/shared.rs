@@ -377,7 +377,15 @@ pub(super) fn is_canonical_traceability_entity_type(entity_type: &str) -> bool {
 }
 
 pub(super) fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'static str> {
-    match normalize_traceability_entity_type(entity_type).as_str() {
+    // REQ-AXO-902390 — `commit`, `soll_ref` and `url` are legal EVERYWHERE: a
+    // commit proves any kind of node, and an intent cross-reference is not
+    // entity-specific. They were absent from this vocabulary while 6058 `Commit`
+    // rows already existed in the live graph (written by `axon_commit_work`), so
+    // inferring the right type would have been rejected by the schema.
+    // Les valeurs sont comparées via `to_ascii_lowercase()` du type rendu, donc
+    // "sollref" et non "soll_ref" — attrapé par le test de schéma.
+    let mut accepted = vec!["commit", "sollref", "url"];
+    accepted.extend(match normalize_traceability_entity_type(entity_type).as_str() {
         "requirement" => vec!["document", "file", "symbol", "test", "metric", "validation"],
         "decision" => vec![
             "document",
@@ -396,18 +404,160 @@ pub(super) fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'stat
             vec!["document", "file", "symbol", "metric"]
         }
         _ => vec!["document", "file", "symbol"],
+    });
+    accepted
+}
+
+/// REQ-AXO-902390 — what SHAPE does this `artifact_ref` have?
+///
+/// The single place that answers "is this thing a filesystem path?". Three call
+/// sites need the same answer and disagreed: evidence attachment (which typed a
+/// commit hash as `Document`), the broken-evidence sweep (which then stat()ed it),
+/// and `soll_remove_evidence(broken_only=true)` (which would have DELETED it).
+///
+/// Measured on `axon_live` 2026-08-20: 493 commit hashes and 113 SOLL ids stored
+/// as `artifact_type='Document'`, contributing to 1173 rows marked `broken`. APS
+/// hit the same defect and checked all 22 of their "broken" refs by hand — 21 were
+/// valid. Had they trusted the tool's own suggested remedy, they would have
+/// destroyed 3 commit attachments and 18 intent references (inbox 12093).
+///
+/// Deliberately conservative: anything not RECOGNISED is `Unknown`, which callers
+/// treat as "leave it alone". Guessing is what created the mess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArtifactRefShape {
+    /// Looks like a filesystem path — the only shape a disk check may resolve.
+    Path,
+    /// A git object id: 7-40 lowercase hex characters and nothing else.
+    CommitHash,
+    /// A canonical SOLL id (`TYPE-PROJ-N`, DEC-AXO-085) or a `SOLL:` reference.
+    SollRef,
+    Url,
+    /// Recognised as none of the above. NEVER resolved as a path.
+    Unknown,
+}
+
+pub(super) fn classify_artifact_ref(artifact_ref: &str) -> ArtifactRefShape {
+    let raw = artifact_ref.trim();
+    if raw.is_empty() {
+        return ArtifactRefShape::Unknown;
     }
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        return ArtifactRefShape::Url;
+    }
+    if raw.starts_with("SOLL:") || is_canonical_soll_id_prefix(raw) {
+        return ArtifactRefShape::SollRef;
+    }
+    // Git revisions in every stored form. The `git:` prefix and `HEAD` were found
+    // among the rows still flagged broken AFTER the first pass of this fix — the
+    // first shape rules were too narrow, and the survivors proved it.
+    let git_body = raw.strip_prefix("git:").unwrap_or(raw);
+    if is_git_object_id(git_body) || is_git_symbolic_rev(git_body) {
+        return ArtifactRefShape::CommitHash;
+    }
+    // Whitespace settles it: a path does not contain spaces in this corpus, but a
+    // note or a shell command does. Live examples that were being stat()ed:
+    // `mix compile --warnings-as-errors`, `axon-dev-brain tmux 2026-05-23T04:38:43`,
+    // `session-50 2026-05-23 soll_work_plan(project_code=MLD, top=5)`.
+    // These are provenance notes recorded in the ref field — real evidence, wrong
+    // column. Never a missing file.
+    if raw.chars().any(char::is_whitespace) {
+        return ArtifactRefShape::Unknown;
+    }
+    // A `scheme:value` ref is STRUCTURED, not a path. Generalised rather than
+    // enumerated: `git:`, `SOLL:` and `commit:` were each found separately, and
+    // `live:axon_live:symbol_count` / `disposition:session-2026-06-20` showed the
+    // scheme vocabulary is open. Callers coin their own; the shape is the invariant.
+    // A scheme must precede any separator, so `docs/a:b.md` stays a path.
+    if let Some(colon) = raw.find(':') {
+        let scheme = &raw[..colon];
+        let before_separator = !raw[..colon].contains('/') && !raw[..colon].contains('\\');
+        if before_separator
+            && !scheme.is_empty()
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            // `commit:<hash>` is a commit; any other scheme is simply not a path.
+            let value = &raw[colon + 1..];
+            return if is_git_object_id(value) {
+                ArtifactRefShape::CommitHash
+            } else {
+                ArtifactRefShape::Unknown
+            };
+        }
+    }
+    if raw.contains('/') || raw.contains('\\') || raw.contains('.') {
+        return ArtifactRefShape::Path;
+    }
+    ArtifactRefShape::Unknown
+}
+
+/// 7-40 lowercase hex and nothing else. The length window excludes a 6-char word;
+/// requiring ALL hex excludes `deadbeef.txt` and `docs/abc123.md`.
+fn is_git_object_id(raw: &str) -> bool {
+    (7..=40).contains(&raw.len())
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+/// `HEAD`, `HEAD~1`, `HEAD^`, `ORIG_HEAD`, `FETCH_HEAD` — symbolic revisions.
+fn is_git_symbolic_rev(raw: &str) -> bool {
+    let head = raw
+        .split(['~', '^'])
+        .next()
+        .unwrap_or(raw);
+    matches!(head, "HEAD" | "ORIG_HEAD" | "FETCH_HEAD" | "MERGE_HEAD")
+}
+
+/// `TYPE-PROJ-N` with a 3-char uppercase project code — the DEC-AXO-085 format.
+/// Kept separate from `project_code_from_canonical_entity_id` because that one
+/// answers "which project", not "is this an id at all".
+fn is_canonical_soll_id_prefix(raw: &str) -> bool {
+    let head = raw.split(['#', ':']).next().unwrap_or(raw);
+    let mut parts = head.split('-');
+    let (Some(kind), Some(project), Some(number)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    kind.len() >= 3
+        && kind.chars().all(|c| c.is_ascii_uppercase())
+        && project.len() == 3
+        && project.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
+}
+
+/// REQ-AXO-902390 — may a disk existence check decide this row is broken?
+///
+/// Both the declared type AND the ref shape must agree. The declared type alone
+/// was the bug: `Document` is the fallback bucket, so everything unrecognised
+/// landed there and got stat()ed.
+pub(super) fn evidence_ref_is_disk_checkable(artifact_type: &str, artifact_ref: &str) -> bool {
+    matches!(
+        artifact_type.trim().to_ascii_lowercase().as_str(),
+        "file" | "document"
+    ) && classify_artifact_ref(artifact_ref) == ArtifactRefShape::Path
 }
 
 pub(super) fn normalize_evidence_artifact_type(raw: &str, artifact_ref: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "document" | "doc" => {
-            if artifact_ref.contains('/') || artifact_ref.ends_with(".md") {
-                "File".to_string()
-            } else {
-                "Document".to_string()
-            }
-        }
+        // REQ-AXO-902390 — `Document` was the FALLBACK bucket: anything without a
+        // `/` or a `.md` suffix landed there, including commit hashes and SOLL
+        // ids, which the broken-evidence sweep then resolved as filesystem paths.
+        // Type from the SHAPE first; `Document` now means "a document", not
+        // "whatever is left".
+        "" | "document" | "doc" => match classify_artifact_ref(artifact_ref) {
+            ArtifactRefShape::CommitHash => "Commit".to_string(),
+            ArtifactRefShape::SollRef => "SollRef".to_string(),
+            ArtifactRefShape::Url => "Url".to_string(),
+            ArtifactRefShape::Path => "File".to_string(),
+            ArtifactRefShape::Unknown => "Document".to_string(),
+        },
         "file" | "path" | "uri" => "File".to_string(),
         "symbol" | "code" => "Symbol".to_string(),
         "test" => "Test".to_string(),
@@ -677,5 +827,180 @@ mod scoped_query_filter_tests {
             scoped_query_filter(Some("  AXO  "), ""),
             " AND project_code = 'AXO'"
         );
+    }
+}
+
+#[cfg(test)]
+mod req_902390_artifact_ref_shape_tests {
+    use super::*;
+
+    #[test]
+    fn a_commit_hash_is_never_a_path() {
+        // Les formes VERBATIM trouvées typées `Document` dans axon_live.
+        for hash in ["01c24be7", "024333dd", "923f0f4", "e5f370f", "56e88a6"] {
+            assert_eq!(
+                classify_artifact_ref(hash),
+                ArtifactRefShape::CommitHash,
+                "{hash} devrait être reconnu comme un hash git"
+            );
+            assert!(
+                !evidence_ref_is_disk_checkable("Document", hash),
+                "{hash} ne doit JAMAIS être résolu sur disque"
+            );
+        }
+    }
+
+    #[test]
+    fn a_soll_reference_is_never_a_path() {
+        // Ceux d'APS (inbox 12093) et les nôtres.
+        for id in [
+            "MIL-APS-001",
+            "DEC-APS-003",
+            "CPT-AXO-018",
+            "CPT-AXO-90044",
+            "REQ-AXO-902390",
+            "SOLL:REQ-APS-158#kpi-contract",
+        ] {
+            assert_eq!(
+                classify_artifact_ref(id),
+                ArtifactRefShape::SollRef,
+                "{id} devrait être reconnu comme un renvoi SOLL"
+            );
+            assert!(!evidence_ref_is_disk_checkable("Document", id));
+        }
+    }
+
+    #[test]
+    fn a_real_path_is_still_disk_checkable() {
+        // LA falsification : la branche qui détecte un vrai fichier disparu doit
+        // rester ATTEIGNABLE. Un correctif qui rend l'outil muet ne vaut pas
+        // mieux que celui qui le rend bavard.
+        let real = "/home/dstadel/projects/aps3d/lib/aps3d/tms/route_optimizer.ex";
+        assert_eq!(classify_artifact_ref(real), ArtifactRefShape::Path);
+        assert!(evidence_ref_is_disk_checkable("File", real));
+        assert!(evidence_ref_is_disk_checkable("Document", "docs/architecture.md"));
+    }
+
+    #[test]
+    fn the_aps_case_yields_one_offender_not_twenty_two() {
+        // Rejeu du décompte exact d'APS : 3 hashes + 18 renvois + 1 chemin.
+        let mut refs: Vec<String> = vec![
+            "923f0f4".to_string(),
+            "e5f370f".to_string(),
+            "56e88a6".to_string(),
+            "/home/dstadel/projects/aps3d/lib/aps3d/tms/route_optimizer.ex".to_string(),
+        ];
+        refs.push("MIL-APS-001".to_string());
+        refs.push("DEC-APS-003".to_string());
+        refs.push("SOLL:REQ-APS-158#kpi-contract".to_string());
+        for n in 216..=228 {
+            refs.push(format!("REQ-APS-{n}"));
+        }
+        refs.push("REQ-APS-158".to_string());
+        refs.push("REQ-APS-159".to_string());
+        assert_eq!(refs.len(), 22, "le cas d'APS compte bien 22 refs");
+
+        let checkable: Vec<&String> = refs
+            .iter()
+            .filter(|r| evidence_ref_is_disk_checkable("Document", r))
+            .collect();
+        assert_eq!(
+            checkable.len(),
+            1,
+            "une seule ref est vérifiable sur disque, pas 22 : {checkable:?}"
+        );
+    }
+
+    #[test]
+    fn document_is_no_longer_the_fallback_bucket() {
+        // La cause racine : `Document` recevait tout ce qui n'avait ni `/` ni `.md`.
+        assert_eq!(normalize_evidence_artifact_type("", "01c24be7"), "Commit");
+        assert_eq!(normalize_evidence_artifact_type("document", "CPT-AXO-018"), "SollRef");
+        assert_eq!(
+            normalize_evidence_artifact_type("doc", "https://example.test/x"),
+            "Url"
+        );
+        assert_eq!(normalize_evidence_artifact_type("", "docs/x.md"), "File");
+        // Et un vrai document reste un document.
+        assert_eq!(
+            normalize_evidence_artifact_type("document", "cahier des charges"),
+            "Document"
+        );
+    }
+
+    #[test]
+    fn the_inferred_types_are_accepted_by_the_schema() {
+        // Sans ça, inférer le BON type le ferait rejeter — 6058 lignes `Commit`
+        // existent déjà dans le graphe live alors que le vocabulaire les ignorait.
+        for entity in ["requirement", "decision", "concept", "vision"] {
+            assert!(artifact_schema_accepts(entity, "Commit"), "{entity} / Commit");
+            assert!(artifact_schema_accepts(entity, "SollRef"), "{entity} / SollRef");
+            assert!(artifact_schema_accepts(entity, "Url"), "{entity} / Url");
+        }
+    }
+
+    #[test]
+    fn the_survivors_of_the_first_pass_are_recognised() {
+        // Formes VERBATIM encore marquées `broken` APRÈS la première passe de ce
+        // correctif : elles ont prouvé que mes règles initiales étaient trop
+        // étroites. Un correctif dont on ne vérifie pas les survivants n'est
+        // vérifié qu'à moitié.
+        for git_ref in ["git:f9a2da1", "git:23fcb7a", "HEAD", "HEAD~1", "ORIG_HEAD"] {
+            assert_eq!(
+                classify_artifact_ref(git_ref),
+                ArtifactRefShape::CommitHash,
+                "{git_ref} est une révision git"
+            );
+            assert!(!evidence_ref_is_disk_checkable("Document", git_ref));
+        }
+        // Notes de provenance et commandes rangées dans le champ ref : une preuve
+        // réelle, dans la mauvaise colonne. Jamais un fichier disparu.
+        for note in [
+            "mix compile --warnings-as-errors",
+            "axon-dev-brain tmux 2026-05-23T04:38:43",
+            "session-50 2026-05-23 soll_work_plan(project_code=MLD, top=5)",
+        ] {
+            assert_eq!(
+                classify_artifact_ref(note),
+                ArtifactRefShape::Unknown,
+                "{note} n'est pas un chemin"
+            );
+            assert!(!evidence_ref_is_disk_checkable("Document", note));
+        }
+    }
+
+    #[test]
+    fn a_scheme_prefixed_ref_is_never_a_path() {
+        // Formes VERBATIM encore marquées broken après la DEUXIÈME passe. Le
+        // vocabulaire des schémas est ouvert — les appelants inventent le leur —
+        // donc la règle porte sur la FORME, pas sur une liste.
+        assert_eq!(
+            classify_artifact_ref("commit:532b8cab"),
+            ArtifactRefShape::CommitHash
+        );
+        for structured in [
+            "live:axon_live:symbol_count",
+            "disposition:session-2026-06-20",
+            "run:2026-06-20T10:00:00Z",
+        ] {
+            assert_eq!(
+                classify_artifact_ref(structured),
+                ArtifactRefShape::Unknown,
+                "{structured} est un ref structuré, pas un chemin"
+            );
+            assert!(!evidence_ref_is_disk_checkable("Document", structured));
+        }
+        // Mais un chemin qui contient un `:` APRÈS un séparateur reste un chemin.
+        assert_eq!(classify_artifact_ref("docs/a:b.md"), ArtifactRefShape::Path);
+    }
+
+    #[test]
+    fn a_hex_looking_filename_is_a_path_not_a_hash() {
+        // Le piège inverse : ne pas classer un fichier comme un commit.
+        assert_eq!(classify_artifact_ref("deadbeef.txt"), ArtifactRefShape::Path);
+        assert_eq!(classify_artifact_ref("docs/abc123.md"), ArtifactRefShape::Path);
+        // Trop court pour un hash abrégé, et pas un chemin : on ne devine pas.
+        assert_eq!(classify_artifact_ref("abc12"), ArtifactRefShape::Unknown);
+        assert!(!evidence_ref_is_disk_checkable("Document", "abc12"));
     }
 }

@@ -65,6 +65,14 @@ impl McpServer {
             if artifact_ref.is_empty() {
                 continue;
             }
+            // REQ-AXO-902390 — the SQL filter above trusts `artifact_type`, and
+            // `Document` is where every unrecognised ref used to land. Measured on
+            // axon_live: 493 commit hashes + 113 SOLL ids typed `Document`, all
+            // stat()ed as paths and reported as missing files. A ref whose SHAPE is
+            // not a path is a TYPING defect, never a broken file.
+            if !evidence_ref_is_disk_checkable("file", &artifact_ref) {
+                continue;
+            }
             let status = row[3].clone();
             let checked_at = row[4].parse::<i64>().unwrap_or(0);
             let stale = status.is_empty() || (now_secs - checked_at) > BROKEN_FILE_TTL_SECS;
