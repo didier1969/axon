@@ -217,6 +217,25 @@ fn graph_first_indexer_lane_sizing(
     }
 }
 
+/// REQ-AXO-902373 — VRAM the indexer must LEAVE to the other GPU consumers on this
+/// host. Measured 2026-08-20 on the 8 GiB reference machine:
+///
+/// | consumer            | VRAM      | when                                     |
+/// |---------------------|-----------|------------------------------------------|
+/// | live brain          | ~1.5-2.2 GiB | resident (query-embed CUDA context)   |
+/// | Handy (dictation)   | ~1.5-2 GiB   | ON DEMAND — loads its model when the operator speaks |
+/// | other host projects | headroom     | opportunistic                        |
+///
+/// Handy is why this is a RESERVE and not a leftover: it holds no VRAM at rest, so a
+/// "free memory" probe at indexer start would happily hand its share to the arena,
+/// and the dictation would then fail the moment it is used. An intermittent consumer
+/// has to be budgeted for even while it is absent.
+///
+/// Absolute rather than a percentage: what it covers — CUDA contexts and a Whisper-class
+/// model — costs roughly the same regardless of card size.
+/// Override with `AXON_GPU_RESERVE_MB`.
+const DEFAULT_GPU_RESERVE_MB: u64 = 4_096;
+
 fn apply_graph_first_indexer_memory_defaults(
     profile: RuntimeBootProfile,
     runtime_profile: &RuntimeProfile,
@@ -243,14 +262,31 @@ fn apply_graph_first_indexer_memory_defaults(
         .or_else(|| current_gpu_memory_snapshot().map(|snapshot| snapshot.total_mb))
         .unwrap_or(8_192);
 
-    let soft_limit_mb = if total_vram_mb <= 8_192 {
-        total_vram_mb.saturating_sub(128).max(6_144)
-    } else if total_vram_mb <= 12_288 {
-        total_vram_mb.saturating_sub(256).max(8_192)
-    } else {
-        total_vram_mb.saturating_sub((total_vram_mb / 12).max(512))
-    };
-    let cuda_limit_mb = soft_limit_mb.saturating_sub(128).max(4_096);
+    // REQ-AXO-902373 — the indexer is NOT alone on the GPU.
+    //
+    // The previous ladder derived the budget from the card TOTAL minus a 128 MiB
+    // token margin (8192 -> soft 8064 / cuda 7936, i.e. 97% of an 8 GiB card). That
+    // is only correct for an indexer that owns the whole GPU. In the standing live
+    // deployment the brain holds a CUDA context too (~1.5-2.2 GiB for the query-embed
+    // lane), so the two budgets summed to MORE than the card: 7936 + 1518 > 8192.
+    // The ORT BFC arena grows monotonically and never returns memory, so it walked up
+    // to the ceiling and every subsequent batch died in `BFCArena::Alloc` — which
+    // stage_b2 reports as a whole-batch failure, marking 64 healthy chunks `failed`.
+    // Measured 2026-08-20: ~233k chunks left without a vector this way.
+    //
+    // Operator directive (2026-08-20): live is served first, but the indexer must
+    // never take the whole card — the spare VRAM belongs to the brain and to the
+    // other projects sharing this host. Hence an explicit RESERVE subtracted from the
+    // total, rather than a margin token. Absolute (not a percentage) because what it
+    // must cover — a second CUDA context — costs roughly the same on any card.
+    let reserve_mb = std::env::var("AXON_GPU_RESERVE_MB")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_GPU_RESERVE_MB);
+    // Floor: below ~2 GiB the BGE-Large session cannot load at all, so a reserve
+    // larger than the card would otherwise produce an indexer that never starts.
+    let soft_limit_mb = total_vram_mb.saturating_sub(reserve_mb).max(2_048);
+    let cuda_limit_mb = soft_limit_mb.saturating_sub(128).max(1_920);
 
     // Respect user-provided env vars: only set defaults when not already configured.
     for (env_name, value) in [
@@ -2037,15 +2073,18 @@ mod tests {
 
         apply_graph_first_indexer_memory_defaults(RuntimeBootProfile::indexer(), &runtime_profile);
 
+        // REQ-AXO-902373 — 8192 total - 4096 reserve = 4096 soft, 3968 cuda.
+        // The reserve is what the brain (and any other GPU consumer on this host)
+        // gets to keep; the old 8064/7936 values oversubscribed the card.
         assert_eq!(
             std::env::var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB").unwrap(),
-            "8064"
+            "4096"
         );
-        assert_eq!(std::env::var("AXON_CUDA_MEMORY_LIMIT_MB").unwrap(), "7936");
-        assert_eq!(std::env::var("AXON_OPT_MAX_VRAM_USED_MB").unwrap(), "8064");
+        assert_eq!(std::env::var("AXON_CUDA_MEMORY_LIMIT_MB").unwrap(), "3968");
+        assert_eq!(std::env::var("AXON_OPT_MAX_VRAM_USED_MB").unwrap(), "4096");
         assert_eq!(
             std::env::var("AXON_GPU_PRIMARY_WORKER_MAX_USED_MB").unwrap(),
-            "8064"
+            "4096"
         );
         assert_eq!(
             std::env::var("AXON_VECTOR_READY_QUEUE_DEPTH").unwrap(),

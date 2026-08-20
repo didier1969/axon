@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::embedder::lifecycle_machine::process_lifecycle;
 use crate::embedder::OrtGpuFirstTextEmbedding;
@@ -59,6 +59,12 @@ pub struct GpuB2Embedder {
     /// asleep (VRAM released) ; `Some` == resident. Under DEC-AXO-901631
     /// (idle-drop OFF) this stays `Some` for the worker's whole lifetime.
     inner: Mutex<Option<OrtGpuFirstTextEmbedding>>,
+    /// REQ-AXO-902373 — overflow lane. A GPU that cannot allocate must degrade to
+    /// SLOW, never to MISSING DATA: this CPU session is built lazily on the first
+    /// VRAM allocation failure and then kept, so the batch is recomputed in RAM
+    /// instead of marking 64 healthy chunks `failed`. Stays `None` on hosts that
+    /// never hit VRAM pressure — no cost when unused.
+    cpu_overflow: Mutex<Option<OrtGpuFirstTextEmbedding>>,
     lane: String,
     worker_idx: usize,
     /// REQ-AXO-902220 — CUDA/TensorRT provider (true) vs CPU EP (false),
@@ -83,6 +89,7 @@ impl GpuB2Embedder {
         let model = OrtGpuFirstTextEmbedding::try_new(lane, worker_idx, true)?;
         Ok(Self {
             inner: Mutex::new(Some(model)),
+            cpu_overflow: Mutex::new(None),
             lane: lane.to_string(),
             worker_idx,
             use_gpu: true,
@@ -95,6 +102,7 @@ impl GpuB2Embedder {
         let model = OrtGpuFirstTextEmbedding::try_new(lane, worker_idx, false)?;
         Ok(Self {
             inner: Mutex::new(Some(model)),
+            cpu_overflow: Mutex::new(None),
             lane: lane.to_string(),
             worker_idx,
             use_gpu: false,
@@ -120,6 +128,50 @@ impl GpuB2Embedder {
         } else {
             false
         }
+    }
+}
+
+/// REQ-AXO-902373 — does this error mean "the GPU could not allocate"?
+///
+/// The 2026-08-20 incident surfaced as an ORT node failure whose message carries the
+/// allocator frame, e.g. `Non-zero status code returned while running Gather node ...
+/// bfc_arena.cc:358 void* onnxruntime::BFCArena::Alloc`. The node name varies with
+/// whichever operator asked for memory first, so matching on the node is useless —
+/// match the ALLOCATOR instead.
+///
+/// Deliberately conservative: an unrecognised error still propagates. Treating a
+/// genuine model error as VRAM pressure would silently move real failures to the CPU
+/// lane and hide them.
+pub(crate) fn is_gpu_allocation_failure(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("bfc_arena")
+        || m.contains("bfcarena")
+        || m.contains("out of memory")
+        || m.contains("cuda_error_out_of_memory")
+        || m.contains("failed to allocate memory")
+}
+
+impl GpuB2Embedder {
+    /// REQ-AXO-902373 — recompute a batch on the CPU after the GPU refused to
+    /// allocate. Slow (seconds vs milliseconds) and that is the point: the operator
+    /// asked for VRAM pressure to cost TIME, not coverage.
+    fn embed_batch_on_cpu(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut guard = match self.cpu_overflow.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.is_none() {
+            let lane = format!("{}-cpu-overflow", self.lane);
+            *guard = Some(OrtGpuFirstTextEmbedding::try_new(
+                &lane,
+                self.worker_idx,
+                false,
+            )?);
+        }
+        guard
+            .as_mut()
+            .expect("cpu overflow session present after lazy build")
+            .embed_texts(texts)
     }
 }
 
@@ -153,10 +205,29 @@ impl B2Embedder for GpuB2Embedder {
         process_lifecycle().mark_used();
         // DEC-AXO-901631 — one inference for the whole length-homogeneous
         // batch (sorted-drain guarantees the ordering ; no micro-batching).
-        guard
+        let outcome = guard
             .as_mut()
             .expect("session present after wake-on-demand rebuild")
-            .embed_texts(texts)
+            .embed_texts(texts);
+
+        match outcome {
+            Ok(vectors) => Ok(vectors),
+            Err(err) if self.use_gpu && is_gpu_allocation_failure(&err.to_string()) => {
+                // REQ-AXO-902373 — the GPU arena is full. Release the session lock
+                // BEFORE the CPU recompute so the idle watchdog and any sibling
+                // worker are not blocked for the (much longer) CPU pass.
+                drop(guard);
+                warn!(
+                    lane = %self.lane,
+                    worker = self.worker_idx,
+                    batch = texts.len(),
+                    error = %err,
+                    "GPU could not allocate — recomputing this batch on CPU                      (slower, but no chunk is lost). Raise AXON_GPU_RESERVE_MB or                      lower AXON_CUDA_MEMORY_LIMIT_MB if this repeats."
+                );
+                self.embed_batch_on_cpu(texts)
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -470,5 +541,51 @@ mod tests {
             "REQ-AXO-902220 SHIP-GATE OK — baseline={baseline} loaded={loaded} \
              dropped={dropped} reloaded={reloaded} MiB"
         );
+    }
+}
+
+#[cfg(test)]
+mod req_902373_tests {
+    use super::is_gpu_allocation_failure;
+
+    /// The VERBATIM error from the 2026-08-20 incident. Kept literal: the guard has to
+    /// recognise what the GPU actually emits, not a paraphrase of it.
+    const REAL_INCIDENT_ERROR: &str = "failed ORT run_binding for embedding batch: \
+Non-zero status code returned while running Gather node. \
+Name:'/embeddings/word_embeddings/Gather' Status Message: \
+/build/source/onnxruntime/core/framework/bfc_arena.cc:358 \
+void* onnxruntime::BFCArena::Alloc(size_t) Failed to allocate memory";
+
+    #[test]
+    fn recognises_the_real_incident_error() {
+        assert!(is_gpu_allocation_failure(REAL_INCIDENT_ERROR));
+    }
+
+    #[test]
+    fn recognises_allocator_failures_whatever_node_asked_first() {
+        // The node name varies with whichever operator requested memory first —
+        // matching on it would be brittle, so we match the allocator frame.
+        for msg in [
+            "running Add node ... bfc_arena.cc:358 BFCArena::Alloc",
+            "CUDA_ERROR_OUT_OF_MEMORY",
+            "cudaMalloc failed: out of memory",
+            "Failed to allocate memory for requested buffer",
+        ] {
+            assert!(is_gpu_allocation_failure(msg), "should match: {msg}");
+        }
+    }
+
+    #[test]
+    fn does_not_swallow_genuine_model_errors() {
+        // Conservative on purpose: routing a real failure to the CPU lane would hide
+        // it behind slowness instead of surfacing it.
+        for msg in [
+            "invalid input shape: expected 512 got 1414",
+            "tokenizer failed to encode input",
+            "ORT session not initialised",
+            "engine cache is corrupt",
+        ] {
+            assert!(!is_gpu_allocation_failure(msg), "should NOT match: {msg}");
+        }
     }
 }
