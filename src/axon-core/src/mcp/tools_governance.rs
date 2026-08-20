@@ -10,20 +10,49 @@ use crate::ist_snapshot::structural_invariants::{
 };
 use crate::ist_snapshot::RelationType;
 
-/// REQ-AXO-902280 (feedback #44, LLL — blocking) — pick the eligible↔indexed verdict from
-/// BOTH the row gap AND the `discovered` (enrolled-but-unparsed) backlog. A row in
-/// `ist.IndexedFile` being present ("indexed") does NOT mean its symbols were parsed; a
-/// stuck `discovered` backlog means the feeder never drained it, so `eligible == indexed`
-/// is NOT proof the source is searchable — the exact false-positive #44 hit (429 LLL files
-/// `discovered`, verdict "✅ every eligible source file is indexed"). Kept a pure free fn
-/// (no `&self`, no filesystem) so the whole verdict matrix is unit-testable.
-fn indexing_verdict(eligible: i64, indexed: i64, discovered: i64) -> String {
+/// REQ-AXO-902280 (feedback #44, LLL) + REQ-AXO-902389 (APS inbox 11933) — the
+/// eligible↔indexed↔parsed verdict.
+///
+/// A row in `ist.IndexedFile` being present ("indexed") does NOT mean its symbols were
+/// parsed, so `eligible == indexed` is not proof the source is searchable — the #44
+/// false positive (429 LLL files `discovered`, verdict "✅ every eligible source file
+/// is indexed").
+///
+/// REQ-AXO-902389 — but `status='discovered'` alone is the WRONG discriminator, and
+/// the report said so itself: it stated «nothing reads `IndexedFile.status` — that
+/// column is dead weight (REQ-AXO-901916) … Coverage truth is CHUNK PRESENCE», then
+/// ten lines later blocked on that very column. APS got «⛔ 716 file(s) ENROLLED but
+/// NOT parsed … the index is stale/incomplete» on an index with **1449/1454 chunk
+/// coverage (99.7%), backlog 0, zero parser errors**. A false alarm at the foot of an
+/// otherwise correct report — the mirror image of the vacuous ✅ (REQ-AXO-902384), and
+/// the only line a hurried reader keeps.
+///
+/// The discriminator is therefore `discovered_without_chunks`: a file marked
+/// `discovered` that HAS chunks was parsed, and its status is merely stale. What
+/// blocks is a file enrolled with NOTHING extracted from it.
+///   LLL:  429 discovered, 0 with chunks   → 429 blocking (unchanged)
+///   APS:  716 discovered, ~all with chunks →   0 blocking (fixed)
+///
+/// Pure free fn (no `&self`, no filesystem) so the whole verdict matrix is unit-testable.
+fn indexing_verdict(
+    eligible: i64,
+    indexed: i64,
+    discovered: i64,
+    discovered_without_chunks: i64,
+) -> String {
     if eligible == 0 {
         return "⚠️ zero eligible source files under the project root — check the watch root / ignore rules.".to_string();
     }
-    if discovered > 0 {
+    if discovered_without_chunks > 0 {
         return format!(
-            "⛔ {discovered} file(s) ENROLLED but NOT parsed (status='discovered'): 'indexed' counts the IndexedFile ROW, not extracted symbols — so eligible==indexed does NOT mean the source is searchable. The feeder is not draining this backlog; the index is stale/incomplete. Check the indexer is running and Watchman is reachable, or trigger a fresh boot (REQ-AXO-902253)."
+            "⛔ {discovered_without_chunks} file(s) ENROLLED but NOTHING EXTRACTED (IndexedFile row present, zero chunks): 'indexed' counts the ROW, not extracted content — so eligible==indexed does NOT mean the source is searchable. The feeder is not draining this backlog; the index is stale/incomplete. Check the indexer is running and Watchman is reachable, or trigger a fresh boot (REQ-AXO-902253)."
+        );
+    }
+    if discovered > 0 {
+        // Stale bookkeeping, NOT a stall: these files carry chunks, so they were
+        // parsed. Reported for what it is instead of blocking on it.
+        return format!(
+            "✅ every eligible source file is indexed AND parsed (chunk coverage is the truth). ℹ️ {discovered} file(s) still carry the legacy `status='discovered'` flag while HAVING chunks — stale bookkeeping on a column nothing reads (REQ-AXO-901916), not an indexing gap."
         );
     }
     let gap = eligible - indexed;
@@ -486,7 +515,17 @@ impl McpServer {
         let eligible = breakdown.eligible as i64;
         let gap = eligible - indexed;
 
-        let verdict = indexing_verdict(eligible, indexed, discovered);
+        // REQ-AXO-902389 — the discriminator: enrolled files with NOTHING extracted.
+        // `status='discovered'` alone flags stale bookkeeping as a stall.
+        let discovered_without_chunks = self.sql_scalar(&format!(
+            // `ist.chunk` anchors to the file by PATH (`file_path`), not by a row id.
+            "SELECT COUNT(*)::BIGINT FROM ist.indexedfile f \
+             WHERE f.project_code = '{}' AND f.status = 'discovered' \
+               AND NOT EXISTS (SELECT 1 FROM ist.chunk c WHERE c.file_path = f.path)",
+            escaped
+        ));
+
+        let verdict = indexing_verdict(eligible, indexed, discovered, discovered_without_chunks);
 
         let reason_lines = if breakdown.excluded_by_reason.is_empty() {
             "* (none — every walked file is eligible)".to_string()
@@ -2118,26 +2157,66 @@ mod tests {
     #[test]
     fn indexing_verdict_flags_discovered_backlog_as_blocker() {
         // The exact #44 shape: 429 LLL files enrolled, none parsed (all `discovered`).
-        let v = indexing_verdict(429, 429, 429);
+        let v = indexing_verdict(429, 429, 429, 429);
         assert!(v.starts_with("⛔"), "discovered backlog must block, got: {v}");
         assert!(v.contains("429"), "the backlog size must be stated: {v}");
-        assert!(v.contains("discovered"), "the stuck status must be named: {v}");
+        // REQ-AXO-902389 — was `contains("discovered")`. The verdict deliberately
+        // no longer names that column: it is dead weight nothing reads
+        // (REQ-AXO-901916), and blocking on it is the bug this REQ fixed. What the
+        // assertion actually guards is that the STALL is named — so assert that.
+        assert!(
+            v.contains("NOTHING EXTRACTED") && v.contains("zero chunks"),
+            "the stall must be named by its real cause: {v}"
+        );
         assert!(!v.contains('✅'), "must NOT claim all-indexed over an unparsed backlog: {v}");
+    }
+
+    #[test]
+    fn a_stale_discovered_flag_on_parsed_files_is_not_a_blocker() {
+        // REQ-AXO-902389 — le cas APS (inbox 11933) : 710 fichiers portent encore
+        // `status='discovered'`, mais 5 seulement n'ont AUCUN morceau. Leur
+        // couverture réelle était 1449/1454 = 99,7 %, backlog 0, 0 erreur parser —
+        // et l'outil rendait « ⛔ 716 ENROLLED but NOT parsed … index stale ».
+        //
+        // Mesuré au moment du correctif, la même forme partout : KKI 16164
+        // découverts / 12 vides · NEX 753/3 · AXO 660/1. Le verdict criait un
+        // facteur 1000 au-dessus du réel.
+        let v = indexing_verdict(1454, 1454, 710, 0);
+        assert!(v.starts_with("✅"), "des fichiers parsés ne bloquent pas : {v}");
+        assert!(
+            v.contains("710") && v.contains("stale"),
+            "le drapeau périmé est SIGNALÉ, pas caché : {v}"
+        );
+        assert!(!v.contains('⛔'), "aucun blocage sur du bookkeeping périmé : {v}");
+    }
+
+    #[test]
+    fn enrolled_with_nothing_extracted_still_blocks() {
+        // LA falsification : la branche qui détecte une vraie panne d'extraction
+        // doit rester ATTEIGNABLE. Un correctif qui rend l'outil muet ne vaut pas
+        // mieux que celui qui le rend bavard.
+        let v = indexing_verdict(1454, 1454, 710, 5);
+        assert!(v.starts_with("⛔"), "5 fichiers sans rien extrait bloquent : {v}");
+        assert!(v.contains('5'), "le nombre RÉEL est nommé, pas les 710 : {v}");
+        assert!(
+            !v.contains("710"),
+            "le verdict ne doit plus citer le compte périmé : {v}"
+        );
     }
 
     #[test]
     fn indexing_verdict_green_only_when_parsed_and_no_backlog() {
         // LLL after the post-outage reindex: 457 parsed, zero discovered.
-        let v = indexing_verdict(457, 457, 0);
+        let v = indexing_verdict(457, 457, 0, 0);
         assert!(v.starts_with("✅"), "clean parsed state is green: {v}");
         assert!(v.contains("parsed"), "the green verdict distinguishes parsed: {v}");
     }
 
     #[test]
     fn indexing_verdict_incomplete_empty_and_discovered_precedence() {
-        assert!(indexing_verdict(100, 90, 0).starts_with("⏳"), "under-enrolled → waiting");
-        assert!(indexing_verdict(0, 0, 0).starts_with("⚠"), "no eligible → watch-root warning");
+        assert!(indexing_verdict(100, 90, 0, 0).starts_with("⏳"), "under-enrolled → waiting");
+        assert!(indexing_verdict(0, 0, 0, 0).starts_with("⚠"), "no eligible → watch-root warning");
         // A discovered backlog dominates a raw row gap: the parse stall is the actionable cause.
-        assert!(indexing_verdict(100, 90, 5).starts_with("⛔"), "discovered dominates the gap verdict");
+        assert!(indexing_verdict(100, 90, 5, 5).starts_with("⛔"), "discovered dominates the gap verdict");
     }
 }

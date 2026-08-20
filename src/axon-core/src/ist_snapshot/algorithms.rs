@@ -35,6 +35,62 @@ pub fn to_petgraph(graph: &IstGraph) -> (DiGraph<String, u8>, Vec<NodeIndex>) {
     (pg, node_idx)
 }
 
+/// REQ-AXO-902375 — `to_petgraph`, restricted to relations that express a
+/// DEPENDENCY (one symbol needs another).
+///
+/// Kept separate from [`to_petgraph`] rather than replacing it: other callers
+/// legitimately want the whole graph (reachability, neighbourhood rendering). Only
+/// the algorithms that make a claim about dependency — cycles above all — must
+/// exclude the rest.
+///
+/// `SIMILAR_TO` is the edge that forced this: symmetric by construction, 9% of the
+/// live graph, and every one of its pairs is a spurious 2-cycle.
+pub fn to_petgraph_dependencies_only(graph: &IstGraph) -> (DiGraph<String, u8>, Vec<NodeIndex>) {
+    let n = graph.node_count();
+    let mut pg: DiGraph<String, u8> = DiGraph::with_capacity(n, graph.edge_count());
+    let mut node_idx: Vec<NodeIndex> = Vec::with_capacity(n);
+    for i in 0..n as u32 {
+        node_idx.push(pg.add_node(graph.id_of(i).to_string()));
+    }
+    for src in 0..n as u32 {
+        let src_pg = node_idx[src as usize];
+        for (tgt, rel) in graph.forward_neighbors(src) {
+            if !is_dependency_relation(rel) {
+                continue;
+            }
+            pg.add_edge(src_pg, node_idx[tgt as usize], rel as u8);
+        }
+    }
+    (pg, node_idx)
+}
+
+/// Does this relation mean "the source NEEDS the target"?
+///
+/// Deliberately an ALLOW-list. A deny-list would silently re-admit the next
+/// symmetric or annotative relation someone adds — which is exactly how
+/// `SIMILAR_TO` ended up in the cycle graph in the first place.
+pub fn is_dependency_relation(rel: RelationType) -> bool {
+    matches!(
+        rel,
+        RelationType::Calls
+            | RelationType::CallsNif
+            | RelationType::Imports
+            | RelationType::Implements
+            | RelationType::Uses
+            | RelationType::Reads
+    )
+}
+
+// Deliberately EXCLUDED, with the reason each time:
+//   Contains       — structural nesting (module ⊃ function), not dependency. A
+//                    module "containing" a function that "uses" the module is not
+//                    a cycle, it is how code is laid out.
+//   SimilarTo      — RESEMBLANCE, and symmetric by construction: every pair is a
+//                    2-cycle. This is the edge that made 9% of the graph spurious.
+//   Declares       — a declaration site, the mirror of Contains.
+//   ReadsArtifact  — points at a data file, not at another symbol.
+//   Other          — unclassified; admitting it would defeat the allow-list.
+
 /// REQ-AXO-91488 — PageRank centrality. Returns `(id, score)` pairs sorted
 /// by descending score. `damping` is the standard 0.85 used in the original
 /// Brin/Page paper ; `iterations` should be ≥30 for convergence on graphs
@@ -106,7 +162,24 @@ pub fn structural_sccs(graph: &IstGraph) -> Vec<Vec<String>> {
     if graph.node_count() == 0 {
         return Vec::new();
     }
-    let (pg, _) = to_petgraph(graph);
+    // REQ-AXO-902375 / REQ-AXO-902388 — DEPENDENCY relations only.
+    //
+    // `to_petgraph` keeps EVERY relation, and `SIMILAR_TO` is symmetric BY NATURE
+    // (a↔b), so each near-duplicate pair mechanically forms a 2-cycle that Tarjan
+    // reports as a circular dependency. It is the 4th most frequent relation in the
+    // live graph — 144 194 edges, ~9% — so this was not a rounding error.
+    //
+    // APS saw the consequence and mis-diagnosed it, understandably: they reported
+    // "impossible cycles" containing `APS3D.Supply.StocksTest.product_fixture`,
+    // whose in-degree is 0, and chains linking fixtures across DIFFERENT test
+    // modules (inbox 11933). Their explanation was bare-name edge aggregation. The
+    // real mechanism is simpler: those fixtures don't CALL each other, they RESEMBLE
+    // each other — near-identical setup code, hence a SIMILAR_TO pair, hence a
+    // 2-cycle. A node with in-degree 0 in the CALLS graph can sit in an SCC of the
+    // ALL-relations graph without any contradiction.
+    //
+    // A cycle is a claim about DEPENDENCY. Resemblance is not dependency.
+    let (pg, _) = to_petgraph_dependencies_only(graph);
     // REQ-AXO-901928 — petgraph 0.6.5 `tarjan_scc` is RECURSIVE (its own doc
     // says "This implementation is recursive"); on a deep call-chain it
     // recurses to depth = chain length and stack-overflows (SIGABRT observed on
@@ -1077,6 +1150,69 @@ mod tests {
         assert_eq!(pr.len(), 10);
         assert!(pr_ms < 5_000, "pagerank latency regressed: {pr_ms}ms");
         assert!(bfs_ms < 5_000, "bfs_reverse latency regressed: {bfs_ms}ms");
+    }
+
+    #[test]
+    fn similar_to_pairs_are_not_circular_dependencies() {
+        // REQ-AXO-902375 — LE bug : `SIMILAR_TO` est symétrique par construction,
+        // donc chaque paire de quasi-doublons formait un 2-cycle rendu comme
+        // « dépendance circulaire ». 144 194 arêtes dans le graphe live, ~9 %.
+        let nodes = vec![n("a"), n("b")];
+        let edges = vec![
+            e("a", "b", RelationType::SimilarTo),
+            e("b", "a", RelationType::SimilarTo),
+        ];
+        let graph = IstGraph::build(nodes, edges);
+        assert!(
+            structural_sccs(&graph).is_empty(),
+            "se ressembler n'est pas dépendre : aucun cycle attendu"
+        );
+    }
+
+    #[test]
+    fn no_scc_member_can_have_zero_in_degree() {
+        // L'invariant nommé par APS (inbox 11933), et il est bon marché : un nœud
+        // de degré ENTRANT 0 ne peut appartenir à aucun cycle. Leur cas était
+        // `APS3D.Supply.StocksTest.product_fixture`, 0 appelant, listé dans une SCC
+        // de 53 symboles.
+        //
+        // Le graphe ci-dessous le reproduit : `orphan` ne dépend de rien et rien ne
+        // dépend de lui, il RESSEMBLE seulement à `a`. Avant le filtre, il
+        // atterrissait dans le cycle a↔b.
+        let nodes = vec![n("a"), n("b"), n("orphan")];
+        let edges = vec![
+            e("a", "b", RelationType::Calls),
+            e("b", "a", RelationType::Calls),
+            e("a", "orphan", RelationType::SimilarTo),
+            e("orphan", "a", RelationType::SimilarTo),
+        ];
+        let graph = IstGraph::build(nodes, edges);
+        let sccs = structural_sccs(&graph);
+
+        // Le vrai cycle survit — la branche reste ATTEIGNABLE.
+        assert_eq!(sccs.len(), 1, "le cycle a↔b reste détecté : {sccs:?}");
+        assert_eq!(sccs[0].len(), 2, "et il ne compte que ses deux membres");
+
+        // L'invariant : tout membre d'une SCC a au moins une arête de dépendance
+        // entrante VENANT de la SCC.
+        for component in &sccs {
+            let members: std::collections::HashSet<&String> = component.iter().collect();
+            for member in component {
+                let idx = (0..graph.node_count() as u32)
+                    .find(|i| graph.id_of(*i) == member.as_str())
+                    .expect("membre présent dans le graphe");
+                let has_incoming = (0..graph.node_count() as u32).any(|src| {
+                    members.contains(&graph.id_of(src).to_string())
+                        && graph.forward_neighbors(src).any(|(tgt, rel)| {
+                            tgt == idx && is_dependency_relation(rel)
+                        })
+                });
+                assert!(
+                    has_incoming,
+                    "{member} est dans une SCC sans dépendance entrante — impossible"
+                );
+            }
+        }
     }
 
     #[test]

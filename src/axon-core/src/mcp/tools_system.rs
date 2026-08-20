@@ -1652,16 +1652,52 @@ impl McpServer {
             "present": present, "status": status, "detail": detail
         }));
 
+        // REQ-AXO-902378 — the text used to report `{issues} issue(s)` and leave the
+        // NATURE of each one in `data.*`, which the Claude Code client does not
+        // expose. APS finished a full diagnostic session without ever learning what
+        // the single reported filesystem issue WAS (inbox 11933). A count that says
+        // "there is something to know" and withholds what it is, is worse than
+        // silence: it is a dead end (PIL-AXO-002).
+        let issue_lines: Vec<String> = artifacts
+            .iter()
+            .filter(|a| {
+                !matches!(
+                    a.get("status").and_then(|v| v.as_str()),
+                    Some("ok") | Some("absent")
+                )
+            })
+            .map(|a| {
+                format!(
+                    "  - **{}** ({}): {}\n    `{}`",
+                    a.get("artifact").and_then(|v| v.as_str()).unwrap_or("?"),
+                    a.get("status").and_then(|v| v.as_str()).unwrap_or("?"),
+                    a.get("detail").and_then(|v| v.as_str()).unwrap_or("(no detail)"),
+                    a.get("path").and_then(|v| v.as_str()).unwrap_or("?"),
+                )
+            })
+            .collect();
+        let text = if issue_lines.is_empty() {
+            format!(
+                "Filesystem health {instance}/{role}: {} artefact(s) inspecté(s), **aucun problème**.",
+                artifacts.len()
+            )
+        } else {
+            format!(
+                "Filesystem health {instance}/{role}: {} artefact(s) inspecté(s), **{issues} problème(s)** :\n\n{}",
+                artifacts.len(),
+                issue_lines.join("\n")
+            )
+        };
+
         Some(json!({
-            "content": [{
-                "type": "text",
-                "text": format!("Filesystem health {instance}/{role}: {} artifact(s), {issues} issue(s)", artifacts.len())
-            }],
+            "content": [{ "type": "text", "text": text }],
             "data": {
                 "status": "ok",
                 "instance": instance,
                 "role": role,
                 "issues": issues,
+                // The denominator travels with the count (REQ-AXO-902384).
+                "artifacts_inspected": artifacts.len(),
                 "artifacts": artifacts,
                 "scope_note": "launcher-agnostic FS artifacts only (writer locks + build-info); process/socket liveness via status / mcp_surface_diagnostics",
                 "follow_up_tools": ["status", "truth_check"]
