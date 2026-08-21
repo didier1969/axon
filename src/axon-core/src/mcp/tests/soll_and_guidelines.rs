@@ -11324,6 +11324,118 @@ fn test_supersedes_retires_the_target_without_reopening_the_source() {
     );
 }
 
+/// REQ-AXO-902431 — `soll_remove_evidence` se décrivait comme « safe
+/// maintenance » et supprimait en masse, sans retour possible, sur une base de
+/// traçabilité.
+///
+/// FSF (`mcp_feedback` #86, `blocking`) : le mode par défaut aurait supprimé
+/// **59 références de commits VALIDES** — vérifiées une par une par
+/// `git cat-file -e`, 59 commits réels, 0 introuvable. Ils ne l'ont évité que
+/// parce qu'ils avaient mesuré le faux positif juste avant. *« Un utilisateur
+/// qui lit "safe maintenance" et l'exécute n'a aucune raison de vérifier
+/// d'abord. »*
+///
+/// REQ-AXO-902390 a retiré la cause du faux étiquetage. Ce test porte l'autre
+/// moitié : le mode qui DÉCIDE lui-même quoi supprimer est en aperçu.
+#[test]
+fn test_remove_evidence_previews_before_it_deletes_in_the_mode_that_decides_alone() {
+    use crate::test_support::ist_fixtures::{
+        create_test_server_with_ist_seed, IstSeed, SollNodeFixture,
+    };
+
+    let seed = IstSeed::new().node(
+        SollNodeFixture::new("REQ-MTG-701", "Requirement", "MTG", "Porteuse de preuves")
+            .status("delivered"),
+    );
+    let harness = create_test_server_with_ist_seed(seed).expect("serveur de test");
+
+    let seed_row = |id: &str, kind: &str, r: &str| {
+        harness
+            .server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, created_at) \
+                 VALUES ('{id}', 'requirement', 'REQ-MTG-701', '{kind}', '{r}', 0)"
+            ))
+            .unwrap();
+    };
+    seed_row("tr-mtg-1", "File", "/chemin/qui/nexiste/pas/a.rs");
+    seed_row("tr-mtg-2", "File", "/chemin/qui/nexiste/pas/b.rs");
+
+    let rows_left = || -> i64 {
+        harness
+            .server
+            .graph_store
+            .query_count_param(
+                "SELECT count(*) FROM soll.Traceability WHERE soll_entity_id = $e",
+                &json!({ "e": "REQ-MTG-701" }),
+            )
+            .unwrap_or(-1)
+    };
+    let remove = |args: serde_json::Value| -> serde_json::Value {
+        harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": "soll_remove_evidence", "arguments": args })),
+                id: Some(json!(902431)),
+            })
+            .unwrap()
+            .result
+            .expect("soll_remove_evidence doit répondre")
+    };
+
+    assert_eq!(rows_left(), 2, "précondition : deux lignes en base");
+
+    // L'appel que FSF aurait fait : le mode par défaut, sans rien préciser.
+    let preview = remove(json!({ "entity_id": "REQ-MTG-701" }));
+    let text = preview["content"][0]["text"].as_str().unwrap_or_default();
+
+    assert_eq!(
+        rows_left(),
+        2,
+        "LE verdict : l'appel par défaut ne doit RIEN supprimer. C'est le mode qui \
+         décide lui-même de son ensemble, sur une base de traçabilité, sans retour \
+         possible.\n{preview}"
+    );
+    // CONTRÔLE POSITIF : l'aperçu doit quand même NOMMER ce qui partirait —
+    // sinon « rien n'a été supprimé » serait vrai d'un outil qui ne fait rien.
+    assert_eq!(
+        preview["data"]["removed_count"].as_i64(),
+        Some(2),
+        "l'aperçu doit nommer les deux lignes candidates : {preview}"
+    );
+    assert!(
+        text.contains("APERCU") || text.contains("APERÇU"),
+        "un aperçu ne doit pas se lire comme une suppression : {text}"
+    );
+
+    // Confirmé : ça supprime. Sans ça, l'outil serait simplement cassé.
+    let applied = remove(json!({ "entity_id": "REQ-MTG-701", "dry_run": false }));
+    assert_eq!(
+        rows_left(),
+        0,
+        "avec `dry_run:false`, la suppression doit bien avoir lieu : {applied}"
+    );
+
+    // CONTRÔLE DE NON-RÉGRESSION : le mode explicite reste immédiat. Là,
+    // l'appelant a NOMMÉ chaque ligne — il n'y a pas de surprise à protéger, et
+    // lui imposer un aller-retour serait de la cérémonie.
+    seed_row("tr-mtg-3", "Test", "module::tests::nommee");
+    assert_eq!(rows_left(), 1);
+    let explicit = remove(json!({
+        "entity_id": "REQ-MTG-701",
+        "broken_only": false,
+        "artifact_refs": ["module::tests::nommee"]
+    }));
+    assert_eq!(
+        rows_left(),
+        0,
+        "le mode explicite ne doit PAS être passé en aperçu : {explicit}"
+    );
+}
+
 #[test]
 fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
     let server = create_test_server();
@@ -11933,16 +12045,49 @@ fn test_soll_remove_evidence_drops_only_broken_file_refs_by_default() {
         Some(valid_path.as_str())
     );
 
-    // Idempotent: second call returns 0 removed, 1 kept.
+    // REQ-AXO-902431 — l'appel ci-dessus est desormais un APERCU. Ce que ce test
+    // garde depuis REQ-AXO-254 — la SELECTION : seuls les refs casses sont
+    // candidats, le valide est preserve — est inchange et vient d'etre verifie.
+    // Ce qui change est l'EFFET : rien n'a ete supprime.
+    assert_eq!(data["dry_run"].as_bool(), Some(true), "{response}");
+    let still_there = server
+        .graph_store
+        .query_count_param(
+            "SELECT count(*) FROM soll.Traceability WHERE soll_entity_id = $e",
+            &json!({ "e": "REQ-AXO-2540" }),
+        )
+        .unwrap_or(-1);
+    assert_eq!(
+        still_there, 3,
+        "le mode qui derive lui-meme son ensemble est en apercu : les 3 lignes \
+         doivent etre intactes apres l'appel par defaut"
+    );
+
+    // Applique, puis idempotence — c'est la seconde chose que ce test garde.
+    let applied = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_remove_evidence",
+                "arguments": {"entity_id": "REQ-AXO-2540", "dry_run": false}
+            })),
+            id: Some(json!(254002)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(applied["data"]["removed_count"].as_u64(), Some(2), "{applied}");
+
     let response2 = server
         .handle_request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "soll_remove_evidence",
-                "arguments": {"entity_id": "REQ-AXO-2540"}
+                "arguments": {"entity_id": "REQ-AXO-2540", "dry_run": false}
             })),
-            id: Some(json!(254002)),
+            id: Some(json!(254003)),
         })
         .unwrap()
         .result

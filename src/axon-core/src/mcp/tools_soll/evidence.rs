@@ -1202,6 +1202,22 @@ impl McpServer {
             .get("broken_only")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        // REQ-AXO-902431 — `broken_only` DECIDE lui-meme quoi supprimer, sur une
+        // base de tracabilite, en masse et sans retour possible. Il est donc en
+        // APERCU par defaut : l'appelant voit ce qui partirait, puis rappelle
+        // avec `dry_run:false`. Le mode `explicit_refs` reste immediat — la, le
+        // caller a NOMME chaque ligne, il n'y a pas de surprise a proteger.
+        //
+        // FSF (#86) : le mode se decrivait lui-meme comme « safe maintenance » et
+        // aurait supprime 59 references de commits VALIDES — verifiees une par
+        // une par `git cat-file -e`, 59 commits reels, 0 introuvable. Ils ne l'ont
+        // evite que parce qu'ils avaient mesure le faux positif juste avant. « Un
+        // utilisateur qui lit "safe maintenance" et l'execute n'a aucune raison de
+        // verifier d'abord. »
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(broken_only);
         let explicit_refs: Vec<String> = args
             .get("artifact_refs")
             .and_then(|v| v.as_array())
@@ -1285,7 +1301,15 @@ impl McpServer {
             } else {
                 explicit_refs.iter().any(|r| r == &artifact_ref)
             };
-            if should_remove {
+            if should_remove && dry_run {
+                // REQ-AXO-902431 — apercu : la ligne est NOMMEE, pas touchee.
+                removed.push(json!({
+                    "id": id,
+                    "artifact_ref": artifact_ref,
+                    "artifact_type": artifact_type,
+                    "status": "would_remove"
+                }));
+            } else if should_remove {
                 if let Err(e) = self
                     .graph_store
                     .execute_param("DELETE FROM soll.Traceability WHERE id = ?", &json!([id]))
@@ -1321,6 +1345,18 @@ impl McpServer {
         } else {
             "explicit_refs"
         };
+        // REQ-AXO-902431 — un apercu ne doit pas se lire comme une suppression.
+        let verb = if dry_run { "WOULD remove" } else { "removed" };
+        let dry_run_note = if dry_run {
+            format!(
+                " — APERCU, rien n'a ete supprime. Relire la liste ci-dessus, puis \
+                 rappeler avec `dry_run:false` pour appliquer. \
+                 (Ce mode decide LUI-MEME quoi retirer sur une base de tracabilite : \
+                 l'apercu est le defaut, pas une option.)"
+            )
+        } else {
+            String::new()
+        };
         // REQ-AXO-902265 — name the refs that matched NOTHING. `removed 0` alone reads
         // identically whether the row was protected, absent, or misspelled, so a caller
         // cleaning an evidence store believes it succeeded. Only meaningful in the explicit
@@ -1345,12 +1381,13 @@ impl McpServer {
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "soll_remove_evidence({entity_id}, mode={mode_label}): removed {removed_count}, kept {kept_count}{unmatched_note}"
+                    "soll_remove_evidence({entity_id}, mode={mode_label}): {verb} {removed_count}, kept {kept_count}{unmatched_note}{dry_run_note}"
                 )
             }],
             "data": {
                 "entity_id": entity_id,
                 "mode": mode_label,
+                "dry_run": dry_run,
                 "removed_count": removed_count,
                 "removed": removed,
                 "kept": kept,

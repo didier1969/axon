@@ -393,12 +393,13 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_remove_evidence",
-                "description": "[SOLL] Removes Traceability rows linking a SOLL entity to evidence artifacts. REQ-AXO-254 closure of MIL-AXO-015 wave G followup (broken_file_evidence cleanup). Two modes: (1) `broken_only=true` (default) removes ONLY rows whose `artifact_ref` no longer resolves to an existing file/document on disk — safe maintenance; (2) `broken_only=false` removes the explicit `artifact_refs` regardless of disk state — exact match required. Returns count + list of removed rows for audit. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Removes Traceability rows linking a SOLL entity to evidence artifacts. DESTRUCTIVE and NOT reversible — this is a traceability store. Two modes: (1) `broken_only=true` (default) DERIVES its own candidate set (rows whose `artifact_ref` is a disk-checkable path that no longer exists) and is therefore **DRY-RUN BY DEFAULT** (REQ-AXO-902431): it returns what WOULD go, and applies only when you re-call with `dry_run:false`. Refs that a disk check cannot decide — commit SHAs, SOLL ids, URLs — are NOT broken, they are mis-typed, and are never candidates (REQ-AXO-902390). (2) `broken_only=false` removes the explicit `artifact_refs` immediately: you named every row, so there is no surprise to guard. Returns count + the full list for audit. Operator guide: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "entity_id": { "type": "string", "description": "Canonical SOLL entity id (e.g. REQ-AXO-013) whose Traceability rows are candidates for removal." },
-                        "broken_only": { "type": "boolean", "description": "When true (default), only remove rows whose artifact_ref does NOT exist on disk. When false, remove the explicit `artifact_refs` exactly." },
+                        "broken_only": { "type": "boolean", "description": "When true (default), the tool derives its own candidate set: rows whose artifact_ref is a disk-checkable path that no longer exists. This mode is DRY-RUN by default — pass `dry_run:false` to apply. When false, remove the explicit `artifact_refs` exactly (applied immediately)." },
+                        "dry_run": { "type": "boolean", "description": "REQ-AXO-902431 — when true, report what WOULD be removed without touching anything. Defaults to TRUE in `broken_only` mode (the tool decides the set, so you see it first) and to FALSE in explicit mode (you named the rows)." },
                         "artifact_refs": { "type": "array", "items": { "type": "string" }, "description": "Optional explicit list of artifact_ref values to remove (only consulted when `broken_only=false`)." }
                     },
                     "required": ["entity_id"]
