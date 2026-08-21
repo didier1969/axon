@@ -34,6 +34,47 @@ fn process_cache() -> &'static Arc<IstSnapshotCache> {
 
 /// REQ-AXO-91486 — caller-facing handle. Clones are cheap. Use this from
 /// any module that needs RAM-first / PG-fallback dispatch on IST queries.
+/// Is this symbol id something a reader can actually OPEN?
+///
+/// REQ-AXO-902440 — the corpus holds entities that must never reach a surface
+/// meant for a human or an LLM, and three tools were shipping them raw:
+///
+/// * `impact`'s Derived Local Projection — measured 2026-08-21 on
+///   `current_runtime_tuning_snapshot`: **15 of 19 rows** were unopenable
+///   (`fused_L19_28_0` chunker artefacts, `Some`/`new`/`lock`/`min`/`max`
+///   language primitives, a bare file path, an id with an empty tail).
+///   The 4 rows the caller actually needed were buried in them.
+/// * `debt_digest`'s `dry` section — TE2 reported 10 of the 15 "most central
+///   duplications" were `fused_L*` (llm_feedback #183). Same entities, other
+///   tool: a shared chokepoint, not two bugs.
+///
+/// This is a PRESENTATION filter, never a measurement filter: counts stay
+/// whole, and every caller says how many rows it withheld. Silently shrinking
+/// a list reads as "there was nothing else", which is the failure mode this
+/// repo keeps paying for.
+pub fn symbol_id_is_presentable(id: &str) -> bool {
+    // Language and stdlib primitives. `Some` is not a structural neighbour, it
+    // is a variant constructor; a neighbour list containing it ranks nothing.
+    const PRIMITIVES: &[&str] = &[
+        "Some", "None", "Ok", "Err", "new", "default", "clone", "lock", "min", "max", "len",
+        "push", "get", "insert", "unwrap", "unwrap_or", "unwrap_or_else", "unwrap_or_default",
+        "into_inner", "get_or_insert", "get_or_init", "to_string", "from", "into", "iter",
+        "collect", "map", "filter", "next", "as_str", "is_empty", "trim", "format", "println",
+    ];
+    let Some((_, tail)) = id.rsplit_once("::") else {
+        // No `::` at all — this is a file path or a bare token, not a symbol
+        // anyone can `inspect`.
+        return false;
+    };
+    let tail = tail.trim();
+    !tail.is_empty()
+        // Chunker fusion artefacts (`code_chunker.rs` emits
+        // `<file>::fused_L<start>_<end>_<seq>`): an indexing internal, never a
+        // symbol. They cannot be opened, inspected, or acted on.
+        && !tail.starts_with("fused_")
+        && !PRIMITIVES.contains(&tail)
+}
+
 pub fn process_view() -> IstGraphView {
     IstGraphView::new(Arc::clone(process_cache()))
 }

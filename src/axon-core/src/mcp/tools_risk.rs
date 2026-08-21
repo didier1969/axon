@@ -97,6 +97,13 @@ impl McpServer {
         let cap = 200usize;
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut ids: Vec<String> = Vec::new();
+        // REQ-AXO-902440 — withhold what a reader cannot open. Measured on
+        // `current_runtime_tuning_snapshot`: 15 of 19 rows were chunker
+        // artefacts, language primitives, bare file paths or empty-tailed ids;
+        // the 4 useful neighbours were buried in them. The count of withheld
+        // rows is SAID below — a filter that shrinks a list in silence reads as
+        // "there was nothing else".
+        let mut withheld = 0usize;
         for reach in [
             view.forward_at_radius(p, anchor, radius as u32, cap, &[]),
             view.reverse_at_radius(p, anchor, radius as u32, cap, &[]),
@@ -106,12 +113,23 @@ impl McpServer {
         {
             for id in reach {
                 if id != anchor && seen.insert(id.clone()) {
-                    ids.push(id);
+                    if crate::ist_snapshot::symbol_id_is_presentable(&id) {
+                        ids.push(id);
+                    } else {
+                        withheld += 1;
+                    }
                 }
             }
         }
-        if ids.len() <= 1 {
-            return None;
+        if ids.is_empty() {
+            // A named empty beats filler: the caller learns the neighbourhood
+            // held nothing openable, instead of being handed rows to sort.
+            return Some(format!(
+                "\n\n### Derived Local Projection\n\n_No openable structural neighbour \
+                 ({withheld} entr(y|ies) withheld: chunk-fusion artefacts, language \
+                 primitives, file paths). The `Impact Radius` above is the measurement; \
+                 this section only ever added local context._"
+            ));
         }
         let json_rows: Vec<Vec<Value>> = ids
             .into_iter()
@@ -127,8 +145,16 @@ impl McpServer {
             })
             .collect();
         let projection_res = serde_json::to_string(&json_rows).ok()?;
+        let withheld_note = match withheld {
+            0 => String::new(),
+            n => format!(
+                " {n} unopenable entr(y|ies) withheld (chunk-fusion artefacts, language \
+                 primitives, file paths) — REQ-AXO-902440."
+            ),
+        };
         Some(format!(
-            "\n\n### Derived Local Projection\n\n**Status:** derived neighborhood view (RAM CSR), useful for local context; does not replace the canonical `CALLS` truth.\n\n{}",
+            "\n\n### Derived Local Projection\n\n**Status:** derived neighborhood view (RAM CSR), useful for local context; does not replace the canonical `CALLS` truth.{}\n\n{}",
+            withheld_note,
             format_table_from_json(&projection_res, &columns)
         ))
     }
@@ -231,10 +257,33 @@ impl McpServer {
                         .to_string();
 
                     if !caller_id.is_empty() {
+                        // REQ-AXO-902440 — when the RAM row carries no name or
+                        // kind the table printed `| AXO | - | - |`: the count
+                        // was right and the caller could not tell WHAT was
+                        // impacted, which is the only thing they came for. The
+                        // name is already in hand — it is the tail of the id we
+                        // are keying on. Deriving it beats printing a dash.
+                        let display_name = if name == "-" || name.is_empty() {
+                            caller_id
+                                .rsplit_once("::")
+                                .map(|(_, tail)| tail.to_string())
+                                .filter(|tail| !tail.trim().is_empty())
+                                .unwrap_or_else(|| name.clone())
+                        } else {
+                            name.clone()
+                        };
+                        let display_kind = if kind == "-" || kind.is_empty() {
+                            // Distinct from a measured kind: the snapshot row
+                            // did not carry one, and saying so beats a dash
+                            // that reads like "none".
+                            "unnamed in snapshot".to_string()
+                        } else {
+                            kind
+                        };
                         impacted_symbol_ids.insert(caller_id.clone());
                         impact_rows
                             .entry(caller_id)
-                            .or_insert_with(|| (origin, name.clone(), kind));
+                            .or_insert_with(|| (origin, display_name, display_kind));
                     }
                     if !name.is_empty() {
                         impacted_symbol_names.insert(name);

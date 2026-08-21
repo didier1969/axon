@@ -1369,6 +1369,13 @@ impl McpServer {
         if want("dry") {
             let mut seen: HashSet<(u32, u32)> = HashSet::new();
             let mut pairs: Vec<(String, String, f64)> = Vec::new();
+            // REQ-AXO-902440 — TE2 (llm_feedback #183) measured 10 of the 15
+            // "most central duplications" as `fused_L*` chunker artefacts: not
+            // symbols, not openable, not actionable. Same entities `impact`
+            // was shipping in its projection — one shared predicate, not two
+            // per-tool patches. The raw `total` stays whole; only what is
+            // OFFERED is filtered, and the count withheld is reported.
+            let mut unopenable_pairs = 0usize;
             for i in 0..total_nodes as u32 {
                 for (t, rel) in snapshot.forward_neighbors(i) {
                     if matches!(rel, crate::ist_snapshot::RelationType::SimilarTo) {
@@ -1379,6 +1386,12 @@ impl McpServer {
                             // REQ-AXO-902361 — a pair touching a test/script/fixture is not
                             // production duplication to act on; drop it (actionable, not raw).
                             if is_test_id(&a) || is_test_id(&b) {
+                                continue;
+                            }
+                            if !crate::ist_snapshot::symbol_id_is_presentable(&a)
+                                || !crate::ist_snapshot::symbol_id_is_presentable(&b)
+                            {
+                                unopenable_pairs += 1;
                                 continue;
                             }
                             let score = pr
@@ -1407,8 +1420,14 @@ impl McpServer {
             counts.insert("dry".into(), json!(total));
             sections.push(json!({
                 "key": "dry",
-                "description": "near-duplicate SIMILAR_TO pairs (semantic clones), most-central first",
+                "description": match unopenable_pairs {
+                    0 => "near-duplicate SIMILAR_TO pairs (semantic clones), most-central first".to_string(),
+                    n => format!(
+                        "near-duplicate SIMILAR_TO pairs (semantic clones), most-central first                          — {n} pair(s) withheld as unopenable (chunk-fusion artefacts,                          language primitives, file paths; REQ-AXO-902440)"
+                    ),
+                },
                 "total_available": total,
+                "unopenable_pairs_withheld": unopenable_pairs,
                 "offenders": offenders
             }));
         }

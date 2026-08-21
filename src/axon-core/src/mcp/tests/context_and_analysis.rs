@@ -5852,3 +5852,52 @@ fn test_repo_literal_lane_finds_the_root_of_a_registry_only_project() {
         "a project present ONLY in the registry must still yield its root"
     );
 }
+
+#[test]
+fn test_unopenable_entities_never_reach_a_reader_facing_surface() {
+    // REQ-AXO-902440 — measured on `impact symbol=current_runtime_tuning_snapshot`
+    // (2026-08-21): 15 of 19 projection rows were entities nobody can open —
+    // `fused_L*` chunk-fusion artefacts, language primitives, a bare file path,
+    // an id with an empty tail. TE2 hit the SAME entities through
+    // `debt_digest.dry` (llm_feedback #183), which is why the predicate is
+    // shared instead of patched per tool.
+    use crate::ist_snapshot::symbol_id_is_presentable;
+
+    // Rejected — every family, taken from the real measurement.
+    for id in [
+        "AXO::axon::src::axon-core::src::code_chunker.rs::fused_L19_28_0",
+        "AXO::axon::src::axon-core::src::mcp::tools_ist_algorithms.rs::",
+        "/home/dstadel/projects/axon/src/axon-core/src/structural_health.rs",
+        "AXO::axon::src::axon-core::src::structural_health.rs::Some",
+        "AXO::axon::src::axon-core::src::structural_health.rs::unwrap_or_else",
+        "AXO::axon::src::axon-core::src::structural_health.rs::lock",
+    ] {
+        assert!(
+            !symbol_id_is_presentable(id),
+            "must be withheld from a reader-facing surface: {id}"
+        );
+    }
+
+    // POSITIVE CONTROL — the four rows that WERE useful in that same call must
+    // survive, otherwise this predicate would "fix" the noise by emptying the
+    // section, which is worse than the noise.
+    for id in [
+        "AXO::axon::src::axon-core::src::runtime_tuning.rs::current_runtime_tuning_state",
+        "AXO::axon::src::axon-core::src::runtime_tuning.rs::reset_runtime_tuning_snapshot",
+        "AXO::axon::src::axon-core::src::runtime_tuning.rs::runtime_tuning_snapshot_slot",
+        "AXO::axon::src::axon-core::src::runtime_tuning.rs::normalize_runtime_tuning_state",
+        "AXO::axon::src::axon-core::src::structural_health.rs::clamp01",
+    ] {
+        assert!(
+            symbol_id_is_presentable(id),
+            "a real symbol must NOT be withheld: {id}"
+        );
+    }
+
+    // A symbol legitimately named like a primitive but qualified is still a
+    // symbol — the tail is what is judged, and `fused_group` is not `fused_L…`
+    // by accident: the chunker prefix is what marks the artefact.
+    assert!(symbol_id_is_presentable(
+        "AXO::axon::src::axon-core::src::parser::rust.rs::parse_new_binding"
+    ));
+}
