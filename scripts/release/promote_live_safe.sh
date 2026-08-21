@@ -21,6 +21,8 @@ SKIP_BUILD=0
 SKIP_QUALIFY=0
 DRY_RUN=0
 SKIP_DEV_VALIDATION=0
+# REQ-AXO-902391 — 0 = build from a FROZEN worktree at the resolved SHA.
+BUILD_FROM_TREE=0
 # REQ-AXO-902165 / DEC-AXO-901666 / REQ-AXO-902256 — step 5 runs via `axonctl cutover`
 # (the Rust health-gated cutover with NATIVE auto-rollback). There is no longer a second
 # step-5 implementation to choose between: the `USE_CUTOVER` toggle and the
@@ -48,7 +50,16 @@ One-shot promotion flow:
 
 Live promotion always builds the brain MCP + indexer authority contract.
 
+Le build (étape 1) part d'un WORKTREE DÉTACHÉ au SHA de HEAD, jamais de l'arbre
+de travail : `cargo` lit les sources au fil de la compilation, donc une écriture
+concurrente produirait un binaire composite sous une étiquette qu'il ne mérite
+pas (REQ-AXO-902391). Un SHA non poussé est refusé — un binaire live doit
+correspondre à un commit qu'un tiers peut retrouver.
+
 Flags:
+  --dirty                Construit depuis l'arbre de travail (dev uniquement).
+                         Le binaire cesse d'être une fonction du SHA seul et
+                         `git describe` le marque `-dirty`. JAMAIS le défaut.
   --skip-dev-validation  EMERGENCY ONLY. Bypasses dev pre-flight. Use
                          only when dev environment is intentionally
                          unavailable (e.g. fresh-clone bootstrap before
@@ -75,6 +86,10 @@ while [[ $# -gt 0 ]]; do
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-qualify) SKIP_QUALIFY=1; shift ;;
     --skip-dev-validation) SKIP_DEV_VALIDATION=1; shift ;;
+    # REQ-AXO-902391 — build from the WORKING TREE instead of a frozen worktree.
+    # Never the default: the whole point is that the binary's identity must be a
+    # function of the SHA alone.
+    --dirty) BUILD_FROM_TREE=1; shift ;;
     # REQ-AXO-902256 — no-op: the cutover is the only step-5 path now.
     --cutover) shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -515,8 +530,73 @@ BROADCAST_PREFLIGHT_SENT=1
 # the dev brain always ran a binary compiled pre-commit whose build_id
 # (git describe) pointed to HEAD^ instead of HEAD. The promote then failed
 # because build_id != HEAD.
+# REQ-AXO-902391 — construire depuis un arbre FIGÉ, pas depuis l'arbre de travail.
+#
+# `cargo` lit les sources AU FIL de la compilation. Un build de ~140 s prend donc
+# le disque tel qu'il est à chaque lecture de fichier, pas tel qu'il était au
+# départ : une écriture concurrente produit un binaire composite, étiqueté d'un
+# SHA qu'il ne contient pas. Ce n'est pas un risque d'usage, c'est une propriété
+# du script — et elle contredit PIL-AXO-005 (« Diff(empreinte du binaire tournant
+# vs artefact du manifeste) = 0 ») autant que GUI-PRO-006 (builds déterministes).
+#
+# Le 2026-08-20, trois promotes ont été interrompus par écriture concurrente dans
+# la même soirée, dont un après un gel annoncé des DEUX côtés : deux agents
+# compétents qui se préviennent par messages n'ont pas tenu une fenêtre de 140 s.
+# C'est la démonstration de GUI-PRO-118 — une propriété mécanique ne peut pas
+# reposer sur une discipline. Le contournement manuel (worktree détaché) était
+# déjà validé par VPC ; le câbler ici le rend systématique.
+#
+# Le worktree ne déplace QUE les sources : `CARGO_TARGET_DIR` reste la cible
+# canonique et les artefacts sont réinstallés dans `bin/` — donc les étapes 2 à 7
+# lisent exactement ce qu'elles lisaient avant.
+build_from_frozen_worktree() {
+  local sha="$1"
+  local worktree="${TMPDIR:-/tmp}/axon-promote-${sha:0:12}"
+
+  git -C "$ROOT_DIR" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+  rm -rf "$worktree"
+  git -C "$ROOT_DIR" worktree add --detach "$worktree" "$sha" >/dev/null
+  # Le worktree survit à un échec de build juste le temps du trap : sans retrait,
+  # `git worktree list` se remplit de squelettes et le prochain `add` échoue.
+  trap 'git -C "$ROOT_DIR" worktree remove --force "'"$worktree"'" >/dev/null 2>&1 || true' RETURN
+
+  CARGO_TARGET_DIR="$ROOT_DIR/.axon/cargo-target" \
+    "$worktree/scripts/axon" setup --artifact-only
+
+  # Les artefacts sont produits dans le worktree ; le reste du promote lit
+  # `$ROOT_DIR/bin`. Copier plutôt que repointer ROOT_DIR : repointer emmènerait
+  # aussi `.axon/live-release/` dans le temporaire, donc l'état de release.
+  local installed=0
+  shopt -s nullglob
+  for artifact in "$worktree"/bin/*; do
+    install -m 755 "$artifact" "$ROOT_DIR/bin/$(basename "$artifact")"
+    installed=$((installed + 1))
+  done
+  shopt -u nullglob
+  if [[ "$installed" -eq 0 ]]; then
+    echo "❌ build depuis le worktree figé : aucun artefact produit dans $worktree/bin" >&2
+    return 1
+  fi
+  echo "  ✅ $installed artefact(s) construits depuis le SHA figé $sha (worktree détaché, arbre de travail non lu)"
+}
+
 if [[ "$SKIP_BUILD" -ne 1 ]]; then
-  run_step 1 build "$ROOT_DIR/scripts/axon" setup --artifact-only
+  if [[ "$BUILD_FROM_TREE" -eq 1 ]]; then
+    promote_log "⚠️  --dirty : build depuis l'ARBRE DE TRAVAIL. Le binaire n'est PAS une fonction du SHA seul (REQ-AXO-902391) — réservé au dev."
+    run_step 1 build "$ROOT_DIR/scripts/axon" setup --artifact-only
+  else
+    PROMOTE_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+    # Un binaire live doit correspondre à un commit que quelqu'un d'autre peut
+    # retrouver. Sans ça, « quelle version tourne en production » n'a pas de
+    # réponse vérifiable par un tiers.
+    if [[ -z "$(git -C "$ROOT_DIR" branch -r --contains "$PROMOTE_SHA" 2>/dev/null)" ]]; then
+      echo "❌ $PROMOTE_SHA n'est sur aucune branche distante — pousse-le avant de promouvoir," >&2
+      echo "   ou passe --dirty en connaissance de cause (build non reproductible)." >&2
+      exit 2
+    fi
+    promote_log "   source figée : $PROMOTE_SHA (worktree détaché — l'arbre de travail n'est pas lu, REQ-AXO-902391)"
+    run_step 1 build build_from_frozen_worktree "$PROMOTE_SHA"
+  fi
 fi
 
 # --- Step 4 (manifest): SYNCHRONOUS at step 4 by default (REQ-AXO-902359) ---
