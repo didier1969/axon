@@ -49,6 +49,43 @@ fn query_count_decodes_float_and_numeric_aggregates_not_just_bigint() {
     assert_eq!(r, 3, "the numeric family is rounded, not truncated");
 }
 
+/// REQ-AXO-902408 — signalé par KKI (llm_feedback #179). La description de
+/// `practice_put` promet un gate qui passe ou REJETTE ; `gate=inconclusive` est
+/// un troisième état non documenté, et le caller ne peut pas savoir s'il a
+/// quelque chose à faire. Recoupé côté AXO : les trois `practice_put` de la
+/// session 121 ont tous rendu `inconclusive` — c'est le cas COURANT.
+#[test]
+fn practice_put_gate_says_what_it_means_and_whether_to_act() {
+    let server = create_test_server();
+    let resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "practice_put",
+                "arguments": {
+                    "context": "une garde vient d'etre ecrite",
+                    "practice": "la falsifier avant de la committer",
+                    "scope": "PGT"
+                }
+            })),
+            id: Some(json!(902_408)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let text = resp["content"][0]["text"].as_str().unwrap_or("");
+    assert!(text.contains("gate="), "le verdict doit être rendu : {text}");
+    assert!(
+        text.contains("aucune action requise")
+            || text.contains("rien à faire")
+            || text.contains("stockée"),
+        "tout verdict non rejetant doit dire ce qu'il implique et s'il demande \
+         quelque chose au caller : {text}"
+    );
+}
+
 /// REQ-AXO-902325 — the tool advertises "top practices by trust". It computed them,
 /// put them in `data`, and never rendered them. Most MCP clients (including the bare
 /// HTTP path) surface only `content[0].text`, so the advertised half was invisible to

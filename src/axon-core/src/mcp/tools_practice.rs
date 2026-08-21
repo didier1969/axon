@@ -421,9 +421,32 @@ impl McpServer {
             .unwrap_or((0, false));
 
         let dense_state = if dense.is_empty() { "prose_fallback" } else { "dense" };
+        // REQ-AXO-902408 — say what the verdict MEANS and whether it asks
+        // anything of the caller.
+        //
+        // Reported by KKI (llm_feedback #179): the tool's own description
+        // promises a gate that either passes or REJECTS, so `inconclusive` reads
+        // as an undocumented third state — "not enough base to judge"? "the
+        // check errored"? "ambiguous, revisit"? The `id` proves the write
+        // happened, so it is not blocking; the caller simply cannot tell whether
+        // there is an action to take. Cross-checked on AXO: all three
+        // `practice_put` calls of session 121 returned `inconclusive`, so this
+        // is the ORDINARY case, not an edge one.
+        let gate_note = match gate_label {
+            "inconclusive" => " (base indexée insuffisante pour trancher — aucune action requise)",
+            "neutral" => " (aucune contradiction trouvée dans la base — rien à faire)",
+            "ungated" => " (vérification indisponible — écriture acceptée, rien à faire)",
+            "advisory_failure_mode" => {
+                " (tension assumée : une leçon d'échec contredit l'état sain par nature — stockée)"
+            }
+            "advisory_imperative_directive" => {
+                " (directive normative, non falsifiable par la base — stockée)"
+            }
+            _ => "",
+        };
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_put — {} · scope=`{scope}` · gate={gate_label} · embed={embed_state} · encoding={dense_state} · {perishability} · id={id}{}",
+                "### 🧠 practice_put — {} · scope=`{scope}` · gate={gate_label}{gate_note} · embed={embed_state} · encoding={dense_state} · {perishability} · id={id}{}",
                 if inserted {"stored"} else {"updated"},
                 dense_advisory.map(|a| format!(" · ⚠️ {a}")).unwrap_or_default()
             )}],

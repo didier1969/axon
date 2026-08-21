@@ -1056,7 +1056,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "practice_put",
-                "description": "[PRACTICE] REQ-AXO-902131 — store a GOVERNED best practice into the cross-tenant memory. WRITE-GATED by contradiction_check: a practice that CONTRADICTS the scope's indexed base is REJECTED (anti-poison). Idempotent on (scope, practice). scope='*' = global/cross-tenant (every project inherits it). Body is dense + pointer-bearing (evidence = SOLL ids / commit / metric).",
+                "description": "[PRACTICE] REQ-AXO-902131 — store a GOVERNED best practice into the cross-tenant memory. WRITE-GATED by contradiction_check: a practice that CONTRADICTS the scope's indexed base is REJECTED (anti-poison). Idempotent on (scope, practice). scope='*' = global/cross-tenant (every project inherits it). Body is dense + pointer-bearing (evidence = SOLL ids / commit / metric). REQ-AXO-902408 — the answer's `gate=` is NOT binary: `neutral` (no contradiction found), `inconclusive` (not enough indexed base to judge — the ORDINARY case on a young scope), `ungated` (the check was unavailable), `advisory_failure_mode` / `advisory_imperative_directive` (contradiction downgraded because a failure lesson or a normative directive legitimately tensions with the healthy-state base — REQ-AXO-902132/902154). All of these STORE and require nothing from you; only a hard rejection returns `isError` with `status=write_gate_rejected`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
