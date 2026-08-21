@@ -32,13 +32,16 @@ impl McpServer {
             return out;
         }
         let mut deferred = 0usize;
-        let mut by_blocking_node: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut by_blocking_node: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         let mut other: Vec<&WorkPlanBlocker> = Vec::new();
         for blocker in blockers {
             if blocker.reason == "status_deferred" {
                 deferred += 1;
             } else if let Some(target) = blocker.reason.strip_prefix(BLOCKED_BY) {
-                *by_blocking_node.entry(target.trim()).or_default() += 1;
+                by_blocking_node
+                    .entry(target.trim())
+                    .or_default()
+                    .push(blocker.id.as_str());
             } else {
                 other.push(blocker);
             }
@@ -46,10 +49,17 @@ impl McpServer {
 
         let mut out = String::from("Blockers:\n");
         // Heaviest blocking node first — that is the actionable ordering.
-        let mut folded: Vec<(&str, usize)> = by_blocking_node.into_iter().collect();
-        folded.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        for (target, count) in &folded {
-            out.push_str(&format!("- {target} blocks {count} node(s)\n"));
+        let mut folded: Vec<(&str, Vec<&str>)> = by_blocking_node.into_iter().collect();
+        folded.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+        for (target, blocked) in &folded {
+            // Folding only pays when there is something to fold. A milestone
+            // blocking ONE node loses information if its name is replaced by
+            // "1 node(s)" — so name it. The fold exists to kill repetition,
+            // not to hide identity.
+            match blocked.as_slice() {
+                [single] => out.push_str(&format!("- {target} blocks {single}\n")),
+                many => out.push_str(&format!("- {target} blocks {} node(s)\n", many.len())),
+            }
         }
         for blocker in other {
             out.push_str(&format!(
@@ -212,6 +222,17 @@ mod blocker_section_tests {
         assert!(
             first.contains("MIL-AXO-054") && first.contains("8"),
             "heaviest blocker first with its count, got: {first}"
+        );
+        // Folding only pays when there is something to fold: a milestone
+        // blocking ONE node is NAMED, not reduced to "1 node(s)". Losing the
+        // identity of a lone blocked requirement would trade one defect for
+        // another (caught by
+        // `test_work_plan_separates_belonging_to_a_live_milestone_from_being_blocked`).
+        let lone = vec![blocker("REQ-AXO-902368", "blocked_by:MIL-AXO-054")];
+        let rendered = McpServer::render_blocker_section(&lone, false);
+        assert!(
+            rendered.contains("REQ-AXO-902368"),
+            "a single blocked node keeps its id: {rendered}"
         );
         assert!(
             folded.contains("9 node(s) `deferred`") && folded.contains("DECISION"),
