@@ -1544,6 +1544,71 @@ mod req_902393_file_context_budget_tests {
         }
     }
 
+    /// REQ-AXO-902396 — REPRODUCTION d'un défaut OUVERT, volontairement ignorée.
+    ///
+    /// Le lane octets (ici forcé par un budget de 0 ms, le repli sur délai)
+    /// dimensionne avec `budget × FALLBACK_CHARS_PER_TOKEN` caractères. Cette
+    /// constante est une MOYENNE : sur du texte à ~1,2 caractère par jeton elle
+    /// n'est pas une borne. Ce test échoue en l'état — « morceau 1/22 de 969
+    /// jetons pour une fenêtre de 512 » — et c'est la mesure corpus : 5 064
+    /// morceaux sur 70 fichiers au-dessus de la fenêtre, jusqu'à 2 950 jetons,
+    /// embarqués queue coupée.
+    ///
+    /// Ignoré et NON corrigé parce que la correction évidente est fausse : faire
+    /// vérifier chaque segment assemblé par un encode réel fait passer le fichier
+    /// journal de 640 Ko de 256 à **1 639 encodes**, ce que
+    /// `log_file_shape_with_giant_line_does_not_encode_storm` refuse à juste
+    /// titre (~9 ms l'encode ⇒ ~15 s sur un seul fichier). Les deux invariants —
+    /// « aucun morceau au-dessus de la fenêtre » et « pas de tempête d'encodes »
+    /// — ne se satisfont pas par un patch : il faut un dimensionnement calibré
+    /// sur la densité réelle du fichier, mesurée sur un échantillon borné. Tant
+    /// que ce n'est pas conçu, le défaut est DÉCLARÉ ici plutôt que masqué.
+    #[test]
+    #[ignore = "REQ-AXO-902396 — défaut ouvert : reproduction, pas une régression"]
+    fn the_byte_lane_still_emits_above_the_window() {
+        let profile = active_chunk_profile();
+        // ASCII dense en jetons : « zqxjv » se découpe en sous-mots, ~1,2
+        // caractère par jeton — la densité mesurée sur les extraits PDF qui
+        // débordent. Volontairement PAS d'idéogrammes : en UTF-8 ils pèsent
+        // 3 octets par caractère et le lane compte des OCTETS, donc ils
+        // masqueraient le défaut au lieu de l'exposer.
+        let body: String = (0..400)
+            .map(|_| ["zqxjv"; 10].join(" "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let file_content = format!("fn dense() {{\n{body}\n}}\n");
+        let symbol = crate::parser::Symbol {
+            name: "dense".to_string(),
+            kind: "function".to_string(),
+            start_line: 1,
+            end_line: file_content.lines().count(),
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: Default::default(),
+            embedding: None,
+        };
+
+        // budget 0 ms = repli sur délai, le chemin qui produit les dépassements.
+        let chunks = build_file_chunks_with_budget(&[&symbol], &file_content, 0);
+
+        assert!(!chunks.is_empty(), "le corps doit être couvert");
+        for chunk in &chunks {
+            let measured = estimated_token_count(&chunk.1.content);
+            assert!(
+                measured <= profile.model_max_tokens,
+                "morceau {} de {} jetons pour une fenêtre de {} — l'estimation par \
+                 caractères a servi de borne",
+                chunk.1.chunk_path,
+                measured,
+                profile.model_max_tokens
+            );
+        }
+    }
+
     /// Un fichier court traverse sans être touché — le budget est un plafond,
     /// pas une coupe systématique — et `end_line` reste celui du corps retenu.
     #[test]
