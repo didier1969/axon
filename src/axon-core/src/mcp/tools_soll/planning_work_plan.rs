@@ -798,6 +798,9 @@ impl McpServer {
                 &cycles,
                 &top_recommendations,
                 truncated,
+                // REQ-AXO-902443 — the per-batch loop gets the folded blocker
+                // section; the audit surface keeps the full enumeration.
+                format == "verbose",
             )
         };
 
