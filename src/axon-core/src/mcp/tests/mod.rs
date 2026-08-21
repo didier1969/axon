@@ -405,5 +405,7 @@ mod context_and_analysis;
 mod guidance_contract;
 mod mailbox_conformance;
 mod mailbox_reactivity;
+/// REQ-AXO-902409 — garde de classe « N éléments soumis ⇒ N éléments rendus ».
+mod rendered_lists_contract;
 mod runtime_surface;
 mod soll_and_guidelines;
