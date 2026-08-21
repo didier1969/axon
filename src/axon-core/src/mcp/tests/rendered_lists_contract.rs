@@ -214,6 +214,57 @@ const ENUMERATION_PROMISES: &[&str] = &[
     "returns the contradicting",
 ];
 
+/// Outils que le balayage ne doit PAS appeler, en plus de ceux que
+/// `McpServer::is_mutating_tool` classe déjà comme mutants.
+///
+/// Un balayage aveugle du catalogue **invoque tout**, y compris ce qui écrit.
+/// `embed_provider action=set` bascule le fournisseur d'embed via une variable
+/// d'environnement du PROCESSUS — donc partagée avec tous les autres tests ;
+/// `idle_drop action=set` écrit une ligne de contrôle DURABLE et
+/// cross-processus ; `mcp_inbox_read` en mode `unread` AVANCE le curseur de
+/// lecture. Aucun n'est dans `is_mutating_tool`, dont la liste sert la politique
+/// async/monitoring et n'a jamais eu vocation à borner un balayage.
+///
+/// Cette liste locale existe donc parce que la classification canonique est
+/// incomplète (REQ-AXO-902412). Risque résiduel assumé et nommé : un mutant
+/// absent des DEUX listes serait appelé. C'est la raison pour laquelle le
+/// balayage tourne contre un serveur de test à base éphémère — le rayon
+/// d'action reste le processus de test, jamais le runtime live.
+const RUNTIME_MUTATORS: &[&str] = &[
+    "embed_provider",
+    "idle_drop",
+    "rescan_project",
+    "practice_put",
+    "practice_retire",
+    "practice_tick",
+    "mcp_feedback",
+    "mcp_inbox_read",
+    "mcp_inbox_archive",
+    "mcp_outbox_send",
+    "mailbox_lease",
+    "mailbox_room_create",
+    "mailbox_room_join",
+    "mailbox_sweep",
+    "mailbox_tap",
+    "mailbox_topic_subscribe",
+    "mailbox_topic_unsubscribe",
+    "axon_init_project",
+    "axon_commit_work",
+    "axon_apply_guidelines",
+    "axon_apply_methodology_bundle",
+    "document_intent",
+    "infer_soll_mutation",
+    "contract_evolve",
+    "fuse",
+    "re_anchor",
+    "ist_snapshot_warm",
+    "skill_invoke",
+];
+
+fn is_write_capable(tool: &str) -> bool {
+    McpServer::is_mutating_tool(tool) || RUNTIME_MUTATORS.contains(&tool)
+}
+
 /// Valeur plausible pour un paramètre REQUIS, choisie par NOM de paramètre —
 /// jamais par nom d'outil.
 ///
@@ -249,6 +300,10 @@ fn catalog_tools(base_arguments: &Value) -> Vec<(String, bool, Value)> {
                 .iter()
                 .filter_map(|t| {
                     let name = t.get("name").and_then(Value::as_str)?.to_string();
+                    // REQ-AXO-902409 — un balayage ne doit rien ÉCRIRE.
+                    if is_write_capable(&name) {
+                        return None;
+                    }
                     let description = t
                         .get("description")
                         .and_then(Value::as_str)
