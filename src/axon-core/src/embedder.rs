@@ -12,8 +12,8 @@ use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_capacity_profile::{recommend_embedding_lane_sizing, RuntimeProfile};
 use crate::runtime_tuning::{
-    current_runtime_tuning_snapshot as runtime_tuning_snapshot,
-    current_runtime_tuning_state as runtime_tuning_state,
+    resolve_runtime_tuning_snapshot as runtime_tuning_snapshot,
+    resolve_runtime_tuning_state as runtime_tuning_state,
     update_runtime_tuning_state as update_shared_runtime_tuning_state, RuntimeTuningSnapshot,
     RuntimeTuningState,
 };
@@ -394,7 +394,11 @@ pub fn bootstrap_runtime_tuning_state() -> RuntimeTuningState {
 }
 
 pub fn current_runtime_tuning_snapshot() -> RuntimeTuningSnapshot {
-    runtime_tuning_snapshot(bootstrap_runtime_tuning_state_from_env())
+    // REQ-AXO-902415 — la fonction du dessous prend de quoi FABRIQUER un
+    // bootstrap, pas un bootstrap : le balayage d'environnement ne tourne plus
+    // qu'au premier appel. Ce chemin-ci est celui du lot d'embed, deux fois par
+    // lot (`build_token_aware_micro_batches`).
+    runtime_tuning_snapshot(bootstrap_runtime_tuning_state_from_env).0
 }
 
 #[cfg(test)]
@@ -1329,7 +1333,7 @@ pub fn apply_runtime_embedding_lane_adjustment(
     semantic_idle_sleep_scale_pct: Option<usize>,
 ) {
     let _snapshot = update_shared_runtime_tuning_state(
-        bootstrap_runtime_tuning_state_from_env(),
+        bootstrap_runtime_tuning_state_from_env,
         vector_workers,
         graph_workers,
         chunk_batch_size,
@@ -1417,7 +1421,7 @@ pub fn apply_runtime_embedding_lane_adjustment(
 }
 
 pub fn current_runtime_tuning_state() -> RuntimeTuningState {
-    runtime_tuning_state(bootstrap_runtime_tuning_state_from_env())
+    runtime_tuning_state(bootstrap_runtime_tuning_state_from_env)
 }
 
 pub fn refresh_vector_batch_controller_from_env() {
@@ -2259,7 +2263,7 @@ pub fn run_embedder_sustained_sweep_aligned(
             let max_length = configured_embedding_max_length();
             let target_total_tokens = batch_size.saturating_mul(max_length).max(max_length);
             crate::runtime_tuning::update_runtime_tuning_state(
-                bootstrap_runtime_tuning_state_from_env(),
+                bootstrap_runtime_tuning_state_from_env,
                 None,
                 None,
                 None,
@@ -2295,7 +2299,7 @@ pub fn run_embedder_sustained_sweep_aligned(
     // into other consumers of the singleton.
     if let (Some(items), Some(tokens)) = (saved_microbatch_items, saved_microbatch_tokens) {
         crate::runtime_tuning::update_runtime_tuning_state(
-            bootstrap_runtime_tuning_state_from_env(),
+            bootstrap_runtime_tuning_state_from_env,
             None,
             None,
             None,

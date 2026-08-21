@@ -45,22 +45,84 @@ pub fn normalize_runtime_tuning_state(mut state: RuntimeTuningState) -> RuntimeT
     state
 }
 
-pub fn current_runtime_tuning_snapshot(bootstrap: RuntimeTuningState) -> RuntimeTuningSnapshot {
-    let slot = runtime_tuning_snapshot_slot();
+/// REQ-AXO-902415 — which of the two things actually happened.
+///
+/// The distinction is not cosmetic: REQ-AXO-902414 burned three refuted
+/// hypotheses and four full test suites because nothing in the signature, the
+/// name, or the return value said whether the bootstrap had been honoured or
+/// silently dropped. The symptom pointed the opposite way from the cause — the
+/// environment variables were correctly set, and a probe watching them would
+/// have come back empty without exonerating anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuningOrigin {
+    /// The slot was empty: the bootstrap was normalized and RETAINED.
+    Bootstrapped,
+    /// The slot was already filled: the bootstrap was never asked for.
+    Inherited,
+}
+
+/// REQ-AXO-902415 — resolve the process-wide tuning snapshot, taking a way to
+/// BUILD a bootstrap rather than a bootstrap.
+///
+/// The previous shape (`fn(bootstrap: RuntimeTuningState)`) had two faults that
+/// share one root — it demanded a value it might not use, and never said which:
+///
+/// * **The caller paid, every time.** `bootstrap_runtime_tuning_state_from_env`
+///   reads a dozen environment variables plus the whole lane config. That ran on
+///   EVERY call, including the embed batch path (`embedder.rs`, right after
+///   `encode_batch`, twice per batch), and `get_or_insert` threw it away on all
+///   but the first. Not a correctness bug — waste, and the reason the argument
+///   existed at all. `FnOnce` means it is computed only when it is needed.
+/// * **Nobody could tell.** Hence [`TuningOrigin`] in the return.
+///
+/// The name says what it does: it RESOLVES a snapshot, bootstrapping only if
+/// there is nothing to inherit.
+pub fn resolve_runtime_tuning_snapshot(
+    bootstrap: impl FnOnce() -> RuntimeTuningState,
+) -> (RuntimeTuningSnapshot, TuningOrigin) {
+    resolve_in_slot(runtime_tuning_snapshot_slot(), bootstrap)
+}
+
+/// The resolution itself, against a slot passed in.
+///
+/// REQ-AXO-902415 — the process-wide slot is a `OnceLock` that no test can
+/// empty, and emptying it would race every other test in the binary anyway. A
+/// guard whose INPUT cannot be substituted cannot be falsified: it would only
+/// ever observe whichever branch the rest of the suite happened to leave behind.
+/// Taking the slot as a parameter makes both branches reachable on demand —
+/// including the one that matters most, "the bootstrap was never called".
+fn resolve_in_slot(
+    slot: &Mutex<Option<RuntimeTuningSnapshot>>,
+    bootstrap: impl FnOnce() -> RuntimeTuningState,
+) -> (RuntimeTuningSnapshot, TuningOrigin) {
     let mut guard = slot.lock().unwrap_or_else(|poison| poison.into_inner());
-    let snapshot = guard.get_or_insert(RuntimeTuningSnapshot {
-        version: 1,
-        state: normalize_runtime_tuning_state(bootstrap),
-    });
-    *snapshot
+    match *guard {
+        Some(existing) => (existing, TuningOrigin::Inherited),
+        None => {
+            let snapshot = RuntimeTuningSnapshot {
+                version: 1,
+                state: normalize_runtime_tuning_state(bootstrap()),
+            };
+            *guard = Some(snapshot);
+            (snapshot, TuningOrigin::Bootstrapped)
+        }
+    }
 }
 
-pub fn current_runtime_tuning_state(bootstrap: RuntimeTuningState) -> RuntimeTuningState {
-    current_runtime_tuning_snapshot(bootstrap).state
+pub fn resolve_runtime_tuning_state(
+    bootstrap: impl FnOnce() -> RuntimeTuningState,
+) -> RuntimeTuningState {
+    resolve_runtime_tuning_snapshot(bootstrap).0.state
 }
 
+/// REQ-AXO-902415 — same treatment as [`resolve_runtime_tuning_snapshot`], and
+/// for the same reason: this `get_or_insert` also discards `bootstrap` whenever
+/// the slot is already filled, which after startup is always. Leaving one of the
+/// two doors with the old shape would have left the trap in place for whoever
+/// reads this file next.
+#[allow(clippy::too_many_arguments)]
 pub fn update_runtime_tuning_state(
-    bootstrap: RuntimeTuningState,
+    bootstrap: impl FnOnce() -> RuntimeTuningState,
     vector_workers: Option<usize>,
     graph_workers: Option<usize>,
     chunk_batch_size: Option<usize>,
@@ -75,9 +137,9 @@ pub fn update_runtime_tuning_state(
 ) -> RuntimeTuningSnapshot {
     let slot = runtime_tuning_snapshot_slot();
     let mut guard = slot.lock().unwrap_or_else(|poison| poison.into_inner());
-    let current = guard.get_or_insert(RuntimeTuningSnapshot {
+    let current = guard.get_or_insert_with(|| RuntimeTuningSnapshot {
         version: 1,
-        state: bootstrap,
+        state: bootstrap(),
     });
     let mut next = current.state;
     if let Some(value) = vector_workers {
@@ -130,4 +192,109 @@ pub fn reset_runtime_tuning_snapshot(bootstrap: RuntimeTuningState) -> RuntimeTu
     let slot = runtime_tuning_snapshot_slot();
     *slot.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(snapshot);
     snapshot
+}
+
+/// REQ-AXO-902415 — l'API exigeait un `bootstrap`, le calculait, puis le jetait
+/// en silence quand l'emplacement était déjà rempli.
+///
+/// Ces tests portent sur `resolve_in_slot` avec un emplacement à eux : la
+/// résolution est exactement la même fonction que celle du processus, mais les
+/// DEUX branches deviennent atteignables à volonté. Contre l'emplacement global
+/// on ne pourrait observer que celle que le reste de la suite a laissée.
+#[cfg(test)]
+mod resolution_says_which_branch_it_took {
+    use super::*;
+    use std::cell::Cell;
+
+    fn a_state(vector_workers: usize) -> RuntimeTuningState {
+        RuntimeTuningState {
+            vector_workers,
+            graph_workers: 2,
+            chunk_batch_size: 32,
+            file_vectorization_batch_size: 8,
+            vector_ready_queue_depth: 24,
+            vector_persist_queue_bound: 64,
+            vector_max_inflight_persists: 4,
+            embed_micro_batch_max_items: 16,
+            embed_micro_batch_max_total_tokens: 4096,
+            semantic_sleep_scale_pct: 100,
+            semantic_idle_sleep_scale_pct: 100,
+        }
+    }
+
+    #[test]
+    fn an_empty_slot_bootstraps_and_says_so() {
+        let slot = Mutex::new(None);
+        let called = Cell::new(false);
+
+        let (snapshot, origin) = resolve_in_slot(&slot, || {
+            called.set(true);
+            a_state(7)
+        });
+
+        assert_eq!(origin, TuningOrigin::Bootstrapped);
+        assert!(
+            called.get(),
+            "contrôle positif : sur un emplacement vide le bootstrap DOIT être \
+             demandé, sinon l'assertion suivante ne mesure rien"
+        );
+        assert_eq!(snapshot.state.vector_workers, 7, "la valeur fournie est retenue");
+        assert_eq!(snapshot.version, 1);
+    }
+
+    #[test]
+    fn a_filled_slot_never_asks_for_the_bootstrap() {
+        // LE test. L'ancienne signature prenait une VALEUR : l'appelant payait
+        // le calcul — une douzaine de lectures d'environnement plus la config de
+        // voie, deux fois par lot d'embed — et `get_or_insert` le jetait. Aucune
+        // signature prenant une valeur ne peut exprimer cette assertion.
+        let slot = Mutex::new(Some(RuntimeTuningSnapshot {
+            version: 3,
+            state: a_state(11),
+        }));
+        let called = Cell::new(false);
+
+        let (snapshot, origin) = resolve_in_slot(&slot, || {
+            called.set(true);
+            a_state(7)
+        });
+
+        assert_eq!(origin, TuningOrigin::Inherited);
+        assert!(
+            !called.get(),
+            "l'emplacement était rempli : le bootstrap ne doit même pas être \
+             CALCULÉ. C'est le gaspillage que REQ-AXO-902415 retire, et le seul \
+             endroit où il est observable."
+        );
+        assert_eq!(
+            snapshot.state.vector_workers, 11,
+            "c'est l'instantané en place qui est rendu, pas le bootstrap"
+        );
+        assert_eq!(snapshot.version, 3, "la version en place est préservée");
+    }
+
+    /// REQ-AXO-902414 — le défaut que cette forme a coûté : trois hypothèses
+    /// réfutées et quatre suites complètes, parce que rien ne disait laquelle
+    /// des deux branches avait été prise. Le symptôme pointait à l'opposé de la
+    /// cause — les variables d'environnement étaient correctement posées, et une
+    /// sonde qui les surveillait serait revenue vide sans rien disculper.
+    #[test]
+    fn the_two_branches_are_distinguishable_from_the_return_value_alone() {
+        let empty = Mutex::new(None);
+        let filled = Mutex::new(Some(RuntimeTuningSnapshot {
+            version: 1,
+            state: a_state(11),
+        }));
+
+        let (_, first) = resolve_in_slot(&empty, || a_state(7));
+        let (_, second) = resolve_in_slot(&empty, || a_state(7));
+        let (_, third) = resolve_in_slot(&filled, || a_state(7));
+
+        assert_ne!(
+            first, second,
+            "le MEME appel, deux fois, ne fait pas la même chose — et c'est ce \
+             que l'ancienne valeur de retour taisait"
+        );
+        assert_eq!(second, third, "les deux héritages sont indiscernables entre eux");
+    }
 }
