@@ -13984,3 +13984,58 @@ fn test_an_unjudgeable_reference_is_never_called_broken() {
         "directory"
     );
 }
+
+#[test]
+fn test_auto_evidence_attaches_the_subject_requirement_not_the_ones_merely_cited() {
+    // REQ-AXO-902445 — APS measured four commits in one session attaching
+    // evidence to requirements they never touched (llm_feedback #207), because
+    // the message named them as precedents: "same distinction as REQ-APS-572",
+    // "REQ-APS-560 is why Horde is unrunnable". That is what a GOOD commit
+    // message does, so the tool was penalising message quality — and
+    // `soll_verify_requirements` counted a long-delivered requirement as better
+    // covered than it is.
+    let message = "fix(cluster): drain the handoff queue (REQ-ZZ7-573)\n\n\
+                   Same DERIVED / CHOSEN distinction as REQ-ZZ7-572, and \
+                   REQ-ZZ7-560 is the reason Horde is unrunnable here.";
+
+    let subject_ids = crate::mcp::tools_soll::parse_commit_req_ids_for_tests(
+        message.lines().next().unwrap_or(""),
+    );
+    let all_ids = crate::mcp::tools_soll::parse_commit_req_ids_for_tests(message);
+
+    // POSITIVE CONTROL — the whole-message parse really does pick up all three,
+    // otherwise this test would prove nothing about narrowing.
+    assert_eq!(
+        all_ids,
+        vec!["REQ-ZZ7-573", "REQ-ZZ7-572", "REQ-ZZ7-560"],
+        "positive control: the message really does cite three requirements"
+    );
+
+    assert_eq!(
+        subject_ids,
+        vec!["REQ-ZZ7-573"],
+        "only the subject declares what the commit proves"
+    );
+
+    // REQ-AXO-902445, second defect, found BY this guard: the scanner accepted
+    // an uppercase-only project segment, while a canonical code is 3
+    // ALPHAnumeric characters. Every tenant whose code carries a digit — TE2,
+    // GS2, ZZ7 — parsed to nothing, so `axon_commit_work` attached no evidence
+    // for them at all, and said nothing about it. That is why the fixture above
+    // deliberately uses `ZZ7` rather than a letters-only code.
+    assert!(
+        !crate::mcp::tools_soll::parse_commit_req_ids_for_tests(
+            "fix(x): thing (REQ-TE2-154)"
+        )
+        .is_empty(),
+        "a project code carrying a digit must parse"
+    );
+    // …and a malformed segment still must not.
+    assert!(
+        crate::mcp::tools_soll::parse_commit_req_ids_for_tests(
+            "fix(x): thing (REQ-TOOLONG-154)"
+        )
+        .is_empty(),
+        "a segment that is not a canonical 3-char code is not an id"
+    );
+}

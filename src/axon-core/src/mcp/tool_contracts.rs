@@ -578,6 +578,11 @@ pub(crate) fn extract_sql_relations(sql: &str) -> Vec<(String, String)> {
 /// round-trip AC4 promised to remove. Folding the real columns into the text
 /// makes the corrected call self-sufficient in the same response. Pure (takes
 /// the already-built repair `Value`) so it is unit-testable without a DB.
+#[cfg(test)]
+pub(crate) fn render_pg_repair_text_for_tests(repair: &Value) -> String {
+    render_pg_repair_text(repair)
+}
+
 pub(crate) fn render_pg_repair_text(repair: &Value) -> String {
     let problem = repair
         .get("problem_class")
@@ -604,6 +609,25 @@ pub(crate) fn render_pg_repair_text(repair: &Value) -> String {
                     out.push_str(&format!(
                         "\n  {name} does not exist — run `schema_overview` for the table list"
                     ));
+                    // REQ-AXO-902444 — VPC (llm_feedback #221) filed a bug
+                    // report against GUI-PRO-028 saying "the prescribed SQL
+                    // does not run", then retracted it: the guideline was
+                    // right, the quotes were theirs. PostgreSQL folds UNQUOTED
+                    // identifiers to lower case, so `soll."Node"` fails while
+                    // `soll.Node` works — but PG renders the error as
+                    // `relation "soll.Node" does not exist`, adding quotes of
+                    // its own. It reads exactly like "the unquoted form
+                    // failed". The message states a true fact in a shape that
+                    // suggests a false one; two turns and one wrong product
+                    // report were spent on it.
+                    if name.chars().any(|c| c.is_ascii_uppercase()) {
+                        out.push_str(
+                            "\n  Note: PostgreSQL folds UNQUOTED identifiers to lower case, so \
+                             `soll.Node` resolves to `soll.node` and works. If you wrote \
+                             `soll.\"Node\"`, the QUOTES are what failed, not the name — the \
+                             quotes in this error message are added by PG.",
+                        );
+                    }
                 }
             }
         }

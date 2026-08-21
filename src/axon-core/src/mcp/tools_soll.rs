@@ -82,6 +82,8 @@ pub(crate) use shared::soll_entity_from_canonical_id;
 // dropped `commit`/`sollref`/`url` while calling itself a mirror.
 #[cfg(test)]
 pub(crate) use completeness::classify_evidence_ref_against_root;
+#[cfg(test)]
+pub(crate) use workflow::parse_commit_req_ids as parse_commit_req_ids_for_tests;
 pub(crate) use shared::all_accepted_evidence_artifact_types;
 
 #[allow(dead_code)]

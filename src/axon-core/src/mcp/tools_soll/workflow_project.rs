@@ -116,16 +116,29 @@ fn path_satisfies_required_path(path: &str, required_path: &str) -> bool {
 /// REQ-AXO-159 — extract canonical `REQ-<PROJ>-<N>` ids from a commit message
 /// for auto-evidence attachment. Deduplicates, preserves first-seen order. No
 /// regex dependency: scans `REQ-` anchors then validates `<UPPER>+-<DIGITS>+`.
-pub(super) fn parse_commit_req_ids(message: &str) -> Vec<String> {
+pub(crate) fn parse_commit_req_ids(message: &str) -> Vec<String> {
     let bytes = message.as_bytes();
     let mut ids: Vec<String> = Vec::new();
     for (start, _) in message.match_indices("REQ-") {
         let mut j = start + 4;
         let proj_start = j;
-        while j < bytes.len() && bytes[j].is_ascii_uppercase() {
+        // REQ-AXO-902445 — ALPHAnumeric, not uppercase-only.
+        //
+        // Found while guarding the subject/body split: a canonical project code
+        // is "3 alphanumeric characters" (`is_valid_project_code`), and this
+        // scanner accepted letters only. So `REQ-TE2-154`, `REQ-GS2-…`,
+        // `REQ-ZZ9-…` — every tenant whose code carries a DIGIT — parsed to
+        // nothing, and `axon_commit_work` attached no evidence at all for them.
+        // Silently: an empty id list returns "" and the response simply omits
+        // the auto-evidence line, which reads exactly like a commit that
+        // mentioned no requirement.
+        while j < bytes.len() && (bytes[j] as char).is_ascii_alphanumeric() {
             j += 1;
         }
         if j == proj_start || j >= bytes.len() || bytes[j] != b'-' {
+            continue;
+        }
+        if !crate::project_meta::is_valid_project_code(&message[proj_start..j]) {
             continue;
         }
         j += 1; // skip the '-' between PROJ and the number
@@ -883,7 +896,38 @@ impl McpServer {
         diff_paths: &[serde_json::Value],
         project_dir: Option<&std::path::Path>,
     ) -> String {
-        let ids = parse_commit_req_ids(message);
+        // REQ-AXO-902445 — the SUBJECT declares what the commit proves; the body
+        // only CITES.
+        //
+        // APS measured the dilution (llm_feedback #207): four commits in one
+        // session attached evidence to requirements they never touched, because
+        // the message named them as precedents ("same distinction as
+        // REQ-APS-572", "REQ-APS-560 is why Horde is unrunnable"). That is what
+        // a GOOD commit message does — name its causes and its guardrails — so
+        // the tool was penalising message quality, and `soll_verify_requirements`
+        // counted a delivered-months-ago requirement as better covered than it
+        // is.
+        //
+        // The subject line already carries the answer, unambiguously, via the
+        // Conventional-Commits convention `axon_pre_flight_check` validates. A
+        // tool does not need to GUESS what a commit proves when the title says
+        // it. Body-only mentions are NAMED back instead of attached — silence
+        // would just move the defect.
+        let subject_line = message.lines().next().unwrap_or("");
+        let subject_ids = parse_commit_req_ids(subject_line);
+        let all_ids = parse_commit_req_ids(message);
+        // A message with no REQ in its title keeps the historical behaviour:
+        // narrowing to an empty set would silently stop attaching anything.
+        let (ids, mentioned_only): (Vec<String>, Vec<String>) = if subject_ids.is_empty() {
+            (all_ids, Vec::new())
+        } else {
+            let mentioned = all_ids
+                .iter()
+                .filter(|id| !subject_ids.contains(id))
+                .cloned()
+                .collect();
+            (subject_ids, mentioned)
+        };
         if ids.is_empty() {
             return String::new();
         }
@@ -937,10 +981,19 @@ impl McpServer {
             String::new()
         } else {
             let short = &sha[..sha.len().min(8)];
+            let mentioned_note = if mentioned_only.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " \u{2014} cit\u{00e9}(s) dans le corps, NON attach\u{00e9}(s) (le titre d\u{00e9}clare le sujet) : {}",
+                    mentioned_only.join(", ")
+                )
+            };
             format!(
-                "REQ-AXO-159 auto-evidence : commit {} attach\u{00e9} \u{00e0} {}",
+                "REQ-AXO-159 auto-evidence : commit {} attach\u{00e9} \u{00e0} {}{}",
                 short,
-                attached.join(", ")
+                attached.join(", "),
+                mentioned_note
             )
         }
     }

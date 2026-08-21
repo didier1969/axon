@@ -4179,3 +4179,43 @@ fn test_mcp_feedback_report_renders_a_named_item_in_full() {
         "the id that does not exist must be reported, not dropped"
     );
 }
+
+#[test]
+fn test_sql_repair_names_the_identifier_folding_trap() {
+    // REQ-AXO-902444 — VPC filed a bug against GUI-PRO-028 ("the prescribed SQL
+    // does not run"), then retracted it (llm_feedback #221): the guideline was
+    // correct, the quotes were theirs. PG renders `soll."Node"` failing as
+    // `relation "soll.Node" does not exist` — with quotes IT added — which
+    // reads as "the unquoted form failed". Two turns and one wrong product
+    // report were spent on a message that states a true fact in a misleading
+    // shape.
+    use crate::mcp::tool_contracts::render_pg_repair_text_for_tests;
+
+    let mixed_case = json!({
+        "problem_class": "undefined_table",
+        "referenced_relations": [{ "relation": "soll.Node", "real_columns": [], "exists": false }]
+    });
+    let text = render_pg_repair_text_for_tests(&mixed_case);
+    assert!(
+        text.contains("folds UNQUOTED identifiers to lower case"),
+        "the folding trap must be named when the identifier carries an \
+         uppercase letter: {text}"
+    );
+    assert!(
+        text.contains("added by PG"),
+        "and it must say the quotes in the message are PG's own: {text}"
+    );
+
+    // POSITIVE CONTROL — an all-lowercase name cannot be hitting this trap, so
+    // the note must NOT fire. Without this the note would be unconditional
+    // noise on every missing table.
+    let lower = json!({
+        "problem_class": "undefined_table",
+        "referenced_relations": [{ "relation": "soll.foo", "real_columns": [], "exists": false }]
+    });
+    let text = render_pg_repair_text_for_tests(&lower);
+    assert!(
+        !text.contains("folds UNQUOTED identifiers"),
+        "no folding note for an all-lowercase identifier: {text}"
+    );
+}
