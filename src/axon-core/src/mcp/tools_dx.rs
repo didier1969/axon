@@ -288,6 +288,75 @@ impl McpServer {
         ))
     }
 
+    /// REQ-AXO-902399 — is this KIND of symbol reachable by the call graph at
+    /// all, in this project?
+    ///
+    /// Reported by KKI (llm_feedback #170, blocking): `inspect` answered
+    /// `Callers 0 · Callees 0` for Java classes referenced a dozen times each,
+    /// under a banner reading `Code-intel: LIVE — prefer over grep`. The call
+    /// graph is NOT empty — measured 2026-08-21: 49 234 `CALLS` edges for KKI.
+    /// They land on **methods** (3 330 have callers) and never on **classes**
+    /// (0 of 2 005), and nothing links a class to its members. So the zero is
+    /// literally true and reads as "nothing calls this". KKI wrote exactly that
+    /// conclusion — "RegimeDetector is wired to nothing" — into a SOLL node.
+    ///
+    /// A zero with no denominator is a verdict, not a measurement (the class of
+    /// REQ-AXO-902384). This gives it one: sample up to `SAMPLE` sibling symbols
+    /// of the same kind and report how many carry any call edge. Sampled, not
+    /// exhaustive, because the exhaustive form is a full scan of the kind on
+    /// every zero-result inspect — and the number only has to distinguish
+    /// "measured at zero" from "out of the computation's reach".
+    fn call_graph_reach_note(&self, project: Option<&str>, kind: &str) -> Option<String> {
+        const SAMPLE: usize = 200;
+        /// Below this, "0 of N" says nothing — a small project legitimately has
+        /// few edges, and the note would be noise on every leaf function.
+        const MIN_SIBLINGS: usize = 20;
+
+        let project = project?;
+        let rows: Vec<Vec<Value>> = self
+            .graph_store
+            .query_json_param(
+                "SELECT id FROM ist.symbol WHERE project_code = ? AND kind = ? LIMIT ?",
+                &json!([project, kind, SAMPLE as i64]),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())?;
+        if rows.len() < MIN_SIBLINGS {
+            return None;
+        }
+
+        let view = crate::ist_snapshot::process_view();
+        let rels: [RelationType; 2] = [RelationType::Calls, RelationType::CallsNif];
+        let wired = rows
+            .iter()
+            .filter_map(|r| r.first().and_then(Value::as_str))
+            .filter(|id| {
+                !view
+                    .reverse_at_radius(project, id, 1, 1, &rels)
+                    .unwrap_or_default()
+                    .is_empty()
+                    || !view
+                        .forward_at_radius(project, id, 1, 1, &rels)
+                        .unwrap_or_default()
+                        .is_empty()
+            })
+            .count();
+        if wired > 0 {
+            return None;
+        }
+
+        Some(format!(
+            "**Ce zéro n'est pas mesuré, il est hors de portée du calcul** : sur {} symboles \
+             de type `{}` échantillonnés dans `{}`, **aucun** ne porte d'arête d'appel. Les \
+             arêtes `CALLS` du projet existent, elles atterrissent sur d'autres types de \
+             symboles. Ne PAS en conclure que ce symbole n'est appelé par rien — vérifier en \
+             source, ou inspecter un symbole du type qui porte les arêtes (REQ-AXO-902399).\n\n",
+            rows.len(),
+            kind,
+            project,
+        ))
+    }
+
     fn resolve_scoped_symbol_id_dx(&self, symbol: &str, project: Option<&str>) -> Option<String> {
         self.resolve_scoped_symbol_id_canonical(symbol, project)
     }
@@ -2046,10 +2115,22 @@ impl McpServer {
                 );
                 let guidance = crate::mcp::classify_guidance(&guidance_facts);
                 let guidance_shadow = crate::mcp::guidance_outcome_to_value(&guidance);
+                // REQ-AXO-902399 — a 0/0 inspect must say whether it MEASURED
+                // zero or whether this kind of symbol is outside the call
+                // graph's reach in this project.
+                let reach_note = if callers == 0 && callees == 0 {
+                    rows.first()
+                        .and_then(|row| row.get(1))
+                        .and_then(Value::as_str)
+                        .and_then(|kind| self.call_graph_reach_note(project, kind))
+                } else {
+                    None
+                };
                 let evidence = format!(
-                    "{}{}{}",
+                    "{}{}{}{}",
                     project_note.unwrap_or_default(),
                     degraded_note.clone().unwrap_or_default(),
+                    reach_note.unwrap_or_default(),
                     table
                 );
                 let mut evidence = evidence_by_mode(

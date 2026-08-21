@@ -3194,6 +3194,94 @@ fn test_axon_inspect_accepts_canonical_project_code_for_repo_code_symbols() {
     }
 }
 
+/// REQ-AXO-902399 — signalé par KKI (llm_feedback #170, blocking). `inspect`
+/// rendait `Callers 0 · Callees 0` pour des classes Java référencées 12 à 16
+/// fois, sous un bandeau « Code-intel: LIVE — prefer over grep ». Le graphe
+/// n'est pas vide (49 234 arêtes `CALLS` pour KKI) : les arêtes atterrissent
+/// sur les MÉTHODES (3 330 en portent) et jamais sur les CLASSES (0 sur 2 005).
+/// KKI a écrit la conclusion inverse dans un nœud SOLL. Un zéro sans
+/// dénominateur est un verdict, pas une mesure.
+#[test]
+fn test_axon_inspect_zero_says_when_the_kind_is_out_of_the_call_graph() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+    }
+    use crate::test_support::ist_fixtures::{CallFixture, IstSeed, SymbolFixture};
+
+    // 25 classes sans la moindre arête + des méthodes qui, elles, en portent :
+    // exactement la topologie mesurée sur KKI.
+    let mut seed = IstSeed::new();
+    for i in 0..25 {
+        seed = seed.symbol(SymbolFixture::new(
+            format!("CGR::file{i}.java::Clazz{i}"),
+            format!("Clazz{i}"),
+            "class",
+            "CGR",
+        ));
+    }
+    for i in 0..25 {
+        seed = seed.symbol(SymbolFixture::new(
+            format!("CGR::file{i}.java::meth{i}"),
+            format!("meth{i}"),
+            "method",
+            "CGR",
+        ));
+    }
+    for i in 1..25 {
+        seed = seed.call(CallFixture::canonical(
+            format!("CGR::file{i}.java::meth{i}"),
+            "CGR::file0.java::meth0",
+            "CGR",
+        ));
+    }
+    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(seed).unwrap();
+
+    let inspect = |symbol: &str| -> String {
+        harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "inspect",
+                    "arguments": { "symbol": symbol, "project": "CGR" }
+                })),
+                id: Some(json!(902399)),
+            })
+            .unwrap()
+            .result
+            .expect("inspect must answer")["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // Une classe : 0/0, et le type entier est hors de portée du calcul.
+    let class_text = inspect("Clazz7");
+    assert!(
+        class_text.contains("hors de portée du calcul"),
+        "un 0/0 sur un type qui ne porte AUCUNE arête doit le dire.\n---\n{class_text}"
+    );
+    assert!(
+        class_text.contains("25 symboles"),
+        "le dénominateur échantillonné doit être donné.\n---\n{class_text}"
+    );
+
+    // Une méthode appelée : le zéro ne s'applique pas, pas de note.
+    let called_text = inspect("meth0");
+    assert!(
+        !called_text.contains("hors de portée du calcul"),
+        "un symbole qui a des appelants ne doit pas porter la note.\n---\n{called_text}"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
+}
+
 #[test]
 fn test_axon_fs_read() {
     let server = create_test_server();
