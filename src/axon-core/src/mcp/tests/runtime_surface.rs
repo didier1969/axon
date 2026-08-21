@@ -3300,6 +3300,11 @@ fn test_status_exposes_runtime_version_identity() {
 
 #[test]
 fn test_status_exposes_resource_policy_identity() {
+    // RUNTIME-TUNING-SNAPSHOT-OK: `resource_policy.vector_workers` retombe sur
+    // `local_vector_workers`, qui est un `std::env::var("AXON_VECTOR_WORKERS")`
+    // direct (tools_framework_runtime_status.rs) — pas l'instantane memoise.
+    // Y glisser un rafraichissement changerait silencieusement ce que ce test
+    // mesure. (REQ-AXO-902414)
     let _guard = env_lock();
     unsafe {
         std::env::set_var("AXON_RESOURCE_PRIORITY", "critical");

@@ -348,15 +348,18 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
     // qui m'a attrapé sur le `reset` ci-dessous — la garde a fait exactement son
     // travail, et elle a dit quoi faire.
     let _sg_guard = crate::service_guard::lock_for_tests();
+    crate::service_guard::reset_for_tests();
     // Le balayage appelle ~90 outils, dont les surfaces runtime : elles TOUCHENT
-    // l'ordonnanceur utility-first, qui est un état de PROCESSUS partagé par tous
-    // les tests. Mesuré : sans ce module la suite complète est verte (1880/0) ;
-    // avec lui, `test_single_gpu_worker_cruise_mode_grows_more_aggressively_when_
-    // ready_queue_starves` tombe à 80 au lieu de 104 — deux fois sur deux, et vert
-    // en isolation. Le balayage laisse donc l'ordonnanceur dans un autre état.
+    // l'ordonnanceur utility-first, un état de PROCESSUS partagé par tous les
+    // tests. On le remet à neuf des DEUX côtés : avant, pour ne pas mesurer
+    // l'héritage d'un autre test ; après, pour ne pas le léguer.
     //
-    // On le remet à neuf des DEUX côtés : avant, pour ne pas mesurer l'héritage
-    // d'un autre test ; après, pour ne pas le léguer.
+    // Note d'enquête, pour qui relira : l'arrivée de ce module a fait tomber
+    // `test_single_gpu_worker_cruise_mode_grows_more_aggressively_when_ready_
+    // queue_starves` à 80 au lieu de 104. Ce module en était le DÉCLENCHEUR — il
+    // déplace l'ordre d'exécution — et non la cause : ce test lisait un
+    // instantané de réglage mémoïsé qu'il n'établissait jamais (REQ-AXO-902414).
+    // Deux hypothèses accusant ce balayage-ci ont été réfutées avant celle-là.
     crate::vector_control::reset_utility_first_scheduler_for_tests();
     let server = create_test_server();
     seed_listable_content(&server);
@@ -384,16 +387,21 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
     // Mesuré : aucune dérive aujourd'hui. La garde reste parce que le chemin
     // existe et qu'une dérive corromprait silencieusement tous les tests suivants,
     // en rendant par-dessus le marché ce rapport-ci sans valeur.
-    const PROCESS_GLOBAL_ENV: &[&str] = &[
-        "AXON_VECTOR_WORKERS",
-        "AXON_EMBEDDING_PROVIDER",
-        "AXON_RUNTIME_MODE",
-        "AXON_EMBED_MAX_LENGTH",
-    ];
-    let env_before: Vec<(String, Option<String>)> = PROCESS_GLOBAL_ENV
-        .iter()
-        .map(|k| ((*k).to_string(), std::env::var(k).ok()))
-        .collect();
+    // TOUTES les `AXON_*`, pas une liste choisie à la main.
+    //
+    // La première version de cette sonde en surveillait QUATRE, retenues à vue de
+    // nez, et concluait « aucune dérive ». C'était un verdict sans dénominateur
+    // sur mon propre appareil de mesure : `vector_control.rs` lit à lui seul
+    // `AXON_VECTOR_TARGET_READY_CHUNKS`, `AXON_GPU_READY_LOW_WATERMARK_CHUNKS`,
+    // `AXON_GPU_READY_HIGH_WATERMARK*`, `AXON_GPU_PRESSURE_EMBED_BATCH_CHUNKS`…
+    // — aucune n'était dans les quatre. Un instrument qui ne couvre pas l'espace
+    // qu'il prétend surveiller rend un « rien trouvé » qui ne veut rien dire.
+    let snapshot_axon_env = || -> std::collections::BTreeMap<String, String> {
+        std::env::vars()
+            .filter(|(k, _)| k.starts_with("AXON_"))
+            .collect()
+    };
+    let env_before = snapshot_axon_env();
 
     let mut exercised: Vec<String> = Vec::new();
     let mut violations: Vec<String> = Vec::new();
@@ -440,27 +448,45 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
         }
     }
 
-    // Rendre l'ordonnanceur de processus tel qu'on l'a trouvé.
+    // Rendre l'état de processus tel qu'on l'a trouvé — les DEUX registres.
+    //
+    // ⚠️ Ces deux réinitialisations sont de l'HYGIÈNE, pas le correctif d'un bug.
+    // Elles ont été ajoutées en poursuivant une hypothèse — « le balayage nourrit
+    // le `service_guard`, que le contrôleur consulte » — qui a ensuite été
+    // RÉFUTÉE : la suite complète a rougi avec les deux réinitialisations en
+    // place. La vraie cause était ailleurs (un instantané de réglage mémoïsé que
+    // le test victime n'établissait jamais, REQ-AXO-902414), et elle est corrigée
+    // chez le test victime, pas ici.
+    //
+    // Elles restent parce qu'un balayage de ~90 outils doit rendre les registres
+    // de processus tels qu'il les a trouvés, quelle que soit la cause du jour.
+    crate::service_guard::reset_for_tests();
     crate::vector_control::reset_utility_first_scheduler_for_tests();
 
     // L'invariant d'innocuité, AVANT les verdicts de rendu : un balayage qui
     // laisse l'environnement modifié corrompt tous les tests qui suivent, et le
     // rapport de rendu qu'il produit ne vaut alors plus rien.
-    let env_drift: Vec<String> = env_before
-        .iter()
-        .filter_map(|(key, before)| {
-            let after = std::env::var(key).ok();
-            (after != *before).then(|| {
-                format!("{key} : {before:?} → {after:?}")
-            })
-        })
-        .collect();
+    let env_after = snapshot_axon_env();
+    let mut env_drift: Vec<String> = Vec::new();
+    for (key, before) in &env_before {
+        match env_after.get(key) {
+            Some(after) if after == before => {}
+            Some(after) => env_drift.push(format!("{key} : `{before}` → `{after}`")),
+            None => env_drift.push(format!("{key} : `{before}` → SUPPRIMÉE")),
+        }
+    }
+    for (key, after) in &env_after {
+        if !env_before.contains_key(key) {
+            env_drift.push(format!("{key} : absente → `{after}`"));
+        }
+    }
     assert!(
         env_drift.is_empty(),
-        "le balayage a MODIFIÉ l'environnement du processus alors qu'il n'appelle \
-         que des outils en lecture — du code de production écrit ces variables \
-         (runtime_boot.rs:62, embedder.rs:1346) et le verrou de test ne peut pas \
-         l'en empêcher :\n  - {}",
+        "le balayage a MODIFIÉ l'environnement `AXON_*` du processus alors qu'il \
+         n'appelle que des outils en lecture — du code de production écrit ces \
+         variables (runtime_boot.rs:62, embedder.rs:1346) et le verrou de test ne \
+         peut pas l'en empêcher. Les tests qui asservissent leur résultat à ces \
+         variables (contrôleur de lot vectoriel) tomberont LOIN d'ici :\n  - {}",
         env_drift.join("\n  - ")
     );
 

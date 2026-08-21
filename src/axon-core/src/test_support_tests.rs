@@ -574,3 +574,170 @@ fn no_test_touches_global_service_state_without_the_lock() {
         offenders.join("\n  ")
     );
 }
+
+/// REQ-AXO-902414 — l'instantane de reglage runtime est un cache PROCESSUS
+/// (`RUNTIME_TUNING_SNAPSHOT`, un `OnceLock<Mutex<Option<..>>>`) rempli par
+/// `get_or_insert` : le premier test du processus qui le touche fixe la valeur
+/// pour tous les suivants, et le `bootstrap` recalcule depuis l'environnement
+/// est alors CALCULE puis JETE, sans un mot.
+///
+/// Consequence vecue : `test_single_gpu_worker_cruise_mode_grows_more_...`
+/// posait `AXON_VECTOR_WORKERS=1`, lisait 8 dans l'instantane, et rendait 80 au
+/// lieu de 104. Vert en isolation, rouge en suite, et le simple ajout de trois
+/// tests ailleurs dans le crate suffisait a faire basculer le verdict.
+///
+/// PORTEE DE CETTE GARDE, dite franchement : elle balaie les tests qui POSENT
+/// une des variables du bootstrap. Elle ne detecte PAS un test qui lirait
+/// l'instantane sans poser aucune variable — celui-la herite aussi, mais rien
+/// dans sa source ne le trahit statiquement.
+#[test]
+fn no_test_sets_a_runtime_tuning_env_var_without_establishing_the_snapshot() {
+    const ESTABLISHES: &[&str] = &[
+        "refresh_runtime_tuning_snapshot_from_env",
+        "reset_runtime_tuning_snapshot",
+    ];
+    const MARKER: &str = "RUNTIME-TUNING-SNAPSHOT-OK:";
+    // Les deux fonctions dont la source DEFINIT l'etat memoise.
+    const BOOTSTRAPS: &[&str] = &[
+        "bootstrap_runtime_tuning_state_from_env",
+        "bootstrap_embedding_lane_config_from_env",
+    ];
+
+    let sources = crate_sources();
+
+    // --- L'entree de la garde est DERIVEE, pas recopiee -----------------------
+    // On ne retient que les litteraux lus DANS le corps du bootstrap : ce sont
+    // exactement les variables dont la valeur n'atteint le code teste QUE par
+    // l'instantane. Un saut d'indirection de plus happerait
+    // `AXON_EMBEDDING_PROVIDER`, qui dispose aussi d'une voie de lecture directe
+    // (`embedding_provider_requested_is_gpu`) : le poser n'est donc pas en soi
+    // une dependance a l'ordre, et la garde crierait sur ~17 tests sains.
+    let collect_vars = |body: &str, out: &mut Vec<String>| {
+        let mut rest = body;
+        while let Some(at) = rest.find("\"AXON_") {
+            rest = &rest[at + 1..];
+            if let Some(close) = rest.find('"') {
+                let var = &rest[..close];
+                if var
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                    && !out.iter().any(|v| v == var)
+                {
+                    out.push(var.to_string());
+                }
+            }
+        }
+    };
+
+    let mut seed_bodies: Vec<String> = Vec::new();
+    for (_, text) in &sources {
+        let lines: Vec<&str> = text.lines().collect();
+        for (name, start, end, _) in fn_blocks(&lines) {
+            if BOOTSTRAPS.contains(&name.as_str()) {
+                seed_bodies.push(lines[start..=end].join("\n"));
+            }
+        }
+    }
+
+    let mut tuning_vars: Vec<String> = Vec::new();
+    for body in &seed_bodies {
+        collect_vars(body, &mut tuning_vars);
+    }
+    tuning_vars.sort();
+
+    // Un denominateur vide rendrait cette garde verte pour de mauvaises raisons.
+    assert!(
+        tuning_vars.len() >= 10,
+        "la derivation n'a trouve que {} variable(s) dans {BOOTSTRAPS:?} : \
+         les fonctions ont ete renommees ou deplacees, et cette garde ne \
+         surveille donc plus rien. Reaccorde `BOOTSTRAPS` avant de croire un \
+         resultat vert.\n  trouvees : {:?}",
+        tuning_vars.len(),
+        tuning_vars
+    );
+
+    // --- Balayage -------------------------------------------------------------
+    let mut scanned = 0usize;
+    let mut setters = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    for (path, text) in &sources {
+        if !path.contains("test") {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        for (name, start, end, inside_impl) in fn_blocks(&lines) {
+            if inside_impl {
+                continue;
+            }
+            let body = lines[start..=end].join("\n");
+            scanned += 1;
+            let touched: Vec<&String> = tuning_vars
+                .iter()
+                .filter(|v| body.contains(&format!("set_var(\"{v}\"")))
+                .collect();
+            if touched.is_empty() {
+                continue;
+            }
+            setters += 1;
+            if body.contains(MARKER) {
+                continue;
+            }
+            // L'instantane doit etre etabli APRES les `set_var` et AVANT que le
+            // test n'exerce quoi que ce soit — un rafraichissement place en
+            // seule teardown satisfait un `contains` naif tout en laissant le
+            // test dependre de l'ordre. C'est la faiblesse que la falsification
+            // de cette garde a mise au jour (REQ-AXO-902414).
+            // Borne basse : le DERNIER `set_var` surveille — etablir avant lui
+            // ne sert a rien, la variable suivante n'est pas encore posee.
+            let last_set = touched
+                .iter()
+                .filter_map(|v| body.rfind(&format!("set_var(\"{v}\"")))
+                .max()
+                .unwrap_or(0);
+            // Borne haute : le DERNIER `remove_var` surveille. Un `remove_var`
+            // isole ne marque pas la teardown — les setups en contiennent aussi
+            // (remise a zero des drapeaux `_AUTOCONFIGURED`), ce qui coupait la
+            // fenetre trop tot et accusait des tests sains.
+            let teardown_at = touched
+                .iter()
+                .filter_map(|v| body.rfind(&format!("remove_var(\"{v}\"")))
+                .max()
+                .unwrap_or(body.len());
+            let established_in_body = ESTABLISHES
+                .iter()
+                .any(|e| body.match_indices(e).any(|(at, _)| at > last_set && at < teardown_at));
+            if established_in_body {
+                continue;
+            }
+            offenders.push(format!(
+                "{path}::{name}  [{}]",
+                touched
+                    .iter()
+                    .map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "ces tests posent une variable du bootstrap de reglage runtime puis \
+         laissent l'instantane MEMOISE decider a leur place (REQ-AXO-902414).\n\
+         Mecanisme : `current_runtime_tuning_snapshot` fait `get_or_insert` — si \
+         un test anterieur a rempli l'emplacement, ton `set_var` est decoratif et \
+         ton assertion mesure l'ordre d'execution, pas le comportement. La \
+         suite rougit alors LOIN d'ici et ressemble a une vraie regression.\n\
+         Geste : apres tes `set_var` et AVANT d'exercer quoi que ce soit, appelle \
+         `super::refresh_runtime_tuning_snapshot_from_env()` — un appel place \
+         en seule teardown ne compte pas, il n'etablit rien pour TON test. \
+         Rappelle-le aussi apres tes `remove_var`, sinon tu repasses le \
+         probleme au voisin.\n\
+         Si ton test ne LIT pas l'instantane, dis-le sur place avec un \
+         commentaire `// {MARKER} <raison>` : la raison est l'audit.\n\
+         Denominateur : {scanned} fonctions balayees, {setters} posent une de ces \
+         {} variables.\n  {}",
+        tuning_vars.len(),
+        offenders.join("\n  ")
+    );
+}

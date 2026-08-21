@@ -427,6 +427,10 @@ fn test_apply_cpu_fallback_ort_runtime_env_preserves_explicit_openmp_configurati
 
 #[test]
 fn test_apply_cpu_fallback_ort_runtime_env_reports_advisory_lane_sizing_when_autoconfigured() {
+    // RUNTIME-TUNING-SNAPSHOT-OK: `apply_cpu_fallback_ort_runtime_env` ne touche
+    // pas l'instantane memoise — ni lecture ni ecriture — et toutes les
+    // assertions ci-dessous portent sur des variables d'environnement ou sur la
+    // structure rendue. Rien a etablir. (REQ-AXO-902414)
     let _guard = lock_env_guard();
     unsafe {
         std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
@@ -690,6 +694,13 @@ fn test_embedding_lane_config_disables_vector_workers_when_runtime_mode_skips_se
 
 #[test]
 fn test_apply_runtime_embedding_lane_adjustment_updates_live_batch_env_and_controller() {
+    // RUNTIME-TUNING-SNAPSHOT-OK: son second temps VERIFIE l'heritage — il pose
+    // `AXON_CHUNK_BATCH_SIZE=96` puis exige que le reglage rende toujours 64,
+    // c'est-a-dire que l'autorite etablie l'emporte sur une ecriture
+    // d'environnement tardive. Un rafraichissement a cet endroit detruirait
+    // l'assertion au lieu de la fiabiliser. Le rafraichissement d'ENTREE, lui,
+    // reste en place plus bas : il rend deterministes les champs passes `None`
+    // a `apply_runtime_embedding_lane_adjustment`. (REQ-AXO-902414)
     let _guard = lock_env_guard();
     unsafe {
         std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
@@ -701,6 +712,12 @@ fn test_apply_runtime_embedding_lane_adjustment_updates_live_batch_env_and_contr
         std::env::remove_var("AXON_GRAPH_WORKERS_AUTOCONFIGURED");
     }
     super::refresh_vector_batch_controller_from_env();
+    // REQ-AXO-902414 — `apply_runtime_embedding_lane_adjustment` passe `None`
+    // pour `vector_workers` et `update_runtime_tuning_state` fait lui aussi un
+    // `get_or_insert` : les champs non fournis heritent de l'emplacement. On
+    // l'etablit donc depuis NOTRE environnement, sinon les `None` valent ce
+    // qu'un test voisin y a laisse.
+    super::refresh_runtime_tuning_snapshot_from_env();
 
     super::apply_runtime_embedding_lane_adjustment(
         None,
@@ -798,6 +815,10 @@ fn test_apply_runtime_embedding_lane_adjustment_updates_live_batch_env_and_contr
         std::env::remove_var("AXON_SEMANTIC_SLEEP_SCALE_PCT_AUTOCONFIGURED");
         std::env::remove_var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT_AUTOCONFIGURED");
     }
+    // Ce test est le POLLUEUR historique : il laissait l'emplacement rempli de
+    // ses propres valeurs pour tout le reste du processus. On le rend a l'etat
+    // que l'environnement decrit maintenant.
+    super::refresh_runtime_tuning_snapshot_from_env();
 }
 
 #[test]
@@ -831,6 +852,9 @@ fn test_configured_embedding_max_length_defaults_to_model_cap() {
 
 #[test]
 fn test_configured_embedding_max_length_honors_lower_override_and_caps_high_override() {
+    // RUNTIME-TUNING-SNAPSHOT-OK: `configured_embedding_max_length` relit
+    // `AXON_EMBED_MAX_LENGTH` a chaque appel et ne passe pas par l'instantane.
+    // C'est precisement le contrat teste ici. (REQ-AXO-902414)
     let _guard = lock_env_guard();
     unsafe {
         std::env::set_var("AXON_EMBED_MAX_LENGTH", "384");
@@ -1484,11 +1508,78 @@ fn test_single_gpu_worker_cruise_mode_waits_for_second_regression_before_step_do
     std::env::remove_var("AXON_EMBEDDING_PROVIDER");
 }
 
+/// REQ-AXO-902414 — repro DETERMINISTE de l'ordre-dependance qui rougissait la
+/// suite au hasard de l'ordonnancement (80 attendu 104), et verte en isolation.
+///
+/// Le champ est NOMME, pas devine : `gpu_single_worker_cruise_mode` lit
+/// `current_runtime_tuning_state().vector_workers`, et le multiplicateur du pas
+/// d'embed vaut 3 en croisiere mono-worker contre 2 sinon. Avec
+/// `chunk_batch_size = 32` et `VECTOR_BATCH_CONTROLLER_EMBED_STEP = 24` :
+/// 32 + 24x3 = 104 (croisiere) contre 32 + 24x2 = 80 (hors croisiere).
+/// Le seul terme qui bouge entre les deux moities de ce test est le
+/// `vector_workers` MEMOISE — l'environnement, lui, est identique.
+#[test]
+fn req_902414_cruise_verdict_follows_the_memoized_snapshot_not_the_environment() {
+    let _guard = lock_env_guard();
+    std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
+    // Court-circuite `gpu_bootstrap_vector_worker_cap`, qui ramenerait 8 a la
+    // capacite VRAM de la machine et rendrait ce repro dependant du materiel.
+    std::env::set_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION", "true");
+
+    // Etat laisse par un test anterieur : plusieurs workers dans l'emplacement.
+    std::env::set_var("AXON_VECTOR_WORKERS", "8");
+    super::refresh_runtime_tuning_snapshot_from_env();
+    assert_eq!(
+        super::current_runtime_tuning_snapshot().state.vector_workers,
+        8,
+        "precondition du repro : l'emplacement doit porter 8 workers"
+    );
+
+    // Mot pour mot le geste du test victime : poser 1 worker, NE PAS rafraichir.
+    std::env::set_var("AXON_VECTOR_WORKERS", "1");
+    let mut controller = VectorBatchController::new(&controller_test_config());
+    let inherited = controller.observe(
+        10_000,
+        controller_observation_with_runtime(4_096, false, false, 4, 64, 4, 20_480, 0, 0),
+    );
+    assert_eq!(inherited.reason, "ready_queue_starved");
+    assert_eq!(
+        inherited.target_embed_batch_chunks, 80,
+        "l'environnement dit 1 worker, l'instantane memoise en dit 8 : \
+         `current_runtime_tuning_snapshot` fait `get_or_insert`, donc le \
+         bootstrap recalcule depuis l'environnement est CALCULE puis JETE. \
+         32 + 24x2 = 80, le multiplicateur hors croisiere."
+    );
+
+    // Meme environnement, meme observation — seul l'instantane est etabli.
+    super::refresh_runtime_tuning_snapshot_from_env();
+    let mut controller = VectorBatchController::new(&controller_test_config());
+    let established = controller.observe(
+        10_000,
+        controller_observation_with_runtime(4_096, false, false, 4, 64, 4, 20_480, 0, 0),
+    );
+    assert_eq!(
+        established.target_embed_batch_chunks, 104,
+        "32 + 24x3 : le multiplicateur de croisiere, une fois l'instantane etabli"
+    );
+
+    std::env::remove_var("AXON_VECTOR_WORKERS");
+    std::env::remove_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
+    std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+    super::refresh_runtime_tuning_snapshot_from_env();
+}
+
 #[test]
 fn test_single_gpu_worker_cruise_mode_grows_more_aggressively_when_ready_queue_starves() {
     let _guard = lock_env_guard();
     std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
     std::env::set_var("AXON_VECTOR_WORKERS", "1");
+    // REQ-AXO-902414 — `observe` lit `vector_workers` dans l'instantane MEMOISE
+    // (`current_runtime_tuning_state`), pas dans l'environnement. Sans ce
+    // rafraichissement les deux `set_var` ci-dessus sont decoratifs : le premier
+    // test du processus a deja rempli l'emplacement, `get_or_insert` jette le
+    // bootstrap recalcule, et l'assertion mesure l'ordre d'execution.
+    super::refresh_runtime_tuning_snapshot_from_env();
 
     let mut controller = VectorBatchController::new(&controller_test_config());
     let diagnostics = controller.observe(
@@ -1503,6 +1594,10 @@ fn test_single_gpu_worker_cruise_mode_grows_more_aggressively_when_ready_queue_s
 
     std::env::remove_var("AXON_VECTOR_WORKERS");
     std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+    // On rend l'emplacement a l'etat que l'environnement decrit maintenant :
+    // le rafraichissement d'entree l'aurait sinon laisse a `workers=1` pour
+    // tous les tests suivants, ce qui deplace le probleme au lieu de le fermer.
+    super::refresh_runtime_tuning_snapshot_from_env();
 }
 
 #[test]
@@ -1511,6 +1606,10 @@ fn test_single_gpu_worker_cruise_mode_reduces_chunk_target_when_ready_queue_star
     let _guard = lock_env_guard();
     std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
     std::env::set_var("AXON_VECTOR_WORKERS", "1");
+    // REQ-AXO-902414 — meme lecture memoisee que le test voisin. Ici la borne
+    // `.max(default_embed_batch_chunks)` masquait la derive : le resultat
+    // restait 32 des deux cotes. Fragilite latente, pas absence de fragilite.
+    super::refresh_runtime_tuning_snapshot_from_env();
 
     let mut controller = VectorBatchController::new(&controller_test_config());
     controller.observe(
@@ -1529,6 +1628,7 @@ fn test_single_gpu_worker_cruise_mode_reduces_chunk_target_when_ready_queue_star
 
     std::env::remove_var("AXON_VECTOR_WORKERS");
     std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+    super::refresh_runtime_tuning_snapshot_from_env();
 }
 
 #[test]
