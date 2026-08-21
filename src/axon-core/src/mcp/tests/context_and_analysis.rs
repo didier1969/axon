@@ -3236,6 +3236,37 @@ fn test_axon_inspect_zero_says_when_the_kind_is_out_of_the_call_graph() {
             "CGR",
         ));
     }
+    // REQ-AXO-902399 tranche 2 — le containment tel qu'il EXISTE réellement :
+    // un CHEMIN DE FICHIER vers ses symboles. Mesuré s122 sur les quatre
+    // projets du parc : `CONTAINS` symbole→symbole vaut 0 partout, donc c'est
+    // la seule forme qu'un test a le droit de simuler.
+    use crate::test_support::ist_fixtures::EdgeFixture;
+    for i in 0..25 {
+        for member in [format!("Clazz{i}"), format!("meth{i}")] {
+            let target = if member.starts_with("Clazz") {
+                format!("CGR::file{i}.java::Clazz{i}")
+            } else {
+                format!("CGR::file{i}.java::meth{i}")
+            };
+            seed = seed.edge(EdgeFixture::new(
+                "CONTAINS",
+                format!("/p/file{i}.java"),
+                target,
+                "CGR",
+            ));
+        }
+    }
+    // Un fichier à DEUX classes : l'attribution y est impossible, et c'est ce
+    // fait-là que l'outil doit rendre plutôt qu'un chiffre qui aurait l'air
+    // d'une réponse.
+    for (id, name, kind) in [
+        ("CGR::Multi.java::Alpha", "Alpha", "class"),
+        ("CGR::Multi.java::Beta", "Beta", "class"),
+        ("CGR::Multi.java::helper", "helper", "method"),
+    ] {
+        seed = seed.symbol(SymbolFixture::new(id, name, kind, "CGR"));
+        seed = seed.edge(EdgeFixture::new("CONTAINS", "/p/Multi.java", id, "CGR"));
+    }
     let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(seed).unwrap();
 
     let inspect = |symbol: &str| -> String {
@@ -3264,9 +3295,22 @@ fn test_axon_inspect_zero_says_when_the_kind_is_out_of_the_call_graph() {
         class_text.contains("hors de portée du calcul"),
         "un 0/0 sur un type qui ne porte AUCUNE arête doit le dire.\n---\n{class_text}"
     );
+    // L'assertion épinglait « 25 symboles », la taille du fixture — et rougissait
+    // dès qu'on y ajoutait une classe, ce qui n'apprend rien. Ce qu'elle garde
+    // vraiment, c'est que le dénominateur SOIT DONNÉ et qu'il dépasse le seuil
+    // sous lequel la note est supprimée : « 0 sur 3 » ne veut rien dire.
+    let sampled: usize = class_text
+        .split("**Ce zéro n'est pas mesuré, il est hors de portée du calcul** : sur ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| {
+            panic!("le dénominateur échantillonné doit être donné.\n---\n{class_text}")
+        });
     assert!(
-        class_text.contains("25 symboles"),
-        "le dénominateur échantillonné doit être donné.\n---\n{class_text}"
+        sampled >= 20,
+        "un dénominateur sous le seuil ne distingue rien : la note aurait dû être \
+         supprimée, pas rendue avec {sampled}.\n---\n{class_text}"
     );
 
     // Une méthode appelée : le zéro ne s'applique pas, pas de note.
@@ -3274,6 +3318,56 @@ fn test_axon_inspect_zero_says_when_the_kind_is_out_of_the_call_graph() {
     assert!(
         !called_text.contains("hors de portée du calcul"),
         "un symbole qui a des appelants ne doit pas porter la note.\n---\n{called_text}"
+    );
+
+    // ── REQ-AXO-902399 tranche 2 — l'avertissement ne suffit pas ────────────
+    //
+    // La tranche 1 dit POURQUOI le zéro ne veut rien dire et laisse le lecteur
+    // avec sa question : « est-ce que quelqu'un utilise cette classe ? ». Une
+    // impasse polie reste une impasse (PIL-AXO-002).
+
+    // `Clazz0` partage son fichier avec `meth0`, qui a 24 appelants. Le fichier
+    // ne portant QU'UNE classe, ses membres sont les siens : la réponse est
+    // exacte, pas approchée.
+    let used = inspect("Clazz0");
+    assert!(
+        used.contains("Réponse par le fichier"),
+        "quand le fichier permet de trancher, l'outil doit RÉPONDRE, pas seulement \
+         avertir.\n---\n{used}"
+    );
+    assert!(
+        used.contains("24 appelant"),
+        "la réponse doit porter le compte mesuré, pas une formule vague.\n---\n{used}"
+    );
+    assert!(
+        used.contains("hors de ce fichier"),
+        "un appelant interne au fichier ne prouve pas l'usage de la classe : la \
+         distinction dedans/dehors est le dénominateur de ce verdict.\n---\n{used}"
+    );
+
+    // `Clazz7` partage son fichier avec `meth7`, qui n'a AUCUN appelant. Le
+    // contrôle négatif : sans lui, une réponse qui dirait « utilisé » pour tout
+    // passerait le test précédent.
+    let unused = inspect("Clazz7");
+    assert!(
+        unused.contains("aucun** ne porte d'appelant"),
+        "contrôle négatif : une classe dont les membres n'ont pas d'appelant doit \
+         être distinguée d'une classe utilisée, sinon la réponse ne mesure \
+         rien.\n---\n{unused}"
+    );
+
+    // Deux classes dans le fichier : l'outil doit dire qu'il ne peut PAS
+    // trancher, plutôt que d'attribuer à l'une les appelants de l'autre.
+    let ambiguous = inspect("Alpha");
+    assert!(
+        ambiguous.contains("ne permet pas de trancher") && ambiguous.contains("2 classes"),
+        "avec plusieurs classes dans le fichier, l'attribution est impossible et \
+         doit être NOMMÉE avec son compte — un chiffre rendu ici aurait l'air \
+         d'une réponse.\n---\n{ambiguous}"
+    );
+    assert!(
+        !ambiguous.contains("Réponse par le fichier"),
+        "surtout, l'outil ne doit pas prétendre répondre.\n---\n{ambiguous}"
     );
 
     unsafe {

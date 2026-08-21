@@ -357,6 +357,133 @@ impl McpServer {
         ))
     }
 
+    /// REQ-AXO-902399 tranche 2 — RÉPONDRE, au lieu de seulement avertir.
+    ///
+    /// La tranche 1 a rendu le zéro honnête (« hors de portée du calcul »).
+    /// Elle laisse le lecteur avec sa question intacte : *est-ce que quelqu'un
+    /// utilise cette classe ?* Une impasse polie reste une impasse
+    /// (PIL-AXO-002).
+    ///
+    /// **Mesuré s122, et ça change le diagnostic** : `CONTAINS` ne relie JAMAIS
+    /// un symbole à un symbole. Dans TOUS les projets — AXO 12 639, KKI 19 015,
+    /// TE2 20 773, APS 12 542 arêtes — la source est un CHEMIN DE FICHIER, et
+    /// symbole→symbole vaut **0 partout**. Ce n'est donc pas un trou de
+    /// l'extracteur Java comme le rapport KKI le suggérait : l'IST ne porte de
+    /// containment classe→méthode pour AUCUN langage.
+    ///
+    /// Reste un intermédiaire utilisable : la classe et ses méthodes partagent
+    /// un FICHIER, et ce lien-là existe. Mesuré sur KKI : **1 082 des 1 326**
+    /// fichiers `.java` portant une classe n'en portent qu'UNE (82 %). Pour
+    /// ceux-là « les méthodes du fichier » EST « les méthodes de la classe » —
+    /// exact, pas approché. Pour les autres, ça ne l'est pas, et le dire est le
+    /// correctif : un verdict porte son dénominateur (REQ-AXO-902384).
+    fn containing_file_reach_answer(&self, project: &str, symbol_id: &str) -> Option<String> {
+        /// Un fichier au-delà de ça n'est pas une classe, c'est un module —
+        /// l'agrégation n'y voudrait plus rien dire et coûterait cher.
+        const MAX_SIBLINGS: usize = 200;
+
+        let file: String = self
+            .graph_store
+            .query_json_param(
+                "SELECT source_id FROM ist.edge WHERE project_code = ? \
+                 AND relation_type = 'CONTAINS' AND target_id = ? LIMIT 1",
+                &json!([project, symbol_id]),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())?
+            .first()?
+            .first()
+            .and_then(Value::as_str)?
+            .to_string();
+
+        let siblings: Vec<Vec<Value>> = self
+            .graph_store
+            .query_json_param(
+                "SELECT s.id, s.name, s.kind FROM ist.edge e JOIN ist.symbol s ON s.id = e.target_id \
+                 WHERE e.project_code = ? AND e.relation_type = 'CONTAINS' AND e.source_id = ? LIMIT ?",
+                &json!([project, &file, (MAX_SIBLINGS + 1) as i64]),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())?;
+        if siblings.len() > MAX_SIBLINGS {
+            return None;
+        }
+
+        let short = file.rsplit('/').next().unwrap_or(&file).to_string();
+        let kind_of = |row: &Vec<Value>| -> String {
+            row.get(2)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        };
+        let classes = siblings.iter().filter(|r| kind_of(r) == "class").count();
+
+        // Plusieurs classes dans le fichier : l'attribution est impossible, et
+        // c'est CE fait qu'il faut rendre — pas un chiffre qui aurait l'air
+        // d'une réponse.
+        if classes != 1 {
+            return Some(format!(
+                "**Le fichier ne permet pas de trancher** : `{short}` porte {classes} classes, \
+                 donc les appelants de ses méthodes ne peuvent pas être attribués à celle-ci. \
+                 Il faudrait un containment classe→méthode, absent de l'IST pour TOUS les \
+                 langages (mesuré : `CONTAINS` a toujours un fichier pour source).\n\n"
+            ));
+        }
+
+        let own_ids: std::collections::BTreeSet<&str> = siblings
+            .iter()
+            .filter_map(|r| r.first().and_then(Value::as_str))
+            .collect();
+        let view = crate::ist_snapshot::process_view();
+        let rels: [RelationType; 2] = [RelationType::Calls, RelationType::CallsNif];
+        let mut callers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for member in siblings.iter().filter(|r| kind_of(r) != "class") {
+            let Some(id) = member.first().and_then(Value::as_str) else {
+                continue;
+            };
+            for caller in view
+                .reverse_at_radius(project, id, 1, 64, &rels)
+                .unwrap_or_default()
+            {
+                callers.insert(caller);
+            }
+        }
+        let members = siblings.len().saturating_sub(1);
+        let outside: Vec<&String> = callers
+            .iter()
+            .filter(|c| !own_ids.contains(c.as_str()))
+            .collect();
+
+        if callers.is_empty() {
+            return Some(format!(
+                "**Réponse par le fichier** : `{short}` ne porte qu'UNE classe, donc ses \
+                 {members} membre(s) sont les siens — et **aucun** ne porte d'appelant. \
+                 Ce symbole a de bonnes chances d'être réellement inutilisé ; c'est une \
+                 mesure, pas le zéro non calculé ci-dessus.\n\n"
+            ));
+        }
+
+        let named = outside
+            .iter()
+            .take(6)
+            .map(|c| format!("`{}`", c.rsplit("::").next().unwrap_or(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "**Réponse par le fichier** : `{short}` ne porte qu'UNE classe, donc ses {members} \
+             membre(s) sont les siens. Ils totalisent **{} appelant(s) distincts, dont {} hors \
+             de ce fichier**{}. Ce symbole EST utilisé — inspecter un de ses membres pour le \
+             détail.\n\n",
+            callers.len(),
+            outside.len(),
+            if named.is_empty() {
+                String::new()
+            } else {
+                format!(" : {named}")
+            },
+        ))
+    }
+
     fn resolve_scoped_symbol_id_dx(&self, symbol: &str, project: Option<&str>) -> Option<String> {
         self.resolve_scoped_symbol_id_canonical(symbol, project)
     }
@@ -2209,11 +2336,18 @@ impl McpServer {
                 } else {
                     None
                 };
+                // REQ-AXO-902399 tranche 2 — l'avertissement dit pourquoi le
+                // zéro ne veut rien dire ; il ne répond pas à la question posée.
+                // Quand le fichier permet de trancher, la répondre.
+                let file_answer = reach_note.as_ref().and_then(|_| {
+                    project.and_then(|p| self.containing_file_reach_answer(p, &symbol_id))
+                });
                 let evidence = format!(
-                    "{}{}{}{}",
+                    "{}{}{}{}{}",
                     project_note.unwrap_or_default(),
                     degraded_note.clone().unwrap_or_default(),
                     reach_note.unwrap_or_default(),
+                    file_answer.unwrap_or_default(),
                     table
                 );
                 let mut evidence = evidence_by_mode(
