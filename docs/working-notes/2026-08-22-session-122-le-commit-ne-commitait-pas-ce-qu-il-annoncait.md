@@ -95,6 +95,54 @@ travail non déclaré.
 
 ---
 
+## 3bis. Trois autres surfaces qui savaient et ne disaient pas
+
+**`REQ-AXO-902418` — l'enum publié se déclarait « miroir » et avait dérivé.**
+`catalog.rs` listait à la main les types d'artefact acceptés, sous une description qui
+disait d'elle-même *« mirror of shared.rs::accepted_evidence_artifact_schema, the single
+source of truth »*. `commit`, `sollref` et `url` — acceptés pour **toute** entité — en
+étaient absents. TE2 a envoyé cinq SHA typés `file`, le seul choix plausible dans l'enum
+amputé, et a reçu `did_you_mean: "/home/.../567592f"` : un chemin qui ne peut pas exister.
+L'outil censé résoudre la friction poussait vers la mauvaise piste. L'enum est maintenant
+dérivé de la source ; la réparation nomme le type au lieu de proposer un chemin.
+
+**`REQ-AXO-902415` — la fonction exigeait un argument coûteux et le jetait.**
+`current_runtime_tuning_snapshot(bootstrap)` demandait une valeur que l'appelant
+construisait — une douzaine de lectures d'environnement plus la config de voie — puis
+`get_or_insert` la jetait dès que l'emplacement était rempli, c'est-à-dire toujours après
+le démarrage. Le corps du REQ disait « en production, rien à craindre » ; c'est vrai pour
+la correction et trompeur sur le coût : l'argument est recalculé **à chaque appel**, y
+compris sur le chemin du lot d'embed, deux fois par lot. `impl FnOnce()` règle les deux
+moitiés — il n'est calculé que s'il sert — et `TuningOrigin` dans le retour règle l'autre :
+REQ-AXO-902414 avait brûlé trois hypothèses et quatre suites complètes faute de pouvoir
+distinguer les deux branches.
+
+Point de méthode : l'emplacement du processus est un `OnceLock` qu'aucun test ne peut
+vider. Une garde dont l'entrée n'est pas substituable ne peut pas être falsifiée — elle
+n'observerait que la branche que le reste de la suite a laissée. En passant l'emplacement
+en paramètre, l'assertion qui compte devient exprimable : *le bootstrap n'est même pas
+calculé*. Aucune signature prenant une **valeur** ne peut la formuler.
+
+**`REQ-AXO-902399` tranche 2 — répondre, au lieu d'expliquer pourquoi on ne peut pas.**
+La mesure a recadré le diagnostic de KKI : `CONTAINS` a **toujours** un chemin de fichier
+pour source, dans les quatre projets (AXO 12 639, KKI 19 015, TE2 20 773, APS 12 542 ;
+symbole→symbole = **0 partout**). Ce n'est donc pas l'extracteur Java — l'IST ne porte de
+containment classe→méthode pour **aucun** langage (`REQ-AXO-902423`).
+
+Reste un intermédiaire : la classe et ses méthodes partagent un fichier. **1 082 des 1 326**
+fichiers `.java` de KKI ne portent qu'une classe (82 %) — pour ceux-là l'agrégation est
+*exacte*, pas approchée ; pour les 18 % restants elle ne l'est pas, et le dire est le
+correctif. La tranche 1 disait pourquoi le zéro ne veut rien dire ; une impasse polie reste
+une impasse.
+
+**`REQ-AXO-902422` — la première ligne de chaque init.** Le `label` du session_pointer est
+figé à l'enregistrement, le nœud bouge à chaque handoff : l'init annonçait
+« Session 113 close — live v0.8.0-1493 » quand le corps, lu un appel plus tard, disait
+« Session 121 close », live `v0.8.0-1541`. Le titre courant l'emporte désormais ;
+l'étiquette est conservée mais rendue **pour ce qu'elle est**.
+
+---
+
 ## 4. Relève des canaux — les deux, toujours
 
 `mcp_inbox_read` : **0 message**. `mcp_feedback_report` : **18 ouverts, 5 nouveaux**.
@@ -158,7 +206,19 @@ l'outillage.
 
 | | |
 |---|---|
-| Porte à l'ouverture | `--lib` 1887/0 (7 ignorés) · `--bins` 43/0 · `cargo build --tests` |
-| REQ livrés | `902405`, `902407` (`b5bbeb37`) ; `902417` en cours |
-| REQ tracés | `902417` → `902422` (6) |
-| Doléances relevées | 18 ouvertes, 5 neuves (TE2), 1 `blocking` (VPC #181) |
+| Porte à l'ouverture / à la clôture | `--lib` **1887/0** → **1899/0** (7 ignorés) · `--bins` 43/0 · `cargo build --tests` |
+| REQ livrés (7) | `902405` `902407` (`b5bbeb37`) · `902417` (`b3f46fae`) · `902418` (`ee6e177b`) · `902415` (`c5767b1d`) · `902399` t2 (`e8965608`) · `902422` |
+| REQ tracés (7) | `902417` → `902423` |
+| Doléances fermées | TE2 #186, #185 · KKI #170 (`blocking`) |
+| Doléances relevées | 18 ouvertes à l'ouverture, 5 neuves (TE2), 1 `blocking` restante (VPC #181) |
+| Gardes falsifiées | 6 correctifs, 6 falsifications — aucune garde n'a été crue sur son vert initial |
+
+## Ce que je laisse ouvert, et pourquoi je ne l'ai pas tranché seul
+
+| REQ | Question |
+|---|---|
+| `902418` | Faut-il **retyper** un `file` qui ne résout pas mais dont la forme dit « commit » ? `file` est *légal* — le réécrire est une coercition d'une autre classe que la réparation d'un type illégal |
+| `902423` | Le containment classe→méthode : ajout au modèle de graphe + réindexation du parc (~590k morceaux) |
+| `902416` | `MIL → MIL` n'admet que `SUPERSEDES` (« remplace »), donc aucun vocabulaire pour « précède ». Une relation d'ordre est candidate au cycle : conception, pas une ligne de matrice |
+| `902402` | Remise à niveau des 4 907 `file_context` — voie A ciblée vs voie B rescan (~110×). **Attend le mot de l'opérateur depuis la s121** |
+| `902409` | P0, échec intermittent. Deux passages verts de plus ce jour (12 et 13) — *compatible avec* la quatrième hypothèse, pas une confirmation. Seuil à fixer **à l'avance** : 5 passages consécutifs |

@@ -1206,7 +1206,8 @@ impl McpServer {
         project_code: &str,
         project_path: Option<&str>,
     ) -> serde_json::Value {
-        if let Ok(Some(value)) = self.graph_store.read_session_pointer(project_code) {
+        if let Ok(Some(mut value)) = self.graph_store.read_session_pointer(project_code) {
+            self.freshen_session_pointer_title(&mut value);
             return value;
         }
         if let Some(path) = project_path {
@@ -1219,6 +1220,51 @@ impl McpServer {
             }
         }
         serde_json::Value::Null
+    }
+
+    /// REQ-AXO-902422 — attach the pointed node's CURRENT title.
+    ///
+    /// The `label` is captured when the pointer is registered and never touched
+    /// again, while the node it points at is rewritten at every handoff. Same
+    /// knowledge stored twice, so it diverges (GUI-PRO-013) — measured on
+    /// 2026-08-21: the first line of every init read
+    /// `CPT-AXO-052 — Session 113 close — live v0.8.0-1493` while the node's
+    /// body, read one call later, said *Session 121 close*, live
+    /// `v0.8.0-1541`. **Eight sessions of drift on the most-read orientation
+    /// line of the product** — and the label is not false, it was true in s113,
+    /// which is exactly what makes it expensive: it reads as fresh.
+    ///
+    /// Resolved HERE and not in `render_continuation_block`, which is pure over
+    /// the assembled bundle by design (no I/O, no timeout risk) — and because
+    /// `data.kickoff_bundle` must carry the same truth as the rendered text.
+    fn freshen_session_pointer_title(&self, pointer: &mut serde_json::Value) {
+        if pointer.get("kind").and_then(|v| v.as_str()) != Some("soll_node") {
+            return;
+        }
+        let Some(id) = pointer
+            .get("value")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let title = self
+            .graph_store
+            .query_json_param(
+                "SELECT title FROM soll.Node WHERE id = ? LIMIT 1",
+                &serde_json::json!([id]),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&raw).ok())
+            .and_then(|rows| {
+                rows.first()
+                    .and_then(|r| r.first())
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
+        if let Some(title) = title.filter(|t| !t.trim().is_empty()) {
+            pointer["current_title"] = serde_json::Value::from(title);
+        }
     }
 
     fn find_active_handoff(project_path: &str) -> Option<String> {
@@ -1583,8 +1629,23 @@ impl McpServer {
         if sp_kind != "none" {
             let val = sp.and_then(|v| v.get("value")).and_then(|v| v.as_str()).unwrap_or("");
             let label = sp.and_then(|v| v.get("label")).and_then(|v| v.as_str()).unwrap_or("");
-            let label = if label.is_empty() { String::new() } else { format!(" — {label}") };
-            out.push_str(&format!("**Session pointer** (`{sp_kind}`): `{val}`{label}\n"));
+            // REQ-AXO-902422 — the node's CURRENT title wins over the label
+            // frozen when the pointer was registered. The label is kept only
+            // when it says something the title does not, and it is then marked
+            // as what it is: an operator note, not the node's state.
+            let current = sp
+                .and_then(|v| v.get("current_title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let suffix = match (current.is_empty(), label.is_empty()) {
+                (false, false) if label != current => {
+                    format!(" — {current} (étiquette opérateur : {label})")
+                }
+                (false, _) => format!(" — {current}"),
+                (true, false) => format!(" — {label}"),
+                (true, true) => String::new(),
+            };
+            out.push_str(&format!("**Session pointer** (`{sp_kind}`): `{val}`{suffix}\n"));
         }
         if let Some(summary) = bundle
             .get("derived_session_pointer")
@@ -2837,6 +2898,109 @@ mod continuation_block_tests {
         assert!(b.contains("HEAD 78145526"), "derived summary: {b}");
         assert!(b.contains("REQ-AXO-902165") && b.contains("[P1]"), "wave-1 + priority: {b}");
         assert!(b.contains("`78145526`"), "recent commit sha: {b}");
+    }
+
+    /// REQ-AXO-902422 — le `label` est fig\u{e9} \u{e0} l'enregistrement du pointeur, le
+    /// n\u{153}ud bouge \u{e0} chaque handoff. Mesur\u{e9} le 2026-08-21 : la PREMI\u{c8}RE ligne de
+    /// chaque init annon\u{e7}ait « Session 113 close — live v0.8.0-1493 » alors que
+    /// le corps, lu un appel plus tard, disait « Session 121 close », live
+    /// `v0.8.0-1541`. Huit sessions d'\u{e9}cart sur le signal d'orientation le plus
+    /// lu du produit — et l'\u{e9}tiquette n'est pas fausse, elle \u{e9}tait vraie en s113,
+    /// ce qui la rend co\u{fb}teuse : elle se lit comme fra\u{ee}che.
+    /// REQ-AXO-902422 — le CÂBLAGE, pas seulement la bascule d'affichage.
+    ///
+    /// Le test de rendu ci-dessous reçoit `current_title` tout fait : il resterait
+    /// vert si la requête ne rendait JAMAIS rien — mauvaise table, mauvaise
+    /// colonne (`soll.Node` a `title`, pas `label`), mauvais placeholder. C'est
+    /// la classe de défaut que cette session passe à corriger ailleurs ; elle
+    /// vaut ici aussi. Celui-ci interroge la vraie base.
+    #[test]
+    fn the_current_title_is_actually_read_from_the_pointed_node() {
+        use crate::test_support::ist_fixtures::{
+            create_test_server_with_ist_seed, IstSeed, SollNodeFixture,
+        };
+
+        let seed = IstSeed::new().node(
+            SollNodeFixture::new("CPT-TST-052", "Concept", "TST", "Session 121 close — mesuré")
+                .status("current"),
+        );
+        let harness = create_test_server_with_ist_seed(seed).expect("serveur de test");
+
+        let mut pointer = json!({
+            "kind": "soll_node",
+            "value": "CPT-TST-052",
+            "label": "Session 113 close — périmé",
+        });
+        harness.server.freshen_session_pointer_title(&mut pointer);
+        assert_eq!(
+            pointer.get("current_title").and_then(|v| v.as_str()),
+            Some("Session 121 close — mesuré"),
+            "le titre doit venir de la BASE ; s'il est absent, la requête ne \
+             résout rien et l'init continuera d'afficher l'étiquette périmée : {pointer}"
+        );
+
+        // Un pointeur qui ne désigne pas de nœud SOLL n'a pas de titre à
+        // rafraîchir — et surtout, pas de requête à payer.
+        let mut file_pointer = json!({"kind": "file", "value": "docs/handoff.md"});
+        harness
+            .server
+            .freshen_session_pointer_title(&mut file_pointer);
+        assert!(
+            file_pointer.get("current_title").is_none(),
+            "aucun titre ne doit être inventé pour un pointeur de fichier : {file_pointer}"
+        );
+
+        // Un id qui ne résout pas laisse l'étiquette intacte plutôt que de vider
+        // la seule orientation disponible.
+        let mut ghost = json!({"kind": "soll_node", "value": "CPT-TST-999", "label": "gardée"});
+        harness.server.freshen_session_pointer_title(&mut ghost);
+        assert!(
+            ghost.get("current_title").is_none() && ghost["label"] == "gardée",
+            "un nœud absent ne doit rien écraser : {ghost}"
+        );
+    }
+
+    #[test]
+    fn the_pointed_nodes_current_title_wins_over_the_frozen_label() {
+        let with_both = json!({
+            "session_pointer": {
+                "kind": "soll_node",
+                "value": "CPT-AXO-052",
+                "label": "Session 113 close — live v0.8.0-1493",
+                "current_title": "Session 121 close — l'instrument était borné par ce qu'il mesurait",
+            },
+        });
+        let b = McpServer::render_continuation_block(&with_both);
+        assert!(
+            b.contains("Session 121 close"),
+            "le titre COURANT du nœud doit être rendu : {b}"
+        );
+        assert!(
+            b.contains("étiquette opérateur"),
+            "l'étiquette figée n'est pas jetée — elle est rendue POUR CE QU'ELLE EST, \
+             pas à la place de l'état du nœud : {b}"
+        );
+        // Contrôle d'ordre : « 113 » ne doit pas précéder « 121 », sinon un
+        // lecteur pressé repart encore sur l'état périmé.
+        let pos_current = b.find("Session 121 close").expect("titre courant");
+        let pos_label = b.find("Session 113 close").expect("étiquette figée");
+        assert!(
+            pos_current < pos_label,
+            "l'état courant doit venir EN PREMIER : {b}"
+        );
+
+        // Sans titre courant (nœud supprimé, pointeur non-SOLL), l'étiquette
+        // reste le seul repère — la retirer serait une régression.
+        let label_only = json!({
+            "session_pointer": {
+                "kind": "soll_node", "value": "CPT-AXO-052", "label": "active pointer",
+            },
+        });
+        let b = McpServer::render_continuation_block(&label_only);
+        assert!(
+            b.contains("active pointer") && !b.contains("étiquette opérateur"),
+            "sans titre courant, l'étiquette est rendue seule et sans qualificatif : {b}"
+        );
     }
 
     #[test]
