@@ -11190,6 +11190,140 @@ fn test_work_plan_separates_belonging_to_a_live_milestone_from_being_blocked() {
     );
 }
 
+/// REQ-AXO-902428 — poser une arête `SUPERSEDES` rouvrait le nœud qui
+/// supersède, preuves attachées comprises.
+///
+/// TROIS tenants l'ont mesuré indépendamment, chacun avec ses identifiants :
+/// FSF #90 (`REQ-FSF-480`, `delivered` → `current`), OPV #93 (`REQ-OPV-844` et
+/// `797`, revenus en tête du plan comme « work in progress — finish before
+/// starting new work »), VPC #101 (`REQ-VPC-092`, découvert seulement en
+/// recomptant l'histogramme des statuts avant/après).
+///
+/// Le message y aidait : « `A` retires `B` (status flipped) » se lit comme
+/// portant sur `B`, sujet de la phrase. Il portait aussi sur `A`, en silence.
+#[test]
+fn test_supersedes_retires_the_target_without_reopening_the_source() {
+    use crate::test_support::ist_fixtures::{
+        create_test_server_with_ist_seed, IstSeed, SollNodeFixture,
+    };
+
+    let seed = IstSeed::new()
+        .node(SollNodeFixture::new("REQ-CCL-901", "Requirement", "CCL", "Remplacante livree").status("delivered"))
+        .node(SollNodeFixture::new("REQ-CCL-902", "Requirement", "CCL", "Remplacee").status("current"))
+        .node(SollNodeFixture::new("REQ-CCL-903", "Requirement", "CCL", "Retiree sans remplacant").status("superseded"))
+        .node(SollNodeFixture::new("REQ-CCL-904", "Requirement", "CCL", "Autre remplacante").status("current"))
+        .node(SollNodeFixture::new("REQ-CCL-905", "Requirement", "CCL", "Retiree AVEC remplacant").status("superseded"))
+        .node(SollNodeFixture::new("REQ-CCL-906", "Requirement", "CCL", "Le remplacant deja enregistre").status("current"));
+    let harness = create_test_server_with_ist_seed(seed).expect("serveur de test");
+
+    // 905 a DÉJÀ son remplaçant enregistré — c'est le cas où refuser est le bon
+    // conseil (« supersède plutôt le plus récent »).
+    harness
+        .server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+             VALUES ('REQ-CCL-906', 'REQ-CCL-905', 'SUPERSEDES', 'CCL')",
+        )
+        .unwrap();
+
+    let link = |src: &str, tgt: &str| -> serde_json::Value {
+        harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_manager",
+                    "arguments": {
+                        "action": "link",
+                        "entity": "requirement",
+                        "data": { "source_id": src, "target_id": tgt, "relation_type": "SUPERSEDES" }
+                    }
+                })),
+                id: Some(json!(902428)),
+            })
+            .unwrap()
+            .result
+            .expect("soll_manager doit répondre")
+    };
+    let status_of = |id: &str| -> String {
+        harness
+            .server
+            .graph_store
+            .query_json(&format!("SELECT status FROM soll.Node WHERE id = '{id}'"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&raw).ok())
+            .and_then(|rows| {
+                rows.first()
+                    .and_then(|r| r.first())
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+    };
+
+    let res = link("REQ-CCL-901", "REQ-CCL-902");
+    let text = res["content"][0]["text"].as_str().unwrap_or_default();
+
+    // CONTRÔLE POSITIF : l'opération a bien eu lieu. Sans lui, « la source n'a
+    // pas bougé » serait vrai d'un appel qui n'a rien fait du tout.
+    assert_eq!(
+        status_of("REQ-CCL-902"),
+        "superseded",
+        "précondition : la CIBLE doit être retirée, sinon rien n'est mesuré.\n{res}"
+    );
+
+    // LE verdict.
+    assert_eq!(
+        status_of("REQ-CCL-901"),
+        "delivered",
+        "la SOURCE doit garder son statut. La forcer à `current` rouvrait une \
+         exigence LIVRÉE — avec ses preuves — et `soll_work_plan` la remontait \
+         alors comme « travail en cours », envoyant la session suivante refaire \
+         du travail déjà fait.\n{res}"
+    );
+    assert_eq!(
+        res["data"]["source_status_after"].as_str(),
+        Some("delivered"),
+        "la réponse annonçait `current` EN DUR — vrai seulement parce que le SQL \
+         l'y forçait.\n{res}"
+    );
+    assert!(
+        text.contains("REQ-CCL-901") && text.contains("inchang"),
+        "le texte doit nommer ce qui arrive à CHAQUE bout : « (status flipped) » \
+         se lisait comme portant sur la cible.\n{text}"
+    );
+
+    // La cible déjà retirée SANS remplaçant enregistré : c'est exactement le trou
+    // que l'ancien message décrivait avant de refuser de le combler.
+    let recovered = link("REQ-CCL-904", "REQ-CCL-903");
+    assert_ne!(
+        recovered.get("isError").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "un nœud retiré dont le remplaçant n'est PAS enregistré doit pouvoir le \
+         recevoir : refuser, c'est refuser de combler le trou qu'on signale \
+         (PIL-AXO-002).\n{recovered}"
+    );
+
+    // CONTRÔLE NÉGATIF : quand un remplaçant EST enregistré, refuser reste le bon
+    // conseil — sinon le correctif aurait supprimé la garde au lieu de la borner.
+    let refused = link("REQ-CCL-904", "REQ-CCL-905");
+    assert_eq!(
+        refused.get("isError").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "une cible dont le remplaçant est DÉJÀ enregistré doit toujours être \
+         refusée, en nommant ce remplaçant.\n{refused}"
+    );
+    assert!(
+        refused["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("REQ-CCL-906"),
+        "le refus doit NOMMER le remplaçant existant : {refused}"
+    );
+}
+
 #[test]
 fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
     let server = create_test_server();

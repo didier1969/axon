@@ -1549,6 +1549,11 @@ impl McpServer {
                         // status updates land in one CTE so neither survives.
                         if relation_type == "SUPERSEDES" {
                             let mut src_type = String::new();
+                            // REQ-AXO-902428 — le statut de la SOURCE etait lu
+                            // puis jete ; la reponse annoncait « current » en
+                            // dur, ce qui etait vrai seulement parce que le CTE
+                            // l'y forcait.
+                            let mut src_status = String::new();
                             let mut tgt_type = String::new();
                             let mut tgt_status = String::new();
                             let raw = self
@@ -1569,6 +1574,7 @@ impl McpServer {
                                 let st = row[2].as_str().unwrap_or("").to_string();
                                 if id == src {
                                     src_type = ty;
+                                    src_status = st;
                                 } else if id == tgt {
                                     tgt_type = ty;
                                     tgt_status = st;
@@ -1605,22 +1611,39 @@ impl McpServer {
                                     },
                                 }));
                             }
-                            if tgt_status == "superseded" {
+                            // REQ-AXO-902428 — cette branche refusait TOUTE cible
+                            // deja `superseded`, y compris le cas que son propre
+                            // message decrit comme un trou : « No SUPERSEDES edge
+                            // points at it, so its replacement is UNRECORDED ».
+                            // Elle refusait donc precisement d'enregistrer ce
+                            // qu'elle signalait comme manquant (PIL-AXO-002 :
+                            // decrire un trou sans dire comment le combler est
+                            // une impasse). VPC a du contourner en repassant le
+                            // noeud retire en `current` pour poser l'arete — un
+                            // geste qui RESSEMBLE a une regression de donnee et
+                            // que rien ne documente. On refuse desormais
+                            // seulement quand un remplacant EST deja enregistre :
+                            // la, superseder le plus recent est le bon conseil.
+                            let recorded_replacement = if tgt_status == "superseded" {
+                                self.query_single_column(&format!(
+                                    "SELECT source_id FROM soll.Edge \
+                                     WHERE target_id = '{}' AND relation_type = 'SUPERSEDES' \
+                                     LIMIT 1",
+                                    escape_sql(tgt)
+                                ))
+                                .ok()
+                                .and_then(|rows| rows.into_iter().next())
+                            } else {
+                                None
+                            };
+                            if recorded_replacement.is_some() {
                                 // REQ-AXO-902299 — the server already knows who
                                 // retired this node; making the caller hunt for it
                                 // was the dead-end. One query answers it.
-                                let replacement = self
-                                    .query_single_column(&format!(
-                                        "SELECT source_id FROM soll.Edge \
-                                         WHERE target_id = '{}' AND relation_type = 'SUPERSEDES' \
-                                         LIMIT 1",
-                                        escape_sql(tgt)
-                                    ))
-                                    .ok()
-                                    .and_then(|rows| rows.into_iter().next());
+                                let replacement = recorded_replacement.clone();
                                 let replacement_note = match replacement.as_deref() {
                                     Some(r) => format!(" It was replaced by `{r}` — supersede that one instead if this is a further revision."),
-                                    None => " No SUPERSEDES edge points at it, so its replacement is unrecorded; `soll_children` on it (direction=parents) shows what else links to it.".to_string(),
+                                    None => String::new(),
                                 };
                                 return Some(json!({
                                     "content": [{
@@ -1659,17 +1682,36 @@ impl McpServer {
                             let target_project = project_code_from_canonical_entity_id(src)
                                 .or_else(|| project_code_from_canonical_entity_id(tgt))
                                 .unwrap_or_default();
-                            let cte = "WITH inserted AS (INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES (?, ?, 'SUPERSEDES', ?) ON CONFLICT (source_id, target_id, relation_type) DO NOTHING RETURNING source_id), src_flip AS (UPDATE soll.Node SET status = 'current' WHERE id = ? RETURNING id) UPDATE soll.Node SET status = 'superseded' WHERE id = ?";
+                            // REQ-AXO-902428 — le `src_flip` est RETIRE. Il
+                            // forcait la SOURCE a `current`, donc superseder un
+                            // noeud avec une exigence LIVREE la rouvrait, preuves
+                            // attachees comprises. Trois tenants l'ont mesure
+                            // independamment, chacun avec ses ids : FSF #90
+                            // (REQ-FSF-480), OPV #93 (REQ-OPV-844 et 797, revenus
+                            // en tete du plan comme « work in progress »), VPC
+                            // #101 (REQ-VPC-092, decouvert en recomptant
+                            // l'histogramme de statuts).
+                            //
+                            // Superseder B avec A dit quelque chose de B, rien de
+                            // A. Si le statut de A doit changer, l'appelant le
+                            // demande.
+                            let cte = "WITH inserted AS (INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES (?, ?, 'SUPERSEDES', ?) ON CONFLICT (source_id, target_id, relation_type) DO NOTHING RETURNING source_id) UPDATE soll.Node SET status = 'superseded' WHERE id = ?";
                             let exec = self
                                 .graph_store
-                                .execute_param(cte, &json!([src, tgt, target_project, src, tgt]));
+                                .execute_param(cte, &json!([src, tgt, target_project, tgt]));
                             return match exec {
                                 Ok(()) => Some(json!({
                                     "content": [{
                                         "type": "text",
+                                        // REQ-AXO-902428 — « (status flipped) » se
+                                        // lisait comme portant sur la CIBLE, sujet
+                                        // de la phrase. Il portait AUSSI sur la
+                                        // source, en silence. Chaque bout nomme
+                                        // desormais ce qui lui arrive.
                                         "text": format!(
-                                            "SUPERSEDES applied: `{}` retires `{}` (status flipped).",
-                                            src, tgt
+                                            "SUPERSEDES applied: `{src}` retires `{tgt}`. \
+                                             `{tgt}` -> superseded ; `{src}` inchange (statut `{}`).",
+                                            if src_status.is_empty() { "?" } else { src_status.as_str() }
                                         )
                                     }],
                                     "data": {
@@ -1679,7 +1721,8 @@ impl McpServer {
                                             "target_id": tgt,
                                             "relation_type": "SUPERSEDES"
                                         },
-                                        "source_status_after": "current",
+                                        "source_status_after": src_status,
+                                        "source_status_changed": false,
                                         "target_status_after": "superseded"
                                     }
                                 })),
