@@ -6388,6 +6388,45 @@ fn test_soll_children_traverses_both_directions_and_filters_relation() {
     );
 }
 
+/// REQ-AXO-902401 — signalé par KKI (llm_feedback #171). SOLL's canonical
+/// orientation is NOT uniform: `BELONGS_TO`/`REFINES` point child → parent,
+/// `TARGETS`/`SOLVES` point parent → child. So a Milestone's targeted
+/// Requirements answer to `direction=parents`, and the default `children` call
+/// printed a bare "0 found" while ten REQs hung off `MIL-KKI-005`. A zero with
+/// no denominator reads as "there are none" — the vacuous-verdict class of
+/// REQ-AXO-902384.
+#[test]
+fn test_soll_children_zero_names_the_other_direction() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let exec = |sql: &str| server.graph_store.execute(sql).unwrap();
+
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-CHZ-001', 'Milestone', 'CHZ', 'jalon', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-CHZ-010', 'Requirement', 'CHZ', 'vise par le jalon', 'x', 'planned', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('MIL-CHZ-001', 'REQ-CHZ-010', 'TARGETS')");
+
+    let empty = server
+        .axon_soll_children(&json!({ "id": "MIL-CHZ-001" }))
+        .expect("must answer");
+    let text = empty["content"][0]["text"].as_str().unwrap_or_default();
+
+    assert_eq!(empty["data"]["count"], 0, "cette direction est bien vide");
+    assert!(
+        text.contains("direction=\\\"parents\\\"") || text.contains("direction=\"parents\""),
+        "un zéro doit nommer la direction où les arêtes se trouvent.\n---\n{text}"
+    );
+    assert!(
+        text.contains("1 edge(s) exist the other way"),
+        "le dénominateur de l'autre direction doit être donné.\n---\n{text}"
+    );
+
+    // Et l'autre direction les rend réellement.
+    let other = server
+        .axon_soll_children(&json!({ "id": "MIL-CHZ-001", "direction": "parents" }))
+        .expect("must answer");
+    assert_eq!(other["data"]["count"], 1);
+}
+
 /// REQ-AXO-902248 — `soll_get` replaces the single most-prescribed raw-SQL
 /// pattern in the system (`sql SELECT description FROM soll.Node WHERE id=…`,
 /// which the GLOBAL CLAUDE.md tells every LLM to run, in every project).
@@ -8790,6 +8829,18 @@ fn test_axon_init_project_returns_global_guidelines() {
     assert!(
         content.contains("read any body in full via"),
         "init must point to the on-demand body read, got: {content}"
+    );
+    // REQ-AXO-902400 — and it must point at `soll_get`, not at the raw SQL the
+    // canon forbids. Signalé par KKI (llm_feedback #175) : l'init prescrivait
+    // lui-même `sql SELECT description FROM soll.Node`, dans le tout premier
+    // appel de chaque session, chez chaque tenant.
+    assert!(
+        content.contains("soll_get(id="),
+        "init must prescribe soll_get for body reads, got: {content}"
+    );
+    assert!(
+        !content.contains("SELECT description FROM soll.Node"),
+        "init must NOT prescribe the raw SQL body read, got: {content}"
     );
     for line in content.lines().filter(|l| l.starts_with("- **GUI-")) {
         assert!(

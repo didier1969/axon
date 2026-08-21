@@ -782,14 +782,55 @@ impl McpServer {
             .iter()
             .map(|r| format!("- {} [{}] {} — {}", cell(r, 0), cell(r, 2), cell(r, 4), cell(r, 3)))
             .collect();
+
+        // REQ-AXO-902401 — a bare "0 found" is a vacuous verdict here, because
+        // SOLL's canonical orientation is NOT uniform: `BELONGS_TO`/`REFINES`
+        // point child → parent, while `TARGETS`/`SOLVES` point parent → child.
+        // So a milestone's targeted requirements answer to `direction=parents`,
+        // and `soll_children(id=MIL-KKI-005)` printed "0 found" while ten REQs
+        // hung off it. Reported by KKI (llm_feedback #171) as "only traverses
+        // BELONGS_TO/BLOCKED_BY" — there is no relation whitelist; the direction
+        // is what misses. Until the per-relation orientation lands, say where
+        // the edges actually are instead of implying there are none.
+        let opposite_hint = if items.is_empty() {
+            let (o_match, _) = match direction {
+                "parents" => ("target_id", "source_id"),
+                _ => ("source_id", "target_id"),
+            };
+            let other = if direction == "parents" { "children" } else { "parents" };
+            let count: i64 = self
+                .graph_store
+                .query_json_param(
+                    &format!("SELECT count(*) FROM soll.Edge WHERE {o_match} = ?"),
+                    &json!([id]),
+                )
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                .and_then(|rows| {
+                    rows.first()?.first()?.as_i64().or_else(|| {
+                        rows.first()?.first()?.as_str().and_then(|s| s.parse().ok())
+                    })
+                })
+                .unwrap_or(0);
+            (count > 0).then(|| format!(
+                "\n\n_0 in this direction, but {count} edge(s) exist the other way: \
+                 `soll_children(id=\"{id}\", direction=\"{other}\")`. SOLL orientation is not \
+                 uniform — `BELONGS_TO`/`REFINES` point child→parent, `TARGETS`/`SOLVES` point \
+                 parent→child._"
+            ))
+        } else {
+            None
+        };
+
         Some(json!({
             "content": [{ "type": "text", "text": format!(
-                "{} of {}{}: {} found\n{}",
+                "{} of {}{}: {} found\n{}{}",
                 if direction == "parents" { "Parents" } else { "Children" },
                 id,
                 rel.map(|r| format!(" via {r}")).unwrap_or_default(),
                 items.len(),
-                if lines.is_empty() { "(none)".to_string() } else { lines.join("\n") }
+                if lines.is_empty() { "(none)".to_string() } else { lines.join("\n") },
+                opposite_hint.unwrap_or_default(),
             ) }],
             "data": { "status": "ok", "id": id, "direction": direction,
                       "relation_type": rel, "count": items.len(), "nodes": items }

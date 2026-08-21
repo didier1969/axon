@@ -2103,7 +2103,13 @@ impl McpServer {
             "Server-assigned project code: `{}`.\n\n",
             project_code
         ));
-        response_text.push_str("Available global rules (digest — read any body in full via `sql SELECT description FROM soll.Node WHERE id='<ID>'`). Which ones do you want to activate, ignore, or specialize for this project?\n");
+        // REQ-AXO-902400 — point at `soll_get`, NOT at raw SQL. This line is the
+        // first thing every LLM reads in every session of every tenant, and it
+        // prescribed the exact `sql SELECT description FROM soll.Node` that
+        // REQ-AXO-902248 replaced and GUI-PRO-102 lists as an anti-pattern. Raw
+        // `sql` is 63.5 % of MCP traffic not because LLMs prefer it but because
+        // the procedures asked for it; each surviving line reopens the tap.
+        response_text.push_str("Available global rules (digest — read any body in full via `soll_get(id='<ID>')`). Which ones do you want to activate, ignore, or specialize for this project?\n");
         response_text.push_str(&rules_text);
         response_text.push_str("\n(Use `axon_apply_guidelines` to apply these choices).");
 
