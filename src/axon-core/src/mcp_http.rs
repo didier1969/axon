@@ -228,11 +228,8 @@ fn classify_mcp_request(request: &JsonRpcRequest) -> McpRequestClass {
                 .as_ref()
                 .and_then(|params| params.get("name"))
                 .and_then(|value| value.as_str())
-                .map(|name| {
-                    name.strip_prefix("mcp_axon_")
-                        .or_else(|| name.strip_prefix("axon_"))
-                        .unwrap_or(name)
-                });
+                // REQ-AXO-902434 — source unique du nom canonique.
+                .map(crate::mcp::canonical_tool_name);
             if tool_name.is_some_and(is_observer_tool_name) {
                 McpRequestClass::Observer
             } else if tool_name.is_some_and(is_runtime_command_proxy_tool_name) {

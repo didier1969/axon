@@ -217,6 +217,73 @@ fn test_mcp_tools_list() {
 /// `handoff_check`. Closest: axon_handoff_check » — il suggérait exactement ce
 /// que l'appelant avait tapé. Les DEUX outils dont la résolution cassait sont
 /// ceux du chemin de livraison.
+/// REQ-AXO-902434 — le catalogue PUBLIE six noms préfixés que le routeur reçoit
+/// rabotés : deux espaces de noms réconciliés par une convention, pas par une
+/// dérivation.
+///
+/// Mesuré s122 : 108 outils sur 114 portent le même nom des deux côtés, 6 ne se
+/// rejoignent qu'après ce retrait — et la convention était recopiée sur **cinq**
+/// sites, dont **deux ne l'appliquaient qu'à moitié**. `batch` et la dérivation
+/// de schéma ignoraient `mcp_axon_`, que les trois autres traitaient : le même
+/// nom marchait par la voie directe et échouait par `batch`.
+///
+/// C'est la même recopie, dans le mauvais ordre, qui avait cassé `help`
+/// (REQ-AXO-902426).
+#[test]
+fn test_every_published_tool_name_normalises_to_something_the_router_knows() {
+    let catalog = crate::mcp::catalog::tools_catalog(true);
+    let published: Vec<String> = catalog["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .map(str::to_string)
+        .collect();
+
+    // CONTRÔLE POSITIF : sans lui, une liste vide validerait tout.
+    assert!(
+        published.len() > 100,
+        "le catalogue doit publier une surface réelle, sinon ce test ne mesure \
+         rien : {} outil(s)",
+        published.len()
+    );
+
+    // La normalisation est IDEMPOTENTE, et chaque écriture d'un même outil
+    // converge vers le même nom — c'est ce que « une seule source » garantit.
+    for name in &published {
+        let canonical = crate::mcp::canonical_tool_name(name);
+        assert_eq!(
+            crate::mcp::canonical_tool_name(canonical),
+            canonical,
+            "la normalisation doit être idempotente : `{name}` -> `{canonical}`"
+        );
+        for prefix in ["axon_", "mcp_axon_"] {
+            let prefixed = format!("{prefix}{canonical}");
+            assert_eq!(
+                crate::mcp::canonical_tool_name(&prefixed),
+                canonical,
+                "`{prefixed}` doit désigner le même outil que `{canonical}` — \
+                 c'est le préfixe `mcp_axon_` que deux sites sur cinq oubliaient"
+            );
+        }
+    }
+
+    // Et les six noms préfixés du catalogue doivent réellement se raboter.
+    let prefixed: Vec<&String> = published.iter().filter(|n| n.starts_with("axon_")).collect();
+    assert!(
+        !prefixed.is_empty(),
+        "contrôle positif : le catalogue publie bien des noms préfixés, sinon la \
+         boucle ci-dessus ne teste pas le cas qui a cassé"
+    );
+    for name in prefixed {
+        assert_ne!(
+            crate::mcp::canonical_tool_name(name),
+            name.as_str(),
+            "`{name}` est publié préfixé : le routeur le connaît sous sa forme rabotée"
+        );
+    }
+}
+
 #[test]
 fn test_help_resolves_a_tool_whose_real_name_carries_the_axon_prefix() {
     let server = create_test_server();

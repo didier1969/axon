@@ -9,10 +9,8 @@ impl McpServer {
     pub(crate) fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         let params = params?;
         let name = params.get("name")?.as_str()?;
-        let normalized_name = name
-            .strip_prefix("mcp_axon_")
-            .or_else(|| name.strip_prefix("axon_"))
-            .unwrap_or(name);
+        // REQ-AXO-902434 — source unique du nom canonique.
+        let normalized_name = super::catalog::canonical_tool_name(name);
         let arguments = params.get("arguments")?;
 
         let runtime_mode = AxonRuntimeMode::from_env();

@@ -65,6 +65,9 @@ pub(crate) fn effective_project_search_path() -> String {
 }
 
 mod catalog;
+// REQ-AXO-902434 — on expose la FONCTION, pas le module : le nom canonique d'un
+// outil est consomme hors de `mcp` (le classifieur HTTP), rien d'autre ne l'est.
+pub(crate) use catalog::canonical_tool_name;
 mod dispatch;
 mod format;
 mod guidance;
@@ -498,7 +501,8 @@ impl McpServer {
             let Some(name) = tool.get("name").and_then(Value::as_str) else {
                 return false;
             };
-            name == normalized_name || name.strip_prefix("axon_") == Some(normalized_name)
+            // REQ-AXO-902434 — meme predicat que le routeur, pas une recopie.
+            crate::mcp::catalog::tool_names_denote_the_same_tool(name, normalized_name)
         })?;
         let schema = entry.get("inputSchema")?;
         let required = schema

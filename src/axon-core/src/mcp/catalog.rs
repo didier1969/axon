@@ -37,6 +37,33 @@ fn tool_available_in_runtime(name: &str) -> bool {
     }
 }
 
+/// REQ-AXO-902434 — les prefixes qu'un client peut coller devant un nom d'outil.
+///
+/// Le catalogue PUBLIE six noms prefixes (`axon_commit_work`, `axon_init_project`…)
+/// et le routeur les recoit rabotes : deux espaces de noms reconcilies par une
+/// convention, pas par une derivation. Mesure s122 : 108 outils sur 114 portent le
+/// meme nom des deux cotes, 6 ne se rejoignent qu'apres ce retrait.
+///
+/// La convention etait recopiee sur CINQ sites, et deux ne l'appliquaient qu'a
+/// moitie — `batch` et la derivation de schema ignoraient `mcp_axon_`, que les
+/// trois autres traitaient. Un meme nom marchait donc par la voie directe et
+/// echouait par `batch`. C'est aussi ce qui a casse `help` pendant des mois : il
+/// avait recopie le retrait, dans le mauvais ordre (REQ-AXO-902426).
+pub(crate) const TOOL_NAME_PREFIXES: [&str; 2] = ["mcp_axon_", "axon_"];
+
+/// REQ-AXO-902434 — le nom sous lequel le routeur connait un outil.
+pub(crate) fn canonical_tool_name(name: &str) -> &str {
+    TOOL_NAME_PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+        .unwrap_or(name)
+}
+
+/// REQ-AXO-902434 — deux ecritures designent-elles le MEME outil ?
+pub(crate) fn tool_names_denote_the_same_tool(left: &str, right: &str) -> bool {
+    canonical_tool_name(left) == canonical_tool_name(right)
+}
+
 pub(crate) fn tools_catalog(include_internal: bool) -> Value {
     let mut catalog = json!({
         "tools": [

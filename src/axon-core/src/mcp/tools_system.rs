@@ -1317,7 +1317,9 @@ impl McpServer {
                 all_results.push(json!({ "name": "", "error": "missing `tool`" }));
                 continue;
             }
-            let normalized_tool_name = tool_name.strip_prefix("axon_").unwrap_or(tool_name);
+            // REQ-AXO-902434 — ce site ne rabotait QUE `axon_` : un nom en
+            // `mcp_axon_` marchait par la voie directe et echouait par `batch`.
+            let normalized_tool_name = super::catalog::canonical_tool_name(tool_name);
             let tool_args = call.get("args").cloned().unwrap_or_else(|| json!({}));
 
             // REQ-AXO-901925 — route through the canonical dispatcher so EVERY

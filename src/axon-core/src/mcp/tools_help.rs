@@ -287,9 +287,15 @@ fn tool_help_response(tool_name: &str) -> Value {
     // un verdict que `help` est le recours documenté pour comprendre. Les deux
     // outils dont la résolution cassait sont ceux du chemin de LIVRAISON.
     let catalog = tools_catalog(true);
+    // REQ-AXO-902434 — l'ordre (exact d'abord) est propre a `help`, qui resout
+    // contre le CATALOGUE et non contre le routeur ; la liste de prefixes, elle,
+    // est partagee. C'est sa recopie qui avait casse cet outil (REQ-AXO-902426).
     let tool = std::iter::once(tool_name)
-        .chain(tool_name.strip_prefix("mcp_axon_"))
-        .chain(tool_name.strip_prefix("axon_"))
+        .chain(
+            crate::mcp::catalog::TOOL_NAME_PREFIXES
+                .iter()
+                .filter_map(|prefix| tool_name.strip_prefix(prefix)),
+        )
         .find_map(|candidate| {
             catalog
                 .get("tools")
