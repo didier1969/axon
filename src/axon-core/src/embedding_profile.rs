@@ -105,7 +105,22 @@ pub fn runtime_embedding_snapshot_dir() -> AnyhowResult<PathBuf> {
     Ok(model_root.join("snapshots").join(snapshot.trim()))
 }
 
-fn load_runtime_embedding_tokenizer_uncached() -> AnyhowResult<Tokenizer> {
+/// REQ-AXO-902393 — what a loaded tokenizer is FOR.
+///
+/// The same files back two different instruments and they must not be the same
+/// object. `Encode` feeds the model, so it clamps to the window — that clamp is
+/// the model's physical limit. `Measure` answers "how big is this text", and a
+/// ruler that stops at 512 cannot report 678: it reports 512, and every guard
+/// downstream reads that as "inside the window".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenizerRole {
+    /// Feeds the model — truncation armed at the window.
+    Encode,
+    /// Measures text — no truncation, so an over-window text says so.
+    Measure,
+}
+
+fn load_runtime_embedding_tokenizer_uncached(role: TokenizerRole) -> AnyhowResult<Tokenizer> {
     let snapshot_dir = runtime_embedding_snapshot_dir()?;
     let tokenizer_json = snapshot_dir.join("tokenizer.json");
     let config_json = snapshot_dir.join("config.json");
@@ -167,11 +182,19 @@ fn load_runtime_embedding_tokenizer_uncached() -> AnyhowResult<Tokenizer> {
         pad_id,
         ..Default::default()
     }));
-    tokenizer
-        .with_truncation(Some(TruncationParams {
+    let truncation = match role {
+        TokenizerRole::Encode => Some(TruncationParams {
             max_length,
             ..Default::default()
-        }))
+        }),
+        // REQ-AXO-902393 — a measuring tokenizer must never clamp. This costs
+        // nothing: `encode` pre-tokenizes the WHOLE input before truncation
+        // (the very property that forces `MAX_PRECISE_ENCODE_BYTES` to exist),
+        // so the clamp only ever shortened the ANSWER, never the work.
+        TokenizerRole::Measure => None,
+    };
+    tokenizer
+        .with_truncation(truncation)
         .map_err(|err| anyhow!("failed to configure tokenizer truncation: {}", err))?;
 
     if let serde_json::Value::Object(root_object) = special_tokens_map {
@@ -214,7 +237,21 @@ fn load_runtime_embedding_tokenizer_uncached() -> AnyhowResult<Tokenizer> {
 pub fn load_runtime_embedding_tokenizer() -> AnyhowResult<Arc<Tokenizer>> {
     static TOKENIZER: OnceLock<Result<Arc<Tokenizer>, String>> = OnceLock::new();
     match TOKENIZER.get_or_init(|| {
-        load_runtime_embedding_tokenizer_uncached()
+        load_runtime_embedding_tokenizer_uncached(TokenizerRole::Encode)
+            .map(Arc::new)
+            .map_err(|err| err.to_string())
+    }) {
+        Ok(tokenizer) => Ok(Arc::clone(tokenizer)),
+        Err(err) => Err(anyhow!(err.clone())),
+    }
+}
+
+/// REQ-AXO-902393 — the ruler. Same model files, truncation disabled, so a text
+/// above the window reports its real size instead of the window's size.
+pub fn load_measuring_tokenizer() -> AnyhowResult<Arc<Tokenizer>> {
+    static TOKENIZER: OnceLock<Result<Arc<Tokenizer>, String>> = OnceLock::new();
+    match TOKENIZER.get_or_init(|| {
+        load_runtime_embedding_tokenizer_uncached(TokenizerRole::Measure)
             .map(Arc::new)
             .map_err(|err| err.to_string())
     }) {
@@ -226,7 +263,7 @@ pub fn load_runtime_embedding_tokenizer() -> AnyhowResult<Arc<Tokenizer>> {
 pub fn token_count_for_text(text: &str) -> AnyhowResult<usize> {
     #[cfg(test)]
     encode_counter::bump();
-    let tokenizer = load_runtime_embedding_tokenizer()?;
+    let tokenizer = load_measuring_tokenizer()?;
     let encoding = tokenizer
         .encode(text, true)
         .map_err(|err| anyhow!("failed to encode chunk text for token counting: {}", err))?;
@@ -239,8 +276,12 @@ pub fn token_count_for_text(text: &str) -> AnyhowResult<usize> {
 /// the fixed per-chunk prefix). Special tokens ([CLS]/[SEP]) are added once
 /// per emitted chunk, not per line, so counting them per fragment would
 /// over-estimate every line by a constant and distort the segmentation.
-/// Per-line / prefix texts are far below the 512-token model window, so the
-/// tokenizer's truncation never bites here.
+/// REQ-AXO-902393 — measured through [`load_measuring_tokenizer`], NOT the
+/// embedding tokenizer. The previous note ("per-line texts are far below the
+/// window, so truncation never bites here") was true of body lines and false of
+/// the one caller that matters: a whole-chunk `estimated_token_count` went
+/// through this same encode and came back clamped to 512 whatever its real
+/// size. A ruler shared with the thing it measures reports the cap.
 ///
 /// On tokenizer-load/encode error, falls back to a conservative char/3
 /// heuristic (BGE averages ~3-4 chars/token on source code) so the chunker
@@ -281,7 +322,7 @@ pub fn content_token_count(text: &str) -> usize {
 fn content_token_count_uncached(text: &str) -> usize {
     #[cfg(test)]
     encode_counter::bump();
-    match load_runtime_embedding_tokenizer() {
+    match load_measuring_tokenizer() {
         Ok(tokenizer) => match tokenizer.encode(text, false) {
             Ok(encoding) => encoding.len(),
             Err(_) => text.chars().count().div_ceil(3).max(1),
@@ -372,6 +413,63 @@ mod tests {
                 "cache must equal the uncached count for {s:?}"
             );
         }
+    }
+
+    /// REQ-AXO-902393 — the counting tokenizer must NOT be the truncating one.
+    ///
+    /// Measured 2026-08-21: 400/400 sampled chunks labelled `token_count = 512`
+    /// really held 512..1364 tokens. Every one of them was labelled by
+    /// `token_count_for_text`, whose tokenizer carries `TruncationParams {
+    /// max_length: 512 }` — so the label was not a measurement, it was the cap.
+    /// "No embedded chunk ever exceeds 512" was true by construction of the
+    /// instrument, and it hid ~6 300 chunks embedded with their tail dropped.
+    ///
+    /// Skipped (not failed) when the model cache is absent: the whole point is
+    /// the REAL tokenizer's answer, and the char/3 fallback would pass this
+    /// assertion for the wrong reason.
+    #[test]
+    fn token_counting_is_not_capped_by_the_model_window() {
+        if load_runtime_embedding_tokenizer().is_err() {
+            return;
+        }
+        // `token` is a single vocabulary entry, so the expected count is exact
+        // and independent of any sub-word split.
+        let words = MAX_LENGTH + 200;
+        let text = "token ".repeat(words);
+
+        let counted = token_count_for_text(&text).expect("tokenizer loaded above");
+        assert!(
+            counted > MAX_LENGTH,
+            "a {words}-token text must count above the {MAX_LENGTH}-token window, got {counted} \
+             — the counter is reading the truncation cap, not the text"
+        );
+
+        let fragment = content_token_count(&text);
+        assert!(
+            fragment > MAX_LENGTH,
+            "per-fragment counting must not saturate either, got {fragment}"
+        );
+    }
+
+    /// REQ-AXO-902393 — the EMBEDDING tokenizer keeps its truncation (the model
+    /// window is real), and that truncation is DETECTABLE rather than mute:
+    /// an over-window input leaves an overflowing encoding behind.
+    #[test]
+    fn embedding_tokenizer_truncates_and_says_so() {
+        let Ok(tokenizer) = load_runtime_embedding_tokenizer() else {
+            return;
+        };
+        let text = "token ".repeat(MAX_LENGTH + 200);
+        let encoding = tokenizer.encode(text.as_str(), true).expect("encode");
+        assert_eq!(
+            encoding.len(),
+            MAX_LENGTH,
+            "the embedding tokenizer must still clamp to the model window"
+        );
+        assert!(
+            !encoding.get_overflowing().is_empty(),
+            "truncation must be observable — an empty overflow makes the loss mute"
+        );
     }
 
     #[test]

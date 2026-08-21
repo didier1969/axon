@@ -1251,14 +1251,19 @@ impl GraphStore {
             // chunks were produced for this file.
             if chunk_ids_emitted.is_empty() && !parsed.content.is_empty() {
                 let file_chunk_id = format!("{}::{}::file_context::chunk", project_code, path_str);
-                let truncated = match parsed.content.char_indices().nth(2000) {
-                    Some((idx, _)) => &parsed.content[..idx],
-                    None => &parsed.content,
-                };
-                let file_content =
-                    format!("file: {}\nkind: file_context\n\n{}", path_str, truncated);
-                let token_count = crate::code_chunker::measured_symbol_token_count(&file_content)
-                    .unwrap_or(file_content.len() / 3);
+                // REQ-AXO-902393 — bounded in TOKENS, not in characters. The
+                // previous 2 000-char cap emitted ~600-token chunks on prose and
+                // ~1 400 on dense text, all above the 512-token window and all
+                // labelled `512` because the counter was clamped too. For a file
+                // with no symbols this chunk is its only vector, so the truncated
+                // tail was the file's missing half.
+                let built = crate::code_chunker::build_file_context_chunk(
+                    &path_str,
+                    &parsed.content,
+                    crate::code_chunker::active_chunk_profile(),
+                );
+                let file_content = built.content;
+                let token_count = built.token_count;
                 let chunk_hash = Self::stable_content_hash(&file_content);
                 chunk_rows.push(ChunkRow {
                     chunk_id: file_chunk_id.clone(),
@@ -1270,7 +1275,7 @@ impl GraphStore {
                     content: file_content.clone(),
                     content_hash: chunk_hash.clone(),
                     start_line: 1,
-                    end_line: truncated.lines().count() as i64,
+                    end_line: built.end_line as i64,
                     part_index: 1,
                     part_count: 1,
                     chunk_path: "1/1".to_string(),

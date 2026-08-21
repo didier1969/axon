@@ -364,6 +364,76 @@ fn fit_repeated_context(symbol: &Symbol, context: String, ceiling_tokens: usize)
     String::new()
 }
 
+/// REQ-AXO-902393 — the file-level context chunk, sized in TOKENS.
+pub struct FileContextChunk {
+    /// Exact text to store and embed, prefix included.
+    pub content: String,
+    /// Measured token count of `content` — the label, not an estimate.
+    pub token_count: usize,
+    /// Last line of the file body actually retained.
+    pub end_line: usize,
+}
+
+/// REQ-AXO-902393 — build the chunk that represents a file with no symbols
+/// (config, README, docs), bounded by the model window in TOKENS.
+///
+/// It used to keep the first 2 000 CHARACTERS, full stop. A character cap is not
+/// a token budget: on ordinary prose 2 000 chars is ~600 tokens and on dense text
+/// (CJK, tables, base64) it reaches ~1 400 — every one of them over the 512-token
+/// window, embedded with the tail silently dropped. Measured 2026-08-21: 4 907
+/// such chunks across 4 862 files, all labelled `512` because the counter was
+/// itself clamped at 512. For a file with no symbols this chunk is the file's
+/// ONLY vector, so the dropped tail is the file's missing half.
+///
+/// Cheap char estimate first, then *verify and halve* — same discipline as
+/// [`fit_repeated_context`]: `SAFE_CHARS_PER_TOKEN` is a density floor, not a
+/// bound, so a single estimate would leave dense text over the window.
+pub fn build_file_context_chunk(
+    path: &str,
+    file_content: &str,
+    profile: EmbeddingChunkProfile,
+) -> FileContextChunk {
+    let assemble = |body: &str| format!("file: {path}\nkind: file_context\n\n{body}");
+
+    let budget = profile.model_max_tokens;
+    let mut take_chars = file_content
+        .chars()
+        .count()
+        .min(budget.saturating_mul(SAFE_CHARS_PER_TOKEN));
+
+    // `CONTEXT_FIT_ATTEMPTS` halvings from a 4-chars-per-token start reach the
+    // 1-char-per-token worst case (CJK) with margin; the final clamp below is
+    // what makes the bound unconditional rather than best-effort.
+    for _ in 0..CONTEXT_FIT_ATTEMPTS {
+        let body: String = file_content.chars().take(take_chars).collect();
+        let content = assemble(&body);
+        let token_count = estimated_token_count(&content);
+        if token_count <= budget {
+            return FileContextChunk {
+                token_count,
+                end_line: body.lines().count().max(1),
+                content,
+            };
+        }
+        take_chars /= 2;
+    }
+
+    // Floor: one character cannot produce more than one token, so `budget`
+    // characters cannot exceed `budget` tokens — minus the prefix, which is
+    // measured and subtracted rather than assumed.
+    let prefix_tokens = estimated_token_count(&assemble(""));
+    let body: String = file_content
+        .chars()
+        .take(budget.saturating_sub(prefix_tokens).max(1))
+        .collect();
+    let content = assemble(&body);
+    FileContextChunk {
+        token_count: estimated_token_count(&content),
+        end_line: body.lines().count().max(1),
+        content,
+    }
+}
+
 /// REQ-AXO-901894 — A segment of a symbol body the chunker will emit.
 ///
 /// Either a contiguous run of whole lines (`LineRange`, the normal case) or a
@@ -1423,6 +1493,68 @@ pub fn fuse_small_chunks(mut tagged: Vec<TaggedChunk>, target_tokens: usize) -> 
     flush(&mut group, &mut group_tokens, &mut result, &mut fused_seq);
 
     result
+}
+
+#[cfg(test)]
+mod req_902393_file_context_budget_tests {
+    use super::*;
+
+    /// Texte à ~1 caractère par jeton : chaque idéogramme est un jeton WordPiece.
+    /// Donne une densité que l'ancien plafond de 2 000 CARACTÈRES ne pouvait pas
+    /// borner, sans dépendre d'un corpus.
+    fn dense_text(chars: usize) -> String {
+        "日本語のテキスト".chars().cycle().take(chars).collect()
+    }
+
+    /// REQ-AXO-902393 — le morceau `file_context` était borné à 2 000 CARACTÈRES,
+    /// sans budget de jetons. Mesuré le 2026-08-21 : 4 907 morceaux `file_context`
+    /// (4 862 fichiers) portaient l'étiquette 512 PILE et pesaient réellement 512
+    /// à 1 364 jetons — le compteur saturait, donc le dépassement était invisible,
+    /// et l'embed en jetait la queue sans le dire. Ce sont les fichiers SANS
+    /// symbole (config, README, docs) : ce morceau est leur SEULE représentation.
+    #[test]
+    fn a_dense_file_context_chunk_fits_the_model_window() {
+        let profile = active_chunk_profile();
+        let built = build_file_context_chunk("docs/dense.md", &dense_text(4_000), profile);
+
+        assert!(
+            built.token_count <= profile.model_max_tokens,
+            "le morceau file_context doit tenir dans la fenêtre du modèle : {} > {}",
+            built.token_count,
+            profile.model_max_tokens
+        );
+        assert!(
+            !built.content.is_empty(),
+            "borner ne veut pas dire vider : il reste du contexte"
+        );
+    }
+
+    /// L'étiquette doit être la MESURE du contenu émis, pas une estimation ni un
+    /// plafond — c'est ce que le tri du réservoir et les purges lisent.
+    #[test]
+    fn the_stored_token_count_is_the_measured_one() {
+        let profile = active_chunk_profile();
+        for text in [dense_text(4_000), "petit fichier\nsur deux lignes\n".to_string()] {
+            let built = build_file_context_chunk("f.txt", &text, profile);
+            assert_eq!(
+                built.token_count,
+                estimated_token_count(&built.content),
+                "l'étiquette doit être le compte du contenu réellement émis"
+            );
+        }
+    }
+
+    /// Un fichier court traverse sans être touché — le budget est un plafond,
+    /// pas une coupe systématique — et `end_line` reste celui du corps retenu.
+    #[test]
+    fn a_short_file_passes_through_untouched() {
+        let profile = active_chunk_profile();
+        let built = build_file_context_chunk("a.rs", "fn main() {}\nlet x = 1;\n", profile);
+
+        assert!(built.content.ends_with("fn main() {}\nlet x = 1;\n"));
+        assert_eq!(built.end_line, 2);
+        assert!(built.token_count < profile.model_max_tokens);
+    }
 }
 
 #[cfg(test)]
