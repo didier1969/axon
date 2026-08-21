@@ -132,7 +132,11 @@ pub(crate) fn parse_commit_req_ids(message: &str) -> Vec<String> {
         // Silently: an empty id list returns "" and the response simply omits
         // the auto-evidence line, which reads exactly like a commit that
         // mentioned no requirement.
-        while j < bytes.len() && (bytes[j] as char).is_ascii_alphanumeric() {
+        // UPPERCASE letters or digits — `is_valid_project_code` checks the
+        // 3-char length and the alphanumeric class, but it accepts lower case,
+        // and a canonical id never does (`REQ-axo-1` is not an id — locked by
+        // `ignores_malformed_and_non_req_tokens`, which is what caught this).
+        while j < bytes.len() && (bytes[j].is_ascii_uppercase() || bytes[j].is_ascii_digit()) {
             j += 1;
         }
         if j == proj_start || j >= bytes.len() || bytes[j] != b'-' {

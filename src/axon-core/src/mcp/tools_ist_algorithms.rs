@@ -1404,7 +1404,14 @@ impl McpServer {
                     }
                 }
             }
-            let total = pairs.len();
+            // REQ-AXO-902440 — the presentation filter must NOT move the
+            // measurement. `unopenable_pairs` were counted out of `pairs` for
+            // the OFFERED list only, so add them back into the total; otherwise
+            // this REQ would be a description contradicted by its own code,
+            // which is the exact defect it exists to fix. (The `is_test_id`
+            // filter above DOES reduce the total on purpose — REQ-AXO-902361
+            // made this section actionable rather than raw.)
+            let total = pairs.len() + unopenable_pairs;
             pairs.sort_by(|x, y| y.2.partial_cmp(&x.2).unwrap_or(std::cmp::Ordering::Equal));
             let offenders: Vec<Value> = pairs
                 .iter()
