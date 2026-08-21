@@ -690,8 +690,43 @@ impl McpServer {
         // flags on the commit branch mirror the dry-run envelope so a
         // caller can branch on a single boolean instead of parsing the
         // human-readable content blob.
+        // REQ-AXO-902403 — RENDER the logical_key → canonical id mapping.
+        //
+        // Reported by KKI (llm_feedback #176): four Requirements created with
+        // `logical_key`, and the whole answer was "SOLL revision committed:
+        // REV-… (9 operations)". The ids WERE assigned — `identity_mapping`
+        // carries them — but only into `data.*`, which the Claude Code client
+        // does not expose to the LLM (the cause REQ-AXO-902355 closed for the
+        // kickoff_bundle). So they called `soll_work_plan` and INFERRED that
+        // 047/048/049/050 were their four items *in plan order* — a guess
+        // nothing guarantees, then hard-wired into a milestone, a decision and
+        // five edges. A wrong order would have wired the graph crooked in
+        // silence. And `soll_manager(action=create)` — the lower-level
+        // primitive — does print its id: the wrapper said LESS than the tool it
+        // wraps.
+        let mut mapping_lines: Vec<String> = identity_mapping
+            .iter()
+            .map(|(logical, canonical): (&String, &String)| {
+                format!("| {logical} | {canonical} |")
+            })
+            .collect();
+        mapping_lines.sort();
+        let mapping_block = if mapping_lines.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\n| logical_key | id canonique |\n|---|---|\n{}\n",
+                mapping_lines.join("\n")
+            )
+        };
+
         Some(json!({
-            "content": [{"type":"text","text": format!("SOLL revision committed: {} ({} operations)", revision_id, operations.len())}],
+            "content": [{"type":"text","text": format!(
+                "SOLL revision committed: {} ({} operations){}",
+                revision_id,
+                operations.len(),
+                mapping_block
+            )}],
             "data": {
                 "revision_id": revision_id,
                 "applied": true,

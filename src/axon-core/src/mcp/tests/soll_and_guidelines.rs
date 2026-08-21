@@ -1590,6 +1590,20 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
         .unwrap();
 
     assert!(content.contains("SOLL revision committed"), "{content}");
+    // REQ-AXO-902403 — signalé par KKI (llm_feedback #176) : les ids canoniques
+    // étaient attribués mais n'atteignaient que `data.identity_mapping`. KKI a
+    // dû les INFÉRER de l'ordre du plan, puis câbler cinq arêtes sur cette
+    // supposition. Le wrapper doit en dire au moins autant que `soll_manager`,
+    // qui imprime « SOLL entity created: REQ-… ».
+    assert!(
+        content.contains("req-preview-commit"),
+        "le logical_key doit apparaître dans le texte.\n---\n{content}"
+    );
+    assert!(
+        content.contains(&format!("REQ-{code}-")),
+        "l'id canonique attribué doit apparaître dans le texte, pas seulement \
+         dans data.*.\n---\n{content}"
+    );
     assert_eq!(
         server
             .graph_store
