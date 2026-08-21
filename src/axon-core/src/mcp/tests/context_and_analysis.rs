@@ -3376,6 +3376,102 @@ fn test_axon_inspect_zero_says_when_the_kind_is_out_of_the_call_graph() {
     }
 }
 
+/// REQ-AXO-902424 — le bandeau de complétude annonçait `N/N` parce que
+/// `completed_files` était LITTÉRALEMENT assigné `total_files`.
+///
+/// Ce n'était pas une mesure, c'était une tautologie habillée en mesure — et
+/// c'est ce chiffre que GUI-PRO-114, GUI-PRO-111 et GUI-PRO-102 §3b font
+/// vérifier à tout LLM avant de l'autoriser à préférer l'index au grep.
+///
+/// Signalé par KKI (`mcp_feedback` #187, `blocking`). Mesuré côté AXO : KKI
+/// annonçait `1513/1513` avec **1 486 fichiers portant des symboles sur 17 265
+/// enrôlés** — 8,6 %. Coût chez eux : six classes Java existantes rendues
+/// introuvables sur le chemin critique d'un arbitrage produit.
+#[test]
+fn test_scope_banner_reports_the_real_denominator_not_itself() {
+    let server = create_test_server();
+
+    // Deux projets, deux régimes. `TSA` est sain (un seul fichier sans symbole,
+    // comme un `.md`), `TSB` est dans l'état de KKI.
+    let seed_file = |proj: &str, n: usize| {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) \
+                 VALUES ('/p/{proj}/f{n}.rs', '{proj}', 'h', 0)"
+            ))
+            .unwrap();
+    };
+    let seed_symbol = |proj: &str, n: usize| {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.Symbol (id, name, kind, project_code) \
+                 VALUES ('{proj}::f{n}::s', 's{n}', 'function', '{proj}')"
+            ))
+            .unwrap();
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+                 VALUES ('/p/{proj}/f{n}.rs', '{proj}::f{n}::s', 'CONTAINS', '{proj}', 0)"
+            ))
+            .unwrap();
+    };
+
+    for n in 0..10 {
+        seed_file("TSA", n);
+        if n < 9 {
+            seed_symbol("TSA", n); // 9 / 10 — régime normal
+        }
+        seed_file("TSB", n);
+        if n < 2 {
+            seed_symbol("TSB", n); // 2 / 10 — régime KKI
+        }
+    }
+
+    let note = |proj: &str| -> String {
+        server
+            .project_scope_truth_note(Some(proj))
+            .unwrap_or_default()
+    };
+
+    let healthy = note("TSA");
+    let starved = note("TSB");
+
+    // CONTRÔLE POSITIF d'abord : le bandeau se calcule bien sur ces projets.
+    // Sans lui, deux chaînes vides passeraient toutes les assertions suivantes.
+    assert!(
+        healthy.contains("TSA") && starved.contains("TSB"),
+        "précondition : les deux bandeaux doivent être rendus.\n{healthy}\n{starved}"
+    );
+
+    // LE verdict : le numérateur n'est plus le dénominateur.
+    assert!(
+        starved.contains("2/10"),
+        "le bandeau doit porter les DEUX grandeurs mesurées. `N/N` était une \
+         tautologie : `completed_files` valait `total_files`.\n{starved}"
+    );
+    assert!(
+        healthy.contains("9/10"),
+        "un projet sain doit lui aussi rendre le vrai rapport.\n{healthy}"
+    );
+
+    // Et l'avertissement doit se déclencher là où un négatif ne prouve rien —
+    // pas partout, sinon il devient du bruit qu'on apprend à ignorer.
+    assert!(
+        starved.contains("ne prouve PAS l'absence"),
+        "au-delà du seuil, le bandeau doit dire qu'un résultat vide ne prouve \
+         rien : c'est lui qui autorise à préférer l'index au grep.\n{starved}"
+    );
+    assert!(
+        !healthy.contains("ne prouve PAS l'absence"),
+        "CONTRÔLE NÉGATIF : un écart de quelques pour cent est normal (un `.md` \
+         ne porte pas de symboles). Avertir partout reviendrait à n'avertir \
+         nulle part.\n{healthy}"
+    );
+}
+
 #[test]
 fn test_axon_fs_read() {
     let server = create_test_server();

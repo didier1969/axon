@@ -16,10 +16,34 @@ enum QueryIntent {
 pub(crate) struct ProjectScopeSummary {
     pub(crate) total_files: i64,
     pub(crate) completed_files: i64,
-    pub(crate) pending_files: i64,
-    pub(crate) indexing_files: i64,
     pub(crate) backlog_files: i64,
     pub(crate) pending_reasons: Vec<(String, i64)>,
+}
+
+impl ProjectScopeSummary {
+    /// REQ-AXO-902424 — la part des fichiers enrolés qui ne portent AUCUN
+    /// symbole extrait.
+    pub(crate) fn symbol_shortfall_ratio(&self) -> f64 {
+        if self.total_files <= 0 {
+            return 0.0;
+        }
+        (self.total_files - self.completed_files) as f64 / self.total_files as f64
+    }
+
+    /// REQ-AXO-902424 — l'index de symboles peut-il porter un NÉGATIF ?
+    ///
+    /// Le seuil est un jugement, assumé comme tel, et il vit ICI pour que les
+    /// deux surfaces qui l'appliquent — le bandeau de `status` et la note de
+    /// portée de `query`/`inspect` — ne puissent pas diverger. C'est exactement
+    /// la recopie à la main qui a produit la moitié des défauts de cette
+    /// session (GUI-PRO-013).
+    ///
+    /// Quelques pour cent d'écart sont NORMAUX : un `.md`, un `.json` ne
+    /// portent pas de symboles (AXO 7 %, APS 5 %, OPV 7 %). Au-delà d'un quart,
+    /// un résultat vide ne prouve plus rien — KKI était à 91 %.
+    pub(crate) fn symbol_coverage_is_trustworthy(&self) -> bool {
+        self.symbol_shortfall_ratio() < 0.25
+    }
 }
 
 /// REQ-AXO-91511 — materialize IST symbol ids into the JSON row-of-row
@@ -203,29 +227,66 @@ impl McpServer {
             return None;
         }
 
-        // REQ-AXO-901653 slice-5d — public.File dropped ; project-scope files
-        // count derives from ist.Chunk (project_code carrier). pending /
-        // indexing have no pipeline equivalent (writes are in-line) ;
-        // collapse to 0 and treat all known files as completed.
+        // REQ-AXO-902424 — le dénominateur était le NUMÉRATEUR.
+        //
+        // `completed_files = total_files` : le `N/N` ne pouvait structurellement
+        // rien dire d'autre que `N/N`. Ce n'était pas une mesure, c'était une
+        // tautologie habillée en mesure — et c'est ce chiffre que GUI-PRO-114,
+        // GUI-PRO-111 et GUI-PRO-102 §3b font vérifier à tout LLM avant de lui
+        // permettre de préférer l'index au grep.
+        //
+        // Signalé par KKI (`mcp_feedback` #187, `blocking`), mesuré côté AXO :
+        //
+        //   projet | enrôlés | fichiers portant des symboles | bandeau rendu
+        //   KKI    |  17 265 |                         1 486 | « 1513/1513 »
+        //   AXO    |     903 |                           840 | « 900/900 »
+        //   APS    |   1 449 |                         1 374 |
+        //
+        // Sur KKI, 8,6 % du projet porte des symboles et le voyant restait vert.
+        // Coût mesuré chez eux : six classes Java existantes rendues introuvables
+        // sur le chemin critique d'un arbitrage produit, et la conclusion qu'un
+        // LLM conforme en tire — « ces mouvements n'existent pas, il faut les
+        // écrire ».
+        //
+        // Le bandeau porte désormais les DEUX grandeurs : ce qui est enrôlé, et
+        // ce qui a réellement livré des symboles. Le lien fichier→symbole est
+        // l'arête `CONTAINS` (dont la source est un chemin — REQ-AXO-902423).
         let params = json!({ "project": project });
-        let total_files = self
+        let enrolled_files = self
             .graph_store
             .query_count_param(
-                "SELECT count(DISTINCT file_path) FROM ist.Chunk WHERE project_code = $project",
+                "SELECT count(*) FROM ist.IndexedFile WHERE project_code = $project",
                 &params,
             )
             .unwrap_or(0);
-        let pending_files = 0i64;
-        let indexing_files = 0i64;
-        let backlog_files = 0i64;
-        let completed_files = total_files;
+        let files_with_symbols = self
+            .graph_store
+            .query_count_param(
+                "SELECT count(DISTINCT source_id) FROM ist.Edge \
+                 WHERE project_code = $project AND relation_type = 'CONTAINS'",
+                &params,
+            )
+            .unwrap_or(0);
+        // Un projet sans ligne d'enrôlement retombe sur l'ancienne base
+        // (fichiers porteurs de morceaux) plutôt que d'annoncer 0 : rendre un
+        // zéro faute de source serait le défaut d'à côté.
+        let total_files = if enrolled_files > 0 {
+            enrolled_files
+        } else {
+            self.graph_store
+                .query_count_param(
+                    "SELECT count(DISTINCT file_path) FROM ist.Chunk WHERE project_code = $project",
+                    &params,
+                )
+                .unwrap_or(0)
+        };
+        let completed_files = files_with_symbols.min(total_files);
+        let backlog_files = (total_files - completed_files).max(0);
         let pending_reasons: Vec<(String, i64)> = Vec::new();
 
         Some(ProjectScopeSummary {
             total_files,
             completed_files,
-            pending_files,
-            indexing_files,
             backlog_files,
             pending_reasons,
         })
@@ -250,16 +311,38 @@ impl McpServer {
             format!(" Top backlog causes: {}.", reasons)
         };
 
+        // REQ-AXO-902424 — quand une part importante des fichiers enrôlés ne
+        // porte AUCUN symbole, un résultat vide de `query` ne prouve rien, et
+        // c'est ce bandeau qui autorise à préférer l'index au grep.
+        //
+        // Le seuil est un jugement, et il est assumé comme tel : un écart de
+        // quelques pour cent est NORMAL (un `.md`, un `.json` ne portent pas de
+        // symboles et ne devraient pas alarmer — AXO 7 %, APS 5 %, OPV 7 %).
+        // Au-delà d'un quart, l'index de symboles ne peut plus porter un négatif
+        // — KKI était à 91 %.
+        let shortfall_ratio = summary.symbol_shortfall_ratio();
+        let unreliable_note = if !summary.symbol_coverage_is_trustworthy() {
+            format!(
+                "\n⚠️ **{:.0} % des fichiers enrôlés ne portent aucun symbole extrait.** Un \
+                 résultat VIDE de `query`/`inspect` sur ce projet ne prouve PAS l'absence — \
+                 recouper par `retrieve_context` (contenu) avant de conclure, et voir \
+                 `diagnose_indexing`.",
+                shortfall_ratio * 100.0
+            )
+        } else {
+            String::new()
+        };
+
         Some(format!(
-            "**Scope completeness `{}`:** {}/{} files completed; visible backlog {} (`pending`: {}, `indexing`: {}).{}\
+            "**Scope completeness `{}`:** {}/{} fichier(s) enrôlé(s) portent des symboles \
+             extraits; sans symbole: {}.{}{}\
 \n",
             project,
             summary.completed_files,
             summary.total_files,
             summary.backlog_files,
-            summary.pending_files,
-            summary.indexing_files,
-            reason_note
+            reason_note,
+            unreliable_note
         ))
     }
 

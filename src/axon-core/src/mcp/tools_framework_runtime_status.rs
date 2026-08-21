@@ -605,20 +605,24 @@ impl McpServer {
         if let Some(code_intel_project) = self.auto_resolve_project_code_str() {
             if let Some(scope) = self.project_scope_summary(Some(&code_intel_project)) {
                 if scope.total_files > 0 {
-                    if scope.backlog_files == 0 {
+                    // REQ-AXO-902424 — `backlog_files` valait 0 par construction
+                    // (`completed_files` etait assigne `total_files`), donc cette
+                    // branche annoncait LIVE quoi qu'il arrive. Le verdict lit
+                    // desormais la couverture REELLE, via le seuil partage avec la
+                    // note de portee de `query`/`inspect` — un seuil recopie a la
+                    // main aurait diverge, comme le reste de cette session le montre.
+                    if scope.symbol_coverage_is_trustworthy() {
                         evidence.push_str(&format!(
-                            "**Code-intel:** LIVE — `{}` {}/{} files indexed, backlog 0 (query/inspect/impact/why operational — prefer over grep)\n",
+                            "**Code-intel:** LIVE — `{}` {}/{} fichier(s) enrole(s) portent des symboles (query/inspect/impact/why operational — prefer over grep)\n",
                             code_intel_project, scope.completed_files, scope.total_files,
                         ));
                     } else {
                         evidence.push_str(&format!(
-                            "**Code-intel:** DEGRADED — `{}` scope {}/{} files, backlog {} (`pending`: {}, `indexing`: {})\n",
+                            "**Code-intel:** PARTIAL — `{}` seulement {}/{} fichier(s) enrole(s) portent des symboles ({:.0} % sans). Un resultat VIDE de `query`/`inspect` ne prouve PAS l'absence : recouper par `retrieve_context`, et voir `diagnose_indexing`.\n",
                             code_intel_project,
                             scope.completed_files,
                             scope.total_files,
-                            scope.backlog_files,
-                            scope.pending_files,
-                            scope.indexing_files,
+                            scope.symbol_shortfall_ratio() * 100.0,
                         ));
                     }
                 }
