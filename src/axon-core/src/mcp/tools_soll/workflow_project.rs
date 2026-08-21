@@ -1775,6 +1775,53 @@ impl McpServer {
                     }
                 }
             }
+
+            // REQ-AXO-902441 — the PROJECT indexes, inlined for the same reason
+            // the Vision and Pillars were (REQ-AXO-902355): they only ever
+            // reached `data.kickoff_bundle`, which the Claude Code client does
+            // not expose to the LLM.
+            //
+            // Reported by OPV (llm_feedback #219) and reproduced by AXO on
+            // 2026-08-21: GUI-PRO-102 Phase B section 3 REQUIRES a telegraph of
+            // the PROJECT guidelines, Phase A step 8 says to read them from
+            // `soll_skeleton.guidelines_index`, and the renderer never printed
+            // it. The GLOBAL guidelines ARE served in full further down — the
+            // asymmetry is the whole defect. OPV fell back to
+            // `soll_query_context(search=…)`, got 1 of at least 2, then to raw
+            // `sql`, then emitted an INCOMPLETE section from project memory.
+            //
+            // id+title only: an index, not bodies (a project carries a handful,
+            // and `soll_get(id=…)` opens any of them).
+            let index_block = |key: &str, label: &str, out: &mut String| {
+                let Some(items) = sk.get(key).and_then(|v| v.as_array()) else {
+                    return;
+                };
+                if items.is_empty() {
+                    return;
+                }
+                let lines: Vec<String> = items
+                    .iter()
+                    .map(|n| {
+                        let (id, title, _) = node_parts(n);
+                        format!("`{id}` {title}")
+                    })
+                    .collect();
+                out.push_str(&format!(
+                    "\n**{label} ({}):** {}\n",
+                    lines.len(),
+                    lines.join(" · ")
+                ));
+            };
+            index_block(
+                "guidelines_index",
+                "Guidelines PROJET — corps via soll_get(id=…)",
+                &mut out,
+            );
+            index_block(
+                "decisions_index",
+                "Decisions/Milestones récents — corps via soll_get(id=…)",
+                &mut out,
+            );
         }
 
         out
@@ -3022,6 +3069,77 @@ mod continuation_block_tests {
         assert!(b.contains("Continuation"), "header present: {b}");
         assert!(!b.contains("Session pointer** (`none`"), "no explicit pointer line: {b}");
         assert!(b.contains("no git HEAD"), "derived summary shown: {b}");
+    }
+
+    /// REQ-AXO-902441 — CLASS guard, not an instance one.
+    ///
+    /// GUI-PRO-102 Phase A steps 5-8 tell every LLM to read four things out of
+    /// `soll_skeleton`: the Vision, the Pillars, the PROJECT guidelines index
+    /// and the recent Decisions index. Phase B section 3 then REQUIRES a
+    /// telegraph of the project guidelines. REQ-AXO-902355 inlined the first
+    /// two and stopped; the last two stayed in `data.kickoff_bundle`, which the
+    /// Claude Code client never exposes to the LLM.
+    ///
+    /// OPV measured the consequence (llm_feedback #219): no way to obtain the
+    /// GUI-OPV index, `soll_query_context(search=…)` returned 1 of at least 2
+    /// (full-text searches WORDS, not a TYPE), `sql` refused, and the session
+    /// emitted section 3 from project memory instead of the registry. AXO
+    /// reproduced it the same day.
+    ///
+    /// So the assertion is over the LIST of prescribed keys, not over one key:
+    /// adding a fifth thing to Phase A without rendering it turns this red.
+    #[test]
+    fn every_skeleton_key_phase_a_prescribes_reaches_the_text_surface() {
+        // The contract, spelled out once. Each entry: skeleton key + the marker
+        // that proves the renderer surfaced it.
+        let prescribed: &[(&str, &str)] = &[
+            ("vision", "VIS-ZZZ-001"),
+            ("pillars", "PIL-ZZZ-001"),
+            ("guidelines_index", "GUI-ZZZ-004"),
+            ("decisions_index", "DEC-ZZZ-007"),
+        ];
+        let bundle = json!({
+            "session_pointer": {"kind": "none"},
+            "soll_skeleton": {
+                "vision": [{"id": "VIS-ZZZ-001", "title": "V", "body": "VISION BODY"}],
+                "pillars": [{"id": "PIL-ZZZ-001", "title": "P", "body": "PILLAR BODY"}],
+                "guidelines_index": [{"id": "GUI-ZZZ-004", "title": "Loi numero 1"}],
+                "decisions_index": [{"id": "DEC-ZZZ-007", "title": "Choix de stockage"}],
+            },
+        });
+        let rendered = McpServer::render_continuation_block(&bundle);
+        for (key, marker) in prescribed {
+            assert!(
+                rendered.contains(marker),
+                "GUI-PRO-102 Phase A prescribes reading `soll_skeleton.{key}`, so the \
+                 renderer must surface it in content.text — `{marker}` is absent from:\n{rendered}"
+            );
+        }
+        // The guideline TITLE matters too: an index of bare ids does not let a
+        // session write the section 3 telegraph.
+        assert!(
+            rendered.contains("Loi numero 1"),
+            "the index carries id AND title: {rendered}"
+        );
+    }
+
+    #[test]
+    fn skeleton_indexes_stay_silent_when_the_project_has_none() {
+        // POSITIVE CONTROL for the guard above: an empty index must render
+        // NOTHING rather than an empty header. Without this, the test above
+        // would also pass against a renderer that always prints the labels.
+        let bundle = json!({
+            "session_pointer": {"kind": "none"},
+            "soll_skeleton": {
+                "vision": [{"id": "VIS-ZZZ-001", "title": "V", "body": "VISION BODY"}],
+                "guidelines_index": [],
+            },
+        });
+        let rendered = McpServer::render_continuation_block(&bundle);
+        assert!(
+            !rendered.contains("Guidelines PROJET"),
+            "no dangling header for an empty index: {rendered}"
+        );
     }
 
     // REQ-AXO-902355 — soll_skeleton Vision+Pillar bodies must be INLINED in
