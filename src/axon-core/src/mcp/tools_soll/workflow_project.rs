@@ -144,6 +144,26 @@ pub(super) fn parse_commit_req_ids(message: &str) -> Vec<String> {
     ids
 }
 
+/// REQ-AXO-902432 — lancer `git` dans le repertoire du projet, UNE seule fois.
+///
+/// Deux fermetures locales construisaient la meme `Command` avec le meme
+/// `current_dir` conditionnel (`classify_diff_paths` et
+/// `partition_staged_by_declaration`). Chaque site garde sa mise en forme — l'un
+/// veut la sortie brute pour lire un code de retour, l'autre des lignes — mais
+/// la construction, elle, n'a aucune raison d'exister deux fois : c'est par la
+/// que le `current_dir` se perd sur un seul des deux chemins, et un commit part
+/// alors dans le mauvais arbre (REQ-AXO-191).
+fn git_output(
+    project_dir: Option<&std::path::PathBuf>,
+    args: &[&str],
+) -> Option<std::process::Output> {
+    let mut cmd = std::process::Command::new("git");
+    if let Some(dir) = project_dir {
+        cmd.current_dir(dir);
+    }
+    cmd.args(args).output().ok()
+}
+
 impl McpServer {
     /// REQ-AXO-902296 — sort `diff_paths` into (stageable, already-staged, rejected)
     /// BEFORE touching the index.
@@ -166,13 +186,7 @@ impl McpServer {
         diff_paths: &[serde_json::Value],
         project_dir: Option<&std::path::PathBuf>,
     ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
-        let git = |args: &[&str]| -> Option<std::process::Output> {
-            let mut cmd = std::process::Command::new("git");
-            if let Some(dir) = project_dir {
-                cmd.current_dir(dir);
-            }
-            cmd.args(args).output().ok()
-        };
+        let git = |args: &[&str]| git_output(project_dir, args);
 
         let (mut stageable, mut already_staged, mut rejected) = (vec![], vec![], vec![]);
         for path in diff_paths.iter().filter_map(serde_json::Value::as_str) {
@@ -238,13 +252,7 @@ impl McpServer {
         project_dir: Option<&std::path::PathBuf>,
     ) -> (Vec<String>, Vec<String>) {
         let git = |args: &[&str]| -> std::collections::BTreeSet<String> {
-            let mut cmd = std::process::Command::new("git");
-            if let Some(dir) = project_dir {
-                cmd.current_dir(dir);
-            }
-            cmd.args(args)
-                .output()
-                .ok()
+            git_output(project_dir, args)
                 .filter(|o| o.status.success())
                 .map(|o| {
                     String::from_utf8_lossy(&o.stdout)

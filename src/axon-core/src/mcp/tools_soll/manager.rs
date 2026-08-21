@@ -86,6 +86,26 @@ fn apply_metadata_routed_fields(data: &serde_json::Value, meta: &mut serde_json:
     }
 }
 
+/// REQ-AXO-902432 — l'entree de l'ecrivain de revision unique.
+///
+/// Une struct plutot que huit parametres positionnels : sur un journal d'audit,
+/// intervertir `entity_type` et `entity_id` produirait des lignes syntaxiquement
+/// valides et semantiquement fausses, que rien ne rattraperait a la relecture.
+pub(super) struct RevisionRecord<'a> {
+    /// `update` | `unlink` — porte aussi la `source` (`mcp.<action>`) et le prefixe d'id.
+    pub action: &'a str,
+    /// Partie discriminante de `revision_id`, fournie par l'appelant : `unlink`
+    /// indexe sur la SOURCE de l'arete, `update` sur le noeud.
+    pub revision_key: &'a str,
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub project_code: &'a str,
+    pub summary: &'a str,
+    pub before: &'a Value,
+    /// `None` ecrit NULL : une suppression n'a pas d'apres.
+    pub after: Option<&'a Value>,
+}
+
 impl McpServer {
     /// REQ-AXO-125 — normalize writer errors so the LLM-visible text
     /// contains only the action kind, category, and a recovery hint —
@@ -240,28 +260,66 @@ impl McpServer {
     ) -> anyhow::Result<String> {
         let project_code = project_code_from_canonical_entity_id(entity_id)
             .unwrap_or_else(|| "AXO".to_string());
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let revision_id = format!("update-{now_ms}-{entity_id}");
-        let summary = format!("update: {entity_id}");
+        self.record_revision(RevisionRecord {
+            action: "update",
+            revision_key: entity_id,
+            entity_type: entity,
+            entity_id,
+            project_code: &project_code,
+            summary: &format!("update: {entity_id}"),
+            before,
+            after: Some(after),
+        })
+    }
+
+    /// REQ-AXO-902432 — l'ecrivain de revision, UN SEUL.
+    ///
+    /// En corrigeant REQ-AXO-902425 j'ai ecrit un SECOND couple d'INSERT au lieu
+    /// d'unifier avec celui d'`unlink` — sur le journal d'audit lui-meme, c'est-a-dire
+    /// sur le mecanisme dont la raison d'etre est qu'on puisse revenir en arriere.
+    /// Deux copies de la meme ecriture, c'est deux chances qu'une seule evolue : la
+    /// colonne ajoutee d'un cote, le `project_code` corrige de l'autre, et un chemin
+    /// cesse silencieusement de journaliser.
+    ///
+    /// C'est exactement le defaut que cette session a corrige ailleurs — un miroir que
+    /// personne ne re-derive (GUI-PRO-013) — commis en le corrigeant.
+    ///
+    /// `after: None` ecrit NULL : une suppression n'a pas d'apres.
+    fn record_revision(&self, record: RevisionRecord<'_>) -> anyhow::Result<String> {
+        // REQ-AXO-902432 — `now_unix_ms()` est deja importe dans ce fichier et
+        // utilise vingt lignes plus haut ; j'avais recopie l'expression en ligne.
+        // `debt_digest` nomme la famille : `now_ms` existe en CINQ exemplaires
+        // dans le depot (service_guard, runtime_watchdog, contract::store,
+        // axonctl, watchman_source). J'en ajoutais un sixieme sans le voir.
+        let now_ms = now_unix_ms();
+        // La forme de l'id est preservee telle quelle pour chaque appelant : la
+        // cle discriminante est fournie, pas devinee (`unlink` indexe sur la
+        // SOURCE de l'arete, `update` sur le noeud).
+        let revision_id = format!("{}-{now_ms}-{}", record.action, record.revision_key);
 
         self.graph_store.execute_param(
             "INSERT INTO soll.Revision (revision_id, project_code, author, source, summary, status, created_at, committed_at) \
-             VALUES (?, ?, 'soll_manager', 'mcp.update', ?, 'committed', ?, ?)",
-            &json!([revision_id, project_code, summary, now_ms, now_ms]),
+             VALUES (?, ?, 'soll_manager', ?, ?, 'committed', ?, ?)",
+            &json!([
+                revision_id,
+                record.project_code,
+                format!("mcp.{}", record.action),
+                record.summary,
+                now_ms,
+                now_ms,
+            ]),
         )?;
         self.graph_store.execute_param(
             "INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, project_code, action, before_json, after_json, created_at) \
-             VALUES (?, ?, ?, ?, 'update', ?::jsonb, ?::jsonb, ?)",
+             VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?)",
             &json!([
                 revision_id,
-                entity,
-                entity_id,
-                project_code,
-                before.to_string(),
-                after.to_string(),
+                record.entity_type,
+                record.entity_id,
+                record.project_code,
+                record.action,
+                record.before.to_string(),
+                record.after.map(Value::to_string),
                 now_ms,
             ]),
         )?;
@@ -1980,11 +2038,6 @@ impl McpServer {
                 let project_code = project_code_from_canonical_entity_id(&src)
                     .or_else(|| project_code_from_canonical_entity_id(&tgt))
                     .unwrap_or_else(|| "AXO".to_string());
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                let revision_id = format!("unlink-{}-{}", now_ms, src);
                 let entity_id = format!("{}:{}:{}", src, relation_type, tgt);
                 let before_json = json!({
                     "source_id": src,
@@ -2001,52 +2054,42 @@ impl McpServer {
                 // unlink (revision present, edge still there) which the
                 // operator can re-execute idempotently. A future REQ may
                 // wrap this in an explicit BEGIN/COMMIT.
-                if let Err(e) = self.graph_store.execute_param(
-                    "INSERT INTO soll.Revision (revision_id, project_code, author, source, summary, status, created_at, committed_at) \
-                     VALUES (?, ?, 'soll_manager', 'mcp.unlink', ?, 'committed', ?, ?)",
-                    &json!([
-                        revision_id,
-                        project_code,
-                        summary,
-                        now_ms,
-                        now_ms,
-                    ]),
-                ) {
-                    return Some(json!({
-                        "content": [{
-                            "type": "text",
-                            "text": format!("soll_manager(unlink): revision insert failed: {}", e)
-                        }],
-                        "isError": true,
-                        "data": {
-                            "status": "internal_error",
-                            "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>(),
-                        }
-                    }));
-                }
-                if let Err(e) = self.graph_store.execute_param(
-                    "INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, project_code, action, before_json, after_json, created_at) \
-                     VALUES (?, 'edge', ?, ?, 'unlink', ?::jsonb, NULL, ?)",
-                    &json!([
-                        revision_id,
-                        entity_id,
-                        project_code,
-                        before_json.to_string(),
-                        now_ms,
-                    ]),
-                ) {
-                    return Some(json!({
-                        "content": [{
-                            "type": "text",
-                            "text": format!("soll_manager(unlink): revision_change insert failed: {}", e)
-                        }],
-                        "isError": true,
-                        "data": {
-                            "status": "internal_error",
-                            "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>(),
-                        }
-                    }));
-                }
+                // REQ-AXO-902432 — meme ecrivain que `update`. Les deux INSERT
+                // etaient recopies ici ; deux copies de la meme ecriture, c'est
+                // deux chances qu'une seule evolue.
+                // REQ-AXO-902432 — l'id RENDU par l'ecrivain, pas un recalcul.
+                // En unifiant, j'ai d'abord laisse la reponse annoncer un
+                // `revision_id` reconstruit localement : quelques millisecondes
+                // d'ecart suffisaient a en faire une cle qui n'existe nulle part,
+                // donc un `soll_rollback_revision` sans cible. Attrape a la
+                // relecture, pas par le compilateur — c'est exactement le defaut
+                // « la surface annonce ce qu'elle n'a pas verifie » que ce lot
+                // corrige ailleurs.
+                let revision_id = match self.record_revision(RevisionRecord {
+                    action: "unlink",
+                    revision_key: &src,
+                    entity_type: "edge",
+                    entity_id: &entity_id,
+                    project_code: &project_code,
+                    summary: &summary,
+                    before: &before_json,
+                    after: None,
+                }) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return Some(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("soll_manager(unlink): revision insert failed: {}", e)
+                            }],
+                            "isError": true,
+                            "data": {
+                                "status": "internal_error",
+                                "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>(),
+                            }
+                        }));
+                    }
+                };
                 match self.graph_store.execute_param(
                     "DELETE FROM soll.Edge WHERE source_id=? AND target_id=? AND relation_type=?",
                     &json!([src, tgt, relation_type]),

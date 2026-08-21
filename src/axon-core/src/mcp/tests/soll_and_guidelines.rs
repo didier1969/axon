@@ -11436,6 +11436,106 @@ fn test_remove_evidence_previews_before_it_deletes_in_the_mode_that_decides_alon
     );
 }
 
+/// REQ-AXO-902432 — un `revision_id` ANNONCÉ doit exister dans le journal.
+///
+/// En unifiant les deux écrivains de révision (`update` et `unlink` recopiaient
+/// le même couple d'INSERT), j'ai d'abord laissé la réponse d'`unlink` annoncer
+/// un id **reconstruit localement**. Quelques millisecondes d'écart avec celui
+/// que l'écrivain venait d'écrire suffisaient à en faire une clé qui n'existe
+/// nulle part — donc un `soll_rollback_revision` sans cible, sur exactement le
+/// mécanisme dont la raison d'être est qu'on puisse revenir en arrière.
+///
+/// Attrapé à la relecture, pas par le compilateur : les deux chaînes se
+/// compilent. Cette garde le rend mesurable, sur les DEUX chemins — c'est ce
+/// que l'unification doit garantir et ce qu'une seule copie testée ne dirait
+/// pas.
+#[test]
+fn test_every_announced_revision_id_exists_in_the_journal() {
+    use crate::test_support::ist_fixtures::{
+        create_test_server_with_ist_seed, IstSeed, SollNodeFixture,
+    };
+
+    let seed = IstSeed::new()
+        .node(SollNodeFixture::new("REQ-NAN-601", "Requirement", "NAN", "Source").status("current"))
+        .node(SollNodeFixture::new("REQ-NAN-602", "Requirement", "NAN", "Cible").status("current"));
+    let harness = create_test_server_with_ist_seed(seed).expect("serveur de test");
+    harness
+        .server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+             VALUES ('REQ-NAN-601', 'REQ-NAN-602', 'REFINES', 'NAN')",
+        )
+        .unwrap();
+
+    let call = |args: serde_json::Value| -> serde_json::Value {
+        harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": "soll_manager", "arguments": args })),
+                id: Some(json!(902432)),
+            })
+            .unwrap()
+            .result
+            .expect("soll_manager doit répondre")
+    };
+    let journal_has = |rev: &str| -> bool {
+        harness
+            .server
+            .graph_store
+            .query_count_param(
+                "SELECT count(*) FROM soll.RevisionChange WHERE revision_id = $r",
+                &json!({ "r": rev }),
+            )
+            .unwrap_or(0)
+            > 0
+    };
+
+    // Chemin 1 — `update`.
+    let updated = call(json!({
+        "action": "update",
+        "entity": "requirement",
+        "data": { "id": "REQ-NAN-601", "description": "Corps remplacé." }
+    }));
+    let update_rev = updated["data"]["revision_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`update` doit nommer sa révision : {updated}"));
+    assert!(
+        journal_has(update_rev),
+        "la révision `{update_rev}` annoncée par `update` doit EXISTER dans le \
+         journal — sinon `soll_rollback_revision` n'a pas de cible."
+    );
+
+    // Chemin 2 — `unlink`. C'est celui qui annonçait un id reconstruit.
+    let unlinked = call(json!({
+        "action": "unlink",
+        "entity": "requirement",
+        "data": {
+            "source_id": "REQ-NAN-601",
+            "target_id": "REQ-NAN-602",
+            "relation_type": "REFINES"
+        }
+    }));
+    let unlink_rev = unlinked["data"]["revision_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`unlink` doit nommer sa révision : {unlinked}"));
+    assert!(
+        journal_has(unlink_rev),
+        "la révision `{unlink_rev}` annoncée par `unlink` doit EXISTER dans le \
+         journal. C'est précisément ce qui était faux quand chaque chemin \
+         reconstruisait son id de son côté."
+    );
+
+    // Les deux chemins passent par le MÊME écrivain : leurs ids ne peuvent pas
+    // se ressembler par hasard, ils partagent leur forme.
+    assert!(
+        update_rev.starts_with("update-") && unlink_rev.starts_with("unlink-"),
+        "chaque révision porte son action en préfixe : {update_rev} / {unlink_rev}"
+    );
+}
+
 #[test]
 fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
     let server = create_test_server();
