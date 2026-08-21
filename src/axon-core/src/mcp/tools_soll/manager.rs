@@ -208,6 +208,66 @@ impl McpServer {
     /// mutation_feedback are byte-for-byte identical to a normal update. The token win
     /// is on the INPUT: the caller sends only the short new section, never the 2500-char
     /// body. Response is terse (append-specific, no body echo).
+    /// REQ-AXO-902425 — journalise une mutation de nœud AVANT de l'appliquer.
+    ///
+    /// Signalé par FSF (`mcp_feedback` #83) et vérifié côté AXO : sur ~15
+    /// `action=update` passées dans une seule session, `soll.RevisionChange`
+    /// n'a reçu **aucune** ligne. Seul `action=unlink` journalisait, et sa
+    /// description le clame (« removes one SOLL edge with audit »), tandis que
+    /// celle d'`append_section` promet « same audit as action=update » — vrai,
+    /// et vide, puisque `update` n'en écrivait aucun.
+    ///
+    /// Ce que ça mettait en jeu dépasse l'audit. `soll_rollback_revision` est
+    /// publié comme outil, et la règle dure du produit est *« ne jamais
+    /// supprimer de nœud SOLL — revenir en arrière par
+    /// `soll_rollback_revision` »*. Le filet n'avait rien dessous : FSF a
+    /// remplacé le corps de `CPT-FSF-001` (106 347 caractères, leur pointeur de
+    /// session canonique) en écrivant dans le nœud que l'opération était
+    /// récupérable. Elle ne l'était pas. Seul un relecteur a évité la perte.
+    ///
+    /// Un remplacement de corps est l'opération la PLUS destructive de la
+    /// surface SOLL — c'est précisément celle qui n'était pas journalisée.
+    ///
+    /// Échouer ici REFUSE la mutation, comme `unlink`. Une écriture SOLL qu'on
+    /// ne peut pas journaliser est exactement ce que la politique interdit ;
+    /// l'appliquer quand même reconduirait la promesse creuse.
+    fn record_node_revision(
+        &self,
+        entity: &str,
+        entity_id: &str,
+        before: &Value,
+        after: &Value,
+    ) -> anyhow::Result<String> {
+        let project_code = project_code_from_canonical_entity_id(entity_id)
+            .unwrap_or_else(|| "AXO".to_string());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let revision_id = format!("update-{now_ms}-{entity_id}");
+        let summary = format!("update: {entity_id}");
+
+        self.graph_store.execute_param(
+            "INSERT INTO soll.Revision (revision_id, project_code, author, source, summary, status, created_at, committed_at) \
+             VALUES (?, ?, 'soll_manager', 'mcp.update', ?, 'committed', ?, ?)",
+            &json!([revision_id, project_code, summary, now_ms, now_ms]),
+        )?;
+        self.graph_store.execute_param(
+            "INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, project_code, action, before_json, after_json, created_at) \
+             VALUES (?, ?, ?, ?, 'update', ?::jsonb, ?::jsonb, ?)",
+            &json!([
+                revision_id,
+                entity,
+                entity_id,
+                project_code,
+                before.to_string(),
+                after.to_string(),
+                now_ms,
+            ]),
+        )?;
+        Ok(revision_id)
+    }
+
     fn soll_append_section(&self, entity: &str, data: &Value) -> Option<Value> {
         let id = data.get("id")?.as_str()?;
         let section = data
@@ -1264,11 +1324,19 @@ impl McpServer {
                     }
                 }
 
-                let update_res: anyhow::Result<()> = (|| {
+                let update_res: anyhow::Result<String> = (|| {
                     let current = self.query_named_row(
                         &format!("SELECT title, description, status, metadata FROM soll.Node WHERE id = '{}'", escape_sql(id)),
                         4,
                     )?;
+                    // REQ-AXO-902425 — l'instantané « avant » était DÉJÀ lu ici,
+                    // ligne suivante, et n'était simplement jamais journalisé.
+                    let before_row = json!({
+                        "title": current[0],
+                        "description": current[1],
+                        "status": current[2],
+                        "metadata": serde_json::from_str::<Value>(&current[3]).unwrap_or(json!({})),
+                    });
                     let mut meta: Value = serde_json::from_str(&current[3]).unwrap_or(json!({}));
 
                     let title = data
@@ -1297,19 +1365,43 @@ impl McpServer {
 
                     meta["updated_at"] = json!(now_unix_ms());
 
+                    // REQ-AXO-902425 — journaliser AVANT d'écraser. L'ordre est
+                    // le contrat : si l'audit échoue, la mutation n'a pas lieu.
+                    let revision_id = self.record_node_revision(
+                        entity,
+                        id,
+                        &before_row,
+                        &json!({
+                            "title": title,
+                            "description": description,
+                            "status": status,
+                            "metadata": meta,
+                        }),
+                    )?;
+
                     let q = "UPDATE soll.Node SET title = ?, description = ?, status = ?, metadata = ? WHERE id = ?";
                     self.graph_store.execute_param(
                         q,
                         &json!([title, description, status, meta.to_string(), id]),
-                    )
+                    )?;
+                    Ok(revision_id)
                 })();
 
                 match update_res {
-                    Ok(_) => {
+                    Ok(revision_id) => {
+                        // REQ-AXO-902425 — NOMMER la révision. Un LLM ne peut pas
+                        // deviner qu'un outil appelé `soll_rollback_revision` a
+                        // quelque chose où revenir ; le lui dire à l'écriture est
+                        // ce qui rend la garantie vérifiable au moment où elle
+                        // compte, pas au moment où on en a besoin.
                         let mut payload = json!({
-                            "content": [{ "type": "text", "text": format!("Update succeeded for `{}`", id) }],
+                            "content": [{ "type": "text", "text": format!(
+                                "Update succeeded for `{id}` — état précédent journalisé, \
+                                 réversible par `soll_rollback_revision(revision_id=\"{revision_id}\")`"
+                            ) }],
                             "data": {
                                 "project_code": project_code.as_deref().unwrap_or(""),
+                                "revision_id": revision_id,
                             }
                         });
                         // REQ-AXO-901949 inv.5 — auto-continue (single source).

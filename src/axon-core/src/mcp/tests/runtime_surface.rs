@@ -209,6 +209,66 @@ fn test_mcp_tools_list() {
     assert!(!tool_names.contains(&"resume_vectorization"));
 }
 
+/// REQ-AXO-902426 — `help` rabotait le préfixe `axon_` AVANT de chercher, puis
+/// échouait sur le nom tronqué que le catalogue ne publie pas.
+///
+/// Signalé par KKI (`mcp_feedback` #134), reproduit à l'identique côté AXO. Le
+/// message d'erreur était sa propre réfutation : « Unknown MCP tool
+/// `handoff_check`. Closest: axon_handoff_check » — il suggérait exactement ce
+/// que l'appelant avait tapé. Les DEUX outils dont la résolution cassait sont
+/// ceux du chemin de livraison.
+#[test]
+fn test_help_resolves_a_tool_whose_real_name_carries_the_axon_prefix() {
+    let server = create_test_server();
+    let ask = |tool: &str| -> serde_json::Value {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": "help", "arguments": { "tool": tool } })),
+                id: Some(json!(902426)),
+            })
+            .unwrap()
+            .result
+            .expect("help doit répondre")
+    };
+
+    for tool in ["axon_handoff_check", "axon_pre_flight_check", "axon_commit_work"] {
+        let res = ask(tool);
+        assert_ne!(
+            res.get("isError").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "`help(tool=\"{tool}\")` doit résoudre : c'est le nom que le catalogue \
+             PUBLIE.\n{res}"
+        );
+    }
+
+    // CONTRÔLE POSITIF : la forme sans préfixe continue de marcher (le dispatch
+    // l'accepte), sinon le correctif aurait troqué un échec contre un autre.
+    let bare = ask("query");
+    assert_ne!(
+        bare.get("isError").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "un nom sans préfixe doit continuer de résoudre : {bare}"
+    );
+
+    // CONTRÔLE NÉGATIF : un nom réellement inconnu échoue TOUJOURS, et l'erreur
+    // nomme ce que l'APPELANT a demandé — reprocher une chaîne qu'il n'a jamais
+    // écrite est ce qui rendait le message absurde.
+    let ghost = ask("axon_ceci_nexiste_pas");
+    assert_eq!(
+        ghost.get("isError").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "un outil inexistant doit toujours échouer : {ghost}"
+    );
+    let text = ghost["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("axon_ceci_nexiste_pas"),
+        "l'erreur doit nommer ce que l'appelant a demandé, pas une variante \
+         rabotée qu'il n'a jamais écrite :\n{text}"
+    );
+}
+
 #[test]
 fn test_help_returns_compact_llm_routing_and_skill_pointer() {
     let server = create_test_server();

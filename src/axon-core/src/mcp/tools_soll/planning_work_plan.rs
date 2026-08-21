@@ -510,9 +510,18 @@ impl McpServer {
         // so the work_plan auto-classifies it out of the actionable wave and
         // names the blocker in the blockers section. A terminal target = block
         // lifted, so the node stays schedulable (the edge is historical).
+        // REQ-AXO-902427 — deux filtres, deux défauts distincts, tous deux
+        // signalés par APS (`mcp_feedback` #201) et reproduits sur AXO.
         let blocked_by_open_dep: HashMap<String, String> = nodes
-            .keys()
-            .filter_map(|id| {
+            .iter()
+            // (1) Un nœud TERMINAL ne peut pas être bloqué. Sans ce filtre, un
+            // REQ `delivered` portant une vieille arête `BLOCKED_BY` atterrit
+            // dans « Blockers ». Mesuré sur AXO : **12 des 19** entrées étaient
+            // des exigences LIVRÉES. Une section « ce qui bloque » faite
+            // majoritairement de travail terminé s'apprend à être ignorée — et
+            // c'est alors la moitié utile qui est perdue.
+            .filter(|(_, node)| !is_terminal_status(&node.status))
+            .filter_map(|(id, _)| {
                 snapshot
                     .outgoing_edges(id)
                     .find(|(target, rel)| {
@@ -520,7 +529,28 @@ impl McpServer {
                             && snapshot
                                 .nodes
                                 .get(*target)
-                                .map(|target_node| !is_terminal_status(&target_node.status))
+                                .map(|target_node| {
+                                    // (2) Un JALON EN COURS est le CONTENANT du
+                                    // travail, pas son obstacle.
+                                    //
+                                    // `REQ → MIL` n'admet que `BLOCKED_BY` dans
+                                    // la matrice de relations : toute exigence
+                                    // rattachée à un jalon est donc « bloquée
+                                    // par » lui PAR CONSTRUCTION, et le plan
+                                    // écartait des vagues exactement le travail
+                                    // du jalon en cours. APS l'a mesuré :
+                                    // l'artefact écrit à la main battait le plan
+                                    // calculé, donc le plan ne servait pas.
+                                    //
+                                    // Un jalon `planned` continue de parquer :
+                                    // là on attend bien qu'il démarre. C'est le
+                                    // `current` qui distingue « je fais partie
+                                    // de » de « j'attends ».
+                                    let target_is_current_milestone = target.starts_with("MIL-")
+                                        && target_node.status.trim().eq_ignore_ascii_case("current");
+                                    !is_terminal_status(&target_node.status)
+                                        && !target_is_current_milestone
+                                })
                                 .unwrap_or(true)
                     })
                     .map(|(target, _)| (id.clone(), target.to_string()))

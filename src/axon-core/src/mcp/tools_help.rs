@@ -271,19 +271,39 @@ fn closest_tool_names(requested: &str, limit: usize) -> Vec<String> {
 }
 
 fn tool_help_response(tool_name: &str) -> Value {
-    let normalized = tool_name
-        .strip_prefix("mcp_axon_")
-        .or_else(|| tool_name.strip_prefix("axon_"))
-        .unwrap_or(tool_name);
-    let tool = tools_catalog(true)
-        .get("tools")
-        .and_then(Value::as_array)
-        .and_then(|tools| {
-            tools
-                .iter()
-                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(normalized))
+    // REQ-AXO-902426 — résoudre le nom TEL QU'IL EST DONNÉ d'abord ; ne tenter
+    // une variante sans préfixe que si la résolution exacte échoue, jamais
+    // l'inverse.
+    //
+    // Le retrait était inconditionnel et venait EN PREMIER : `help(tool=
+    // "axon_handoff_check")` cherchait donc `handoff_check`, que le catalogue
+    // ne publie pas — il publie `axon_handoff_check`. Signalé par KKI
+    // (`mcp_feedback` #134), reproduit à l'identique côté AXO. Le message
+    // d'erreur qui en sortait était sa propre réfutation : « Unknown MCP tool
+    // `handoff_check`. Closest: axon_handoff_check » — il suggérait exactement
+    // ce que l'appelant avait tapé.
+    //
+    // Le prix de ce défaut n'est pas le tour perdu : `axon_handoff_check` rend
+    // un verdict que `help` est le recours documenté pour comprendre. Les deux
+    // outils dont la résolution cassait sont ceux du chemin de LIVRAISON.
+    let catalog = tools_catalog(true);
+    let tool = std::iter::once(tool_name)
+        .chain(tool_name.strip_prefix("mcp_axon_"))
+        .chain(tool_name.strip_prefix("axon_"))
+        .find_map(|candidate| {
+            catalog
+                .get("tools")
+                .and_then(Value::as_array)
+                .and_then(|tools| {
+                    tools
+                        .iter()
+                        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(candidate))
+                })
         })
         .cloned();
+    // L'erreur nomme ce que l'APPELANT a demandé. Rendre le nom raboté faisait
+    // reprocher à l'appelant une chaîne qu'il n'avait jamais écrite.
+    let normalized = tool_name;
 
     let Some(tool) = tool else {
         // REQ-AXO-902289 — "call tools/list" was the whole repair, which asks an

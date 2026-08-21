@@ -10945,6 +10945,251 @@ mod commit_is_bounded_to_the_declaration {
     }
 }
 
+/// REQ-AXO-902425 — `soll_rollback_revision` est publié comme outil, et la règle
+/// dure du produit est « ne JAMAIS supprimer un nœud SOLL — revenir en arrière
+/// par `soll_rollback_revision` ». Le filet n'avait rien dessous : seul
+/// `action=unlink` journalisait. Signalé par FSF (`mcp_feedback` #83) après avoir
+/// remplacé le corps de leur pointeur de session canonique — 106 347 caractères —
+/// en écrivant DANS le nœud que l'opération était récupérable. Elle ne l'était
+/// pas.
+///
+/// Ce test fait l'ALLER-RETOUR. Vérifier qu'une ligne d'audit existe mesurerait
+/// la moitié qui ne sert à rien : ce que FSF avait besoin de récupérer, c'est le
+/// CORPS, et les deux lignes qu'ils ont trouvées avaient `before_json = {}`.
+#[test]
+fn test_soll_update_is_journalled_and_the_previous_body_comes_back() {
+    use crate::test_support::ist_fixtures::{
+        create_test_server_with_ist_seed, IstSeed, SollNodeFixture,
+    };
+
+    let original = "Corps canonique d'origine.\n".repeat(40);
+    let seed = IstSeed::new().node(
+        SollNodeFixture::new("CPT-TST-830", "Concept", "TST", "Pointeur de session")
+            .description(original.clone())
+            .status("current"),
+    );
+    let harness = create_test_server_with_ist_seed(seed).expect("serveur de test");
+
+    let call = |args: serde_json::Value, name: &str| -> serde_json::Value {
+        harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": name, "arguments": args })),
+                id: Some(json!(902425)),
+            })
+            .unwrap()
+            .result
+            .unwrap_or_else(|| panic!("`{name}` n'a rien rendu"))
+    };
+    let body_now = || -> String {
+        harness
+            .server
+            .graph_store
+            .query_json("SELECT description FROM soll.Node WHERE id = 'CPT-TST-830'")
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&raw).ok())
+            .and_then(|rows| {
+                rows.first()
+                    .and_then(|r| r.first())
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+    };
+
+    assert_eq!(body_now(), original, "précondition : le corps est en base");
+
+    // L'écrasement — l'opération la PLUS destructive de la surface SOLL.
+    let updated = call(
+        json!({
+            "action": "update",
+            "entity": "concept",
+            "data": { "id": "CPT-TST-830", "description": "Version élaguée." }
+        }),
+        "soll_manager",
+    );
+    let text = updated["content"][0]["text"].as_str().unwrap_or_default();
+
+    // CONTRÔLE POSITIF : l'écrasement a bien eu lieu. Sans lui, un « rollback
+    // réussi » plus bas serait vrai sans rien avoir restauré.
+    assert_eq!(
+        body_now(),
+        "Version élaguée.",
+        "précondition : le corps doit avoir été REMPLACÉ, sinon la restauration \
+         ne mesure rien"
+    );
+
+    let revision_id = updated["data"]["revision_id"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "l'écriture doit NOMMER sa révision — un LLM ne peut pas deviner \
+                 que `soll_rollback_revision` a quelque chose où revenir :\n{updated}"
+            )
+        })
+        .to_string();
+    assert!(
+        text.contains("soll_rollback_revision"),
+        "la réponse VISIBLE doit dire comment revenir en arrière, pas seulement \
+         `data.*` que plusieurs clients n'exposent pas :\n{text}"
+    );
+
+    // Le corps précédent doit être DANS le journal, pas un `{}` — c'est
+    // exactement ce que FSF a trouvé et qui ne les a pas sauvés.
+    let journalled = harness
+        .server
+        .graph_store
+        .query_json(&format!(
+            "SELECT before_json->>'description' FROM soll.RevisionChange WHERE revision_id = '{revision_id}'"
+        ))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&raw).ok())
+        .and_then(|rows| {
+            rows.first()
+                .and_then(|r| r.first())
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        journalled, original,
+        "le journal doit porter le CORPS précédent en entier. Une ligne dont \
+         `before_json` vaut `{{}}` est une ligne d'audit qui ne restaure rien."
+    );
+
+    // L'ALLER-RETOUR — la seule assertion qui prouve la garantie.
+    let rolled = call(
+        json!({ "revision_id": revision_id }),
+        "soll_rollback_revision",
+    );
+    assert_ne!(
+        rolled.get("isError").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "le rollback doit aboutir :\n{rolled}"
+    );
+    assert_eq!(
+        body_now(),
+        original,
+        "le corps d'origine doit être REVENU. C'est la garantie que la règle \
+         « ne jamais supprimer, revenir en arrière » met en jeu."
+    );
+}
+
+/// REQ-AXO-902427 — `soll_work_plan` cachait exactement le travail à faire et
+/// listait comme « bloqué » du travail LIVRÉ.
+///
+/// Signalé par APS (`mcp_feedback` #201), reproduit sur AXO : 12 des 19 entrées
+/// de la section « Blockers » étaient des exigences `delivered`. Mécanisme :
+/// `REQ → MIL` n'admet que `BLOCKED_BY` dans la matrice de relations, donc toute
+/// exigence rattachée à un jalon est « bloquée par » lui PAR CONSTRUCTION — et
+/// les vagues ne contenaient plus que de la dette d'hygiène. APS le résume
+/// mieux que moi : *l'artefact écrit à la main battait le plan calculé, donc le
+/// plan ne servait pas.*
+#[test]
+fn test_work_plan_separates_belonging_to_a_live_milestone_from_being_blocked() {
+    use crate::test_support::ist_fixtures::{
+        create_test_server_with_ist_seed, IstSeed, SollNodeFixture,
+    };
+
+    let seed = IstSeed::new()
+        .node(SollNodeFixture::new("PIL-XON-001", "Pillar", "XON", "Axe").status("current"))
+        .node(SollNodeFixture::new("MIL-XON-100", "Milestone", "XON", "Jalon EN COURS").status("current"))
+        .node(SollNodeFixture::new("MIL-XON-200", "Milestone", "XON", "Jalon PAS COMMENCE").status("planned"))
+        // Rattachée au jalon EN COURS : c'est du travail à faire, pas un blocage.
+        .node(
+            SollNodeFixture::new("REQ-XON-801", "Requirement", "XON", "Dans le jalon en cours")
+                .status("current"),
+        )
+        // Rattachée à un jalon PAS COMMENCÉ : là on attend vraiment.
+        .node(
+            SollNodeFixture::new("REQ-XON-802", "Requirement", "XON", "Attend un jalon a venir")
+                .status("current"),
+        )
+        // LIVRÉE, et portant encore l'arête. Un travail terminé ne bloque rien.
+        .node(
+            SollNodeFixture::new("REQ-XON-803", "Requirement", "XON", "Deja livree")
+                .status("delivered"),
+        )
+        ;
+    let harness = create_test_server_with_ist_seed(seed).expect("serveur de test");
+
+    // Les arêtes SOLL vivent dans `soll.Edge`. `EdgeFixture` écrit dans
+    // `ist.Edge` — les y poser laissait le plan les ignorer en silence, et
+    // c'est le contrôle positif ci-dessous qui l'a attrapé.
+    for (src, rel, tgt) in [
+        ("REQ-XON-801", "BELONGS_TO", "PIL-XON-001"),
+        ("REQ-XON-802", "BELONGS_TO", "PIL-XON-001"),
+        ("REQ-XON-803", "BELONGS_TO", "PIL-XON-001"),
+        ("REQ-XON-801", "BLOCKED_BY", "MIL-XON-100"),
+        ("REQ-XON-802", "BLOCKED_BY", "MIL-XON-200"),
+        ("REQ-XON-803", "BLOCKED_BY", "MIL-XON-100"),
+    ] {
+        harness
+            .server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                 VALUES ('{src}', '{tgt}', '{rel}', 'XON')"
+            ))
+            .unwrap();
+    }
+
+    let plan = harness
+        .server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_work_plan",
+                "arguments": { "project_code": "XON", "format": "brief", "top": 8 }
+            })),
+            id: Some(json!(902427)),
+        })
+        .unwrap()
+        .result
+        .expect("soll_work_plan doit répondre")["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    let blockers = plan
+        .split("Blockers:")
+        .nth(1)
+        .and_then(|rest| rest.split("Wave 1:").next())
+        .unwrap_or("")
+        .to_string();
+
+    // CONTRÔLE POSITIF d'abord : un vrai blocage DOIT rester listé. Sans lui, un
+    // correctif qui viderait la section entière passerait les deux assertions
+    // suivantes en ne mesurant rien.
+    assert!(
+        blockers.contains("REQ-XON-802"),
+        "contrôle positif : une exigence qui attend un jalon PAS COMMENCÉ est \
+         réellement bloquée et doit rester listée.\n--- blockers ---\n{blockers}\n--- PLAN COMPLET ---\n{plan}"
+    );
+
+    assert!(
+        !blockers.contains("REQ-XON-803"),
+        "une exigence LIVRÉE ne peut pas être bloquée. Sa présence ici est ce qui \
+         a rendu la section ignorable chez APS (12 sur 19).\n--- blockers ---\n{blockers}"
+    );
+    assert!(
+        !blockers.contains("REQ-XON-801"),
+        "un jalon EN COURS est le CONTENANT du travail, pas son obstacle : \
+         l'exigence qui lui appartient ne doit pas être écartée.\n--- blockers ---\n{blockers}"
+    );
+
+    // Et elle doit être RÉELLEMENT exécutable, pas seulement absente des
+    // blockers — c'est la moitié qui manquait à APS.
+    assert!(
+        plan.contains("REQ-XON-801"),
+        "l'exigence du jalon en cours doit apparaître dans le plan comme \
+         actionnable.\n--- plan ---\n{plan}"
+    );
+}
+
 #[test]
 fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
     let server = create_test_server();
