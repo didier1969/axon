@@ -508,6 +508,71 @@ fn test_mcp_feedback_report_lists_filters_and_resolves() {
 }
 
 #[test]
+fn test_mcp_feedback_report_renders_items_in_text_not_only_data() {
+    // REQ-AXO-902398 — signalé par KKI (llm_feedback #180, blocking) : le
+    // rapport rendait TROIS LIGNES DE COMPTEURS pour 10 items. Les items
+    // n'atteignaient que `data.feedback`, que le client Claude Code n'expose
+    // pas au LLM — même cause que REQ-AXO-902355 pour le kickoff_bundle.
+    //
+    // Conséquence le jour même : interrogé sur ce que KKI avait envoyé, AXO a
+    // répondu « rien reçu ». Les 11 items étaient là. Un compteur n'est pas un
+    // rapport, et `mark_resolved` exige un `id` que le rapport ne donnait pas.
+    let server = create_test_server();
+    let probe = "FBRTXT_PROBE le rendu doit sortir dans le texte";
+    server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_feedback",
+                "arguments": {
+                    "problem": probe,
+                    "severity": "blocking",
+                    "category": "bug",
+                    "tool": "mcp_feedback_report",
+                    "project_code": "FBRTXT"
+                }
+            })),
+            id: Some(json!(1)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let r = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_feedback_report",
+                "arguments": { "project_code": "FBRTXT" }
+            })),
+            id: Some(json!(2)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let text = r["content"][0]["text"].as_str().unwrap_or_default();
+    let id = r["data"]["feedback"][0]["id"].as_i64().expect("un item");
+
+    assert!(
+        text.contains(&id.to_string()),
+        "l'id doit figurer dans le TEXTE — `mark_resolved` l'exige et le triage \
+         est infaisable sans lui.\n---\n{text}"
+    );
+    assert!(
+        text.contains("blocking") && text.contains("mcp_feedback_report"),
+        "sévérité et outil doivent être lisibles dans le texte.\n---\n{text}"
+    );
+    assert!(
+        text.contains("le rendu doit sortir dans le texte"),
+        "le problème lui-même doit être lisible : sans lui le rapport ne \
+         rapporte rien.\n---\n{text}"
+    );
+}
+
+#[test]
 fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
     // REQ-AXO-901957 — capture (no arg content) → aggregate → report →
     // resolve with REQ/VAL → regress on recurrence. Isolated by a synthetic

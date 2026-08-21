@@ -770,12 +770,66 @@ impl McpServer {
             .iter()
             .filter(|f| f["severity"].as_str() == Some("blocking"))
             .count();
-        let report = format!(
-            "## 📨 MCP Feedback Report\n\n**Items (last {}h):** {} ({} open, {} blocking)\n**Triage:** fix an item, then `mcp_feedback_report mark_resolved={{id, resolved_by_req, note}}` to close it.\n",
+        // REQ-AXO-902398 — render the ITEMS, not just how many there are.
+        //
+        // Reported by KKI (llm_feedback #180, blocking): ten items came back as
+        // three lines of counters. The rows only ever reached `data.feedback`,
+        // which the Claude Code client does not expose to the LLM — the same
+        // cause REQ-AXO-902355 closed for the kickoff_bundle. Worse, the
+        // documented triage path (`mark_resolved={id,…}`) needs an `id` the
+        // report never printed, so the tool told you to do something it made
+        // impossible. On 2026-08-21 this produced a FALSE negative fact under a
+        // `Status: ok`: asked what KKI had sent, AXO answered "nothing".
+        let clip = |v: &Value, max: usize| -> String {
+            let s = v.as_str().unwrap_or("").replace(['\n', '|'], " ");
+            if s.chars().count() <= max {
+                s
+            } else {
+                format!("{}…", s.chars().take(max).collect::<String>())
+            }
+        };
+        let mut report = format!(
+            "## 📨 MCP Feedback Report\n\n**Items (last {}h):** {} ({} open, {} blocking)\n",
             window_hours,
             feedback.len(),
             open_count,
             blocking_count,
+        );
+        if feedback.is_empty() {
+            report.push_str(
+                "\n_No item matches these filters — widen `window_hours`, or drop \
+                 `project_code`/`severity`/`tool`. An empty list is a filter result, \
+                 not proof that nothing was reported._\n",
+            );
+        } else {
+            report.push_str("\n| id | sev | cat | tool | proj | problem |\n|---|---|---|---|---|---|\n");
+            for f in &feedback {
+                report.push_str(&format!(
+                    "| {} | {} | {} | {} | {} | {} |\n",
+                    f["id"].as_i64().map(|v| v.to_string()).unwrap_or_default(),
+                    clip(&f["severity"], 10),
+                    clip(&f["category"], 12),
+                    clip(&f["tool"], 24),
+                    clip(&f["project_code"], 6),
+                    clip(&f["problem"], 160),
+                ));
+            }
+            // The blocking ones carry the proposed fix in full-ish: they are the
+            // items the triage line asks you to act on first.
+            for f in feedback.iter().filter(|f| {
+                f["severity"].as_str() == Some("blocking")
+                    && f["triage_status"].as_str() == Some("open")
+            }) {
+                report.push_str(&format!(
+                    "\n**#{} · {} — proposed:** {}\n",
+                    f["id"].as_i64().map(|v| v.to_string()).unwrap_or_default(),
+                    clip(&f["tool"], 32),
+                    clip(&f["proposed_solution"], 600),
+                ));
+            }
+        }
+        report.push_str(
+            "\n**Triage:** fix an item, then `mcp_feedback_report mark_resolved={id, resolved_by_req, note}` to close it.\n",
         );
         Some(json!({
             "content": [{ "type": "text", "text": format_standard_contract(
