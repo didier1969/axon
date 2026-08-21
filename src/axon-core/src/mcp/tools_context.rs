@@ -1976,7 +1976,7 @@ impl McpServer {
             // Repo-root fallback: drop project_code filter (every occurrence —
             // the ANN composition references it in both the `sem` and `lex`
             // CTEs), post-filter by repo_root prefix.
-            if let Some(repo_root) = Self::project_repo_root(project) {
+            if let Some(repo_root) = self.project_repo_root(project) {
                 let fallback_query = query.replace(
                     &Self::sql_project_filter_for_fields(project, &["c.project_code"]),
                     "",

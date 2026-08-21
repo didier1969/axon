@@ -5820,3 +5820,35 @@ fn an_unrelated_needle_suggests_nothing_rather_than_a_random_neighbour() {
         "below the similarity threshold, say nothing rather than guess: {rows:?}"
     );
 }
+
+#[test]
+fn test_repo_literal_lane_finds_the_root_of_a_registry_only_project() {
+    // REQ-AXO-902437 — `project_repo_root` resolved only through
+    // `.axon/meta.json` on disk. Measured on axon_live: 13 roots visible that
+    // way, 75 in `soll.ProjectCodeRegistry`. For the other 62 the repo-literal
+    // fallback lane of `retrieve_context` — the lane that exists precisely for
+    // projects the code-intel does NOT index — got `None` and returned nothing,
+    // with no way for a caller to tell "no match" from "no repo read".
+    let server = create_test_server();
+    let root = tempdir().expect("tempdir");
+    let root_str = root.path().to_string_lossy().to_string();
+    server
+        .graph_store
+        .sync_project_registry_entry("ZZ8", Some("zz8-fixture"), Some(&root_str))
+        .expect("register fixture project");
+
+    // POSITIVE CONTROL — a code in NEITHER source must still resolve to None,
+    // otherwise this test would pass on a function that returns Some(_) for
+    // anything and measures nothing.
+    assert_eq!(
+        server.project_repo_root(Some("QQ7")),
+        None,
+        "positive control: an unregistered code has no root"
+    );
+
+    assert_eq!(
+        server.project_repo_root(Some("ZZ8")).as_deref(),
+        Some(root_str.as_str()),
+        "a project present ONLY in the registry must still yield its root"
+    );
+}

@@ -8,8 +8,22 @@ use super::super::McpServer;
 use super::util::truncate;
 
 impl McpServer {
-    pub(super) fn project_repo_root(project: Option<&str>) -> Option<String> {
+    /// REQ-AXO-902437 — registry FIRST, disk second.
+    ///
+    /// This used to be a static fn resolving only through `.axon/meta.json`
+    /// on disk. Measured on axon_live: that scan sees 13 project roots while
+    /// `soll.ProjectCodeRegistry` holds 75. For the other 62 it returned
+    /// `None`, so the repo-literal fallback lane of `retrieve_context` — the
+    /// lane that exists precisely for projects whose code is NOT indexed —
+    /// silently had no repo to read. Same defect class as REQ-AXO-902436 and
+    /// as REQ-AXO-901971, which fixed it a third time in `storage.rs`; the
+    /// registry read itself is reused (`lookup_project_path_by_code`), not
+    /// re-implemented a fourth time.
+    pub(crate) fn project_repo_root(&self, project: Option<&str>) -> Option<String> {
         let project = project.map(str::trim).filter(|value| !value.is_empty())?;
+        if let Some(path) = self.lookup_project_path_by_code(&project.to_ascii_uppercase()) {
+            return Some(path.to_string_lossy().into_owned());
+        }
         let identity = crate::project_meta::resolve_canonical_project_identity(project).ok()?;
         let repo_root = identity.meta_path.parent()?.parent()?;
         Some(repo_root.to_string_lossy().into_owned())

@@ -212,7 +212,7 @@ impl McpServer {
         diagnostics.file_candidates_considered = file_candidates.len();
         entries.extend(file_candidates);
         if entries.is_empty() {
-            if let Some(repo_root) = Self::project_repo_root(project) {
+            if let Some(repo_root) = self.project_repo_root(project) {
                 let mut fallback = self.find_symbol_candidates(None, terms, path_hints, limit);
                 fallback.retain(|candidate| candidate.uri.starts_with(&repo_root));
                 diagnostics.symbol_candidates_considered += fallback.len();
@@ -237,7 +237,7 @@ impl McpServer {
         terms: &[String],
         limit: usize,
     ) -> (Vec<EntryCandidate>, Vec<ChunkCandidate>) {
-        let Some(repo_root) = Self::project_repo_root(project) else {
+        let Some(repo_root) = self.project_repo_root(project) else {
             return (Vec::new(), Vec::new());
         };
         let repo_root_path = Path::new(&repo_root);
