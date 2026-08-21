@@ -4072,3 +4072,110 @@ fn rollup_tools_are_never_scope_injected() {
         );
     }
 }
+
+#[test]
+fn test_mcp_feedback_report_renders_a_named_item_in_full() {
+    // REQ-AXO-902439 — the list lane clips `problem` at 160 chars and shows
+    // `proposed_solution` only for open blocking items, so triaging a long
+    // doléance forced `sql SELECT problem FROM axon.llm_feedback` — the raw-SQL
+    // fallback the canon forbids. Paid twice on 2026-08-21 by the author of
+    // this fix. The `ids` lane must return the item whole.
+    let server = create_test_server();
+    // Longer than the 160-char scan clip, so "full" is measurable rather than
+    // asserted.
+    let long_problem = format!("PROBLEM_HEAD {} PROBLEM_TAIL", "x".repeat(400));
+    let long_solution = format!("SOLUTION_HEAD {} SOLUTION_TAIL", "y".repeat(400));
+    // `id` is GENERATED ALWAYS AS IDENTITY — let PG assign it and read it back,
+    // rather than pinning a literal the column refuses.
+    server
+        .graph_store
+        .execute_param(
+            "INSERT INTO axon.llm_feedback (created_at, llm_identity, category, severity, \
+             tool, project_code, problem, proposed_solution, satisfaction, triage_status) \
+             VALUES (now(), 'test-llm', 'incomplete', 'minor', 'mcp_feedback_report', \
+             'AXO', ?, ?, 3, 'open')",
+            &json!([long_problem, long_solution]),
+        )
+        .expect("insert feedback fixture");
+    let raw = server
+        .graph_store
+        .query_json(
+            "SELECT id FROM axon.llm_feedback WHERE llm_identity = 'test-llm' \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .expect("read back fixture id");
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).expect("rows");
+    let fixture_id: i64 = rows[0][0]
+        .as_i64()
+        .or_else(|| rows[0][0].as_str().and_then(|s| s.parse().ok()))
+        .expect("fixture id");
+
+    // POSITIVE CONTROL — the LIST lane must clip, otherwise this test would
+    // pass against a surface that never clipped and measures nothing.
+    let listed = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_feedback_report",
+                "arguments": { "project_code": "AXO", "limit": 50 }
+            })),
+            id: Some(json!(9024391)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let listed_text = listed["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        !listed_text.contains("PROBLEM_TAIL"),
+        "positive control: the list lane is supposed to clip the problem"
+    );
+
+    let detail = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_feedback_report",
+                "arguments": { "ids": [fixture_id] }
+            })),
+            id: Some(json!(9024392)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let text = detail["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("PROBLEM_TAIL"),
+        "the ids lane must render the problem WHOLE, got {} chars",
+        text.len()
+    );
+    assert!(
+        text.contains("SOLUTION_TAIL"),
+        "the ids lane must render the proposed solution too, even for a \
+         non-blocking item"
+    );
+
+    // An unknown id is NAMED back, never silently absent.
+    let unknown = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_feedback_report",
+                "arguments": { "ids": [fixture_id, 777902439] }
+            })),
+            id: Some(json!(9024393)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let unknown_ids = unknown["data"]["unknown_ids"]
+        .as_array()
+        .expect("unknown_ids array");
+    assert_eq!(
+        unknown_ids.len(),
+        1,
+        "the id that does not exist must be reported, not dropped"
+    );
+}

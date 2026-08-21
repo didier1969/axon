@@ -1514,10 +1514,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "mcp_feedback_report",
-                "description": "[SYSTEM/SOLL] REQ-AXO-902020 — content-rich READ/triage counterpart to `mcp_feedback` (which was write-only). Lists voluntary LLM doléances (problem / proposed_solution / severity / satisfaction) newest-first, OPEN by default, with severity/category/tool/project filters. Optional `mark_resolved` closes an item against the SOLL fix that resolved it — symmetric to `mcp_friction_report`. Use this to triage feedback instead of raw SQL on axon.llm_feedback.",
+                "description": "[SYSTEM/SOLL] REQ-AXO-902020 — content-rich READ/triage counterpart to `mcp_feedback` (which was write-only). TWO lanes. LIST lane (default): voluntary LLM doléances newest-first, OPEN by default, with severity/category/tool/project filters — `problem` is CLIPPED to a scan line, `proposed_solution` shown only for open blocking items. DETAIL lane (REQ-AXO-902439): pass `ids` (or `id`) to get those items COMPLETE — full `problem` and `proposed_solution`, no clipping, bounded by text volume with the deferred ids named. Scan with the list, then open what you triage. Optional `mark_resolved` closes an item against the SOLL fix that resolved it — symmetric to `mcp_friction_report`. Use this instead of raw SQL on axon.llm_feedback (the column is `tool`, not `tool_name`).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "ids": { "type": "array", "items": { "type": "integer" }, "description": "REQ-AXO-902439 — DETAIL lane: render exactly these feedback ids in full (problem + proposed_solution, unclipped). Overrides every filter below; unknown ids are named back. This is the read path for triage — the list lane clips." },
+                        "id": { "type": "integer", "description": "Single-item shorthand for `ids`." },
                         "project_code": { "type": "string", "description": "Filter to one tenant; omit for the cross-tenant aggregate." },
                         "category": { "type": "string", "enum": ["bug", "unclear_doc", "undocumented", "too_slow", "incomplete", "too_verbose", "other"], "description": "Filter by feedback category (optional)." },
                         "severity": { "type": "string", "enum": ["blocking", "token_cost", "minor"], "description": "Filter by severity (optional)." },

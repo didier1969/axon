@@ -694,6 +694,30 @@ impl McpServer {
                 );
             }
         }
+        // REQ-AXO-902439 — read ONE item (or a few) in full.
+        //
+        // Reported by AXO (llm_feedback #213) and paid twice on 2026-08-21 by
+        // the author of this very fix: to triage 18 doléances you must READ
+        // them, and the list surface clips `problem` at 160 chars and renders
+        // `proposed_solution` only for blocking items. The only working path
+        // was `sql SELECT problem, proposed_solution FROM axon.llm_feedback` —
+        // exactly the raw-SQL fallback GUI-PRO-114 forbids. A triage tool whose
+        // documented workflow ends in the forbidden tool is not a triage tool.
+        let requested_ids: Vec<i64> = args
+            .get("ids")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                    .collect()
+            })
+            .or_else(|| args.get("id").and_then(Value::as_i64).map(|id| vec![id]))
+            .unwrap_or_default();
+        if !requested_ids.is_empty() {
+            return self.mcp_feedback_items_in_full(&requested_ids);
+        }
+
         let project_code = args.get("project_code").and_then(Value::as_str).unwrap_or("");
         let category = args.get("category").and_then(Value::as_str).unwrap_or("");
         let severity = args.get("severity").and_then(Value::as_str).unwrap_or("");
@@ -845,6 +869,136 @@ impl McpServer {
                 "open_count": open_count,
                 "blocking_count": blocking_count,
                 "window_hours": window_hours,
+            }
+        }))
+    }
+
+    /// REQ-AXO-902439 — the `ids` lane of `mcp_feedback_report`: the named
+    /// items, complete, with no clipping of `problem` / `proposed_solution`.
+    ///
+    /// Bounded by VOLUME rather than by count, because the weight of a doléance
+    /// is unknowable before the call (a TE2 report runs 1 500-3 000 chars, a
+    /// one-liner runs 80) and `limit` only ever bounded the number. Whatever
+    /// does not fit is NAMED by id rather than silently dropped — the same
+    /// remedy REQ-AXO-902419 applied to `mcp_inbox_read`.
+    fn mcp_feedback_items_in_full(&self, ids: &[i64]) -> Option<Value> {
+        // Ids are parsed i64, so this interpolation carries no injectable text.
+        let id_list = ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let rows = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT id, created_at::text, llm_identity, category, severity, tool, \
+                        project_code, problem, proposed_solution, satisfaction, \
+                        triage_status, COALESCE(resolved_by_req,'') \
+                 FROM axon.llm_feedback WHERE id IN ({id_list}) ORDER BY id"
+            ))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+            .unwrap_or_default();
+
+        let cell = |r: &Vec<Value>, i: usize| -> String {
+            r.get(i)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let feedback: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": cell(r, 0).parse::<i64>().ok(),
+                    "created_at": cell(r, 1),
+                    "llm_identity": cell(r, 2),
+                    "category": cell(r, 3),
+                    "severity": cell(r, 4),
+                    "tool": cell(r, 5),
+                    "project_code": cell(r, 6),
+                    "problem": cell(r, 7),
+                    "proposed_solution": cell(r, 8),
+                    "satisfaction": cell(r, 9).parse::<i64>().ok(),
+                    "triage_status": cell(r, 10),
+                    "resolved_by_req": cell(r, 11),
+                })
+            })
+            .collect();
+
+        // ~24 KB of text: several full doléances per call, still far from any
+        // client-side truncation point.
+        const TEXT_BUDGET: usize = 24_000;
+        let mut report = String::from("## 📨 MCP Feedback — items in full
+");
+        let mut rendered = 0usize;
+        let mut deferred: Vec<String> = Vec::new();
+        for r in &rows {
+            let id = cell(r, 0);
+            let block = format!(
+                "\n---\n\n### #{id} · {sev} · {cat} · `{tool}` · {proj} · {status}\n\
+                 _{who}, {when}_\n\n**Problem**\n\n{problem}\n\n**Proposed**\n\n{proposed}\n",
+                sev = cell(r, 4),
+                cat = cell(r, 3),
+                tool = cell(r, 5),
+                proj = cell(r, 6),
+                status = cell(r, 10),
+                who = cell(r, 2),
+                when = cell(r, 1),
+                problem = cell(r, 7),
+                proposed = {
+                    let p = cell(r, 8);
+                    if p.trim().is_empty() {
+                        "_(none supplied)_".to_string()
+                    } else {
+                        p
+                    }
+                },
+            );
+            if rendered > 0 && report.len() + block.len() > TEXT_BUDGET {
+                deferred.push(id);
+                continue;
+            }
+            report.push_str(&block);
+            rendered += 1;
+        }
+
+        let missing: Vec<String> = ids
+            .iter()
+            .filter(|id| !rows.iter().any(|r| cell(r, 0) == id.to_string()))
+            .map(|id| id.to_string())
+            .collect();
+        if !missing.is_empty() {
+            report.push_str(&format!(
+                "\n_No such feedback id: {}._\n",
+                missing.join(", ")
+            ));
+        }
+        if !deferred.is_empty() {
+            report.push_str(&format!(
+                "\n_{} item(s) not rendered here to stay under the text budget — \
+                 call again with `ids=[{}]`. They are complete in \
+                 `data.feedback`._\n",
+                deferred.len(),
+                deferred.join(", ")
+            ));
+        }
+
+        Some(json!({
+            "content": [{ "type": "text", "text": format_standard_contract(
+                "ok",
+                "named feedback items rendered in full",
+                "scope:mcp_surface",
+                &report,
+                &["fix an item, then mcp_feedback_report mark_resolved={id, resolved_by_req, note}"],
+                "high",
+            )}],
+            "data": {
+                "feedback": feedback,
+                "requested_ids": ids,
+                "rendered_in_text": rendered,
+                "deferred_ids": deferred,
+                "unknown_ids": missing,
             }
         }))
     }
