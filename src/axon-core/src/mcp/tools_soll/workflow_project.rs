@@ -212,6 +212,62 @@ impl McpServer {
         (stageable, already_staged, rejected)
     }
 
+    /// REQ-AXO-902417 — split the index in two against the caller's
+    /// declaration: `(covered, outside)`.
+    ///
+    /// `git commit -m <msg>` takes the WHOLE index. A caller who staged
+    /// something earlier in the session — a `git rm` held back for a later
+    /// commit is the measured case (TE2, `mcp_feedback` #186) — got it swept
+    /// into this commit, under a message that does not mention it. The tool
+    /// exists to attach a FAITHFUL proof to a Requirement, and it was producing
+    /// commits whose message did not cover their content.
+    ///
+    /// `covered` is what the bounded commit will actually record, and it is NOT
+    /// the same list as `diff_paths`: a declared path that carries no change is
+    /// absent from it. Reporting `diff_paths` as "committed" would repeat the
+    /// defect being fixed — a surface asserting something it never verified.
+    ///
+    /// git decides what "declared" covers, not us: a declared directory
+    /// legitimately covers the files under it, and reimplementing pathspec
+    /// matching here would drift from the git the caller actually runs — the
+    /// same reason `classify_diff_paths` uses `--dry-run` as its oracle.
+    ///
+    /// No `&self`: the verdict depends only on the paths and the repo dir.
+    pub(crate) fn partition_staged_by_declaration(
+        declared: &[String],
+        project_dir: Option<&std::path::PathBuf>,
+    ) -> (Vec<String>, Vec<String>) {
+        let git = |args: &[&str]| -> std::collections::BTreeSet<String> {
+            let mut cmd = std::process::Command::new("git");
+            if let Some(dir) = project_dir {
+                cmd.current_dir(dir);
+            }
+            cmd.args(args)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let all_staged = git(&["diff", "--cached", "--name-only"]);
+        if all_staged.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let mut covering = vec!["diff", "--cached", "--name-only", "--"];
+        covering.extend(declared.iter().map(String::as_str));
+        let covered = git(&covering);
+        let outside = all_staged.difference(&covered).cloned().collect();
+        (covered.into_iter().collect(), outside)
+    }
+
     pub(crate) fn axon_commit_work(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         let diff_paths = args.get("diff_paths")?.as_array()?;
         let message = args.get("message")?.as_str()?;
@@ -617,19 +673,77 @@ impl McpServer {
         }
         }
 
+        // REQ-AXO-902417 — everything below this line exists because the commit
+        // itself carried NO pathspec while the two guards above carry one.
+        // `git add -A --` with no pathspec is refused twice in this function
+        // (empty `diff_paths`, and an empty `stageable` set) for exactly the
+        // reason that it would sweep the whole tree — and then `git commit -m`
+        // swept the whole INDEX, a hundred lines further down, unguarded.
+        let declared: Vec<String> = diff_paths
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect();
+        let (will_commit, excluded) =
+            Self::partition_staged_by_declaration(&declared, resolved_project_path.as_ref());
+
         let mut commit_cmd = std::process::Command::new("git");
         if let Some(dir) = resolved_project_path.as_ref() {
             commit_cmd.current_dir(dir);
         }
-        let commit_out = commit_cmd.arg("commit").arg("-m").arg(message).output();
+        // `--only` is implied by giving pathspecs; it is spelled out because the
+        // whole point of this call is that the commit is BOUNDED.
+        commit_cmd.arg("commit").arg("--only").arg("-m").arg(message).arg("--");
+        for path in &declared {
+            commit_cmd.arg(path);
+        }
+        let commit_out = commit_cmd.output();
 
         match commit_out {
             Ok(output) => {
-                let status = if output.status.success() {
+                if !output.status.success() {
+                    return Some(Self::commit_failure_response(&output, &declared, &excluded));
+                }
+                let status = {
                     let mut s = format!(
                         "Commit succeeded.\n{}",
                         String::from_utf8_lossy(&output.stdout)
                     );
+                    // REQ-AXO-902417 — name what was committed. The caller used
+                    // to get git's own "N files changed" line, which a confident
+                    // caller does not re-read because they declared the paths
+                    // themselves — and that is precisely how a 401-line deletion
+                    // rode along unnoticed.
+                    s.push_str(&format!(
+                        "\nCommitted ({} path(s), measured against the index — NOT a \
+                         restatement of `diff_paths`): {}\n",
+                        will_commit.len(),
+                        will_commit
+                            .iter()
+                            .map(|p| format!("`{p}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    // Deliberately NOT printing "declared but unchanged" here.
+                    // Deriving it means comparing `declared` (which may be a
+                    // directory) to git's file paths by string — the exact kind
+                    // of hand-rolled restatement this change removes. The line
+                    // above is measured; a caller comparing it to their own
+                    // `diff_paths` sees any gap without being told a guess.
+                    if !excluded.is_empty() {
+                        // Not an error, and nothing is lost — but silence here
+                        // would let the caller believe these landed.
+                        s.push_str(&format!(
+                            "NOT committed (staged before this call, outside `diff_paths`, \
+                             STILL staged and untouched): {}\n\
+                             List them in `diff_paths` to include them in a commit.\n",
+                            excluded
+                                .iter()
+                                .map(|p| format!("`{p}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
                     // REQ-AXO-159 — auto-attach commit evidence (Traceability) to
                     // each EXISTING Requirement referenced in the message, so a
                     // delivered REQ accrues its proof without a manual
@@ -644,11 +758,6 @@ impl McpServer {
                         s.push_str(&note);
                     }
                     s
-                } else {
-                    format!(
-                        "Commit failed.\n{}",
-                        String::from_utf8_lossy(&output.stderr)
-                    )
                 };
                 Some(serde_json::json!({
                     "content": [{ "type": "text", "text": format!("Validation passed.\n\n{}", status) }]
@@ -663,6 +772,96 @@ impl McpServer {
                 Some(&e.to_string()),
             )),
         }
+    }
+
+    /// REQ-AXO-902417 — a `git commit` that exits non-zero.
+    ///
+    /// Two things changed here. The envelope now carries `isError` — a failed
+    /// commit used to come back in a success-shaped envelope opening with
+    /// "Validation passed", so a caller reading the envelope rather than the
+    /// prose could not tell a commit from a non-commit.
+    ///
+    /// And the failure is now CLASSIFIED, because bounding the commit makes two
+    /// modes reachable that were not before:
+    ///
+    /// * a merge in progress — git refuses a partial commit outright. This must
+    ///   never fall back to committing the whole index: that would restore the
+    ///   very defect, silently, under the one condition nobody tests.
+    /// * nothing to commit in the declared paths — previously masked, because
+    ///   the unbounded commit happily committed whatever ELSE was staged and
+    ///   reported success.
+    fn commit_failure_response(
+        output: &std::process::Output,
+        declared: &[String],
+        excluded: &[String],
+    ) -> serde_json::Value {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let merged = format!("{stderr}\n{stdout}");
+
+        let (problem_class, explanation, hint) = if merged.contains("during a merge") {
+            (
+                "partial_commit_refused_during_merge",
+                "A merge is in progress, and git refuses to commit a subset of paths while one \
+                 is. This tool will NOT commit the whole index instead: that is exactly the \
+                 defect it now prevents, and it would hide a merge behind a message that does \
+                 not mention it."
+                    .to_string(),
+                "finish or abort the merge (`git merge --continue` / `git merge --abort`), then \
+                 retry — or commit the merge yourself, deliberately, and re-run this tool for \
+                 the follow-up work",
+            )
+        } else if merged.contains("no changes added to commit")
+            || merged.contains("nothing to commit")
+            || merged.contains("nothing added to commit")
+        {
+            (
+                "declared_paths_carry_no_change",
+                format!(
+                    "None of the {} declared path(s) differ from HEAD, so there is nothing to \
+                     commit. This used to succeed by committing whatever else was staged.",
+                    declared.len()
+                ),
+                "check `git status` — the change you meant to commit is either already \
+                 committed, or lives in a path absent from `diff_paths`",
+            )
+        } else {
+            (
+                "git_commit_rejected",
+                "git refused the commit; its own message is reproduced below.".to_string(),
+                "read git's message, repair, then re-run `axon_pre_flight_check`",
+            )
+        };
+
+        serde_json::json!({
+            "content": [{ "type": "text", "text": format!(
+                "Commit FAILED — nothing was committed.\n\n{explanation}\n\n\
+                 Declared paths: {}\n{}\ngit said:\n{}\n\nNext: {hint}",
+                declared.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", "),
+                if excluded.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "Staged but outside the declaration (untouched): {}\n",
+                        excluded.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ")
+                    )
+                },
+                if merged.trim().is_empty() { "(no output)" } else { merged.trim() }
+            )}],
+            "isError": true,
+            "data": {
+                "status": "commit_failed",
+                "next_action": { "kind": "repair_then_retry", "tool": "axon_pre_flight_check" },
+                "operator_guidance": {
+                    "tool": "axon_commit_work",
+                    "problem_class": problem_class,
+                    "declared_paths": declared,
+                    "staged_outside_declaration": excluded,
+                    "git_exit_code": output.status.code(),
+                    "hint": hint
+                }
+            }
+        })
     }
 
     /// REQ-AXO-159 — after a successful commit, attach a Traceability "Commit"
@@ -2853,6 +3052,37 @@ mod commit_req_id_tests {
                 rejected[0].1.contains("gitignore"),
                 "the reason must point at .gitignore, not echo a raw stderr: {:?}",
                 rejected[0]
+            );
+        }
+
+        /// REQ-AXO-902417 — a DECLARED directory legitimately covers the files
+        /// under it. This is the case a hand-rolled set-difference gets wrong,
+        /// and the reason `staged_paths_outside_declaration` asks git what its
+        /// own pathspecs match instead of comparing strings.
+        #[test]
+        fn a_declared_directory_covers_the_files_staged_under_it() {
+            let dir = repo();
+            let owned = dir.path().to_path_buf();
+            let sub = dir.path().join("sub");
+            std::fs::create_dir(&sub).unwrap();
+            std::fs::write(sub.join("a.txt"), "a").unwrap();
+            std::fs::write(dir.path().join("elsewhere.txt"), "e").unwrap();
+            git(dir.path(), &["add", "-A", "."]);
+
+            let (covered, outside) =
+                McpServer::partition_staged_by_declaration(&["sub".to_string()], Some(&owned));
+
+            assert_eq!(
+                covered,
+                vec!["sub/a.txt".to_string()],
+                "the declared directory must report the file staged UNDER it as \
+                 covered — that list is what the response calls 'committed': {covered:?}"
+            );
+            assert_eq!(
+                outside,
+                vec!["elsewhere.txt".to_string()],
+                "`sub/a.txt` is covered by the declared directory and must NOT be \
+                 reported outside it; `elsewhere.txt` must be: {outside:?}"
             );
         }
 

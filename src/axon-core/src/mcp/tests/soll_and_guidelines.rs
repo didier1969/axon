@@ -10607,6 +10607,290 @@ fn test_axon_commit_work_refuses_partial_diff_when_git_add_fails() {
     );
 }
 
+// REQ-AXO-902417 — `axon_commit_work` committed the ENTIRE git index, not the
+// declared `diff_paths`. Measured by TE2 (`mcp_feedback` #186): two declared
+// paths, two others staged earlier in the session for a LATER commit, and the
+// resulting commit carried all four — including a 401-line deletion the message
+// never mentioned.
+//
+// These tests run against a throwaway repo via the tool's own `project_path`
+// argument, and interrogate the COMMIT, not the tool's prose. A test that only
+// read the response text would pass on a tool that reported the right thing and
+// committed the wrong one — which is exactly the failure being fixed.
+mod commit_is_bounded_to_the_declaration {
+    use super::*;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed: {out:?}");
+    }
+
+    fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    fn repo_with_two_committed_files() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path();
+        git(p, &["init", "-q", "."]);
+        git(p, &["config", "user.email", "t@t"]);
+        git(p, &["config", "user.name", "t"]);
+        std::fs::write(p.join("declared.txt"), "v1").unwrap();
+        std::fs::write(p.join("unrelated.txt"), "v1").unwrap();
+        git(p, &["add", "-A", "."]);
+        git(p, &["commit", "-qm", "base"]);
+        dir
+    }
+
+    fn commit_via_tool(
+        server: &McpServer,
+        repo: &std::path::Path,
+        diff_paths: serde_json::Value,
+        message: &str,
+    ) -> serde_json::Value {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_commit_work",
+                "arguments": {
+                    "diff_paths": diff_paths,
+                    "message": message,
+                    "project_path": repo.to_string_lossy(),
+                }
+            })),
+            id: Some(json!(9417)),
+        };
+        server
+            .handle_request(req)
+            .unwrap()
+            .result
+            .expect("axon_commit_work returned no result")
+    }
+
+    #[test]
+    fn a_path_staged_before_the_call_stays_out_of_the_commit_and_stays_staged() {
+        let server = create_test_server();
+        let dir = repo_with_two_committed_files();
+        let repo = dir.path();
+
+        // The measured situation: something staged earlier, meant for LATER.
+        std::fs::write(repo.join("unrelated.txt"), "v2").unwrap();
+        git(repo, &["add", "--", "unrelated.txt"]);
+        // And the change this commit is actually about.
+        std::fs::write(repo.join("declared.txt"), "v2").unwrap();
+
+        let result = commit_via_tool(
+            &server,
+            repo,
+            json!(["declared.txt"]),
+            "fix: REQ-AXO-902417 only the declared path",
+        );
+        let content = result.get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // POSITIVE CONTROL, before the verdict. If the commit never happened —
+        // because the tool refused, because `project_path` was ignored, because
+        // the guideline gate fired — then "unrelated.txt is absent from the
+        // commit" would be trivially true and would measure nothing.
+        let committed = git_stdout(repo, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed.contains("declared.txt"),
+            "precondition: a commit must have happened and must carry the declared \
+             path. Nothing below means anything otherwise.\n  commit: {committed:?}\n\
+             \n  tool said: {content}"
+        );
+
+        // The verdict.
+        assert!(
+            !committed.contains("unrelated.txt"),
+            "`unrelated.txt` was staged before the call and NOT declared in \
+             `diff_paths`; it must not ride along under a message that does not \
+             mention it.\n  commit contained: {committed:?}\n  tool said: {content}"
+        );
+
+        // And nothing was lost. Excluding the path would be a poor trade if it
+        // also dropped the caller's staged work on the floor.
+        let still_staged = git_stdout(repo, &["diff", "--cached", "--name-only"]);
+        assert!(
+            still_staged.contains("unrelated.txt"),
+            "the excluded path must still be STAGED afterwards — excluded, not \
+             discarded.\n  still staged: {still_staged:?}"
+        );
+
+        // The response must say so: git's own "N files changed" is what a
+        // confident caller skips, having declared the paths themselves.
+        assert!(
+            content.contains("declared.txt") && content.contains("unrelated.txt"),
+            "the response must name both what was committed and what was left \
+             staged:\n{content}"
+        );
+    }
+
+    #[test]
+    fn a_brand_new_file_is_committed_by_the_bounded_commit() {
+        // The most common real case for this tool — every new test file, every
+        // new module — and the one the other tests miss: they all declare paths
+        // git already tracks. It matters because git's own wording for a
+        // path-limited commit is "record the current content of the listed files
+        // (WHICH MUST ALREADY BE KNOWN TO GIT)". The `git add -A --` above is
+        // what makes an untracked file known; that this suffices was reasoned,
+        // and reasoning is what this session keeps catching out. Measure it.
+        let server = create_test_server();
+        let dir = repo_with_two_committed_files();
+        let repo = dir.path();
+        std::fs::write(repo.join("fresh.rs"), "fn main() {}").unwrap();
+
+        let result = commit_via_tool(
+            &server,
+            repo,
+            json!(["fresh.rs"]),
+            "feat: REQ-AXO-902417 a brand-new file",
+        );
+        let content = result.get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert_ne!(
+            result.get("isError").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "committing a new file must not be refused:\n{content}"
+        );
+        let committed = git_stdout(repo, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed.contains("fresh.rs"),
+            "a previously-untracked declared file must land in the commit — if this \
+             is red, `--only` needs the path staged differently and EVERY commit \
+             creating a file is broken.\n  commit: {committed:?}\n  tool said: {content}"
+        );
+        assert!(
+            git_stdout(repo, &["status", "--porcelain"]).trim().is_empty(),
+            "nothing must be left behind: {:?}",
+            git_stdout(repo, &["status", "--porcelain"])
+        );
+    }
+
+    #[test]
+    fn a_deletion_already_staged_with_git_rm_and_declared_is_still_committed() {
+        // REQ-AXO-902296 must survive the bound: a `git rm` path is absent from
+        // BOTH worktree and index-as-content, so a naive pathspec commit could
+        // drop it. Declaring it must still commit its deletion.
+        let server = create_test_server();
+        let dir = repo_with_two_committed_files();
+        let repo = dir.path();
+        git(repo, &["rm", "-q", "declared.txt"]);
+
+        let result = commit_via_tool(
+            &server,
+            repo,
+            json!(["declared.txt"]),
+            "fix: REQ-AXO-902417 a declared deletion still lands",
+        );
+        let content = result.get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let committed = git_stdout(repo, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed.contains("declared.txt"),
+            "a staged deletion that IS declared must be committed — bounding the \
+             commit must not undo REQ-AXO-902296.\n  commit: {committed:?}\n\
+             \n  tool said: {content}"
+        );
+        assert!(
+            !std::path::Path::new(&repo.join("declared.txt")).exists(),
+            "sanity: the file really is gone from the worktree"
+        );
+    }
+
+    #[test]
+    fn a_merge_in_progress_is_refused_by_name_never_by_committing_everything() {
+        // The condition nobody tests. `git commit --only` refuses during a
+        // merge; the only wrong answer is to fall back to the unbounded commit,
+        // which would restore the defect silently under the one state where the
+        // index is guaranteed to hold work the caller did not declare.
+        let server = create_test_server();
+        let dir = repo_with_two_committed_files();
+        let repo = dir.path();
+
+        git(repo, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(repo.join("declared.txt"), "side").unwrap();
+        git(repo, &["commit", "-qam", "side change"]);
+        git(repo, &["checkout", "-q", "-"]);
+        std::fs::write(repo.join("declared.txt"), "trunk").unwrap();
+        git(repo, &["commit", "-qam", "trunk change"]);
+
+        // Conflicting merge, then a resolution staged by hand.
+        let merge = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(["merge", "side"])
+            .output()
+            .expect("git runs");
+        assert!(
+            !merge.status.success(),
+            "precondition: the merge must CONFLICT, otherwise no merge is in \
+             progress and this test measures nothing: {merge:?}"
+        );
+        std::fs::write(repo.join("declared.txt"), "resolved").unwrap();
+        git(repo, &["add", "--", "declared.txt"]);
+        assert!(
+            repo.join(".git/MERGE_HEAD").exists(),
+            "precondition: a merge must still be in progress"
+        );
+
+        let result = commit_via_tool(
+            &server,
+            repo,
+            json!(["declared.txt"]),
+            "fix: REQ-AXO-902417 merge refusal",
+        );
+        let content = result.get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert_eq!(
+            result.get("isError").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "a commit that did not happen must not come back in a success-shaped \
+             envelope:\n{content}"
+        );
+        assert_eq!(
+            result
+                .pointer("/data/operator_guidance/problem_class")
+                .and_then(serde_json::Value::as_str),
+            Some("partial_commit_refused_during_merge"),
+            "the refusal must be CLASSIFIED, not left to git's raw stderr:\n{content}"
+        );
+        assert!(
+            repo.join(".git/MERGE_HEAD").exists(),
+            "the tool must NOT have completed the merge behind the caller's back — \
+             that is the silent fallback this guard exists to prevent"
+        );
+    }
+}
+
 #[test]
 fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
     let server = create_test_server();
