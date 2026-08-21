@@ -342,6 +342,22 @@ fn catalog_tools(base_arguments: &Value) -> Vec<(String, bool, Value)> {
 #[test]
 fn every_tool_that_returns_items_names_them_in_the_text() {
     let _guard = env_lock();
+    // Ordre env → service_guard, identique partout dans la caisse : c'est
+    // l'uniformité de l'ordre qui écarte le deadlock. Le verrou est exigé par
+    // `no_test_touches_global_service_state_without_the_lock` (REQ-AXO-902274),
+    // qui m'a attrapé sur le `reset` ci-dessous — la garde a fait exactement son
+    // travail, et elle a dit quoi faire.
+    let _sg_guard = crate::service_guard::lock_for_tests();
+    // Le balayage appelle ~90 outils, dont les surfaces runtime : elles TOUCHENT
+    // l'ordonnanceur utility-first, qui est un état de PROCESSUS partagé par tous
+    // les tests. Mesuré : sans ce module la suite complète est verte (1880/0) ;
+    // avec lui, `test_single_gpu_worker_cruise_mode_grows_more_aggressively_when_
+    // ready_queue_starves` tombe à 80 au lieu de 104 — deux fois sur deux, et vert
+    // en isolation. Le balayage laisse donc l'ordonnanceur dans un autre état.
+    //
+    // On le remet à neuf des DEUX côtés : avant, pour ne pas mesurer l'héritage
+    // d'un autre test ; après, pour ne pas le léguer.
+    crate::vector_control::reset_utility_first_scheduler_for_tests();
     let server = create_test_server();
     seed_listable_content(&server);
 
@@ -355,6 +371,29 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
         "window_hours": 168,
         "mode": "brief"
     });
+
+    // Un balayage en LECTURE ne doit pas réécrire l'environnement du processus.
+    //
+    // « Lecture seule pour les données du tenant » n'implique PAS « sans effet de
+    // bord sur le processus » : `runtime_boot.rs:62` et `embedder.rs:1346` posent
+    // `AXON_VECTOR_WORKERS` / `AXON_EMBEDDING_PROVIDER` en CODE DE PRODUCTION. Un
+    // outil qui ne fait que répondre pourrait donc les écraser, et le verrou
+    // d'environnement des tests n'y pourrait rien — l'écriture n'ayant pas lieu
+    // dans un test.
+    //
+    // Mesuré : aucune dérive aujourd'hui. La garde reste parce que le chemin
+    // existe et qu'une dérive corromprait silencieusement tous les tests suivants,
+    // en rendant par-dessus le marché ce rapport-ci sans valeur.
+    const PROCESS_GLOBAL_ENV: &[&str] = &[
+        "AXON_VECTOR_WORKERS",
+        "AXON_EMBEDDING_PROVIDER",
+        "AXON_RUNTIME_MODE",
+        "AXON_EMBED_MAX_LENGTH",
+    ];
+    let env_before: Vec<(String, Option<String>)> = PROCESS_GLOBAL_ENV
+        .iter()
+        .map(|k| ((*k).to_string(), std::env::var(k).ok()))
+        .collect();
 
     let mut exercised: Vec<String> = Vec::new();
     let mut violations: Vec<String> = Vec::new();
@@ -400,6 +439,30 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
             violations.push(format!("{tool} : {violation}"));
         }
     }
+
+    // Rendre l'ordonnanceur de processus tel qu'on l'a trouvé.
+    crate::vector_control::reset_utility_first_scheduler_for_tests();
+
+    // L'invariant d'innocuité, AVANT les verdicts de rendu : un balayage qui
+    // laisse l'environnement modifié corrompt tous les tests qui suivent, et le
+    // rapport de rendu qu'il produit ne vaut alors plus rien.
+    let env_drift: Vec<String> = env_before
+        .iter()
+        .filter_map(|(key, before)| {
+            let after = std::env::var(key).ok();
+            (after != *before).then(|| {
+                format!("{key} : {before:?} → {after:?}")
+            })
+        })
+        .collect();
+    assert!(
+        env_drift.is_empty(),
+        "le balayage a MODIFIÉ l'environnement du processus alors qu'il n'appelle \
+         que des outils en lecture — du code de production écrit ces variables \
+         (runtime_boot.rs:62, embedder.rs:1346) et le verrou de test ne peut pas \
+         l'en empêcher :\n  - {}",
+        env_drift.join("\n  - ")
+    );
 
     // Le dénominateur d'abord : sans lui, « 0 violation » ne veut rien dire.
     // Plancher tenu SOUS la mesure courante (6 : query, promote_status,

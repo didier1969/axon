@@ -318,12 +318,12 @@ impl McpServer {
                 )
             };
             return Some(json!({
-                "content": [{"type":"text","text": format!("SOLL apply_plan DRY-RUN ready (NO mutations applied). preview_id={} (create={}, update={}).{} To commit, call soll_commit_revision(preview_id=\"{}\") or re-call soll_apply_plan with dry_run=false.", preview_id, counts.0, counts.1, blocker_note, preview_id)}],
+                "content": [{"type":"text","text": format!("SOLL apply_plan DRY-RUN ready (NO mutations applied). preview_id={} (create={}, update={}, link={}).{} To commit, call soll_commit_revision(preview_id=\"{}\") or re-call soll_apply_plan with dry_run=false.", preview_id, counts.0, counts.1, counts.2, blocker_note, preview_id)}],
                 "data": {
                     "preview_id": preview_id,
                     "applied": false,
                     "dry_run": true,
-                    "counts": {"create": counts.0, "update": counts.1},
+                    "counts": {"create": counts.0, "update": counts.1, "link": counts.2},
                     "commit_blockers": commit_blockers,
                     "operations": operations,
                     "result_contract": result_contract,
@@ -1394,17 +1394,29 @@ pub(super) fn format_soll_query_context_summary(
     out
 }
 
-fn summarize_ops(ops: &[Value]) -> (usize, usize) {
+/// REQ-AXO-902411 — compter AUSSI les liens.
+///
+/// Le dry-run rendait `create=0, update=0` pour un lot de 15 arêtes `TARGETS`
+/// soumises : un appelant qui prévisualise un lot de liens lisait « 0, 0 » et
+/// en concluait raisonnablement que son lot était vide ou mal formé. Le commit,
+/// lui, annonçait bien « 15 operations » — le défaut n'était que sur la branche
+/// de PRÉVISUALISATION.
+///
+/// C'est la classe de REQ-AXO-902409 sur le chemin qui n'écrit pas, et c'est
+/// le pire des deux : un aperçu muet précède la décision d'appliquer.
+fn summarize_ops(ops: &[Value]) -> (usize, usize, usize) {
     let mut creates = 0usize;
     let mut updates = 0usize;
+    let mut links = 0usize;
     for op in ops {
         match op.get("kind").and_then(|v| v.as_str()).unwrap_or("") {
             "create" => creates += 1,
             "update" => updates += 1,
+            "link" => links += 1,
             _ => {}
         }
     }
-    (creates, updates)
+    (creates, updates, links)
 }
 
 fn apply_plan_operation_contract(operations: &[Value]) -> Value {

@@ -314,13 +314,24 @@ fn prefix_overhead_tokens(symbol: &Symbol, repeated_context: &str) -> usize {
 ///
 /// The cap is in CHARS derived from the token ceiling: `content_token_count` is
 /// a tokenizer encode, and running it in a shrink loop on a 512 KiB docstring is
-/// the very cost the surrounding guards exist to avoid. `SAFE_CHARS_PER_TOKEN`
-/// under-estimates density, so the residue may still exceed the ceiling — the
-/// caller re-measures and routes on the measured value, never on this estimate.
+/// the very cost the surrounding guards exist to avoid. It uses
+/// `FALLBACK_CHARS_PER_TOKEN` — the SAME constant that will label the chunk — so
+/// the bound and the label agree by construction (REQ-AXO-902394). The estimate
+/// can still be optimistic on token-dense text, so the caller re-measures and
+/// routes on the measured value, never on this one.
 fn cap_symbol_docstring(symbol: &Symbol, profile: EmbeddingChunkProfile) -> Option<Symbol> {
     let docstring = symbol.docstring.as_deref()?;
+    // REQ-AXO-902394 — UNE seule constante chars/jeton, celle qui étiquette.
+    //
+    // Ce plafond se calculait avec `SAFE_CHARS_PER_TOKEN` (4) alors que
+    // l'étiquetage du morceau utilise `FALLBACK_CHARS_PER_TOKEN` (3) : 33 %
+    // d'écart par construction, dans le sens « la docstring passe la garde puis
+    // dépasse l'étiquette ». C'est exactement le piège que REQ-AXO-902340 a fermé
+    // pour le CORPS — quinze lignes plus bas — et qui était resté ouvert ici.
+    // Deux constantes pour une seule grandeur physique, c'est ainsi qu'une borne
+    // qui se lit respectée est systématiquement dépassée (GUI-PRO-013).
     let max_chars = (profile.target_chunk_tokens / DOCSTRING_BUDGET_DIVISOR)
-        .saturating_mul(SAFE_CHARS_PER_TOKEN)
+        .saturating_mul(FALLBACK_CHARS_PER_TOKEN)
         .max(1);
     if docstring.chars().count() <= max_chars {
         return None;

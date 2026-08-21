@@ -99,6 +99,58 @@ fn c1_envelope_wellformed_vp_and_missing_field_vn() {
     assert_eq!(no_idem["data"]["status"].as_str(), Some("input_invalid"));
 }
 
+/// REQ-AXO-902413 — signalé par VPC. `mcp_outbox_send` accepte `priority`, la
+/// requête de lecture TRIE dessus (`ORDER BY CASE priority WHEN 'high'…`), le
+/// champ gouverne l'archivage (`priority='high'` échappe à l'archivage auto et
+/// au balayage TTL) — et il n'était **pas publié**. Un automate ne pouvait donc
+/// que tout notifier (interdit par l'opérateur de VPC) ou deviner l'urgence par
+/// mots-clés. VPC n'a livré aucune surveillance, délibérément.
+///
+/// Même classe que REQ-AXO-902409 : le writer persiste, le reader ne restitue
+/// pas — ici sur un champ qui DÉCIDE.
+#[test]
+fn c6_priority_is_published_in_data_and_text() {
+    let server = create_test_server();
+
+    for (key, subject, priority) in [
+        ("c6-high", "incident en cours", "high"),
+        ("c6-low", "note de routine", "low"),
+    ] {
+        let sent = send(
+            &server,
+            json!({
+                "from": FROM, "to_project": TO,
+                "idempotency_key": key,
+                "subject": subject, "body_dense": "corps",
+                "priority": priority
+            }),
+        );
+        assert_eq!(sent["data"]["status"].as_str(), Some("ok"), "{key} envoyé");
+    }
+
+    let inbox = read(&server, json!({ "project": TO, "mode": "all" }));
+    let msgs = inbox["data"]["messages"].as_array().expect("messages array");
+    assert_eq!(msgs.len(), 2);
+
+    let high = msgs
+        .iter()
+        .find(|m| m["subject"].as_str() == Some("incident en cours"))
+        .expect("le message haute priorité est là");
+    assert_eq!(
+        high["priority"].as_str(),
+        Some("high"),
+        "la priorité doit être PUBLIÉE : elle gouverne l'archivage et le tri, \
+         et sans elle un automate ne peut que deviner l'urgence"
+    );
+
+    let text = inbox["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("HAUTE"),
+        "la priorité haute doit être visible dans le TEXTE : le tri se fait \
+         dessus, un lecteur qui ne la voit pas ne comprend pas l'ordre servi.\n---\n{text}"
+    );
+}
+
 // ── C2 — HMAC integrity (VP verified + VN tampered) ────────────────────────
 #[test]
 fn c2_hmac_verified_then_db_tamper_breaks_signature() {

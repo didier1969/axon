@@ -496,7 +496,12 @@ impl McpServer {
                 .to_string()
         };
         let sql = format!(
-            "SELECT id, message_id, context_id, from_project, kind, idempotency_key, in_reply_to, subject, body_dense, sig, created_at \
+            // REQ-AXO-902413 — `priority` est SÉLECTIONNÉ parce qu'il est publié.
+            // Il était déjà utilisé par l'`ORDER BY` juste au-dessus : le tri se
+            // faisait dessus et la valeur restait invisible. Le champ gouverne aussi
+            // l'archivage (`priority='high'` échappe à l'archivage auto et au
+            // balayage TTL) — un champ qui décide du comportement doit être lisible.
+            "SELECT id, message_id, context_id, from_project, kind, idempotency_key, in_reply_to, subject, body_dense, sig, created_at, priority \
              FROM axon.mailbox_message WHERE to_project='{}' AND id > {} AND archived_at IS NULL{} {} LIMIT {}",
             esc(&project),
             floor,
@@ -534,6 +539,10 @@ impl McpServer {
                 "subject": subject,
                 "body_dense": body,
                 "created_at": g(10),
+                // REQ-AXO-902413 — signalé par VPC : le champ existe, il gouverne
+                // l'archivage, il n'était pas publié. Sans lui un automate ne peut
+                // que tout notifier (interdit) ou deviner l'urgence par mots-clés.
+                "priority": g(11),
                 "signature_verified": verified,
             }));
             // REQ-AXO-902145 — render each body into the TEXT channel (content[0].text),
@@ -542,8 +551,16 @@ impl McpServer {
             // The explicit pull is where the content is meant to land.
             let sig_mark = if verified { "✓" } else { "✗ sig" };
             let reply = if irt.is_empty() { String::new() } else { format!(" ↩ {irt}") };
+            // REQ-AXO-902413 — la priorité dans le TEXTE aussi : le tri se fait
+            // dessus, donc un lecteur qui ne la voit pas ne comprend pas l'ordre
+            // qu'on lui sert.
+            let prio = match g(11) {
+                "high" => " · ⚠️ HAUTE",
+                "low" => " · basse",
+                _ => "",
+            };
             body_lines.push_str(&format!(
-                "\n\n**[{id}] {from} → {subject}** ({kind}, {sig_mark}{reply})\n{body}"
+                "\n\n**[{id}] {from} → {subject}** ({kind}, {sig_mark}{reply}{prio})\n{body}"
             ));
         }
 

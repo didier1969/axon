@@ -519,8 +519,78 @@ impl McpServer {
             }));
         }
 
+        // REQ-AXO-902410 — normaliser le type FOURNI comme on normalise le type
+        // DÉDUIT d'un id.
+        //
+        // La branche par id passait par `classify_existing_link_endpoint(...).label()`,
+        // qui rend le préfixe canonique (`MIL`, `REQ`, …) ; la branche par type
+        // passait la chaîne BRUTE de l'appelant. `"milestone"` ne matchait donc
+        // jamais la politique, clavée sur `MIL` : `pair_allowed=false`, et l'outil
+        // répondait « Direction MILESTONE -> REQUIREMENT has no canonical relation »
+        // pour la relation qui rattache TOUT le backlog de quatre tenants.
+        //
+        // Le coût n'est pas cosmétique : c'est la voie par TYPE que le message
+        // d'erreur de `soll_manager` prescrit (« call `soll_relation_schema` to get
+        // the matrix for a kind BEFORE guessing — top open friction in telemetry »).
+        // L'outil censé résoudre la friction n°1 la nourrissait, en rendant un fait
+        // négatif FAUX avec l'assurance d'un `Status: ok`.
+        let normalize_kind = |raw: &str| -> Option<String> {
+            let lowered = raw.trim().to_ascii_lowercase();
+            let canonical = match lowered.as_str() {
+                "vision" | "vis" => "VIS",
+                "pillar" | "pil" => "PIL",
+                "requirement" | "req" => "REQ",
+                "concept" | "cpt" => "CPT",
+                "decision" | "dec" => "DEC",
+                "milestone" | "mil" => "MIL",
+                "validation" | "val" => "VAL",
+                "stakeholder" | "stk" => "STK",
+                "guideline" | "gui" => "GUI",
+                "skill" | "ski" => "SKI",
+                "prompt_template" | "prompttemplate" | "prt" => "PRT",
+                "technology_migration" | "technologymigration" | "tmg" => "TMG",
+                "artifact" | "art" => "ART",
+                _ => return None,
+            };
+            Some(canonical.to_string())
+        };
+        let unknown_kind_error = |field: &str, raw: &str| -> Value {
+            json!({
+                "content": [{ "type": "text", "text": format!(
+                    "`{field}` = `{raw}` n'est pas un type SOLL connu. Un type inconnu est \
+                     REFUSÉ plutôt que rendu comme « aucune relation canonique » : un faux \
+                     négatif se lit comme une réponse (REQ-AXO-902410)."
+                ) }],
+                "isError": true,
+                "data": {
+                    "status": "input_invalid",
+                    "parameter_repair": {
+                        "invalid_field": field,
+                        "received": raw,
+                        "accepted_values": [
+                            "vision", "pillar", "requirement", "concept", "decision",
+                            "milestone", "validation", "stakeholder", "guideline",
+                            "skill", "prompt_template", "technology_migration", "artifact"
+                        ],
+                        "follow_up_tools": ["soll_relation_schema", "help"],
+                        "hint": "les préfixes canoniques (VIS/PIL/REQ/CPT/DEC/MIL/VAL/STK/GUI/SKI/PRT/TMG/ART) sont acceptés aussi"
+                    }
+                }
+            })
+        };
+        if let Some(ref raw) = source_type {
+            if normalize_kind(raw.as_ref()).is_none() {
+                return Some(unknown_kind_error("source_type", raw.as_ref()));
+            }
+        }
+        if let Some(ref raw) = target_type {
+            if normalize_kind(raw.as_ref()).is_none() {
+                return Some(unknown_kind_error("target_type", raw.as_ref()));
+            }
+        }
+
         let resolved_source_type = match (source_type, source_id) {
-            (Some(kind), _) => Some(kind),
+            (Some(kind), _) => normalize_kind(kind.as_ref()),
             (None, Some(id)) => match self.classify_existing_link_endpoint(id) {
                 Ok(kind) => Some(kind.label().to_string()),
                 Err(error) => {
@@ -542,7 +612,7 @@ impl McpServer {
             (None, None) => None,
         };
         let resolved_target_type = match (target_type, target_id) {
-            (Some(kind), _) => Some(kind),
+            (Some(kind), _) => normalize_kind(kind.as_ref()),
             (None, Some(id)) => match self.classify_existing_link_endpoint(id) {
                 Ok(kind) => Some(kind.label().to_string()),
                 Err(error) => {

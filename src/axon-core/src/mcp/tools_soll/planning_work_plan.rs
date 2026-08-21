@@ -1157,16 +1157,31 @@ impl McpServer {
         let summary = chapters
             .iter()
             .map(|c| {
-                format!(
-                    "{} [{}] {} — {} (open {})",
-                    c.get("milestone").and_then(|v| v.as_str()).unwrap_or(""),
-                    c.get("readiness").and_then(|v| v.as_str()).unwrap_or(""),
-                    c.get("chapter").and_then(|v| v.as_str()).unwrap_or(""),
-                    c.get("title").and_then(|v| v.as_str()).unwrap_or(""),
-                    c.get("reqs")
-                        .and_then(|v| v.get("open"))
+                // REQ-AXO-902404 — dire de QUOI le nombre est le nombre.
+                //
+                // La ligne s'écrivait `MIL-x [ready] PIL-y — <titre> (open 7)` :
+                // le `chapter` est un id de Pillar posé juste avant le titre, sans
+                // étiquette, donc il se lisait comme le SUJET du compte qui suit.
+                // KKI en a conclu que `(open N)` était keyé sur le Pillar — c'est
+                // faux, le compte porte sur les REQ du JALON — et a écrit cette
+                // fausse preuve dans un nœud SOLL avant de la rétracter.
+                //
+                // Le compte était juste ; c'est le rendu qui n'avait pas de
+                // référent. On étiquette le chapitre et on donne le dénominateur.
+                let reqs = c.get("reqs");
+                let count = |key: &str| {
+                    reqs.and_then(|v| v.get(key))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0)
+                };
+                format!(
+                    "{} [{}] {} — {} REQ ouverts / {} · thème {}",
+                    c.get("milestone").and_then(|v| v.as_str()).unwrap_or(""),
+                    c.get("readiness").and_then(|v| v.as_str()).unwrap_or(""),
+                    c.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                    count("open"),
+                    count("total"),
+                    c.get("chapter").and_then(|v| v.as_str()).unwrap_or(""),
                 )
             })
             .collect::<Vec<_>>()

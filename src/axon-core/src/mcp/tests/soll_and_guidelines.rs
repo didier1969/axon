@@ -7044,6 +7044,71 @@ fn test_soll_relation_schema_resolves_pair_by_ids() {
     assert!(data["canonical_examples"].as_array().is_some());
 }
 
+/// REQ-AXO-902410 — la voie par TYPE doit rendre la MÊME réponse que la voie par
+/// ID.
+///
+/// Elle ne le faisait pas : la branche par id normalisait le kind
+/// (`classify_existing_link_endpoint(...).label()` → `MIL`), la branche par type
+/// passait la chaîne brute de l'appelant. `"milestone"` ne matchait donc jamais
+/// la politique et l'outil répondait « Direction MILESTONE -> REQUIREMENT has no
+/// canonical relation » — pour la relation qui rattache TOUT le backlog de
+/// quatre tenants (APS, OPV, TE2, AXO).
+///
+/// C'est la voie par type que le message d'erreur de `soll_manager` prescrit
+/// (« call `soll_relation_schema` to get the matrix for a kind BEFORE guessing —
+/// top open friction in telemetry »). L'outil censé résoudre la friction n°1
+/// rendait un fait négatif FAUX sous un `Status: ok`.
+#[test]
+fn test_soll_relation_schema_by_type_matches_by_id() {
+    let server = create_test_server();
+
+    let by_type = |source: &str, target: &str| -> Value {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_relation_schema",
+                    "arguments": { "source_type": source, "target_type": target }
+                })),
+                id: Some(json!(902_410)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    // Les deux paires que KKI a heurtées, plus la casse et les préfixes.
+    for (source, target, expected) in [
+        ("milestone", "requirement", "TARGETS"),
+        ("Milestone", "Requirement", "TARGETS"),
+        ("MIL", "REQ", "TARGETS"),
+        ("requirement", "pillar", "BELONGS_TO"),
+    ] {
+        let response = by_type(source, target);
+        let text = response["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains(expected),
+            "{source} -> {target} doit rendre {expected} par TYPE comme par ID.\n---\n{text}"
+        );
+        assert_eq!(
+            response["data"]["pair_allowed"].as_bool(),
+            Some(true),
+            "{source} -> {target} : la paire est légale et le graphe en est plein"
+        );
+    }
+
+    // Un type inconnu est REFUSÉ, pas rendu comme « aucune relation canonique » :
+    // un faux négatif se lit comme une réponse.
+    let unknown = by_type("jalonnage", "requirement");
+    assert_eq!(unknown["isError"].as_bool(), Some(true));
+    assert_eq!(
+        unknown["data"]["status"].as_str(),
+        Some("input_invalid"),
+        "un type inconnu doit produire une réparation de paramètre, pas un verdict"
+    );
+}
+
 #[test]
 fn test_soll_relation_schema_unresolved_ids_return_guided_discovery_payload() {
     let server = create_test_server();
