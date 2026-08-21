@@ -1995,11 +1995,23 @@ impl McpServer {
     /// REQ-AXO-902100 (feedback #18) — `inspect mode=source` body : the symbol's
     /// source (from `ist.chunk.content`, no file I/O) + direct caller/callee
     /// signatures, file:line anchored. Serves the prepare_edit case in one call.
+    /// REQ-AXO-902442 — `around` / `offset` make the truncation ADDRESSABLE.
+    ///
+    /// AXO measured the dead end (llm_feedback #214): `inspect
+    /// symbol=axon_commit_work mode=source` renders "showing 160 of 613 lines"
+    /// — the FIRST 160 — while the `git commit` invocation being looked for sits
+    /// at line ~460. Nothing in the response said how to reach it: no `offset`,
+    /// no `part=`, no `around=`. The session fell back to `grep -n` + `sed -n`
+    /// on a 3 000-line file, which is exactly what MCP-first exists to remove,
+    /// and PIL-AXO-002 forbids (a tool that announces its own truncation
+    /// without naming the way forward is a dead end that knows it).
     fn inspect_source_block(
         &self,
         symbol_id: &str,
         caller_ids: &[String],
         callee_ids: &[String],
+        around: Option<&str>,
+        offset: usize,
     ) -> String {
         use std::fmt::Write as _;
         let sql_lit = |s: &str| s.replace('\'', "''");
@@ -2027,20 +2039,50 @@ impl McpServer {
                         body.push('\n');
                     }
                 }
-                let total = body.lines().count();
-                let shown: Vec<&str> = body.lines().take(INSPECT_SOURCE_LINE_CAP).collect();
+                let body = Self::strip_repeated_chunk_headers(&body);
+                let lines: Vec<&str> = body.lines().collect();
+                let total = lines.len();
+
+                let (window_start, window_end, not_found) =
+                    Self::source_window_for(&lines, around, offset);
+                let shown = &lines[window_start..window_end];
+
                 let cap_note = if total > INSPECT_SOURCE_LINE_CAP {
-                    format!(" (showing {} of {} lines)", INSPECT_SOURCE_LINE_CAP, total)
+                    // Name the NEXT call, with its arguments filled in. A count
+                    // of what is missing is a statement; the call is a way out.
+                    let next = if window_end < total {
+                        format!(
+                            " — next: `inspect symbol=… mode=source offset={window_end}`"
+                        )
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        " (lines {}-{} of {}{}; `around=\"<text>\"` jumps straight to a match)",
+                        window_start + 1,
+                        window_end,
+                        total,
+                        next
+                    )
+                } else {
+                    String::new()
+                };
+                let miss_note = if not_found {
+                    format!(
+                        "\n_`around` found no line containing that text in this symbol \
+                         ({total} lines) — showing from offset {window_start} instead._\n"
+                    )
                 } else {
                     String::new()
                 };
                 let _ = write!(
                     out,
-                    "\n\n#### Source — `{}:{}`-`{}`{}\n```\n{}\n```\n",
+                    "\n\n#### Source — `{}:{}`-`{}`{}\n{}```\n{}\n```\n",
                     file_path,
                     start,
                     end,
                     cap_note,
+                    miss_note,
                     shown.join("\n")
                 );
             }
@@ -2048,6 +2090,77 @@ impl McpServer {
         out.push_str(&self.neighbor_signature_section("Callers", caller_ids));
         out.push_str(&self.neighbor_signature_section("Callees", callee_ids));
         out
+    }
+
+    /// REQ-AXO-902442 — which slice of a symbol body to render.
+    ///
+    /// Returns `(start, end, around_missed)`. `around` wins over `offset`: it
+    /// answers the question actually being asked ("show me the `git commit`
+    /// inside this function") without requiring a line number nobody has yet.
+    /// The match is centred rather than put on the first line, so the reader
+    /// sees what leads INTO it. A miss never silently shows the top as if it
+    /// had matched — the caller is told.
+    pub(crate) fn source_window_for(
+        lines: &[&str],
+        around: Option<&str>,
+        offset: usize,
+    ) -> (usize, usize, bool) {
+        let total = lines.len();
+        if total == 0 {
+            return (0, 0, false);
+        }
+        let clamp = |v: usize| v.min(total.saturating_sub(1));
+        let (start, missed) = match around {
+            Some(needle) if !needle.trim().is_empty() => {
+                match lines.iter().position(|line| line.contains(needle)) {
+                    Some(hit) => (hit.saturating_sub(INSPECT_SOURCE_LINE_CAP / 4), false),
+                    None => (clamp(offset), true),
+                }
+            }
+            _ => (clamp(offset), false),
+        };
+        (start, (start + INSPECT_SOURCE_LINE_CAP).min(total), missed)
+    }
+
+    /// REQ-AXO-902442 — one header, not one per chunk part.
+    ///
+    /// `code_chunker` prefixes every stored part with `symbol:` / `kind:` /
+    /// `part: k/n` / `context:` lines. Concatenated back together for
+    /// `mode=source`, a 23-part symbol therefore carried ~90 lines of repeated
+    /// header inside a 160-line window: the caller paid the overhead AND did not
+    /// get what they came for. The first header stays (it names the symbol and
+    /// its signature); the repeats and every `part: k/n` marker go.
+    fn strip_repeated_chunk_headers(body: &str) -> String {
+        let mut seen_header = false;
+        let mut kept: Vec<&str> = Vec::with_capacity(body.lines().count());
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            let is_part_marker = trimmed.starts_with("part: ")
+                && trimmed
+                    .trim_start_matches("part: ")
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '/');
+            if is_part_marker {
+                continue;
+            }
+            let is_header = trimmed.starts_with("symbol: ")
+                || trimmed.starts_with("kind: ")
+                || trimmed == "context:";
+            if is_header {
+                if seen_header {
+                    continue;
+                }
+            } else if !trimmed.is_empty() {
+                seen_header = true;
+            }
+            kept.push(line);
+        }
+        kept.join("\n")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn strip_repeated_chunk_headers_for_tests(body: &str) -> String {
+        Self::strip_repeated_chunk_headers(body)
     }
 
     /// REQ-AXO-902100 — one-line signature + file:line per direct neighbour.
@@ -2450,6 +2563,11 @@ impl McpServer {
                         &symbol_id,
                         &caller_ids,
                         &callee_ids,
+                        args.get("around").and_then(Value::as_str),
+                        args.get("offset")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0)
+                            .min(usize::MAX as u64) as usize,
                     ));
                 }
                 let tested = rows

@@ -5901,3 +5901,81 @@ fn test_unopenable_entities_never_reach_a_reader_facing_surface() {
         "AXO::axon::src::axon-core::src::parser::rust.rs::parse_new_binding"
     ));
 }
+
+#[test]
+fn test_inspect_source_repeated_chunk_headers_are_collapsed() {
+    // REQ-AXO-902442 — `code_chunker` prefixes every stored part with
+    // `symbol:` / `kind:` / `part: k/n` / `context:`. Concatenated back for
+    // `mode=source`, a 23-part symbol carried ~90 lines of repeated header
+    // inside a 160-line window (llm_feedback #214): the caller paid the
+    // overhead AND did not get what they came for.
+    let body = "symbol: f\nkind: function\npart: 1/2\n\ncontext:\nfn f() {\n    let a = 1;\n\
+                \nsymbol: f\nkind: function\npart: 2/2\n\ncontext:\n    let b = 2;\n}\n";
+    let collapsed = McpServer::strip_repeated_chunk_headers_for_tests(body);
+
+    // POSITIVE CONTROL — the FIRST header survives; it names the symbol and
+    // its signature, and stripping it would trade one defect for another.
+    assert!(
+        collapsed.starts_with("symbol: f"),
+        "the first header must stay: {collapsed}"
+    );
+    assert_eq!(
+        collapsed.matches("symbol: f").count(),
+        1,
+        "the repeat is dropped: {collapsed}"
+    );
+    assert_eq!(
+        collapsed.matches("kind: function").count(),
+        1,
+        "same for kind: {collapsed}"
+    );
+    assert!(
+        !collapsed.contains("part: 1/2") && !collapsed.contains("part: 2/2"),
+        "the part markers are an indexing internal, never code: {collapsed}"
+    );
+    // The CODE is untouched — that is the whole payload.
+    for line in ["fn f() {", "    let a = 1;", "    let b = 2;", "}"] {
+        assert!(
+            collapsed.contains(line),
+            "source line lost: {line} in {collapsed}"
+        );
+    }
+}
+
+#[test]
+fn test_inspect_source_window_reaches_the_middle_of_a_long_symbol() {
+    // REQ-AXO-902442 — the measured dead end (llm_feedback #214):
+    // `inspect symbol=axon_commit_work mode=source` rendered "showing 160 of
+    // 613 lines" — the FIRST 160 — while the `git commit` call sits at ~460.
+    // No `offset`, no `part=`, no `around=`: the only way out was `grep -n` +
+    // `sed -n` on a 3 000-line file.
+    let mut body: Vec<String> = (0..613).map(|i| format!("line {i}")).collect();
+    body[460] = "    commit_cmd.arg(\"commit\")".to_string();
+    let lines: Vec<&str> = body.iter().map(String::as_str).collect();
+
+    // POSITIVE CONTROL — the default window really does start at the top and
+    // really does miss line 460, otherwise `around` would be fixing nothing.
+    let (start, end, missed) = McpServer::source_window_for(&lines, None, 0);
+    assert_eq!(start, 0);
+    assert!(!missed);
+    assert!(
+        !lines[start..end].iter().any(|l| l.contains("commit_cmd")),
+        "positive control: the default window must NOT contain the target"
+    );
+
+    // `around` reaches it, with lead-in context rather than pinning it to the
+    // first rendered line.
+    let (start, end, missed) = McpServer::source_window_for(&lines, Some("commit_cmd"), 0);
+    assert!(!missed);
+    assert!(start < 460 && end > 460, "window {start}..{end} must span 460");
+    assert!(lines[start..end].iter().any(|l| l.contains("commit_cmd")));
+
+    // `offset` continues where the previous window stopped.
+    let (start, end, _) = McpServer::source_window_for(&lines, None, 160);
+    assert_eq!(start, 160);
+    assert!(end > 160);
+
+    // A miss is REPORTED, never rendered as if it had matched.
+    let (_, _, missed) = McpServer::source_window_for(&lines, Some("no_such_text_anywhere"), 0);
+    assert!(missed, "an `around` that matches nothing must say so");
+}

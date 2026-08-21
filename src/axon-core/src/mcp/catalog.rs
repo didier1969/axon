@@ -923,13 +923,15 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "inspect",
-                "description": "[DX] Inspect symbol detail: callers, callees, stats. mode=source ALSO returns the symbol's source body + direct-neighbour signatures (file:line) — the prepare_edit one-call path (REQ-AXO-902100), no full-file Read needed. Use after query identifies target.",
+                "description": "[DX] Inspect symbol detail: callers, callees, stats. mode=source ALSO returns the symbol's source body + direct-neighbour signatures (file:line) — the prepare_edit one-call path (REQ-AXO-902100), no full-file Read needed. On a LONG symbol the body is windowed: pass `around=\"<text>\"` to jump straight to the first line containing that text (no line number needed), or `offset=<line>` to continue where the previous window stopped — the response names the exact next call (REQ-AXO-902442). Use after query identifies target.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "symbol": { "type": "string" },
                         "project": { "type": "string" },
-                        "mode": { "type": "string", "enum": ["brief", "verbose", "source"], "description": "brief (default) / verbose (rich evidence) / source (REQ-AXO-902100: append the symbol's source body + direct caller/callee signatures, all from the IST — no file Read needed)." }
+                        "mode": { "type": "string", "enum": ["brief", "verbose", "source"], "description": "brief (default) / verbose (rich evidence) / source (REQ-AXO-902100: append the symbol's source body + direct caller/callee signatures, all from the IST — no file Read needed)." },
+                        "around": { "type": "string", "description": "REQ-AXO-902442 — mode=source only: show the window around the FIRST line containing this text, instead of the first lines of the symbol. This is the way to reach the middle of a long function without knowing a line number (`around=\"git commit\"`). No match → the response says so and falls back to `offset`." },
+                        "offset": { "type": "integer", "description": "REQ-AXO-902442 — mode=source only: first body line to render (0-based), for continuing where the previous window stopped. The truncation note names the exact next call." }
                     },
                     "required": ["symbol"]
                 }
