@@ -1063,6 +1063,60 @@ fn an_artifact_type_illegal_for_the_entity_falls_back_to_what_the_ref_implies() 
     );
 }
 
+/// REQ-AXO-902418 — un SHA n'est pas un chemin cassé, et la réparation cessait
+/// de le confondre.
+///
+/// TE2 (`mcp_feedback` #185) a envoyé cinq SHA typés `file` — le seul choix
+/// plausible dans l'enum publié, où `commit` était absent — et a reçu
+/// `did_you_mean: "/home/.../trader-elixir-v2/567592f"`, un chemin qui
+/// n'existera jamais. La réparation censée résoudre la friction poussait
+/// activement vers la mauvaise piste.
+#[test]
+fn a_commit_sha_rejected_as_a_file_is_repaired_toward_its_type_not_toward_a_path() {
+    let server = create_test_server();
+    seed_requirement(&server, "REQ-TST-918");
+
+    let res = attach(
+        &server,
+        "REQ-TST-918",
+        json!([{ "artifact_type": "file", "artifact_ref": "b3f46fae" }]),
+    );
+
+    // CONTRÔLE POSITIF : la pièce a bien été REFUSÉE. Sans lui, une réparation
+    // absente (parce que l'attachement a réussi) rendrait vertes les assertions
+    // suivantes en ne mesurant rien.
+    assert_eq!(
+        res["data"]["attached"].as_i64(),
+        Some(0),
+        "précondition : un SHA typé `file` doit être refusé, sinon ce test ne \
+         mesure pas la réparation : {res}"
+    );
+
+    let repair = &res["data"]["parameter_repair"];
+    assert_eq!(
+        repair["invalid_field"].as_str(),
+        Some("artifact_type"),
+        "le champ fautif est le TYPE, pas le ref : le SHA est correct, c'est \
+         `file` qui le fait passer au contrôle disque : {res}"
+    );
+    assert_eq!(
+        repair["suggested_artifact_type"].as_str(),
+        Some("commit"),
+        "la réparation doit NOMMER le type qui marche : {res}"
+    );
+    assert!(
+        repair.get("did_you_mean").is_none(),
+        "aucun « vouliez-vous dire <chemin> » ne doit être proposé pour un SHA — \
+         c'est précisément la suggestion qui a coûté un aller-retour à TE2 : {res}"
+    );
+    let hint = repair["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("commit") && !hint.contains("project root`"),
+        "l'indice doit dire quoi renvoyer, sans préfixer le SHA par la racine \
+         projet : {hint}"
+    );
+}
+
 #[test]
 fn an_unrepairable_artifact_type_is_still_rejected() {
     // La frontière tient — et c'est ce test qui l'a imposée. Écrite d'abord en

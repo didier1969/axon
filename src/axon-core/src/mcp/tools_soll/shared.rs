@@ -408,6 +408,31 @@ pub(super) fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'stat
     accepted
 }
 
+/// REQ-AXO-902418 — every artifact type the handler can accept, for ANY entity
+/// kind. This is what the published `inputSchema` enum must declare: JSON Schema
+/// carries one enum per field, so the declaration can only be the union, and the
+/// per-entity narrowing belongs to the description and the handler.
+///
+/// The catalog used to spell that union out by hand — while its own description
+/// called itself "a mirror of accepted_evidence_artifact_schema, the single
+/// source of truth". It had drifted: `commit`, `sollref` and `url`, which
+/// `accepted_evidence_artifact_schema` adds for EVERY kind, were missing from
+/// it. TE2 measured the cost (`mcp_feedback` #185): five commit SHAs attached as
+/// `file` because `commit` was absent from the enum, five rejections, and a
+/// second call in `commit` that worked first try. A mirror that no one
+/// re-derives is a copy (GUI-PRO-013).
+///
+/// Derived over `CANONICAL_TRACEABILITY_ENTITY_TYPES`, so a new entity kind or a
+/// new artifact type reaches the schema without anyone remembering to.
+pub(crate) fn all_accepted_evidence_artifact_types() -> Vec<&'static str> {
+    CANONICAL_TRACEABILITY_ENTITY_TYPES
+        .iter()
+        .flat_map(|kind| accepted_evidence_artifact_schema(kind))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// REQ-AXO-902390 — what SHAPE does this `artifact_ref` have?
 ///
 /// The single place that answers "is this thing a filesystem path?". Three call

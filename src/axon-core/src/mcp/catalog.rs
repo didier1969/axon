@@ -372,7 +372,14 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "artifact_type": { "type": "string", "enum": ["document", "file", "symbol", "test", "metric", "validation", "rationale", "diff"], "description": "Kind of evidence (aliases: kind, type). Inferred from artifact_ref when omitted. REQ-AXO-902102 — accepted SET depends on entity_type (mirror of shared.rs::accepted_evidence_artifact_schema, the single source of truth): requirement → document/file/symbol/test/metric/validation (NOT diff/rationale); decision → document/file/symbol/rationale/diff (NOT test/metric); validation → +diff; concept → document/file/symbol/rationale; guideline → document/file/symbol/rationale/diff. The handler rejects an out-of-set type and returns the accepted list for that entity." },
+                                    // REQ-AXO-902418 — DERIVED from the accepted set, never re-listed
+                                    // here. The literal that stood in this slot called itself a
+                                    // mirror of `accepted_evidence_artifact_schema` and had drifted:
+                                    // `commit`, `sollref` and `url` are accepted for EVERY entity kind
+                                    // and were absent from it, so a caller reading the enum had no way
+                                    // to learn that a commit SHA is attachable (TE2 `mcp_feedback` #185
+                                    // — five SHAs sent as `file`, five rejections).
+                                    "artifact_type": { "type": "string", "enum": crate::mcp::tools_soll::all_accepted_evidence_artifact_types(), "description": "Kind of evidence (aliases: kind, type). Inferred from artifact_ref when omitted — a bare 7-40 hex ref types itself as `commit`. The enum above is the UNION over every entity kind; the set actually accepted NARROWS by `entity_type` (REQ-AXO-902102). `commit`, `sollref` and `url` are accepted for every kind. On rejection the handler returns `accepted_artifact_schema` — the exact list for THAT entity — so read it rather than guess; do not re-derive the per-entity sets from this description." },
                                     "artifact_ref": { "type": "string", "description": "Pointer to the evidence: file path | symbol id `module::fn` | test path `module::tests::name` | `VAL-CODE-NNN` | metric name/URL | commit SHA. Aliases: path, uri." },
                                     "note": { "type": "string", "description": "Optional human-readable note." }
                                 },

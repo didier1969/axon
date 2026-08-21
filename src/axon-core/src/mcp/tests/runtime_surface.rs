@@ -3831,6 +3831,59 @@ fn a_usable_canonical_list_is_left_untouched() {
     );
 }
 
+/// REQ-AXO-902418 — l'enum publié pour `artifact_type` doit être l'UNION de ce
+/// que le gestionnaire accepte, pas une copie tenue à la main d'une partie.
+///
+/// Le littéral qui occupait cette place se déclarait lui-même « mirror of
+/// shared.rs::accepted_evidence_artifact_schema, the single source of truth » et
+/// avait divergé : `commit`, `sollref` et `url`, acceptés pour TOUTE entité, en
+/// étaient absents. Un LLM qui lit l'enum n'avait aucun moyen d'apprendre qu'un
+/// SHA de commit est attachable — coût mesuré chez TE2 (`mcp_feedback` #185) :
+/// cinq rejets, puis un second appel en `commit` qui passe du premier coup.
+#[test]
+fn the_published_evidence_type_enum_is_the_union_of_what_the_handler_accepts() {
+    let catalog = crate::mcp::catalog::tools_catalog(true);
+    let tools = catalog["tools"].as_array().expect("tools array");
+    let published: Vec<String> = tools
+        .iter()
+        .find(|t| t["name"].as_str() == Some("soll_attach_evidence"))
+        .expect("`soll_attach_evidence` doit exister au catalogue")["inputSchema"]["properties"]
+        ["artifacts"]["items"]["properties"]["artifact_type"]["enum"]
+        .as_array()
+        .expect("`artifact_type` doit publier un enum")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::to_string)
+        .collect();
+
+    // CONTRÔLE POSITIF : un enum vide, ou un chemin JSON qui a bougé, rendrait
+    // les deux boucles ci-dessous vertes en ne comparant rien.
+    assert!(
+        published.contains(&"file".to_string()),
+        "l'enum publié doit au minimum porter la valeur de tous les jours ; s'il \
+         ne la porte pas, le chemin de lecture est faux et ce test ne mesure \
+         rien : {published:?}"
+    );
+
+    let accepted = crate::mcp::tools_soll::all_accepted_evidence_artifact_types();
+    for kind in &accepted {
+        assert!(
+            published.iter().any(|p| p == kind),
+            "`{kind}` est accepté par le gestionnaire et ABSENT de l'enum publié : \
+             un appelant ne peut pas le deviner avant d'avoir provoqué l'erreur.\n  \
+             publié : {published:?}\n  accepté : {accepted:?}"
+        );
+    }
+    for kind in &published {
+        assert!(
+            accepted.contains(&kind.as_str()),
+            "`{kind}` est publié comme légal alors qu'AUCUNE entité ne l'accepte : \
+             l'enum promet une valeur que le gestionnaire refusera toujours.\n  \
+             publié : {published:?}\n  accepté : {accepted:?}"
+        );
+    }
+}
+
 #[test]
 fn no_alias_shadows_a_real_parameter_of_its_own_tool() {
     // The guard that keeps this safe as the table grows: an alias must NOT be a

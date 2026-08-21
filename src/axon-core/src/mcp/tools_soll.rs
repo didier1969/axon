@@ -76,6 +76,10 @@ use storage::*;
 // module, which owns the sources; re-exported rather than duplicated.
 pub(crate) use inference::CANONICAL_NODE_STATUSES;
 pub(crate) use shared::soll_entity_from_canonical_id;
+// REQ-AXO-902418 — the published `soll_attach_evidence` enum is DERIVED from the
+// accepted set, not spelled out again in `catalog.rs`. The hand-written copy had
+// dropped `commit`/`sollref`/`url` while calling itself a mirror.
+pub(crate) use shared::all_accepted_evidence_artifact_types;
 
 #[allow(dead_code)]
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [

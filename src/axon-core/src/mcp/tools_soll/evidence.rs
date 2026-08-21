@@ -1050,6 +1050,46 @@ fn first_rejected_repair(
                     "artifact #{idx} type `{supplied}` is not accepted; use one of {accepted_schema:?}"
                 ),
             }),
+            // REQ-AXO-902418 — before proposing a path, ask what the ref IS.
+            // TE2 (`mcp_feedback` #185) sent five commit SHAs typed `file` — the
+            // only plausible choice in the published enum — and got back
+            // `did_you_mean: "/home/.../trader-elixir-v2/567592f"`, a path that
+            // can never exist. The repair meant to resolve the friction was
+            // ACTIVELY pushing toward the wrong fix: the path is not wrong, the
+            // TYPE is. `classify_artifact_ref` already knows the difference
+            // (REQ-AXO-902390); this branch simply had not asked it.
+            "path_not_resolvable"
+                if !matches!(
+                    classify_artifact_ref(raw_ref),
+                    ArtifactRefShape::Path | ArtifactRefShape::Unknown
+                ) =>
+            {
+                let (right_type, what) = match classify_artifact_ref(raw_ref) {
+                    ArtifactRefShape::CommitHash => ("commit", "a git object id"),
+                    ArtifactRefShape::SollRef => ("sollref", "a canonical SOLL id"),
+                    ArtifactRefShape::Url => ("url", "a URL"),
+                    // Guarded by the `if` above; kept total rather than
+                    // unreachable!() so a new shape cannot panic a repair path.
+                    ArtifactRefShape::Path | ArtifactRefShape::Unknown => ("document", "a document"),
+                };
+                json!({
+                    "invalid_field": "artifact_type",
+                    "rejected_artifact_index": idx,
+                    "rejected_artifact_kind": kind,
+                    "supplied_artifact_type": supplied,
+                    "supplied_artifact_ref": raw_ref,
+                    "primary_reason": primary,
+                    "accepted_artifact_schema": accepted_schema,
+                    "suggested_artifact_type": right_type,
+                    "hint": format!(
+                        "artifact #{idx}: `{raw_ref}` is {what}, not a file path — it was checked \
+                         against the filesystem because it was typed `{supplied}`. Re-send it with \
+                         `artifact_type: \"{right_type}\"` (accepted for every entity kind), or \
+                         omit `artifact_type` entirely and let the shape be inferred. Do NOT \
+                         prefix it with the project root."
+                    ),
+                })
+            }
             "path_not_resolvable" => {
                 // REQ-AXO-901619 — forward suggested_absolute_path + project_root
                 // so the LLM gets a concrete "did you mean" candidate in
