@@ -44,6 +44,7 @@ use super::soll::{
 use super::McpServer;
 use crate::project_meta::{
     discover_project_identities, is_valid_project_code, resolve_canonical_project_identity,
+    resolve_project_identity,
 };
 
 mod completeness;
@@ -79,6 +80,8 @@ pub(crate) use shared::soll_entity_from_canonical_id;
 // REQ-AXO-902418 — the published `soll_attach_evidence` enum is DERIVED from the
 // accepted set, not spelled out again in `catalog.rs`. The hand-written copy had
 // dropped `commit`/`sollref`/`url` while calling itself a mirror.
+#[cfg(test)]
+pub(crate) use completeness::classify_evidence_ref_against_root;
 pub(crate) use shared::all_accepted_evidence_artifact_types;
 
 #[allow(dead_code)]

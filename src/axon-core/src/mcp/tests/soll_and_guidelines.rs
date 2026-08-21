@@ -13855,3 +13855,132 @@ fn test_axon_commit_work_entry_tag_exempts_deliverable_symbol_from_gate() {
         "role='entry' must exempt a deliverable symbol from the gate: {response:?}"
     );
 }
+
+#[test]
+fn test_relative_evidence_is_judged_against_the_registry_root_not_the_brain_cwd() {
+    // REQ-AXO-902436 — the freshness sweep resolved a RELATIVE `artifact_ref`
+    // through `resolve_canonical_project_identity`, which only reads
+    // `.axon/meta.json` from disk. Measured on axon_live: that scan knows 13
+    // project roots while `soll.ProjectCodeRegistry` knows 75. For the 62 it
+    // misses the root came back `None`, every relative ref was stat()ed
+    // against the brain's own cwd, and 126 of 156 relative refs were reported
+    // `broken` while present under their real root (TE2 78/82, OPV 47/47).
+    // `soll_remove_evidence(broken_only=true)` deletes exactly that list.
+    //
+    // The fixture uses a project code that exists ONLY in the registry — no
+    // `.axon/meta.json` anywhere — because that is precisely the population
+    // the disk-only resolver cannot see.
+    let server = create_test_server();
+    let root = tempdir().expect("tempdir");
+    std::fs::create_dir_all(root.path().join("docs")).expect("mkdir docs");
+    std::fs::write(root.path().join("docs/proof.md"), b"proof").expect("write proof");
+    let root_str = root.path().to_string_lossy().to_string();
+    server
+        .graph_store
+        .sync_project_registry_entry("ZZ9", Some("zz9-fixture"), Some(&root_str))
+        .expect("register fixture project");
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-ZZ9-902436', 'Requirement', 'ZZ9', 'Registry-rooted evidence', 'Relative evidence must resolve against the registry root', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .expect("insert requirement");
+    // The real reference: relative, and PRESENT under the registry root.
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-ZZ9-PRESENT', 'requirement', 'REQ-ZZ9-902436', 'file', 'docs/proof.md', 1.0, 0)")
+        .expect("insert present evidence");
+    // POSITIVE CONTROL — same shape, same sweep, but genuinely absent under
+    // the root. Without it, `broken == 0` could equally mean "the sweep never
+    // looked at this project", which is the failure this test exists to catch.
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-ZZ9-ABSENT', 'requirement', 'REQ-ZZ9-902436', 'file', 'docs/never_written.md', 1.0, 0)")
+        .expect("insert absent evidence");
+
+    // Driven through the public MCP surface — the contract a client actually
+    // reads, not an internal struct.
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_verify_requirements",
+                "arguments": { "project_code": "ZZ9" }
+            })),
+            id: Some(json!(902436)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let details = result["data"]["details"].as_array().expect("details");
+    let entry = details
+        .iter()
+        .find(|value| value["id"].as_str() == Some("REQ-ZZ9-902436"))
+        .expect("requirement entry");
+    let offenders: Vec<&str> = entry["broken_file_evidence_offenders"]
+        .as_array()
+        .expect("offenders array")
+        .iter()
+        .filter_map(|o| o["path"].as_str())
+        .collect();
+    assert!(
+        offenders.contains(&"docs/never_written.md"),
+        "positive control: the sweep must actually run and flag the absent \
+         reference — got {offenders:?}"
+    );
+    assert!(
+        !offenders.contains(&"docs/proof.md"),
+        "a relative reference that EXISTS under the registry root must not be \
+         reported broken — got {offenders:?}"
+    );
+    assert_eq!(
+        entry["broken_file_evidence_count"].as_u64(),
+        Some(1),
+        "exactly the absent one, never the present one"
+    );
+    assert_eq!(
+        result["data"]["unresolvable_file_evidence_count"].as_u64(),
+        Some(0),
+        "the root resolved, so nothing is left unjudged"
+    );
+}
+
+#[test]
+fn test_an_unjudgeable_reference_is_never_called_broken() {
+    // REQ-AXO-902436 — the destructive half. When the root cannot be resolved
+    // at all, a RELATIVE reference is UNMEASURABLE, not broken: there is
+    // nothing to check it against. Reporting it broken is what aims
+    // `soll_remove_evidence(broken_only=true)` at valid proofs.
+    //
+    // An ABSOLUTE reference stays judgeable with no root whatsoever, so it
+    // keeps its verdict — the root only ever mattered for relative paths.
+    use crate::mcp::tools_soll::classify_evidence_ref_against_root;
+
+    assert_eq!(
+        classify_evidence_ref_against_root("docs/audits/attestation.md", None),
+        "unresolved_root",
+        "no root → a relative path is UNJUDGED, not broken"
+    );
+    assert_eq!(
+        classify_evidence_ref_against_root("/nonexistent/axon/req_902436_absolute_probe.log", None),
+        "broken",
+        "an absolute path needs no root to be judged absent"
+    );
+
+    let root = tempdir().expect("tempdir");
+    std::fs::create_dir_all(root.path().join("sub")).expect("mkdir sub");
+    std::fs::write(root.path().join("sub/present.md"), b"x").expect("write");
+    assert_eq!(
+        classify_evidence_ref_against_root("sub/present.md", Some(root.path())),
+        "present"
+    );
+    assert_eq!(
+        classify_evidence_ref_against_root("sub/missing.md", Some(root.path())),
+        "broken"
+    );
+    assert_eq!(
+        classify_evidence_ref_against_root("sub", Some(root.path())),
+        "directory"
+    );
+}

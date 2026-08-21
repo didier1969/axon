@@ -169,8 +169,23 @@ impl McpServer {
                 footer
             )
         };
+        // REQ-AXO-902436 — refs the sweep could not judge are NOT reported as
+        // broken, and their existence has to be said out loud: without this
+        // line the verdict reads as full coverage while part of the corpus was
+        // never measured, and `soll_remove_evidence(broken_only=true)` is the
+        // action it invites.
+        let unresolvable_section = match summary.unresolvable_file_evidence_count {
+            0 => String::new(),
+            n => format!(
+                "\n\n⚠️ {n} file reference(s) NOT judged: the project root did not resolve, \
+                 so a relative path could not be checked against anything. They are \
+                 deliberately absent from the broken list above — unmeasured is not broken. \
+                 Register the project path (`axon_init_project project_path=…`) and re-run \
+                 before acting on this verdict."
+            ),
+        };
         let text = format!(
-            "Requirement verification: done={}, partial={}, missing={}\n\nTop gaps:\n{}{}{}",
+            "Requirement verification: done={}, partial={}, missing={}\n\nTop gaps:\n{}{}{}{}",
             summary.done,
             summary.partial,
             summary.missing,
@@ -180,7 +195,8 @@ impl McpServer {
                 top_gaps.join("\n")
             },
             next_to_close,
-            broken_section
+            broken_section,
+            unresolvable_section
         );
 
         // REQ-AXO-91527 (MIL-AXO-019 Tier B) — tri-modal envelope.
@@ -205,6 +221,10 @@ impl McpServer {
                 },
                 "details": details,
                 "requirements": details,
+                // REQ-AXO-902436 — first-class "not measured" count, distinct
+                // from zero-broken. A consumer that ignores it is at least
+                // able to see it.
+                "unresolvable_file_evidence_count": summary.unresolvable_file_evidence_count,
                 "completion_model": completion_model,
                 "completeness_axes": {
                     "concept_completeness": snapshot.concept_complete(),

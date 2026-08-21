@@ -85,6 +85,13 @@ pub(crate) struct RequirementCoverageSummary {
     pub(super) partial: usize,
     pub(super) missing: usize,
     pub(super) entries: Vec<RequirementCoverageEntry>,
+    /// REQ-AXO-902436 — file/document refs the sweep could NOT judge because
+    /// the project root did not resolve (relative ref, unknown root). They are
+    /// deliberately NOT counted as broken: reporting them as broken is what
+    /// aimed `soll_remove_evidence(broken_only=true)` at 126 valid proofs.
+    /// Zero is the normal value; any other value means the verdict below is
+    /// partial, and the tool must say so rather than imply full coverage.
+    pub(super) unresolvable_file_evidence_count: usize,
 }
 
 #[derive(Clone, Debug, Default)]

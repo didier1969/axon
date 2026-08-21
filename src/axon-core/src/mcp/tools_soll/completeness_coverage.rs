@@ -1,5 +1,37 @@
 use super::*;
 
+/// Verdict of one `file`/`document` artifact ref against the project root.
+///
+/// REQ-AXO-902436 — FOUR states, not three. `unresolved_root` is the one that
+/// was missing, and its absence is what made the sweep destructive: when the
+/// root could not be resolved, a RELATIVE ref was stat()ed against whatever
+/// directory the brain happened to run in, missed, and was reported `broken`.
+/// `soll_remove_evidence(broken_only=true)` then deletes it. An unmeasurable
+/// ref is not a broken ref — it is a ref the tool could not judge, and saying
+/// so is the whole point (PIL-AXO-002: no verdict on an unmeasured quantity).
+///
+/// An ABSOLUTE ref stays judgeable with no root at all, so it keeps its
+/// `broken` verdict — the root only ever mattered for relative refs.
+pub(crate) fn classify_evidence_ref_against_root(
+    raw_ref: &str,
+    project_root: Option<&Path>,
+) -> &'static str {
+    let path = Path::new(raw_ref);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match project_root {
+            Some(root) => root.join(path),
+            None => return "unresolved_root",
+        }
+    };
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(meta) if meta.is_dir() => "directory",
+        Ok(_) => "present",
+        Err(_) => "broken",
+    }
+}
+
 impl McpServer {
     /// Batched broken-file-evidence map keyed by requirement_id, carrying the
     /// NAMED offenders (traceability id + artifact path), not just a count.
@@ -17,10 +49,14 @@ impl McpServer {
     /// instead of forcing raw SQL on `soll.Traceability`. Requirements with
     /// no broken reference are absent from the map (callers use
     /// `.get(id)` with a `unwrap_or_default`).
+    /// Returns `(offenders_by_requirement, unresolvable_ref_count)`. The second
+    /// member is REQ-AXO-902436: refs the sweep could not judge at all. It is
+    /// returned rather than folded into the first, because "I could not
+    /// measure this" and "this is broken" must never share a bucket.
     fn broken_file_evidence_by_requirement(
         &self,
         project_code: &str,
-    ) -> HashMap<String, Vec<BrokenFileEvidence>> {
+    ) -> (HashMap<String, Vec<BrokenFileEvidence>>, usize) {
         // 5-min TTL: balances staleness (artifacts referenced from SOLL rarely
         // disappear between minutes) against refresh cost (single batched
         // sweep per window).
@@ -38,7 +74,7 @@ impl McpServer {
         );
         let raw = match self.graph_store.query_json(&query) {
             Ok(s) => s,
-            Err(_) => return HashMap::new(),
+            Err(_) => return (HashMap::new(), 0),
         };
         let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
 
@@ -92,26 +128,25 @@ impl McpServer {
         let fresh_status: HashMap<String, &'static str> = if stale_refs.is_empty() {
             HashMap::new()
         } else {
-            let project_root = resolve_canonical_project_identity(project_code)
+            // REQ-AXO-902436 — resolve the root through BOTH sources, not just
+            // `.axon/meta.json` on disk. Measured on axon_live: the disk scan
+            // knows 13 project roots, `soll.ProjectCodeRegistry` knows 75, and
+            // the 62 it misses had EVERY relative artifact_ref stat()ed against
+            // the brain's own cwd — 126 of 156 relative refs marked `broken`
+            // while present under their real root (TE2 78/82, OPV 47/47).
+            // `resolve_project_identity` is the composed resolver that already
+            // existed in project_meta.rs (disk first, registry fallback); this
+            // sweep was calling the disk-only half.
+            let project_root = resolve_project_identity(&self.graph_store, project_code)
                 .ok()
                 .map(|identity| identity.project_path);
             // One stat() per unique stale path.
             let mut fresh: HashMap<String, &'static str> = HashMap::with_capacity(stale_refs.len());
             for raw_ref in &stale_refs {
-                let path = Path::new(raw_ref);
-                let candidate = if path.is_absolute() {
-                    path.to_path_buf()
-                } else if let Some(root) = project_root.as_ref() {
-                    root.join(path)
-                } else {
-                    path.to_path_buf()
-                };
-                let status: &'static str = match std::fs::symlink_metadata(&candidate) {
-                    Ok(meta) if meta.is_dir() => "directory",
-                    Ok(_) => "present",
-                    Err(_) => "broken",
-                };
-                fresh.insert(raw_ref.clone(), status);
+                fresh.insert(
+                    raw_ref.clone(),
+                    classify_evidence_ref_against_root(raw_ref, project_root.as_deref()),
+                );
             }
             // Batch UPDATE via VALUES list (one round-trip).
             let mut values: Vec<String> = Vec::new();
@@ -147,6 +182,7 @@ impl McpServer {
         // freshest status. Requirements with only healthy evidence never
         // enter the map (REQ-AXO-902337 contract) — callers unwrap_or_default.
         let mut by_req: HashMap<String, Vec<BrokenFileEvidence>> = HashMap::new();
+        let mut unresolvable = 0usize;
         for row in &all_rows {
             let effective_status: &str = if row.stale {
                 fresh_status
@@ -156,17 +192,21 @@ impl McpServer {
             } else {
                 row.status.as_str()
             };
-            if effective_status == "broken" {
-                by_req
-                    .entry(row.req_id.clone())
-                    .or_default()
-                    .push(BrokenFileEvidence {
-                        traceability_id: row.traceability_id.clone(),
-                        artifact_ref: row.artifact_ref.clone(),
-                    });
+            match effective_status {
+                "broken" => {
+                    by_req
+                        .entry(row.req_id.clone())
+                        .or_default()
+                        .push(BrokenFileEvidence {
+                            traceability_id: row.traceability_id.clone(),
+                            artifact_ref: row.artifact_ref.clone(),
+                        });
+                }
+                "unresolved_root" => unresolvable += 1,
+                _ => {}
             }
         }
-        by_req
+        (by_req, unresolvable)
     }
 
     pub(crate) fn requirement_coverage_summary(
@@ -189,7 +229,8 @@ impl McpServer {
         // the stat() + UPDATE flow. Hot-path callers already pay this only
         // once per work_plan invocation (cached upstream by REQ-AXO-319).
         // REQ-AXO-902337 — it now returns the named offenders per requirement.
-        let broken_by_req = self.broken_file_evidence_by_requirement(&project_code);
+        let (broken_by_req, unresolvable_file_evidence) =
+            self.broken_file_evidence_by_requirement(&project_code);
 
         // Stable iteration order by id so callers comparing snapshots
         // across calls (tests, diff tooling) see deterministic output.
@@ -253,6 +294,7 @@ impl McpServer {
             });
         }
 
+        summary.unresolvable_file_evidence_count = unresolvable_file_evidence;
         Ok(summary)
     }
 
