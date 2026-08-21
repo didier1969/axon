@@ -3981,6 +3981,144 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
     assert!(content.contains(&dec_id));
 }
 
+/// REQ-AXO-902405 — une Decision creee par le CHEMIN NOMINAL ne peut pas naitre
+/// en violation. L'ecrivain declare `REFINES` legal pour `DEC -> REQ`
+/// (`relation_policy`, `allowed: ["SOLVES","REFINES"]`, `allow_multiple_types`
+/// donc aucune canonisation automatique ne rattrape le choix) tandis que la
+/// regle `decision_without_links` ne reconnaissait que `SOLVES | IMPACTS`.
+///
+/// Ce test fait jouer les DEUX ensemble — outil d'ecriture puis validateur —
+/// parce qu'un test qui n'interroge qu'un seul cote ne peut pas voir une
+/// divergence entre les deux. C'est ce qui a laisse celle-ci vivre.
+#[test]
+fn test_a_decision_attached_via_refines_is_not_reported_as_unlinked() {
+    let server = create_test_server();
+    // Code projet DECLARE dans le registre et inutilise par les autres tests :
+    // un code inconnu fait echouer l'ecriture AVANT la question posee ici.
+    let code = "SWX".to_string();
+    let req_id = format!("REQ-{code}-001");
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('{code}', 'AXON_GLOBAL', 0, 1, 0, 0) ON CONFLICT (project_code) DO UPDATE SET last_req = 1"))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{req_id}', 'Requirement', '{code}', 'Ancre', 'Le besoin que la decision affine', 'current', '{{\"priority\":\"P1\"}}')"))
+        .unwrap();
+
+    // Temoin : une Decision sans la moindre arete, qui doit etre signalee.
+    let orphan_id = format!("DEC-{code}-900");
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{orphan_id}', 'Decision', '{code}', 'Decision sans aucun lien', 'Temoin du controle positif', 'current', '{{}}')"))
+        .unwrap();
+
+    // Chemin nominal : l'outil d'ecriture, avec la relation qu'il DECLARE legale.
+    let create = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "decision",
+                "data": {
+                    "project_code": code,
+                    "attach_to": req_id,
+                    "relation_type": "REFINES",
+                    "title": "Decision qui affine sans resoudre",
+                    "description": "Elle precise le besoin sans le clore.",
+                    "status": "current"
+                }
+            }
+        })),
+        id: Some(json!(9405)),
+    };
+    let created = server
+        .handle_request(create)
+        .unwrap()
+        .result
+        .expect("creation refusee");
+    let created_text = created.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        created_text.contains("created"),
+        "precondition : l'ecrivain doit ACCEPTER REFINES pour DEC -> REQ. \
+         S'il le refuse desormais, c'est l'autre moitie du contrat qui a bouge \
+         et ce test doit etre relu, pas rafistole :\n{created_text}"
+    );
+    let dec_id = created_text
+        .split('`')
+        .find(|token| token.starts_with("DEC-"))
+        .expect("id de la Decision introuvable dans la reponse")
+        .to_string();
+
+    // Ce que l'ecrivain a REELLEMENT pose. Sans cette verification, un test qui
+    // demande REFINES et recoit SOLVES (canonisation) passerait au vert en
+    // mesurant le cas nominal, pas le cas litigieux.
+    let stored = server
+        .graph_store
+        .query_json(&format!(
+            "SELECT relation_type FROM soll.Edge WHERE source_id = '{dec_id}' OR target_id = '{dec_id}'"
+        ))
+        .unwrap_or_else(|_| "[]".to_string());
+    assert!(
+        stored.contains("REFINES"),
+        "precondition : l'arete posee doit etre REFINES, sinon ce test mesure \
+         autre chose que la divergence visee. Pose : {stored}"
+    );
+
+    // Le validateur, sur la meme base.
+    let validate = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_validate",
+            "arguments": { "project_code": code }
+        })),
+        id: Some(json!(9406)),
+    };
+    let validated = server
+        .handle_request(validate)
+        .unwrap()
+        .result
+        .expect("validation sans resultat");
+
+    let unlinked = validated
+        .pointer("/data/violations/decisions_without_links")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    // CONTROLE POSITIF, avant le verdict. Une Decision sans la moindre arete
+    // DOIT apparaitre ici. Sans ce controle, une liste vide — parce que la
+    // regle ne tourne pas, parce que le chemin JSON a bouge, parce que le
+    // filtre de statut exclut tout — rendrait l'assertion suivante verte en ne
+    // mesurant rien. C'est exactement la classe de defaut que cette session
+    // corrige ailleurs (REQ-AXO-902384) ; elle vaut aussi pour mes tests.
+    assert!(
+        unlinked.iter().any(|v| v.as_str() == Some(orphan_id.as_str())),
+        "controle positif en echec : {orphan_id} n'a AUCUNE arete et n'est pas \
+         signalee. La regle ne s'execute pas sur cette base, ou le chemin \
+         `/data/decisions_without_links` a change — le verdict suivant ne \
+         voudrait rien dire.\n  signales : {unlinked:?}\n  reponse : {validated}"
+    );
+
+    assert!(
+        !unlinked
+            .iter()
+            .any(|v| v.as_str() == Some(dec_id.as_str())),
+        "{dec_id} a ete rattachee par `REFINES`, une relation que l'outil \
+         d'ecriture declare legale pour DEC -> REQ, et le validateur la compte \
+         pourtant comme « sans lien ». Le validateur doit lire la POLITIQUE, \
+         pas en recopier une part.\n  signales : {unlinked:?}"
+    );
+}
+
 #[test]
 fn test_axon_validate_soll_reports_duplicate_titles_and_uncovered_requirements() {
     // REQ-AXO-91560 — per-test project_code isolation.
@@ -4830,10 +4968,108 @@ fn test_axon_query_empty_fallback_returns_structured_recovery_without_empty_resu
         "{content}"
     );
     assert!(!content.contains("Aucun résultat trouvé."), "{content}");
+
+    // REQ-AXO-902407 — la guidance doit être DANS le texte. Ce test asserait
+    // uniquement `data["operator_guidance"]`, que plusieurs clients MCP
+    // n'exposent jamais au modèle : il restait vert pendant que la réponse
+    // visible disait « use recovery guidance » sans en rendre une seule ligne.
+    assert!(
+        content.contains("What to do next"),
+        "la réponse vide doit rendre la marche à suivre, pas y renvoyer :\n{content}"
+    );
+    assert!(
+        content.contains("retrieve_context"),
+        "la marche à suivre doit NOMMER un appel concret :\n{content}"
+    );
+    assert!(
+        content.contains("symbol NAMES"),
+        "elle doit dire ce que `query` cherche réellement — c'est le \
+         malentendu qui fait relancer la même requête aveugle :\n{content}"
+    );
+
     let data = result.get("data").unwrap();
     assert_eq!(data["result_count"].as_u64(), Some(0));
     assert_eq!(data["query_state"].as_str(), Some("structure_only_empty"));
     assert!(data["operator_guidance"].as_object().is_some());
+}
+
+/// REQ-AXO-902407 — une PHRASE et un IDENTIFIANT ne se rattrapent pas de la
+/// même façon, et rendre la même marche à suivre aux deux serait rendre une
+/// marche à suivre pour personne.
+#[test]
+fn test_axon_query_empty_routes_a_literal_phrase_to_content_search_first() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    let ask = |q: &str| -> String {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "query",
+                "arguments": { "query": q, "project": "TST" }
+            })),
+            id: Some(json!(2124)),
+        };
+        server
+            .handle_request(req)
+            .unwrap()
+            .result
+            .expect("Expected result")
+            .get("content")
+            .unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let phrase = ask("where do we validate the refresh token");
+    let identifier = ask("booking");
+
+    // La phrase : recherche de CONTENU en premier, avec le motif recopié.
+    let first_step_of_phrase = phrase
+        .split("**What to do next**")
+        .nth(1)
+        .expect("la branche phrase doit rendre la marche à suivre")
+        .lines()
+        .find(|l| l.trim_start().starts_with("1."))
+        .expect("premier pas manquant")
+        .to_string();
+    assert!(
+        first_step_of_phrase.contains("retrieve_context"),
+        "pour une phrase, le PREMIER pas doit être la recherche de contenu :\n{first_step_of_phrase}"
+    );
+    assert!(
+        phrase.contains("where do we validate the refresh token"),
+        "la marche à suivre doit recopier le motif, sinon elle n'est pas \
+         collable telle quelle :\n{phrase}"
+    );
+
+    // L'identifiant : on raccourcit le motif d'abord, le contenu ensuite.
+    let first_step_of_identifier = identifier
+        .split("**What to do next**")
+        .nth(1)
+        .expect("la branche identifiant doit rendre la marche à suivre")
+        .lines()
+        .find(|l| l.trim_start().starts_with("1."))
+        .expect("premier pas manquant")
+        .to_string();
+    assert!(
+        !first_step_of_identifier.contains("retrieve_context"),
+        "pour un identifiant, `retrieve_context` n'est pas le premier réflexe — \
+         raccourcir le motif l'est :\n{first_step_of_identifier}"
+    );
+
+    // Les deux disent le périmètre réellement interrogé : « absent de ce projet »
+    // et « absent partout » sont deux réponses différentes.
+    for text in [&phrase, &identifier] {
+        assert!(
+            text.contains("project=\"*\""),
+            "la marche à suivre doit proposer de retirer la borne de projet :\n{text}"
+        );
+    }
 }
 
 #[test]

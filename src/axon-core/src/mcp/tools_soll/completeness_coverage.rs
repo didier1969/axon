@@ -364,8 +364,46 @@ impl McpServer {
                 }
             }
 
-            // decision_without_links: Decision with no SOLVES/IMPACTS.
+            // decision_without_links: une Decision qui n'est reliee a rien.
             // REQ-AXO-901602 — apply status filter when caller opts in.
+            //
+            // REQ-AXO-902405 — la regle codait en dur `SOLVES | IMPACTS`, un
+            // SOUS-ENSEMBLE de ce que l'ecrivain declare legal : la matrice
+            // `("DEC","REQ")` admet `["SOLVES","REFINES"]` avec
+            // `allow_multiple_types: true`, donc aucune canonisation
+            // automatique ne rattrape le choix. Une Decision rattachee par le
+            // chemin nominal avec `REFINES` naissait en violation, et le
+            // message lui reprochait de n'avoir « aucun lien » alors qu'elle en
+            // avait un, legal, pose par l'outil lui-meme.
+            //
+            // On lit desormais la POLITIQUE au lieu d'en recopier une part
+            // (GUI-PRO-013) : ajouter une relation a la matrice n'exige plus de
+            // penser a la repercuter ici, ce que personne n'a fait la premiere
+            // fois. Le nom de la regle redevient vrai — « sans lien » veut dire
+            // sans aucune arete que la politique reconnaisse.
+            let decision_attachment_relations = super::relation_policy::
+                allowed_relation_targets_from_source("DEC")
+                .iter()
+                .filter_map(|route| {
+                    route
+                        .get("allowed_relations")
+                        .and_then(Value::as_array)
+                        .map(|types| {
+                            types
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                })
+                .flatten()
+                .collect::<std::collections::BTreeSet<String>>();
+            debug_assert!(
+                decision_attachment_relations.contains("SOLVES"),
+                "la politique ne declare plus SOLVES pour DEC : la derivation \
+                 lit la mauvaise cle, et cette regle laisserait passer tout"
+            );
+
             for id in snapshot.node_ids_of_type("Decision") {
                 let Some(node) = snapshot.nodes.get(id) else {
                     continue;
@@ -373,12 +411,10 @@ impl McpServer {
                 if !status_allowed(&node.status, false) {
                     continue;
                 }
-                let has_links = snapshot
-                    .outgoing_edges(id)
-                    .any(|(_, rel)| matches!(rel, "SOLVES" | "IMPACTS"))
-                    || snapshot
-                        .incoming_edges(id)
-                        .any(|(_, rel)| matches!(rel, "SOLVES" | "IMPACTS"));
+                let recognised =
+                    |rel: &str| decision_attachment_relations.contains(rel);
+                let has_links = snapshot.outgoing_edges(id).any(|(_, rel)| recognised(rel))
+                    || snapshot.incoming_edges(id).any(|(_, rel)| recognised(rel));
                 if !has_links {
                     decisions_without_links.push(id.clone());
                 }

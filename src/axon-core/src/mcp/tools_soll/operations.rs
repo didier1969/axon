@@ -392,7 +392,8 @@ impl McpServer {
             repair_guidance.push(repair_guidance_entry(
                 "decisions_without_solves_or_impacts",
                 &snapshot.decisions_without_links,
-                "Decision nodes should solve a requirement or impact an artifact.",
+                "Une Decision doit etre reliee a ce qu'elle tranche. Les relations legales \
+                 sont celles que `soll_relation_schema source_type=decision` declare.",
                 &[
                     "link each decision to a requirement with `SOLVES` or `REFINES` when it addresses a need",
                     "link each decision to an artifact with `IMPACTS` or `SUBSTANTIATES` when it changes implementation reality",
@@ -463,7 +464,16 @@ impl McpServer {
             }
         }
         if !snapshot.decisions_without_links.is_empty() {
-            evidence.push_str("\n- Decisions without SOLVES/IMPACTS link:\n");
+            // REQ-AXO-902405 — l'etiquette annoncait `SOLVES/IMPACTS`, le
+            // sous-ensemble code en dur que la regle appliquait, pendant que la
+            // guidance de reparation juste au-dessus conseillait `SOLVES` OU
+            // `REFINES`. Le meme rapport reprochait donc d'avoir fait ce qu'il
+            // conseillait. La regle lit desormais la politique ; l'etiquette
+            // cesse de nommer un sous-ensemble.
+            evidence.push_str(
+                "\n- Decisions sans aucune relation reconnue par la politique \
+                 (voir `soll_relation_schema source_type=decision`) :\n",
+            );
             for id in &snapshot.decisions_without_links {
                 evidence.push_str(&format!("  - {}\n", id));
             }

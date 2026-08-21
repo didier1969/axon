@@ -574,6 +574,83 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902407 — the two empty-result branches told the caller to "use
+    /// recovery guidance" and rendered NONE of it: the guidance lived in
+    /// `data.operator_guidance`, which several MCP clients never expose to the
+    /// model. Telling someone to read something they cannot see is worse than
+    /// saying nothing — it costs a retry of the same blind query. Same class as
+    /// REQ-AXO-902409 (the writer persists, the reader does not restitute).
+    ///
+    /// The single most useful fact here is the one the empty result does NOT
+    /// convey: `query` matches symbol NAMES, not file contents. A caller
+    /// searching for a literal phrase gets zero hits and concludes the code is
+    /// absent, when it was only never indexed under that name.
+    fn query_empty_result_guidance(query_text: &str, project: &str) -> String {
+        let trimmed = query_text.trim();
+        // A symbol name is one identifier token. Anything with a space, a dot,
+        // a slash or a quote is a phrase, and phrases belong to content search.
+        let looks_like_a_phrase = trimmed.is_empty()
+            || trimmed
+                .chars()
+                .any(|c| !(c.is_alphanumeric() || c == '_' || c == ':' || c == '-'));
+
+        let scope = if project == "*" {
+            "every project".to_string()
+        } else {
+            format!("project `{project}`")
+        };
+
+        let mut steps: Vec<String> = Vec::new();
+        if looks_like_a_phrase {
+            steps.push(format!(
+                "`retrieve_context question=\"{trimmed}\"` — **start here**. This \
+                 looks like a phrase, not a symbol name, and `query` only matches \
+                 symbol NAMES. Content lives in the FTS + vector surfaces that \
+                 `retrieve_context` fuses."
+            ));
+            steps.push(
+                "`query` again with the single identifier you expect to exist \
+                 (a function or type name), not the sentence around it."
+                    .to_string(),
+            );
+        } else {
+            steps.push(format!(
+                "`query \"{}\"` — shorten the pattern. Symbol search is exact-ish; \
+                 a partial name matches where the full one does not.",
+                trimmed.split(&[':', '-'][..]).next().unwrap_or(trimmed)
+            ));
+            steps.push(format!(
+                "`retrieve_context question=\"{trimmed}\"` — if the name is right \
+                 but the symbol is not indexed under it (macro-generated, aliased, \
+                 or only present in a comment), content search still finds it."
+            ));
+        }
+        if project != "*" {
+            steps.push(format!(
+                "`query \"{trimmed}\" project=\"*\"` — the search was bounded to \
+                 {scope}. Drop the bound to tell \"absent from this project\" apart \
+                 from \"absent everywhere\"."
+            ));
+        }
+        steps.push(
+            "`status mode=brief` — read `Scope completeness N/N`. A visible backlog \
+             means the symbol may exist on disk and not yet in the index; that is a \
+             different answer from `it does not exist`."
+                .to_string(),
+        );
+
+        let mut out = String::from("\n**What to do next** — do NOT re-run this query unchanged:\n\n");
+        for (i, step) in steps.iter().enumerate() {
+            out.push_str(&format!("{}. {}\n", i + 1, step));
+        }
+        out.push_str(
+            "\n> `query` searches symbol NAMES. An empty result means \"no symbol is \
+             named that\" — it is not evidence that the behaviour is absent from the \
+             codebase.\n",
+        );
+        out
+    }
+
     fn query_diagnostic_block(
         intent: QueryIntent,
         query_path: &str,
@@ -1562,7 +1639,10 @@ impl McpServer {
                         diagnostic,
                         project_note.clone().unwrap_or_default(),
                         degraded_note.clone().unwrap_or_default(),
-                        "No exact structural match resolved in current graph. Use the guidance below to proceed without re-running a blind search."
+                        format!(
+                            "No exact structural match resolved in current graph.\n{}",
+                            Self::query_empty_result_guidance(query_text, project)
+                        )
                     )
                 }],
                 "data": {
@@ -1609,7 +1689,10 @@ impl McpServer {
                         diagnostic,
                         project_note.unwrap_or_default(),
                         degraded_note.unwrap_or_default(),
-                        "No usable match reconstructed from current index. Use recovery guidance instead of re-running the same query."
+                        format!(
+                            "No usable match reconstructed from current index.\n{}",
+                            Self::query_empty_result_guidance(query_text, project)
+                        )
                     )
                 }],
                 "data": {
