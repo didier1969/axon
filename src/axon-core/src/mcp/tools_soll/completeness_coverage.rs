@@ -626,7 +626,7 @@ impl McpServer {
             })
             .collect::<Vec<_>>();
 
-        let relation_policy_violations =
+        let (relation_policy_violations, supersedes_targets_still_open) =
             self.collect_relation_policy_violations(resolved_project_code.as_deref())?;
         let requirement_coverage = match (resolved_project_code.as_deref(), cached_coverage) {
             (Some(_), Some(cached)) => cached.clone(),
@@ -644,6 +644,7 @@ impl McpServer {
             duplicate_title_rows,
             duplicate_ids,
             relation_policy_violations,
+            supersedes_targets_still_open,
             requirement_coverage,
         })
     }

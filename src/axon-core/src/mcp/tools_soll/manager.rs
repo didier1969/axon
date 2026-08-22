@@ -895,15 +895,36 @@ impl McpServer {
                         // their titles) and hands back a `corrected_call` with one blank to
                         // fill. Choosing from a list is a decision; inventing an id is a
                         // round-trip.
-                        let candidates = self.candidate_parent_pillars(&project_code);
+                        // REQ-AXO-902453 (TE2 #224) — les candidats sont désormais
+                        // filtrés par la matrice de relations du kind SOURCE. Ils ne
+                        // l'étaient pas : un `milestone` se voyait proposer les six
+                        // Pillars du projet, dont AUCUN n'est atteignable depuis un
+                        // MIL — et le message suivant l'expliquait. La relation est
+                        // nommée avec chaque parent, pour que le second appel soit
+                        // correct du premier coup.
+                        let source_prefix = prefix_for_node_type(entity_type_cap);
+                        let candidates =
+                            self.candidate_parents_for_source(&project_code, source_prefix);
                         let candidate_lines: String = candidates
                             .iter()
-                            .map(|(id, title)| format!("\n  {id} — {title}"))
+                            .map(|(id, title, relation)| {
+                                format!("\n  {id} — {title}  (relation_type: {relation})")
+                            })
                             .collect();
                         let candidate_hint = if candidates.is_empty() {
-                            String::new()
+                            // Un kind qui n'atteint rien légalement doit le DIRE, pas
+                            // rendre une liste vide qui se lit comme « rien trouvé ».
+                            format!(
+                                "\n\nAucun parent légal pour un `{entity}` dans `{project_code}` : \
+                                 {}",
+                                relation_reach_sentence_for_source(source_prefix)
+                            )
                         } else {
-                            format!("\n\nParents plausibles dans `{project_code}` :{candidate_lines}")
+                            format!(
+                                "\n\nParents ATTEIGNABLES depuis un `{entity}` dans \
+                                 `{project_code}` (filtrés par la matrice de relations) :\
+                                 {candidate_lines}"
+                            )
                         };
                         return Some(json!({
                             "content": [{
@@ -927,7 +948,11 @@ impl McpServer {
                                     "required_fields": ["attach_to"],
                                     "candidate_parents": candidates
                                         .iter()
-                                        .map(|(id, title)| json!({ "id": id, "title": title }))
+                                        .map(|(id, title, relation)| json!({
+                                            "id": id,
+                                            "title": title,
+                                            "relation_type": relation
+                                        }))
                                         .collect::<Vec<_>>(),
                                     "corrected_call": {
                                         "tool": "soll_manager",
@@ -936,6 +961,7 @@ impl McpServer {
                                             "entity": entity,
                                             "data": {
                                                 "attach_to": "<choisir dans candidate_parents>",
+                                                "relation_type": "<le `relation_type` de CE candidat>",
                                             }
                                         }
                                     },
@@ -989,21 +1015,7 @@ impl McpServer {
 
                 // Validate (source_type, relation_type, target_type) per
                 // the canonical relation_policy table.
-                let source_prefix = match entity_type_cap {
-                    "Vision" => "VIS",
-                    "Pillar" => "PIL",
-                    "Requirement" => "REQ",
-                    "Concept" => "CPT",
-                    "Decision" => "DEC",
-                    "Milestone" => "MIL",
-                    "Validation" => "VAL",
-                    "Stakeholder" => "STK",
-                    "Guideline" => "GUI",
-                    "Skill" => "SKI",          // REQ-AXO-91578
-                    "PromptTemplate" => "PRT", // REQ-AXO-91579
-                    "TechnologyMigration" => "TMG", // REQ-AXO-901727
-                    other => other,
-                };
+                let source_prefix = prefix_for_node_type(entity_type_cap);
                 let target_prefix: String = attach_to.split('-').next().unwrap_or("").to_string();
                 let policy = relation_policy_for_pair(source_prefix, &target_prefix);
                 // REQ-AXO-902288 — auto-canonize a wrong/guessed relation_type whenever the
@@ -1119,13 +1131,37 @@ impl McpServer {
 
                 // Atomic INSERT node + INSERT edge via single CTE so the
                 // node never survives a failed edge insert.
-                let cte_sql = "WITH new_node AS (\
-                    INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
-                    VALUES (?, ?, ?, ?, ?, ?, ?::JSONB) \
-                    RETURNING id\
-                ) \
-                INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
-                SELECT new_node.id, ?, ?, ? FROM new_node";
+                // REQ-AXO-902453 (TE2 #224) — deux chemins qui devaient s'accorder.
+                // `link` posait l'arête SUPERSEDES ET retirait la cible, en le disant ;
+                // `create(relation_type=SUPERSEDES)` posait l'arête et se TAISAIT, la
+                // cible restant `current`. Le graphe se contredisait alors lui-même —
+                // supersédé par une arête, ouvert par son statut — et `soll_validate`
+                // ne voyait rien. TE2 ne l'a découvert qu'en comptant les jalons
+                // ouverts dans `soll_roadmap`.
+                //
+                // La bascule entre dans le MÊME CTE que les deux INSERT : une
+                // supersession partielle ne doit pas pouvoir survivre à un échec.
+                let cte_sql = if relation_type == "SUPERSEDES" {
+                    "WITH new_node AS (\
+                        INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                        VALUES (?, ?, ?, ?, ?, ?, ?::JSONB) \
+                        RETURNING id\
+                    ), new_edge AS (\
+                        INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                        SELECT new_node.id, ?, ?, ? FROM new_node \
+                        RETURNING target_id\
+                    ) \
+                    UPDATE soll.Node SET status = 'superseded' \
+                    WHERE id IN (SELECT target_id FROM new_edge)"
+                } else {
+                    "WITH new_node AS (\
+                        INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                        VALUES (?, ?, ?, ?, ?, ?, ?::JSONB) \
+                        RETURNING id\
+                    ) \
+                    INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                    SELECT new_node.id, ?, ?, ? FROM new_node"
+                };
 
                 let insert_res = self.graph_store.execute_param(
                     cte_sql,
@@ -1159,6 +1195,15 @@ impl McpServer {
                             report.push_str(&format!(
                                 "\nℹ️ `project_code` non fourni — déduit `{canonical_code}` du \
                                  parent `{attach_to}`."
+                            ));
+                        }
+                        if relation_type == "SUPERSEDES" {
+                            // REQ-AXO-902453 — `link` disait « status flipped » ;
+                            // `create` ne disait rien. Chaque bout nomme ce qui lui
+                            // arrive, comme REQ-AXO-902428 l'a imposé à `link`.
+                            report.push_str(&format!(
+                                "\n⚠ `{attach_to}` -> `superseded` (SUPERSEDES retire la cible) ; \
+                                 `{created_id}` reste `{status}`."
                             ));
                         }
                         if relation_type_inferred {

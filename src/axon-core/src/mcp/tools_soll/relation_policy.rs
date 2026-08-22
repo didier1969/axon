@@ -723,6 +723,77 @@ pub(super) fn relation_example_sentence(
     )
 }
 
+/// REQ-AXO-902453 — « MIL can legally reach: REQ via TARGETS, MIL via
+/// SUPERSEDES », à partir du seul préfixe source. Même donnée que
+/// `soll_relation_schema`, formulée pour un message d'erreur : un refus qui ne
+/// dit pas où aller est une impasse (PIL-AXO-002).
+pub(super) fn relation_reach_sentence_for_source(source_prefix: &str) -> String {
+    let routes: Vec<String> = allowed_relation_targets_from_source(source_prefix)
+        .iter()
+        .filter_map(|route| {
+            let kind = route.get("target_kind")?.as_str()?;
+            let rels: Vec<&str> = route
+                .get("allowed_relations")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            if rels.is_empty() {
+                return None;
+            }
+            Some(format!("{kind} via {}", rels.join("/")))
+        })
+        .collect();
+    if routes.is_empty() {
+        format!("`{source_prefix}` n'atteint aucun type de nœud selon la politique canonique.")
+    } else {
+        format!("un `{source_prefix}` atteint : {}.", routes.join(", "))
+    }
+}
+
+/// REQ-AXO-902453 — le préfixe canonique d'un type de nœud SOLL. Était inline
+/// dans `manager.rs` ; partagé pour que le refus `attach_required` (qui a besoin
+/// du kind source AVANT la validation de la paire) lise la MÊME table.
+pub(super) fn prefix_for_node_type(node_type: &str) -> &str {
+    match node_type {
+        "Vision" => "VIS",
+        "Pillar" => "PIL",
+        "Requirement" => "REQ",
+        "Concept" => "CPT",
+        "Decision" => "DEC",
+        "Milestone" => "MIL",
+        "Validation" => "VAL",
+        "Stakeholder" => "STK",
+        "Guideline" => "GUI",
+        "Skill" => "SKI",                               // REQ-AXO-91578
+        "PromptTemplate" => "PRT",                      // REQ-AXO-91579
+        "TechnologyMigration" => "TMG",                 // REQ-AXO-901727
+        other => other,
+    }
+}
+
+/// REQ-AXO-902453 — le type de nœud SOLL derrière un préfixe canonique.
+/// Réciproque du `match` de `manager.rs` (type → préfixe) ; sans elle, on ne
+/// peut pas passer de « ce que ce kind peut atteindre » (matrice, en préfixes)
+/// à « quels nœuds proposer » (base, en types).
+pub(super) fn node_type_for_prefix(prefix: &str) -> Option<&'static str> {
+    Some(match prefix {
+        "VIS" => "Vision",
+        "PIL" => "Pillar",
+        "REQ" => "Requirement",
+        "CPT" => "Concept",
+        "DEC" => "Decision",
+        "MIL" => "Milestone",
+        "VAL" => "Validation",
+        "STK" => "Stakeholder",
+        "GUI" => "Guideline",
+        "SKI" => "Skill",
+        "PRT" => "PromptTemplate",
+        "TMG" => "TechnologyMigration",
+        _ => return None,
+    })
+}
+
 pub(super) fn allowed_relation_targets_from_source(source_type: &str) -> Vec<Value> {
     SOLL_RELATION_ENDPOINT_KINDS
         .iter()

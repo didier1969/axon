@@ -180,20 +180,69 @@ impl McpServer {
         Ok(raw.to_string())
     }
 
-    /// REQ-AXO-902312 — the project's Pillars, as `(id, title)`, for an
-    /// `attach_required` refusal that names its candidates instead of describing
-    /// them. Pillars only: they are the canonical parent for the entity kinds that
-    /// hit this error (REQ/GUI/CPT → PIL is single-legal, so naming a pillar is
-    /// enough to complete the call). Best-effort — an empty list degrades to the
-    /// previous prose hint rather than failing the (already failing) call.
-    pub(super) fn candidate_parent_pillars(&self, project_code: &str) -> Vec<(String, String)> {
+    /// REQ-AXO-902453 — les parents que ce kind peut LÉGALEMENT atteindre, avec
+    /// la relation à employer : `(id, titre, relation)`.
+    ///
+    /// Signalé par TE2 (`llm_feedback` #224) : le refus `attach_required`
+    /// proposait les six Pillars du projet à un `milestone`. **Aucun n'est
+    /// atteignable depuis un MIL** — et le message SUIVANT l'expliquait. Deux
+    /// appels perdus, et une hésitation sur laquelle des deux réponses croire.
+    ///
+    /// La matrice existait déjà et était correcte (`relation_policy_for_pair`) ;
+    /// c'est une jointure, pas une fonctionnalité. Puisque le kind source est
+    /// connu, la relation est nommée avec chaque parent : le second appel est
+    /// correct du premier coup.
+    ///
+    /// `SUPERSEDES` est écarté des propositions : il MUTE la cible en
+    /// `superseded`. Proposer une relation destructive à quelqu'un qui cherche
+    /// juste un parent serait la pire des suggestions (même raison qu'en
+    /// `completeness_relations.rs`).
+    pub(super) fn candidate_parents_for_source(
+        &self,
+        project_code: &str,
+        source_prefix: &str,
+    ) -> Vec<(String, String, String)> {
+        /// Assez pour choisir, trop peu pour noyer.
+        const MAX_CANDIDATES: usize = 12;
+
+        // Quels TYPES ce kind peut-il atteindre, et par quelle relation ?
+        let mut relation_by_type: HashMap<String, String> = HashMap::new();
+        for route in allowed_relation_targets_from_source(source_prefix) {
+            let Some(target_prefix) = route.get("target_kind").and_then(Value::as_str) else {
+                continue;
+            };
+            let relations: Vec<&str> = route
+                .get("allowed_relations")
+                .and_then(Value::as_array)
+                .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let chosen = route
+                .get("default_relation")
+                .and_then(Value::as_str)
+                .or_else(|| relations.iter().copied().find(|r| *r != "SUPERSEDES"));
+            let Some(relation) = chosen.filter(|r| *r != "SUPERSEDES") else {
+                continue;
+            };
+            if let Some(node_type) = node_type_for_prefix(target_prefix) {
+                relation_by_type.insert(node_type.to_string(), relation.to_string());
+            }
+        }
+        if relation_by_type.is_empty() {
+            return Vec::new();
+        }
+
         let escaped = escape_sql(project_code);
+        let type_list = relation_by_type
+            .keys()
+            .map(|t| format!("'{}'", escape_sql(t)))
+            .collect::<Vec<_>>()
+            .join(", ");
         self.graph_store
             .query_json(&format!(
-                "SELECT id, COALESCE(title, '') FROM soll.Node \
-                 WHERE type = 'Pillar' AND project_code = '{escaped}' \
+                "SELECT id, COALESCE(title, ''), type FROM soll.Node \
+                 WHERE type IN ({type_list}) AND project_code = '{escaped}' \
                    AND COALESCE(status, '') NOT IN ('superseded', 'rejected', 'archived') \
-                 ORDER BY id ASC LIMIT 12"
+                 ORDER BY type ASC, id ASC LIMIT {MAX_CANDIDATES}"
             ))
             .ok()
             .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
@@ -201,7 +250,11 @@ impl McpServer {
             .into_iter()
             .filter_map(|row| {
                 let mut it = row.into_iter();
-                Some((it.next()?, it.next().unwrap_or_default()))
+                let id = it.next()?;
+                let title = it.next().unwrap_or_default();
+                let node_type = it.next().unwrap_or_default();
+                let relation = relation_by_type.get(&node_type)?.clone();
+                Some((id, title, relation))
             })
             .collect()
     }

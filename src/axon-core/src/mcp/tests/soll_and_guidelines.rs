@@ -843,6 +843,17 @@ fn create_call(server: &McpServer, data: Value) -> Value {
 }
 
 fn seed_pillar(server: &McpServer, code: &str, id: &str, title: &str) {
+    // Une mutation exige un code ENREGISTRÉ (require_registered_mutation_project_code).
+    // `TST` l'est par le seed de test ; tout autre code doit être inscrit ici,
+    // sinon le fixture échoue sur `wrong_project_scope` avant d'atteindre la
+    // règle qu'il teste.
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) \
+             VALUES ('{code}', '/tmp/{code}', '{code}') ON CONFLICT (project_code) DO NOTHING"
+        ))
+        .unwrap();
     server
         .graph_store
         .execute(&format!(
@@ -14115,5 +14126,224 @@ fn test_a_digit_bearing_tenant_really_gets_a_traceability_row_end_to_end() {
         rows[0][0].as_str().map(str::to_ascii_lowercase).as_deref(),
         Some("commit"),
         "et c'est une preuve de type Commit"
+    );
+}
+
+/// REQ-AXO-902453 défaut 1 — signalé par TE2 (`llm_feedback` #224). Le refus
+/// `attach_required` proposait les six Pillars du projet à un `milestone` ;
+/// **aucun n'est atteignable depuis un MIL**, et le message SUIVANT l'expliquait.
+/// Deux appels perdus, et une hésitation sur laquelle des deux réponses croire.
+/// La matrice existait déjà : c'était une jointure, pas une fonctionnalité.
+#[test]
+fn attach_required_proposes_only_parents_the_source_kind_can_actually_reach() {
+    let server = create_test_server();
+    // Pas d'apostrophe : `seed_pillar` interpole le titre sans échapper.
+    seed_pillar(&server, "TSA", "PIL-TSA-901", "Pilier inatteignable depuis un jalon");
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('REQ-TSA-901', 'Requirement', 'TSA', 'Cible legale dun jalon', '', 'current', '{}') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .unwrap();
+
+    let refusal = |entity: &str| -> String {
+        server
+            .execute_tool_direct(
+                "soll_manager",
+                &json!({
+                    "action": "create",
+                    "entity": entity,
+                    "data": { "title": "sans parent", "description": "corps", "project_code": "TSA" }
+                }),
+            )
+            .expect("soll_manager répond")["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // Un MIL atteint REQ via TARGETS, et MIL via SUPERSEDES (destructif, donc
+    // jamais proposé). Il n'atteint AUCUN Pillar.
+    let milestone = refusal("milestone");
+    assert!(
+        !milestone.contains("PIL-TSA-901"),
+        "un jalon ne peut pas s'attacher à un Pillar — le proposer envoie dans un mur.\n---\n{milestone}"
+    );
+    assert!(
+        milestone.contains("REQ-TSA-901"),
+        "la seule cible légale doit être proposée.\n---\n{milestone}"
+    );
+    assert!(
+        milestone.contains("TARGETS"),
+        "la relation doit être nommée avec le parent, sinon le second appel se devine.\n---\n{milestone}"
+    );
+
+    // Contrôle positif : REQ → PIL est légal (BELONGS_TO). Le Pillar doit rester
+    // proposé — sinon le correctif a simplement cassé le cas qui marchait.
+    let requirement = refusal("requirement");
+    assert!(
+        requirement.contains("PIL-TSA-901") && requirement.contains("BELONGS_TO"),
+        "un requirement atteint bien un Pillar : le filtre ne doit pas l'écarter.\n---\n{requirement}"
+    );
+}
+
+/// REQ-AXO-902453 défaut 2 — deux chemins qui devaient s'accorder. `link` posait
+/// l'arête SUPERSEDES ET retirait la cible, en le disant ; `create` posait
+/// l'arête et se TAISAIT, la cible restant `current`. Le graphe se contredisait
+/// alors lui-même — supersédé par une arête, ouvert par son statut — et TE2 ne
+/// l'a découvert qu'en comptant les jalons ouverts de `soll_roadmap`.
+#[test]
+fn create_with_supersedes_retires_the_target_exactly_like_link_does() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSB", "PIL-TSB-901", "Ancre");
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('MIL-TSB-901', 'Milestone', 'TSB', 'Jalon remplacé', '', 'current', '{}') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .unwrap();
+
+    let status_of = |id: &str| -> String {
+        let raw = server
+            .graph_store
+            .query_json(&format!(
+                "SELECT COALESCE(status, '') FROM soll.Node WHERE id = '{id}'"
+            ))
+            .unwrap_or_default();
+        serde_json::from_str::<Vec<Vec<String>>>(&raw)
+            .unwrap_or_default()
+            .into_iter()
+            .next()
+            .and_then(|row| row.into_iter().next())
+            .unwrap_or_default()
+    };
+
+    let res = server
+        .execute_tool_direct(
+            "soll_manager",
+            &json!({
+                "action": "create",
+                "entity": "milestone",
+                "data": {
+                    "title": "Jalon remplaçant",
+                    "description": "corps",
+                    "attach_to": "MIL-TSB-901",
+                    "relation_type": "SUPERSEDES"
+                }
+            }),
+        )
+        .expect("soll_manager répond");
+    assert_ne!(res["isError"].as_bool(), Some(true), "{res}");
+
+    assert_eq!(
+        status_of("MIL-TSB-901"),
+        "superseded",
+        "une arête SUPERSEDES qui ne retire pas sa cible laisse DEUX jalons ouverts"
+    );
+    let text = res["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("superseded") && text.contains("MIL-TSB-901"),
+        "le silence était la moitié du défaut : la bascule doit être annoncée.\n---\n{text}"
+    );
+
+    // Contrôle positif : une création ORDINAIRE ne touche pas au statut du parent.
+    let ordinary = create_call(
+        &server,
+        json!({ "title": "exigence ordinaire", "description": "corps", "attach_to": "PIL-TSB-901" }),
+    );
+    assert_ne!(ordinary["isError"].as_bool(), Some(true), "{ordinary}");
+    assert_eq!(
+        status_of("PIL-TSB-901"),
+        "current",
+        "seul SUPERSEDES retire ; un BELONGS_TO ne doit rien muter"
+    );
+}
+
+/// REQ-AXO-902453, la porte proposée par TE2 : « une arête `SUPERSEDES` dont la
+/// cible est encore `current` est une incohérence structurelle ; ça mériterait
+/// d'être une violation détectée, pas un état silencieux ». `soll_validate`
+/// rendait 0 violation avec deux jalons ouverts dont l'un était supersédé.
+#[test]
+fn soll_validate_flags_a_supersedes_edge_whose_target_is_still_open() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSC", "PIL-TSC-901", "Ancre");
+    for (id, status) in [
+        ("MIL-TSC-901", "current"),    // remplaçant vivant
+        ("MIL-TSC-902", "current"),    // cible INCOHÉRENTE : supersédée mais ouverte
+        ("MIL-TSC-903", "superseded"), // cible cohérente — le contrôle positif
+        ("MIL-TSC-904", "superseded"), // source RETIRÉE : l'arête part du mauvais bout
+        ("MIL-TSC-905", "current"),    // ... vers un nœud VIVANT
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('{id}', 'Milestone', 'TSC', '{id}', '', '{status}', '{{}}') \
+                 ON CONFLICT (id) DO UPDATE SET status = '{status}'"
+            ))
+            .unwrap();
+    }
+    for (source, target) in [
+        ("MIL-TSC-901", "MIL-TSC-902"),
+        ("MIL-TSC-901", "MIL-TSC-903"),
+        // Arête à l'envers : c'est la SOURCE qui est retirée. Mesuré sur AXO,
+        // 7 des 10 cas réels sont de cette forme (`PIL-AXO-006 SUPERSEDES
+        // PIL-AXO-004`, alors que 006 est le supersédé).
+        ("MIL-TSC-904", "MIL-TSC-905"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                 VALUES ('{source}', '{target}', 'SUPERSEDES', 'TSC') \
+                 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
+            ))
+            .unwrap();
+    }
+
+    let text = server
+        .execute_tool_direct("soll_validate", &json!({ "project_code": "TSC" }))
+        .expect("soll_validate répond")["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    assert!(
+        text.contains("MIL-TSC-902"),
+        "la cible encore ouverte doit être signalée.\n---\n{text}"
+    );
+    // Contrôle positif : la supersession COHÉRENTE ne doit produire aucun bruit.
+    // Sans lui, une règle qui signale TOUTE arête SUPERSEDES passerait au vert.
+    assert!(
+        !text.contains("MIL-TSC-903"),
+        "une supersession cohérente n'est pas une violation.\n---\n{text}"
+    );
+    assert!(
+        !text.contains("0 minimal coherence violation"),
+        "le compteur doit inclure la nouvelle famille.\n---\n{text}"
+    );
+
+    // Les deux incohérences portent la même signature et se réparent à
+    // l'OPPOSÉ. Confondre les deux fait conseiller de retirer le nœud
+    // survivant : sur AXO, cela aurait retiré `PIL-AXO-004`.
+    let inverse_line = text
+        .lines()
+        .find(|l| l.contains("MIL-TSC-905"))
+        .unwrap_or_default();
+    assert!(
+        inverse_line.contains("INVERSE"),
+        "une arête dont la SOURCE est retirée est inversée, pas une cible oubliée.\n---\n{text}"
+    );
+    let open_line = text
+        .lines()
+        .find(|l| l.contains("MIL-TSC-902"))
+        .unwrap_or_default();
+    assert!(
+        !open_line.contains("INVERSE"),
+        "une source VIVANTE vers une cible ouverte n'est pas une inversion.\n---\n{text}"
     );
 }

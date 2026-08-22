@@ -331,11 +331,21 @@ impl McpServer {
         Ok(true)
     }
 
+    /// REQ-AXO-902453 — rend DEUX familles, sur le même parcours d'arêtes :
+    /// les relations illégales, et les **supersessions incohérentes** (une arête
+    /// `SUPERSEDES` dont la cible est encore ouverte). La seconde est née d'un
+    /// défaut mesuré par TE2 : `create(relation_type=SUPERSEDES)` posait l'arête
+    /// sans retirer la cible, et rien ne le voyait — `soll_validate` rendait 0
+    /// violation avec deux jalons ouverts dont l'un était supersédé.
+    ///
+    /// Deux familles, un seul balayage : les recompter séparément coûterait un
+    /// second parcours pour la même donnée (GUI-PRO-013).
     pub(crate) fn collect_relation_policy_violations(
         &self,
         project_code: Option<&str>,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
         let mut violations = Vec::new();
+        let mut supersedes_targets_still_open = Vec::new();
         let mut exclusive_pairs: std::collections::HashMap<
             (String, String),
             std::collections::HashSet<String>,
@@ -385,6 +395,35 @@ impl McpServer {
             None
         };
 
+        // REQ-AXO-902453 — statuts des cibles de SUPERSEDES. Le snapshot les
+        // porte déjà quand l'appel est scopé ; hors scope, UNE requête pour
+        // toutes les cibles concernées. Ne pas les charger reviendrait à rendre
+        // « 0 supersession incohérente » sans l'avoir mesuré, ce qui est le
+        // défaut d'à côté (REQ-AXO-902409).
+        let status_index: std::collections::HashMap<String, String> = if let Some(snap) =
+            snapshot_opt.as_deref()
+        {
+            snap.nodes
+                .iter()
+                .map(|(id, node)| (id.clone(), node.status.clone()))
+                .collect()
+        } else {
+            let raw = self.graph_store.query_json(
+                "SELECT n.id, COALESCE(n.status, '') FROM soll.Node n \
+                 WHERE n.id IN (SELECT target_id FROM soll.Edge WHERE relation_type = 'SUPERSEDES') \
+                    OR n.id IN (SELECT source_id FROM soll.Edge WHERE relation_type = 'SUPERSEDES')",
+            );
+            raw.ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|row| {
+                    let mut it = row.into_iter();
+                    Some((it.next()?, it.next().unwrap_or_default()))
+                })
+                .collect()
+        };
+
         for (source_id, target_id, relation_type) in edge_rows.iter() {
             let source_id: &str = source_id.as_str();
             let target_id: &str = target_id.as_str();
@@ -415,6 +454,41 @@ impl McpServer {
                     continue;
                 }
             };
+
+            // REQ-AXO-902453 — une arête `SUPERSEDES` dit que la cible est
+            // retirée. Si son statut dit le contraire, le graphe se contredit
+            // lui-même et le plan de travail compte un nœud de trop.
+            //
+            // Deux incohérences DIFFERENTES portent la même signature, et les
+            // confondre est dangereux. Mesuré sur AXO au moment de poser cette
+            // règle : 7 des 10 cas ont la SOURCE retirée et la cible vivante —
+            // ce sont des arêtes posées A L'ENVERS (`PIL-AXO-006 SUPERSEDES
+            // PIL-AXO-004`, alors que 006 est le supersédé). Conseiller « retire
+            // la cible » sur celles-là retirerait le nœud CANONIQUE. La règle
+            // nomme donc laquelle des deux elle a trouvée.
+            if relation_type == "SUPERSEDES" {
+                // Un statut ABSENT n'est pas un statut ouvert : le nœud n'est
+                // pas dans le périmètre chargé, et l'affirmer serait inventer.
+                if let Some(target_status) = status_index.get(target_id) {
+                    if target_status != "superseded" {
+                        let source_retired = status_index
+                            .get(source_id)
+                            .map(|s| s == "superseded" || s == "rejected")
+                            .unwrap_or(false);
+                        supersedes_targets_still_open.push(if source_retired {
+                            format!(
+                                "{source_id} -> {target_id} (SUPERSEDES probablement INVERSE : \
+                                 la source est retiree, la cible est `{target_status}`)"
+                            )
+                        } else {
+                            format!(
+                                "{source_id} -> {target_id} (SUPERSEDES, cible encore \
+                                 `{target_status}`)"
+                            )
+                        });
+                    }
+                }
+            }
 
             let Some(policy) = relation_policy_for_pair(source_kind.label(), target_kind.label())
             else {
@@ -469,7 +543,7 @@ impl McpServer {
 
         violations.sort();
         violations.dedup();
-        Ok(violations)
+        Ok((violations, supersedes_targets_still_open))
     }
 
     pub(crate) fn axon_soll_relation_schema(
