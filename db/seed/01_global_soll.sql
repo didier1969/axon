@@ -9,8 +9,8 @@
 -- Identity) :
 --   - 1 ProjectCodeRegistry row (PRO sentinel)
 --   - 1 soll.Registry counters row (PRO namespace)
---   - 49 soll.Node rows : 5 PIL-PRO + 8 CPT-PRO + 3 DEC-PRO + 33 GUI-PRO
---   - 43 soll.Edge rows : cross-namespace BELONGS_TO / INHERITS_FROM /
+--   - 51 soll.Node rows : 5 PIL-PRO + 8 CPT-PRO + 3 DEC-PRO + 35 GUI-PRO
+--   - 45 soll.Edge rows : cross-namespace BELONGS_TO / INHERITS_FROM /
 --     EPITOMIZES / EXPLAINS / etc. that connect PRO methodology to AXO
 --     and other consumer projects
 --
@@ -313,6 +313,20 @@ INSERT INTO soll.Node (id, type, project_code, title, description, status, metad
 VALUES ('GUI-PRO-101', 'Guideline', 'PRO', 'Sentinel self-heal smoke', 'Body content sufficient to pass soll_validate criteria.', 'current', '{"updated_at": 1779126887843}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-119', 'Guideline', 'PRO', 'Une supersession retire sa cible', 'Règle SOLL déclarative (DEC-AXO-901652, REQ-AXO-902455). Une arête `SUPERSEDES` affirme que sa cible est retirée. Si le statut de la cible dit le contraire, le graphe se contredit lui-même — supersédé par une arête, ouvert par son statut — et le plan de travail compte un nœud de trop. Signalé par TE2 (llm_feedback #224), découvert en comptant les jalons ouverts de `soll_roadmap`.
+
+RÉPARATION : retirer la cible (soll_manager action=update, status=superseded), ou retirer l''arête si la supersession n''était pas voulue (action=unlink).
+
+Cette règle ne s''applique QUE lorsque la source est vivante. Source retirée = arête inversée, voir GUI-PRO-120.', 'current', '{"soll_rule": {"mode": "forbidden", "relations": ["SUPERSEDES"], "source_status_not_in": ["superseded", "rejected"], "target_status_not_in": ["superseded"], "message": "la cible est encore ouverte alors que l''arête la déclare retirée"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-120', 'Guideline', 'PRO', 'Une arête SUPERSEDES ne part pas du nœud retiré', 'Règle SOLL déclarative (DEC-AXO-901652, REQ-AXO-902455). `A SUPERSEDES B` dit que A remplace B : A est vivant, B est retiré. Quand c''est la SOURCE qui porte un statut retiré et la cible qui est vivante, l''arête a été posée À L''ENVERS.
+
+Mesure AXO du 2026-08-22 : 8 des 10 arêtes incohérentes étaient de cette forme (PIL-AXO-006 SUPERSEDES PIL-AXO-004, alors que 006 est le supersédé). C''est pourquoi cette règle est SÉPARÉE de GUI-PRO-119 : conseiller « retire la cible » sur celles-ci retirerait le nœud CANONIQUE survivant.
+
+RÉPARATION : action=unlink, puis re-lier dans l''autre sens — le nœud retiré est la SOURCE.', 'current', '{"soll_rule": {"mode": "forbidden", "relations": ["SUPERSEDES"], "source_status_in": ["superseded", "rejected"], "target_status_not_in": ["superseded"], "message": "arête INVERSÉE : la source est retirée et la cible vivante — ne PAS retirer la cible"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
 VALUES ('PIL-PRO-001', 'Pillar', 'PRO', 'Code Quality', 'Architectural discipline ensuring code is testable, deep, well-bounded, free of warnings. Spans: test-first development (GUI-001), DRY/SRP/KISS/cognitive-limits/clean-as-you-go (GUI-013/014/015/016/017), APoSD foundations — deep modules, information hiding, pull-complexity-downwards, design-it-twice (GUI-018/019/020/021). Consumer project GUI-{code}-N covering same scope INHERITS_FROM corresponding GUI-PRO.', 'current', '{"updated_at": 1778514324408}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
@@ -457,4 +471,10 @@ VALUES ('GUI-PRO-099', 'PIL-PRO-099', 'BELONGS_TO', 'PRO', '{}'::jsonb)
 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
 INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
 VALUES ('GUI-PRO-101', 'GUI-PRO-001', 'INHERITS_FROM', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-119', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-120', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;

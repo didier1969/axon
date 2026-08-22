@@ -14263,12 +14263,16 @@ fn create_with_supersedes_retires_the_target_exactly_like_link_does() {
     );
 }
 
-/// REQ-AXO-902453, la porte proposée par TE2 : « une arête `SUPERSEDES` dont la
-/// cible est encore `current` est une incohérence structurelle ; ça mériterait
-/// d'être une violation détectée, pas un état silencieux ». `soll_validate`
-/// rendait 0 violation avec deux jalons ouverts dont l'un était supersédé.
+/// REQ-AXO-902455 — la porte demandée par TE2 (`llm_feedback` #224) n'est plus
+/// une branche Rust : c'est une RÈGLE-DONNÉE, portée par `GUI-PRO-119` et
+/// `GUI-PRO-120`, seedées sous `PRO` donc héritées par tout tenant.
+/// `DEC-AXO-901652` le prescrivait ; ce test vérifie que la donnée décide.
+///
+/// Aucune Guideline n'est créée ici : les règles viennent du seed. Un test qui
+/// poserait lui-même sa règle prouverait que le moteur évalue, pas que le
+/// produit LIVRE la règle.
 #[test]
-fn soll_validate_flags_a_supersedes_edge_whose_target_is_still_open() {
+fn soll_validate_enforces_the_supersedes_rules_carried_as_data_not_as_code() {
     let server = create_test_server();
     seed_pillar(&server, "TSC", "PIL-TSC-901", "Ancre");
     for (id, status) in [
@@ -14291,8 +14295,7 @@ fn soll_validate_flags_a_supersedes_edge_whose_target_is_still_open() {
         ("MIL-TSC-901", "MIL-TSC-902"),
         ("MIL-TSC-901", "MIL-TSC-903"),
         // Arête à l'envers : c'est la SOURCE qui est retirée. Mesuré sur AXO,
-        // 7 des 10 cas réels sont de cette forme (`PIL-AXO-006 SUPERSEDES
-        // PIL-AXO-004`, alors que 006 est le supersédé).
+        // 7 des 10 cas réels sont de cette forme.
         ("MIL-TSC-904", "MIL-TSC-905"),
     ] {
         server
@@ -14305,12 +14308,24 @@ fn soll_validate_flags_a_supersedes_edge_whose_target_is_still_open() {
             .unwrap();
     }
 
-    let text = server
-        .execute_tool_direct("soll_validate", &json!({ "project_code": "TSC" }))
-        .expect("soll_validate répond")["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    // Les règles LIVRÉES, pas des règles fabriquées par le test.
+    let rules = server.load_soll_rules("TSC");
+    assert!(
+        rules.iter().any(|r| r.id == "GUI-PRO-119")
+            && rules.iter().any(|r| r.id == "GUI-PRO-120"),
+        "le seed doit livrer les deux règles ; chargées : {:?}",
+        rules.iter().map(|r| &r.id).collect::<Vec<_>>()
+    );
+
+    let validate = || -> String {
+        server
+            .execute_tool_direct("soll_validate", &json!({ "project_code": "TSC" }))
+            .expect("soll_validate répond")["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let text = validate();
 
     assert!(
         text.contains("MIL-TSC-902"),
@@ -14324,26 +14339,45 @@ fn soll_validate_flags_a_supersedes_edge_whose_target_is_still_open() {
     );
     assert!(
         !text.contains("0 minimal coherence violation"),
-        "le compteur doit inclure la nouvelle famille.\n---\n{text}"
+        "le compteur doit inclure les violations de règles.\n---\n{text}"
     );
 
-    // Les deux incohérences portent la même signature et se réparent à
-    // l'OPPOSÉ. Confondre les deux fait conseiller de retirer le nœud
-    // survivant : sur AXO, cela aurait retiré `PIL-AXO-004`.
-    let inverse_line = text
-        .lines()
-        .find(|l| l.contains("MIL-TSC-905"))
-        .unwrap_or_default();
+    // Chaque ligne cite SA Guideline : c'est ce qui transforme « c'est
+    // interdit » en « c'est interdit PARCE QUE <intention> », et c'est la valeur
+    // que DEC-AXO-901649 nomme. Les deux incohérences se réparent à l'OPPOSÉ,
+    // donc elles ne peuvent pas citer la même règle.
+    let line_for = |id: &str| -> String {
+        text.lines()
+            .find(|l| l.contains(id))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let forgotten = line_for("MIL-TSC-902");
+    let inverted = line_for("MIL-TSC-905");
     assert!(
-        inverse_line.contains("INVERSE"),
-        "une arête dont la SOURCE est retirée est inversée, pas une cible oubliée.\n---\n{text}"
+        forgotten.contains("GUI-PRO-119"),
+        "une cible oubliée relève de GUI-PRO-119.\n---\n{text}"
     );
-    let open_line = text
-        .lines()
-        .find(|l| l.contains("MIL-TSC-902"))
-        .unwrap_or_default();
     assert!(
-        !open_line.contains("INVERSE"),
-        "une source VIVANTE vers une cible ouverte n'est pas une inversion.\n---\n{text}"
+        inverted.contains("GUI-PRO-120"),
+        "une arête dont la SOURCE est retirée est inversée : GUI-PRO-120, dont la \
+         réparation est l'OPPOSÉE.\n---\n{text}"
+    );
+
+    // ── Falsification par la DONNÉE ────────────────────────────────────────
+    // Retirer la Guideline doit éteindre la règle. Si le rouge persiste, c'est
+    // qu'une branche Rust décide encore — ce que ce lot a précisément supprimé.
+    server
+        .graph_store
+        .execute("UPDATE soll.Node SET status = 'superseded' WHERE id = 'GUI-PRO-119'")
+        .unwrap();
+    let after = validate();
+    assert!(
+        !after.contains("GUI-PRO-119"),
+        "règle retirée, elle ne doit plus être évaluée : la DONNÉE décide.\n---\n{after}"
+    );
+    assert!(
+        after.contains("GUI-PRO-120"),
+        "retirer une règle ne doit pas éteindre les autres.\n---\n{after}"
     );
 }

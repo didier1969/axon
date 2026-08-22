@@ -105,10 +105,11 @@ pub(crate) struct SollCompletenessSnapshot {
     pub(super) duplicate_title_rows: Vec<Vec<String>>,
     pub(super) duplicate_ids: Vec<String>,
     pub(super) relation_policy_violations: Vec<String>,
-    /// REQ-AXO-902453 — arêtes `SUPERSEDES` dont la cible est encore ouverte.
-    /// Le graphe se contredit alors lui-même : supersédé par une arête, ouvert
-    /// par son statut. Mesuré par TE2, invisible à `soll_validate` jusqu'ici.
-    pub(super) supersedes_targets_still_open: Vec<String>,
+    /// REQ-AXO-902455 — violations des règles SOLL DÉCLARATIVES (les
+    /// `Guideline` porteuses d'une metadata `soll_rule`). Chaque ligne cite le
+    /// `rule_id`, donc `soll_get(rule_id)` rend l'intention qui l'a mandatée.
+    /// Remplace la branche `SUPERSEDES` en dur de REQ-AXO-902453.
+    pub(super) declarative_rule_violations: Vec<String>,
     pub(super) requirement_coverage: RequirementCoverageSummary,
 }
 
@@ -118,7 +119,7 @@ impl SollCompletenessSnapshot {
             && self.validations_without_verifies.is_empty()
             && self.decisions_without_links.is_empty()
             && self.relation_policy_violations.is_empty()
-            && self.supersedes_targets_still_open.is_empty()
+            && self.declarative_rule_violations.is_empty()
     }
 
     pub(crate) fn duplicate_free(&self) -> bool {

@@ -364,7 +364,7 @@ impl McpServer {
             + snapshot.uncovered_requirements.len()
             + snapshot.duplicate_title_rows.len()
             + snapshot.relation_policy_violations.len()
-            + snapshot.supersedes_targets_still_open.len();
+            + snapshot.declarative_rule_violations.len();
 
         let mut repair_guidance = Vec::new();
         if !snapshot.orphan_requirements.is_empty() {
@@ -423,15 +423,15 @@ impl McpServer {
                 ],
             ));
         }
-        if !snapshot.supersedes_targets_still_open.is_empty() {
+        if !snapshot.declarative_rule_violations.is_empty() {
             repair_guidance.push(repair_guidance_entry(
-                "supersedes_targets_still_open",
-                &snapshot.supersedes_targets_still_open,
-                "A SUPERSEDES edge says its target is retired; these targets are still open. Read the line: `INVERSE` means the edge points the wrong way — do NOT retire the target, it is the surviving node.",
+                "declarative_rule_violations",
+                &snapshot.declarative_rule_violations,
+                "Declarative SOLL rules were violated. Each line ends with the id of the Guideline that mandates the rule — read it before repairing, it carries the intent AND the remedy.",
                 &[
-                    "edge marked INVERSE: soll_manager(action=unlink) then re-link the other way round — the retired node is the SOURCE",
-                    "otherwise retire the target: soll_manager(action=update, data={id, status:\"superseded\"})",
-                    "or drop the edge if the supersession was never intended: soll_manager(action=unlink, relation_type=\"SUPERSEDES\")",
+                    "soll_get(<rule_id>) — the rule says what it forbids and why",
+                    "repair the graph, or amend the rule: soll_manager(action=update, entity=guideline, data={id, metadata})",
+                    "a rule that no longer applies is superseded, never deleted (PIL-AXO-003)",
                 ],
             ));
         }
@@ -506,11 +506,11 @@ impl McpServer {
                 evidence.push_str(&format!("  - {} :: {} -> {}\n", row[0], row[1], row[2]));
             }
         }
-        if !snapshot.supersedes_targets_still_open.is_empty() {
+        if !snapshot.declarative_rule_violations.is_empty() {
             evidence.push_str(
-                "\n- Supersessions incohérentes (arête `SUPERSEDES`, cible encore ouverte) :\n",
+                "\n- Règles SOLL déclaratives violées (chaque ligne cite sa Guideline) :\n",
             );
-            for row in &snapshot.supersedes_targets_still_open {
+            for row in &snapshot.declarative_rule_violations {
                 evidence.push_str(&format!("  - {}\n", row));
             }
         }

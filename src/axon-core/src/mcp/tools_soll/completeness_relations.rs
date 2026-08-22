@@ -1,5 +1,5 @@
 use super::*;
-use crate::soll_snapshot::SollSnapshot;
+use crate::soll_snapshot::{parse_soll_rule, SollRule, SollSnapshot};
 
 impl McpServer {
     /// DEC-AXO-091 / REQ-AXO-322 (v2) — snapshot-aware endpoint
@@ -340,12 +340,47 @@ impl McpServer {
     ///
     /// Deux familles, un seul balayage : les recompter séparément coûterait un
     /// second parcours pour la même donnée (GUI-PRO-013).
+    /// REQ-AXO-902455 — charge les règles SOLL déclaratives : les `Guideline`
+    /// portant une metadata `soll_rule`, pour ce projet ET pour `PRO` (le
+    /// bundle méthodologique dont tout tenant hérite).
+    ///
+    /// Même requête que `tools_governance::axon_structural_invariants` avec une
+    /// autre clé de metadata : deux moteurs, un seul mécanisme de gouvernance,
+    /// et l'id de la Guideline devient le `rule_id` de chaque violation — donc
+    /// `soll_get(rule_id)` répond « pourquoi c'est interdit ».
+    ///
+    /// Best-effort : une base sans règle rend un vecteur vide, et l'audit se
+    /// réduit aux checks en code. Une règle illisible est écartée par
+    /// `parse_soll_rule`, jamais traitée comme permissive.
+    pub(crate) fn load_soll_rules(&self, project_code: &str) -> Vec<SollRule> {
+        let escaped = escape_sql(project_code);
+        let sql = format!(
+            "SELECT id, COALESCE(title, ''), (metadata->'soll_rule')::text FROM {} \
+             WHERE type = 'Guideline' AND metadata->'soll_rule' IS NOT NULL \
+               AND project_code IN ('{escaped}', 'PRO') \
+               AND COALESCE(status, '') NOT IN ('superseded', 'rejected', 'archived') \
+             ORDER BY id",
+            self.graph_store.soll_table("Node")
+        );
+        self.graph_store
+            .query_json(&sql)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| row.len() >= 3)
+            .filter_map(|row| {
+                let body = serde_json::from_str::<Value>(&row[2]).ok()?;
+                parse_soll_rule(&row[0], &row[1], &body)
+            })
+            .collect()
+    }
+
     pub(crate) fn collect_relation_policy_violations(
         &self,
         project_code: Option<&str>,
     ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
         let mut violations = Vec::new();
-        let mut supersedes_targets_still_open = Vec::new();
         let mut exclusive_pairs: std::collections::HashMap<
             (String, String),
             std::collections::HashSet<String>,
@@ -395,35 +430,6 @@ impl McpServer {
             None
         };
 
-        // REQ-AXO-902453 — statuts des cibles de SUPERSEDES. Le snapshot les
-        // porte déjà quand l'appel est scopé ; hors scope, UNE requête pour
-        // toutes les cibles concernées. Ne pas les charger reviendrait à rendre
-        // « 0 supersession incohérente » sans l'avoir mesuré, ce qui est le
-        // défaut d'à côté (REQ-AXO-902409).
-        let status_index: std::collections::HashMap<String, String> = if let Some(snap) =
-            snapshot_opt.as_deref()
-        {
-            snap.nodes
-                .iter()
-                .map(|(id, node)| (id.clone(), node.status.clone()))
-                .collect()
-        } else {
-            let raw = self.graph_store.query_json(
-                "SELECT n.id, COALESCE(n.status, '') FROM soll.Node n \
-                 WHERE n.id IN (SELECT target_id FROM soll.Edge WHERE relation_type = 'SUPERSEDES') \
-                    OR n.id IN (SELECT source_id FROM soll.Edge WHERE relation_type = 'SUPERSEDES')",
-            );
-            raw.ok()
-                .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|row| {
-                    let mut it = row.into_iter();
-                    Some((it.next()?, it.next().unwrap_or_default()))
-                })
-                .collect()
-        };
-
         for (source_id, target_id, relation_type) in edge_rows.iter() {
             let source_id: &str = source_id.as_str();
             let target_id: &str = target_id.as_str();
@@ -454,41 +460,6 @@ impl McpServer {
                     continue;
                 }
             };
-
-            // REQ-AXO-902453 — une arête `SUPERSEDES` dit que la cible est
-            // retirée. Si son statut dit le contraire, le graphe se contredit
-            // lui-même et le plan de travail compte un nœud de trop.
-            //
-            // Deux incohérences DIFFERENTES portent la même signature, et les
-            // confondre est dangereux. Mesuré sur AXO au moment de poser cette
-            // règle : 7 des 10 cas ont la SOURCE retirée et la cible vivante —
-            // ce sont des arêtes posées A L'ENVERS (`PIL-AXO-006 SUPERSEDES
-            // PIL-AXO-004`, alors que 006 est le supersédé). Conseiller « retire
-            // la cible » sur celles-là retirerait le nœud CANONIQUE. La règle
-            // nomme donc laquelle des deux elle a trouvée.
-            if relation_type == "SUPERSEDES" {
-                // Un statut ABSENT n'est pas un statut ouvert : le nœud n'est
-                // pas dans le périmètre chargé, et l'affirmer serait inventer.
-                if let Some(target_status) = status_index.get(target_id) {
-                    if target_status != "superseded" {
-                        let source_retired = status_index
-                            .get(source_id)
-                            .map(|s| s == "superseded" || s == "rejected")
-                            .unwrap_or(false);
-                        supersedes_targets_still_open.push(if source_retired {
-                            format!(
-                                "{source_id} -> {target_id} (SUPERSEDES probablement INVERSE : \
-                                 la source est retiree, la cible est `{target_status}`)"
-                            )
-                        } else {
-                            format!(
-                                "{source_id} -> {target_id} (SUPERSEDES, cible encore \
-                                 `{target_status}`)"
-                            )
-                        });
-                    }
-                }
-            }
 
             let Some(policy) = relation_policy_for_pair(source_kind.label(), target_kind.label())
             else {
@@ -543,7 +514,27 @@ impl McpServer {
 
         violations.sort();
         violations.dedup();
-        Ok((violations, supersedes_targets_still_open))
+        // REQ-AXO-902455 — les invariants SOLL ne sont plus des branches Rust :
+        // ils sont des DONNÉES, portées par des Guideline, chargées ici et
+        // évaluées par le moteur pur. DEC-AXO-901652 le prescrivait ; la branche
+        // `SUPERSEDES` qui vivait juste au-dessus a été SUPPRIMÉE, pas doublée.
+        //
+        // L'évaluation exige le snapshot du projet (statuts + types des deux
+        // extrémités). Hors périmètre projet, elle n'est PAS faite — et le dire
+        // vaut mieux que rendre « 0 violation » sans avoir mesuré
+        // (REQ-AXO-902409).
+        let declarative_rule_violations = match (project_code, snapshot_opt.as_deref()) {
+            (Some(code), Some(snapshot)) => {
+                let rules = self.load_soll_rules(code);
+                crate::soll_snapshot::declarative_rules::evaluate_all(snapshot, &rules)
+                    .iter()
+                    .map(|violation| violation.render())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+
+        Ok((violations, declarative_rule_violations))
     }
 
     pub(crate) fn axon_soll_relation_schema(
