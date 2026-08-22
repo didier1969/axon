@@ -15063,6 +15063,137 @@ fn the_three_attachment_rules_replaced_the_hardcoded_checks_without_losing_cover
     }
 }
 
+/// REQ-AXO-902455 — `GUI-PRO-124` et `GUI-PRO-125` sont les DEUX règles reprises
+/// de `GUI-AXO-1032/1033` en les passant sous `PRO`. Le déplacement s'est fait
+/// sans garde : les tests du moteur couvraient leurs PRÉDICATS (preuve,
+/// `incoming`), rien ne vérifiait que CES règles-là sont livrées par le seed et
+/// évaluées.
+///
+/// L'enjeu est chiffré : au 2026-08-22 elles portent **164 des 182 violations
+/// AXO** (88 + 76). Si elles cessaient de charger — parse cassé, statut, scope
+/// projet — le compte tomberait à 18 et rien ne le dirait. C'est la garde qui
+/// manquait au lot précédent.
+#[test]
+fn the_two_rules_rehomed_under_pro_are_still_delivered_and_evaluated() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSL", "PIL-TSL-901", "Ancre reprises");
+    for (id, kind, status) in [
+        ("REQ-TSL-901", "Requirement", "delivered"), // preuve cassée → 124
+        ("REQ-TSL-902", "Requirement", "delivered"), // preuve valide → contrôle
+        ("MIL-TSL-901", "Milestone", "superseded"),  // rien ne le remplace → 125
+        ("MIL-TSL-902", "Milestone", "superseded"),  // remplacé → contrôle
+        ("MIL-TSL-903", "Milestone", "current"),     // le remplaçant vivant
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('{id}', '{kind}', 'TSL', '{id}', '', '{status}', '{{}}') \
+                 ON CONFLICT (id) DO UPDATE SET status = '{status}'"
+            ))
+            .unwrap();
+    }
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+             VALUES ('MIL-TSL-903', 'MIL-TSL-902', 'SUPERSEDES', 'TSL') \
+             ON CONFLICT (source_id, target_id, relation_type) DO NOTHING",
+        )
+        .unwrap();
+    for (tid, req, status) in [
+        ("TRC-TSL-901", "REQ-TSL-901", "broken"),
+        ("TRC-TSL-902", "REQ-TSL-902", "present"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Traceability \
+                 (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, artifact_status, confidence, created_at) \
+                 VALUES ('{tid}', 'requirement', '{req}', 'File', 'src/{req}.rs', '{status}', 1.0, 0) \
+                 ON CONFLICT (id) DO UPDATE SET artifact_status = '{status}'"
+            ))
+            .unwrap();
+    }
+    server.soll_cache().invalidate("TSL");
+
+    // Les règles viennent du SEED, pas du test : un test qui poserait sa propre
+    // règle prouverait que le moteur évalue, pas que le produit LIVRE.
+    let loaded = server.load_soll_rules("TSL");
+    for id in ["GUI-PRO-124", "GUI-PRO-125"] {
+        assert!(
+            loaded.iter().any(|r| r.id == id),
+            "{id} doit être livrée par le seed ; chargées : {:?}",
+            loaded.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+    }
+
+    let text = server
+        .execute_tool_direct("soll_validate", &json!({ "project_code": "TSL" }))
+        .expect("soll_validate répond")["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let cited = |rule: &str| -> String {
+        text.lines()
+            .filter(|l| l.contains(rule))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let broken_proof = cited("GUI-PRO-124");
+    assert!(
+        broken_proof.contains("REQ-TSL-901"),
+        "une exigence livrée dont la preuve est cassée doit être signalée.\n---\n{text}"
+    );
+    assert!(
+        !broken_proof.contains("REQ-TSL-902"),
+        "une preuve `present` n'est pas une violation — sans ce contrôle, une \
+         règle qui signale TOUTE preuve passerait.\n---\n{text}"
+    );
+
+    let no_replacement = cited("GUI-PRO-125");
+    assert!(
+        no_replacement.contains("MIL-TSL-901"),
+        "un nœud retiré que rien ne remplace doit être signalé.\n---\n{text}"
+    );
+    assert!(
+        !no_replacement.contains("MIL-TSL-902"),
+        "ce nœud RECOIT une arête SUPERSEDES : son remplaçant est enregistré.\n---\n{text}"
+    );
+    assert!(
+        !no_replacement.contains("MIL-TSL-903"),
+        "le remplaçant est vivant, il n'est pas sujet de la règle.\n---\n{text}"
+    );
+
+    // ── Falsification par la DONNÉE ────────────────────────────────────────
+    // Retirer chaque Guideline doit éteindre SA règle et laisser l'autre — si
+    // le rouge persiste, c'est qu'une branche Rust décide encore.
+    server
+        .graph_store
+        .execute("UPDATE soll.Node SET status = 'superseded' WHERE id = 'GUI-PRO-124'")
+        .unwrap();
+    server.soll_cache().invalidate("TSL");
+    let after = server
+        .execute_tool_direct("soll_validate", &json!({ "project_code": "TSL" }))
+        .expect("soll_validate répond")["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !after.contains("GUI-PRO-124"),
+        "règle retirée, elle ne doit plus être évaluée : la DONNÉE décide.\n---\n{after}"
+    );
+    assert!(
+        after.contains("GUI-PRO-125"),
+        "retirer une règle ne doit pas éteindre l'autre.\n---\n{after}"
+    );
+    server
+        .graph_store
+        .execute("UPDATE soll.Node SET status = 'current' WHERE id = 'GUI-PRO-124'")
+        .unwrap();
+}
+
 /// REQ-AXO-902455 — règles INLINE. Le plan promettait de pouvoir essayer une
 /// règle AVANT de l'inscrire comme Guideline ; sans ce chemin, écrire une règle
 /// juste demande de créer un nœud SOLL puis de le superséder, ce qui laisse une
