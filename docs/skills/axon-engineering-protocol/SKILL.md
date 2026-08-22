@@ -63,6 +63,23 @@ Follow `next_action` > `operator_guidance.follow_up_tools` > `parameter_repair`.
 | `change_safety` envelope | Tri-modal envelope (`surfaces_used:["symbol_index","soll_traceability"]` / `surfaces_degraded` / `total_available:1` / `next_call_hint` / `pagination`) ; no `results[]` (single-verdict shape preserved, same logic as inspect). Both surfaces stay PG-backed — RAM IST snapshot doesn't carry the `tested` flag — REQ-AXO-91514 |
 | `axon_commit_work` refactor-exempt gates | Guidelines whose metadata carries `exempt_for_refactor: true` step aside when the commit message starts with a Conventional-Commits `refactor` type (`refactor:` / `refactor(<scope>):` / `refactor!:` / `refactor(<scope>)!:`). Default seeds set the flag on GUI-PRO-001 (TDD) + GUI-PRO-002 (Documentation MCP) so pure dead-code / SQL-dialect collapses stop being blocked. `feat`/`fix`/`chore` stay strictly gated. Live SOLL nodes seeded before this change keep the old metadata until `soll_manager action=update entity=guideline data={id,metadata}` refreshes them — REQ-AXO-91569 |
 
+## SOLL declarative rules (REQ-AXO-902455 / DEC-AXO-901673)
+
+SOLL invariants are **data, not Rust branches**. A rule = a `Guideline` node carrying a `soll_rule` metadata object, loaded at runtime for `project + PRO` and evaluated by `soll_validate`; every violation cites its `rule_id`, so `soll_get(rule_id)` answers *why*. Pass `rules=[…]` to `soll_validate` to try one before inscribing it.
+
+A rule = a SUBJECT (`subject_kind`, `subject_status_in/not_in`) + **exactly ONE** predicate — combining two is refused at parse:
+
+| Predicate | Fields |
+|---|---|
+| edge | `mode: forbidden\|required`, `direction: outgoing\|incoming`, `relations[]`, `other_kind`/`other_status_*` |
+| evidence | `evidence_status_in[]` (+ `evidence_artifact_types[]`) — real statuses are `present`/`broken`, never `missing` |
+| metadata | `metadata_required[]` — absent, null, empty string and empty array all count as missing |
+| uniqueness | `unique_by: title\|id` |
+| aggregate | `at_most: N` (+ `group_by_relation`, `group_direction`) — bound is INCLUSIVE |
+| reachability | `reaches: true` + `other_kind` + `relations[]` — transitive |
+
+`DEC-AXO-901673` supersedes `DEC-AXO-901649`: uniqueness and aggregate compare nodes to each other. Still forbidden: bound variables, arbitrary joins, user-defined recursion.
+
 ## SOLL writes
 
 - `soll_apply_plan` — batch (`dry_run=true`, `logical_key`, `author`) ; `soll_commit_revision` checkpoint per `preview_id`.
