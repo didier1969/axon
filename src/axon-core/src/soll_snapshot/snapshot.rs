@@ -14,6 +14,12 @@ use petgraph::Direction;
 #[derive(Clone, Debug)]
 pub struct SnapshotNode {
     pub id: String,
+    /// REQ-AXO-902458 — le CORPS du nœud. `GUI-PRO-110` porte sur lui : le
+    /// statut seul est invisible au scan d'un LLM, qui lit le texte. Coût
+    /// mesuré au 2026-08-22 : 3,2 Mo pour le plus gros projet (AXO), **14 Mo**
+    /// pour le parc entier si les 92 projets sont chargés — le cache n'évince
+    /// pas. Dans l'enveloppe « few MB » que PIL-AXO-9002 prévoit.
+    pub description: String,
     pub entity_type: String,
     pub title: String,
     pub status: String,
@@ -297,6 +303,36 @@ impl SollSnapshot {
         petgraph::algo::has_path_connecting(&filtered, from_idx, to_idx, None)
     }
 
+    /// REQ-AXO-902458 — les cycles formés par un JEU de relations seulement.
+    ///
+    /// `cycle_sets` juge le graphe entier : un cycle par `SUPERSEDES` n'est pas
+    /// un cycle de filiation, et les confondre signalerait des nœuds que
+    /// personne ne peut réparer. Même patron de filtrage que
+    /// `reaches_via_relations` — on ne réécrit pas la traversée.
+    pub fn cycle_sets_via_relations(&self, relations: &HashSet<String>) -> Vec<HashSet<String>> {
+        let filtered = EdgeFiltered::from_fn(&self.graph, |e| relations.contains(e.weight()));
+        let mut out = Vec::new();
+        for component in petgraph::algo::tarjan_scc(&filtered) {
+            if component.len() > 1 {
+                out.push(
+                    component
+                        .into_iter()
+                        .map(|nidx| self.graph[nidx].clone())
+                        .collect(),
+                );
+            } else if let Some(&nidx) = component.first() {
+                let has_self_loop = self
+                    .graph
+                    .edges_directed(nidx, Direction::Outgoing)
+                    .any(|e| e.target() == nidx && relations.contains(e.weight()));
+                if has_self_loop {
+                    out.push(std::iter::once(self.graph[nidx].clone()).collect());
+                }
+            }
+        }
+        out
+    }
+
     /// Traceability rows for a given (lowercase entity_type, entity_id).
     pub fn traceability_rows_for<'a>(
         &'a self,
@@ -375,6 +411,7 @@ mod tests {
             title: format!("title-{}", id),
             status: "current".to_string(),
             metadata_raw: "{}".to_string(),
+            description: String::new(),
         }
     }
 

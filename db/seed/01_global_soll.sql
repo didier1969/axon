@@ -9,8 +9,8 @@
 -- Identity) :
 --   - 1 ProjectCodeRegistry row (PRO sentinel)
 --   - 1 soll.Registry counters row (PRO namespace)
---   - 60 soll.Node rows : 5 PIL-PRO + 8 CPT-PRO + 3 DEC-PRO + 44 GUI-PRO
---   - 54 soll.Edge rows : cross-namespace BELONGS_TO / INHERITS_FROM /
+--   - 62 soll.Node rows : 5 PIL-PRO + 8 CPT-PRO + 3 DEC-PRO + 46 GUI-PRO
+--   - 56 soll.Edge rows : cross-namespace BELONGS_TO / INHERITS_FROM /
 --     EPITOMIZES / EXPLAINS / etc. that connect PRO methodology to AXO
 --     and other consumer projects
 --
@@ -45,7 +45,7 @@ ON CONFLICT (project_code) DO NOTHING;
 -- repart sous eux et l'allocateur boucle a vide jusqu'a les depasser (sa
 -- garde `EXIT WHEN NOT EXISTS` empeche la collision, pas le gaspillage).
 -- GREATEST pour ne JAMAIS reculer un compteur deja plus avance en base.
-UPDATE soll.Registry SET last_gui = GREATEST(last_gui, 129) WHERE project_code = 'PRO';
+UPDATE soll.Registry SET last_gui = GREATEST(last_gui, 131) WHERE project_code = 'PRO';
 
 -- PRO Nodes (Pillars, Concepts, Decisions, Guidelines)
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
@@ -517,6 +517,50 @@ Le moteur ne savait tester une arête que dans UN sens. Cet invariant demande «
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-130', 'Guideline', 'PRO', 'Un nœud retiré le dit dans son CORPS, pas seulement dans son statut', 'Règle SOLL déclarative (REQ-AXO-902458, axe « contenu du corps »). Matérialise `GUI-PRO-110`, énoncée depuis des mois et **jamais mécanisée**.
+
+Le `status` seul est INVISIBLE au scan d''un LLM : les LLM lisent le CORPS. Un nœud `superseded` dont le texte ne dit rien se fait citer, copier et suivre comme s''il était vivant — c''est exactement ce que `GUI-PRO-110` décrit, et pourquoi elle demande de marquer le corps à toute supersession.
+
+## Complémentaire de GUI-PRO-125, pas redondante
+
+`125` demande une ARÊTE (« qu''est-ce qui le remplace, dans le graphe »). Celle-ci demande une PHRASE (« le lecteur du texte est-il averti »). Un nœud peut satisfaire l''''une et violer l''''autre : l''''arête existe mais le corps se lit comme un document courant.
+
+## Marqueurs acceptés
+
+`supersédé` · `superseded by` · `remplacé par` / `remplacée par` · `caduc` · `pointeur canonique` · `obsolète`. Comparaison **sans casse**, sur le corps entier.
+
+La liste est FERMÉE, et c''''est délibéré : accepter une expression régulière fournie par le tenant serait le langage de requête que `DEC-AXO-901673` continue d''''interdire. Un tenant qui veut son propre vocabulaire pose SA règle avec SES fragments — c''''est précisément ce que les règles-données permettent sans toucher au cœur.
+
+## État mesuré à la pose (2026-08-22)
+
+**255 nœuds retirés sans marqueur, sur 16 projets** : APS AXO CSC FSF HXH INK KKI LLL MLD MPM NEX OPV PRO ROM SWT VPC. C''''est la règle au plus fort volume du catalogue — le motif est universel, aucun projet n''''y échappe.
+
+## RÉPARATION
+
+`soll_manager(action=append_section)` avec un en-tête qui dit le retrait et pointe le remplaçant. Ne PAS réécrire le corps entier : la trace historique a de la valeur, c''''est l''''avertissement qui manque.', 'current', '{"soll_rule": {"subject_status_in": ["superseded"], "body_contains_any": ["supersédé", "superseded by", "remplacé par", "remplacée par", "caduc", "pointeur canonique", "obsolète"], "message": "nœud retiré dont le CORPS ne l''annonce pas — un LLM le lira comme vivant"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-131', 'Guideline', 'PRO', 'La filiation ne boucle pas', 'Règle SOLL déclarative (REQ-AXO-902458, axe « acyclicité »). Matérialise `DEC-AXO-098`, qui impose un graphe de filiation strictement acyclique.
+
+Un cycle de filiation rend l''''intention circulaire : A existe pour B, qui existe pour A. Aucune racine, donc aucune réponse à « pourquoi ce travail ». `soll_work_plan` ne peut pas ordonner, `GUI-PRO-122` devient satisfiable par la boucle elle-même.
+
+## Pourquoi le validateur de DEC-AXO-098 n''''a jamais été activé
+
+`soll_manager(action=link)` pré-vérifie les cycles À L''''ÉCRITURE — mais seulement sur les arêtes qu''''il pose lui-même. Les cycles ANTÉRIEURS restent, et `soll_acyclic_audit` le dit dans son propre message : *« DEC-AXO-098 cycle validator activation requires these to be 0 »*. Mesuré sur AXO : **3 cycles**. La porte attendait un zéro que rien ne produisait — un gate qui se conditionne à sa propre cible ne s''''arme jamais.
+
+Cette règle inverse le sens : elle SIGNALE les cycles au lieu d''''attendre qu''''il n''''y en ait plus.
+
+## Le jeu de relations est explicite, et il compte
+
+`SOLVES` · `BELONGS_TO` · `REFINES` · `TARGETS` · `EXPLAINS` · `VERIFIES` — la liste de filiation de `DEC-AXO-098`. Un cycle par `SUPERSEDES` n''''est PAS un cycle de filiation (c''''est une chaîne de versions, et deux nœuds qui se supersèdent mutuellement relèvent de `GUI-PRO-119`/`120`). Les confondre signalerait des nœuds que personne ne peut réparer.
+
+## RÉPARATION
+
+`soll_manager(action=unlink)` sur l''''arête qui ferme la boucle. Choisir laquelle demande de VOIR le cycle entier — c''''est pourquoi chaque violation nomme tous ses membres, pas seulement un.', 'current', '{"soll_rule": {"acyclic": true, "relations": ["SOLVES", "BELONGS_TO", "REFINES", "TARGETS", "EXPLAINS", "VERIFIES"], "message": "cycle de filiation — l''intention tourne en rond, aucune racine"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
 VALUES ('PIL-PRO-001', 'Pillar', 'PRO', 'Code Quality', 'Architectural discipline ensuring code is testable, deep, well-bounded, free of warnings. Spans: test-first development (GUI-001), DRY/SRP/KISS/cognitive-limits/clean-as-you-go (GUI-013/014/015/016/017), APoSD foundations — deep modules, information hiding, pull-complexity-downwards, design-it-twice (GUI-018/019/020/021). Consumer project GUI-{code}-N covering same scope INHERITS_FROM corresponding GUI-PRO.', 'current', '{"updated_at": 1778514324408}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
@@ -703,4 +747,12 @@ ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
 
 INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
 VALUES ('GUI-PRO-129', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-130', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-131', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;

@@ -14450,8 +14450,18 @@ fn soll_validate_enforces_the_supersedes_rules_carried_as_data_not_as_code() {
     );
     // Contrôle positif : la supersession COHÉRENTE ne doit produire aucun bruit.
     // Sans lui, une règle qui signale TOUTE arête SUPERSEDES passerait au vert.
+    //
+    // L'assertion porte sur les LIGNES DE CES DEUX RÈGLES, pas sur le rapport
+    // entier : `MIL-TSC-903` y figure légitimement au titre de `GUI-PRO-130`
+    // (son corps est vide, donc il ne dit pas qu'il est retiré). Assertion sur
+    // le texte entier = un test qui rougit dès qu'une AUTRE règle est posée.
+    let supersedes_lines: String = text
+        .lines()
+        .filter(|l| l.contains("GUI-PRO-119") || l.contains("GUI-PRO-120"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        !text.contains("MIL-TSC-903"),
+        !supersedes_lines.contains("MIL-TSC-903"),
         "une supersession cohérente n'est pas une violation.\n---\n{text}"
     );
     assert!(

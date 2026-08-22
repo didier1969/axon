@@ -1404,6 +1404,7 @@ mod tests {
             title: format!("title-{}", id),
             status: "current".to_string(),
             metadata_raw: "{}".to_string(),
+            description: String::new(),
         }
     }
 
@@ -1615,6 +1616,7 @@ mod tests {
                     title: id.to_string(),
                     status: status.to_string(),
                     metadata_raw: String::new(),
+                    description: String::new(),
                 },
             )
         }

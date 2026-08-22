@@ -231,6 +231,7 @@ mod tests {
             title: format!("title-{}", id),
             status: status.to_string(),
             metadata_raw: "{}".to_string(),
+            description: String::new(),
         }
     }
 
@@ -241,6 +242,7 @@ mod tests {
             title: format!("title-{}", id),
             status: status.to_string(),
             metadata_raw: meta.to_string(),
+            description: String::new(),
         }
     }
 

@@ -192,6 +192,19 @@ pub enum RulePredicate {
         other: EndpointMatcher,
         relations: Vec<String>,
     },
+    /// Axe 7 — le CORPS du sujet doit contenir au moins un de ces fragments,
+    /// comparés sans casse. C'est la forme de `GUI-PRO-110` : le statut seul est
+    /// invisible au scan d'un LLM, qui lit le texte.
+    ///
+    /// Fermé volontairement à une liste de fragments : accepter une expression
+    /// régulière de l'utilisateur serait le langage de requête que
+    /// `DEC-AXO-901673` continue d'interdire.
+    BodyContainsAny { fragments: Vec<String> },
+    /// Axe 8 — le sous-graphe formé par `relations` ne contient aucun cycle.
+    /// Forme de `DEC-AXO-098`, dont le validateur n'a jamais pu être activé :
+    /// `soll_acyclic_audit` mesure 3 cycles sur AXO et dit lui-même qu'il
+    /// « requires these to be 0 ».
+    Acyclic { relations: Vec<String> },
 }
 
 /// Le champ sur lequel porte une contrainte d'unicité. Fermé volontairement :
@@ -247,6 +260,8 @@ pub enum PredicateKind {
     Uniqueness,
     Aggregate,
     Reachability,
+    BodyContent,
+    Acyclicity,
 }
 
 impl RulePredicate {
@@ -258,6 +273,8 @@ impl RulePredicate {
             Self::UniqueBy { .. } => PredicateKind::Uniqueness,
             Self::AtMost { .. } => PredicateKind::Aggregate,
             Self::Reaches { .. } => PredicateKind::Reachability,
+            Self::BodyContainsAny { .. } => PredicateKind::BodyContent,
+            Self::Acyclic { .. } => PredicateKind::Acyclicity,
         }
     }
 }
@@ -344,12 +361,16 @@ pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<S
     let unique_by = text("unique_by");
     let at_most = v.get("at_most").and_then(|x| x.as_u64());
     let reaches = v.get("reaches").and_then(|x| x.as_bool()).unwrap_or(false);
+    let body_fragments = string_list("body_contains_any");
+    let acyclic = v.get("acyclic").and_then(|x| x.as_bool()).unwrap_or(false);
     let declared = [
         !evidence_statuses.is_empty(),
         !metadata_keys.is_empty(),
         unique_by.is_some(),
         at_most.is_some(),
         reaches,
+        !body_fragments.is_empty(),
+        acyclic,
     ];
     if declared.iter().filter(|d| **d).count() > 1 {
         return None;
@@ -375,6 +396,14 @@ pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<S
                 .and_then(|x| x.as_str())
                 .map(EdgeDirection::from_str_ci)
                 .unwrap_or(Some(EdgeDirection::Outgoing))?,
+        }
+    } else if !body_fragments.is_empty() {
+        RulePredicate::BodyContainsAny {
+            fragments: body_fragments,
+        }
+    } else if acyclic {
+        RulePredicate::Acyclic {
+            relations: string_list("relations"),
         }
     } else if reaches {
         RulePredicate::Reaches {
@@ -726,6 +755,57 @@ fn evaluate_rule_with_facts(
                 }
             }
         }
+        RulePredicate::BodyContainsAny { fragments } => {
+            if rule.subject.is_unconstrained() {
+                return out;
+            }
+            let needles: Vec<String> = fragments.iter().map(|f| f.to_lowercase()).collect();
+            for id in subjects(rule, facts) {
+                let Some(node) = snapshot.nodes.get(id) else {
+                    continue;
+                };
+                let body = node.description.to_lowercase();
+                if !needles.iter().any(|needle| body.contains(needle.as_str())) {
+                    out.push(violation(rule, id));
+                }
+            }
+        }
+        RulePredicate::Acyclic { relations } => {
+            // Un cycle n'appartient à aucun nœud en particulier : chaque membre
+            // est nommé, parce qu'un compteur de cycles n'ouvre aucune action
+            // (REQ-AXO-902409) et que la réparation se choisit en voyant la
+            // boucle entière.
+            let rel_set: std::collections::HashSet<String> = if relations.is_empty() {
+                snapshot
+                    .edges
+                    .iter()
+                    .map(|e| e.relation_type.clone())
+                    .collect()
+            } else {
+                relations.iter().cloned().collect()
+            };
+            let member: std::collections::HashSet<&str> =
+                subjects(rule, facts).into_iter().collect();
+            for cycle in snapshot.cycle_sets_via_relations(&rel_set) {
+                let mut cited: Vec<&str> = cycle
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|id| member.contains(id))
+                    .collect();
+                cited.sort_unstable();
+                let names = cited.join(", ");
+                for id in cited {
+                    out.push(SollRuleViolation {
+                        rule_id: rule.id.clone(),
+                        predicate: rule.predicate.kind(),
+                        source_id: id.to_string(),
+                        target_id: Some(names.clone()),
+                        relation: Some("cycle".to_string()),
+                        message: rule.message.clone(),
+                    });
+                }
+            }
+        }
         RulePredicate::Reaches { other, relations } => {
             if rule.subject.is_unconstrained() {
                 return out;
@@ -783,6 +863,7 @@ mod tests {
             title: id.to_string(),
             status: status.to_string(),
             metadata_raw: "{}".to_string(),
+            description: String::new(),
         }
     }
 
@@ -815,6 +896,7 @@ mod tests {
             title: id.to_string(),
             status: status.to_string(),
             metadata_raw: meta.to_string(),
+            description: String::new(),
         }
     }
 
@@ -863,6 +945,94 @@ mod tests {
         // nœud `current` n'est pas sujet du tout.
         assert!(!found.iter().any(|v| v.source_id == "REQ-TST-002"));
         assert!(!found.iter().any(|v| v.source_id == "REQ-TST-001"));
+    }
+
+    /// REQ-AXO-902458 / V2 — axe « contenu du corps ». `GUI-PRO-110` dit que le
+    /// statut seul est INVISIBLE au scan d'un LLM (les LLM lisent le CORPS) :
+    /// un nœud retiré doit le dire dans son texte. Cette guideline existe depuis
+    /// des mois et n'a JAMAIS été mécanisée — mesuré : **122 nœuds `superseded`
+    /// sur 12 projets** dont le corps ne porte aucun marqueur.
+    ///
+    /// Le prédicat reste FERMÉ : une liste de fragments, comparés sans casse.
+    /// Pas d'expression régulière fournie par l'utilisateur — ce serait le
+    /// langage de requête que `DEC-AXO-901673` continue d'interdire.
+    #[test]
+    fn a_body_rule_flags_a_retired_node_whose_text_does_not_say_it_is_retired() {
+        let rule = parse_soll_rule(
+            "GUI-TST-020",
+            "Un nœud retiré le dit dans son corps",
+            &json!({
+                "subject_status_in": ["superseded"],
+                "body_contains_any": ["supersédé par", "remplacé par"],
+                "message": "statut retiré mais le corps ne le dit pas"
+            }),
+        )
+        .unwrap();
+        let mut marked = node("REQ-TST-201", "Requirement", "superseded");
+        marked.description = "Corps utile. SUPERSÉDÉ PAR REQ-TST-203.".to_string();
+        let mut silent = node("REQ-TST-202", "Requirement", "superseded");
+        silent.description = "Corps utile, et rien qui dise qu'il est retiré.".to_string();
+        let mut living = node("REQ-TST-203", "Requirement", "current");
+        living.description = "Aucun marqueur, mais ce nœud est VIVANT.".to_string();
+
+        let snap = snapshot(vec![marked, silent, living], vec![]);
+        let found = evaluate_rule(&snap, &rule);
+        assert_eq!(
+            found.iter().map(|v| v.source_id.as_str()).collect::<Vec<_>>(),
+            vec!["REQ-TST-202"],
+            "seul le nœud retiré SANS marqueur est fautif ; la comparaison ignore \
+             la casse, et un nœud vivant n'est pas sujet.\n{found:?}"
+        );
+    }
+
+    /// REQ-AXO-902458 / V2 — axe « acyclicité ». `DEC-AXO-098` impose un graphe
+    /// de filiation strictement acyclique, et `soll_acyclic_audit` le mesure —
+    /// mais en CODE, et son propre message dit que le validateur « requires
+    /// these to be 0 » pour être activé. Mesuré : **3 cycles sur AXO**, donc il
+    /// ne l'a jamais été.
+    ///
+    /// Le prédicat porte sur un JEU de relations : un cycle par `SUPERSEDES`
+    /// n'est pas un cycle de filiation, et les confondre signalerait des nœuds
+    /// que personne ne peut réparer.
+    #[test]
+    fn an_acyclic_rule_flags_only_the_cycle_formed_by_the_named_relations() {
+        let rule = parse_soll_rule(
+            "GUI-TST-021",
+            "La filiation ne boucle pas",
+            &json!({
+                "subject_kind": "Requirement",
+                "acyclic": true,
+                "relations": ["REFINES"],
+                "message": "cycle de filiation"
+            }),
+        )
+        .unwrap();
+        let snap = snapshot(
+            vec![
+                node("REQ-TST-301", "Requirement", "current"),
+                node("REQ-TST-302", "Requirement", "current"),
+                node("REQ-TST-303", "Requirement", "current"),
+                node("REQ-TST-304", "Requirement", "current"),
+            ],
+            vec![
+                // Cycle SUR les relations visées.
+                edge("REQ-TST-301", "REQ-TST-302", "REFINES"),
+                edge("REQ-TST-302", "REQ-TST-301", "REFINES"),
+                // Cycle sur une AUTRE relation : hors sujet, ne doit rien produire.
+                edge("REQ-TST-303", "REQ-TST-304", "SUPERSEDES"),
+                edge("REQ-TST-304", "REQ-TST-303", "SUPERSEDES"),
+            ],
+        );
+        let found = evaluate_rule(&snap, &rule);
+        let mut cited: Vec<&str> = found.iter().map(|v| v.source_id.as_str()).collect();
+        cited.sort_unstable();
+        assert_eq!(
+            cited,
+            vec!["REQ-TST-301", "REQ-TST-302"],
+            "les deux nœuds du cycle REFINES sont nommés — un compteur de cycles \
+             n'ouvre aucune action (REQ-AXO-902409) — et le cycle SUPERSEDES est \
+             hors du jeu de relations visé.\n{found:?}"
+        );
     }
 
     /// REQ-AXO-902455 — le snapshot est chargé PAR PROJET, mais une supersession
@@ -1162,6 +1332,7 @@ mod tests {
             title: title.to_string(),
             status: "current".to_string(),
             metadata_raw: "{}".to_string(),
+            description: String::new(),
         };
         let snap = snapshot(
             vec![

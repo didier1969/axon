@@ -1993,6 +1993,7 @@ mod structural_health_helpers_tests {
             title: String::new(),
             status: "current".to_string(),
             metadata_raw: String::new(),
+            description: String::new(),
         };
         let trace = |ty: &str, entity: &str| SnapshotTraceability {
             id: format!("t-{entity}"),

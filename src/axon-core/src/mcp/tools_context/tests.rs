@@ -188,6 +188,7 @@ fn fusion_snapshot() -> crate::soll_snapshot::SollSnapshot {
         title: format!("title-{id}"),
         status: "current".to_string(),
         metadata_raw: "{}".to_string(),
+        description: String::new(),
     };
     let mut nodes = HashMap::new();
     nodes.insert(

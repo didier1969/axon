@@ -26,7 +26,8 @@ pub fn load_snapshot(
     let project_code_escaped = escape_sql(project_code);
 
     let node_query = format!(
-        "SELECT id, type, COALESCE(title, ''), COALESCE(status, ''), COALESCE(metadata::text, '{{}}') \
+        "SELECT id, type, COALESCE(title, ''), COALESCE(status, ''), COALESCE(metadata::text, '{{}}'), \
+         COALESCE(description, '') \
          FROM soll.Node \
          WHERE project_code = '{}'",
         project_code_escaped
@@ -49,6 +50,7 @@ pub fn load_snapshot(
                 title: row[2].clone(),
                 status: row[3].clone(),
                 metadata_raw: row[4].clone(),
+                description: row.get(5).cloned().unwrap_or_default(),
             },
         );
     }
