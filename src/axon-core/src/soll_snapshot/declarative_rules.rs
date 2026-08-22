@@ -105,17 +105,71 @@ impl EndpointMatcher {
     }
 }
 
+/// REQ-AXO-902455 axe 1 — de quel côté du sujet l'arête est cherchée.
+///
+/// `Outgoing` (défaut) répond à « ce nœud pointe-t-il vers … ». `Incoming`
+/// répond à « quelque chose pointe-t-il vers ce nœud », que la forme sortante ne
+/// peut PAS exprimer : OPV (`llm_feedback` #96) demande « 105 nœuds retirés,
+/// rien n'exige d'enregistrer le remplaçant » — c'est-à-dire *un nœud
+/// `superseded` doit recevoir une arête `SUPERSEDES`*.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EdgeDirection {
+    #[default]
+    Outgoing,
+    Incoming,
+}
+
+impl EdgeDirection {
+    pub fn from_str_ci(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "outgoing" | "out" | "from" => Some(Self::Outgoing),
+            "incoming" | "in" | "to" => Some(Self::Incoming),
+            _ => None,
+        }
+    }
+}
+
+/// Ce que la règle exige ou interdit du sujet.
+///
+/// UN prédicat par règle, jamais deux : une règle qui en combinerait plusieurs
+/// n'aurait pas de sens de violation univoque, et son message ne pourrait pas
+/// dire lequel a échoué. `parse_soll_rule` refuse la combinaison plutôt que de
+/// choisir en silence.
+#[derive(Clone, Debug)]
+pub enum RulePredicate {
+    /// Axe historique — une arête (dans `direction`) vers/depuis un nœud
+    /// correspondant à `other` est interdite (`Forbidden`) ou requise
+    /// (`Required`).
+    Edge {
+        mode: RuleMode,
+        direction: EdgeDirection,
+        other: EndpointMatcher,
+        relations: Vec<String>,
+    },
+    /// Axe 2 — aucune preuve du sujet ne doit porter l'un de ces
+    /// `artifact_status`. Répond à VPC : « empêcher `delivered` quand une preuve
+    /// est passée `missing` » — 485 preuves sur 636 n'avaient jamais été
+    /// vérifiées. La donnée était déjà dans le snapshot ; elle n'était pas
+    /// atteignable depuis le schéma.
+    ForbiddenEvidenceStatus {
+        statuses: Vec<String>,
+        /// Restreint aux preuves de ces types. Vide = tous.
+        artifact_types: Vec<String>,
+    },
+    /// Axe 3 — ces clés de métadonnées doivent être présentes ET non vides.
+    /// C'est la forme de `uncovered_requirements`, jusqu'ici en dur.
+    RequiredMetadata { keys: Vec<String> },
+}
+
 /// Une règle SOLL déclarative. `id`/`title` portent la Guideline qui la
 /// gouverne, pour qu'une violation se rattache à son intention.
 #[derive(Clone, Debug)]
 pub struct SollRule {
     pub id: String,
     pub title: String,
-    pub mode: RuleMode,
-    pub source: EndpointMatcher,
-    pub target: EndpointMatcher,
-    /// Types de relation contraints. Vide = toute relation.
-    pub relations: Vec<String>,
+    /// Les nœuds auxquels la règle s'applique.
+    pub subject: EndpointMatcher,
+    pub predicate: RulePredicate,
     /// Phrase rendue avec chaque violation. Sans elle le lecteur reçoit une
     /// correspondance de motif et aucune idée de quoi faire — c'est le « un
     /// compteur n'est pas un rapport » que ce dépôt corrige en boucle
@@ -152,10 +206,16 @@ impl SollRuleViolation {
 }
 
 /// Parse un objet de règle (metadata de Guideline ou entrée `rules[]` inline).
-/// `None` quand `mode` manque ou n'est pas reconnu : une règle que personne ne
-/// peut évaluer est ÉCARTÉE, pas traitée comme permissive.
+///
+/// `None` quand la règle est inévaluable : `mode` manquant/inconnu, ou DEUX
+/// prédicats combinés. Une règle que personne ne peut évaluer est ÉCARTÉE,
+/// jamais traitée comme permissive.
+///
+/// Le sujet se déclare par `subject_kind` / `subject_status_in` /
+/// `subject_status_not_in`. Les noms historiques `source_*` restent acceptés :
+/// `GUI-PRO-119` et `GUI-PRO-120` sont livrées sous cette forme et un tenant a
+/// pu en écrire d'autres.
 pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<SollRule> {
-    let mode = RuleMode::from_str_ci(v.get("mode")?.as_str()?)?;
     let string_list = |key: &str| -> Vec<String> {
         v.get(key)
             .and_then(|x| x.as_array())
@@ -167,36 +227,73 @@ pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<S
             })
             .unwrap_or_default()
     };
-    let kind_field = |key: &str| -> Option<String> {
+    let text = |key: &str| -> Option<String> {
         v.get(key)
             .and_then(|x| x.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
+    let first_list = |a: &str, b: &str| -> Vec<String> {
+        let primary = string_list(a);
+        if primary.is_empty() {
+            string_list(b)
+        } else {
+            primary
+        }
+    };
+
+    let subject = EndpointMatcher {
+        kind: text("subject_kind").or_else(|| text("source_kind")),
+        status: StatusMatcher {
+            any_of: first_list("subject_status_in", "source_status_in"),
+            none_of: first_list("subject_status_not_in", "source_status_not_in"),
+        },
+    };
+
+    // UN prédicat, jamais deux : sinon la violation n'a pas de sens univoque.
+    let evidence_statuses = string_list("evidence_status_in");
+    let metadata_keys = string_list("metadata_required");
+    let declared = [!evidence_statuses.is_empty(), !metadata_keys.is_empty()];
+    if declared.iter().filter(|d| **d).count() > 1 {
+        return None;
+    }
+
+    let predicate = if !evidence_statuses.is_empty() {
+        RulePredicate::ForbiddenEvidenceStatus {
+            statuses: evidence_statuses,
+            artifact_types: string_list("evidence_artifact_types"),
+        }
+    } else if !metadata_keys.is_empty() {
+        RulePredicate::RequiredMetadata { keys: metadata_keys }
+    } else {
+        // Forme historique : une contrainte d'arête. `mode` y est obligatoire.
+        let mode = RuleMode::from_str_ci(v.get("mode")?.as_str()?)?;
+        let direction = v
+            .get("direction")
+            .and_then(|x| x.as_str())
+            .map(EdgeDirection::from_str_ci)
+            .unwrap_or(Some(EdgeDirection::Outgoing))?;
+        RulePredicate::Edge {
+            mode,
+            direction,
+            other: EndpointMatcher {
+                kind: text("other_kind").or_else(|| text("target_kind")),
+                status: StatusMatcher {
+                    any_of: first_list("other_status_in", "target_status_in"),
+                    none_of: first_list("other_status_not_in", "target_status_not_in"),
+                },
+            },
+            relations: string_list("relations"),
+        }
+    };
+
     Some(SollRule {
         id: id.to_string(),
         title: title.to_string(),
-        mode,
-        source: EndpointMatcher {
-            kind: kind_field("source_kind"),
-            status: StatusMatcher {
-                any_of: string_list("source_status_in"),
-                none_of: string_list("source_status_not_in"),
-            },
-        },
-        target: EndpointMatcher {
-            kind: kind_field("target_kind"),
-            status: StatusMatcher {
-                any_of: string_list("target_status_in"),
-                none_of: string_list("target_status_not_in"),
-            },
-        },
-        relations: string_list("relations"),
-        message: v
-            .get("message")
-            .and_then(|x| x.as_str())
-            .map(str::to_string),
+        subject,
+        predicate,
+        message: text("message"),
     })
 }
 
@@ -216,8 +313,8 @@ fn node_facts(snapshot: &SollSnapshot) -> NodeFacts<'_> {
         .collect()
 }
 
-/// Évalue une règle. O(arêtes) pour `Forbidden`, O(nœuds + arêtes) pour
-/// `Required`.
+/// Évalue une règle. O(arêtes) pour une contrainte d'arête `Forbidden`,
+/// O(nœuds + arêtes) sinon.
 ///
 /// Un nœud absent du snapshot est IGNORÉ, jamais supposé : son extrémité est
 /// hors du périmètre chargé, et lui prêter un statut serait en inventer un.
@@ -226,80 +323,158 @@ pub fn evaluate_rule(snapshot: &SollSnapshot, rule: &SollRule) -> Vec<SollRuleVi
     evaluate_rule_with_facts(snapshot, rule, &facts)
 }
 
+fn violation(rule: &SollRule, subject: &str) -> SollRuleViolation {
+    SollRuleViolation {
+        rule_id: rule.id.clone(),
+        source_id: subject.to_string(),
+        target_id: None,
+        relation: None,
+        message: rule.message.clone(),
+    }
+}
+
+/// Les sujets de la règle, triés — un rapport dont l'ordre change d'un appel à
+/// l'autre ne se compare pas (même raison que REQ-AXO-902452).
+fn subjects<'a>(rule: &SollRule, facts: &NodeFacts<'a>) -> Vec<&'a str> {
+    let mut out: Vec<&str> = facts
+        .iter()
+        .filter(|(_, (kind, status))| rule.subject.matches(kind, status))
+        .map(|(id, _)| *id)
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 fn evaluate_rule_with_facts(
     snapshot: &SollSnapshot,
     rule: &SollRule,
     facts: &NodeFacts<'_>,
 ) -> Vec<SollRuleViolation> {
-    let rel_ok = |rel: &str| rule.relations.is_empty() || rule.relations.iter().any(|r| r == rel);
     let mut out = Vec::new();
-
-    match rule.mode {
-        RuleMode::Forbidden => {
-            for edge in &snapshot.edges {
-                if !rel_ok(&edge.relation_type) {
+    match &rule.predicate {
+        RulePredicate::Edge {
+            mode,
+            direction,
+            other,
+            relations,
+        } => {
+            let rel_ok = |rel: &str| relations.is_empty() || relations.iter().any(|r| r == rel);
+            // Selon la direction, le SUJET est l'une ou l'autre extrémité.
+            fn ends<'e>(
+                edge: &'e super::snapshot::SnapshotEdge,
+                direction: EdgeDirection,
+            ) -> (&'e str, &'e str) {
+                match direction {
+                    EdgeDirection::Outgoing => (edge.source_id.as_str(), edge.target_id.as_str()),
+                    EdgeDirection::Incoming => (edge.target_id.as_str(), edge.source_id.as_str()),
+                }
+            }
+            match mode {
+                RuleMode::Forbidden => {
+                    for edge in &snapshot.edges {
+                        if !rel_ok(&edge.relation_type) {
+                            continue;
+                        }
+                        let (subject_id, other_id) = ends(edge, *direction);
+                        let (Some((skind, sstatus)), Some((okind, ostatus))) =
+                            (facts.get(subject_id), facts.get(other_id))
+                        else {
+                            continue;
+                        };
+                        if rule.subject.matches(skind, sstatus) && other.matches(okind, ostatus) {
+                            out.push(SollRuleViolation {
+                                rule_id: rule.id.clone(),
+                                source_id: edge.source_id.clone(),
+                                target_id: Some(edge.target_id.clone()),
+                                relation: Some(edge.relation_type.clone()),
+                                message: rule.message.clone(),
+                            });
+                        }
+                    }
+                }
+                RuleMode::Required => {
+                    // Une règle `required` sans sélecteur de sujet exigerait
+                    // l'arête de CHAQUE nœud du graphe. Ce n'est jamais
+                    // l'intention de l'auteur, et ça noierait le rapport.
+                    if rule.subject.is_unconstrained() {
+                        return out;
+                    }
+                    let mut satisfied: HashMap<&str, bool> =
+                        subjects(rule, facts).into_iter().map(|id| (id, false)).collect();
+                    for edge in &snapshot.edges {
+                        if !rel_ok(&edge.relation_type) {
+                            continue;
+                        }
+                        let (subject_id, other_id) = ends(edge, *direction);
+                        if !satisfied.contains_key(subject_id) {
+                            continue;
+                        }
+                        let Some((okind, ostatus)) = facts.get(other_id) else {
+                            continue;
+                        };
+                        if other.matches(okind, ostatus) {
+                            satisfied.insert(subject_id, true);
+                        }
+                    }
+                    let mut offenders: Vec<&str> = satisfied
+                        .into_iter()
+                        .filter(|(_, ok)| !*ok)
+                        .map(|(id, _)| id)
+                        .collect();
+                    offenders.sort_unstable();
+                    out.extend(offenders.into_iter().map(|id| violation(rule, id)));
+                }
+            }
+        }
+        RulePredicate::ForbiddenEvidenceStatus {
+            statuses,
+            artifact_types,
+        } => {
+            let subjects: std::collections::HashSet<&str> =
+                subjects(rule, facts).into_iter().collect();
+            for trace in &snapshot.traceability {
+                if !subjects.contains(trace.soll_entity_id.as_str()) {
                     continue;
                 }
-                let (Some((skind, sstatus)), Some((tkind, tstatus))) = (
-                    facts.get(edge.source_id.as_str()),
-                    facts.get(edge.target_id.as_str()),
-                ) else {
+                if !artifact_types.is_empty()
+                    && !artifact_types
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(&trace.artifact_type))
+                {
                     continue;
-                };
-                if rule.source.matches(skind, sstatus) && rule.target.matches(tkind, tstatus) {
+                }
+                if statuses.iter().any(|s| s == &trace.artifact_status) {
                     out.push(SollRuleViolation {
                         rule_id: rule.id.clone(),
-                        source_id: edge.source_id.clone(),
-                        target_id: Some(edge.target_id.clone()),
-                        relation: Some(edge.relation_type.clone()),
+                        source_id: trace.soll_entity_id.clone(),
+                        target_id: Some(trace.artifact_ref.clone()),
+                        relation: Some(format!("evidence:{}", trace.artifact_status)),
                         message: rule.message.clone(),
                     });
                 }
             }
         }
-        RuleMode::Required => {
-            // Une règle `required` sans sélecteur de source exigerait l'arête de
-            // CHAQUE nœud du graphe. Ce n'est jamais l'intention de l'auteur, et
-            // ça noierait le rapport sous des milliers de lignes.
-            if rule.source.is_unconstrained() {
+        RulePredicate::RequiredMetadata { keys } => {
+            if rule.subject.is_unconstrained() {
                 return out;
             }
-            let mut satisfied: HashMap<&str, bool> = HashMap::new();
-            for (id, (kind, status)) in facts.iter() {
-                if rule.source.matches(kind, status) {
-                    satisfied.insert(*id, false);
-                }
-            }
-            for edge in &snapshot.edges {
-                if !rel_ok(&edge.relation_type) {
-                    continue;
-                }
-                if !satisfied.contains_key(edge.source_id.as_str()) {
-                    continue;
-                }
-                let Some((tkind, tstatus)) = facts.get(edge.target_id.as_str()) else {
+            for id in subjects(rule, facts) {
+                let Some(node) = snapshot.nodes.get(id) else {
                     continue;
                 };
-                if rule.target.matches(tkind, tstatus) {
-                    satisfied.insert(edge.source_id.as_str(), true);
-                }
-            }
-            let mut offenders: Vec<&str> = satisfied
-                .into_iter()
-                .filter(|(_, ok)| !*ok)
-                .map(|(id, _)| id)
-                .collect();
-            // Trié : un rapport qui change d'ordre d'un appel à l'autre ne se
-            // compare pas (même raison que REQ-AXO-902452).
-            offenders.sort_unstable();
-            for id in offenders {
-                out.push(SollRuleViolation {
-                    rule_id: rule.id.clone(),
-                    source_id: id.to_string(),
-                    target_id: None,
-                    relation: None,
-                    message: rule.message.clone(),
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&node.metadata_raw).unwrap_or(serde_json::Value::Null);
+                let missing = keys.iter().any(|key| {
+                    match parsed.get(key) {
+                        None | Some(serde_json::Value::Null) => true,
+                        Some(serde_json::Value::String(text)) => text.trim().is_empty(),
+                        Some(serde_json::Value::Array(items)) => items.is_empty(),
+                        Some(_) => false,
+                    }
                 });
+                if missing {
+                    out.push(violation(rule, id));
+                }
             }
         }
     }
@@ -340,10 +515,223 @@ mod tests {
     }
 
     fn snapshot(nodes: Vec<SnapshotNode>, edges: Vec<SnapshotEdge>) -> SollSnapshot {
+        snapshot_with_evidence(nodes, edges, Vec::new())
+    }
+
+    fn snapshot_with_evidence(
+        nodes: Vec<SnapshotNode>,
+        edges: Vec<SnapshotEdge>,
+        traceability: Vec<crate::soll_snapshot::SnapshotTraceability>,
+    ) -> SollSnapshot {
         let map: HashMap<String, SnapshotNode> =
             nodes.into_iter().map(|n| (n.id.clone(), n)).collect();
-        SollSnapshot::build("TST", 1, map, edges, Vec::new())
+        SollSnapshot::build("TST", 1, map, edges, traceability)
     }
+
+    fn node_with_metadata(id: &str, entity_type: &str, status: &str, meta: &str) -> SnapshotNode {
+        SnapshotNode {
+            id: id.to_string(),
+            entity_type: entity_type.to_string(),
+            title: id.to_string(),
+            status: status.to_string(),
+            metadata_raw: meta.to_string(),
+        }
+    }
+
+    fn evidence(entity_id: &str, artifact_type: &str, r#ref: &str, status: &str)
+        -> crate::soll_snapshot::SnapshotTraceability
+    {
+        crate::soll_snapshot::SnapshotTraceability {
+            id: format!("{entity_id}:{ref_}", ref_ = r#ref),
+            soll_entity_type: "requirement".to_string(),
+            soll_entity_id: entity_id.to_string(),
+            artifact_type: artifact_type.to_string(),
+            artifact_ref: r#ref.to_string(),
+            artifact_status: status.to_string(),
+        }
+    }
+
+    /// AXE 1 — REQ-AXO-902455, demandé par OPV (`llm_feedback` #96) : « 105 nœuds
+    /// retirés, rien n'exige d'enregistrer ce qui les remplace ». C'est une règle
+    /// sur les arêtes ENTRANTES ; la forme sortante ne peut pas l'exprimer.
+    #[test]
+    fn an_incoming_rule_flags_a_retired_node_that_nothing_replaces() {
+        let rule = parse_soll_rule(
+            "GUI-TST-010",
+            "Un nœud retiré dit ce qui le remplace",
+            &json!({
+                "mode": "required",
+                "direction": "incoming",
+                "subject_status_in": ["superseded"],
+                "relations": ["SUPERSEDES"],
+                "message": "retiré sans remplaçant enregistré"
+            }),
+        )
+        .unwrap();
+        let snap = snapshot(
+            vec![
+                node("REQ-TST-001", "Requirement", "current"),
+                node("REQ-TST-002", "Requirement", "superseded"), // remplacé : OK
+                node("REQ-TST-003", "Requirement", "superseded"), // orphelin : violation
+            ],
+            vec![edge("REQ-TST-001", "REQ-TST-002", "SUPERSEDES")],
+        );
+        let found = evaluate_rule(&snap, &rule);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].source_id, "REQ-TST-003");
+        // Contrôle positif : celui QUI a un remplaçant n'est pas signalé, et le
+        // nœud `current` n'est pas sujet du tout.
+        assert!(!found.iter().any(|v| v.source_id == "REQ-TST-002"));
+        assert!(!found.iter().any(|v| v.source_id == "REQ-TST-001"));
+    }
+
+    /// La MÊME règle en sortante ne dit pas la même chose — c'est ce qui prouve
+    /// que `direction` porte du sens et n'est pas un champ décoratif.
+    #[test]
+    fn the_same_rule_outgoing_does_not_mean_the_same_thing() {
+        let outgoing = parse_soll_rule(
+            "GUI-TST-011",
+            "sortante",
+            &json!({
+                "mode": "required",
+                "subject_status_in": ["superseded"],
+                "relations": ["SUPERSEDES"]
+            }),
+        )
+        .unwrap();
+        let snap = snapshot(
+            vec![
+                node("REQ-TST-001", "Requirement", "current"),
+                node("REQ-TST-002", "Requirement", "superseded"),
+            ],
+            vec![edge("REQ-TST-001", "REQ-TST-002", "SUPERSEDES")],
+        );
+        // En sortante, REQ-002 est signalé (il ne supersède rien) — l'INVERSE du
+        // verdict entrant, où il est le seul à être correctement remplacé.
+        let found = evaluate_rule(&snap, &outgoing);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source_id, "REQ-TST-002");
+    }
+
+    /// AXE 2 — VPC : « empêcher `delivered` quand une preuve est passée
+    /// `missing` ». 485 preuves sur 636 n'avaient jamais été vérifiées ; la
+    /// donnée était dans le snapshot, inatteignable depuis le schéma.
+    #[test]
+    fn an_evidence_rule_flags_a_delivered_requirement_whose_proof_went_missing() {
+        let rule = parse_soll_rule(
+            "GUI-TST-012",
+            "Une exigence livrée n'est pas prouvée par un fichier disparu",
+            &json!({
+                "subject_kind": "Requirement",
+                "subject_status_in": ["delivered"],
+                "evidence_status_in": ["broken"],
+                "message": "preuve absente sous une exigence livrée"
+            }),
+        )
+        .unwrap();
+        let snap = snapshot_with_evidence(
+            vec![
+                node("REQ-TST-001", "Requirement", "delivered"),
+                node("REQ-TST-002", "Requirement", "delivered"),
+                node("REQ-TST-003", "Requirement", "current"),
+            ],
+            vec![],
+            vec![
+                evidence("REQ-TST-001", "file", "src/parti.rs", "broken"),
+                evidence("REQ-TST-002", "file", "src/present.rs", "present"),
+                // `current` avec une preuve cassée : hors sujet, la règle vise
+                // les LIVRÉES.
+                evidence("REQ-TST-003", "file", "src/autre.rs", "broken"),
+            ],
+        );
+        let found = evaluate_rule(&snap, &rule);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].source_id, "REQ-TST-001");
+        assert_eq!(found[0].target_id.as_deref(), Some("src/parti.rs"));
+        assert!(found[0].render().contains("GUI-TST-012"));
+    }
+
+    /// Le filtre par type de preuve : une règle qui ne vise que les fichiers ne
+    /// doit pas rougir sur une métrique cassée.
+    #[test]
+    fn an_evidence_rule_can_be_restricted_to_one_artifact_type() {
+        let rule = parse_soll_rule(
+            "GUI-TST-013",
+            "fichiers seulement",
+            &json!({
+                "subject_kind": "Requirement",
+                "evidence_status_in": ["broken"],
+                "evidence_artifact_types": ["file"]
+            }),
+        )
+        .unwrap();
+        let snap = snapshot_with_evidence(
+            vec![node("REQ-TST-001", "Requirement", "delivered")],
+            vec![],
+            vec![evidence("REQ-TST-001", "metric", "p99_latency", "broken")],
+        );
+        assert!(
+            evaluate_rule(&snap, &rule).is_empty(),
+            "une métrique n'est pas un fichier"
+        );
+    }
+
+    /// AXE 3 — la forme de `uncovered_requirements`, jusqu'ici en dur.
+    #[test]
+    fn a_metadata_rule_flags_a_requirement_without_acceptance_criteria() {
+        let rule = parse_soll_rule(
+            "GUI-TST-014",
+            "Une exigence porte ses critères d'acceptation",
+            &json!({
+                "subject_kind": "Requirement",
+                "metadata_required": ["acceptance_criteria"]
+            }),
+        )
+        .unwrap();
+        let snap = snapshot(
+            vec![
+                node_with_metadata("REQ-TST-001", "Requirement", "current", "{}"),
+                node_with_metadata(
+                    "REQ-TST-002",
+                    "Requirement",
+                    "current",
+                    r#"{"acceptance_criteria": []}"#,
+                ),
+                node_with_metadata(
+                    "REQ-TST-003",
+                    "Requirement",
+                    "current",
+                    r#"{"acceptance_criteria": ["le test passe"]}"#,
+                ),
+            ],
+            vec![],
+        );
+        let found = evaluate_rule(&snap, &rule);
+        let flagged: Vec<&str> = found.iter().map(|v| v.source_id.as_str()).collect();
+        assert_eq!(
+            flagged,
+            vec!["REQ-TST-001", "REQ-TST-002"],
+            "absent ET vide comptent tous deux comme manquants ; renseigné ne compte pas"
+        );
+    }
+
+    /// Une règle qui combine DEUX prédicats n'a pas de sens de violation
+    /// univoque : son message ne pourrait pas dire lequel a échoué. Refusée au
+    /// parse plutôt que tranchée en silence.
+    #[test]
+    fn a_rule_combining_two_predicates_is_refused_rather_than_silently_resolved() {
+        assert!(parse_soll_rule(
+            "GUI-TST-015",
+            "x",
+            &json!({
+                "subject_kind": "Requirement",
+                "evidence_status_in": ["missing"],
+                "metadata_required": ["acceptance_criteria"]
+            }),
+        )
+        .is_none());
+    }
+
 
     /// La règle demandée par TE2, exprimée en DONNÉE et non en branche Rust.
     fn supersedes_rule() -> SollRule {
