@@ -115,7 +115,10 @@ impl McpServer {
             let normalized = relation_type.to_uppercase();
             if policy.allowed.iter().any(|allowed| *allowed == normalized) {
                 normalized
-            } else if policy.allowed.len() == 1 && policy.allowed[0] != "SUPERSEDES" {
+            } else if policy.allowed.len() == 1
+                && policy.allowed[0] != "SUPERSEDES"
+                && normalized != "SUPERSEDES"
+            {
                 // REQ-AXO-901939 — auto-canonize when the direction is
                 // UNAMBIGUOUS: the requested relation is not allowed for this
                 // pair, but the pair admits exactly ONE canonical relation, so
@@ -137,7 +140,18 @@ impl McpServer {
             } else {
                 // REQ-AXO-902098 — flag the destructive nature so the LLM does
                 // not blindly retry with SUPERSEDES for a mere ordering intent.
-                let destructive_note = if policy.allowed.iter().any(|r| *r == "SUPERSEDES") {
+                let destructive_note = if normalized == "SUPERSEDES" {
+                    // REQ-AXO-902462 — le refus doit dire POURQUOI il ne
+                    // propose rien d'approchant : aucune des relations légales
+                    // de cette paire n'exprime un RETRAIT, et en substituer une
+                    // écrirait l'intention inverse. Un refus qui ne dit pas où
+                    // aller est une impasse (PIL-AXO-002).
+                    " — note: aucune relation legale de cette paire n'exprime un RETRAIT, \
+                     et SUPERSEDES n'est JAMAIS substitue par une autre (il changerait \
+                     l'intention). Marquez le CORPS du noeud retire (GUI-PRO-130) et laissez \
+                     la violation GUI-PRO-125 visible ; l'ouverture de la paire est suivie \
+                     par REQ-AXO-902461"
+                } else if policy.allowed.iter().any(|r| *r == "SUPERSEDES") {
                     " — note: SUPERSEDES is DESTRUCTIVE (sets the target status='superseded'); \
                      pass it explicitly ONLY for a deliberate redirect, never for ordering"
                 } else {

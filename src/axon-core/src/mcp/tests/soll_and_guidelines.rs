@@ -1423,6 +1423,114 @@ fn test_soll_manager_link_auto_canonizes_unambiguous_relation() {
 }
 
 #[test]
+fn test_soll_manager_link_never_auto_canonizes_a_requested_supersedes() {
+    // REQ-AXO-902462 — l'auto-canonisation de REQ-AXO-901939 est utile quand un
+    // LLM devine mal une relation de FILIATION. Appliquée à `SUPERSEDES`, elle
+    // change la NATURE de l'affirmation : « ceci REMPLACE cela » devient « ce
+    // jalon PLANIFIE ce travail », et rend `status: ok`. Mesuré deux fois sur
+    // AXO le 2026-08-22 en réparant GUI-PRO-125 (MIL→REQ devenu TARGETS,
+    // DEC→GUI devenu COMPLIES_WITH) ; les deux arêtes ont dû être retirées à la
+    // main. La garde symétrique existait déjà — « ne JAMAIS auto-canoniser VERS
+    // SUPERSEDES » (REQ-AXO-902098) — mais « jamais DEPUIS » manquait.
+    let server = create_test_server();
+    let code = "TSU".to_string();
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('{code}', 'AXON_GLOBAL', 0, 2, 0, 0) ON CONFLICT (project_code) DO UPDATE SET last_req = 2"
+        ))
+        .unwrap();
+    for (id, ty) in [
+        (format!("MIL-{code}-901"), "Milestone"),
+        (format!("REQ-{code}-901"), "Requirement"),
+        (format!("REQ-{code}-902"), "Requirement"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{id}', '{ty}', '{code}', 't', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+            ))
+            .unwrap();
+    }
+    // PG partage entre tests : une execution precedente a pu laisser une arete.
+    server
+        .graph_store
+        .execute(&format!(
+            "DELETE FROM soll.Edge WHERE source_id LIKE 'MIL-{code}-9%' OR target_id LIKE 'REQ-{code}-9%'"
+        ))
+        .unwrap();
+    let link = |src: String, tgt: String, rel: &str, rid: i64| -> serde_json::Value {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_manager",
+                    "arguments": { "action": "link", "entity": "milestone",
+                        "data": { "source_id": src, "target_id": tgt, "relation_type": rel } }
+                })),
+                id: Some(json!(rid)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+    let edges_between = |src: &str, tgt: &str| -> i64 {
+        server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Edge WHERE source_id='{src}' AND target_id='{tgt}'"
+            ))
+            .unwrap()
+    };
+
+    // CONTRÔLE POSITIF — le comportement de REQ-AXO-901939 est CONSERVÉ : sur la
+    // même paire MIL→REQ (qui n'admet que TARGETS), une relation de filiation
+    // mal devinée s'auto-canonise toujours. Sans ce contrôle, une garde qui
+    // désarmerait l'auto-canonisation ENTIÈRE passerait au vert.
+    let ok = link(
+        format!("MIL-{code}-901"),
+        format!("REQ-{code}-901"),
+        "BLOCKED_BY",
+        1,
+    );
+    assert_ne!(
+        ok.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "une relation de filiation mal devinee doit toujours s'auto-canoniser : {ok:?}"
+    );
+    assert_eq!(
+        ok["data"]["auto_canonized_from"].as_str(),
+        Some("BLOCKED_BY")
+    );
+
+    // LE DÉFAUT — même paire, mais la demande est un RETRAIT. Elle doit être
+    // REFUSÉE, jamais réécrite : une relation qui porte un effet de bord
+    // destructif n'est pas substituable par une relation de planification.
+    let refused = link(
+        format!("MIL-{code}-901"),
+        format!("REQ-{code}-902"),
+        "SUPERSEDES",
+        2,
+    );
+    assert_eq!(
+        refused.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "un SUPERSEDES demande sur une paire qui ne l'admet pas doit REJETER : {refused:?}"
+    );
+    assert_eq!(
+        edges_between(&format!("MIL-{code}-901"), &format!("REQ-{code}-902")),
+        0,
+        "le refus ne doit ecrire AUCUNE arete — surtout pas une TARGETS qui dirait le contraire du retrait demande"
+    );
+    let text = refused["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("SUPERSEDES"),
+        "le refus doit nommer la relation demandee : {text}"
+    );
+}
+
+#[test]
 fn test_soll_manager_link_cycle_guard_filiation_and_inheritance() {
     // REQ-AXO-901593 — the cycle pre-check covers BOTH filiation (regression
     // after the parametrization refactor) and the non-filiation guarded
