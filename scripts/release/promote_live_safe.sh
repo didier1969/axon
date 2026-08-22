@@ -599,6 +599,19 @@ if [[ "$SKIP_BUILD" -ne 1 ]]; then
   fi
 fi
 
+# --- Step 1b: preflight — la porte d'intégrité d'artefact, au seul moment où elle
+# peut dire la vérité (REQ-AXO-902454).
+#
+# Elle vérifie trois choses : `bin/<rôle>` a bien l'empreinte que son `.build-info`
+# déclare · `AXON_BUILD_ID` == `git describe` · et `bin/` correspond encore à
+# l'artefact canonique du workspace. La troisième n'est vraie qu'AVANT que quoi que
+# ce soit d'autre ne recompile dans le target partagé — c'est-à-dire ici, et nulle
+# part plus loin dans la séquence. Aucune vérification n'est perdue : elles sont
+# toutes faites, plus tôt, sur l'artefact fraîchement installé.
+ensure_head_stable
+run_step 1b preflight "$ROOT_DIR/scripts/axon" release-preflight
+ensure_head_stable
+
 # --- Step 4 (manifest): SYNCHRONOUS at step 4 by default (REQ-AXO-902359) ---
 # The optimisation of REQ-AXO-902188 launched the manifest EARLY, concurrently with
 # the dev_gate, to shave ~2s off the critical path. Its comment reasoned only about
@@ -704,9 +717,13 @@ test_targets_compile_step() {
 }
 run_step 2e test_targets_compile test_targets_compile_step
 
-# --- Step 3: preflight ---
-ensure_head_stable
-run_step 3 preflight "$ROOT_DIR/scripts/axon" release-preflight
+# --- Step 3: preflight — DÉPLACÉ juste après le build (REQ-AXO-902454) ---
+# Il tournait ICI, après `dev_restart`. Or `axon-dev start brain --fast` recompile
+# en profil RELEASE dans le MÊME `.axon/cargo-target` que l'étape 1, donc au moment
+# où la garde s'exécutait, l'artefact canonique du workspace n'était plus celui dont
+# l'étape 1 avait enregistré l'empreinte dans `bin/*.build-info`.
+# Le promote invalidait sa propre porte : « Workspace artifact drift » à chaque fois,
+# 100 % du temps, sur un arbre parfaitement propre.
 ensure_head_stable
 
 # --- Step 4: manifest (JOIN the background job launched before step 2, REQ-AXO-902188) ---
