@@ -159,6 +159,53 @@ pub enum RulePredicate {
     /// Axe 3 — ces clés de métadonnées doivent être présentes ET non vides.
     /// C'est la forme de `uncovered_requirements`, jusqu'ici en dur.
     RequiredMetadata { keys: Vec<String> },
+    /// Axe 4 — deux sujets ne partagent pas la même valeur de `field`.
+    ///
+    /// PREMIER prédicat qui compare des nœuds ENTRE EUX au lieu de juger chacun
+    /// isolément : c'est lui qui révise `DEC-AXO-901649`. La frontière se
+    /// déplace, elle ne disparaît pas — voir la Décision qui la supersède.
+    /// Forme de `duplicate_titles`, jusqu'ici en dur.
+    UniqueBy { field: RuleField },
+    /// Axe 5 — au plus `max` sujets par groupe. `group_by_relation` absent = un
+    /// seul groupe (tous les sujets du projet).
+    AtMost {
+        max: usize,
+        group_by_relation: Option<String>,
+        group_direction: EdgeDirection,
+    },
+    /// Axe 6 — tout sujet doit ATTEINDRE un nœud correspondant à `other`, en ne
+    /// suivant que `relations`. Rend vérifiable la cohérence de filiation :
+    /// « toute exigence remonte à une Vision ».
+    Reaches {
+        other: EndpointMatcher,
+        relations: Vec<String>,
+    },
+}
+
+/// Le champ sur lequel porte une contrainte d'unicité. Fermé volontairement :
+/// ouvrir sur une expression arbitraire serait le langage de requête que la
+/// Décision continue d'interdire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleField {
+    Title,
+    Id,
+}
+
+impl RuleField {
+    pub fn from_str_ci(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "title" => Some(Self::Title),
+            "id" => Some(Self::Id),
+            _ => None,
+        }
+    }
+
+    fn of<'a>(&self, node: &'a super::snapshot::SnapshotNode) -> &'a str {
+        match self {
+            Self::Title => node.title.as_str(),
+            Self::Id => node.id.as_str(),
+        }
+    }
 }
 
 /// Une règle SOLL déclarative. `id`/`title` portent la Guideline qui la
@@ -254,7 +301,16 @@ pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<S
     // UN prédicat, jamais deux : sinon la violation n'a pas de sens univoque.
     let evidence_statuses = string_list("evidence_status_in");
     let metadata_keys = string_list("metadata_required");
-    let declared = [!evidence_statuses.is_empty(), !metadata_keys.is_empty()];
+    let unique_by = text("unique_by");
+    let at_most = v.get("at_most").and_then(|x| x.as_u64());
+    let reaches = v.get("reaches").and_then(|x| x.as_bool()).unwrap_or(false);
+    let declared = [
+        !evidence_statuses.is_empty(),
+        !metadata_keys.is_empty(),
+        unique_by.is_some(),
+        at_most.is_some(),
+        reaches,
+    ];
     if declared.iter().filter(|d| **d).count() > 1 {
         return None;
     }
@@ -266,6 +322,31 @@ pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<S
         }
     } else if !metadata_keys.is_empty() {
         RulePredicate::RequiredMetadata { keys: metadata_keys }
+    } else if let Some(field) = unique_by {
+        RulePredicate::UniqueBy {
+            field: RuleField::from_str_ci(&field)?,
+        }
+    } else if let Some(max) = at_most {
+        RulePredicate::AtMost {
+            max: max as usize,
+            group_by_relation: text("group_by_relation"),
+            group_direction: v
+                .get("group_direction")
+                .and_then(|x| x.as_str())
+                .map(EdgeDirection::from_str_ci)
+                .unwrap_or(Some(EdgeDirection::Outgoing))?,
+        }
+    } else if reaches {
+        RulePredicate::Reaches {
+            other: EndpointMatcher {
+                kind: text("other_kind").or_else(|| text("target_kind")),
+                status: StatusMatcher {
+                    any_of: first_list("other_status_in", "target_status_in"),
+                    none_of: first_list("other_status_not_in", "target_status_not_in"),
+                },
+            },
+            relations: string_list("relations"),
+        }
     } else {
         // Forme historique : une contrainte d'arête. `mode` y est obligatoire.
         let mode = RuleMode::from_str_ci(v.get("mode")?.as_str()?)?;
@@ -345,6 +426,19 @@ fn subjects<'a>(rule: &SollRule, facts: &NodeFacts<'a>) -> Vec<&'a str> {
     out
 }
 
+/// Les deux bouts d'une arête, du point de vue du SUJET : `Outgoing` le voit
+/// comme la source, `Incoming` comme la cible. Partagé par les prédicats
+/// d'arête et de groupement.
+fn ends<'e>(
+    edge: &'e super::snapshot::SnapshotEdge,
+    direction: EdgeDirection,
+) -> (&'e str, &'e str) {
+    match direction {
+        EdgeDirection::Outgoing => (edge.source_id.as_str(), edge.target_id.as_str()),
+        EdgeDirection::Incoming => (edge.target_id.as_str(), edge.source_id.as_str()),
+    }
+}
+
 fn evaluate_rule_with_facts(
     snapshot: &SollSnapshot,
     rule: &SollRule,
@@ -360,15 +454,6 @@ fn evaluate_rule_with_facts(
         } => {
             let rel_ok = |rel: &str| relations.is_empty() || relations.iter().any(|r| r == rel);
             // Selon la direction, le SUJET est l'une ou l'autre extrémité.
-            fn ends<'e>(
-                edge: &'e super::snapshot::SnapshotEdge,
-                direction: EdgeDirection,
-            ) -> (&'e str, &'e str) {
-                match direction {
-                    EdgeDirection::Outgoing => (edge.source_id.as_str(), edge.target_id.as_str()),
-                    EdgeDirection::Incoming => (edge.target_id.as_str(), edge.source_id.as_str()),
-                }
-            }
             match mode {
                 RuleMode::Forbidden => {
                     for edge in &snapshot.edges {
@@ -473,6 +558,130 @@ fn evaluate_rule_with_facts(
                     }
                 });
                 if missing {
+                    out.push(violation(rule, id));
+                }
+            }
+        }
+        RulePredicate::UniqueBy { field } => {
+            // Grouper par valeur normalisée. Une violation NOMME les nœuds en
+            // cause : un compteur de doublons n'ouvre aucune action
+            // (REQ-AXO-902409).
+            let mut by_value: HashMap<String, Vec<&str>> = HashMap::new();
+            for id in subjects(rule, facts) {
+                let Some(node) = snapshot.nodes.get(id) else {
+                    continue;
+                };
+                let value = field.of(node).trim().to_lowercase();
+                if value.is_empty() {
+                    // Un champ vide n'est pas un doublon : c'est une absence,
+                    // qui relève d'une règle de métadonnées, pas d'unicité.
+                    continue;
+                }
+                by_value.entry(value).or_default().push(id);
+            }
+            let mut groups: Vec<(String, Vec<&str>)> = by_value
+                .into_iter()
+                .filter(|(_, ids)| ids.len() > 1)
+                .collect();
+            groups.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            for (value, mut ids) in groups {
+                ids.sort_unstable();
+                for id in &ids {
+                    let others: Vec<&str> =
+                        ids.iter().copied().filter(|other| other != id).collect();
+                    out.push(SollRuleViolation {
+                        rule_id: rule.id.clone(),
+                        source_id: (*id).to_string(),
+                        target_id: Some(others.join(", ")),
+                        relation: Some(format!("same:{value}")),
+                        message: rule.message.clone(),
+                    });
+                }
+            }
+        }
+        RulePredicate::AtMost {
+            max,
+            group_by_relation,
+            group_direction,
+        } => {
+            let subject_ids: Vec<&str> = subjects(rule, facts);
+            if subject_ids.is_empty() {
+                return out;
+            }
+            // Sans relation de groupement, tous les sujets forment UN groupe.
+            let mut groups: HashMap<String, Vec<&str>> = HashMap::new();
+            match group_by_relation {
+                None => {
+                    groups.insert(String::new(), subject_ids);
+                }
+                Some(relation) => {
+                    let member: std::collections::HashSet<&str> =
+                        subject_ids.iter().copied().collect();
+                    for edge in &snapshot.edges {
+                        if &edge.relation_type != relation {
+                            continue;
+                        }
+                        let (subject_id, group_id) = ends(edge, *group_direction);
+                        if !member.contains(subject_id) {
+                            continue;
+                        }
+                        groups.entry(group_id.to_string()).or_default().push(subject_id);
+                    }
+                    // Un sujet sans groupe est IGNORÉ, jamais compté dans un
+                    // groupe fictif : l'affecter d'office fausserait le compte.
+                }
+            }
+            let mut over: Vec<(String, Vec<&str>)> = groups
+                .into_iter()
+                .filter(|(_, ids)| ids.len() > *max)
+                .collect();
+            over.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            for (group_id, mut ids) in over {
+                ids.sort_unstable();
+                ids.dedup();
+                let count = ids.len();
+                for id in ids {
+                    out.push(SollRuleViolation {
+                        rule_id: rule.id.clone(),
+                        source_id: id.to_string(),
+                        target_id: Some(if group_id.is_empty() {
+                            format!("{count} sujets pour un maximum de {max}")
+                        } else {
+                            format!("{group_id} ({count} sujets pour un maximum de {max})")
+                        }),
+                        relation: Some("at_most".to_string()),
+                        message: rule.message.clone(),
+                    });
+                }
+            }
+        }
+        RulePredicate::Reaches { other, relations } => {
+            if rule.subject.is_unconstrained() {
+                return out;
+            }
+            let rel_set: std::collections::HashSet<String> = if relations.is_empty() {
+                snapshot
+                    .edges
+                    .iter()
+                    .map(|e| e.relation_type.clone())
+                    .collect()
+            } else {
+                relations.iter().cloned().collect()
+            };
+            // Les cibles acceptables. En pratique peu nombreuses (les Visions
+            // d'un projet se comptent sur une main), d'où la boucle directe
+            // plutôt qu'un BFS instrumenté : `reaches_via_relations` est la
+            // traversée petgraph déjà testée du dépôt, on ne la réécrit pas.
+            let targets: Vec<&str> = facts
+                .iter()
+                .filter(|(_, (kind, status))| other.matches(kind, status))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in subjects(rule, facts) {
+                let reached = targets
+                    .iter()
+                    .any(|target| snapshot.reaches_via_relations(id, target, &rel_set));
+                if !reached {
                     out.push(violation(rule, id));
                 }
             }
@@ -713,6 +922,137 @@ mod tests {
             vec!["REQ-TST-001", "REQ-TST-002"],
             "absent ET vide comptent tous deux comme manquants ; renseigné ne compte pas"
         );
+    }
+
+    /// AXE 4 — unicité. PREMIER prédicat qui compare des nœuds ENTRE EUX ; c'est
+    /// lui qui révise `DEC-AXO-901649`. Forme de `duplicate_titles`, en dur
+    /// jusqu'ici.
+    #[test]
+    fn a_uniqueness_rule_names_every_node_that_shares_a_title() {
+        let rule = parse_soll_rule(
+            "GUI-TST-020",
+            "Deux exigences ne portent pas le même titre",
+            &json!({ "subject_kind": "Requirement", "unique_by": "title" }),
+        )
+        .unwrap();
+        let titled = |id: &str, title: &str| SnapshotNode {
+            id: id.to_string(),
+            entity_type: "Requirement".to_string(),
+            title: title.to_string(),
+            status: "current".to_string(),
+            metadata_raw: "{}".to_string(),
+        };
+        let snap = snapshot(
+            vec![
+                titled("REQ-TST-001", "Corriger le cache"),
+                titled("REQ-TST-002", "  corriger le CACHE  "), // même titre, normalisé
+                titled("REQ-TST-003", "Autre chose"),           // unique
+                titled("REQ-TST-004", ""),                      // vide : une ABSENCE
+            ],
+            vec![],
+        );
+        let found = evaluate_rule(&snap, &rule);
+        let flagged: Vec<&str> = found.iter().map(|v| v.source_id.as_str()).collect();
+        assert_eq!(
+            flagged,
+            vec!["REQ-TST-001", "REQ-TST-002"],
+            "les DEUX porteurs sont nommés — un seul ne dirait pas quoi comparer"
+        );
+        // Chaque ligne NOMME l'autre : un compteur de doublons n'ouvre aucune action.
+        assert!(found[0].target_id.as_deref() == Some("REQ-TST-002"), "{found:?}");
+        assert!(found[1].target_id.as_deref() == Some("REQ-TST-001"), "{found:?}");
+        // Contrôles positifs : l'unique n'est pas signalé, et un titre VIDE n'est
+        // pas un doublon — c'est une absence, qui relève d'une autre règle.
+        assert!(!flagged.contains(&"REQ-TST-003"));
+        assert!(!flagged.contains(&"REQ-TST-004"));
+    }
+
+    /// AXE 5 — agrégat. Capacité neuve : aucun check en dur ne la couvrait.
+    #[test]
+    fn an_at_most_rule_flags_the_group_that_exceeds_its_ceiling() {
+        let rule = parse_soll_rule(
+            "GUI-TST-021",
+            "Au plus deux exigences en cours par jalon",
+            &json!({
+                "subject_kind": "Requirement",
+                "subject_status_in": ["current"],
+                "at_most": 2,
+                "group_by_relation": "TARGETS",
+                "group_direction": "incoming"
+            }),
+        )
+        .unwrap();
+        let mut nodes = vec![
+            node("MIL-TST-001", "Milestone", "current"),
+            node("MIL-TST-002", "Milestone", "current"),
+        ];
+        let mut edges = vec![];
+        // MIL-001 porte 3 exigences (au-dessus), MIL-002 en porte exactement 2.
+        for (mil, count) in [("MIL-TST-001", 3), ("MIL-TST-002", 2)] {
+            for n in 1..=count {
+                let id = format!("REQ-{}-{n}", &mil[4..11]);
+                nodes.push(node(&id, "Requirement", "current"));
+                edges.push(edge(mil, &id, "TARGETS"));
+            }
+        }
+        let snap = snapshot(nodes, edges);
+        let found = evaluate_rule(&snap, &rule);
+        assert_eq!(found.len(), 3, "seul le groupe en dépassement : {found:?}");
+        assert!(
+            found.iter().all(|v| v.source_id.starts_with("REQ-TST-001")),
+            "{found:?}"
+        );
+        // La ligne dit DE COMBIEN on dépasse, pas seulement qu'on dépasse.
+        assert!(
+            found[0].target_id.as_deref().is_some_and(|t| t.contains("3 sujets")),
+            "{found:?}"
+        );
+        // Contrôle positif : la borne est INCLUSIVE — un groupe à exactement
+        // `max` n'est pas une violation, et ce test fixe cette convention.
+        assert!(!found.iter().any(|v| v.source_id.starts_with("REQ-TST-002")));
+    }
+
+    /// AXE 6 — atteignabilité. Réutilise `reaches_via_relations`, la traversée
+    /// petgraph déjà testée du dépôt : ce prédicat est un appel, pas un
+    /// algorithme réécrit.
+    #[test]
+    fn a_reachability_rule_flags_the_requirement_that_reaches_no_vision() {
+        let rule = parse_soll_rule(
+            "GUI-TST-022",
+            "Toute exigence remonte à une Vision",
+            &json!({
+                "subject_kind": "Requirement",
+                "reaches": true,
+                "other_kind": "Vision",
+                "relations": ["BELONGS_TO", "EPITOMIZES"]
+            }),
+        )
+        .unwrap();
+        let snap = snapshot(
+            vec![
+                node("VIS-TST-001", "Vision", "current"),
+                node("PIL-TST-001", "Pillar", "current"),
+                node("REQ-TST-001", "Requirement", "current"), // rattaché
+                node("REQ-TST-002", "Requirement", "current"), // orphelin
+                node("REQ-TST-003", "Requirement", "current"), // rattaché à un pilier ISOLÉ
+                node("PIL-TST-002", "Pillar", "current"),
+            ],
+            vec![
+                edge("PIL-TST-001", "VIS-TST-001", "EPITOMIZES"),
+                edge("REQ-TST-001", "PIL-TST-001", "BELONGS_TO"),
+                edge("REQ-TST-003", "PIL-TST-002", "BELONGS_TO"),
+            ],
+        );
+        let found = evaluate_rule(&snap, &rule);
+        let flagged: Vec<&str> = found.iter().map(|v| v.source_id.as_str()).collect();
+        assert_eq!(
+            flagged,
+            vec!["REQ-TST-002", "REQ-TST-003"],
+            "l'orphelin ET celui dont le pilier ne mène nulle part : c'est la \
+             TRANSITIVITÉ qui est testée, pas le voisinage direct"
+        );
+        // Contrôle positif : celui qui atteint la Vision en deux sauts passe.
+        assert!(!flagged.contains(&"REQ-TST-001"));
     }
 
     /// Une règle qui combine DEUX prédicats n'a pas de sens de violation
