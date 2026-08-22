@@ -88,8 +88,13 @@ impl ScopedSymbolResolution {
     /// REQ-AXO-902452 — la phrase qui manquait. `None` sur un nom non ambigu :
     /// une note sur chaque appel serait du bruit, et le bruit se filtre.
     pub(crate) fn ambiguity_note(&self) -> Option<String> {
-        /// Au-delà, la liste cesse d'aider et remplit l'écran.
-        const SHOWN: usize = 5;
+        /// Au-delà, la liste cesse d'aider et remplit l'écran — et surtout, la
+        /// note est insérée AVANT la table dans `inspect`, alors que
+        /// `evidence_by_mode` tronque à 4 000 caractères PAR LA FIN en mode
+        /// brief. Chaque ligne gagnée ici est une ligne de verdict qui survit.
+        /// Le compte total est donné de toute façon : trois exemples suffisent
+        /// à lever l'ambiguïté, l'id complet fait le reste.
+        const SHOWN: usize = 3;
 
         if self.homonyms.is_empty() {
             return None;
