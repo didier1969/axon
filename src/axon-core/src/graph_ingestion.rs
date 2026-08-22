@@ -188,19 +188,66 @@ impl GraphStore {
     /// (ambiguous) falls back to the file-local synthetic id, which the REQ-134
     /// query projection still matches by name-suffix. Globally-qualified names
     /// (already carrying a `::`/`.` path) keep their direct mapping.
-    fn resolve_call_target_id(
+    /// REQ-AXO-902456 — un receveur qui n'est PAS interne interdit la résolution
+    /// par nom court.
+    ///
+    /// La règle d'origine (« un nom à définition unique dans le lot désigne
+    /// forcément celle-là ») tient pour un appel de fonction libre. Elle est
+    /// FAUSSE dès que l'appel vise la bibliothèque standard ou un crate externe,
+    /// qui ne sont pas indexés : `pairs.truncate(top)` devenait une arête vers
+    /// `mcp::tools_context::util.rs::truncate`, et `tokio::spawn(…)` vers
+    /// `mcp::revision_docs_listener.rs::spawn`. Mesuré sur AXO : **246 arêtes
+    /// CALLS** vers un symbole dont le nom est une méthode stdlib courante, dont
+    /// **19 appelants fantômes** sur `pipeline::project_resolver.rs::len`.
+    ///
+    /// L'effet local dépasse de loin les 0,5 % globaux : une règle d'architecture
+    /// cherche les appels ANORMAUX, et les appels anormaux sont précisément les
+    /// faux. Les trois règles candidates essayées le 2026-08-22 ont rendu 19
+    /// violations, **19 fausses**.
+    ///
+    /// Le parser porte déjà l'information : `field_expression` (`a.b()`) et
+    /// `scoped_identifier` (`m::f()`) renseignent tous deux
+    /// `properties["receiver"]`. Elle n'était simplement pas transmise ici.
+    ///
+    /// Un receveur INTERNE (`self`, `Self`, `crate`, `crate::…`) désigne bien du
+    /// code du projet : la résolution reste. Tout autre receveur retombe sur
+    /// l'id synthétique local — le MÊME repli que les cas 0 ou >1 définitions,
+    /// pas une classe nouvelle : 85,3 % des arêtes CALLS d'AXO pointent déjà
+    /// vers un id absent de `ist.symbol` (73,7 % à 93,3 % selon le projet), la
+    /// plupart étant de vrais appels externes.
+    fn resolve_call_target_id_with_receiver(
         project_code: &str,
         caller_path: &str,
         callee_name: &str,
+        receiver: Option<&str>,
         name_index: &std::collections::HashMap<String, Vec<String>>,
     ) -> String {
         if Self::is_globally_qualified_symbol(callee_name) {
+            return Self::symbol_id(project_code, caller_path, callee_name);
+        }
+        if receiver.is_some_and(|r| !Self::receiver_is_internal(r)) {
             return Self::symbol_id(project_code, caller_path, callee_name);
         }
         match name_index.get(callee_name) {
             Some(ids) if ids.len() == 1 => ids[0].clone(),
             _ => Self::symbol_id(project_code, caller_path, callee_name),
         }
+    }
+
+    /// REQ-AXO-902456 — le receveur d'un appel désigne-t-il du code du projet ?
+    ///
+    /// `self` / `Self` / `crate` sont les seules formes qui le GARANTISSENT sans
+    /// typage. `pairs`, `names`, `tokio`, `serde_json` ne le garantissent pas —
+    /// et sans inférence de types on ne peut pas trancher, donc on ne devine
+    /// pas. Le prix d'un refus est une arête manquante vers une méthode interne
+    /// appelée sur une variable ; le prix d'une acceptation est une arête FAUSSE
+    /// qui contamine tout verdict la traversant, indéfiniment.
+    fn receiver_is_internal(receiver: &str) -> bool {
+        let receiver = receiver.trim();
+        matches!(receiver, "self" | "Self" | "crate")
+            || receiver.starts_with("crate::")
+            || receiver.starts_with("self::")
+            || receiver.starts_with("Self::")
     }
 
     /// REQ-AXO-902203 — canonical id for a CALLS/CALLS_NIF edge SOURCE (the caller). The
@@ -1303,10 +1350,11 @@ impl GraphStore {
                 // edge kind keeps the file-local id (source/containment edges are
                 // always co-located with their file).
                 let target_id = match table {
-                    "CALLS" | "CALLS_NIF" => Self::resolve_call_target_id(
+                    "CALLS" | "CALLS_NIF" => Self::resolve_call_target_id_with_receiver(
                         project_code,
                         &path_str,
                         &relation.to,
+                        relation.properties.get("receiver").map(String::as_str),
                         &call_target_index,
                     ),
                     _ => Self::symbol_id(project_code, &path_str, &relation.to),
@@ -1869,13 +1917,89 @@ mod req_axo_140_call_resolution {
         m
     }
 
+    /// REQ-AXO-902456 — un appel sur un receveur EXTERNE ne doit pas fabriquer
+    /// une arête vers un homonyme indexé.
+    ///
+    /// Cas mesurés sur AXO le 2026-08-22 : `pairs.truncate(top)` (`Vec::truncate`,
+    /// stdlib) devenait une arête vers `mcp::tools_context::util.rs::truncate`, et
+    /// `tokio::spawn(…)` vers `mcp::revision_docs_listener.rs::spawn`. Trois
+    /// règles d'architecture candidates ont rendu 19 violations, **19 fausses**.
+    #[test]
+    fn a_call_on_an_external_receiver_does_not_resolve_to_an_indexed_homonym() {
+        // Le dépôt indexe UNE fonction libre `truncate` et UNE fonction `spawn`.
+        let indexed_truncate = GraphStore::symbol_id("PRJ", "prj/util.rs", "truncate");
+        let indexed_spawn = GraphStore::symbol_id("PRJ", "prj/listener.rs", "spawn");
+        let idx = index(&[
+            ("truncate", &indexed_truncate),
+            ("spawn", &indexed_spawn),
+        ]);
+
+        // `pairs.truncate(top)` — receveur = une variable locale, donc un type
+        // dont on ne sait rien. Résoudre serait deviner.
+        let vec_truncate = GraphStore::resolve_call_target_id_with_receiver(
+            "PRJ",
+            "prj/algorithms.rs",
+            "truncate",
+            Some("pairs"),
+            &idx,
+        );
+        assert_ne!(
+            vec_truncate, indexed_truncate,
+            "`pairs.truncate()` est `Vec::truncate` : l'arête ne doit PAS viser la \
+             fonction libre indexée"
+        );
+
+        // `tokio::spawn(…)` — le parser découpe le chemin et met `tokio` en
+        // receveur, donc `is_globally_qualified_symbol` ne le voit plus passer.
+        let tokio_spawn = GraphStore::resolve_call_target_id_with_receiver(
+            "PRJ",
+            "prj/notify.rs",
+            "spawn",
+            Some("tokio"),
+            &idx,
+        );
+        assert_ne!(
+            tokio_spawn, indexed_spawn,
+            "`tokio::spawn()` vise un crate externe, pas la fonction indexée"
+        );
+    }
+
+    /// Contrôle positif — sans lui, refuser TOUTE résolution passerait le test
+    /// précédent au vert tout en détruisant le graphe d'appels interne.
+    #[test]
+    fn a_call_on_an_internal_receiver_still_resolves() {
+        let method_id = GraphStore::symbol_id("PRJ", "prj/b.rs", "ma_methode");
+        let helper_id = GraphStore::symbol_id("PRJ", "prj/c.rs", "helper");
+        let idx = index(&[("ma_methode", &method_id), ("helper", &helper_id)]);
+
+        for receiver in ["self", "Self", "crate", "crate::b", "self::inner"] {
+            let resolved = GraphStore::resolve_call_target_id_with_receiver(
+                "PRJ",
+                "prj/a.rs",
+                "ma_methode",
+                Some(receiver),
+                &idx,
+            );
+            assert_eq!(
+                resolved, method_id,
+                "un receveur `{receiver}` désigne du code du projet : la résolution reste"
+            );
+        }
+
+        // Et un appel de fonction LIBRE (aucun receveur) n'est pas touché.
+        let free = GraphStore::resolve_call_target_id_with_receiver(
+            "PRJ", "prj/a.rs", "helper", None, &idx,
+        );
+        assert_eq!(free, helper_id, "un appel de fonction libre résout comme avant");
+    }
+
     #[test]
     fn unique_cross_file_callee_resolves_to_canonical_defining_id() {
         let callee_id = GraphStore::symbol_id("PRJ", "prj/b.rs", "callee");
         let idx = index(&[("callee", &callee_id)]);
         // Caller lives in a.rs; the synthetic id would have been prj/a.rs::callee.
         let resolved =
-            GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "callee", &idx);
+            GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "callee", None, &idx);
         assert_eq!(resolved, callee_id, "cross-file unique callee must be canonical");
         assert_ne!(
             resolved,
@@ -1888,7 +2012,7 @@ mod req_axo_140_call_resolution {
     fn absent_callee_falls_back_to_synthetic() {
         let idx = index(&[("other", &GraphStore::symbol_id("PRJ", "prj/b.rs", "other"))]);
         let resolved =
-            GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "unknown", &idx);
+            GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "unknown", None, &idx);
         assert_eq!(resolved, GraphStore::symbol_id("PRJ", "prj/a.rs", "unknown"));
     }
 
@@ -1898,7 +2022,7 @@ mod req_axo_140_call_resolution {
             ("dup", &GraphStore::symbol_id("PRJ", "prj/b.rs", "dup")),
             ("dup", &GraphStore::symbol_id("PRJ", "prj/c.rs", "dup")),
         ]);
-        let resolved = GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "dup", &idx);
+        let resolved = GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "dup", None, &idx);
         assert_eq!(
             resolved,
             GraphStore::symbol_id("PRJ", "prj/a.rs", "dup"),
@@ -1942,7 +2066,7 @@ mod req_axo_140_call_resolution {
         // A `::`-qualified name bypasses the name index entirely.
         let idx = index(&[("foo", &GraphStore::symbol_id("PRJ", "prj/b.rs", "foo"))]);
         let resolved =
-            GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "modx::foo", &idx);
+            GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "modx::foo", None, &idx);
         assert_eq!(resolved, GraphStore::symbol_id("PRJ", "prj/a.rs", "modx::foo"));
     }
 
@@ -1952,7 +2076,7 @@ mod req_axo_140_call_resolution {
         // synthetic — no behavioural change for intra-file calls.
         let id = GraphStore::symbol_id("PRJ", "prj/a.rs", "local");
         let idx = index(&[("local", &id)]);
-        let resolved = GraphStore::resolve_call_target_id("PRJ", "prj/a.rs", "local", &idx);
+        let resolved = GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "local", None, &idx);
         assert_eq!(resolved, id);
     }
 }
