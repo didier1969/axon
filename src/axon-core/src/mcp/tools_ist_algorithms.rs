@@ -794,6 +794,38 @@ impl McpServer {
                 String::new()
             }
         );
+        // REQ-AXO-902409 — « 4 below target » est un COMPTEUR, pas un rapport :
+        // il ne dit pas LESQUELLES, donc il n'ouvre aucune action. Trouvé par la
+        // garde de classe elle-même une fois sa couverture élargie — cet outil
+        // n'était pas exercé auparavant, faute de snapshot IST chaud.
+        let summary = if index.sub_scores.is_empty() {
+            summary
+        } else {
+            let below_list = index
+                .below_target()
+                .iter()
+                .map(|s| format!("{} {:.2}/{:.2}", s.name, s.value, s.target))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let all_list = index
+                .sub_scores
+                .iter()
+                .map(|s| {
+                    if s.not_applicable {
+                        format!("{} n/a", s.name)
+                    } else {
+                        format!("{} {:.2}", s.name, s.value)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let below_line = if below_list.is_empty() {
+                String::new()
+            } else {
+                format!("\nSous la cible : {below_list}")
+            };
+            format!("{summary}{below_line}\nDimensions : {all_list}")
+        };
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
             "data": {

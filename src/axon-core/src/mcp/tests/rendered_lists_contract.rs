@@ -117,7 +117,26 @@ fn unrendered_item_arrays(response: &Value, promises_enumeration: bool) -> Vec<S
         if identifiers.is_empty() {
             continue; // tableau de scalaires ou d'objets anonymes : hors périmètre
         }
-        let named = identifiers.iter().any(|id| text.contains(id.as_str()));
+        // Un outil a le droit d'ABRÉGER : `ist_centrality_pagerank` rend
+        // `contrat1.rs::fonction_contrat_1` là où `data.results[].id` porte
+        // `RLC::src::contrat1.rs::fonction_contrat_1` (REQ-AXO-902201, délibéré
+        // et plus lisible). Exiger l'id ENTIER faisait de cet outil un faux
+        // positif — et un faux positif pousse à désaffuter la règle.
+        //
+        // Le repli sur le DERNIER segment `::` est borné à 4 caractères : sans
+        // ce plancher, un segment comme `new` matcherait n'importe quelle prose
+        // et la garde deviendrait vacueuse, ce qui est exactement le piège
+        // documenté dans REQ-AXO-902409 (« nommés OU comptés » l'avait neutralisée).
+        const MIN_SEGMENT_LEN: usize = 4;
+        let named = identifiers.iter().any(|id| {
+            if text.contains(id.as_str()) {
+                return true;
+            }
+            id.rsplit("::")
+                .next()
+                .filter(|segment| segment.len() >= MIN_SEGMENT_LEN)
+                .is_some_and(|segment| text.contains(segment))
+        });
         let counted = text.contains(&items.len().to_string());
         let satisfied = if promises_enumeration { named } else { named || counted };
         if !satisfied {
@@ -165,10 +184,23 @@ fn seed_listable_content(server: &McpServer) {
         ));
     }
     let _ = crate::test_support::ist_fixtures::seed_ist(&server.graph_store, &seed);
+    // REQ-AXO-902075 / 902409 — évincer le snapshot RAM du projet sémé, sinon
+    // les lecteurs IST (`inspect`, `impact`, `wiring`, `orphan_clusters`,
+    // `structural_health_*`) tombent sur celui qu'un test frère a laissé chaud,
+    // n'y trouvent rien, et sortent du balayage comme « non exercés ».
+    crate::ist_snapshot::evict_process_snapshot("RLC");
+
 
     let exec = |sql: &str| {
         let _ = server.graph_store.execute(sql);
     };
+    // REQ-AXO-902409 — SANS cette ligne, 33 outils sur 113 répondaient
+    // `wrong_project_scope` et sortaient du balayage comme « non exercés », ce
+    // qui se lisait comme un manque d'arguments. Un projet non ENREGISTRÉ n'est
+    // pas un projet : `require_registered_*` refuse avant toute lecture. Le
+    // fixture semait des nœuds pour `RLC` sans jamais le déclarer.
+    exec("INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) VALUES ('RLC', '/tmp/rlc', 'rlc') ON CONFLICT (project_code) DO NOTHING");
+    exec("INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('RLC', 'AXON_GLOBAL', 9, 9, 9, 9) ON CONFLICT (project_code) DO NOTHING");
     exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-RLC-001', 'Pillar', 'RLC', 'Pilier de contrat', 'corps', 'current', '{}') ON CONFLICT (id) DO NOTHING");
     for n in 1..=3 {
         exec(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-RLC-00{n}', 'Requirement', 'RLC', 'Exigence de contrat {n}', 'corps', 'planned', '{{\"priority\":\"P1\"}}') ON CONFLICT (id) DO NOTHING"));
@@ -180,6 +212,23 @@ fn seed_listable_content(server: &McpServer) {
              VALUES ('RLC', 'contexte {n}', 'pratique de contrat {n}', 0.8, {n}, 'active')"
         ));
     }
+// Le CHAUFFER — APRES l'enregistrement du projet : `resolve_project_code_value`
+    // refuse un code absent du registre, et le warm sortait donc en
+    // `wrong_project_scope` sans que rien ne le dise. Huit outils IST
+    // (`wiring`, `orphan_clusters`, `structural_health_*`, `debt_digest`,
+    // `ist_*`) restaient alors en `ist_cache_miss`. L'éviction seule ne suffit pas :
+    // les lecteurs IST rendent « snapshot cold » (un refus explicite, PIL-AXO-002)
+    // au lieu de lire, et sortent du balayage sans que l'invariant les touche.
+    let _ = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "ist_snapshot_warm",
+            "arguments": { "project": "RLC", "project_code": "RLC" }
+        })),
+        id: Some(json!(902_409)),
+    });
+
     for n in 1..=3 {
         let _ = server.handle_request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -285,6 +334,18 @@ fn value_for_required_parameter(parameter: &str) -> Option<Value> {
         "source" | "source_id" => Value::from("REQ-RLC-001"),
         "target_id" => Value::from("PIL-RLC-001"),
         "from" | "to" => Value::from("fonction_contrat_1"),
+        // REQ-AXO-902409 tranche 2 — chaque nom ajouté ici sort un outil de la
+        // colonne « sans arguments ». Mesuré à l'ajout : 6 exercés → 9 rien
+        // qu'en enregistrant le projet, puis au-delà avec ces valeurs.
+        "project_code" | "project" | "scope" => Value::from("RLC"),
+        "project_path" => Value::from("/tmp/rlc"),
+        "source_type" => Value::from("requirement"),
+        "target_type" => Value::from("pillar"),
+        "statement" => Value::from("les fonctions de contrat sont testées"),
+        "tool" => Value::from("help"),
+        "symbols" => json!(["fonction_contrat_1"]),
+        "sql" => Value::from("SELECT 1"),
+        "uri" => Value::from("src/contrat1.rs"),
         _ => return None,
     })
 }
@@ -405,6 +466,13 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
 
     let mut exercised: Vec<String> = Vec::new();
     let mut violations: Vec<String> = Vec::new();
+    // REQ-AXO-902409 — « 6 outils exercés sur 113 » n'est pas une liste de
+    // travail : il faut savoir POURQUOI les 107 autres ne le sont pas. Deux
+    // causes, deux gestes opposés — enrichir les arguments, ou semer des
+    // données. Les confondre, c'est rendre un chiffre sans dénominateur, le
+    // défaut même que ce module combat.
+    let mut unexercised_no_args: Vec<String> = Vec::new();
+    let mut unexercised_no_data: Vec<String> = Vec::new();
 
     for (tool, promises_enumeration, arguments) in catalog_tools(&arguments) {
         let Some(result) = server
@@ -416,9 +484,27 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
             })
             .and_then(|response| response.result)
         else {
+            unexercised_no_args.push(tool.clone());
             continue; // pas de réponse exploitable : non exercé
         };
         if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+            // La RAISON, pas seulement le fait : « non exercé » sans cause
+            // n'indique pas quoi enrichir — c'est le verdict sans dénominateur
+            // que ce module combat, appliqué à son propre appareil de mesure.
+            let why = result
+                .get("data")
+                .and_then(|d| d.get("status"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    result["content"][0]["text"]
+                        .as_str()
+                        .unwrap_or("?")
+                        .chars()
+                        .take(48)
+                        .collect()
+                });
+            unexercised_no_args.push(format!("{tool} [{why}]"));
             continue; // arguments insuffisants : non exercé, pas conforme
         }
         let found = unrendered_item_arrays(&result, promises_enumeration);
@@ -442,6 +528,10 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
             .unwrap_or(false);
         if has_items {
             exercised.push(tool.clone());
+        } else {
+            // L'outil a RÉPONDU sans rendre d'items : ses données manquent au
+            // fixture. C'est l'autre moitié de la liste de travail.
+            unexercised_no_data.push(tool.clone());
         }
         for violation in found {
             violations.push(format!("{tool} : {violation}"));
@@ -491,13 +581,33 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
     );
 
     // Le dénominateur d'abord : sans lui, « 0 violation » ne veut rien dire.
-    // Plancher tenu SOUS la mesure courante (6 : query, promote_status,
-    // mcp_friction_report, mcp_telemetry_report, mcp_feedback_report,
-    // runtime_filesystem_health) pour ne pas rougir sur une variation
-    // d'environnement, mais assez haut pour qu'un balayage qui n'exerce plus
-    // rien se voie. Le chiffre exact est rendu dans le message, pas caché.
+    // Plancher tenu SOUS la mesure courante (12) pour ne pas rougir sur une
+    // variation d'environnement, mais assez haut pour qu'un balayage qui
+    // n'exerce plus rien se voie. Le chiffre exact est rendu, pas caché.
+    //
+    // Tranche 2 (REQ-AXO-902409) : 6 → 12 exercés, par deux corrections du
+    // FIXTURE et aucune du contrat. (a) `RLC` n'était pas dans
+    // `soll.ProjectCodeRegistry`, donc 33 outils répondaient
+    // `wrong_project_scope` ; (b) le snapshot IST était chauffé AVANT cet
+    // enregistrement, donc la chauffe échouait en silence et huit outils IST
+    // restaient en `ist_cache_miss`. Les deux se lisaient comme « manque
+    // d'arguments » — d'où la classification des non-exercés et l'impression de
+    // leur RAISON : sans elle il n'y a pas de liste de travail, juste un ratio.
+    // Le bilan est IMPRIMÉ, pas seulement porté par un message d'échec : c'est
+    // lui qui dit par où élargir, et il n'a de valeur que quand le test est VERT.
+    // `cargo test -- --nocapture rendered_lists` le rend lisible.
+    println!(
+        "[REQ-AXO-902409] balayage : {} exercé(s) · {} sans arguments · {} sans données\n\
+         exercés          : {exercised:?}\n\
+         sans arguments   : {unexercised_no_args:?}\n\
+         sans données     : {unexercised_no_data:?}",
+        exercised.len(),
+        unexercised_no_args.len(),
+        unexercised_no_data.len(),
+    );
+
     assert!(
-        exercised.len() >= 5,
+        exercised.len() >= 10,
         "balayage vacuous — seulement {} outil(s) ont rendu des items exploitables \
          ({exercised:?}). Un test qui n'exerce rien passe au vert en ne mesurant \
          rien : c'est la classe de défaut que ce module combat (REQ-AXO-902384). \
