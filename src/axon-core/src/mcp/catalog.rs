@@ -517,6 +517,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "REQ-AXO-901602 — restrict coherence checks (orphan_requirements / decisions_without_links / uncovered_requirements / duplicate_titles) to nodes whose `status` is in this list. Default: `['current','planned']` (terminal statuses delivered/superseded/rejected/completed/accepted/archived excluded as noise). Pass `['*']` for the legacy full sweep."
+                        },
+                        "rules": {
+                            "type": "array",
+                            "items": { "type": "object" },
+                            "description": "REQ-AXO-902455 — declarative SOLL rules evaluated INLINE, on top of those stored as `Guideline` nodes carrying a `soll_rule` metadata object (project + PRO). Try a rule before you inscribe it. Each: {id?, title?, mode: 'forbidden'|'required', source_kind?, target_kind?, relations?: [\"SUPERSEDES\", …], source_status_in?/source_status_not_in?, target_status_in?/target_status_not_in?, message?}. Requires `project_code` (the rules read the project's SOLL snapshot)."
                         }
                     },
                     "required": []

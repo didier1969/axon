@@ -14381,3 +14381,167 @@ fn soll_validate_enforces_the_supersedes_rules_carried_as_data_not_as_code() {
         "retirer une règle ne doit pas éteindre les autres.\n---\n{after}"
     );
 }
+
+/// REQ-AXO-902455 — règles INLINE. Le plan promettait de pouvoir essayer une
+/// règle AVANT de l'inscrire comme Guideline ; sans ce chemin, écrire une règle
+/// juste demande de créer un nœud SOLL puis de le superséder, ce qui laisse une
+/// trace pour rien. Symétrique du paramètre `rules` de `structural_invariants`.
+#[test]
+fn soll_validate_evaluates_inline_rules_so_one_can_be_tried_before_being_inscribed() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSD", "PIL-TSD-901", "Ancre");
+    for (id, kind, status) in [
+        ("REQ-TSD-901", "Requirement", "current"),
+        ("REQ-TSD-902", "Requirement", "delivered"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('{id}', '{kind}', 'TSD', '{id}', '', '{status}', '{{}}') \
+                 ON CONFLICT (id) DO UPDATE SET status = '{status}'"
+            ))
+            .unwrap();
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                 VALUES ('{id}', 'PIL-TSD-901', 'BELONGS_TO', 'TSD') \
+                 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
+            ))
+            .unwrap();
+    }
+
+    let validate = |rules: Value| -> String {
+        server
+            .execute_tool_direct(
+                "soll_validate",
+                &json!({ "project_code": "TSD", "rules": rules }),
+            )
+            .expect("soll_validate répond")["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // Une règle qu'AUCUNE Guideline ne porte : elle n'existe que dans l'appel.
+    let text = validate(json!([{
+        "id": "essai-local",
+        "title": "un requirement livré ne s'attache pas à un pilier",
+        "mode": "forbidden",
+        "source_kind": "Requirement",
+        "source_status_in": ["delivered"],
+        "target_kind": "Pillar",
+        "relations": ["BELONGS_TO"],
+        "message": "essai avant inscription"
+    }]));
+    // Cibler LA LIGNE de la règle, pas tout le rapport : `REQ-TSD-901` y figure
+    // légitimement ailleurs (il n'a ni critères ni preuve, ce que d'autres
+    // vérifications signalent). Une assertion sur le texte entier confondrait
+    // deux sections et rougirait pour une raison sans rapport.
+    let inline_lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("essai-local"))
+        .collect();
+    assert_eq!(
+        inline_lines.len(),
+        1,
+        "une règle inline, une violation.\n---\n{text}"
+    );
+    assert!(
+        inline_lines[0].contains("REQ-TSD-902"),
+        "la règle inline doit être évaluée et nommer le nœud fautif.\n---\n{text}"
+    );
+    assert!(
+        !inline_lines[0].contains("REQ-TSD-901"),
+        "le sélecteur de statut doit trier : seul le `delivered` est visé.\n---\n{text}"
+    );
+
+    // Contrôle positif : sans le paramètre, la règle n'existe nulle part et rien
+    // n'est signalé. C'est ce qui prouve qu'elle venait bien de l'appel.
+    let without = server
+        .execute_tool_direct("soll_validate", &json!({ "project_code": "TSD" }))
+        .expect("soll_validate répond")["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !without.contains("essai-local"),
+        "une règle inline ne doit pas survivre à l'appel qui la portait.\n---\n{without}"
+    );
+}
+
+/// REQ-AXO-902455 — la jointure règle→intention, testée BOUT EN BOUT. C'est la
+/// valeur que DEC-AXO-901649 nomme (« règle gouvernée PAR une Décision SOLL,
+/// jointe à la violation ») : un `rule_id` qui ne s'ouvre pas est un identifiant
+/// décoratif, et le lecteur reste avec « c'est interdit » sans le « parce que ».
+#[test]
+fn every_rule_id_cited_by_a_violation_opens_with_soll_get() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSE", "PIL-TSE-901", "Ancre");
+    for (id, status) in [("MIL-TSE-901", "current"), ("MIL-TSE-902", "current")] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('{id}', 'Milestone', 'TSE', '{id}', '', '{status}', '{{}}') \
+                 ON CONFLICT (id) DO NOTHING"
+            ))
+            .unwrap();
+    }
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+             VALUES ('MIL-TSE-901', 'MIL-TSE-902', 'SUPERSEDES', 'TSE') \
+             ON CONFLICT (source_id, target_id, relation_type) DO NOTHING",
+        )
+        .unwrap();
+
+    let text = server
+        .execute_tool_direct("soll_validate", &json!({ "project_code": "TSE" }))
+        .expect("soll_validate répond")["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    // Les ids cités sont entre crochets en fin de ligne : `… [GUI-PRO-119]`.
+    let cited: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let start = line.rfind('[')?;
+            let end = line.rfind(']')?;
+            (end > start).then(|| line[start + 1..end].to_string())
+        })
+        .filter(|id| id.starts_with("GUI-"))
+        .collect();
+    assert!(
+        !cited.is_empty(),
+        "au moins une violation doit citer sa règle.\n---\n{text}"
+    );
+
+    for rule_id in &cited {
+        let opened = server
+            .execute_tool_direct("soll_get", &json!({ "id": rule_id }))
+            .expect("soll_get répond");
+        assert_ne!(
+            opened["isError"].as_bool(),
+            Some(true),
+            "le rule_id `{rule_id}` cité par une violation doit s'OUVRIR — sinon c'est un \
+             identifiant décoratif : {opened}"
+        );
+        let body = opened["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            body.contains(rule_id.as_str()) && body.len() > 200,
+            "`soll_get({rule_id})` doit rendre le corps de la règle, pas un accusé de \
+             réception.\n---\n{body}"
+        );
+        // La règle doit dire ce qu'elle exige ET comment réparer : c'est la
+        // moitié qui transforme un verdict en action (REQ-AXO-902409).
+        assert!(
+            body.contains("RÉPARATION"),
+            "une règle sans réparation laisse le lecteur devant une impasse polie \
+             (PIL-AXO-002).\n---\n{body}"
+        );
+    }
+}

@@ -358,6 +358,52 @@ impl McpServer {
                 }))
             }
         };
+        // REQ-AXO-902455 — règles INLINE : essayer une règle AVANT de l'inscrire
+        // comme Guideline. Symétrique du paramètre `rules` de
+        // `structural_invariants` (REQ-AXO-157), et pour la même raison : écrire
+        // une règle juste demande un aller-retour, et le faire en créant puis en
+        // supersédant un nœud SOLL laisserait une trace pour rien.
+        //
+        // Évaluées ICI plutôt que dans la chaîne du snapshot : le moteur est pur
+        // et prend (snapshot, règles), donc il n'y a aucune raison de faire
+        // descendre un paramètre à travers trois signatures — c'est le
+        // « troisième snapshot dont la seule raison d'être est de passer un
+        // argument » que REQ-AXO-902438 a mesuré et que je ne rejoue pas.
+        let mut snapshot = snapshot;
+        let inline_rules: Vec<crate::soll_snapshot::SollRule> = args
+            .get("rules")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .enumerate()
+                    .filter_map(|(i, rule)| {
+                        let id = rule
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("inline-{i}"));
+                        let title = rule
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("règle inline");
+                        crate::soll_snapshot::parse_soll_rule(&id, title, rule)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !inline_rules.is_empty() {
+            if let Some(code) = project_code {
+                if let Ok(soll) = self.soll_cache().snapshot(code) {
+                    let found =
+                        crate::soll_snapshot::declarative_rules::evaluate_all(&soll, &inline_rules);
+                    snapshot
+                        .declarative_rule_violations
+                        .extend(found.iter().map(|violation| violation.render()));
+                }
+            }
+        }
+
         let violation_count = snapshot.orphan_requirements.len()
             + snapshot.validations_without_verifies.len()
             + snapshot.decisions_without_links.len()
