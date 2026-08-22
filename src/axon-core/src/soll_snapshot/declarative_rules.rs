@@ -18,11 +18,16 @@
 //! un tenant coûtait une modification du cœur et un promote. `REQ-AXO-902453`
 //! — la règle réclamée par TE2 — est le cas qui l'a rendu concret.
 //!
-//! `DEC-AXO-901649` interdit le DSL de requête général, et la frontière est
-//! tenue : une règle sélectionne ses extrémités par *kind* et par *statut*, et
-//! contraint un ensemble de relations. Rien d'autre. Les prédicats qui lisent
-//! les métadonnées d'un nœud ou comparent des nœuds deux à deux
-//! (`uncovered_requirements`, `duplicate_titles`) restent en code, exprès.
+//! `DEC-AXO-901673` (qui supersède `DEC-AXO-901649`) redéfinit la frontière au
+//! lieu de la supprimer : une règle sélectionne ses extrémités par *kind* et par
+//! *statut*, contraint un ensemble de relations, lit une métadonnée, ou compare
+//! les sujets entre eux (unicité, agrégat, atteignabilité). Restent interdits :
+//! variables liées, jointures arbitraires, récursion définie par l'utilisateur,
+//! et la combinaison de deux prédicats dans une même règle.
+//!
+//! `duplicate_titles` a migré ici (`GUI-PRO-121`) et son SQL a été RETIRÉ.
+//! `uncovered_requirements` reste en code : c'est une CONJONCTION — ni preuve ni
+//! critère d'acceptation — que `parse_soll_rule` refuse par construction.
 
 use std::collections::HashMap;
 
@@ -224,10 +229,38 @@ pub struct SollRule {
     pub message: Option<String>,
 }
 
+/// Quel prédicat a produit une violation. Permet à un consommateur de filtrer
+/// par NATURE de règle sans coder en dur l'id d'une Guideline — le couplage
+/// code→règle que le passage aux règles-données supprime précisément.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PredicateKind {
+    Edge,
+    EvidenceStatus,
+    Metadata,
+    Uniqueness,
+    Aggregate,
+    Reachability,
+}
+
+impl RulePredicate {
+    pub fn kind(&self) -> PredicateKind {
+        match self {
+            Self::Edge { .. } => PredicateKind::Edge,
+            Self::ForbiddenEvidenceStatus { .. } => PredicateKind::EvidenceStatus,
+            Self::RequiredMetadata { .. } => PredicateKind::Metadata,
+            Self::UniqueBy { .. } => PredicateKind::Uniqueness,
+            Self::AtMost { .. } => PredicateKind::Aggregate,
+            Self::Reaches { .. } => PredicateKind::Reachability,
+        }
+    }
+}
+
 /// Une violation détectée, portant l'id de règle pour la jointure SOLL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SollRuleViolation {
     pub rule_id: String,
+    /// La nature du prédicat violé — voir [`PredicateKind`].
+    pub predicate: PredicateKind,
     pub source_id: String,
     /// La cible fautive pour `Forbidden`. `None` pour `Required` (la source ne
     /// porte AUCUNE arête qualifiante).
@@ -407,6 +440,7 @@ pub fn evaluate_rule(snapshot: &SollSnapshot, rule: &SollRule) -> Vec<SollRuleVi
 fn violation(rule: &SollRule, subject: &str) -> SollRuleViolation {
     SollRuleViolation {
         rule_id: rule.id.clone(),
+        predicate: rule.predicate.kind(),
         source_id: subject.to_string(),
         target_id: None,
         relation: None,
@@ -469,6 +503,7 @@ fn evaluate_rule_with_facts(
                         if rule.subject.matches(skind, sstatus) && other.matches(okind, ostatus) {
                             out.push(SollRuleViolation {
                                 rule_id: rule.id.clone(),
+                                predicate: rule.predicate.kind(),
                                 source_id: edge.source_id.clone(),
                                 target_id: Some(edge.target_id.clone()),
                                 relation: Some(edge.relation_type.clone()),
@@ -494,10 +529,23 @@ fn evaluate_rule_with_facts(
                         if !satisfied.contains_key(subject_id) {
                             continue;
                         }
-                        let Some((okind, ostatus)) = facts.get(other_id) else {
-                            continue;
+                        // Une extrémité hors du snapshot n'est PAS une absence
+                        // d'arête. Cas réel et encouragé par le produit : une
+                        // Guideline de projet retirée par la canonique `PRO`
+                        // (`GUI-AXO-1032` ← `GUI-PRO-124`). Le snapshot est
+                        // chargé par projet, donc le remplaçant n'y figure pas —
+                        // 10 nœuds sur 5 projets au 2026-08-22.
+                        //
+                        // Quand la règle n'exige RIEN de l'autre bout, l'arête
+                        // satisfait : une contrainte qui ne porte pas sur ce
+                        // nœud ne peut pas être invalidée par son absence. Si
+                        // elle exige un kind ou un statut, on ne peut pas
+                        // trancher — l'arête est ignorée, comme avant.
+                        let qualifies = match facts.get(other_id) {
+                            Some((okind, ostatus)) => other.matches(okind, ostatus),
+                            None => other.is_unconstrained(),
                         };
-                        if other.matches(okind, ostatus) {
+                        if qualifies {
                             satisfied.insert(subject_id, true);
                         }
                     }
@@ -531,6 +579,7 @@ fn evaluate_rule_with_facts(
                 if statuses.iter().any(|s| s == &trace.artifact_status) {
                     out.push(SollRuleViolation {
                         rule_id: rule.id.clone(),
+                        predicate: rule.predicate.kind(),
                         source_id: trace.soll_entity_id.clone(),
                         target_id: Some(trace.artifact_ref.clone()),
                         relation: Some(format!("evidence:{}", trace.artifact_status)),
@@ -591,6 +640,7 @@ fn evaluate_rule_with_facts(
                         ids.iter().copied().filter(|other| other != id).collect();
                     out.push(SollRuleViolation {
                         rule_id: rule.id.clone(),
+                        predicate: rule.predicate.kind(),
                         source_id: (*id).to_string(),
                         target_id: Some(others.join(", ")),
                         relation: Some(format!("same:{value}")),
@@ -643,6 +693,7 @@ fn evaluate_rule_with_facts(
                 for id in ids {
                     out.push(SollRuleViolation {
                         rule_id: rule.id.clone(),
+                        predicate: rule.predicate.kind(),
                         source_id: id.to_string(),
                         target_id: Some(if group_id.is_empty() {
                             format!("{count} sujets pour un maximum de {max}")
@@ -792,6 +843,70 @@ mod tests {
         // nœud `current` n'est pas sujet du tout.
         assert!(!found.iter().any(|v| v.source_id == "REQ-TST-002"));
         assert!(!found.iter().any(|v| v.source_id == "REQ-TST-001"));
+    }
+
+    /// REQ-AXO-902455 — le snapshot est chargé PAR PROJET, mais une supersession
+    /// cross-projet est un motif que le produit ENCOURAGE : une Guideline de
+    /// tenant retirée par la canonique `PRO`. Mesuré au 2026-08-22 : 10 nœuds
+    /// sur 5 projets (FSF 4, AXO 2, MLD 2, NEX 1, TE2 1).
+    ///
+    /// Le remplaçant n'étant pas dans le snapshot du tenant, l'arête pointait
+    /// vers un nœud inconnu et la règle déclarait le sujet orphelin. Ignorer
+    /// une extrémité absente est prudent pour `forbidden` (ne pas inventer une
+    /// violation) ; pour `required` c'est l'inverse, cela en FABRIQUE une.
+    #[test]
+    fn a_replacement_living_outside_the_snapshot_still_satisfies_an_incoming_rule() {
+        let rule = parse_soll_rule(
+            "GUI-TST-012",
+            "Un nœud retiré dit ce qui le remplace",
+            &json!({
+                "mode": "required",
+                "direction": "incoming",
+                "subject_status_in": ["superseded"],
+                "relations": ["SUPERSEDES"]
+            }),
+        )
+        .unwrap();
+        // `GUI-PRO-124` n'est PAS dans les nœuds : il vit dans le projet PRO.
+        // L'arête, elle, est chargée — le loader prend celles dont UNE extrémité
+        // est ancrée dans le projet.
+        let snap = snapshot(
+            vec![
+                node("GUI-TST-001", "Guideline", "superseded"), // remplacé cross-projet
+                node("GUI-TST-002", "Guideline", "superseded"), // vraiment orphelin
+            ],
+            vec![edge("GUI-PRO-124", "GUI-TST-001", "SUPERSEDES")],
+        );
+        let found = evaluate_rule(&snap, &rule);
+        assert_eq!(
+            found.iter().map(|v| v.source_id.as_str()).collect::<Vec<_>>(),
+            vec!["GUI-TST-002"],
+            "seul le nœud SANS remplaçant est fautif ; celui repris par une \
+             Guideline PRO a bien enregistré ce qui le remplace.\n{found:?}"
+        );
+
+        // Contrôle positif — la tolérance ne vaut QUE si la règle n'exige rien
+        // de l'autre bout. Dès qu'elle contraint le remplaçant, un nœud absent
+        // ne peut plus être présumé conforme : on ne sait pas ce qu'il est.
+        let demanding = parse_soll_rule(
+            "GUI-TST-013",
+            "Le remplaçant doit être vivant",
+            &json!({
+                "mode": "required",
+                "direction": "incoming",
+                "subject_status_in": ["superseded"],
+                "relations": ["SUPERSEDES"],
+                "other_status_in": ["current"]
+            }),
+        )
+        .unwrap();
+        let strict = evaluate_rule(&snap, &demanding);
+        assert_eq!(
+            strict.len(),
+            2,
+            "une règle qui exige un statut du remplaçant ne peut pas le \
+             présumer sur un nœud qu'elle ne voit pas.\n{strict:?}"
+        );
     }
 
     /// La MÊME règle en sortante ne dit pas la même chose — c'est ce qui prouve

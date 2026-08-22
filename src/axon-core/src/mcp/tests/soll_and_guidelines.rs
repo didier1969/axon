@@ -4228,9 +4228,33 @@ fn test_axon_validate_soll_reports_duplicate_titles_and_uncovered_requirements()
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Duplicate titles"), "{content}");
-    assert!(content.contains("Duplicate req"), "{content}");
-    assert!(content.contains("Duplicate dec"), "{content}");
+    // REQ-AXO-902455 — les doublons de titre ne sont plus détectés par un SQL
+    // en dur mais par la règle-donnée `GUI-PRO-121`. Le VERDICT est le même,
+    // sur les mêmes nœuds ; c'est sa source qui a changé, et la ligne le dit
+    // désormais en citant la Guideline qui la mandate.
+    let rule_lines: String = content
+        .lines()
+        .filter(|l| l.contains("GUI-PRO-121"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for id in [&req_a, &req_b, &dec_a, &dec_b] {
+        assert!(
+            rule_lines.contains(id.as_str()),
+            "`{id}` porte un titre partagé et doit être nommé par GUI-PRO-121.\n---\n{content}"
+        );
+    }
+    assert!(
+        rule_lines.contains("duplicate req") && rule_lines.contains("duplicate dec"),
+        "la ligne doit nommer la VALEUR partagée, pas seulement les ids.\n---\n{content}"
+    );
+    // La section du check en dur ne doit plus exister : deux verdicts sur le
+    // même sujet peuvent diverger sans que rien ne le signale (GUI-PRO-017).
+    assert!(
+        !content.contains("Duplicate titles (potential semantic duplicates)"),
+        "le check en dur a été retiré ; sa section ne doit plus être émise.\n---\n{content}"
+    );
+    // `uncovered_requirements` reste en code — c'est une CONJONCTION (ni preuve
+    // ni critère) que `parse_soll_rule` refuse par construction.
     assert!(
         content.contains("Requirements without criteria/evidence"),
         "{content}"
@@ -4248,6 +4272,15 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
     let req_id = format!("REQ-{code}-001");
     let val_id = format!("VAL-{code}-001");
     let dec_id = format!("DEC-{code}-001");
+    // REQ-AXO-902455 — un graphe SOLL « propre » remonte à une Vision : c'est
+    // ce que `GUI-PRO-122` rend vérifiable. Le fixture n'en avait pas, et la
+    // règle a eu raison de le dire — l'exigence pendait dans le vide. On
+    // complète le fixture plutôt que d'affaiblir l'attente.
+    let vis_id = format!("VIS-{code}-001");
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_id}', 'Vision', '{code}', 'Nord du projet de test', 'Ancre de filiation', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"))
+        .unwrap();
     server
         .graph_store
         .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pillar_id}', 'Pillar', '{code}', 'Platform Core', 'Protect SOLL', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"))
@@ -4263,6 +4296,10 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
     server
         .graph_store
         .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{dec_id}', 'Decision', '{code}', 'Linked decision', '', 'current', '{{\"context\":\"Context\",\"rationale\":\"Because\"}}') ON CONFLICT (id) DO NOTHING"))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('{pillar_id}', '{vis_id}', 'EPITOMIZES') ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"))
         .unwrap();
     server
         .graph_store
@@ -4299,8 +4336,17 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
 
     // REQ-AXO-001 has no acceptance_criteria in metadata, so validation
     // now flags it as uncovered even though it has a VERIFIES link.
+    //
+    // REQ-AXO-902455 — DEUX surfaces voient cette absence, sous deux angles
+    // qui ne se recouvrent que partiellement, d'où le compte de 2 :
+    //   - `uncovered_requirements` (en code) : ni preuve NI critère — une
+    //     CONJONCTION, que `parse_soll_rule` refuse par construction ;
+    //   - `GUI-PRO-126` (règle-donnée) : pas de critère, preuve ou non.
+    // Mesuré sur le parc hors projets de test : 29 exigences ouvertes sans
+    // critère, dont 11 chevauchent et **18 sont un ajout réel** — elles ont
+    // une preuve, donc `uncovered_requirements` ne les a jamais vues.
     assert!(
-        content.contains("1 minimal coherence violation(s)"),
+        content.contains("2 minimal coherence violation(s)"),
         "{content}"
     );
     assert!(
@@ -8426,6 +8472,15 @@ fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_comp
     let dec_id = format!("DEC-{code}-001");
     let val_id = format!("VAL-{code}-001");
     let trc_id = format!("TRC-{code}-001");
+    // REQ-AXO-902455 — une baseline SOLL « complète » remonte à une Vision
+    // (`GUI-PRO-122`). Sans elle l'exigence pend dans le vide, et
+    // `concept_completeness` doit dire non — c'est le fixture qu'on complète,
+    // pas le verdict qu'on assouplit.
+    let vis_id = format!("VIS-{code}-001");
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{vis_id}', 'Vision', '{code}', 'Nord du projet de test', 'Ancre de filiation', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"))
+        .unwrap();
     server
         .graph_store
         .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{pil_id}', 'Pillar', '{code}', 'Core pillar', '', 'current', '{{}}')"))
@@ -8441,6 +8496,10 @@ fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_comp
     server
         .graph_store
         .execute(&format!("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{val_id}', 'Validation', '{code}', 'Healthy validation', '', 'delivered', '{{}}')"))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('{pil_id}', '{vis_id}', 'EPITOMIZES', '{code}') ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"))
         .unwrap();
     server
         .graph_store
@@ -14379,6 +14438,463 @@ fn soll_validate_enforces_the_supersedes_rules_carried_as_data_not_as_code() {
     assert!(
         after.contains("GUI-PRO-120"),
         "retirer une règle ne doit pas éteindre les autres.\n---\n{after}"
+    );
+}
+
+/// REQ-AXO-902455 — axe « unicité », porté par `GUI-PRO-121`. PREMIER prédicat
+/// qui compare des nœuds ENTRE EUX ; c'est lui qui matérialise
+/// `DEC-AXO-901673`. La règle vient du seed, pas du test : un test qui poserait
+/// sa propre règle prouverait que le moteur évalue, pas que le produit LIVRE.
+#[test]
+fn soll_validate_names_both_nodes_when_two_living_ones_share_a_title() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSF", "PIL-TSF-901", "Ancre unicite");
+    for (id, title, status) in [
+        ("MIL-TSF-901", "Jalon en double", "current"),
+        ("MIL-TSF-902", "Jalon en double", "planned"),
+        ("MIL-TSF-903", "Jalon unique", "current"),
+        // Retiré : hors du sujet (`current`/`planned`). Sans ce cas, une règle
+        // qui ignorerait le filtre de statut passerait au vert.
+        ("MIL-TSF-904", "Jalon en double", "superseded"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('{id}', 'Milestone', 'TSF', '{title}', '', '{status}', '{{}}') \
+                 ON CONFLICT (id) DO UPDATE SET status = '{status}', title = '{title}'"
+            ))
+            .unwrap();
+    }
+
+    assert!(
+        server.load_soll_rules("TSF").iter().any(|r| r.id == "GUI-PRO-121"),
+        "le seed doit livrer GUI-PRO-121"
+    );
+
+    // Les écritures du test passent par `execute` : le snapshot RAM ne les
+    // voit pas tant qu'il n'est pas invalidé. En runtime c'est `pg_notify`
+    // qui le fait ; ici c'est explicite, sinon la falsification mesurerait
+    // un graphe périmé et passerait au vert sans rien vérifier.
+    let validate = || -> String {
+        server.soll_cache().invalidate("TSF");
+        server
+            .execute_tool_direct("soll_validate", &json!({ "project_code": "TSF" }))
+            .expect("soll_validate répond")["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let lines_of = |text: &str, rule: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| l.contains(rule))
+            .map(str::to_string)
+            .collect()
+    };
+
+    let text = validate();
+    let cited = lines_of(&text, "GUI-PRO-121");
+    let joined = cited.join("\n");
+
+    // Une violation NOMME les nœuds en cause — un compteur de doublons n'ouvre
+    // aucune action (REQ-AXO-902409).
+    assert!(
+        joined.contains("MIL-TSF-901") && joined.contains("MIL-TSF-902"),
+        "les DEUX porteurs du titre partagé doivent être nommés.\n---\n{text}"
+    );
+    // Contrôles positifs : sans eux, une règle qui signale TOUT nœud passerait.
+    assert!(
+        !joined.contains("MIL-TSF-903"),
+        "un titre unique n'est pas une violation d'unicité.\n---\n{text}"
+    );
+    assert!(
+        !joined.contains("MIL-TSF-904"),
+        "un nœud RETIRÉ est hors du sujet de la règle : le filtre de statut \
+         doit être lu.\n---\n{text}"
+    );
+
+    // ── Falsification par la DONNÉE ────────────────────────────────────────
+    server
+        .graph_store
+        .execute("UPDATE soll.Node SET title = 'Jalon redevenu unique' WHERE id = 'MIL-TSF-902'")
+        .unwrap();
+    let after = validate();
+    assert!(
+        lines_of(&after, "GUI-PRO-121").is_empty(),
+        "le doublon levé, la règle doit s'éteindre.\n---\n{after}"
+    );
+}
+
+/// REQ-AXO-902455 — axe « atteignabilité », porté par `GUI-PRO-122`. Rend
+/// vérifiable la cohérence de filiation que VIS-AXO-001 réclame : une exigence
+/// qu'aucun chemin ne relie à une Vision ne dit pas POURQUOI on la ferait.
+#[test]
+fn soll_validate_flags_an_open_requirement_that_reaches_no_vision() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSG", "PIL-TSG-901", "Ancre filiation");
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('VIS-TSG-901', 'Vision', 'TSG', 'Nord du projet', '', 'current', '{}') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .unwrap();
+    for (id, status) in [
+        ("REQ-TSG-901", "planned"),   // rattaché — le contrôle positif
+        ("REQ-TSG-902", "planned"),   // orphelin ouvert — la violation attendue
+        ("REQ-TSG-903", "delivered"), // orphelin TERMINÉ — hors du sujet
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('{id}', 'Requirement', 'TSG', '{id}', '', '{status}', '{{}}') \
+                 ON CONFLICT (id) DO UPDATE SET status = '{status}'"
+            ))
+            .unwrap();
+    }
+    // Le chemin nominal est TRANSITIF : REQ -BELONGS_TO-> PIL -EPITOMIZES-> VIS.
+    // Une règle qui n'inspecterait qu'un saut rendrait REQ-TSG-901 fautif.
+    for (source, target, rel) in [
+        ("PIL-TSG-901", "VIS-TSG-901", "EPITOMIZES"),
+        ("REQ-TSG-901", "PIL-TSG-901", "BELONGS_TO"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                 VALUES ('{source}', '{target}', '{rel}', 'TSG') \
+                 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
+            ))
+            .unwrap();
+    }
+
+    assert!(
+        server.load_soll_rules("TSG").iter().any(|r| r.id == "GUI-PRO-122"),
+        "le seed doit livrer GUI-PRO-122"
+    );
+
+    // Les écritures du test passent par `execute` : le snapshot RAM ne les
+    // voit pas tant qu'il n'est pas invalidé. En runtime c'est `pg_notify`
+    // qui le fait ; ici c'est explicite, sinon la falsification mesurerait
+    // un graphe périmé et passerait au vert sans rien vérifier.
+    let validate = || -> String {
+        server.soll_cache().invalidate("TSG");
+        server
+            .execute_tool_direct("soll_validate", &json!({ "project_code": "TSG" }))
+            .expect("soll_validate répond")["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let cited = |text: &str| -> String {
+        text.lines()
+            .filter(|l| l.contains("GUI-PRO-122"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let text = validate();
+    let joined = cited(&text);
+    assert!(
+        joined.contains("REQ-TSG-902"),
+        "une exigence ouverte sans chemin vers une Vision doit être signalée.\n---\n{text}"
+    );
+    assert!(
+        !joined.contains("REQ-TSG-901"),
+        "le chemin REQ→PIL→VIS est TRANSITIF : cette exigence atteint la Vision.\n---\n{text}"
+    );
+    assert!(
+        !joined.contains("REQ-TSG-903"),
+        "la règle vise les statuts OUVERTS ; rattacher après coup une exigence \
+         livrée fabriquerait de la filiation devinée.\n---\n{text}"
+    );
+
+    // ── Falsification par la DONNÉE ────────────────────────────────────────
+    // Couper le second saut doit rendre REQ-TSG-901 fautif à son tour : c'est
+    // la preuve que la transitivité est réellement parcourue, et non supposée.
+    server
+        .graph_store
+        .execute(
+            "DELETE FROM soll.Edge WHERE source_id = 'PIL-TSG-901' \
+             AND target_id = 'VIS-TSG-901' AND relation_type = 'EPITOMIZES'",
+        )
+        .unwrap();
+    let after = validate();
+    assert!(
+        cited(&after).contains("REQ-TSG-901"),
+        "le chemin coupé, l'exigence rattachée n'atteint plus la Vision.\n---\n{after}"
+    );
+}
+
+/// REQ-AXO-902455 — axe « agrégat », porté par `GUI-PRO-123`. Seul des six axes
+/// posé sans cas réel : aucun des 75 projets n'a plus d'une Vision vivante au
+/// 2026-08-22. C'est une garde de NON-RÉGRESSION, et sa falsification ne peut
+/// donc venir que d'ici — d'où le second nœud construit exprès.
+#[test]
+fn soll_validate_flags_a_project_that_grew_a_second_living_vision() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSH", "PIL-TSH-901", "Ancre agregat");
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('VIS-TSH-901', 'Vision', 'TSH', 'Nord unique', '', 'current', '{}') \
+             ON CONFLICT (id) DO UPDATE SET status = 'current'",
+        )
+        .unwrap();
+
+    assert!(
+        server.load_soll_rules("TSH").iter().any(|r| r.id == "GUI-PRO-123"),
+        "le seed doit livrer GUI-PRO-123"
+    );
+
+    // Les écritures du test passent par `execute` : le snapshot RAM ne les
+    // voit pas tant qu'il n'est pas invalidé. En runtime c'est `pg_notify`
+    // qui le fait ; ici c'est explicite, sinon la falsification mesurerait
+    // un graphe périmé et passerait au vert sans rien vérifier.
+    let validate = || -> String {
+        server.soll_cache().invalidate("TSH");
+        server
+            .execute_tool_direct("soll_validate", &json!({ "project_code": "TSH" }))
+            .expect("soll_validate répond")["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let cited = |text: &str| -> String {
+        text.lines()
+            .filter(|l| l.contains("GUI-PRO-123"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // Contrôle positif D'ABORD : une seule Vision ne doit rien produire. Sans
+    // lui, une règle qui signalerait TOUTE Vision passerait la suite au vert.
+    assert!(
+        cited(&validate()).is_empty(),
+        "une Vision unique n'est pas une violation d'agrégat."
+    );
+
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('VIS-TSH-902', 'Vision', 'TSH', 'Second nord', '', 'current', '{}') \
+             ON CONFLICT (id) DO UPDATE SET status = 'current'",
+        )
+        .unwrap();
+    let text = validate();
+    let joined = cited(&text);
+    // La violation NOMME les sujets et le compte — « trop de Visions » sans
+    // dire lesquelles n'ouvre aucune action (REQ-AXO-902409).
+    assert!(
+        joined.contains("VIS-TSH-901") && joined.contains("VIS-TSH-902"),
+        "les deux Visions vivantes doivent être nommées.\n---\n{text}"
+    );
+    assert!(
+        joined.contains("2 sujets pour un maximum de 1"),
+        "la ligne doit porter le compte ET la borne.\n---\n{text}"
+    );
+
+    // ── Falsification par la DONNÉE ────────────────────────────────────────
+    // Retirer la surnuméraire éteint la règle : c'est le filtre de statut du
+    // sujet qui est éprouvé, pas seulement le comptage.
+    server
+        .graph_store
+        .execute("UPDATE soll.Node SET status = 'superseded' WHERE id = 'VIS-TSH-902'")
+        .unwrap();
+    assert!(
+        cited(&validate()).is_empty(),
+        "la Vision surnuméraire retirée, le projet retrouve un nord unique."
+    );
+}
+
+/// REQ-AXO-902455 — équivalence AVANT retrait, sur le MÊME fixture : le check
+/// en dur `duplicate_titles` et la règle-donnée `GUI-PRO-121` sont comparés
+/// pendant que les deux existent. C'est le patron d'oracle de `DEC-AXO-901662`
+/// et le seul moyen de savoir qu'une migration ne change pas le comportement.
+///
+/// Les DEUX sens sont vérifiés, et c'est le second qui protège (`#1127`) :
+///   1. tout ce que l'ancien code trouve, la règle le trouve aussi ;
+///   2. ce que la règle reçoit à l'exécution DÉBORDE ce que l'ancien couvrait —
+///      il se limitait à `Requirement`/`Decision`/`Concept`, donc il était
+///      aveugle aux `Skill` et `PromptTemplate`. Mesuré sur le parc au
+///      2026-08-22 : les 41 doublons de `PRO` sont exactement de ces deux
+///      types — des résidus de tests dans le namespace produit hérité par les
+///      75 tenants, que l'ancien check n'a jamais pu voir.
+#[test]
+fn the_declarative_title_rule_replaced_the_hardcoded_check_without_losing_coverage() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSI", "PIL-TSI-901", "Ancre equivalence");
+    for (id, kind, title) in [
+        // Couvert par les DEUX.
+        ("REQ-TSI-901", "Requirement", "Titre partage"),
+        ("REQ-TSI-902", "Requirement", "Titre partage"),
+        // Couvert par la RÈGLE SEULE — l'ancien check ignorait ce type.
+        ("SKI-TSI-901", "Skill", "Competence partagee"),
+        ("SKI-TSI-902", "Skill", "Competence partagee"),
+        // Couvert par AUCUN — le contrôle positif.
+        ("REQ-TSI-903", "Requirement", "Titre unique"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('{id}', '{kind}', 'TSI', '{title}', '', 'current', '{{}}') \
+                 ON CONFLICT (id) DO UPDATE SET title = '{title}', type = '{kind}'"
+            ))
+            .unwrap();
+    }
+    server.soll_cache().invalidate("TSI");
+
+    // Les DEUX verdicts sortent du MÊME appel : c'est la surface publique qui
+    // est comparée, pas un champ interne — un test qui lirait la structure
+    // privée survivrait au retrait sans rien prouver de ce que voit l'appelant.
+    let text = server
+        .execute_tool_direct("soll_validate", &json!({ "project_code": "TSI" }))
+        .expect("soll_validate répond")["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let section = |header: &str| -> String {
+        text.lines()
+            .skip_while(|l| !l.contains(header))
+            .skip(1)
+            .take_while(|l| l.trim_start().starts_with("- ") || l.trim_start().starts_with("  - "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let legacy = section("Duplicate titles (potential semantic duplicates)");
+    let rule_lines: String = text
+        .lines()
+        .filter(|l| l.contains("GUI-PRO-121"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Le check en dur est PARTI (GUI-PRO-017 : pas de double source). Sa
+    // section ne doit plus être émise du tout — sinon deux verdicts
+    // coexistent et peuvent diverger sans que rien ne le signale.
+    assert!(
+        legacy.is_empty(),
+        "la section du check en dur doit avoir disparu ; sa survivance \
+         signalerait une double source.\n---\n{text}"
+    );
+
+    // Sens 1 — inclusion : rien de ce que l'ancien voyait n'est perdu. Ces
+    // deux ids sont exactement ceux que le check en dur rendait sur ce même
+    // fixture, mesuré avant son retrait (commit de cette migration).
+    for id in ["REQ-TSI-901", "REQ-TSI-902"] {
+        assert!(
+            rule_lines.contains(id),
+            "la règle doit couvrir tout ce que le check en dur trouvait ; \
+             `{id}` manque.\n---\n{rule_lines}"
+        );
+    }
+
+    // Sens 2 — débordement : la règle voit ce que l'ancien ne pouvait pas.
+    assert!(
+        rule_lines.contains("SKI-TSI-901") && rule_lines.contains("SKI-TSI-902"),
+        "la règle doit voir le doublon de Skill — c'est précisément le trou \
+         que le check en dur laissait, et où vivent les 41 doublons de PRO.\n\
+         ---\n{rule_lines}"
+    );
+
+    // Contrôle positif — sinon une règle qui signale TOUT passerait les deux
+    // assertions précédentes.
+    assert!(
+        !rule_lines.contains("REQ-TSI-903"),
+        "un titre unique n'est pas une violation.\n---\n{text}"
+    );
+}
+
+/// REQ-AXO-902455 — axe « métadonnée », porté par `GUI-PRO-126`. SIXIÈME et
+/// dernier axe du moteur à recevoir une règle réelle : jusqu'ici il était livré
+/// et jamais exercé, l'état exact où `structural_invariants` a passé des mois
+/// (0 règle sur 258 Guidelines). Poser la première EST le test d'acceptation.
+#[test]
+fn soll_validate_flags_an_open_requirement_with_no_acceptance_criteria() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSJ", "PIL-TSJ-901", "Ancre criteres");
+    for (id, status, meta) in [
+        // Critères présents — le contrôle positif.
+        ("REQ-TSJ-901", "planned", r#"{"acceptance_criteria": ["le test X passe"]}"#),
+        // Absents — la violation attendue.
+        ("REQ-TSJ-902", "planned", "{}"),
+        // Présents mais VIDES : une liste vide est une absence, pas une valeur.
+        ("REQ-TSJ-903", "planned", r#"{"acceptance_criteria": []}"#),
+        // Livrée : hors du sujet — un critère écrit après coup est écrit en
+        // regardant ce qui a été fait, donc il ne prouve rien.
+        ("REQ-TSJ-904", "delivered", "{}"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('{id}', 'Requirement', 'TSJ', '{id}', '', '{status}', '{meta}') \
+                 ON CONFLICT (id) DO UPDATE SET status = '{status}', metadata = '{meta}'"
+            ))
+            .unwrap();
+    }
+
+    assert!(
+        server.load_soll_rules("TSJ").iter().any(|r| r.id == "GUI-PRO-126"),
+        "le seed doit livrer GUI-PRO-126"
+    );
+
+    let validate = || -> String {
+        server.soll_cache().invalidate("TSJ");
+        server
+            .execute_tool_direct("soll_validate", &json!({ "project_code": "TSJ" }))
+            .expect("soll_validate répond")["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let cited = |text: &str| -> String {
+        text.lines()
+            .filter(|l| l.contains("GUI-PRO-126"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let text = validate();
+    let joined = cited(&text);
+    assert!(
+        joined.contains("REQ-TSJ-902"),
+        "une exigence ouverte sans critères doit être signalée.\n---\n{text}"
+    );
+    assert!(
+        joined.contains("REQ-TSJ-903"),
+        "une liste de critères VIDE est une absence — sans quoi il suffit \
+         d'écrire `[]` pour éteindre la règle.\n---\n{text}"
+    );
+    assert!(
+        !joined.contains("REQ-TSJ-901"),
+        "des critères présents ne sont pas une violation.\n---\n{text}"
+    );
+    assert!(
+        !joined.contains("REQ-TSJ-904"),
+        "la règle vise les statuts OUVERTS.\n---\n{text}"
+    );
+
+    // ── Falsification par la DONNÉE ────────────────────────────────────────
+    server
+        .graph_store
+        .execute(
+            "UPDATE soll.Node SET metadata = '{\"acceptance_criteria\": [\"la mesure Y descend sous Z\"]}' \
+             WHERE id = 'REQ-TSJ-902'",
+        )
+        .unwrap();
+    let after = cited(&validate());
+    assert!(
+        !after.contains("REQ-TSJ-902"),
+        "les critères écrits, la règle doit s'éteindre sur ce nœud.\n---\n{after}"
+    );
+    assert!(
+        after.contains("REQ-TSJ-903"),
+        "corriger un nœud n'éteint pas la règle sur les autres.\n---\n{after}"
     );
 }
 

@@ -9,8 +9,8 @@
 -- Identity) :
 --   - 1 ProjectCodeRegistry row (PRO sentinel)
 --   - 1 soll.Registry counters row (PRO namespace)
---   - 51 soll.Node rows : 5 PIL-PRO + 8 CPT-PRO + 3 DEC-PRO + 35 GUI-PRO
---   - 45 soll.Edge rows : cross-namespace BELONGS_TO / INHERITS_FROM /
+--   - 57 soll.Node rows : 5 PIL-PRO + 8 CPT-PRO + 3 DEC-PRO + 41 GUI-PRO
+--   - 51 soll.Edge rows : cross-namespace BELONGS_TO / INHERITS_FROM /
 --     EPITOMIZES / EXPLAINS / etc. that connect PRO methodology to AXO
 --     and other consumer projects
 --
@@ -39,6 +39,13 @@ ON CONFLICT (project_code) DO NOTHING;
 INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev)
 VALUES ('PRO', 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 ON CONFLICT (project_code) DO NOTHING;
+
+-- Les GUI-PRO seedes ci-dessous portent des ids EN DUR, que
+-- `soll.allocate_node_id` n'a jamais attribues : sans ce recalage le compteur
+-- repart sous eux et l'allocateur boucle a vide jusqu'a les depasser (sa
+-- garde `EXIT WHEN NOT EXISTS` empeche la collision, pas le gaspillage).
+-- GREATEST pour ne JAMAIS reculer un compteur deja plus avance en base.
+UPDATE soll.Registry SET last_gui = GREATEST(last_gui, 126) WHERE project_code = 'PRO';
 
 -- PRO Nodes (Pillars, Concepts, Decisions, Guidelines)
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
@@ -327,6 +334,131 @@ Mesure AXO du 2026-08-22 : 8 des 10 arêtes incohérentes étaient de cette form
 RÉPARATION : action=unlink, puis re-lier dans l''autre sens — le nœud retiré est la SOURCE.', 'current', '{"soll_rule": {"mode": "forbidden", "relations": ["SUPERSEDES"], "source_status_in": ["superseded", "rejected"], "target_status_not_in": ["superseded"], "message": "arête INVERSÉE : la source est retirée et la cible vivante — ne PAS retirer la cible"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-121', 'Guideline', 'PRO', 'Deux nœuds vivants ne portent pas le même titre', 'Règle SOLL déclarative (REQ-AXO-902455, axe « unicité »). Un titre est ce par quoi un humain et un LLM désignent un nœud. Quand deux nœuds vivants le partagent, toute référence par le titre devient ambiguë et le lecteur ne peut pas savoir lequel fait foi.
+
+PREMIÈRE règle qui compare des nœuds ENTRE EUX : c''est celle qui matérialise DEC-AXO-901673, la décision qui déplace la frontière posée par DEC-AXO-901649.
+
+## État mesuré à la pose (2026-08-22)
+
+Parc entier : 3 groupes, 109 nœuds. PRO 41 · TST 68 · tous les autres projets 0, AXO compris.
+
+Les 41 de PRO sont le vrai signal, et il n''était visible d''aucune autre manière : ce sont des RÉSIDUS DE TESTS dans le namespace produit hérité par les 75 tenants — 21 « test skill — tdd obligatoire procedure » (SKI-PRO-002 … SKI-PRO-1040) et 20 « test prd body template » (PRT-PRO-001 … PRT-PRO-1018). La suite de tests écrit dans PRO. TST est le projet de test lui-même, sans enjeu.
+
+## Divergence assumée avec le check qu''elle remplace
+
+Le check `duplicate_titles` groupait par (type, titre) ; cette règle groupe par titre seul, donc elle attrape EN PLUS deux nœuds de types différents au même titre — une ambiguïté réelle pour un lecteur. Sur la donnée du 2026-08-22 la différence est nulle : aucun des 3 groupes ne mélange les types. La divergence est donc théorique aujourd''hui et voulue ; un test la vérifie dans les deux sens.
+
+## RÉPARATION
+
+Renommer le doublon, ou le retirer (statut `superseded` avec l''arête `SUPERSEDES` vers le canonique) s''il fait double emploi. Les résidus de tests relèvent de la seconde voie.', 'current', '{"soll_rule": {"subject_status_in": ["current", "planned"], "unique_by": "title", "message": "titre partagé par un autre nœud vivant — la référence par le titre est ambiguë"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-122', 'Guideline', 'PRO', 'Une exigence ouverte remonte à une Vision', 'Règle SOLL déclarative (REQ-AXO-902455, axe « atteignabilité »). Une exigence qu''aucun chemin de filiation ne relie à une Vision ne dit pas POURQUOI on la ferait. C''est exactement ce que VIS-AXO-001 nomme : le code dit ce qui est, la SOLL doit dire pourquoi — une exigence détachée n''apporte ni l''un ni l''autre.
+
+Le chemin est transitif et suit les seules relations de filiation : SOLVES, BELONGS_TO, REFINES, TARGETS, EXPLAINS, EPITOMIZES. Le cas nominal est REQ -BELONGS_TO-> PIL -EPITOMIZES-> VIS.
+
+## Portée : les statuts OUVERTS seulement, et c''est mesuré
+
+État AXO au 2026-08-22 : 127 exigences n''atteignent aucune Vision, mais 100 d''entre elles sont `delivered` et 15 `rejected`. Les signaler serait un audit d''histoire, pas un plan de travail : le travail est fait, et rattacher après coup fabriquerait de la filiation devinée. La règle vise donc `current` et `planned` — 7 cas sur AXO.
+
+Le rattachement rétroactif des 100 `delivered` est une question SÉPARÉE, à trancher avec l''opérateur, pas à imposer par une règle.
+
+## RÉPARATION
+
+soll_manager(action=link) vers le Pillar qui porte le sujet — la paire REQ → PIL n''admet que BELONGS_TO. Si aucun Pillar ne convient, c''est l''exigence qu''il faut requalifier : elle vise autre chose que ce que le produit poursuit.', 'current', '{"soll_rule": {"subject_kind": "Requirement", "subject_status_in": ["current", "planned"], "reaches": true, "other_kind": "Vision", "relations": ["SOLVES", "BELONGS_TO", "REFINES", "TARGETS", "EXPLAINS", "EPITOMIZES"], "message": "aucun chemin de filiation ne relie cette exigence à une Vision"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-123', 'Guideline', 'PRO', 'Un projet n''a qu''une seule Vision vivante', 'Règle SOLL déclarative (REQ-AXO-902455, axe « agrégat »). Une Vision est le nœud unique auquel toute la filiation remonte. Deux Visions vivantes dans un projet, c''est deux nords : GUI-PRO-122 devient satisfiable par l''une OU l''autre, et « pourquoi ce produit existe » cesse d''avoir une réponse.
+
+## Cette règle ne signale RIEN aujourd''hui, et c''est dit plutôt que tu
+
+Mesure du 2026-08-22 sur les 75 projets : AUCUN n''a plus d''une Vision vivante. C''est le seul des six axes du moteur qui soit posé sans cas réel — les autres en ont 41, 7, 88, 76 et 10.
+
+Elle est posée quand même parce qu''elle garde un invariant que le code défend déjà par ailleurs (`axon_init_project` seul peut créer une Vision, `vision_creation_forbidden` refuse partout ailleurs) : la règle rend cet invariant VÉRIFIABLE sur la donnée au lieu de le laisser reposer sur le seul chemin d''écriture. Une garde de non-régression, pas un révélateur. Sa falsification est donc portée par son test, qui construit deux Visions vivantes et exige le rouge.
+
+## RÉPARATION
+
+Retirer la Vision surnuméraire (statut `superseded` + arête SUPERSEDES depuis la canonique), jamais la supprimer. Historiquement AXO en a absorbé quatre de cette façon (VIS-AXO-900/901/902/903 vers VIS-AXO-001).', 'current', '{"soll_rule": {"subject_kind": "Vision", "subject_status_not_in": ["superseded", "rejected", "archived"], "at_most": 1, "message": "plusieurs Visions vivantes dans le projet — la filiation n''a plus de nord unique"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-124', 'Guideline', 'PRO', 'Une exigence livrée n''est pas prouvée par un artefact cassé', 'Règle SOLL déclarative (REQ-AXO-902455, axe « preuves »). Une exigence `delivered` dont une preuve porte `artifact_status = broken` n''est pas prouvée : le fichier, le test ou la métrique qui la justifiait n''existe plus.
+
+Demandée par VPC, avec sa mesure : sur 636 preuves d''un projet client, 485 (76 %) n''avaient jamais été vérifiées, et une exigence pouvait être `delivered` et « prouvée » par un fichier supprimé trois mois plus tôt sans que rien ne le dise.
+
+## Portée cross-tenant, et le volume n''est PAS un critère
+
+Reprend GUI-AXO-1032, qui restreignait à AXO au motif qu''une règle bruyante se fait désaffûter. Ce motif est écarté : le nombre de violations qu''une règle vraie révèle ne décide pas si on la pose. Ce qui décide, c''est sa justesse.
+
+État mesuré à la pose (2026-08-22), sous des exigences `delivered` : AXO 88, TE2 25, FSF 6, ROM 4, NEX 2, MLD 1. Le statut `missing` n''existe dans AUCUNE ligne du parc — une règle qui l''aurait visé n''aurait jamais rien signalé, ce qui est pire qu''une règle absente : elle rassure.
+
+## Ce que la règle ne peut pas distinguer, et qu''il faut lire avant de réparer
+
+Sur les 88 d''AXO, quatre natures très différentes : 33 pointent un module renommé (pipeline_v2 → pipeline), 21 sont des fichiers /tmp qui n''auraient jamais dû être acceptés comme preuve, 6 visent un script supprimé volontairement, 23 sont de vrais fichiers disparus. La règle détecte juste ; le remède n''est pas unique.
+
+## RÉPARATION
+
+Rattacher une preuve valide (soll_attach_evidence), ou retirer la preuve périmée (soll_remove_evidence) et re-qualifier. Ne PAS remettre l''exigence à `current` par réflexe : le travail a pu être fait et seule sa trace avoir bougé.', 'current', '{"soll_rule": {"subject_kind": "Requirement", "subject_status_in": ["delivered"], "evidence_status_in": ["broken"], "message": "preuve cassée sous une exigence livrée — l''artefact qui la justifiait n''existe plus"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-125', 'Guideline', 'PRO', 'Un nœud retiré enregistre ce qui le remplace', 'Règle SOLL déclarative (REQ-AXO-902455, axe « direction entrante »). Un nœud `superseded` doit RECEVOIR une arête SUPERSEDES : sans elle, on sait qu''il est retiré mais pas par quoi, et le lecteur d''un corps périmé n''a aucun chemin vers la version vivante.
+
+Demandée par OPV (llm_feedback #96), avec sa mesure : 105 nœuds retirés sans remplacement enregistré.
+
+## Pourquoi elle n''était pas exprimable avant
+
+Le moteur ne savait poser que des contraintes sur les arêtes SORTANTES. Celle-ci porte sur les ENTRANTES — « quelque chose pointe-t-il vers moi ». La même règle en sortante dit littéralement l''inverse (elle exigerait que le nœud retiré en supersède un autre) : `direction` porte du sens, et un test le vérifie.
+
+## Portée cross-tenant
+
+Reprend GUI-AXO-1033, restreinte à AXO par prudence de volume — motif écarté pour la même raison que GUI-PRO-124.
+
+État mesuré à la pose (2026-08-22) : OPV 95 · AXO 76 · MPM 26 · SWT 14 · NEX 13 · TE2 6 · APS 5 · FSF 4, environ 240 sur le parc.
+
+## Ordre de réparation, mesuré et contraint
+
+Sur AXO, 6 des 76 sont le MÊME défaut que GUI-PRO-120 voit sous un autre angle : le nœud a bien une arête SUPERSEDES, mais posée à l''envers (CPT-AXO-038, DEC-AXO-092, GUI-AXO-1001, PIL-AXO-006, REQ-AXO-207, REQ-AXO-208). Retourner l''arête éteint les deux règles d''un coup. Traiter GUI-PRO-120 EN PREMIER, sinon ces 6 sont comptés deux fois.
+
+## RÉPARATION
+
+Poser l''arête manquante depuis le remplaçant : soll_manager(action=link, source_id=<le vivant>, target_id=<le retiré>, relation_type=SUPERSEDES). Attention au SENS — la source est le nœud VIVANT ; l''inverse est l''erreur que GUI-PRO-120 attrape.
+
+Si rien ne le remplace, le statut juste est `rejected`, pas `superseded`. Mais VÉRIFIER d''abord : « aucune information dans le graphe » ne veut pas dire « rien ne le remplace ». Sur AXO, CPT-AXO-040 (Apache AGE) n''a ni metadata ni indice de titre, et pourtant MIL-AXO-017 et DEC-AXO-083 sont bien ce qui l''a remplacé — nommés en clair dans la documentation du dépôt, jamais écrits dans le graphe.', 'current', '{"soll_rule": {"subject_status_in": ["superseded"], "mode": "required", "direction": "incoming", "relations": ["SUPERSEDES"], "message": "nœud retiré sans arête SUPERSEDES entrante — on ignore ce qui le remplace"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-126', 'Guideline', 'PRO', 'Une exigence ouverte porte ses critères d''acceptation', 'Règle SOLL déclarative (REQ-AXO-902455, axe « métadonnée »). Une exigence ouverte sans critère d''acceptation ne dit pas à quoi on saura qu''elle est faite. C''est le trou que `soll_verify_requirements` ne peut pas combler : sans critère, il ne reste que la déclaration de celui qui la clôt.
+
+## Sixième et dernier axe posé
+
+Le moteur porte six prédicats ; celui-ci était le seul à n''avoir AUCUNE règle réelle. Poser la première est le test d''acceptation d''une capacité livrée (practice #1368) — c''est ainsi qu''on a découvert que `structural_invariants`, livré depuis des mois, n''avait jamais été exercé : 0 règle sur 258 Guidelines.
+
+## État mesuré à la pose (2026-08-22), exigences OUVERTES seulement
+
+CHC 12 sur 12 · LLL 5 sur 17 · MLD 4 sur 4 · APS 3 sur 49 · **AXO 0** — le tenant zéro est déjà conforme, ce qui rend cette règle sûre à hériter : elle ne signale que là où le manque est réel.
+
+## Pourquoi les statuts ouverts seulement
+
+Exiger un critère d''acceptation sur une exigence `delivered` demanderait de le reconstruire après coup, donc de le deviner. Un critère écrit après la livraison ne prouve rien : il est écrit en regardant ce qui a été fait. La règle ne vise que ce qui reste à faire.
+
+## Ce que la règle ne peut PAS exprimer, et qui reste en code
+
+Le check `uncovered_requirements` est une CONJONCTION — ni preuve rattachée NI critère d''acceptation. `parse_soll_rule` refuse deux prédicats dans une même règle, par construction : une violation combinée n''aurait pas de sens univoque et son message ne pourrait pas dire lequel a échoué. Cette règle-ci porte donc la moitié « critère » ; la moitié « preuve » reste dans `soll_completeness_snapshot_filtered`.
+
+## Chevauchement MESURÉ avec `uncovered_requirements`, et ce qu''elle ajoute
+
+Parc hors projets de test, exigences ouvertes : **29** sans critère. **11** sont aussi sans preuve, donc déjà vues par `uncovered_requirements`. **18 sont un ajout réel** — elles portent une preuve et n''ont pas de critère, donc la conjonction ne les a JAMAIS signalées. Le chevauchement est borné et connu ; il n''est pas une raison de ne pas poser la règle, mais il faut savoir qu''une exigence sans preuve ni critère apparaîtra sous les deux angles.
+
+## RÉPARATION
+
+`soll_manager(action=update, data={id, acceptance_criteria: [...]})`. Un critère utile est vérifiable par quelqu''un d''autre que son auteur : « le test X passe », « la métrique Y descend sous Z » — pas « c''est propre ».', 'current', '{"soll_rule": {"subject_kind": "Requirement", "subject_status_in": ["current", "planned"], "metadata_required": ["acceptance_criteria"], "message": "exigence ouverte sans critère d''acceptation — rien ne dira qu''elle est faite"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
 VALUES ('PIL-PRO-001', 'Pillar', 'PRO', 'Code Quality', 'Architectural discipline ensuring code is testable, deep, well-bounded, free of warnings. Spans: test-first development (GUI-001), DRY/SRP/KISS/cognitive-limits/clean-as-you-go (GUI-013/014/015/016/017), APoSD foundations — deep modules, information hiding, pull-complexity-downwards, design-it-twice (GUI-018/019/020/021). Consumer project GUI-{code}-N covering same scope INHERITS_FROM corresponding GUI-PRO.', 'current', '{"updated_at": 1778514324408}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
@@ -477,4 +609,28 @@ VALUES ('GUI-PRO-119', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
 INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
 VALUES ('GUI-PRO-120', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-121', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-122', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-123', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-124', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-125', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-126', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;

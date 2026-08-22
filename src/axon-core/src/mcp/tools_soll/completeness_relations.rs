@@ -379,7 +379,7 @@ impl McpServer {
     pub(crate) fn collect_relation_policy_violations(
         &self,
         project_code: Option<&str>,
-    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    ) -> anyhow::Result<(Vec<String>, Vec<crate::soll_snapshot::SollRuleViolation>)> {
         let mut violations = Vec::new();
         let mut exclusive_pairs: std::collections::HashMap<
             (String, String),
@@ -527,9 +527,6 @@ impl McpServer {
             (Some(code), Some(snapshot)) => {
                 let rules = self.load_soll_rules(code);
                 crate::soll_snapshot::declarative_rules::evaluate_all(snapshot, &rules)
-                    .iter()
-                    .map(|violation| violation.render())
-                    .collect()
             }
             _ => Vec::new(),
         };

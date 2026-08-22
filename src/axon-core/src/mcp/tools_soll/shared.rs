@@ -102,14 +102,12 @@ pub(crate) struct SollCompletenessSnapshot {
     pub(super) validations_without_verifies: Vec<String>,
     pub(super) decisions_without_links: Vec<String>,
     pub(super) uncovered_requirements: Vec<String>,
-    pub(super) duplicate_title_rows: Vec<Vec<String>>,
-    pub(super) duplicate_ids: Vec<String>,
     pub(super) relation_policy_violations: Vec<String>,
     /// REQ-AXO-902455 — violations des règles SOLL DÉCLARATIVES (les
     /// `Guideline` porteuses d'une metadata `soll_rule`). Chaque ligne cite le
     /// `rule_id`, donc `soll_get(rule_id)` rend l'intention qui l'a mandatée.
     /// Remplace la branche `SUPERSEDES` en dur de REQ-AXO-902453.
-    pub(super) declarative_rule_violations: Vec<String>,
+    pub(super) declarative_rule_violations: Vec<crate::soll_snapshot::SollRuleViolation>,
     pub(super) requirement_coverage: RequirementCoverageSummary,
 }
 
@@ -122,8 +120,25 @@ impl SollCompletenessSnapshot {
             && self.declarative_rule_violations.is_empty()
     }
 
+    /// REQ-AXO-902455 — dérivé de la règle d'unicité (`GUI-PRO-121`), plus du
+    /// SQL en dur. Le filtre porte sur la NATURE du prédicat, jamais sur l'id
+    /// d'une Guideline : coder cet id ici recréerait le couplage code→règle que
+    /// le passage aux règles-données supprime.
     pub(crate) fn duplicate_free(&self) -> bool {
-        self.duplicate_title_rows.is_empty()
+        self.uniqueness_violation_ids().is_empty()
+    }
+
+    /// Les nœuds nommés par une violation d'unicité, dédupliqués et triés.
+    pub(crate) fn uniqueness_violation_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .declarative_rule_violations
+            .iter()
+            .filter(|v| v.predicate == crate::soll_snapshot::PredicateKind::Uniqueness)
+            .map(|v| v.source_id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     pub(crate) fn evidence_ready(&self) -> bool {
@@ -144,8 +159,8 @@ impl SollCompletenessSnapshot {
             .chain(self.validations_without_verifies.iter())
             .chain(self.decisions_without_links.iter())
             .chain(self.uncovered_requirements.iter())
-            .chain(self.duplicate_ids.iter())
             .cloned()
+            .chain(self.uniqueness_violation_ids())
             .collect()
     }
 }
@@ -525,10 +540,52 @@ pub(super) fn classify_artifact_ref(artifact_ref: &str) -> ArtifactRefShape {
             };
         }
     }
+    // REQ-AXO-902457 — deux formes de RÉVISION que la règle attrape-tout
+    // ci-dessous happait, parce qu'elles contiennent un point : un intervalle
+    // `a..b` / `a...b`, et la sortie de `git describe` (`v0.8.0-582-g3fdb3640`,
+    // exactement ce que ce dépôt produit à chaque build). Mesurées sur
+    // axon_live, marquées `broken` alors que les commits existent.
+    if is_git_revision_range(git_body) || is_git_describe_output(git_body) {
+        return ArtifactRefShape::CommitHash;
+    }
+    // Une ancre de lignes ne change pas la NATURE du ref : le fichier reste
+    // vérifiable, et c'est le chemin dépouillé qui sera stat()é.
     if raw.contains('/') || raw.contains('\\') || raw.contains('.') {
         return ArtifactRefShape::Path;
     }
     ArtifactRefShape::Unknown
+}
+
+/// `a..b` ou `a...b`, chaque extrémité étant une révision git plausible.
+fn is_git_revision_range(raw: &str) -> bool {
+    let (left, right) = match raw.split_once("...") {
+        Some(pair) => pair,
+        None => match raw.split_once("..") {
+            Some(pair) => pair,
+            None => return false,
+        },
+    };
+    let end_ok = |s: &str| is_git_object_id(s) || is_git_symbolic_rev(s);
+    end_ok(left) && end_ok(right)
+}
+
+/// Sortie de `git describe` : `<tag>-<n>-g<abbrev>`. Le marqueur discriminant
+/// est le dernier segment `g<hex>` précédé d'un compteur — un nom de fichier
+/// ne prend pas cette forme.
+fn is_git_describe_output(raw: &str) -> bool {
+    let trimmed = raw.strip_suffix("-dirty").unwrap_or(raw);
+    let mut parts = trimmed.rsplitn(3, '-');
+    let (Some(sha), Some(distance), Some(tag)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let Some(hex) = sha.strip_prefix('g') else {
+        return false;
+    };
+    !tag.is_empty()
+        && hex.len() >= 7
+        && hex.chars().all(|c| c.is_ascii_hexdigit())
+        && !distance.is_empty()
+        && distance.chars().all(|c| c.is_ascii_digit())
 }
 
 /// 7-40 lowercase hex and nothing else. The length window excludes a 6-char word;
@@ -575,6 +632,33 @@ fn is_canonical_soll_id_prefix(raw: &str) -> bool {
 /// Both the declared type AND the ref shape must agree. The declared type alone
 /// was the bug: `Document` is the fallback bucket, so everything unrecognised
 /// landed there and got stat()ed.
+/// REQ-AXO-902457 — retire un suffixe d'ancre de lignes (`:N` ou `:N-M`) en
+/// FIN de référence, et rend le reste inchangé quand il n'y en a pas.
+///
+/// `process-compose.dev.yaml:45-54` désigne un emplacement DANS un fichier qui
+/// existe : c'est une preuve plus précise qu'un chemin nu, et la déclarer
+/// invérifiable perdrait ce que le disque peut confirmer. Seul un suffixe
+/// entièrement NUMÉRIQUE compte — `docs/a:b.md` reste un chemin entier.
+pub(super) fn evidence_path_without_line_anchor(artifact_ref: &str) -> &str {
+    let Some(colon) = artifact_ref.rfind(':') else {
+        return artifact_ref;
+    };
+    let suffix = &artifact_ref[colon + 1..];
+    if suffix.is_empty() {
+        return artifact_ref;
+    }
+    let numeric_span = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    let is_anchor = match suffix.split_once('-') {
+        Some((start, end)) => numeric_span(start) && numeric_span(end),
+        None => numeric_span(suffix),
+    };
+    if is_anchor {
+        &artifact_ref[..colon]
+    } else {
+        artifact_ref
+    }
+}
+
 pub(super) fn evidence_ref_is_disk_checkable(artifact_type: &str, artifact_ref: &str) -> bool {
     matches!(
         artifact_type.trim().to_ascii_lowercase().as_str(),
@@ -693,28 +777,6 @@ pub(super) fn required_field_hint_for_artifact_kind(kind: &str) -> &'static str 
     }
 }
 
-/// REQ-AXO-066 Phase 1 (DEC-AXO-064 Option A): standardised `project_code`
-/// scoping fragment for SOLL/IST queries.
-///
-/// - `Some(code)` validated by [`is_valid_project_code`] →
-///   `" AND <column_prefix>project_code = '<code>'"`.
-/// - `None` or empty/invalid code → `""` (caller is responsible for unscoped reads).
-///
-/// Single quotes inside `code` are escaped per the existing codebase
-/// convention (`code.replace('\'', "''")`); valid project codes never
-/// contain quotes, but the escape is kept defensively.
-pub(crate) fn scoped_query_filter(project_code: Option<&str>, column_prefix: &str) -> String {
-    let Some(code) = project_code else {
-        return String::new();
-    };
-    let trimmed = code.trim();
-    if trimmed.is_empty() || !is_valid_project_code(trimmed) {
-        return String::new();
-    }
-    let escaped = trimmed.replace('\'', "''");
-    format!(" AND {column_prefix}project_code = '{escaped}'")
-}
-
 #[cfg(test)]
 mod requirement_state_tests {
     use super::{requirement_missing_dimensions, requirement_state_from};
@@ -811,60 +873,6 @@ mod requirement_state_tests {
     fn non_terminal_status_flags_status_dimension() {
         let dims = requirement_missing_dimensions("planned", true, 1, 1, 0);
         assert!(dims.iter().any(|d| d == "status"));
-    }
-}
-
-#[cfg(test)]
-mod scoped_query_filter_tests {
-    use super::scoped_query_filter;
-
-    #[test]
-    fn returns_empty_when_project_code_is_none() {
-        assert_eq!(scoped_query_filter(None, ""), "");
-        assert_eq!(scoped_query_filter(None, "n."), "");
-    }
-
-    #[test]
-    fn returns_empty_when_project_code_is_blank() {
-        assert_eq!(scoped_query_filter(Some(""), ""), "");
-        assert_eq!(scoped_query_filter(Some("   "), "n."), "");
-    }
-
-    #[test]
-    fn returns_empty_when_project_code_is_invalid() {
-        // is_valid_project_code requires exactly 3 ascii alphanumerics; case
-        // insensitive (uppercase is the convention but not enforced).
-        assert_eq!(scoped_query_filter(Some("AX"), ""), "");
-        assert_eq!(scoped_query_filter(Some("AXON"), ""), "");
-        assert_eq!(scoped_query_filter(Some("AX!"), ""), "");
-    }
-
-    #[test]
-    fn applies_filter_with_unprefixed_column() {
-        assert_eq!(
-            scoped_query_filter(Some("AXO"), ""),
-            " AND project_code = 'AXO'"
-        );
-    }
-
-    #[test]
-    fn applies_filter_with_qualified_column_prefix() {
-        assert_eq!(
-            scoped_query_filter(Some("BKS"), "n."),
-            " AND n.project_code = 'BKS'"
-        );
-        assert_eq!(
-            scoped_query_filter(Some("PRO"), "soll.Node."),
-            " AND soll.Node.project_code = 'PRO'"
-        );
-    }
-
-    #[test]
-    fn trims_whitespace_around_valid_code() {
-        assert_eq!(
-            scoped_query_filter(Some("  AXO  "), ""),
-            " AND project_code = 'AXO'"
-        );
     }
 }
 
@@ -1041,4 +1049,70 @@ mod req_902390_artifact_ref_shape_tests {
         assert_eq!(classify_artifact_ref("abc12"), ArtifactRefShape::Unknown);
         assert!(!evidence_ref_is_disk_checkable("Document", "abc12"));
     }
+
+    /// REQ-AXO-902457 — trois formes de preuve légitimes tombaient dans la
+    /// règle attrape-tout « contient un point, donc c'est un chemin », étaient
+    /// `stat()`ées et déclarées `broken`. Chacune est VERBATIM de `axon_live`,
+    /// et chacune a été vérifiée individuellement avant d'être appelée fausse.
+    #[test]
+    fn a_git_describe_a_commit_range_and_a_line_anchor_are_not_missing_files() {
+        // `git describe` — ce dépôt en produit un à chaque build.
+        for describe in ["v0.8.0-582-g3fdb3640", "v1.2.3-45-gabcdef0"] {
+            assert_eq!(
+                classify_artifact_ref(describe),
+                ArtifactRefShape::CommitHash,
+                "{describe} est une version, pas un fichier"
+            );
+            assert!(!evidence_ref_is_disk_checkable("Document", describe));
+        }
+
+        // Range de commits — les DEUX extrémités de l'exemple mesuré sont des
+        // commits réels du dépôt.
+        for range in ["860d15e7..2f881a28", "860d15e7...2f881a28"] {
+            assert_eq!(
+                classify_artifact_ref(range),
+                ArtifactRefShape::CommitHash,
+                "{range} est un intervalle de révisions"
+            );
+            assert!(!evidence_ref_is_disk_checkable("Document", range));
+        }
+
+        // `chemin:lignes` — traitement OPPOSÉ aux deux précédents : le fichier
+        // existe, la preuve est plus précise qu'un chemin nu. La rendre
+        // invérifiable perdrait une information que le disque peut confirmer.
+        for anchored in ["process-compose.dev.yaml:45-54", "src/main.rs:12"] {
+            assert_eq!(
+                classify_artifact_ref(anchored),
+                ArtifactRefShape::Path,
+                "{anchored} désigne un emplacement DANS un fichier réel"
+            );
+            assert!(evidence_ref_is_disk_checkable("Document", anchored));
+        }
+        assert_eq!(
+            evidence_path_without_line_anchor("process-compose.dev.yaml:45-54"),
+            "process-compose.dev.yaml",
+            "le stat() doit porter sur le fichier, pas sur le fichier+ancre"
+        );
+        assert_eq!(
+            evidence_path_without_line_anchor("src/main.rs:12"),
+            "src/main.rs"
+        );
+
+        // ── Contrôles positifs : ne pas élargir au-delà du mesuré ──────────
+        // Un vrai fichier dont le nom ressemble à ces formes reste un chemin.
+        assert_eq!(classify_artifact_ref("deadbeef.txt"), ArtifactRefShape::Path);
+        assert_eq!(classify_artifact_ref("docs/a:b.md"), ArtifactRefShape::Path);
+        // Un `:` suivi d'autre chose que des lignes n'est pas une ancre.
+        assert_eq!(
+            evidence_path_without_line_anchor("docs/a:b.md"),
+            "docs/a:b.md",
+            "seul un suffixe NUMÉRIQUE en fin de ref est une ancre de lignes"
+        );
+        assert_eq!(
+            evidence_path_without_line_anchor("rapport.md"),
+            "rapport.md",
+            "sans ancre, le ref traverse inchangé"
+        );
+    }
 }
+

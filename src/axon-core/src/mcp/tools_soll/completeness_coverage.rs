@@ -16,7 +16,9 @@ pub(crate) fn classify_evidence_ref_against_root(
     raw_ref: &str,
     project_root: Option<&Path>,
 ) -> &'static str {
-    let path = Path::new(raw_ref);
+    // REQ-AXO-902457 — `fichier:45-54` désigne un emplacement DANS un fichier ;
+    // c'est le fichier qu'il faut stat(), pas la chaîne entière.
+    let path = Path::new(super::shared::evidence_path_without_line_anchor(raw_ref));
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -583,49 +585,13 @@ impl McpServer {
             total
         };
 
-        // REQ-AXO-901602 — restrict duplicate-title detection to the
-        // statuses_to_check allow-list so superseded/delivered/rejected
-        // siblings don't inflate the duplicate count. Legacy (None) keeps
-        // the original behaviour: every status counted (this is the very
-        // bug we're closing for the 4× `Indexer fails on empty file`
-        // cluster on AXO).
-        let dup_status_clause = match statuses_to_check {
-            None => String::new(),
-            Some(allowed) if allowed.iter().any(|s| s == "*") => String::new(),
-            Some(allowed) => {
-                let parts: Vec<String> = allowed
-                    .iter()
-                    .map(|s| format!("'{}'", escape_sql(s)))
-                    .collect();
-                format!(" AND COALESCE(status, '') IN ({})", parts.join(", "))
-            }
-        };
-        let duplicate_title_rows_raw = self.graph_store.query_json(&format!(
-            "SELECT type, title, string_agg(id, ', ' ORDER BY id)
-             FROM soll.Node
-             WHERE type IN ('Requirement', 'Decision', 'Concept')
-               AND COALESCE(title, '') <> ''{}{}
-             GROUP BY type, title
-             HAVING COUNT(*) > 1
-             ORDER BY type, title",
-            scoped_query_filter(resolved_project_code.as_deref(), ""),
-            dup_status_clause
-        ))?;
-        let duplicate_title_rows: Vec<Vec<String>> =
-            serde_json::from_str(&duplicate_title_rows_raw).unwrap_or_default();
-
-        let duplicate_ids = duplicate_title_rows
-            .iter()
-            .filter_map(|row| row.get(2).cloned())
-            .flat_map(|ids| {
-                ids.split(',')
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-
+        // REQ-AXO-902455 — la détection de titres dupliqués n'est plus ici :
+        // c'est la règle-donnée `GUI-PRO-121`, évaluée par le moteur déclaratif
+        // sous `collect_relation_policy_violations`. Le SQL retiré ne couvrait
+        // que Requirement/Decision/Concept — aveugle aux Skill/PromptTemplate,
+        // où vivent les 41 doublons de `PRO` (résidus de tests dans le
+        // namespace produit). Équivalence prouvée avant retrait par
+        // `the_declarative_title_rule_covers_everything_the_hardcoded_check_did_and_more`.
         let (relation_policy_violations, declarative_rule_violations) =
             self.collect_relation_policy_violations(resolved_project_code.as_deref())?;
         let requirement_coverage = match (resolved_project_code.as_deref(), cached_coverage) {
@@ -641,8 +607,6 @@ impl McpServer {
             validations_without_verifies,
             decisions_without_links,
             uncovered_requirements,
-            duplicate_title_rows,
-            duplicate_ids,
             relation_policy_violations,
             declarative_rule_violations,
             requirement_coverage,

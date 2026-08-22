@@ -399,7 +399,7 @@ impl McpServer {
                         crate::soll_snapshot::declarative_rules::evaluate_all(&soll, &inline_rules);
                     snapshot
                         .declarative_rule_violations
-                        .extend(found.iter().map(|violation| violation.render()));
+                        .extend(found.iter().cloned());
                 }
             }
         }
@@ -408,7 +408,6 @@ impl McpServer {
             + snapshot.validations_without_verifies.len()
             + snapshot.decisions_without_links.len()
             + snapshot.uncovered_requirements.len()
-            + snapshot.duplicate_title_rows.len()
             + snapshot.relation_policy_violations.len()
             + snapshot.declarative_rule_violations.len();
 
@@ -458,10 +457,11 @@ impl McpServer {
                 ],
             ));
         }
-        if !snapshot.duplicate_ids.is_empty() {
+        let uniqueness_ids = snapshot.uniqueness_violation_ids();
+        if !uniqueness_ids.is_empty() {
             repair_guidance.push(repair_guidance_entry(
                 "duplicate_titles",
-                &snapshot.duplicate_ids,
+                &uniqueness_ids,
                 "Duplicate SOLL titles usually signal overlapping concepts, requirements, or decisions.",
                 &[
                     "merge or supersede duplicates instead of keeping parallel semantic copies",
@@ -472,7 +472,11 @@ impl McpServer {
         if !snapshot.declarative_rule_violations.is_empty() {
             repair_guidance.push(repair_guidance_entry(
                 "declarative_rule_violations",
-                &snapshot.declarative_rule_violations,
+                &snapshot
+                    .declarative_rule_violations
+                    .iter()
+                    .map(|v| v.render())
+                    .collect::<Vec<_>>(),
                 "Declarative SOLL rules were violated. Each line ends with the id of the Guideline that mandates the rule — read it before repairing, it carries the intent AND the remedy.",
                 &[
                     "soll_get(<rule_id>) — the rule says what it forbids and why",
@@ -543,21 +547,12 @@ impl McpServer {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
-        if !snapshot.duplicate_title_rows.is_empty() {
-            evidence.push_str("\n- Duplicate titles (potential semantic duplicates):\n");
-            for row in &snapshot.duplicate_title_rows {
-                if row.len() < 3 {
-                    continue;
-                }
-                evidence.push_str(&format!("  - {} :: {} -> {}\n", row[0], row[1], row[2]));
-            }
-        }
         if !snapshot.declarative_rule_violations.is_empty() {
             evidence.push_str(
                 "\n- Règles SOLL déclaratives violées (chaque ligne cite sa Guideline) :\n",
             );
             for row in &snapshot.declarative_rule_violations {
-                evidence.push_str(&format!("  - {}\n", row));
+                evidence.push_str(&format!("  - {}\n", row.render()));
             }
         }
         if !snapshot.relation_policy_violations.is_empty() {
@@ -613,8 +608,15 @@ impl McpServer {
                     "validations_without_verifies": snapshot.validations_without_verifies,
                     "decisions_without_links": snapshot.decisions_without_links,
                     "uncovered_requirements": snapshot.uncovered_requirements,
-                    "duplicate_title_rows": snapshot.duplicate_title_rows,
-                    "relation_policy_violations": snapshot.relation_policy_violations
+                    "relation_policy_violations": snapshot.relation_policy_violations,
+                    // REQ-AXO-902455 — le JSON portait le COMPTE des règles
+                    // déclaratives sans jamais lister les items : un consommateur
+                    // programmatique lisait un nombre qu'il ne pouvait pas ouvrir.
+                    "declarative_rule_violations": snapshot
+                        .declarative_rule_violations
+                        .iter()
+                        .map(|v| v.render())
+                        .collect::<Vec<_>>()
                 },
                 "repair_guidance": repair_guidance,
                 "completeness": completeness,
