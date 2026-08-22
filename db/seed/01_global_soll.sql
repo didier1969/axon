@@ -324,14 +324,26 @@ VALUES ('GUI-PRO-119', 'Guideline', 'PRO', 'Une supersession retire sa cible', '
 
 RÉPARATION : retirer la cible (soll_manager action=update, status=superseded), ou retirer l''arête si la supersession n''était pas voulue (action=unlink).
 
-Cette règle ne s''applique QUE lorsque la source est vivante. Source retirée = arête inversée, voir GUI-PRO-120.', 'current', '{"soll_rule": {"mode": "forbidden", "relations": ["SUPERSEDES"], "source_status_not_in": ["superseded", "rejected"], "target_status_not_in": ["superseded"], "message": "la cible est encore ouverte alors que l''arête la déclare retirée"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+Cette règle ne s''applique QUE lorsque la source est vivante. Source retirée = arête inversée, voir GUI-PRO-120.
+
+## Correction du 2026-08-22 (session 124) — le vocabulaire de retrait était incomplet
+
+La règle ne comptait que `superseded` comme « retiré ». Or `rejected` et `archived` le sont aussi : `DEC-AXO-073 SUPERSEDES DEC-AXO-072` était signalé alors que les DEUX extrémités sont retirées — la cible est `rejected`, délibérément. Conseiller de « retourner l''''arête » là-dessus aurait remis un nœud rejeté à `current`, c''''est-à-dire falsifié le registre pour verdir une porte.
+
+Mesuré à la correction : **1 cas sur 11** relevait de ce défaut. Peu, mais c''''était la RÈGLE qui était fausse, pas la donnée (GUI-PRO-106 : corriger l''''origine).', 'current', '{"soll_rule": {"mode": "forbidden", "relations": ["SUPERSEDES"], "source_status_not_in": ["superseded", "rejected"], "target_status_not_in": ["superseded", "rejected", "archived"], "message": "la cible est encore ouverte alors que l''arête la déclare retirée"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
 VALUES ('GUI-PRO-120', 'Guideline', 'PRO', 'Une arête SUPERSEDES ne part pas du nœud retiré', 'Règle SOLL déclarative (DEC-AXO-901652, REQ-AXO-902455). `A SUPERSEDES B` dit que A remplace B : A est vivant, B est retiré. Quand c''est la SOURCE qui porte un statut retiré et la cible qui est vivante, l''arête a été posée À L''ENVERS.
 
 Mesure AXO du 2026-08-22 : 8 des 10 arêtes incohérentes étaient de cette forme (PIL-AXO-006 SUPERSEDES PIL-AXO-004, alors que 006 est le supersédé). C''est pourquoi cette règle est SÉPARÉE de GUI-PRO-119 : conseiller « retire la cible » sur celles-ci retirerait le nœud CANONIQUE survivant.
 
-RÉPARATION : action=unlink, puis re-lier dans l''autre sens — le nœud retiré est la SOURCE.', 'current', '{"soll_rule": {"mode": "forbidden", "relations": ["SUPERSEDES"], "source_status_in": ["superseded", "rejected"], "target_status_not_in": ["superseded"], "message": "arête INVERSÉE : la source est retirée et la cible vivante — ne PAS retirer la cible"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+RÉPARATION : action=unlink, puis re-lier dans l''autre sens — le nœud retiré est la SOURCE.
+
+## Correction du 2026-08-22 (session 124) — le vocabulaire de retrait était incomplet
+
+La règle ne comptait que `superseded` comme « retiré ». Or `rejected` et `archived` le sont aussi : `DEC-AXO-073 SUPERSEDES DEC-AXO-072` était signalé alors que les DEUX extrémités sont retirées — la cible est `rejected`, délibérément. Conseiller de « retourner l''''arête » là-dessus aurait remis un nœud rejeté à `current`, c''''est-à-dire falsifié le registre pour verdir une porte.
+
+Mesuré à la correction : **1 cas sur 11** relevait de ce défaut. Peu, mais c''''était la RÈGLE qui était fausse, pas la donnée (GUI-PRO-106 : corriger l''''origine).', 'current', '{"soll_rule": {"mode": "forbidden", "relations": ["SUPERSEDES"], "source_status_in": ["superseded", "rejected"], "target_status_not_in": ["superseded", "rejected", "archived"], "message": "arête INVERSÉE : la source est retirée et la cible vivante — ne PAS retirer la cible"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
 VALUES ('GUI-PRO-121', 'Guideline', 'PRO', 'Deux nœuds vivants ne portent pas le même titre', 'Règle SOLL déclarative (REQ-AXO-902455, axe « unicité »). Un titre est ce par quoi un humain et un LLM désignent un nœud. Quand deux nœuds vivants le partagent, toute référence par le titre devient ambiguë et le lecteur ne peut pas savoir lequel fait foi.
