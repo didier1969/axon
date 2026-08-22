@@ -420,8 +420,32 @@ impl McpServer {
         }));
 
         // 3. SOLL coherence (reuse soll_validate)
+        //
+        // REQ-AXO-902458 — deux natures, deux verdicts. Cette branche comptait
+        // TOUT en `warn` : avec 484 violations sur 22 projets, la porte rendait
+        // « WARN, 0 fail » et le handoff passait. La directive opérateur — « le
+        // handoff ne peut pas se faire tant que les règles ne sont pas
+        // respectées » — ne vivait que dans une practice et dans la mémoire du
+        // LLM. GUI-PRO-118 : un geste qu'il faut se RAPPELER d'appliquer n'est
+        // pas une porte, c'est une intention.
+        //
+        // - violation d'une RÈGLE déclarative (`GUI-PRO-119`…) → `fail` :
+        //   quelqu'un l'a posée exprès, et chaque ligne cite son `rule_id`.
+        // - dette qu'AUCUNE règle ne gouverne → `warn` : personne n'a décidé
+        //   qu'elle bloque, et la confondre rendrait la porte infranchissable
+        //   pour une raison non prise.
         let soll = self.axon_validate_soll(&json!({ "project_code": args.get("project_code") }));
-        let soll_ok = soll
+        let rule_violations: Vec<String> = soll
+            .as_ref()
+            .and_then(|r| r.pointer("/data/violations/declarative_rule_violations"))
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let coherent = soll
             .as_ref()
             .map(|r| {
                 serde_json::to_string(r)
@@ -429,14 +453,55 @@ impl McpServer {
                     .contains("0 minimal coherence violation")
             })
             .unwrap_or(false);
-        if !soll_ok {
+        // Les ids de règle en cause, dédupliqués : c'est ce qui rend le refus
+        // ACTIONNABLE — `soll_get(rule_id)` porte l'intention ET le remède.
+        let cited_rules: Vec<String> = {
+            let mut ids: Vec<String> = rule_violations
+                .iter()
+                .filter_map(|line| {
+                    let open = line.rfind('[')?;
+                    let close = line.rfind(']')?;
+                    (close > open + 1).then(|| line[open + 1..close].to_string())
+                })
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        let soll_status = if !rule_violations.is_empty() {
+            fails += 1;
+            "fail"
+        } else if coherent {
+            "pass"
+        } else {
             warns += 1;
-        }
+            "warn"
+        };
         checks.push(json!({
             "check": "soll_validate",
-            "status": if soll_ok { "pass" } else { "warn" },
-            "detail": if soll_ok { "0 SOLL coherence violations" } else { "SOLL violations present or validate unavailable" },
-            "remediation": if soll_ok { "" } else { "run soll_validate and resolve / /curate-soll" }
+            "status": soll_status,
+            "detail": match soll_status {
+                "fail" => format!(
+                    "{} declarative rule violation(s) — rules: {}",
+                    rule_violations.len(),
+                    cited_rules.join(", ")
+                ),
+                "pass" => "0 SOLL coherence violations".to_string(),
+                _ => "SOLL coherence gaps present or validate unavailable (no rule mandates them)".to_string(),
+            },
+            "offenders": rule_violations,
+            "remediation": match soll_status {
+                "fail" => format!(
+                    "read the rule then repair the graph: {}",
+                    cited_rules
+                        .iter()
+                        .map(|id| format!("soll_get(id=\"{id}\")"))
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                ),
+                "pass" => String::new(),
+                _ => "run soll_validate and resolve / /curate-soll".to_string(),
+            }
         }));
 
         // 4. live runtime health (reuse status brief)

@@ -1822,6 +1822,94 @@ fn test_status_brief_text_surfaces_trust_boundary_and_next_best_action() {
         "brief text must affirm which structural tools are valid; got: {text}"
     );
 }
+/// REQ-AXO-902458 — la porte de handoff VOYAIT les violations de règles et ne
+/// bloquait pas : `axon_handoff_check` faisait `warns += 1`, jamais
+/// `fails += 1`. Avec 484 violations sur 22 projets, elle rendait « WARN, 0 fail ».
+///
+/// La directive opérateur — « le handoff ne peut pas se faire tant que les règles
+/// ne sont pas respectées », répétée trois fois — ne vivait que dans une practice
+/// et dans la mémoire du LLM qui la lit. `GUI-PRO-118` : un geste qu'il faut se
+/// rappeler d'appliquer n'est pas une porte, c'est une intention.
+///
+/// Les DEUX natures sont distinguées, et c'est le cœur du test : une violation de
+/// RÈGLE est un `fail` (quelqu'un l'a posée exprès) ; une dette préexistante que
+/// NULLE règle ne mandate reste un `warn` (personne n'a décidé qu'elle bloque).
+#[test]
+fn test_handoff_check_fails_on_a_declarative_rule_violation_but_only_warns_on_ungoverned_debt() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let exec = |sql: &str| server.graph_store.execute(sql).unwrap();
+    let register = |code: &str| {
+        exec(&format!(
+            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) \
+             VALUES ('{code}', '/tmp/{code}', '{code}') ON CONFLICT (project_code) DO NOTHING"
+        ));
+    };
+    let status_of = |code: &str| -> String {
+        let result = server
+            .axon_handoff_check(&json!({ "project_code": code }))
+            .expect("handoff_check doit répondre");
+        result["data"]["checks"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .find(|c| c["check"].as_str() == Some("soll_validate"))
+            .and_then(|c| c["status"].as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("check soll_validate absent de {result}"))
+    };
+
+    // ── Projet PROPRE — le contrôle positif, écrit EN PREMIER ──────────────
+    // Sans lui, une porte qui rendrait `fail` sur TOUT passerait l'assertion
+    // suivante sans rien mesurer.
+    register("HNS");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-HNS-001', 'Vision', 'HNS', 'Nord HNS', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-HNS-001', 'Pillar', 'HNS', 'Pilier HNS', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HNS-001', 'Requirement', 'HNS', 'Exigence saine HNS', 'x', 'planned', '{\"acceptance_criteria\":[\"le test passe\"]}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('PIL-HNS-001', 'VIS-HNS-001', 'EPITOMIZES', 'HNS')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('REQ-HNS-001', 'PIL-HNS-001', 'BELONGS_TO', 'HNS')");
+    exec("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref) VALUES ('TRC-HNS-001', 'requirement', 'REQ-HNS-001', 'file', 'src/lib.rs')");
+    assert_eq!(
+        status_of("HNS"),
+        "pass",
+        "un graphe qui respecte les règles doit passer — sinon la porte est \
+         infranchissable pour une raison que personne n'a décidée"
+    );
+
+    // ── Projet en VIOLATION de règle → doit BLOQUER ────────────────────────
+    // `MIL-HNR-900` est `superseded` et rien ne pointe vers lui : c'est
+    // `GUI-PRO-125`, une règle posée exprès.
+    register("HNR");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HNR-900', 'Milestone', 'HNR', 'Retire sans remplacant', 'x', 'superseded', '{}')");
+    assert_eq!(
+        status_of("HNR"),
+        "fail",
+        "une violation de RÈGLE doit bloquer le handoff : la règle a été posée \
+         exprès, et la directive opérateur l'exige"
+    );
+
+    // ── Dette NON gouvernée par une règle → reste un avertissement ─────────
+    // Une exigence `delivered` sans preuve est signalée par le gate dédié
+    // `delivered_without_evidence`, mais AUCUNE règle déclarative ne la
+    // mandate. La confondre avec une violation de règle rendrait la porte
+    // infranchissable sur une dette que personne n'a décidé de bloquer.
+    register("HNT");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-HNT-001', 'Vision', 'HNT', 'Nord HNT', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-HNT-001', 'Pillar', 'HNT', 'Pilier HNT', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('PIL-HNT-001', 'VIS-HNT-001', 'EPITOMIZES', 'HNT')");
+    // Une paire de relation ILLÉGALE : `relation_policy_for_pair` n'admet pas
+    // VAL -> PIL. C'est signalé par `relation_policy_violations`, et AUCUNE
+    // règle déclarative ne le mandate — les 36 paires sont encore en dur.
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-HNT-001', 'Validation', 'HNT', 'Validation HNT', 'x', 'passed', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('VAL-HNT-001', 'PIL-HNT-001', 'VERIFIES', 'HNT')");
+    assert_eq!(
+        status_of("HNT"),
+        "warn",
+        "une incohérence qu'AUCUNE règle ne gouverne ne doit pas bloquer : seule \
+         une règle posée exprès a ce pouvoir"
+    );
+}
+
 
 /// REQ-AXO-902250 + REQ-AXO-902358 — GUI-PRO-028's THREE SOLL hard gates now run
 /// INSIDE `axon_handoff_check` instead of being raw SQL the LLM must retype at
