@@ -9,6 +9,7 @@ use super::tools_framework_change_safety::{
 };
 use super::tools_framework_surface::axon_mcp_surface_diagnostics_impl;
 use super::tools_framework_validation::linked_validations_from_intentions;
+use super::tools_context::ScopedSymbolResolution;
 use super::McpServer;
 
 type FrameworkCache = HashMap<String, (i64, Value)>;
@@ -882,11 +883,18 @@ impl McpServer {
             .get("target_type")
             .and_then(|value| value.as_str())
             .unwrap_or("symbol");
-        let resolved_symbol_id = if target_type == "symbol" {
-            self.resolve_scoped_symbol_id_canonical(target, Some(project_code))
+        // REQ-AXO-902452 — un verdict de SURETE calcule sur un homonyme est le
+        // plus couteux de tous : il autorise un changement qu'il n'a pas mesure.
+        let resolved_symbol = if target_type == "symbol" {
+            self.resolve_scoped_symbol(target, Some(project_code))
         } else {
             None
         };
+        let homonym_note = resolved_symbol
+            .as_ref()
+            .and_then(ScopedSymbolResolution::ambiguity_note)
+            .unwrap_or_default();
+        let resolved_symbol_id = resolved_symbol.map(|resolved| resolved.id);
         let validation_signals = match target_type {
             "intent" => self.intent_validation_signals(project_code, target),
             "symbol" => {
@@ -953,10 +961,11 @@ impl McpServer {
             (change_safety == "safe", change_safety != "safe");
 
         let evidence = format!(
-            "**Target:** `{}` ({})\n\
+            "{}**Target:** `{}` ({})\n\
 **Safety:** `{}`\n\
 **Traceability links:** {}\n\
 **Tested:** {}\n",
+            homonym_note,
             target,
             target_type,
             change_safety,

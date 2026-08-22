@@ -48,10 +48,6 @@ impl McpServer {
     #[cfg(test)]
     fn write_impact_cache(_key: String, _now_ms: i64, _value: &Value) {}
 
-    fn resolve_scoped_symbol_id(&self, symbol: &str, project: Option<&str>) -> Option<String> {
-        self.resolve_scoped_symbol_id_canonical(symbol, project)
-    }
-
     fn suggest_scoped_symbols(&self, symbol: &str, project: Option<&str>, limit: usize) -> String {
         self.suggest_scoped_symbols_canonical(symbol, project, limit)
     }
@@ -179,9 +175,13 @@ impl McpServer {
         if let Some(cached) = Self::read_impact_cache(&cache_key, now_ms) {
             return Some(cached);
         }
-        let Some(target_id) = self.resolve_scoped_symbol_id(symbol, project) else {
+        let Some(resolved) = self.resolve_scoped_symbol(symbol, project) else {
             return self.axon_impact_without_calls(symbol, project, depth);
         };
+        // REQ-AXO-902452 — un rayon de souffle calcule sur un homonyme est un
+        // rayon faux ; il porte le nom demande mais mesure un autre symbole.
+        let homonym_note = resolved.ambiguity_note().unwrap_or_default();
+        let target_id = resolved.id;
 
         // REQ-AXO-91512 — RAM-first via IstGraphView (PIL-AXO-9002,
         // feedback_trimodal_use_ram_graph_not_pg). When the cache is
@@ -353,6 +353,7 @@ impl McpServer {
                 };
 
                 let mut evidence = String::new();
+                evidence.push_str(&homonym_note);
                 if let Some(note) = self.project_scope_truth_note(project) {
                     evidence.push_str(&note);
                     evidence.push('\n');
@@ -610,9 +611,13 @@ impl McpServer {
             .unwrap_or(3)
             .clamp(1, 5);
 
-        let Some(target_id) = self.resolve_scoped_symbol_id(symbol, project) else {
+        let Some(resolved) = self.resolve_scoped_symbol(symbol, project) else {
             return Some(Self::fuse_unresolved_error(symbol, project));
         };
+        // REQ-AXO-902452 — fuse marie l'intention au structurel : si le
+        // structurel vient d'un homonyme, le mariage est faux des deux cotes.
+        let homonym_note = resolved.ambiguity_note().unwrap_or_default();
+        let target_id = resolved.id;
         let effective_project: Option<String> = match project {
             Some(p) => Some(p.to_string()),
             None => self.symbol_project_code(&target_id),
@@ -673,7 +678,7 @@ impl McpServer {
 
         // WHY-primary envelope (GUI-AXO-1026 terse; verbose adds the impacted list).
         let intent_count = governing_intent.len();
-        let mut text = format!("## 🔗 Fuse: {symbol}\n\n");
+        let mut text = format!("## 🔗 Fuse: {symbol}\n\n{homonym_note}");
         if soll_rows.is_empty() {
             text.push_str(
                 "**Governing intent (WHY):** none traced — no SOLL node references this symbol or its impact set.\n\n",
@@ -1080,8 +1085,13 @@ impl McpServer {
         let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2);
-        let target_id = match self.resolve_scoped_symbol_id(symbol, project) {
-            Some(id) => id,
+        let (target_id, homonym_note) = match self.resolve_scoped_symbol(symbol, project) {
+            // REQ-AXO-902452 — une simulation de mutation sur le mauvais
+            // symbole rassure sur un changement qu'elle n'a pas mesure.
+            Some(resolved) => {
+                let note = resolved.ambiguity_note().unwrap_or_default();
+                (resolved.id, note)
+            }
             None => {
                 // REQ-AXO-043 — same dead-end as inspect/path/impact: when
                 // suggestion table is empty, "retry with one suggested
@@ -1188,8 +1198,8 @@ impl McpServer {
                     .unwrap_or_else(|| "workspace:*".to_string()),
                 &evidence_by_mode(
                     &format!(
-                        "Modifying '{}' will cascade-impact ~{} components in the architecture.",
-                        symbol, count
+                        "{}Modifying '{}' will cascade-impact ~{} components in the architecture.",
+                        homonym_note, symbol, count
                     ),
                     mode,
                 ),

@@ -5979,3 +5979,123 @@ fn test_inspect_source_window_reaches_the_middle_of_a_long_symbol() {
     let (_, _, missed) = McpServer::source_window_for(&lines, Some("no_such_text_anywhere"), 0);
     assert!(missed, "an `around` that matches nothing must say so");
 }
+
+/// REQ-AXO-902452 — signalé par OPV (llm_feedback #226). Deux fonctions
+/// `load_registry` existaient : une liste de tickers appelée par la production,
+/// un écrivain TypeDB appelé par son seul test. `inspect load_registry` a rendu
+/// « 3 appelants » — ceux de l'AUTRE fonction — et OPV a failli conclure « non
+/// fossile » à tort.
+///
+/// Le fixture reproduit le cas mesuré sur Axon lui-même avec
+/// `axon_debug_with_args` : le tri lexicographique retient la définition MORTE,
+/// `inspect` annonce donc **0 appelant** alors qu'un homonyme en a trois. Le
+/// verdict est rassurant et faux — et personne ne re-vérifie un verdict
+/// rassurant.
+#[test]
+fn test_inspect_says_when_a_short_name_carries_more_than_one_definition() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+    }
+    use crate::test_support::ist_fixtures::{CallFixture, IstSeed, SymbolFixture};
+
+    const DEAD: &str = "HOM::a_dead.rs::load_registry";
+    const LIVE: &str = "HOM::z_live.rs::load_registry";
+    const SOLO: &str = "HOM::solo.rs::only_one_of_me";
+
+    // LIVE est déclarée AVANT DEAD : sans le tri de `ids_with_short_name`, le
+    // premier candidat serait celui de l'ordre d'insertion (LIVE) et
+    // l'assertion « DEAD ← mesurée ici » plus bas rougirait. C'est ce qui rend
+    // le tri déterministe falsifiable par ce test plutôt que seulement affirmé.
+    let mut seed = IstSeed::new()
+        .symbol(SymbolFixture::new(LIVE, "load_registry", "function", "HOM"))
+        .symbol(SymbolFixture::new(DEAD, "load_registry", "function", "HOM"))
+        .symbol(SymbolFixture::new(SOLO, "only_one_of_me", "function", "HOM"));
+    // Trois appelants sur la définition VIVANTE, aucun sur la morte. Le tri
+    // lexicographique retient `a_dead` : c'est le pire cas, pas le plus commode.
+    for i in 0..3 {
+        seed = seed
+            .symbol(SymbolFixture::new(
+                format!("HOM::caller{i}.rs::caller{i}"),
+                format!("caller{i}"),
+                "function",
+                "HOM",
+            ))
+            .call(CallFixture::canonical(
+                format!("HOM::caller{i}.rs::caller{i}"),
+                LIVE,
+                "HOM",
+            ));
+    }
+    seed = seed
+        .symbol(SymbolFixture::new(
+            "HOM::solo_caller.rs::solo_caller",
+            "solo_caller",
+            "function",
+            "HOM",
+        ))
+        .call(CallFixture::canonical(
+            "HOM::solo_caller.rs::solo_caller",
+            SOLO,
+            "HOM",
+        ));
+
+    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(seed).unwrap();
+    let inspect = |symbol: &str| -> String {
+        harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "inspect",
+                    "arguments": { "symbol": symbol, "project": "HOM" }
+                })),
+                id: Some(json!(902452)),
+            })
+            .unwrap()
+            .result
+            .expect("inspect must answer")["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // ── Le défaut : le nom court désigne deux symboles, l'outil n'en mesure
+    //    qu'un et ne le disait pas. ──────────────────────────────────────────
+    let ambiguous = inspect("load_registry");
+    assert!(
+        ambiguous.contains("2 définitions portent ce nom"),
+        "un nom court porté par deux définitions doit l'annoncer.\n---\n{ambiguous}"
+    );
+    assert!(
+        ambiguous.contains(DEAD) && ambiguous.contains(LIVE),
+        "la note doit NOMMER les deux définitions, sinon elle n'est pas actionnable.\n---\n{ambiguous}"
+    );
+    assert!(
+        ambiguous.contains("mesurée ici"),
+        "la note doit désigner CELLE sur laquelle porte le verdict.\n---\n{ambiguous}"
+    );
+    // Le fait qui rend la note indispensable : le chiffre rendu est 0, et il est
+    // vrai — de la seule définition mesurée. Si cette assertion tombe, c'est que
+    // le résolveur a changé de gagnant et que la note désigne un autre symbole
+    // que celui dont le tableau compte les appelants.
+    assert!(
+        ambiguous.contains(&format!("`{DEAD}` ← mesurée ici")),
+        "le tri doit retenir la définition morte — sinon le scénario testé n'est pas celui d'OPV.\n---\n{ambiguous}"
+    );
+
+    // ── Contrôle positif : un nom non ambigu ne paie AUCUNE friction. Deux
+    //    défauts de la session 122 ont été trouvés par un contrôle positif,
+    //    aucun par relecture. ─────────────────────────────────────────────────
+    let unambiguous = inspect("only_one_of_me");
+    assert!(
+        !unambiguous.contains("définitions portent ce nom"),
+        "un nom porté par UNE définition ne doit produire aucune note.\n---\n{unambiguous}"
+    );
+    assert!(
+        !unambiguous.contains("mesurée ici"),
+        "aucun fragment de la note ne doit fuir sur le cas non ambigu.\n---\n{unambiguous}"
+    );
+}

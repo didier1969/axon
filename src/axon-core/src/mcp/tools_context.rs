@@ -48,6 +48,71 @@ pub(super) const DEFAULT_WAIT_FOR_SEMANTIC_MS: u64 = 1000;
 /// scan). Generous: a single source file rarely declares more symbols.
 pub(super) const CONTAINS_SYMBOL_CAP: usize = 10_000;
 
+/// REQ-AXO-902452 — le résultat d'une résolution de symbole, ambiguïté COMPRISE.
+///
+/// Un nom court ne désigne pas un symbole. Mesuré sur ce dépôt : `build` en
+/// désigne deux (34 appelants dans `ist_snapshot`, 7 dans `soll_snapshot`) et
+/// `axon_debug_with_args` en désigne deux dont un seul est appelé. Le résolveur
+/// prenait le premier venu et se taisait ; neuf surfaces rendaient alors un
+/// verdict d'atteignabilité portant sur un AUTRE symbole que celui demandé —
+/// OPV a failli garder du code mort sur la foi d'un « 3 appelants » emprunté à
+/// un homonyme.
+///
+/// **L'erreur va dans les deux sens.** `inspect build` sur-compte ; `inspect
+/// axon_debug_with_args` rend 0 alors que l'homonyme est appelé. Le choix étant
+/// arbitraire, aucune direction n'est garantie : « 0 appelant » n'est PAS un
+/// verdict fort tant que l'ambiguïté n'est pas levée.
+///
+/// Le type PORTE l'ambiguïté pour qu'un appelant ne puisse pas l'ignorer sans
+/// l'avoir vue (GUI-AXO-1026, correct-par-construction).
+pub(crate) struct ScopedSymbolResolution {
+    /// L'id canonique retenu — celui sur lequel porte tout verdict calculé.
+    pub id: String,
+    /// Les AUTRES ids portant ce nom court, triés. Vide ⇒ non ambigu.
+    pub homonyms: Vec<String>,
+    /// Vrai quand le repli PG a buté sur sa limite : il y a AU MOINS
+    /// `homonyms.len()` autres définitions, peut-être davantage.
+    pub homonyms_truncated: bool,
+}
+
+impl ScopedSymbolResolution {
+    /// Un id canonique complet ne peut pas être ambigu : il désigne un nœud.
+    fn unambiguous(id: String) -> Self {
+        Self {
+            id,
+            homonyms: Vec::new(),
+            homonyms_truncated: false,
+        }
+    }
+
+    /// REQ-AXO-902452 — la phrase qui manquait. `None` sur un nom non ambigu :
+    /// une note sur chaque appel serait du bruit, et le bruit se filtre.
+    pub(crate) fn ambiguity_note(&self) -> Option<String> {
+        /// Au-delà, la liste cesse d'aider et remplit l'écran.
+        const SHOWN: usize = 5;
+
+        if self.homonyms.is_empty() {
+            return None;
+        }
+        let mut lines = format!("  · `{}` ← mesurée ici\n", self.id);
+        for other in self.homonyms.iter().take(SHOWN) {
+            lines.push_str(&format!("  · `{}`\n", other));
+        }
+        let hidden = self.homonyms.len().saturating_sub(SHOWN);
+        if hidden > 0 {
+            lines.push_str(&format!("  · … {} autre(s) définition(s)\n", hidden));
+        }
+        Some(format!(
+            "**{}{} définitions portent ce nom** — le verdict ci-dessous ne porte QUE sur la \
+             première :\n{}Passez l'id canonique complet pour viser une autre (REQ-AXO-902452).\
+             \n\n",
+            if self.homonyms_truncated { "au moins " } else { "" },
+            self.homonyms.len() + 1,
+            lines,
+        ))
+    }
+}
+
 impl McpServer {
     #[cfg(not(test))]
     fn retrieve_context_cache() -> &'static Mutex<RetrieveContextCache> {
@@ -79,11 +144,16 @@ impl McpServer {
     #[cfg(test)]
     fn write_retrieve_context_cache(_key: String, _now_ms: i64, _value: &Value) {}
 
-    pub(crate) fn resolve_scoped_symbol_id_canonical(
+    /// REQ-AXO-902452 — résout un nom court ou un id canonique, **en disant
+    /// combien de définitions répondaient**. Remplace les trois noms d'avant
+    /// (`resolve_scoped_symbol_id_canonical` + les délégués d'une ligne `_dx`
+    /// dans `tools_dx` et `resolve_scoped_symbol_id` dans `tools_risk`) : une
+    /// seule question, un seul module (GUI-PRO-013).
+    pub(crate) fn resolve_scoped_symbol(
         &self,
         symbol: &str,
         project: Option<&str>,
-    ) -> Option<String> {
+    ) -> Option<ScopedSymbolResolution> {
         // REQ-AXO-902039 element 2 — RAM-first via IstGraphView (PIL-AXO-9002).
         // This is the `SELECT id FROM Symbol WHERE name=$sym OR id=$sym` the REQ
         // names explicitly. When the project is scoped and the IST snapshot is
@@ -92,37 +162,62 @@ impl McpServer {
         // through to the explicit PG fallback.
         if let Some(proj) = project {
             let view = crate::ist_snapshot::process_view();
-            // `symbol` may already be a canonical id.
+            // `symbol` may already be a canonical id — ce cas n'est jamais ambigu.
             if view.node_kind_db(proj, symbol).is_some() {
                 crate::soll_snapshot::record_fusion_read(true);
-                return Some(symbol.to_string());
+                return Some(ScopedSymbolResolution::unambiguous(symbol.to_string()));
             }
-            // Otherwise resolve by short name (PG used LIMIT 1; first id matches).
+            // REQ-AXO-902452 — résolution par nom court. On garde TOUS les
+            // candidats au lieu de `.next()` : c'est la même liste, c'est le fait
+            // de la jeter qui produisait le faux verdict. `ids_with_short_name`
+            // trie (snapshot.rs) pour que le retenu soit le même d'une
+            // reconstruction du snapshot à l'autre.
             if let Some(ids) = view.ids_for_short_name(proj, symbol) {
                 crate::soll_snapshot::record_fusion_read(true);
-                return ids.into_iter().next();
+                let mut candidates = ids.into_iter();
+                let id = candidates.next()?;
+                return Some(ScopedSymbolResolution {
+                    id,
+                    homonyms: candidates.collect(),
+                    homonyms_truncated: false,
+                });
             }
             // ids_for_short_name returned None ⇒ snapshot cold ⇒ PG fallback.
         }
         // PG-direct fallback: project unscoped or IST snapshot cold (PIL-AXO-9002).
         crate::soll_snapshot::record_fusion_read(false);
+        // REQ-AXO-902452 — `LIMIT 1` ne choisissait pas, il CACHAIT le choix. On
+        // demande une ligne de plus que ce qu'on affiche : l'excédentaire dit
+        // « il y en a d'autres » sans payer un COUNT sur toute la table. `ORDER
+        // BY id` pour la même raison que le tri RAM — un verdict reproductible.
+        const PG_CANDIDATES: usize = 6;
         let query = if project.is_some() {
             format!(
                 "SELECT id FROM Symbol \
                  WHERE (name = $sym OR id = $sym){project_filter} \
-                 LIMIT 1",
+                 ORDER BY id LIMIT {PG_CANDIDATES}",
                 project_filter = Self::sql_project_filter_for_fields(project, &["project_code"])
             )
         } else {
-            "SELECT id FROM Symbol WHERE name = $sym OR id = $sym LIMIT 1".to_string()
+            format!(
+                "SELECT id FROM Symbol WHERE name = $sym OR id = $sym \
+                 ORDER BY id LIMIT {PG_CANDIDATES}"
+            )
         };
         let params = json!({ "sym": symbol });
         let res = self.graph_store.query_json_param(&query, &params).ok()?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-        rows.first()?
-            .first()?
-            .as_str()
-            .map(|value| value.to_string())
+        let truncated = rows.len() >= PG_CANDIDATES;
+        let mut ids = rows
+            .iter()
+            .filter_map(|row| row.first().and_then(Value::as_str))
+            .map(str::to_string);
+        let id = ids.next()?;
+        Some(ScopedSymbolResolution {
+            id,
+            homonyms: ids.collect(),
+            homonyms_truncated: truncated,
+        })
     }
 
     pub(crate) fn suggest_scoped_symbols_canonical(

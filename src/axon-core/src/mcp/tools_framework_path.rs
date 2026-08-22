@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract};
+use super::tools_context::ScopedSymbolResolution;
 use super::McpServer;
 use crate::ist_snapshot::process_view;
 use crate::ist_snapshot::RelationType;
@@ -80,7 +81,14 @@ impl McpServer {
         }
 
         let sink = sink.unwrap_or_default();
-        let Some(source_id) = self.resolve_scoped_symbol_id_canonical(source, project) else {
+        // REQ-AXO-902452 — un chemin entre deux homonymes reste un chemin
+        // valide du graphe, mais pas celui qu'on a demande.
+        let resolved_source = self.resolve_scoped_symbol(source, project);
+        let source_note = resolved_source
+            .as_ref()
+            .and_then(ScopedSymbolResolution::ambiguity_note)
+            .unwrap_or_default();
+        let Some(source_id) = resolved_source.map(|resolved| resolved.id) else {
             return Some(json!({
                 "content": [{ "type": "text", "text": format!("path source '{}' not found in current scope", source) }],
                 "isError": true,
@@ -95,7 +103,12 @@ impl McpServer {
                 }
             }));
         };
-        let Some(sink_id) = self.resolve_scoped_symbol_id_canonical(sink, project) else {
+        let resolved_sink = self.resolve_scoped_symbol(sink, project);
+        let sink_note = resolved_sink
+            .as_ref()
+            .and_then(ScopedSymbolResolution::ambiguity_note)
+            .unwrap_or_default();
+        let Some(sink_id) = resolved_sink.map(|resolved| resolved.id) else {
             return Some(json!({
                 "content": [{ "type": "text", "text": format!("path sink '{}' not found in current scope", sink) }],
                 "isError": true,
@@ -278,12 +291,14 @@ impl McpServer {
             "**Routes:** 1 (no independent alternate within depth)\n".to_string()
         };
         let evidence = format!(
-            "**Source:** `{}`\n\
+            "{}{}**Source:** `{}`\n\
 **Sink:** `{}`\n\
 **Depth used:** {}\n\
 **Path:** {}\n\
 **Edges:** {}\n\
 {}",
+            source_note,
+            sink_note,
             source,
             sink,
             depth,

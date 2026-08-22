@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
+use super::tools_context::ScopedSymbolResolution;
 use super::McpServer;
 use super::{GuidanceCandidates, GuidanceFact};
 
@@ -565,10 +566,6 @@ impl McpServer {
                 format!(" : {named}")
             },
         ))
-    }
-
-    fn resolve_scoped_symbol_id_dx(&self, symbol: &str, project: Option<&str>) -> Option<String> {
-        self.resolve_scoped_symbol_id_canonical(symbol, project)
     }
 
     fn build_symbol_search_params(query_text: &str, project: &str) -> Value {
@@ -2219,7 +2216,14 @@ impl McpServer {
         let project = explicit_project.or(auto_project.as_deref());
         let backend_pressure =
             !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
-        let Some(symbol_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
+        let resolved = self.resolve_scoped_symbol(symbol, project);
+        // REQ-AXO-902452 — c'est CETTE surface qu'OPV a prise en defaut :
+        // « inspect load_registry a rendu 3 appelants, ceux de l'AUTRE fonction ».
+        let homonym_note = resolved
+            .as_ref()
+            .and_then(ScopedSymbolResolution::ambiguity_note)
+            .unwrap_or_default();
+        let Some(symbol_id) = resolved.map(|r| r.id) else {
             let suggestions = self.suggest_scoped_symbols_canonical(symbol, project, 8);
             let suggestion_rows: Vec<Vec<Value>> =
                 serde_json::from_str(&suggestions).unwrap_or_default();
@@ -2539,8 +2543,9 @@ impl McpServer {
                     project.and_then(|p| self.containing_file_reach_answer(p, &symbol_id))
                 });
                 let evidence = format!(
-                    "{}{}{}{}{}",
+                    "{}{}{}{}{}{}",
                     project_note.unwrap_or_default(),
+                    homonym_note,
                     degraded_note.clone().unwrap_or_default(),
                     reach_note.unwrap_or_default(),
                     file_answer.unwrap_or_default(),
@@ -2738,7 +2743,12 @@ impl McpServer {
         let scope = project
             .map(|p| format!("project:{}", p))
             .unwrap_or_else(|| "workspace:*".to_string());
-        let Some(target_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
+        let resolved = self.resolve_scoped_symbol(symbol, project);
+        let homonym_note = resolved
+            .as_ref()
+            .and_then(ScopedSymbolResolution::ambiguity_note)
+            .unwrap_or_default();
+        let Some(target_id) = resolved.map(|r| r.id) else {
             let (sugg_query, sugg_params) = if let Some(project) = project {
                 (
                     "SELECT name, kind, project_code \
@@ -2875,6 +2885,7 @@ impl McpServer {
             "medium"
         };
         let mut evidence = String::new();
+        evidence.push_str(&homonym_note);
         if let Some(note) = self.project_scope_truth_note(project) {
             evidence.push_str(&note);
             evidence.push('\n');
@@ -2984,7 +2995,12 @@ impl McpServer {
         let scope = project
             .map(|p| format!("project:{}", p))
             .unwrap_or_else(|| "workspace:*".to_string());
-        let Some(target_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
+        let resolved = self.resolve_scoped_symbol(symbol, project);
+        let homonym_note = resolved
+            .as_ref()
+            .and_then(ScopedSymbolResolution::ambiguity_note)
+            .unwrap_or_default();
+        let Some(target_id) = resolved.map(|r| r.id) else {
             let report = format!(
                 "## 🧯 API Break Check : {}\n\n{}",
                 symbol,
@@ -3065,6 +3081,7 @@ impl McpServer {
             Ok(res) => {
                 let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
                 let mut evidence = String::new();
+                evidence.push_str(&homonym_note);
                 if let Some(note) = self.project_scope_truth_note(project) {
                     evidence.push_str(&note);
                     evidence.push('\n');

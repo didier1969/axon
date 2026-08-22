@@ -436,15 +436,23 @@ impl IstGraph {
     /// name that is NOT the last `::` segment of the id (TODO/secret/macro
     /// targets). Matching only the suffix silently diverged the RAM mirror from
     /// PG for those symbols (PIL-AXO-9002 requires the RAM mirror to agree).
+    ///
+    /// REQ-AXO-902452 — le résultat est TRIÉ. Sans tri, l'ordre est celui
+    /// d'insertion dans le snapshot : le premier candidat d'un nom ambigu
+    /// changeait d'une reconstruction à l'autre, sans qu'aucun code ne change.
+    /// Un verdict qui bouge tout seul ne se vérifie pas.
     pub fn ids_with_short_name(&self, name: &str) -> Vec<&str> {
-        self.ids
+        let mut hits: Vec<&str> = self
+            .ids
             .iter()
             .enumerate()
             .filter(|(i, id)| {
                 id.rsplit("::").next() == Some(name) || self.names[*i].as_str() == name
             })
             .map(|(_, s)| s.as_str())
-            .collect()
+            .collect();
+        hits.sort_unstable();
+        hits
     }
 
     /// REQ-AXO-901970 — `NodeKind` for a canonical id, if present.

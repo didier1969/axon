@@ -21,11 +21,15 @@ impl McpServer {
     pub(super) fn symbol_validation_signals(&self, project: &str, symbol_name: &str) -> Value {
         let escaped_project = project.replace('\'', "''");
         let escaped_name = symbol_name.replace('\'', "''");
+        // REQ-AXO-902452 — surface interne : ces signaux alimentent
+        // `change_safety`, qui rend DEJA la note d'ambiguite au lecteur. Ici on
+        // ne garde que l'id, en le disant.
         let resolved_symbol_id = if project == "*" {
-            self.resolve_scoped_symbol_id_canonical(symbol_name, None)
+            self.resolve_scoped_symbol(symbol_name, None)
         } else {
-            self.resolve_scoped_symbol_id_canonical(symbol_name, Some(project))
-        };
+            self.resolve_scoped_symbol(symbol_name, Some(project))
+        }
+        .map(|resolved| resolved.id);
         let symbol_match_clause = if let Some(symbol_id) = resolved_symbol_id.as_deref() {
             format!(
                 "(s.name = '{escaped_name}' OR s.id = '{}')",

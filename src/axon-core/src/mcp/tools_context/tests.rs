@@ -336,7 +336,7 @@ fn soll_and_ist_ram_mirrors_are_coresident_for_one_project() {
 }
 
 #[test]
-fn resolve_scoped_symbol_id_canonical_uses_ist_ram() {
+fn resolve_scoped_symbol_uses_ist_ram() {
     use crate::ist_snapshot::snapshot::{IstGraph, NodeFlags, NodeKind, NodeRecord};
     use crate::ist_snapshot::{evict_process_snapshot, publish_process_snapshot};
     let code = "TSR"; // test-symbol-resolve ; single-threaded --lib run, evicted below.
@@ -345,33 +345,74 @@ fn resolve_scoped_symbol_id_canonical_uses_ist_ram() {
     publish_process_snapshot(
         code.to_string(),
         Arc::new(IstGraph::build(
-            vec![NodeRecord {
-                id: symbol_id.clone(),
-                name: "render".to_string(),
-                project_code: code.to_string(),
-                kind: NodeKind::Function,
-                flags: NodeFlags::default(),
-                complexity: None,
-            }],
+            vec![
+                NodeRecord {
+                    id: symbol_id.clone(),
+                    name: "render".to_string(),
+                    project_code: code.to_string(),
+                    kind: NodeKind::Function,
+                    flags: NodeFlags::default(),
+                    complexity: None,
+                },
+                // REQ-AXO-902452 — deux définitions d'un même nom court, dans
+                // deux fichiers. Déclarées dans l'ordre INVERSE du tri pour que
+                // le tri déterministe soit falsifiable ici aussi.
+                NodeRecord {
+                    id: "TSR::z_late.rs::twice".to_string(),
+                    name: "twice".to_string(),
+                    project_code: code.to_string(),
+                    kind: NodeKind::Function,
+                    flags: NodeFlags::default(),
+                    complexity: None,
+                },
+                NodeRecord {
+                    id: "TSR::a_early.rs::twice".to_string(),
+                    name: "twice".to_string(),
+                    project_code: code.to_string(),
+                    kind: NodeKind::Function,
+                    flags: NodeFlags::default(),
+                    complexity: None,
+                },
+            ],
             vec![],
         )),
     );
     let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
     let server = McpServer::new(store);
     // By short name → IST RAM resolves the canonical id (no PG).
-    assert_eq!(
-        server
-            .resolve_scoped_symbol_id_canonical("render", Some(code))
-            .as_deref(),
-        Some(symbol_id.as_str())
-    );
+    let by_name = server
+        .resolve_scoped_symbol("render", Some(code))
+        .expect("short name must resolve from RAM");
+    assert_eq!(by_name.id, symbol_id);
+    // REQ-AXO-902452 — contrôle positif : un nom porté par UNE seule définition
+    // ne doit produire NI homonyme NI note. Sans cette moitié, le correctif
+    // échangerait un défaut contre un autre — une note sur chaque appel serait
+    // du bruit, et le bruit se filtre.
+    assert!(by_name.homonyms.is_empty(), "nom non ambigu : {:?}", by_name.homonyms);
+    assert!(by_name.ambiguity_note().is_none());
     // By canonical id → recognised directly from RAM.
+    let by_id = server
+        .resolve_scoped_symbol(&symbol_id, Some(code))
+        .expect("canonical id must resolve from RAM");
+    assert_eq!(by_id.id, symbol_id);
+    assert!(by_id.homonyms.is_empty());
+    // REQ-AXO-902452 — la lane RAM. Le test bout-en-bout d'`inspect`
+    // (context_and_analysis.rs) exerce le repli PG, son snapshot n'étant pas
+    // chaud : sans ce bloc, la moitié RAM du correctif ne serait couverte par
+    // AUCUNE assertion — vérifié, sa falsification passait au vert.
+    let ambiguous = server
+        .resolve_scoped_symbol("twice", Some(code))
+        .expect("un nom ambigu doit tout de même résoudre");
     assert_eq!(
-        server
-            .resolve_scoped_symbol_id_canonical(&symbol_id, Some(code))
-            .as_deref(),
-        Some(symbol_id.as_str())
+        ambiguous.id, "TSR::a_early.rs::twice",
+        "le tri doit primer sur l'ordre d'insertion du snapshot"
     );
+    assert_eq!(ambiguous.homonyms, vec!["TSR::z_late.rs::twice".to_string()]);
+    let note = ambiguous
+        .ambiguity_note()
+        .expect("un nom ambigu doit produire une note");
+    assert!(note.contains("2 définitions portent ce nom"), "{note}");
+    assert!(note.contains("TSR::z_late.rs::twice"), "{note}");
     evict_process_snapshot(code);
 }
 
