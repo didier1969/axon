@@ -539,7 +539,9 @@ Le `status` seul est INVISIBLE au scan d''un LLM : les LLM lisent le CORPS. Un n
 
 ## Marqueurs acceptés
 
-`supersédé` · `superseded by` · `remplacé par` / `remplacée par` · `caduc` · `pointeur canonique` · `obsolète`. Comparaison **sans casse**, sur le corps entier.
+`superséd` (couvre supersédé / superséded / supersédée) · `superseded` (couvre « superseded by » et « SUPERSEDED (session N) par ») · `remplacé par` / `remplacée par` · `remplacé →` / `remplacée →` · `✅ résolu` · `caduc` · `pointeur canonique` · `obsolète`. Comparaison **sans casse**, sur le corps entier.
+
+**Révision 2026-08-22** — la liste d''origine n''acceptait AUCUNE des deux formes que `GUI-PRO-110` PRESCRIT (`✅ RÉSOLU <date> → <ID>`, `⚠️ REMPLACÉ → <ID>`) : un tenant qui avait SUIVI la prescription était signalé en violation (signalé par TE2, 4 faux positifs sur 5). `superseded by` exigeait aussi le `by` collé, ratant « SUPERSEDED (session 77) par … ». Élargissement mesuré sur le parc : 224 → 169 nœuds signalés, 55 faux positifs éteints. `remplacé` et `résolu` NUS refusés délibérément : dans les 16 cas qu''ils auraient éteints le mot appartient au texte métier et n''annonce aucun retrait.
 
 La liste est FERMÉE, et c''''est délibéré : accepter une expression régulière fournie par le tenant serait le langage de requête que `DEC-AXO-901673` continue d''''interdire. Un tenant qui veut son propre vocabulaire pose SA règle avec SES fragments — c''''est précisément ce que les règles-données permettent sans toucher au cœur.
 
@@ -549,7 +551,7 @@ La liste est FERMÉE, et c''''est délibéré : accepter une expression réguli�
 
 ## RÉPARATION
 
-`soll_manager(action=append_section)` avec un en-tête qui dit le retrait et pointe le remplaçant. Ne PAS réécrire le corps entier : la trace historique a de la valeur, c''''est l''''avertissement qui manque.', 'current', '{"soll_rule": {"subject_status_in": ["superseded"], "body_contains_any": ["supersédé", "superseded by", "remplacé par", "remplacée par", "caduc", "pointeur canonique", "obsolète"], "message": "nœud retiré dont le CORPS ne l''annonce pas — un LLM le lira comme vivant"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+`soll_manager(action=append_section)` avec un en-tête qui dit le retrait et pointe le remplaçant. Ne PAS réécrire le corps entier : la trace historique a de la valeur, c''''est l''''avertissement qui manque.', 'current', '{"soll_rule": {"subject_status_in": ["superseded"], "body_contains_any": ["superséd", "superseded", "remplacé par", "remplacée par", "remplacé →", "remplacée →", "✅ résolu", "caduc", "pointeur canonique", "obsolète"], "message": "nœud retiré dont le CORPS ne l''annonce pas — un LLM le lira comme vivant"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
