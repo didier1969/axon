@@ -14039,3 +14039,81 @@ fn test_auto_evidence_attaches_the_subject_requirement_not_the_ones_merely_cited
         "a segment that is not a canonical 3-char code is not an id"
     );
 }
+
+#[test]
+fn test_a_digit_bearing_tenant_really_gets_a_traceability_row_end_to_end() {
+    // REQ-AXO-902444, contrôle demandé par TE2 (mailbox 13928) et qui manquait à
+    // ma propre garde. Leur formulation : « c'est le seul test qui distingue
+    // corrigé de écrit ».
+    //
+    // Ma garde d'origine testait le PARSEUR — `REQ-TE2-154` est bien extrait
+    // d'un titre. Elle ne testait PAS la chaîne complète commit → ligne de
+    // `soll.Traceability` pour un code projet portant un chiffre. Or c'est là
+    // que se mesure le trou que TE2 a chiffré : 16 REQ `delivered` sans aucune
+    // preuve, sur toute l'histoire de leur projet, alors que leurs titres de
+    // commit nomment systématiquement leur REQ.
+    let server = create_test_server();
+    let sandbox = init_commit_work_sandbox();
+    // Un code à CHIFFRE — c'est toute la question.
+    server
+        .graph_store
+        .sync_project_registry_entry(
+            "Z9X",
+            Some("z9x-fixture"),
+            Some(sandbox.path().to_str().unwrap()),
+        )
+        .expect("register digit-bearing project");
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-Z9X-154', 'Requirement', 'Z9X', 'Digit-coded tenant', 'Auto-evidence must reach a digit-coded tenant', 'current', '{}')")
+        .expect("insert requirement");
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_commit_work",
+            "arguments": {
+                "diff_paths": ["Cargo.toml"],
+                "project_path": sandbox.path().to_str().unwrap(),
+                "message": "fix(ml): REQ-Z9X-154 — sandbox commit, never reaches the real repo",
+                "dry_run": false
+            }
+        },
+        "id": 902444
+    });
+    let result = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap()
+        .result
+        .unwrap();
+    assert!(
+        !result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "the commit itself must succeed: {result:?}"
+    );
+
+    // LA question : une ligne de Traceability existe-t-elle réellement ?
+    let rows = server
+        .graph_store
+        .query_json(
+            "SELECT artifact_type, artifact_ref FROM soll.Traceability \
+             WHERE soll_entity_id = 'REQ-Z9X-154'",
+        )
+        .expect("read traceability");
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&rows).expect("rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "un commit dont le TITRE nomme un REQ d'un tenant à code chiffré doit \
+         produire UNE ligne de Traceability — c'est ce qui manquait à TE2 sur \
+         toute l'histoire du projet. Obtenu : {rows:?}"
+    );
+    assert_eq!(
+        rows[0][0].as_str().map(str::to_ascii_lowercase).as_deref(),
+        Some("commit"),
+        "et c'est une preuve de type Commit"
+    );
+}
