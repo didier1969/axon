@@ -73,6 +73,47 @@ pub(super) fn soll_entity_table_name(prefix: &str) -> Option<&'static str> {
     }
 }
 
+/// REQ-AXO-902461 - le RETRAIT est exprimable entre deux noeuds SOLL QUELCONQUES.
+///
+/// `relation_policy_for_pair` decrit la filiation : ce qu'un noeud PLANIFIE,
+/// EXPLIQUE ou RAFFINE. Le retrait n'est pas de la filiation - c'est une
+/// affirmation sur le CYCLE DE VIE, et elle est vraie de n'importe quelle paire :
+/// une DECISION qui tranche clot une EXIGENCE, un JALON absorbe un CONCEPT, une
+/// VISION en remplace une autre. Trois tenants (APS, OPV, AXO) ont bute sur le
+/// meme refus le meme jour, y compris sur `VIS -> VIS` ou les types sont
+/// IDENTIQUES.
+///
+/// La politique est volontairement SEPAREE de la matrice : l'injecter dans
+/// `relation_policy_for_pair` ajouterait `SUPERSEDES` aux ~169 paires que
+/// `soll_relation_schema` enumere, et risquerait de deplacer leur `default`.
+/// Elle n'est consultee que lorsqu'un `SUPERSEDES` est demande EXPLICITEMENT -
+/// `default: None` garantit qu'elle n'est jamais choisie toute seule.
+///
+/// Une extremite `ART` (artefact de code) est refusee : un fichier ne retire
+/// pas une intention, et l'inverse n'a pas de sens non plus.
+pub(super) fn supersedes_policy_for_soll_pair(
+    source_type: &str,
+    target_type: &str,
+) -> Option<RelationPolicy> {
+    if soll_entity_table_name(source_type).is_none()
+        || soll_entity_table_name(target_type).is_none()
+    {
+        return None;
+    }
+    Some(RelationPolicy {
+        allowed: &["SUPERSEDES"],
+        default: None,
+        allow_multiple_types: false,
+        // Meme projection que les paires same-type qui l'admettent deja
+        // (PIL->PIL, MIL->MIL) : un retrait est lateral, jamais un parent.
+        projection: RelationProjectionPolicy {
+            role: ProjectionRole::Lateral,
+            parent_preference_rank: 95,
+            child_order_rank: 999,
+        },
+    })
+}
+
 pub(super) fn relation_policy_for_pair(
     source_type: &str,
     target_type: &str,
@@ -940,6 +981,60 @@ pub(super) fn relation_scope_matches(
 #[cfg(test)]
 mod blocked_by_policy_tests {
     use super::relation_policy_for_pair;
+    use super::supersedes_policy_for_soll_pair;
+
+    /// REQ-AXO-902461 — le RETRAIT est exprimable entre deux noeuds SOLL
+    /// QUELCONQUES, y compris quand la matrice de filiation ignore la paire.
+    /// Les 6 paires listees sont celles que trois tenants (APS, OPV, AXO) ont
+    /// vues refusees le 2026-08-22.
+    #[test]
+    fn supersedes_is_expressible_between_any_two_soll_kinds() {
+        for (src, tgt) in [
+            ("VIS", "VIS"), // types IDENTIQUES, et pourtant refuse avant
+            ("MIL", "CPT"),
+            ("DEC", "GUI"),
+            ("DEC", "REQ"),
+            ("DEC", "MIL"),
+            ("MIL", "REQ"),
+        ] {
+            let policy = supersedes_policy_for_soll_pair(src, tgt)
+                .unwrap_or_else(|| panic!("{src} -> {tgt} doit pouvoir porter un retrait"));
+            assert_eq!(policy.allowed, &["SUPERSEDES"]);
+            assert!(
+                policy.default.is_none(),
+                "{src} -> {tgt} : le retrait se DEMANDE, il ne s'infere jamais"
+            );
+        }
+    }
+
+    /// CONTROLE POSITIF — un artefact de code n'est pas une intention : il ne
+    /// retire rien, et rien ne le retire. Sans cette borne, `supersedes_policy_
+    /// for_soll_pair` rendrait Some pour n'importe quoi et le test ci-dessus
+    /// passerait au vert sur une implementation qui accepte tout.
+    #[test]
+    fn supersedes_fallback_refuses_an_artifact_endpoint() {
+        assert!(supersedes_policy_for_soll_pair("REQ", "ART").is_none());
+        assert!(supersedes_policy_for_soll_pair("ART", "REQ").is_none());
+        assert!(supersedes_policy_for_soll_pair("ART", "ART").is_none());
+    }
+
+    /// CONTROLE POSITIF — le fallback est SEPARE de la matrice : l'y injecter
+    /// aurait ajoute SUPERSEDES aux ~169 paires que `soll_relation_schema`
+    /// enumere, et deplace leur `default`. MIL -> REQ doit garder TARGETS.
+    #[test]
+    fn supersedes_fallback_does_not_leak_into_the_filiation_matrix() {
+        let policy = relation_policy_for_pair("MIL", "REQ").expect("MIL -> REQ policy exists");
+        assert!(
+            !policy.allowed.contains(&"SUPERSEDES"),
+            "la matrice de filiation ne doit pas annoncer SUPERSEDES (allowed = {:?})",
+            policy.allowed
+        );
+        assert_eq!(policy.default, Some("TARGETS"));
+        assert!(
+            relation_policy_for_pair("VIS", "VIS").is_none(),
+            "une paire sans filiation reste sans politique de filiation"
+        );
+    }
 
     /// REQ-AXO-902016 — BLOCKED_BY is a canonical Requirement dependency edge to
     /// the realistic blocker kinds (another REQ, a pending DEC, a delivery MIL,

@@ -1683,13 +1683,24 @@ impl McpServer {
                                     tgt_status = st;
                                 }
                             }
-                            if src_type != tgt_type || src_type.is_empty() {
+                            // REQ-AXO-902461 - la contrainte « same-type » de
+                            // MIL-AXO-020 est LEVEE : elle rendait inexprimable
+                            // la forme la plus ORDINAIRE du retrait - une
+                            // DECISION qui tranche et clot une EXIGENCE. Trois
+                            // tenants (APS, OPV, AXO) ont bute dessus le meme
+                            // jour. C'etait la SECONDE porte du meme refus, la
+                            // premiere etant la matrice de relations : en
+                            // corriger une seule laissait l'autre mordre.
+                            // Reste verifie : les deux extremites doivent etre
+                            // des noeuds SOLL qui EXISTENT.
+                            if src_type.is_empty() || tgt_type.is_empty() {
                                 return Some(json!({
                                     "content": [{
                                         "type": "text",
                                         "text": format!(
-                                            "SUPERSEDES requires same-type endpoints (got source={} target={}).",
-                                            src_type, tgt_type
+                                            "SUPERSEDES requires two existing SOLL nodes (got source={} target={}).",
+                                            if src_type.is_empty() { "<absent>" } else { src_type.as_str() },
+                                            if tgt_type.is_empty() { "<absent>" } else { tgt_type.as_str() }
                                         )
                                     }],
                                     "isError": true,
@@ -1707,7 +1718,7 @@ impl McpServer {
                                             "target_id": tgt,
                                             "source_type": src_type,
                                             "target_type": tgt_type,
-                                            "hint": "SUPERSEDES is a same-type retirement marker (DEC→DEC, CPT→CPT, GUI→GUI). Cross-type retirement is not modelled.",
+                                            "hint": "SUPERSEDES retires one SOLL node by another, of ANY type (REQ-AXO-902461) - but BOTH must exist. Check the ids with soll_get.",
                                             "follow_up_tools": ["soll_query_context"],
                                         },
                                         "canonical_source": "MIL-AXO-020",

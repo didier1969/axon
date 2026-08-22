@@ -1445,10 +1445,12 @@ fn test_soll_manager_link_never_auto_canonizes_a_requested_supersedes() {
         (format!("REQ-{code}-901"), "Requirement"),
         (format!("REQ-{code}-902"), "Requirement"),
     ] {
+        // DO UPDATE, pas DO NOTHING : une execution precedente a pu retirer la
+        // cible, et un fixture qui ne se re-arme pas rend le test non rejouable.
         server
             .graph_store
             .execute(&format!(
-                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{id}', '{ty}', '{code}', 't', '', 'current', '{{}}') ON CONFLICT (id) DO NOTHING"
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{id}', '{ty}', '{code}', 't', '', 'current', '{{}}') ON CONFLICT (id) DO UPDATE SET status = 'current'"
             ))
             .unwrap();
     }
@@ -1504,29 +1506,217 @@ fn test_soll_manager_link_never_auto_canonizes_a_requested_supersedes() {
         Some("BLOCKED_BY")
     );
 
-    // LE DÉFAUT — même paire, mais la demande est un RETRAIT. Elle doit être
-    // REFUSÉE, jamais réécrite : une relation qui porte un effet de bord
-    // destructif n'est pas substituable par une relation de planification.
-    let refused = link(
+    // L'INVARIANT — même paire, mais la demande est un RETRAIT. La relation
+    // ECRITE est celle qui a ete DEMANDEE, ou rien : jamais une autre. Une
+    // relation qui porte un effet de bord destructif n'est pas substituable par
+    // une relation de planification.
+    //
+    // Note : depuis REQ-AXO-902461 cette demande est ACCEPTEE (le retrait est
+    // exprimable entre deux noeuds SOLL quelconques). L'invariant que ce test
+    // protege n'est PAS le refus — c'etait son symptome a l'epoque ou la paire
+    // etait fermee — mais l'absence de SUBSTITUTION. Il tient dans les deux
+    // regimes : ce qui ne doit jamais arriver, c'est qu'une TARGETS soit ecrite
+    // a la place.
+    let retire = link(
         format!("MIL-{code}-901"),
         format!("REQ-{code}-902"),
         "SUPERSEDES",
         2,
     );
-    assert_eq!(
-        refused.get("isError").and_then(|v| v.as_bool()),
-        Some(true),
-        "un SUPERSEDES demande sur une paire qui ne l'admet pas doit REJETER : {refused:?}"
+    assert!(
+        retire["data"]["auto_canonized_from"].is_null(),
+        "un SUPERSEDES demande ne doit JAMAIS etre auto-canonise : {retire:?}"
     );
     assert_eq!(
         edges_between(&format!("MIL-{code}-901"), &format!("REQ-{code}-902")),
-        0,
-        "le refus ne doit ecrire AUCUNE arete — surtout pas une TARGETS qui dirait le contraire du retrait demande"
+        1,
+        "exactement une arete entre les deux — pas une TARGETS en plus"
     );
-    let text = refused["content"][0]["text"].as_str().unwrap_or_default();
-    assert!(
-        text.contains("SUPERSEDES"),
-        "le refus doit nommer la relation demandee : {text}"
+    let written = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT count(*) FROM soll.Edge WHERE source_id='MIL-{code}-901' AND target_id='REQ-{code}-902' AND relation_type='TARGETS'"
+        ))
+        .unwrap();
+    assert_eq!(
+        written, 0,
+        "une TARGETS ecrite a la place d'un SUPERSEDES dirait le CONTRAIRE de l'intention demandee"
+    );
+
+    // Et le cas ou la substitution reste possible : une extremite qui n'est PAS
+    // un noeud SOLL. Le fallback de REQ-AXO-902461 ne s'y applique pas, donc la
+    // demande retombe sur la politique de la paire — elle doit REJETER, jamais
+    // ecrire une relation approchante.
+    let artifact = link(
+        format!("REQ-{code}-901"),
+        "src/axon-core/src/lib.rs".to_string(),
+        "SUPERSEDES",
+        3,
+    );
+    assert_eq!(
+        artifact.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "un artefact ne retire pas une intention : {artifact:?}"
+    );
+    assert_eq!(
+        edges_between(&format!("REQ-{code}-901"), "src/axon-core/src/lib.rs"),
+        0,
+        "le refus ne doit ecrire AUCUNE arete"
+    );
+}
+
+#[test]
+fn test_soll_manager_link_supersedes_is_expressible_between_any_two_soll_nodes() {
+    // REQ-AXO-902461 — le RETRAIT est exprimable entre deux noeuds SOLL
+    // QUELCONQUES. Trois tenants (APS, OPV, AXO) ont remonte la meme cause le
+    // meme jour : `SUPERSEDES` etait refuse des que les types differaient, et
+    // meme sur VIS -> VIS ou ils sont IDENTIQUES. La forme la plus ordinaire du
+    // retrait n'est pas « un but en absorbe un autre » mais « une DECISION
+    // tranche » — et le graphe ne savait pas l'ecrire.
+    //
+    // Une regle (GUI-PRO-125) qui exige un etat que l'ecriture REFUSE de
+    // produire pousse mecaniquement a la falsification du registre : le tenant
+    // n'a que le choix entre laisser rouge ou fabriquer une arete depuis un
+    // noeud qui n'est pas le vrai remplacant.
+    let server = create_test_server();
+    let code = "TSW".to_string();
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('{code}', 'AXON_GLOBAL', 0, 3, 1, 1) ON CONFLICT (project_code) DO UPDATE SET last_req = 3"
+        ))
+        .unwrap();
+    for (id, ty) in [
+        (format!("VIS-{code}-901"), "Vision"),
+        (format!("VIS-{code}-902"), "Vision"),
+        (format!("MIL-{code}-901"), "Milestone"),
+        (format!("CPT-{code}-901"), "Concept"),
+        (format!("DEC-{code}-901"), "Decision"),
+        (format!("GUI-{code}-901"), "Guideline"),
+        (format!("REQ-{code}-901"), "Requirement"),
+        (format!("REQ-{code}-902"), "Requirement"),
+        (format!("REQ-{code}-903"), "Requirement"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{id}', '{ty}', '{code}', 't', '', 'current', '{{}}') ON CONFLICT (id) DO UPDATE SET status = 'current'"
+            ))
+            .unwrap();
+    }
+    // PG partage entre tests : purger les aretes d'une execution precedente.
+    server
+        .graph_store
+        .execute(&format!(
+            "DELETE FROM soll.Edge WHERE project_code = '{code}'"
+        ))
+        .unwrap();
+
+    let link = |src: String, tgt: String, rel: &str, rid: i64| -> serde_json::Value {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_manager",
+                    "arguments": { "action": "link", "entity": "requirement",
+                        "data": { "source_id": src, "target_id": tgt, "relation_type": rel } }
+                })),
+                id: Some(json!(rid)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    // Les 6 paires mesurees comme refusees sur le parc le 2026-08-22.
+    for (rid, (src, tgt)) in [
+        (format!("VIS-{code}-901"), format!("VIS-{code}-902")), // types IDENTIQUES, refuse quand meme
+        (format!("MIL-{code}-901"), format!("CPT-{code}-901")), // CPT-AXO-040 retire par MIL-AXO-017
+        (format!("DEC-{code}-901"), format!("GUI-{code}-901")), // GUI-AXO-1000 retire par DEC-AXO-085
+        (format!("DEC-{code}-901"), format!("REQ-{code}-901")), // REQ-APS-470, REQ-OPV-001
+        (format!("MIL-{code}-901"), format!("REQ-{code}-902")), // REQ-AXO-91531 retire par MIL-AXO-020
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = link(src.clone(), tgt.clone(), "SUPERSEDES", 100 + rid as i64);
+        assert_ne!(
+            r.get("isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "{src} -SUPERSEDES-> {tgt} doit etre acceptee : {r:?}"
+        );
+        // L'arete ECRITE doit etre un SUPERSEDES, pas une relation approchante.
+        let edges = server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Edge WHERE source_id='{src}' AND target_id='{tgt}' AND relation_type='SUPERSEDES'"
+            ))
+            .unwrap();
+        assert_eq!(edges, 1, "{src} -> {tgt} doit porter une arete SUPERSEDES");
+        // Et le retrait doit avoir eu lieu : c'est ce que GUI-PRO-125 lit.
+        let retired = server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node WHERE id='{tgt}' AND status='superseded'"
+            ))
+            .unwrap();
+        assert_eq!(retired, 1, "{tgt} doit etre passe a superseded");
+    }
+
+    // CONTROLE POSITIF 1 — le fallback n'ouvre QUE le retrait. Une autre
+    // relation sur une paire sans politique reste REFUSEE. Sans ce controle,
+    // une implementation qui ouvrirait la paire entiere passerait au vert.
+    let other = link(
+        format!("VIS-{code}-901"),
+        format!("VIS-{code}-902"),
+        "BELONGS_TO",
+        200,
+    );
+    assert_eq!(
+        other.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "seul SUPERSEDES est ouvert : BELONGS_TO sur VIS -> VIS doit rester refuse : {other:?}"
+    );
+
+    // CONTROLE POSITIF 2 — une paire qui a DEJA une politique garde son defaut.
+    // MIL -> REQ vaut TARGETS quand aucune relation n'est demandee ; le fallback
+    // ne doit pas devenir le nouveau defaut d'une paire existante.
+    let implicit = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": { "action": "link", "entity": "milestone",
+                    "data": { "source_id": format!("MIL-{code}-901"), "target_id": format!("REQ-{code}-903") } }
+            })),
+            id: Some(json!(201)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_ne!(
+        implicit.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "MIL -> REQ sans relation explicite doit appliquer son defaut : {implicit:?}"
+    );
+    let targets = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT count(*) FROM soll.Edge WHERE source_id='MIL-{code}-901' AND target_id='REQ-{code}-903' AND relation_type='TARGETS'"
+        ))
+        .unwrap();
+    assert_eq!(targets, 1, "le defaut TARGETS de MIL -> REQ doit etre intact");
+    let still_open = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT count(*) FROM soll.Node WHERE id='REQ-{code}-903' AND status='current'"
+        ))
+        .unwrap();
+    assert_eq!(
+        still_open, 1,
+        "un TARGETS ne retire personne — le fallback ne doit pas contaminer le defaut"
     );
 }
 
@@ -7365,16 +7555,30 @@ fn test_axon_soll_manager_link_decision_refines_concept() {
 
 #[test]
 fn test_axon_soll_manager_link_decision_supersedes_concept() {
-    // REQ-AXO-188 #1+#2: DEC -> CPT also accepts SUPERSEDES for the case
-    // where a decision retires or wholly replaces an architecture concept.
+    // REQ-AXO-188 #1+#2 : DEC -> CPT accepte SUPERSEDES pour le cas ou une
+    // decision retire ou remplace entierement un concept d'architecture.
+    //
+    // REQ-AXO-902461 — ce test assertait le CONTRAIRE de son propre nom : il
+    // exigeait `isError` et `supersedes_type_mismatch`. La matrice de relations
+    // autorisait pourtant DEC -> CPT en SUPERSEDES (`allowed: ["REFINES",
+    // "SUPERSEDES"]`) ; c'etait la garde `src_type != tgt_type` de MIL-AXO-020,
+    // dans manager.rs, qui la refusait. DEUX sources de verite en conflit, et
+    // le test avait ete retourne du cote de la garde sans que son nom ni son
+    // commentaire suivent. La garde est levee ; le test dit de nouveau ce que
+    // son nom annonce.
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-002', 'Decision', 'AXO', 'Replacement decision', '', 'current', '{\"context\":\"ctx\",\"rationale\":\"why\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-002', 'Decision', 'AXO', 'Replacement decision', '', 'current', '{\"context\":\"ctx\",\"rationale\":\"why\"}') ON CONFLICT (id) DO UPDATE SET status = 'current'")
+        .unwrap();
+    // PG partage : la cible doit etre re-armee, une execution precedente l'a retiree.
+    server
+        .graph_store
+        .execute("DELETE FROM soll.Edge WHERE source_id='DEC-AXO-002' AND target_id='CPT-AXO-002'")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-002', 'Concept', 'AXO', 'Retired concept', 'desc', '', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-002', 'Concept', 'AXO', 'Retired concept', 'desc', 'current', '{}') ON CONFLICT (id) DO UPDATE SET status = 'current'")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -7402,15 +7606,28 @@ fn test_axon_soll_manager_link_decision_supersedes_concept() {
         .unwrap()
         .as_str()
         .unwrap();
-    assert!(result
-        .get("isError")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false));
     assert!(
-        result["data"]["operator_guidance"]["problem_class"].as_str()
-            == Some("supersedes_type_mismatch")
-            || content.contains("SUPERSEDES requires same-type"),
-        "{content}"
+        !result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "une decision qui retire un concept doit etre enregistrable : {content}"
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Edge WHERE relation_type='SUPERSEDES' AND source_id='DEC-AXO-002' AND target_id='CPT-AXO-002'")
+            .unwrap(),
+        1,
+        "l'arete ecrite doit etre un SUPERSEDES : {content}"
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Node WHERE id='CPT-AXO-002' AND status='superseded'")
+            .unwrap(),
+        1,
+        "le retrait doit avoir eu lieu — c'est ce que GUI-PRO-125 lit : {content}"
     );
 }
 

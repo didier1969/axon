@@ -93,7 +93,25 @@ impl McpServer {
     ) -> anyhow::Result<(&'static str, RelationPolicy)> {
         let source_kind = self.classify_existing_link_endpoint(source_id)?;
         let target_kind = self.classify_existing_link_endpoint(target_id)?;
-        let policy = relation_policy_for_pair(source_kind.label(), target_kind.label())
+        let normalized_request = explicit_relation_type.map(|r| r.to_uppercase());
+        let pair_policy = relation_policy_for_pair(source_kind.label(), target_kind.label());
+        // REQ-AXO-902461 - un RETRAIT demande explicitement est recevable entre
+        // deux noeuds SOLL quelconques, meme quand la matrice de filiation ne
+        // connait pas la paire. Sans cela `GUI-PRO-125` exige une arete que
+        // l'ecriture refuse de produire, ce qui ne laisse au tenant que le choix
+        // entre laisser rouge et fabriquer une arete vers un faux remplacant.
+        let pair_admits_supersedes = pair_policy
+            .map(|p| p.allowed.iter().any(|r| *r == "SUPERSEDES"))
+            .unwrap_or(false);
+        let retirement_fallback = if normalized_request.as_deref() == Some("SUPERSEDES")
+            && !pair_admits_supersedes
+        {
+            supersedes_policy_for_soll_pair(source_kind.label(), target_kind.label())
+        } else {
+            None
+        };
+        let policy = retirement_fallback
+            .or(pair_policy)
             .ok_or_else(|| {
                 anyhow!(
                     "{}",
@@ -111,8 +129,7 @@ impl McpServer {
                 )
             })?;
 
-        let selected = if let Some(relation_type) = explicit_relation_type {
-            let normalized = relation_type.to_uppercase();
+        let selected = if let Some(normalized) = normalized_request {
             if policy.allowed.iter().any(|allowed| *allowed == normalized) {
                 normalized
             } else if policy.allowed.len() == 1
