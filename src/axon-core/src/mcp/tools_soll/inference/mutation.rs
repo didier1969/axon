@@ -114,16 +114,27 @@ impl McpServer {
         &self,
         snapshot: &SollCompletenessSnapshot,
     ) -> Vec<String> {
-        if !snapshot.orphan_requirements.is_empty() {
+        // REQ-AXO-902455 — les défauts de rattachement ne sont plus des listes
+        // en dur mais des violations de règles, qui portent DÉJÀ leur guidance
+        // dans le corps de la Guideline citée. On y renvoie plutôt que de
+        // maintenir un second texte de réparation qui divergerait.
+        if !snapshot.declarative_rule_violations.is_empty() {
+            let rules: std::collections::BTreeSet<&str> = snapshot
+                .declarative_rule_violations
+                .iter()
+                .map(|v| v.rule_id.as_str())
+                .collect();
             vec![
-                "link each orphan requirement to its pillar or guideline".to_string(),
+                format!(
+                    "read the rule that flagged each node: {}",
+                    rules
+                        .iter()
+                        .map(|id| format!("`soll_get(id=\"{id}\")`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 "use `soll_relation_schema` before retrying if canonical edges are unclear"
                     .to_string(),
-            ]
-        } else if !snapshot.validations_without_verifies.is_empty() {
-            vec![
-                "attach each validation to a requirement with `VERIFIES`".to_string(),
-                "rerun `soll_validate` after adding the missing proof links".to_string(),
             ]
         } else if !snapshot.uncovered_requirements.is_empty() {
             vec![

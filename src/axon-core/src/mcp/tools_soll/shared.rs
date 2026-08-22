@@ -98,9 +98,6 @@ pub(crate) struct RequirementCoverageSummary {
 pub(crate) struct SollCompletenessSnapshot {
     pub(super) project_scope: String,
     pub(super) total_nodes: usize,
-    pub(super) orphan_requirements: Vec<String>,
-    pub(super) validations_without_verifies: Vec<String>,
-    pub(super) decisions_without_links: Vec<String>,
     pub(super) uncovered_requirements: Vec<String>,
     pub(super) relation_policy_violations: Vec<String>,
     /// REQ-AXO-902455 — violations des règles SOLL DÉCLARATIVES (les
@@ -112,12 +109,13 @@ pub(crate) struct SollCompletenessSnapshot {
 }
 
 impl SollCompletenessSnapshot {
+    /// REQ-AXO-902455 — les trois listes de rattachement (`orphan_requirements`,
+    /// `validations_without_verifies`, `decisions_without_links`) ont migré vers
+    /// `GUI-PRO-127/128/129` et leur code est parti : elles sont désormais
+    /// comptées dans `declarative_rule_violations`, avec le `rule_id` qui dit
+    /// POURQUOI chaque nœud est signalé.
     pub(crate) fn structurally_connected(&self) -> bool {
-        self.orphan_requirements.is_empty()
-            && self.validations_without_verifies.is_empty()
-            && self.decisions_without_links.is_empty()
-            && self.relation_policy_violations.is_empty()
-            && self.declarative_rule_violations.is_empty()
+        self.relation_policy_violations.is_empty() && self.declarative_rule_violations.is_empty()
     }
 
     /// REQ-AXO-902455 — dérivé de la règle d'unicité (`GUI-PRO-121`), plus du
@@ -154,13 +152,14 @@ impl SollCompletenessSnapshot {
     }
 
     pub(crate) fn canonical_orphan_intent_ids(&self) -> BTreeSet<String> {
-        self.orphan_requirements
+        self.uncovered_requirements
             .iter()
-            .chain(self.validations_without_verifies.iter())
-            .chain(self.decisions_without_links.iter())
-            .chain(self.uncovered_requirements.iter())
             .cloned()
-            .chain(self.uniqueness_violation_ids())
+            .chain(
+                self.declarative_rule_violations
+                    .iter()
+                    .map(|v| v.source_id.clone()),
+            )
             .collect()
     }
 }

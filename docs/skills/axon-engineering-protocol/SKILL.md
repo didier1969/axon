@@ -71,14 +71,18 @@ A rule = a SUBJECT (`subject_kind`, `subject_status_in/not_in`) + **exactly ONE*
 
 | Predicate | Fields |
 |---|---|
-| edge | `mode: forbidden\|required`, `direction: outgoing\|incoming`, `relations[]`, `other_kind`/`other_status_*` |
+| edge | `mode: forbidden\|required`, `direction: outgoing\|incoming\|either`, `relations[]`, `other_kind`/`other_status_*` |
 | evidence | `evidence_status_in[]` (+ `evidence_artifact_types[]`) — real statuses are `present`/`broken`, never `missing` |
 | metadata | `metadata_required[]` — absent, null, empty string and empty array all count as missing |
 | uniqueness | `unique_by: title\|id` |
 | aggregate | `at_most: N` (+ `group_by_relation`, `group_direction`) — bound is INCLUSIVE |
 | reachability | `reaches: true` + `other_kind` + `relations[]` — transitive |
 
+`direction: either` accepts the edge on whichever side it sits — for attachment invariants ("is this node wired at all"), which neither single direction expresses: two rules would report a lone node TWICE and a one-sided node wrongly. On `required`, an endpoint outside the project snapshot still satisfies a rule that constrains nothing about it — cross-project supersession (a tenant Guideline retired by the canonical PRO one) is a real, encouraged pattern.
+
 `DEC-AXO-901673` supersedes `DEC-AXO-901649`: uniqueness and aggregate compare nodes to each other. Still forbidden: bound variables, arbitrary joins, user-defined recursion.
+
+**Shipped rules, all under `PRO` (inherited by every tenant)** — `GUI-PRO-119` supersession retires its target · `120` edge not reversed · `121` no shared title · `122` open requirement reaches a Vision · `123` one living Vision per project · `124` no broken proof under a delivered requirement · `125` a retired node records its replacement · `126` open requirement carries acceptance criteria · `127/128/129` requirement / validation / decision wired to the graph. `127`–`129` **replaced** the hard-coded `orphan_requirements` / `validations_without_verifies` / `decisions_without_links`, and `121` replaced `duplicate_titles` — each with an equivalence test on the same fixture *before* the Rust was removed. Only `uncovered_requirements` stays in code: it is a CONJUNCTION (neither proof NOR criteria), which `parse_soll_rule` refuses by design.
 
 ## SOLL writes
 

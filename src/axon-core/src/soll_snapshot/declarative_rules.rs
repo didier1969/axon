@@ -122,6 +122,12 @@ pub enum EdgeDirection {
     #[default]
     Outgoing,
     Incoming,
+    /// L'arête compte de QUELQUE côté qu'elle se trouve. Nécessaire pour les
+    /// invariants de rattachement — « ce nœud est-il relié au graphe » — qu'un
+    /// seul sens ne peut pas exprimer : deux règles `outgoing` + `incoming`
+    /// produiraient DEUX violations pour un nœud isolé, et une violation à tort
+    /// pour un nœud rattaché d'un seul côté.
+    Either,
 }
 
 impl EdgeDirection {
@@ -129,6 +135,7 @@ impl EdgeDirection {
         match s.trim().to_ascii_lowercase().as_str() {
             "outgoing" | "out" | "from" => Some(Self::Outgoing),
             "incoming" | "in" | "to" => Some(Self::Incoming),
+            "either" | "any" | "both" => Some(Self::Either),
             _ => None,
         }
     }
@@ -463,14 +470,17 @@ fn subjects<'a>(rule: &SollRule, facts: &NodeFacts<'a>) -> Vec<&'a str> {
 /// Les deux bouts d'une arête, du point de vue du SUJET : `Outgoing` le voit
 /// comme la source, `Incoming` comme la cible. Partagé par les prédicats
 /// d'arête et de groupement.
-fn ends<'e>(
+fn orientations<'e>(
     edge: &'e super::snapshot::SnapshotEdge,
     direction: EdgeDirection,
-) -> (&'e str, &'e str) {
-    match direction {
-        EdgeDirection::Outgoing => (edge.source_id.as_str(), edge.target_id.as_str()),
-        EdgeDirection::Incoming => (edge.target_id.as_str(), edge.source_id.as_str()),
-    }
+) -> impl Iterator<Item = (&'e str, &'e str)> {
+    let (source, target) = (edge.source_id.as_str(), edge.target_id.as_str());
+    let lectures = match direction {
+        EdgeDirection::Outgoing => [Some((source, target)), None],
+        EdgeDirection::Incoming => [Some((target, source)), None],
+        EdgeDirection::Either => [Some((source, target)), Some((target, source))],
+    };
+    lectures.into_iter().flatten()
 }
 
 fn evaluate_rule_with_facts(
@@ -494,13 +504,20 @@ fn evaluate_rule_with_facts(
                         if !rel_ok(&edge.relation_type) {
                             continue;
                         }
-                        let (subject_id, other_id) = ends(edge, *direction);
-                        let (Some((skind, sstatus)), Some((okind, ostatus))) =
-                            (facts.get(subject_id), facts.get(other_id))
-                        else {
-                            continue;
-                        };
-                        if rule.subject.matches(skind, sstatus) && other.matches(okind, ostatus) {
+                        // `Either` lit l'arête des deux côtés, mais une arête
+                        // fautive reste UNE violation : on s'arrête à la
+                        // première lecture qui correspond.
+                        for (subject_id, other_id) in orientations(edge, *direction) {
+                            let (Some((skind, sstatus)), Some((okind, ostatus))) =
+                                (facts.get(subject_id), facts.get(other_id))
+                            else {
+                                continue;
+                            };
+                            if !(rule.subject.matches(skind, sstatus)
+                                && other.matches(okind, ostatus))
+                            {
+                                continue;
+                            }
                             out.push(SollRuleViolation {
                                 rule_id: rule.id.clone(),
                                 predicate: rule.predicate.kind(),
@@ -509,6 +526,7 @@ fn evaluate_rule_with_facts(
                                 relation: Some(edge.relation_type.clone()),
                                 message: rule.message.clone(),
                             });
+                            break;
                         }
                     }
                 }
@@ -525,7 +543,7 @@ fn evaluate_rule_with_facts(
                         if !rel_ok(&edge.relation_type) {
                             continue;
                         }
-                        let (subject_id, other_id) = ends(edge, *direction);
+                        for (subject_id, other_id) in orientations(edge, *direction) {
                         if !satisfied.contains_key(subject_id) {
                             continue;
                         }
@@ -547,6 +565,7 @@ fn evaluate_rule_with_facts(
                         };
                         if qualifies {
                             satisfied.insert(subject_id, true);
+                        }
                         }
                     }
                     let mut offenders: Vec<&str> = satisfied
@@ -671,11 +690,12 @@ fn evaluate_rule_with_facts(
                         if &edge.relation_type != relation {
                             continue;
                         }
-                        let (subject_id, group_id) = ends(edge, *group_direction);
-                        if !member.contains(subject_id) {
-                            continue;
+                        for (subject_id, group_id) in orientations(edge, *group_direction) {
+                            if !member.contains(subject_id) {
+                                continue;
+                            }
+                            groups.entry(group_id.to_string()).or_default().push(subject_id);
                         }
-                        groups.entry(group_id.to_string()).or_default().push(subject_id);
                     }
                     // Un sujet sans groupe est IGNORÉ, jamais compté dans un
                     // groupe fictif : l'affecter d'office fausserait le compte.
@@ -906,6 +926,92 @@ mod tests {
             2,
             "une règle qui exige un statut du remplaçant ne peut pas le \
              présumer sur un nœud qu'elle ne voit pas.\n{strict:?}"
+        );
+    }
+
+    /// REQ-AXO-902455 — troisième direction : `either`. Sans elle, trois
+    /// invariants SOLL restaient en dur dans `soll_completeness_snapshot_filtered`
+    /// pour une seule raison — ils demandent « une arête dans L'UN OU L'AUTRE
+    /// sens » (`orphan_requirements`, `validations_without_verifies`,
+    /// `decisions_without_links`), et le moteur n'en testait qu'une par règle.
+    ///
+    /// Deux règles `outgoing` + `incoming` ne les remplacent PAS : un nœud sans
+    /// aucune arête produirait DEUX violations pour un seul défaut, et un nœud
+    /// rattaché d'un seul côté en produirait une, à tort.
+    #[test]
+    fn an_either_direction_accepts_an_edge_on_whichever_side_it_sits() {
+        let rule = parse_soll_rule(
+            "GUI-TST-014",
+            "Une exigence est rattachée au graphe",
+            &json!({
+                "mode": "required",
+                "direction": "either",
+                "subject_kind": "Requirement",
+                "subject_status_in": ["planned"]
+            }),
+        )
+        .unwrap();
+        let snap = snapshot(
+            vec![
+                node("REQ-TST-101", "Requirement", "planned"), // rattaché en SORTANT
+                node("REQ-TST-102", "Requirement", "planned"), // rattaché en ENTRANT
+                node("REQ-TST-103", "Requirement", "planned"), // rattaché à RIEN
+                node("PIL-TST-101", "Pillar", "current"),
+                node("DEC-TST-101", "Decision", "current"),
+            ],
+            vec![
+                edge("REQ-TST-101", "PIL-TST-101", "BELONGS_TO"),
+                edge("DEC-TST-101", "REQ-TST-102", "SOLVES"),
+            ],
+        );
+        let found = evaluate_rule(&snap, &rule);
+        assert_eq!(
+            found.iter().map(|v| v.source_id.as_str()).collect::<Vec<_>>(),
+            vec!["REQ-TST-103"],
+            "seul le nœud sans AUCUNE arête est orphelin ; le sens de \
+             rattachement ne doit pas décider.\n{found:?}"
+        );
+
+        // ── Contrôle positif : `either` n'est pas « toujours satisfait » ────
+        // La même règle en `outgoing` seule accuse REQ-TST-102 à tort. C'est
+        // ce qui prouve que la troisième direction dit quelque chose que les
+        // deux autres ne peuvent pas dire.
+        let outgoing_only = parse_soll_rule(
+            "GUI-TST-015",
+            "sortante seule",
+            &json!({
+                "mode": "required",
+                "subject_kind": "Requirement",
+                "subject_status_in": ["planned"]
+            }),
+        )
+        .unwrap();
+        let narrow = evaluate_rule(&snap, &outgoing_only);
+        assert!(
+            narrow.iter().any(|v| v.source_id == "REQ-TST-102"),
+            "la direction sortante seule doit accuser le nœud rattaché en \
+             ENTRANT — sinon `either` ne se distingue de rien.\n{narrow:?}"
+        );
+
+        // `either` vaut aussi pour `forbidden` : l'arête est interdite des deux
+        // côtés, et chaque arête fautive compte UNE fois, pas deux.
+        let banned = parse_soll_rule(
+            "GUI-TST-016",
+            "aucune liaison entre ces deux mondes",
+            &json!({
+                "mode": "forbidden",
+                "direction": "either",
+                "subject_kind": "Decision",
+                "other_kind": "Requirement",
+                "relations": ["SOLVES"]
+            }),
+        )
+        .unwrap();
+        let banned_hits = evaluate_rule(&snap, &banned);
+        assert_eq!(
+            banned_hits.len(),
+            1,
+            "une arête vue des deux côtés reste UNE violation.\n{banned_hits:?}"
         );
     }
 

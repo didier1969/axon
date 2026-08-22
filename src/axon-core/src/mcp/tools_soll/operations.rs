@@ -404,48 +404,18 @@ impl McpServer {
             }
         }
 
-        let violation_count = snapshot.orphan_requirements.len()
-            + snapshot.validations_without_verifies.len()
-            + snapshot.decisions_without_links.len()
-            + snapshot.uncovered_requirements.len()
+        let violation_count = snapshot.uncovered_requirements.len()
             + snapshot.relation_policy_violations.len()
             + snapshot.declarative_rule_violations.len();
 
+        // REQ-AXO-902455 — les trois guidances de rattachement sont parties avec
+        // leurs checks : chaque violation cite désormais sa Guideline
+        // (`GUI-PRO-127/128/129`), dont le corps porte la réparation. Deux
+        // textes de réparation pour un même défaut finissent par diverger, et
+        // c'est exactement ce qui est arrivé à `decisions_without_links`
+        // (REQ-AXO-902405 : l'étiquette annonçait un sous-ensemble que la
+        // guidance voisine contredisait).
         let mut repair_guidance = Vec::new();
-        if !snapshot.orphan_requirements.is_empty() {
-            repair_guidance.push(repair_guidance_entry(
-                "orphan_requirements",
-                &snapshot.orphan_requirements,
-                "Requirements should be structurally attached to the graph.",
-                &[
-                    "link each requirement to its pillar or guideline with `soll_manager`",
-                    "call `soll_relation_schema` with `source_id` or `target_id` before retrying if the valid edge is unclear",
-                ],
-            ));
-        }
-        if !snapshot.validations_without_verifies.is_empty() {
-            repair_guidance.push(repair_guidance_entry(
-                "validations_without_verifies",
-                &snapshot.validations_without_verifies,
-                "Validation nodes should verify at least one requirement.",
-                &[
-                    "add a `VERIFIES` edge from each validation to the requirement it proves",
-                    "use `soll_relation_schema` on the validation id to inspect canonical targets if needed",
-                ],
-            ));
-        }
-        if !snapshot.decisions_without_links.is_empty() {
-            repair_guidance.push(repair_guidance_entry(
-                "decisions_without_solves_or_impacts",
-                &snapshot.decisions_without_links,
-                "Une Decision doit etre reliee a ce qu'elle tranche. Les relations legales \
-                 sont celles que `soll_relation_schema source_type=decision` declare.",
-                &[
-                    "link each decision to a requirement with `SOLVES` or `REFINES` when it addresses a need",
-                    "link each decision to an artifact with `IMPACTS` or `SUBSTANTIATES` when it changes implementation reality",
-                ],
-            ));
-        }
         if !snapshot.uncovered_requirements.is_empty() {
             repair_guidance.push(repair_guidance_entry(
                 "requirements_without_evidence_or_criteria",
@@ -514,33 +484,6 @@ impl McpServer {
         );
         evidence.push_str("Mode: read-only, no auto-repair.\n");
 
-        if !snapshot.orphan_requirements.is_empty() {
-            evidence.push_str("\n- Orphan requirements:\n");
-            for id in &snapshot.orphan_requirements {
-                evidence.push_str(&format!("  - {}\n", id));
-            }
-        }
-        if !snapshot.validations_without_verifies.is_empty() {
-            evidence.push_str("\n- Validations without VERIFIES link:\n");
-            for id in &snapshot.validations_without_verifies {
-                evidence.push_str(&format!("  - {}\n", id));
-            }
-        }
-        if !snapshot.decisions_without_links.is_empty() {
-            // REQ-AXO-902405 — l'etiquette annoncait `SOLVES/IMPACTS`, le
-            // sous-ensemble code en dur que la regle appliquait, pendant que la
-            // guidance de reparation juste au-dessus conseillait `SOLVES` OU
-            // `REFINES`. Le meme rapport reprochait donc d'avoir fait ce qu'il
-            // conseillait. La regle lit desormais la politique ; l'etiquette
-            // cesse de nommer un sous-ensemble.
-            evidence.push_str(
-                "\n- Decisions sans aucune relation reconnue par la politique \
-                 (voir `soll_relation_schema source_type=decision`) :\n",
-            );
-            for id in &snapshot.decisions_without_links {
-                evidence.push_str(&format!("  - {}\n", id));
-            }
-        }
         if !snapshot.uncovered_requirements.is_empty() {
             evidence.push_str("\n- Requirements without criteria/evidence:\n");
             for id in &snapshot.uncovered_requirements {
@@ -604,9 +547,6 @@ impl McpServer {
                 "summary": summary,
                 "scope": snapshot.project_scope,
                 "violations": {
-                    "orphan_requirements": snapshot.orphan_requirements,
-                    "validations_without_verifies": snapshot.validations_without_verifies,
-                    "decisions_without_links": snapshot.decisions_without_links,
                     "uncovered_requirements": snapshot.uncovered_requirements,
                     "relation_policy_violations": snapshot.relation_policy_violations,
                     // REQ-AXO-902455 — le JSON portait le COMPTE des règles

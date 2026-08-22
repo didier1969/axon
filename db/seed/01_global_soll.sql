@@ -9,8 +9,8 @@
 -- Identity) :
 --   - 1 ProjectCodeRegistry row (PRO sentinel)
 --   - 1 soll.Registry counters row (PRO namespace)
---   - 57 soll.Node rows : 5 PIL-PRO + 8 CPT-PRO + 3 DEC-PRO + 41 GUI-PRO
---   - 51 soll.Edge rows : cross-namespace BELONGS_TO / INHERITS_FROM /
+--   - 60 soll.Node rows : 5 PIL-PRO + 8 CPT-PRO + 3 DEC-PRO + 44 GUI-PRO
+--   - 54 soll.Edge rows : cross-namespace BELONGS_TO / INHERITS_FROM /
 --     EPITOMIZES / EXPLAINS / etc. that connect PRO methodology to AXO
 --     and other consumer projects
 --
@@ -45,7 +45,7 @@ ON CONFLICT (project_code) DO NOTHING;
 -- repart sous eux et l'allocateur boucle a vide jusqu'a les depasser (sa
 -- garde `EXIT WHEN NOT EXISTS` empeche la collision, pas le gaspillage).
 -- GREATEST pour ne JAMAIS reculer un compteur deja plus avance en base.
-UPDATE soll.Registry SET last_gui = GREATEST(last_gui, 126) WHERE project_code = 'PRO';
+UPDATE soll.Registry SET last_gui = GREATEST(last_gui, 129) WHERE project_code = 'PRO';
 
 -- PRO Nodes (Pillars, Concepts, Decisions, Guidelines)
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
@@ -459,6 +459,64 @@ Parc hors projets de test, exigences ouvertes : **29** sans critère. **11** son
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-127', 'Guideline', 'PRO', 'Une exigence ouverte est rattachée au graphe', 'Règle SOLL déclarative (REQ-AXO-902455, direction `either`). Une exigence que RIEN ne relie au reste du graphe — ni parent, ni décision, ni validation, ni preuve — n''a aucun chemin par lequel un lecteur puisse arriver jusqu''à elle. Elle existe sans être atteignable.
+
+Distincte de `GUI-PRO-122` : celle-ci demande une arête, N''IMPORTE laquelle ; `122` demande un chemin de filiation qui remonte jusqu''à une Vision. Une exigence peut satisfaire l''une et violer l''autre.
+
+## Pourquoi elle n''était pas exprimable avant
+
+Le moteur ne savait tester une arête que dans UN sens. Cet invariant demande « une arête, de l''un OU l''autre côté ». Deux règles `outgoing` + `incoming` ne le remplacent pas : un nœud isolé produirait DEUX violations pour un seul défaut, et un nœud rattaché d''un seul côté en produirait une à tort. D''où la troisième direction, `either`, et un test qui montre qu''elle dit ce qu''aucune des deux autres ne peut dire.
+
+## État mesuré à la pose (2026-08-22)
+
+**1 seul cas** sur tout le parc hors projets de test (NTO). C''est peu, et c''est dit : cette règle ne révèle presque rien aujourd''hui. Sa valeur est ailleurs — l''invariant cesse d''être une branche Rust qu''un tenant ne peut ni ajuster ni désactiver sans un promote du cœur.
+
+## RÉPARATION
+
+`soll_manager(action=link)` vers le Pillar qui porte le sujet. Si rien ne convient, c''est que l''exigence n''a pas de place dans ce projet.', 'current', '{"soll_rule": {"subject_kind": "Requirement", "subject_status_in": ["current", "planned"], "mode": "required", "direction": "either", "message": "exigence reliée à rien — aucun chemin ne mène jusqu''à elle"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-128', 'Guideline', 'PRO', 'Une validation dit ce qu''elle vérifie', 'Règle SOLL déclarative (REQ-AXO-902455, direction `either`). Une `Validation` est une preuve d''intention : sans arête `VERIFIES`, on sait qu''une vérification a eu lieu mais pas de QUOI elle est la preuve. Elle ne prouve donc rien de rattachable.
+
+L''arête est acceptée dans les deux sens : la convention d''écriture a varié selon les projets et les sessions, et exiger une orientation ferait dépendre la conformité de l''époque à laquelle le nœud a été écrit — pas de sa justesse.
+
+## Pourquoi elle n''était pas exprimable avant
+
+Le moteur ne savait tester une arête que dans UN sens. Cet invariant demande « une arête, de l''un OU l''autre côté ». Deux règles `outgoing` + `incoming` ne le remplacent pas : un nœud isolé produirait DEUX violations pour un seul défaut, et un nœud rattaché d''un seul côté en produirait une à tort. D''où la troisième direction, `either`, et un test qui montre qu''elle dit ce qu''aucune des deux autres ne peut dire.
+
+## État mesuré à la pose (2026-08-22)
+
+**0 cas** sur le parc hors projets de test. Garde de non-régression, comme `GUI-PRO-123`, et c''est écrit plutôt que tu.
+
+## RÉPARATION
+
+`soll_manager(action=link, relation_type=VERIFIES)` depuis la validation vers ce qu''elle éprouve.', 'current', '{"soll_rule": {"subject_kind": "Validation", "mode": "required", "direction": "either", "relations": ["VERIFIES"], "message": "validation sans arête VERIFIES — on ignore de quoi elle est la preuve"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+VALUES ('GUI-PRO-129', 'Guideline', 'PRO', 'Une décision ouverte dit sur quoi elle porte', 'Règle SOLL déclarative (REQ-AXO-902455, direction `either`). Une `Decision` que rien ne relie au graphe énonce un choix sans dire de quoi il décide. Le rationnel est là, son objet ne l''est pas.
+
+## La règle N''ÉNUMÈRE PAS les relations, et c''est délibéré
+
+Le check en dur qu''elle remplace codait `SOLVES | IMPACTS`, un SOUS-ENSEMBLE de ce que l''écrivain déclare légal — d''où `REQ-AXO-902405` : une décision rattachée par le chemin nominal avec `REFINES` naissait en violation, et le message lui reprochait de n''avoir « aucun lien » alors qu''elle en avait un, légal, posé par l''outil lui-même. Le correctif d''alors dérivait la liste depuis la politique au runtime.
+
+Figer cette liste dans une règle-donnée recréerait exactement le défaut : ajouter une relation à la matrice exigerait de penser à la répercuter ici, ce que personne n''a fait la première fois. La règle demande donc UNE arête, quelle qu''elle soit. Vérifié en base au 2026-08-22 : **0 décision** n''est reliée uniquement par une relation hors politique — les deux formulations rendent le même verdict, et celle-ci ne peut pas diverger. La légalité de la relation est jugée séparément, par la matrice de paires.
+
+## Pourquoi elle n''était pas exprimable avant
+
+Le moteur ne savait tester une arête que dans UN sens. Cet invariant demande « une arête, de l''un OU l''autre côté ». Deux règles `outgoing` + `incoming` ne le remplacent pas : un nœud isolé produirait DEUX violations pour un seul défaut, et un nœud rattaché d''un seul côté en produirait une à tort. D''où la troisième direction, `either`, et un test qui montre qu''elle dit ce qu''aucune des deux autres ne peut dire.
+
+## État mesuré à la pose (2026-08-22)
+
+**0 cas** sur le parc hors projets de test.
+
+## RÉPARATION
+
+`soll_manager(action=link)` vers l''exigence ou le concept sur lequel la décision porte. `soll_relation_schema` donne les relations légales pour la paire.', 'current', '{"soll_rule": {"subject_kind": "Decision", "subject_status_in": ["current", "planned"], "mode": "required", "direction": "either", "message": "décision reliée à rien — son objet n''est pas dans le graphe"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
 VALUES ('PIL-PRO-001', 'Pillar', 'PRO', 'Code Quality', 'Architectural discipline ensuring code is testable, deep, well-bounded, free of warnings. Spans: test-first development (GUI-001), DRY/SRP/KISS/cognitive-limits/clean-as-you-go (GUI-013/014/015/016/017), APoSD foundations — deep modules, information hiding, pull-complexity-downwards, design-it-twice (GUI-018/019/020/021). Consumer project GUI-{code}-N covering same scope INHERITS_FROM corresponding GUI-PRO.', 'current', '{"updated_at": 1778514324408}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
@@ -633,4 +691,16 @@ ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
 
 INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
 VALUES ('GUI-PRO-126', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-127', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-128', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
+ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;
+
+INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code, metadata)
+VALUES ('GUI-PRO-129', 'PIL-PRO-001', 'BELONGS_TO', 'PRO', '{}'::jsonb)
 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING;

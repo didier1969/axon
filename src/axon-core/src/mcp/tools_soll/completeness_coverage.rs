@@ -373,96 +373,18 @@ impl McpServer {
         // uncovered_req) from the in-memory snapshot. The UNION ALL
         // round-trip is gone. For workspace-wide calls (no project
         // scope), fall back to SQL because the snapshot is per-project.
-        let mut orphan_requirements: Vec<String> = Vec::new();
-        let mut validations_without_verifies: Vec<String> = Vec::new();
-        let mut decisions_without_links: Vec<String> = Vec::new();
+        // REQ-AXO-902455 — `orphan_requirements`, `validations_without_verifies`
+        // et `decisions_without_links` ne sont plus calculés ici : ce sont les
+        // règles-données `GUI-PRO-127/128/129`, évaluées par le moteur
+        // déclaratif. Équivalence prouvée sur le même fixture avant retrait par
+        // `the_three_attachment_rules_match_the_hardcoded_checks_before_they_are_removed`.
+        //
+        // `uncovered_requirements` reste : c'est une CONJONCTION — ni preuve NI
+        // critère — que `parse_soll_rule` refuse par construction.
         let mut uncovered_requirements: Vec<String> = Vec::new();
 
         let total_nodes = if let Some(code) = resolved_project_code.as_deref() {
             let snapshot = self.soll_cache().snapshot(code)?;
-
-            // orphan_requirement: Requirement, status filter, no edges.
-            for id in snapshot.node_ids_of_type("Requirement") {
-                let Some(node) = snapshot.nodes.get(id) else {
-                    continue;
-                };
-                if !status_allowed(&node.status, true) {
-                    continue;
-                }
-                if !snapshot.has_any_edge(id) {
-                    orphan_requirements.push(id.clone());
-                }
-            }
-
-            // validation_without_verifies: Validation with no VERIFIES
-            // edge (in either direction).
-            for id in snapshot.node_ids_of_type("Validation") {
-                let has_verifies = snapshot
-                    .outgoing_edges(id)
-                    .any(|(_, rel)| rel == "VERIFIES")
-                    || snapshot
-                        .incoming_edges(id)
-                        .any(|(_, rel)| rel == "VERIFIES");
-                if !has_verifies {
-                    validations_without_verifies.push(id.clone());
-                }
-            }
-
-            // decision_without_links: une Decision qui n'est reliee a rien.
-            // REQ-AXO-901602 — apply status filter when caller opts in.
-            //
-            // REQ-AXO-902405 — la regle codait en dur `SOLVES | IMPACTS`, un
-            // SOUS-ENSEMBLE de ce que l'ecrivain declare legal : la matrice
-            // `("DEC","REQ")` admet `["SOLVES","REFINES"]` avec
-            // `allow_multiple_types: true`, donc aucune canonisation
-            // automatique ne rattrape le choix. Une Decision rattachee par le
-            // chemin nominal avec `REFINES` naissait en violation, et le
-            // message lui reprochait de n'avoir « aucun lien » alors qu'elle en
-            // avait un, legal, pose par l'outil lui-meme.
-            //
-            // On lit desormais la POLITIQUE au lieu d'en recopier une part
-            // (GUI-PRO-013) : ajouter une relation a la matrice n'exige plus de
-            // penser a la repercuter ici, ce que personne n'a fait la premiere
-            // fois. Le nom de la regle redevient vrai — « sans lien » veut dire
-            // sans aucune arete que la politique reconnaisse.
-            let decision_attachment_relations = super::relation_policy::
-                allowed_relation_targets_from_source("DEC")
-                .iter()
-                .filter_map(|route| {
-                    route
-                        .get("allowed_relations")
-                        .and_then(Value::as_array)
-                        .map(|types| {
-                            types
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .map(str::to_string)
-                                .collect::<Vec<_>>()
-                        })
-                })
-                .flatten()
-                .collect::<std::collections::BTreeSet<String>>();
-            debug_assert!(
-                decision_attachment_relations.contains("SOLVES"),
-                "la politique ne declare plus SOLVES pour DEC : la derivation \
-                 lit la mauvaise cle, et cette regle laisserait passer tout"
-            );
-
-            for id in snapshot.node_ids_of_type("Decision") {
-                let Some(node) = snapshot.nodes.get(id) else {
-                    continue;
-                };
-                if !status_allowed(&node.status, false) {
-                    continue;
-                }
-                let recognised =
-                    |rel: &str| decision_attachment_relations.contains(rel);
-                let has_links = snapshot.outgoing_edges(id).any(|(_, rel)| recognised(rel))
-                    || snapshot.incoming_edges(id).any(|(_, rel)| recognised(rel));
-                if !has_links {
-                    decisions_without_links.push(id.clone());
-                }
-            }
 
             // uncovered_requirement: Requirement, status filter,
             // no traceability AND no acceptance_criteria. The legacy
@@ -497,9 +419,6 @@ impl McpServer {
                 }
             }
 
-            orphan_requirements.sort();
-            validations_without_verifies.sort();
-            decisions_without_links.sort();
             uncovered_requirements.sort();
 
             snapshot.nodes.len()
@@ -526,37 +445,15 @@ impl McpServer {
                     format!("COALESCE(r.status, '') IN ({})", parts.join(", "))
                 }
             };
-            let decision_status_sql = match statuses_to_check {
-                None => "1=1".to_string(),
-                Some(allowed) if allowed.iter().any(|s| s == "*") => "1=1".to_string(),
-                Some(allowed) => {
-                    let parts: Vec<String> = allowed
-                        .iter()
-                        .map(|s| format!("'{}'", escape_sql(s)))
-                        .collect();
-                    format!("COALESCE(d.status, '') IN ({})", parts.join(", "))
-                }
-            };
             let total = self
                 .graph_store
                 .query_count("SELECT count(*) FROM soll.Node")
                 .unwrap_or(0) as usize;
+            // REQ-AXO-902455 — les trois catégories de rattachement ont migré
+            // vers `GUI-PRO-127/128/129`. Il ne reste que la conjonction que le
+            // moteur déclaratif refuse par construction.
             let fused_sql = format!(
-                "SELECT 'orphan_requirement' AS category, id FROM soll.Node r \
-                 WHERE type = 'Requirement' \
-                   AND {req_status_sql} \
-                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE source_id = r.id OR target_id = r.id) \
-                 UNION ALL \
-                 SELECT 'validation_without_verifies' AS category, id FROM soll.Node v \
-                 WHERE type = 'Validation' \
-                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = v.id OR target_id = v.id) AND relation_type = 'VERIFIES') \
-                 UNION ALL \
-                 SELECT 'decision_without_links' AS category, id FROM soll.Node d \
-                 WHERE type = 'Decision' \
-                   AND {decision_status_sql} \
-                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = d.id OR target_id = d.id) AND relation_type IN ('SOLVES', 'IMPACTS')) \
-                 UNION ALL \
-                 SELECT 'uncovered_requirement' AS category, r.id FROM soll.Node r \
+                "SELECT 'uncovered_requirement' AS category, r.id FROM soll.Node r \
                  LEFT JOIN soll.Traceability t \
                    ON lower(t.soll_entity_type) = lower(r.type) \
                   AND t.soll_entity_id = r.id \
@@ -574,12 +471,8 @@ impl McpServer {
                     continue;
                 }
                 let id = row[1].clone();
-                match row[0].as_str() {
-                    "orphan_requirement" => orphan_requirements.push(id),
-                    "validation_without_verifies" => validations_without_verifies.push(id),
-                    "decision_without_links" => decisions_without_links.push(id),
-                    "uncovered_requirement" => uncovered_requirements.push(id),
-                    _ => {}
+                if row[0] == "uncovered_requirement" {
+                    uncovered_requirements.push(id);
                 }
             }
             total
@@ -603,9 +496,6 @@ impl McpServer {
         Ok(SollCompletenessSnapshot {
             project_scope,
             total_nodes,
-            orphan_requirements,
-            validations_without_verifies,
-            decisions_without_links,
             uncovered_requirements,
             relation_policy_violations,
             declarative_rule_violations,

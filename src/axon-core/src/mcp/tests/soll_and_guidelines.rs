@@ -4153,11 +4153,22 @@ fn test_a_decision_attached_via_refines_is_not_reported_as_unlinked() {
         .result
         .expect("validation sans resultat");
 
-    let unlinked = validated
-        .pointer("/data/violations/decisions_without_links")
+    // REQ-AXO-902455 — l'invariant a migré du code vers la règle-donnée
+    // `GUI-PRO-129`. Le VERDICT que ce test protège est inchangé ; c'est la
+    // surface qui a bougé, et elle porte maintenant le `rule_id`.
+    //
+    // La règle n'énumère plus les relations : elle demande UNE arête, quelle
+    // qu'elle soit. C'est ce qui rend impossible la rechute que ce test
+    // surveille — une liste recopiée depuis la politique ne peut plus diverger
+    // d'elle puisqu'il n'y a plus de liste.
+    let unlinked: Vec<Value> = validated
+        .pointer("/data/violations/declarative_rule_violations")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|v| v.as_str().is_some_and(|line| line.contains("GUI-PRO-129")))
+        .collect();
 
     // CONTROLE POSITIF, avant le verdict. Une Decision sans la moindre arete
     // DOIT apparaitre ici. Sans ce controle, une liste vide — parce que la
@@ -4166,17 +4177,19 @@ fn test_a_decision_attached_via_refines_is_not_reported_as_unlinked() {
     // mesurant rien. C'est exactement la classe de defaut que cette session
     // corrige ailleurs (REQ-AXO-902384) ; elle vaut aussi pour mes tests.
     assert!(
-        unlinked.iter().any(|v| v.as_str() == Some(orphan_id.as_str())),
+        unlinked
+            .iter()
+            .any(|v| v.as_str().is_some_and(|line| line.contains(orphan_id.as_str()))),
         "controle positif en echec : {orphan_id} n'a AUCUNE arete et n'est pas \
          signalee. La regle ne s'execute pas sur cette base, ou le chemin \
-         `/data/decisions_without_links` a change — le verdict suivant ne \
-         voudrait rien dire.\n  signales : {unlinked:?}\n  reponse : {validated}"
+         `/data/violations/declarative_rule_violations` a change — le verdict \
+         suivant ne voudrait rien dire.\n  signales : {unlinked:?}\n  reponse : {validated}"
     );
 
     assert!(
         !unlinked
             .iter()
-            .any(|v| v.as_str() == Some(dec_id.as_str())),
+            .any(|v| v.as_str().is_some_and(|line| line.contains(dec_id.as_str()))),
         "{dec_id} a ete rattachee par `REFINES`, une relation que l'outil \
          d'ecriture declare legale pour DEC -> REQ, et le validateur la compte \
          pourtant comme « sans lien ». Le validateur doit lire la POLITIQUE, \
@@ -5870,9 +5883,25 @@ fn test_soll_query_context_returns_project_visions_from_source() {
         digest["requirement_coverage_summary"]["total"].as_u64(),
         Some(1)
     );
+    // REQ-AXO-902455 — `orphan_requirement_count` a disparu de la topologie :
+    // l'invariant est la règle `GUI-PRO-127`, et la surface porte désormais les
+    // violations AVEC leur `rule_id`, donc avec la raison.
+    let cited = digest["topology_summary"]["declarative_rule_violations"]
+        .as_array()
+        .expect("declarative_rule_violations array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        cited.contains("GUI-PRO-127"),
+        "l'exigence non rattachée doit être signalée, en citant sa règle.\n---\n{cited}"
+    );
     assert_eq!(
-        digest["topology_summary"]["orphan_requirement_count"].as_u64(),
-        Some(1)
+        digest["topology_summary"]["declarative_rule_violation_count"]
+            .as_u64()
+            .map(|n| n > 0),
+        Some(true)
     );
     assert_eq!(
         digest["last_meaningful_revision"]["revision_id"].as_str(),
@@ -7743,12 +7772,41 @@ fn test_axon_validate_soll_returns_structured_repair_guidance_and_completeness()
     let repair_guidance = data["repair_guidance"]
         .as_array()
         .expect("repair guidance array");
-    assert!(repair_guidance
+    // REQ-AXO-902455 — `orphan_requirements` et `validations_without_verifies`
+    // ne sont plus des catégories de guidance : ce sont `GUI-PRO-127` et
+    // `GUI-PRO-128`, et leur réparation vit dans le corps de la Guideline. Une
+    // seule entrée les porte, et elle renvoie à `soll_get(rule_id)` — deux
+    // textes de réparation pour un même défaut divergent, c'est ce qui est
+    // arrivé à `decisions_without_links` (REQ-AXO-902405).
+    let rules_entry = repair_guidance
         .iter()
-        .any(|entry| entry["category"].as_str() == Some("orphan_requirements")));
-    assert!(repair_guidance
+        .find(|entry| entry["category"].as_str() == Some("declarative_rule_violations"))
+        .expect("les violations de règles doivent porter leur guidance");
+    let cited = rules_entry["ids"]
+        .as_array()
+        .expect("ids array")
         .iter()
-        .any(|entry| entry["category"].as_str() == Some("validations_without_verifies")));
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        cited.contains("GUI-PRO-127"),
+        "l'exigence non rattachée doit être signalée par GUI-PRO-127.\n---\n{cited}"
+    );
+    assert!(
+        cited.contains("GUI-PRO-128"),
+        "la validation sans VERIFIES doit être signalée par GUI-PRO-128.\n---\n{cited}"
+    );
+    // Chaque ligne cite sa Guideline : c'est ce qui transforme « c'est
+    // signalé » en « c'est signalé PARCE QUE <intention> ».
+    assert!(
+        rules_entry["next_steps"]
+            .as_array()
+            .expect("next_steps array")
+            .iter()
+            .any(|s| s.as_str().is_some_and(|t| t.contains("soll_get"))),
+        "la guidance doit renvoyer à la règle qui a signalé.\n---\n{rules_entry}"
+    );
 }
 
 #[test]
@@ -14896,6 +14954,113 @@ fn soll_validate_flags_an_open_requirement_with_no_acceptance_criteria() {
         after.contains("REQ-TSJ-903"),
         "corriger un nœud n'éteint pas la règle sur les autres.\n---\n{after}"
     );
+}
+
+/// REQ-AXO-902455 — équivalence AVANT retrait des TROIS derniers checks de
+/// rattachement, sur le MÊME fixture, pendant que les deux implémentations
+/// coexistent. Patron d'oracle de `DEC-AXO-901662`.
+///
+/// Ces trois-là ne trouvent presque rien sur le parc réel (1 cas), donc une
+/// comparaison sur données de production serait vide de sens : le fixture
+/// CONSTRUIT les trois défauts, sans quoi l'équivalence serait vraie par
+/// vacuité (`#434`).
+#[test]
+fn the_three_attachment_rules_replaced_the_hardcoded_checks_without_losing_coverage() {
+    let server = create_test_server();
+    seed_pillar(&server, "TSK", "PIL-TSK-901", "Ancre rattachement");
+    for (id, kind, status) in [
+        ("REQ-TSK-901", "Requirement", "planned"),  // relié à rien
+        ("REQ-TSK-902", "Requirement", "planned"),  // relié — contrôle positif
+        ("VAL-TSK-901", "Validation", "passed"),    // sans VERIFIES
+        ("VAL-TSK-902", "Validation", "passed"),    // avec VERIFIES — contrôle
+        ("DEC-TSK-901", "Decision", "current"),     // relié à rien
+        ("DEC-TSK-902", "Decision", "current"),     // relié — contrôle positif
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                 VALUES ('{id}', '{kind}', 'TSK', '{id}', '', '{status}', '{{}}') \
+                 ON CONFLICT (id) DO UPDATE SET status = '{status}'"
+            ))
+            .unwrap();
+    }
+    for (source, target, rel) in [
+        ("REQ-TSK-902", "PIL-TSK-901", "BELONGS_TO"),
+        // VERIFIES posé dans le sens ENTRANT du sujet : la convention a varié
+        // selon les projets, et `either` est là pour que la conformité ne
+        // dépende pas de l'époque d'écriture.
+        ("VAL-TSK-902", "REQ-TSK-902", "VERIFIES"),
+        ("DEC-TSK-902", "REQ-TSK-902", "SOLVES"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                 VALUES ('{source}', '{target}', '{rel}', 'TSK') \
+                 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
+            ))
+            .unwrap();
+    }
+    server.soll_cache().invalidate("TSK");
+
+    for id in ["GUI-PRO-127", "GUI-PRO-128", "GUI-PRO-129"] {
+        assert!(
+            server.load_soll_rules("TSK").iter().any(|r| r.id == id),
+            "le seed doit livrer {id}"
+        );
+    }
+
+    let text = server
+        .execute_tool_direct("soll_validate", &json!({ "project_code": "TSK" }))
+        .expect("soll_validate répond")["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let section = |header: &str| -> String {
+        text.lines()
+            .skip_while(|l| !l.contains(header))
+            .skip(1)
+            .take_while(|l| l.trim_start().starts_with("- "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let rule_lines = |rule: &str| -> String {
+        text.lines()
+            .filter(|l| l.contains(rule))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    for (header, rule, offender, innocent) in [
+        ("Orphan requirements", "GUI-PRO-127", "REQ-TSK-901", "REQ-TSK-902"),
+        ("Validations without VERIFIES link", "GUI-PRO-128", "VAL-TSK-901", "VAL-TSK-902"),
+        ("Decisions sans aucune relation", "GUI-PRO-129", "DEC-TSK-901", "DEC-TSK-902"),
+    ] {
+        let legacy = section(header);
+        let migrated = rule_lines(rule);
+        // Le check en dur est PARTI : sa section ne doit plus être émise. Deux
+        // verdicts sur le même défaut finissent par diverger — c'est
+        // exactement ce qui est arrivé à `decisions_without_links`
+        // (REQ-AXO-902405).
+        assert!(
+            legacy.is_empty(),
+            "la section `{header}` du check en dur doit avoir disparu ; sa \
+             survivance signalerait une double source.\n---\n{text}"
+        );
+        // Sens 1 — inclusion : le défaut que le check en dur voyait sur ce
+        // fixture (mesuré avant son retrait) est toujours vu.
+        assert!(
+            migrated.contains(offender),
+            "{rule} doit couvrir ce que le check en dur trouvait : `{offender}` \
+             manque.\n---\n{text}"
+        );
+        // Sens 2 — pas de sur-détection : le nœud rattaché reste innocenté.
+        assert!(
+            !migrated.contains(innocent),
+            "`{innocent}` est rattaché ; {rule} ne doit pas le signaler.\n---\n{text}"
+        );
+    }
 }
 
 /// REQ-AXO-902455 — règles INLINE. Le plan promettait de pouvoir essayer une
