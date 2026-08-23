@@ -1324,6 +1324,11 @@ fn test_vector_batch_controller_grows_targets_when_idle_backlog_is_underfed() {
 
 #[test]
 fn test_vector_batch_controller_shrinks_targets_when_interactive_priority_activates() {
+    // REQ-AXO-902469 — LECTEUR de l'etat derive de l'environnement : il doit
+    // prendre le meme verrou que les ecrivains. `lock_env_guard` ne serialise
+    // que les ecrivains entre eux ; un lecteur non verrouille court a cote
+    // d'eux et observe un environnement a moitie pose.
+    let _guard = lock_env_guard();
     let mut controller = VectorBatchController::new(&controller_test_config());
     controller.observe(
         10_000,
@@ -1346,6 +1351,11 @@ fn test_vector_batch_controller_shrinks_targets_when_interactive_priority_activa
 
 #[test]
 fn test_vector_batch_controller_respects_bounds() {
+    // REQ-AXO-902469 — LECTEUR de l'etat derive de l'environnement : il doit
+    // prendre le meme verrou que les ecrivains. `lock_env_guard` ne serialise
+    // que les ecrivains entre eux ; un lecteur non verrouille court a cote
+    // d'eux et observe un environnement a moitie pose.
+    let _guard = lock_env_guard();
     let mut controller = VectorBatchController::new(&controller_test_config());
     let mut diagnostics = current_vector_batch_controller_diagnostics(&controller_test_config());
     for idx in 1..12 {
@@ -1369,6 +1379,11 @@ fn test_vector_batch_controller_respects_bounds() {
 
 #[test]
 fn test_vector_batch_controller_holds_targets_inside_cooldown() {
+    // REQ-AXO-902469 — LECTEUR de l'etat derive de l'environnement : il doit
+    // prendre le meme verrou que les ecrivains. `lock_env_guard` ne serialise
+    // que les ecrivains entre eux ; un lecteur non verrouille court a cote
+    // d'eux et observe un environnement a moitie pose.
+    let _guard = lock_env_guard();
     let mut controller = VectorBatchController::new(&controller_test_config());
     let first = controller.observe(
         10_000,
@@ -1389,6 +1404,11 @@ fn test_vector_batch_controller_holds_targets_inside_cooldown() {
 
 #[test]
 fn test_vector_batch_controller_preserves_last_completed_window_during_warmup() {
+    // REQ-AXO-902469 — LECTEUR de l'etat derive de l'environnement : il doit
+    // prendre le meme verrou que les ecrivains. `lock_env_guard` ne serialise
+    // que les ecrivains entre eux ; un lecteur non verrouille court a cote
+    // d'eux et observe un environnement a moitie pose.
+    let _guard = lock_env_guard();
     let mut controller = VectorBatchController::new(&controller_test_config());
     let matured = controller.observe(
         10_000,
@@ -1407,6 +1427,11 @@ fn test_vector_batch_controller_preserves_last_completed_window_during_warmup() 
 
 #[test]
 fn test_vector_batch_controller_uses_idle_target_during_warmup_when_backlog_is_meaningful() {
+    // REQ-AXO-902469 — LECTEUR de l'etat derive de l'environnement : il doit
+    // prendre le meme verrou que les ecrivains. `lock_env_guard` ne serialise
+    // que les ecrivains entre eux ; un lecteur non verrouille court a cote
+    // d'eux et observe un environnement a moitie pose.
+    let _guard = lock_env_guard();
     let mut controller = VectorBatchController::new(&controller_test_config());
 
     let diagnostics = controller.observe(
@@ -1672,6 +1697,11 @@ fn test_persistent_low_density_underfeed_opens_file_window_more_aggressively() {
 
 #[test]
 fn test_vector_batch_controller_does_not_expand_file_window_when_chunk_density_is_already_good() {
+    // REQ-AXO-902469 — LECTEUR de l'etat derive de l'environnement : il doit
+    // prendre le meme verrou que les ecrivains. `lock_env_guard` ne serialise
+    // que les ecrivains entre eux ; un lecteur non verrouille court a cote
+    // d'eux et observe un environnement a moitie pose.
+    let _guard = lock_env_guard();
     let cpu_config = EmbeddingLaneConfig {
         query_workers: 1,
         vector_workers: 1,
@@ -1698,6 +1728,11 @@ fn test_vector_batch_controller_does_not_expand_file_window_when_chunk_density_i
 
 #[test]
 fn test_vector_batch_controller_shrinks_aggressively_under_gpu_memory_pressure() {
+    // REQ-AXO-902469 — LECTEUR de l'etat derive de l'environnement : il doit
+    // prendre le meme verrou que les ecrivains. `lock_env_guard` ne serialise
+    // que les ecrivains entre eux ; un lecteur non verrouille court a cote
+    // d'eux et observe un environnement a moitie pose.
+    let _guard = lock_env_guard();
     let mut controller = VectorBatchController::new(&controller_test_config());
     controller.observe(
         10_000,
@@ -1721,6 +1756,11 @@ fn test_vector_batch_controller_shrinks_aggressively_under_gpu_memory_pressure()
 
 #[test]
 fn test_vector_batch_controller_surfaces_gpu_memory_pressure_during_warmup() {
+    // REQ-AXO-902469 — LECTEUR de l'etat derive de l'environnement : il doit
+    // prendre le meme verrou que les ecrivains. `lock_env_guard` ne serialise
+    // que les ecrivains entre eux ; un lecteur non verrouille court a cote
+    // d'eux et observe un environnement a moitie pose.
+    let _guard = lock_env_guard();
     let mut controller = VectorBatchController::new(&controller_test_config());
 
     let diagnostics = controller.observe(
