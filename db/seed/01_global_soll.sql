@@ -539,7 +539,9 @@ Le `status` seul est INVISIBLE au scan d''un LLM : les LLM lisent le CORPS. Un n
 
 ## Marqueurs acceptés
 
-`superséd` (couvre supersédé / superséded / supersédée) · `superseded` (couvre « superseded by » et « SUPERSEDED (session N) par ») · `remplacé par` / `remplacée par` · `remplacé →` / `remplacée →` · `✅ résolu` · `caduc` · `pointeur canonique` · `obsolète`. Comparaison **sans casse**, sur le corps entier.
+`superséd` (couvre supersédé / superséded / supersédée) · `superseded` (couvre « superseded by » et « SUPERSEDED (session N) par ») · `remplacé par` / `remplacée par` · `remplacé →` / `remplacée →` · `remplacé 20` / `remplacée 20` · `réfuté →` / `réfutée →` · `réfuté 20` / `réfutée 20` · `✅ résolu` · `résolu 20` / `résolue 20` · `caduc` · `pointeur canonique` · `obsolète`. Comparaison **sans casse**, sur le corps entier.
+
+**Pourquoi les formes en `20`** (REQ-AXO-902464, signalement VPC) : `GUI-PRO-110` prescrit `⚠ REMPLACÉ <date> → <ID>`, où la DATE s''''intercale entre le verbe et la flèche — `remplacé →` ne matche donc pas la forme même que la guideline demande. Le marqueur peut aussi porter du gras (`✅ **RÉSOLU 2026-08-15 →`), ce qui casse `✅ résolu`. S''''ancrer sur `<verbe> 20` traverse les deux variantes (emoji, gras) sans ambiguïté : « remplacé 2026 » n''''est jamais de la prose métier. **RÉFUTÉ, ne pas re-tenter** : les verbes NUS (`remplacé`, `résolu`, `réfuté`) — dans 16 nœuds mesurés le mot appartient au texte métier et n''''annonce aucun retrait.
 
 **Révision 2026-08-22** — la liste d''origine n''acceptait AUCUNE des deux formes que `GUI-PRO-110` PRESCRIT (`✅ RÉSOLU <date> → <ID>`, `⚠️ REMPLACÉ → <ID>`) : un tenant qui avait SUIVI la prescription était signalé en violation (signalé par TE2, 4 faux positifs sur 5). `superseded by` exigeait aussi le `by` collé, ratant « SUPERSEDED (session 77) par … ». Élargissement mesuré sur le parc : 224 → 169 nœuds signalés, 55 faux positifs éteints. `remplacé` et `résolu` NUS refusés délibérément : dans les 16 cas qu''ils auraient éteints le mot appartient au texte métier et n''annonce aucun retrait.
 
@@ -551,7 +553,7 @@ La liste est FERMÉE, et c''''est délibéré : accepter une expression réguli�
 
 ## RÉPARATION
 
-`soll_manager(action=append_section)` avec un en-tête qui dit le retrait et pointe le remplaçant. Ne PAS réécrire le corps entier : la trace historique a de la valeur, c''''est l''''avertissement qui manque.', 'current', '{"soll_rule": {"subject_status_in": ["superseded"], "body_contains_any": ["superséd", "superseded", "remplacé par", "remplacée par", "remplacé →", "remplacée →", "✅ résolu", "caduc", "pointeur canonique", "obsolète"], "message": "nœud retiré dont le CORPS ne l''annonce pas — un LLM le lira comme vivant"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
+`soll_manager(action=append_section)` avec un en-tête qui dit le retrait et pointe le remplaçant. Ne PAS réécrire le corps entier : la trace historique a de la valeur, c''''est l''''avertissement qui manque.', 'current', '{"soll_rule": {"subject_status_in": ["superseded"], "body_contains_any": ["superséd", "superseded", "remplacé par", "remplacée par", "remplacé →", "remplacée →", "remplacé 20", "remplacée 20", "réfuté →", "réfutée →", "réfuté 20", "réfutée 20", "✅ résolu", "résolu 20", "résolue 20", "caduc", "pointeur canonique", "obsolète"], "message": "nœud retiré dont le CORPS ne l''annonce pas — un LLM le lira comme vivant"}, "enforcement": "advisory", "phase": "soll-audit"}'::jsonb)
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
