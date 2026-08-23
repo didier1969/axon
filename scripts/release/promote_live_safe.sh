@@ -546,9 +546,21 @@ BROADCAST_PREFLIGHT_SENT=1
 # reposer sur une discipline. Le contournement manuel (worktree détaché) était
 # déjà validé par VPC ; le câbler ici le rend systématique.
 #
-# Le worktree ne déplace QUE les sources : `CARGO_TARGET_DIR` reste la cible
-# canonique et les artefacts sont réinstallés dans `bin/` — donc les étapes 2 à 7
-# lisent exactement ce qu'elles lisaient avant.
+# Le worktree déplace les sources ET la cible de compilation, et c'est voulu.
+#
+# Ce commentaire affirmait le contraire — « `CARGO_TARGET_DIR` reste la cible
+# canonique » — et le code posait effectivement cette variable. Elle n'a jamais
+# redirigé le build : cargo tourne dans `devenv shell`, où `devenv.nix` réassigne
+# `CARGO_TARGET_DIR = DEVENV_ROOT/.axon/cargo-target`, donc le target DU WORKTREE.
+# Elle ne redirigeait que l'INSTALLATION, restée hors du shell — d'où un promote qui
+# compile ici et publie le binaire de là. Le 2026-08-23 : 8 min 24 de compilation
+# jetées, l'ancien binaire servi à 75 tenants sous la nouvelle étiquette, quatre
+# gardes vertes (REQ-AXO-902464).
+#
+# Désormais : une seule cible, celle du worktree, et `setup.sh` installe depuis la
+# cible que le build lui RAPPORTE. `AXON_BUILD_ID` est posé pour que `build.rs`
+# grave le SHA promu dans le binaire — c'est ce que `preflight.sh` vérifie ensuite
+# en lisant le CONTENU, seul contrôle qui ne soit pas auto-référentiel.
 build_from_frozen_worktree() {
   local sha="$1"
   local worktree="${TMPDIR:-/tmp}/axon-promote-${sha:0:12}"
@@ -560,7 +572,12 @@ build_from_frozen_worktree() {
   # `git worktree list` se remplit de squelettes et le prochain `add` échoue.
   trap 'git -C "$ROOT_DIR" worktree remove --force "'"$worktree"'" >/dev/null 2>&1 || true' RETURN
 
-  CARGO_TARGET_DIR="$ROOT_DIR/.axon/cargo-target" \
+  # `AXON_BUILD_ID` = l'identité du SHA promu, lue DANS le worktree détaché : c'est
+  # elle que `build.rs` grave dans chaque binaire, et que `preflight.sh` va chercher
+  # dans le contenu publié. Sans elle, le binaire ne pourrait pas dire d'où il sort.
+  local frozen_build_id
+  frozen_build_id="$(git -C "$worktree" describe --tags --always --dirty)"
+  AXON_BUILD_ID="$frozen_build_id" \
     "$worktree/scripts/axon" setup --artifact-only
 
   # Les artefacts sont produits dans le worktree ; le reste du promote lit
@@ -719,11 +736,17 @@ run_step 2e test_targets_compile test_targets_compile_step
 
 # --- Step 3: preflight — DÉPLACÉ juste après le build (REQ-AXO-902454) ---
 # Il tournait ICI, après `dev_restart`. Or `axon-dev start brain --fast` recompile
-# en profil RELEASE dans le MÊME `.axon/cargo-target` que l'étape 1, donc au moment
-# où la garde s'exécutait, l'artefact canonique du workspace n'était plus celui dont
-# l'étape 1 avait enregistré l'empreinte dans `bin/*.build-info`.
+# en profil RELEASE dans le `.axon/cargo-target` du WORKSPACE, donc au moment où la
+# garde s'exécutait, le binaire qu'elle prenait pour « la cible canonique » n'était
+# plus celui dont l'étape 1 avait enregistré l'empreinte dans `bin/*.build-info`.
 # Le promote invalidait sa propre porte : « Workspace artifact drift » à chaque fois,
 # 100 % du temps, sur un arbre parfaitement propre.
+#
+# REQ-AXO-902464 : la garde ne recalcule plus de « cible canonique ». Elle compare
+# l'artefact à la source que le build a ENREGISTRÉE (`AXON_ARTIFACT_SOURCE`, le
+# target du worktree figé), qu'aucune étape ultérieure ne touche. Le déplacement en
+# 1b reste juste ; ce qui rendait la garde fragile — supposer que tout se compile
+# dans un unique target partagé — a disparu (voir aussi REQ-AXO-902460).
 ensure_head_stable
 
 # --- Step 4: manifest (JOIN the background job launched before step 2, REQ-AXO-902188) ---

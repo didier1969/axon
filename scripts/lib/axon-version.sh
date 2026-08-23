@@ -50,6 +50,29 @@ axon_file_sha256() {
     sha256sum "$path" | awk '{print $1}'
 }
 
+# REQ-AXO-902464 — le seul contrôle d'artefact qui ne soit pas auto-référentiel.
+#
+# Toutes les autres vérifications de release comparent deux dérivés du MÊME
+# fichier : le sha du build-info au sha réel, l'étiquette `AXON_BUILD_ID` à
+# `git describe`, l'artefact à la cible dont il dit sortir. Le 2026-08-23 elles
+# étaient TOUTES vraies sur un binaire vieux d'un jour, parce qu'aucune ne lisait
+# le binaire. Celle-ci le lit : `build.rs` grave l'identité de build dans le
+# binaire (`AXON_COMPILED_BUILD_ID`), et on vérifie qu'elle y est.
+#
+# Renvoie 0 si l'artefact PORTE cette identité, non-zéro sinon — y compris quand
+# l'artefact est absent ou l'identité vide (`grep -F ''` matcherait tout : un
+# contrôle qui valide n'importe quoi se lit comme un verdict, et c'est pire que
+# pas de contrôle du tout).
+axon_artifact_carries_build_id() {
+    local artifact="${1:-}"
+    local build_id="${2:-}"
+
+    [[ -n "$artifact" && -f "$artifact" ]] || return 1
+    [[ -n "$build_id" ]] || return 1
+
+    strings -a "$artifact" 2>/dev/null | grep -qF -- "$build_id"
+}
+
 axon_write_export_file() {
     local path="$1"
     shift

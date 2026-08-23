@@ -153,8 +153,24 @@ devenv shell -- bash -lc './scripts/validate-devenv.sh'
 BIN_DIR="$PROJECT_ROOT/bin"
 RUST_CORE_DIR="$PROJECT_ROOT/src/axon-core"
 TARGET_BIN="$BIN_DIR/axon-core"
-CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
 mkdir -p "$BIN_DIR"
+
+# REQ-AXO-902464 — la cible de compilation est rapportée PAR LE BUILD, jamais
+# recalculée après coup.
+#
+# Ici vivait `CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"`,
+# que plus personne ne lisait, pendant que `install_release_bin` refaisait la même
+# résolution de son côté. Deux résolutions pour une seule question, et elles n'ont
+# pas la même réponse : cargo tourne DANS `devenv shell`, où `devenv.nix` réassigne
+# `CARGO_TARGET_DIR = DEVENV_ROOT/.axon/cargo-target` ; l'installation tourne
+# DEHORS, où la variable de l'appelant est encore en place. Le 2026-08-23, un
+# promote a donc compilé 8 min 24 dans le worktree figé et installé le binaire de
+# la veille pris dans le workspace — toutes gardes vertes.
+#
+# On demande donc au shell qui compile de dire où il a écrit, et on installe de là.
+AXON_EFFECTIVE_CARGO_TARGET_FILE="$(mktemp -t axon-cargo-target.XXXXXX)"
+trap 'rm -f "$AXON_EFFECTIVE_CARGO_TARGET_FILE"' EXIT
+AXON_EFFECTIVE_CARGO_TARGET=""
 
 # REQ-AXO-902267 — bound build parallelism by AVAILABLE memory, not by core count.
 # `cargo` defaults to one rustc per core (16 on this host) and a release rustc here is
@@ -166,14 +182,23 @@ mkdir -p "$BIN_DIR"
 # `AXON_BUILD_JOBS` overrides it outright.
 CARGO_JOBS="$(axon_resolve_cargo_jobs)"
 echo "🔨 Building Rust core (-j ${CARGO_JOBS}: $(axon_available_ram_gb) GB free, swap $(axon_swap_used_pct)%, $(axon_detect_host_cpu_cores) cores)..."
-devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release --bins -j ${CARGO_JOBS}"
+devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release --bins -j ${CARGO_JOBS} && printf '%s\n' \"\${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}\" > '$AXON_EFFECTIVE_CARGO_TARGET_FILE'"
+
+AXON_EFFECTIVE_CARGO_TARGET="$(tr -d '\n' < "$AXON_EFFECTIVE_CARGO_TARGET_FILE" 2>/dev/null || true)"
+if [[ -z "$AXON_EFFECTIVE_CARGO_TARGET" || ! -d "$AXON_EFFECTIVE_CARGO_TARGET" ]]; then
+    echo "❌ Le build n'a pas rapporté sa cible de compilation (CARGO_TARGET_DIR effectif)."
+    echo "   Sans elle, l'installation devrait deviner d'où copier — c'est exactement"
+    echo "   la devinette qui a publié l'ancien binaire le 2026-08-23 (REQ-AXO-902464)."
+    exit 1
+fi
+echo "📦 Cible de compilation rapportée par le build : $AXON_EFFECTIVE_CARGO_TARGET"
 
 install_release_bin() {
     local bin_name="$1"
     local release_bin
     local target_bin
     local build_info_path
-    release_bin="$(axon_workspace_release_bin_for "$PROJECT_ROOT" "$bin_name")"
+    release_bin="$AXON_EFFECTIVE_CARGO_TARGET/release/$bin_name"
     target_bin="$BIN_DIR/$bin_name"
     build_info_path="$(axon_build_info_path_for "$PROJECT_ROOT" "$bin_name")"
     if [[ ! -x "$release_bin" ]]; then

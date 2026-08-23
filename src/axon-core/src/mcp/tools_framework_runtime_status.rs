@@ -404,6 +404,13 @@ impl McpServer {
         let release_version =
             std::env::var("AXON_RELEASE_VERSION").unwrap_or_else(|_| package_version.clone());
         let build_id = std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| package_version.clone());
+        // REQ-AXO-902464 — `build_id` ci-dessus est ce que l'ENVIRONNEMENT déclare
+        // (`bin/*.build-info`, posé à côté du binaire par le déploiement). Il a servi
+        // une journée entière à annoncer une version que le binaire ne portait pas.
+        // `compiled_build_id` est gravé DANS ce binaire à la compilation : les deux
+        // ensemble rendent la dérive lisible au lieu d'être un mystère opérationnel.
+        let compiled_build_id = crate::build_identity::COMPILED_BUILD_ID;
+        let build_identity_state = crate::build_identity::identity_match(&build_id);
         let install_generation =
             std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string());
         let async_allowlisted_tools = McpServer::ASYNC_JOB_TOOL_NAMES
@@ -1355,6 +1362,8 @@ impl McpServer {
                     "release_version": release_version,
                     "package_version": package_version,
                     "build_id": build_id,
+                    "compiled_build_id": compiled_build_id,
+                    "build_identity": build_identity_state.as_str(),
                     "install_generation": install_generation
                 },
                 "file_vectorization_queue": {

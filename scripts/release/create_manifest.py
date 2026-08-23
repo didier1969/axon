@@ -128,10 +128,24 @@ def main() -> int:
             or sha256_file(path) != expected_sha
         )
 
+    # REQ-AXO-902464 — le build-info archivé décrit CETTE release ; réutiliser celui
+    # d'une autre génération réinjecte son identité dans `bin/` au cutover.
+    # C'est ce qui s'est produit le 2026-08-23 : l'archive du 2026-08-22 21:07 portait
+    # `AXON_BUILD_ID=v0.8.0-1586-g43880d41`, le binaire était identique octet pour
+    # octet, donc la condition « n'existe pas » était fausse et le build-info neuf
+    # n'a jamais été copié. Le manifeste annonçait 1590, le fichier sur disque disait
+    # 1586. Un « déjà là » n'est pas un « à jour ».
+    def _archived_build_info_is_stale(
+        archived: pathlib.Path, current: pathlib.Path
+    ) -> bool:
+        if not archived.exists() or archived.stat().st_size == 0:
+            return True
+        return archived.read_bytes() != current.read_bytes()
+
     if _archive_stale(archived_artifact, artifact_sha):
         shutil.copy2(artifact, archived_artifact)
-    if build_info_path.exists() and (
-        not archived_build_info.exists() or archived_build_info.stat().st_size == 0
+    if build_info_path.exists() and _archived_build_info_is_stale(
+        archived_build_info, build_info_path
     ):
         shutil.copy2(build_info_path, archived_build_info)
 
@@ -193,9 +207,14 @@ def main() -> int:
         archived_bin = bin_root / bin_name
         archived_bin_build_info = bin_root / f"{bin_name}.build-info"
         bin_root.mkdir(parents=True, exist_ok=True)
-        if not archived_bin.exists():
+        # Mêmes règles que pour l'artefact primaire : une archive PRÉSENTE n'est pas
+        # une archive JUSTE (REQ-AXO-902124 pour le binaire, REQ-AXO-902464 pour son
+        # build-info — c'est par cette branche que l'identité de la veille revenait).
+        if _archive_stale(archived_bin, bin_sha):
             shutil.copy2(bin_path, archived_bin)
-        if build_info.exists() and not archived_bin_build_info.exists():
+        if build_info.exists() and _archived_build_info_is_stale(
+            archived_bin_build_info, build_info
+        ):
             shutil.copy2(build_info, archived_bin_build_info)
         manifest["artifacts"][bin_name] = {
             "path": str(archived_bin),

@@ -4,6 +4,7 @@ extern crate self as axon_core;
 
 pub mod bench_pipeline_stages;
 pub mod bridge;
+pub mod build_identity;
 pub mod code_chunker;
 pub mod config;
 pub mod contract;
