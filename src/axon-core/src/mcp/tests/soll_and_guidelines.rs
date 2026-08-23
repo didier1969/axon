@@ -15692,3 +15692,48 @@ fn every_rule_id_cited_by_a_violation_opens_with_soll_get() {
         );
     }
 }
+
+/// REQ-AXO-902466 — une arête relie DEUX projets ; n'en rafraîchir qu'un laisse
+/// l'autre affirmer que l'arête n'existe pas.
+///
+/// VPC (courrier 15091) et OPV (courrier 15106) ont signalé le même jour un
+/// `soll_validate` qui déclarait absente une arête que le writer voyait en base.
+/// Le writer lit PG, le moteur de règles lit le snapshot RAM ; quand le snapshot
+/// retarde, le verdict n'annonce pas « je n'ai pas encore vu l'arête », il affirme
+/// une propriété du graphe. `REQ-AXO-902060` avait fermé le cas mono-projet ; le
+/// `find_map` qu'il a posé ne rend qu'UN projet, et depuis `REQ-AXO-902461` les
+/// supersessions cross-project deviennent la norme.
+#[test]
+fn cross_project_edge_invalidates_both_ends_902466() {
+    let cross_project = serde_json::json!({
+        "action": "link",
+        "entity": "requirement",
+        "data": { "source_id": "REQ-TE2-104", "target_id": "REQ-VPC-067",
+                  "relation_type": "SUPERSEDES" }
+    });
+    assert_eq!(
+        McpServer::soll_mutation_project_codes_in_payload(&cross_project),
+        vec!["TE2".to_string(), "VPC".to_string()],
+        "les DEUX bouts doivent être rafraîchis : le tenant chez qui la violation \
+         est comptée est justement la CIBLE, pas la source"
+    );
+
+    // Mono-projet : un seul code, pas de doublon même si trois clés le nomment.
+    let same_project = serde_json::json!({
+        "action": "link",
+        "data": { "source_id": "DEC-VPC-021", "target_id": "DEC-VPC-009",
+                  "attach_to": "PIL-VPC-001" }
+    });
+    assert_eq!(
+        McpServer::soll_mutation_project_codes_in_payload(&same_project),
+        vec!["VPC".to_string()],
+        "un même projet nommé trois fois ne doit être invalidé qu'une fois"
+    );
+
+    // Rien à dériver : on n'invente pas un projet à invalider.
+    let no_data = serde_json::json!({ "action": "link" });
+    assert!(
+        McpServer::soll_mutation_project_codes_in_payload(&no_data).is_empty(),
+        "sans charge utile, aucun projet ne doit être supposé"
+    );
+}

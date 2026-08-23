@@ -1033,6 +1033,13 @@ impl McpServer {
             // SOLL snapshot is NOT invalidated after a link, so soll_validate
             // reads a stale RAM snapshot and reports edges that exist as missing
             // (llm_feedback id8, SNN).
+            //
+            // REQ-AXO-902466 — ce `find_map` ne rend QU'UN projet, le premier
+            // trouvé : il désigne celui dont les docs dérivées sont rendues. Une
+            // arête CROSS-PROJECT en nomme deux, et le tenant qui subit la
+            // violation est souvent l'autre. L'invalidation de cache, elle, passe
+            // désormais par `soll_mutation_project_codes_in_payload`, qui les
+            // rend TOUS.
             "soll_manager" => arguments.get("data").and_then(|data| {
                 ["source_id", "id", "target_id", "attach_to"]
                     .iter()
@@ -1042,6 +1049,34 @@ impl McpServer {
             }),
             _ => None,
         }
+    }
+
+    /// REQ-AXO-902466 — TOUS les projets que la charge utile d'une mutation SOLL
+    /// nomme, dans l'ordre où ils apparaissent, sans doublon.
+    ///
+    /// Une arête relie DEUX nœuds, et depuis `REQ-AXO-902461` le retrait est
+    /// exprimable entre deux nœuds quelconques : les supersessions cross-project
+    /// passent de l'exception à la norme. N'invalider que le premier projet trouvé
+    /// laisse l'autre affirmer que l'arête n'existe pas — c'est ce que VPC et OPV
+    /// ont signalé le même jour (courriers 15091 / 15106), et le tenant périmé est
+    /// justement celui chez qui la violation est comptée.
+    fn soll_mutation_project_codes_in_payload(arguments: &Value) -> Vec<String> {
+        let Some(data) = arguments.get("data") else {
+            return Vec::new();
+        };
+        let mut codes: Vec<String> = Vec::new();
+        for key in ["source_id", "id", "target_id", "attach_to"] {
+            if let Some(code) = data
+                .get(key)
+                .and_then(|value| value.as_str())
+                .and_then(Self::project_code_from_soll_entity_id)
+            {
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+        }
+        codes
     }
 
     fn attach_derived_docs_refresh_metadata(
@@ -1057,6 +1092,18 @@ impl McpServer {
                 .unwrap_or(false)
         {
             return result;
+        }
+
+        // REQ-AXO-902466 — invalider les DEUX bouts d'une arête avant de choisir
+        // celui dont on rend les docs. Le rendu des docs dérivées reste
+        // mono-projet (c'est une projection humaine, PIL-AXO-009) ; la fraîcheur
+        // du snapshot, elle, conditionne un VERDICT rendu à un LLM.
+        if normalized_name == "soll_manager" {
+            for code in Self::soll_mutation_project_codes_in_payload(arguments) {
+                if let Ok(resolved) = self.resolve_project_code(&code) {
+                    self.soll_cache.invalidate(&resolved);
+                }
+            }
         }
 
         let mut enriched = result;
