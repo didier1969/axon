@@ -1610,4 +1610,97 @@ mod tests {
         );
         assert!(parse_soll_rule("GUI-TST-006", "x", &json!({ "mode": "peut-être" })).is_none());
     }
+
+    /// REQ-AXO-902465 — la LISTE de fragments livrée dans le seed doit reconnaître
+    /// les formes que `GUI-PRO-110` prescrit d'écrire.
+    ///
+    /// Les tests ci-dessus éprouvent le MOTEUR avec des fragments inventés sur
+    /// place ; aucun n'éprouvait la DONNÉE réellement livrée. C'est par là que le
+    /// défaut est passé DEUX fois : `GUI-PRO-130` a signalé en violation des
+    /// tenants qui avaient OBÉI à `GUI-PRO-110`, d'abord parce que la flèche
+    /// remplaçait la préposition, puis parce que la DATE s'intercale entre le
+    /// verbe et la flèche et que le marqueur peut porter du gras. Une règle de
+    /// reconnaissance de format se falsifie contre les chaînes réellement
+    /// écrites, jamais contre la spécification qui les prescrit.
+    #[test]
+    fn the_shipped_gui_pro_130_fragments_accept_every_form_gui_pro_110_prescribes() {
+        let fragments = shipped_gui_pro_130_fragments();
+        assert!(
+            fragments.len() >= 10,
+            "liste de fragments suspecte ({} entrées) — extraction du seed cassée ?",
+            fragments.len()
+        );
+
+        // Formes prescrites par GUI-PRO-110, telles qu'écrites par de vrais
+        // tenants (FSF, VPC, ROM, INK) — pas des exemples reconstruits.
+        for prescribed in [
+            "⚠ REMPLACÉ 2026-06-19 → DEC-VPC-021 (déploiement réel)",
+            "⚠️ REMPLACÉ 2026-06-12 → GUI-PRO-111 + skill `/axon-driven-development`",
+            "⚠️ REMPLACÉ → DEC-AXO-083",
+            "✅ **RÉSOLU 2026-08-15 → REQ-TE2-104** — sans objet.",
+            "⚠️ RÉFUTÉ 2026-08-16 → REQ-FSF-482. Ma cause est FAUSSE.",
+            "## Superseded by VIS-AXO-001 canonical (session 53)",
+            "SUPERSÉDÉ (session 77) par CPT-AXO-054",
+            "Ce nœud est CADUC depuis la migration.",
+            "**Pointeur canonique pour toute lecture future** : `PIL-AXO-004`.",
+        ] {
+            assert!(
+                body_matches_fragments(prescribed, &fragments),
+                "GUI-PRO-130 ne reconnaît PAS une forme que GUI-PRO-110 prescrit — \
+                 le tenant qui a obéi sera signalé en violation :\n  {prescribed}"
+            );
+        }
+
+        // Le revers : un corps qui n'annonce AUCUN retrait ne doit pas passer,
+        // sinon la règle déclare conformes des nœuds qui n'avertissent personne.
+        // Les deux premiers portent le verbe NU — refusé délibérément deux fois,
+        // parce que dans ces cas le mot appartient au texte métier.
+        for silent in [
+            "Le module remplace la boucle de drain par un ordonnancement trié.",
+            "Cette hypothèse a été résolue par la mesure du 2026-07-04.",
+            "Ce concept décrit le pipeline v2 et ses trois étages A1/A2/A3.",
+        ] {
+            assert!(
+                !body_matches_fragments(silent, &fragments),
+                "GUI-PRO-130 accepte un corps qui n'annonce aucun retrait — \
+                 faux négatif, un nœud retiré passerait pour vivant :\n  {silent}"
+            );
+        }
+    }
+
+    /// Même sémantique que `RulePredicate::BodyContainsAny` : minuscules Unicode
+    /// des deux côtés, puis sous-chaîne. Reproduite ici pour que la garde éprouve
+    /// la RÈGLE telle qu'elle sera évaluée, sans dépendre d'un snapshot.
+    fn body_matches_fragments(body: &str, fragments: &[String]) -> bool {
+        let body = body.to_lowercase();
+        fragments
+            .iter()
+            .any(|fragment| body.contains(&fragment.to_lowercase()))
+    }
+
+    /// Extrait `body_contains_any` de la définition de `GUI-PRO-130` telle qu'elle
+    /// est SEMÉE. Le seed est la source d'amorçage de tous les tenants : une
+    /// divergence entre lui et la base se paie au prochain bootstrap.
+    fn shipped_gui_pro_130_fragments() -> Vec<String> {
+        let seed_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../db/seed/01_global_soll.sql");
+        let seed = std::fs::read_to_string(&seed_path)
+            .unwrap_or_else(|e| panic!("seed illisible ({}) : {e}", seed_path.display()));
+
+        let row = seed
+            .split("VALUES ('GUI-PRO-130'")
+            .nth(1)
+            .expect("la ligne GUI-PRO-130 a disparu du seed");
+        let after = row
+            .split("\"body_contains_any\": [")
+            .nth(1)
+            .expect("GUI-PRO-130 n'a plus de prédicat body_contains_any dans le seed");
+        let list = after
+            .split(']')
+            .next()
+            .expect("liste body_contains_any non terminée dans le seed");
+
+        serde_json::from_str::<Vec<String>>(&format!("[{list}]"))
+            .expect("body_contains_any du seed n'est pas une liste JSON de chaînes")
+    }
 }
