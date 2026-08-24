@@ -164,17 +164,35 @@ impl GraphStore {
         Self::canonicalize_sql_text(value).replace('\'', "''")
     }
 
+    /// REQ-AXO-902423 / REQ-AXO-902450 / REQ-AXO-902376 — l'identifiant d'un
+    /// symbole porte TOUJOURS le fichier qui le définit.
+    ///
+    /// Cette fonction omettait le chemin dès que le nom contenait `.` ou `::`,
+    /// au motif qu'un nom « globalement qualifié » se suffirait à lui-même. Il
+    /// ne se suffit pas : le nom est une convention de LANGAGE, pas une adresse.
+    /// Elixir nomme ses fonctions `MyApp.Module.fun`, donc *toutes* ses
+    /// définitions tombaient dans la branche courte.
+    ///
+    /// Ampleur mesurée le 2026-08-24, avant correctif : **101 029 symboles sur
+    /// 372 767 (27,1 %)** portaient un id à deux segments, introuvable par
+    /// chemin. Gradient par extension — `.ex` 90,2 %, `.ts` 25,5 %, `.rs` 1,8 %
+    /// — il suit la convention de nommage, pas la qualité de l'extracteur.
+    ///
+    /// Conséquence en aval : `structural_health_index`, `ist_centrality_pagerank`,
+    /// `orphan_clusters` et `main_sequence` calculaient sur un dénominateur faux
+    /// de 27 %. Aucun n'était citable.
+    ///
+    /// `REQ-AXO-902203` avait déjà rencontré ce défaut par un autre bout — un
+    /// appelant `Class::method` produisait un fantôme `PROJ::Class::method` — et
+    /// l'avait contourné dans `resolve_call_source_id` en raccourcissant le nom.
+    /// Le contournement reste correct ; la cause, elle, est ici.
     fn symbol_id(project_code: &str, path: &str, name: &str) -> String {
-        if Self::is_globally_qualified_symbol(name) {
-            format!("{}::{}", project_code, name)
-        } else {
-            format!(
-                "{}::{}::{}",
-                project_code,
-                Self::symbol_path_namespace(path),
-                name
-            )
-        }
+        format!(
+            "{}::{}::{}",
+            project_code,
+            Self::symbol_path_namespace(path),
+            name
+        )
     }
 
     /// REQ-AXO-140 — resolve a CALLS/CALLS_NIF target to the callee's canonical
@@ -222,9 +240,15 @@ impl GraphStore {
         receiver: Option<&str>,
         name_index: &std::collections::HashMap<String, Vec<String>>,
     ) -> String {
-        if Self::is_globally_qualified_symbol(callee_name) {
-            return Self::symbol_id(project_code, caller_path, callee_name);
-        }
+        // REQ-AXO-902423 — le court-circuit « nom qualifié » a été RETIRÉ.
+        //
+        // Il renvoyait un id local sans jamais consulter l'index des noms : un
+        // appel Elixir `MyApp.Mod.fun()` ne pouvait donc STRUCTURELLEMENT pas
+        // atteindre la définition `MyApp.Mod.fun`, même présente dans le même
+        // lot — et comme Elixir qualifie TOUS ses noms, aucun appel Elixir ne
+        // se résolvait jamais. L'index est désormais consulté pour tous les
+        // noms ; la prudence de REQ-AXO-902456 est intacte, puisque seule une
+        // définition UNIQUE résout et que le receveur externe est écarté avant.
         if receiver.is_some_and(|r| !Self::receiver_is_internal(r)) {
             return Self::symbol_id(project_code, caller_path, callee_name);
         }
@@ -293,10 +317,6 @@ impl GraphStore {
             return Self::chunk_id(symbol_id);
         }
         format!("{}::chunk::part-{:02}", symbol_id, part_index)
-    }
-
-    fn is_globally_qualified_symbol(name: &str) -> bool {
-        name.contains('.') || name.contains("::")
     }
 
     fn symbol_path_namespace(path: &str) -> String {
@@ -1950,7 +1970,7 @@ mod req_axo_140_call_resolution {
         );
 
         // `tokio::spawn(…)` — le parser découpe le chemin et met `tokio` en
-        // receveur, donc `is_globally_qualified_symbol` ne le voit plus passer.
+        // receveur : c'est le test du receveur externe qui écarte cet appel.
         let tokio_spawn = GraphStore::resolve_call_target_id_with_receiver(
             "PRJ",
             "prj/notify.rs",
@@ -2078,5 +2098,120 @@ mod req_axo_140_call_resolution {
         let idx = index(&[("local", &id)]);
         let resolved = GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "local", None, &idx);
         assert_eq!(resolved, id);
+    }
+
+    /// REQ-AXO-902423 / REQ-AXO-902450 / REQ-AXO-902376 — **un symbole sans
+    /// chemin n'est pas un symbole.**
+    ///
+    /// `symbol_id` omettait le chemin du fichier dès que le nom contenait `.`
+    /// ou `::`, au motif qu'un nom « globalement qualifié » se suffirait. Il ne
+    /// se suffit pas : l'identifiant devient `PROJ::Nom`, introuvable par
+    /// chemin, et le défaut frappe au site de DÉFINITION.
+    ///
+    /// Mesuré sur le parc le 2026-08-24 : **101 029 symboles sur 372 767
+    /// (27,1 %)** portent un id à deux segments. Le gradient par extension suit
+    /// exactement la convention de nommage du langage — `.ex` 90,2 %, `.ts`
+    /// 25,5 %, `.rs` 1,8 % — parce qu'Elixir nomme ses fonctions
+    /// `MyApp.Module.fun`. Ce n'est donc PAS un extracteur Elixir manquant.
+    ///
+    /// Tant que c'est vrai, le dénominateur de `structural_health_index`, de
+    /// `ist_centrality_pagerank`, d'`orphan_clusters` et de `main_sequence` est
+    /// faux de 27 % : aucun de ces verdicts n'est citable.
+    #[test]
+    fn a_definition_id_always_carries_its_defining_file() {
+        // Elixir : le nom EST pointé par convention de langage.
+        let ex = GraphStore::symbol_id("FSF", "prj/lib/privacy.ex", "FiscalyAi.Privacy.amount_bucket");
+        assert!(
+            ex.split("::").count() >= 3,
+            "un id de definition doit porter son fichier, got {ex}"
+        );
+        assert!(
+            ex.contains("privacy.ex"),
+            "le fichier definissant doit rester lisible dans l'id, got {ex}"
+        );
+
+        // Rust : un nom `::`-qualifié tombait dans le même trou.
+        let rs = GraphStore::symbol_id("PRJ", "prj/a.rs", "modx::foo");
+        assert!(
+            rs.split("::").count() >= 3,
+            "un nom Rust qualifie ne doit pas non plus perdre son fichier, got {rs}"
+        );
+
+        // Le cas déjà sain ne change pas.
+        let plain = GraphStore::symbol_id("PRJ", "prj/a.rs", "libre");
+        assert!(plain.contains("a.rs") && plain.ends_with("::libre"));
+    }
+
+    /// Corollaire de résolution : une fois la définition réparée, l'APPEL doit
+    /// pouvoir la retrouver.
+    ///
+    /// Le court-circuit sur « nom globalement qualifié » renvoyait un id local
+    /// SANS consulter l'index des noms — donc un appel Elixir
+    /// `MyApp.Mod.fun()` ne pouvait structurellement jamais atteindre la
+    /// définition `MyApp.Mod.fun`, même présente dans le même lot.
+    ///
+    /// La prudence de `REQ-AXO-902456` est conservée telle quelle : on ne
+    /// résout que sur une définition UNIQUE, jamais sur une devinette.
+    #[test]
+    fn a_qualified_call_resolves_to_its_unique_definition() {
+        let def = GraphStore::symbol_id("FSF", "prj/lib/privacy.ex", "FiscalyAi.Privacy.amount_bucket");
+        let idx = index(&[("FiscalyAi.Privacy.amount_bucket", &def)]);
+        let resolved = GraphStore::resolve_call_target_id_with_receiver(
+            "FSF",
+            "prj/lib/caller.ex",
+            "FiscalyAi.Privacy.amount_bucket",
+            None,
+            &idx,
+        );
+        assert_eq!(
+            resolved, def,
+            "un appel qualifie dont la definition est UNIQUE doit l'atteindre"
+        );
+    }
+
+    /// Contrôle négatif — sans lui la garde ci-dessus serait satisfaite par un
+    /// résolveur qui devine.
+    ///
+    /// Un nom qualifié ABSENT de l'index est un appel externe (`Enum.map/2`,
+    /// `tokio::spawn`) : il doit retomber sur l'id synthétique local, et cet id
+    /// doit lui aussi porter le chemin de l'appelant — sinon on aurait déplacé
+    /// la fabrication au lieu de la supprimer.
+    #[test]
+    fn an_unknown_qualified_call_stays_local_and_still_carries_a_path() {
+        let idx = index(&[("autre", &GraphStore::symbol_id("PRJ", "prj/b.rs", "autre"))]);
+        let resolved = GraphStore::resolve_call_target_id_with_receiver(
+            "PRJ",
+            "prj/a.rs",
+            "Enum.map",
+            None,
+            &idx,
+        );
+        assert_eq!(
+            resolved,
+            GraphStore::symbol_id("PRJ", "prj/a.rs", "Enum.map"),
+            "un appel externe reste local, on ne devine pas"
+        );
+        assert!(
+            resolved.split("::").count() >= 3,
+            "meme le repli doit porter un chemin, got {resolved}"
+        );
+    }
+
+    /// Contrôle négatif — un nom qualifié AMBIGU (deux définitions) ne doit pas
+    /// se résoudre. C'est la même règle que pour les noms courts : le prix d'une
+    /// arête manquante est borné, celui d'une arête FAUSSE ne l'est pas.
+    #[test]
+    fn an_ambiguous_qualified_call_refuses_to_choose() {
+        let idx = index(&[
+            ("A.B.fun", &GraphStore::symbol_id("PRJ", "prj/b.ex", "A.B.fun")),
+            ("A.B.fun", &GraphStore::symbol_id("PRJ", "prj/c.ex", "A.B.fun")),
+        ]);
+        let resolved =
+            GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.ex", "A.B.fun", None, &idx);
+        assert_eq!(
+            resolved,
+            GraphStore::symbol_id("PRJ", "prj/a.ex", "A.B.fun"),
+            "deux definitions homonymes : on ne tranche pas"
+        );
     }
 }
