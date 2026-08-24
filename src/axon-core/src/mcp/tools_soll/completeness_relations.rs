@@ -94,24 +94,21 @@ impl McpServer {
         let source_kind = self.classify_existing_link_endpoint(source_id)?;
         let target_kind = self.classify_existing_link_endpoint(target_id)?;
         let normalized_request = explicit_relation_type.map(|r| r.to_uppercase());
-        let pair_policy = relation_policy_for_pair(source_kind.label(), target_kind.label());
         // REQ-AXO-902461 - un RETRAIT demande explicitement est recevable entre
         // deux noeuds SOLL quelconques, meme quand la matrice de filiation ne
         // connait pas la paire. Sans cela `GUI-PRO-125` exige une arete que
         // l'ecriture refuse de produire, ce qui ne laisse au tenant que le choix
         // entre laisser rouge et fabriquer une arete vers un faux remplacant.
-        let pair_admits_supersedes = pair_policy
-            .map(|p| p.allowed.iter().any(|r| *r == "SUPERSEDES"))
-            .unwrap_or(false);
-        let retirement_fallback = if normalized_request.as_deref() == Some("SUPERSEDES")
-            && !pair_admits_supersedes
-        {
-            supersedes_policy_for_soll_pair(source_kind.label(), target_kind.label())
-        } else {
-            None
-        };
-        let policy = retirement_fallback
-            .or(pair_policy)
+        //
+        // REQ-AXO-902470 - la composition « matrice + repli » vit dans
+        // `resolve_relation_policy`, PAS ici : elle etait recopiee dans le
+        // chemin de lecture, et n'ouvrir qu'un des deux a fait condamner par
+        // `soll_validate` les aretes que ce site venait d'accepter.
+        let policy = resolve_relation_policy(
+            source_kind.label(),
+            target_kind.label(),
+            normalized_request.as_deref(),
+        )
             .ok_or_else(|| {
                 anyhow!(
                     "{}",
@@ -505,17 +502,11 @@ impl McpServer {
             // l'ecriture sans ouvrir la lecture laisse le tenant devant un
             // registre qui se contredit lui-meme — et OPV l'a formule mieux que
             // moi : « un validateur qui affirme faux coute une decision ».
-            let pair_policy = relation_policy_for_pair(source_kind.label(), target_kind.label());
-            let policy_for_relation = if relation_type == "SUPERSEDES"
-                && !pair_policy
-                    .map(|p| p.allowed.iter().any(|r| *r == "SUPERSEDES"))
-                    .unwrap_or(false)
-            {
-                supersedes_policy_for_soll_pair(source_kind.label(), target_kind.label())
-            } else {
-                None
-            };
-            let Some(policy) = policy_for_relation.or(pair_policy)
+            let Some(policy) = resolve_relation_policy(
+                source_kind.label(),
+                target_kind.label(),
+                Some(relation_type),
+            )
             else {
                 violations.push(format!(
                     "{}: {} -> {} (pair {} -> {} forbidden)",

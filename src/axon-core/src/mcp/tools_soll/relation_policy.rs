@@ -73,6 +73,44 @@ pub(super) fn soll_entity_table_name(prefix: &str) -> Option<&'static str> {
     }
 }
 
+/// REQ-AXO-902470 (GUI-PRO-013) - LE point d'entree unique pour resoudre la
+/// politique applicable a une paire.
+///
+/// « matrice de filiation + repli de retrait si `SUPERSEDES` est DEMANDE » etait
+/// compose a la main dans DEUX sites de `completeness_relations.rs` : le chemin
+/// d'ECRITURE (`select_relation_type_for_link`) et celui de LECTURE
+/// (`collect_relation_policy_violations`). Ouvrir l'un sans l'autre EST
+/// l'incident du 2026-08-24 : `soll_validate` condamnait les aretes que
+/// `soll_manager` venait d'accepter, et le registre affirmait une chose et son
+/// contraire.
+///
+/// La regle vit desormais a UN endroit. Un cinquieme lecteur qui appelle cette
+/// fonction herite du repli sans avoir a le savoir ; un lecteur qui appelle
+/// `relation_policy_for_pair` directement demande la filiation SEULE, et c'est
+/// alors un choix explicite, pas un oubli.
+///
+/// `requested` est la relation DEMANDEE (deja normalisee en majuscules), ou
+/// `None` quand l'appelant veut le defaut de la paire. Le repli n'est jamais
+/// choisi tout seul : `default: None` sur la politique de retrait garantit qu'un
+/// appel sans relation explicite ne peut pas produire un `SUPERSEDES`.
+pub(super) fn resolve_relation_policy(
+    source_kind: &str,
+    target_kind: &str,
+    requested: Option<&str>,
+) -> Option<RelationPolicy> {
+    let pair_policy = relation_policy_for_pair(source_kind, target_kind);
+    if requested != Some("SUPERSEDES") {
+        return pair_policy;
+    }
+    let pair_admits_supersedes = pair_policy
+        .map(|p| p.allowed.iter().any(|r| *r == "SUPERSEDES"))
+        .unwrap_or(false);
+    if pair_admits_supersedes {
+        return pair_policy;
+    }
+    supersedes_policy_for_soll_pair(source_kind, target_kind).or(pair_policy)
+}
+
 /// REQ-AXO-902461 - le RETRAIT est exprimable entre deux noeuds SOLL QUELCONQUES.
 ///
 /// `relation_policy_for_pair` decrit la filiation : ce qu'un noeud PLANIFIE,
@@ -982,6 +1020,68 @@ pub(super) fn relation_scope_matches(
 mod blocked_by_policy_tests {
     use super::relation_policy_for_pair;
     use super::supersedes_policy_for_soll_pair;
+
+    use super::resolve_relation_policy;
+
+    /// REQ-AXO-902470 — l'invariant que l'incident du 2026-08-24 a viole, exprime
+    /// UNE fois : ecriture et lecture doivent obtenir le MEME verdict.
+    ///
+    /// Les deux chemins composaient « matrice + repli de retrait » chacun de leur
+    /// cote. Ouvrir l'un sans l'autre a fait condamner par `soll_validate` les
+    /// aretes que `soll_manager` venait d'accepter. Ils appellent desormais tous
+    /// deux `resolve_relation_policy` ; ce test verrouille son comportement.
+    #[test]
+    fn a_requested_retirement_resolves_the_same_way_for_writer_and_reader() {
+        // Les 6 paires mesurees comme refusees sur le parc le 2026-08-22.
+        for (src, tgt) in [
+            ("VIS", "VIS"),
+            ("MIL", "CPT"),
+            ("DEC", "GUI"),
+            ("DEC", "REQ"),
+            ("DEC", "MIL"),
+            ("MIL", "REQ"),
+        ] {
+            let policy = resolve_relation_policy(src, tgt, Some("SUPERSEDES"))
+                .unwrap_or_else(|| panic!("{src} -> {tgt} : un RETRAIT demande doit resoudre"));
+            assert!(
+                policy.allowed.iter().any(|r| *r == "SUPERSEDES"),
+                "{src} -> {tgt} : la politique resolue n'admet pas SUPERSEDES (allowed = {:?})",
+                policy.allowed
+            );
+        }
+    }
+
+    /// CONTROLE POSITIF 1 — le repli ne s'applique QU'au retrait demande.
+    /// Sans lui, une implementation qui rendrait toujours la politique de retrait
+    /// passerait le test ci-dessus.
+    #[test]
+    fn resolve_falls_back_only_for_an_explicitly_requested_retirement() {
+        // Meme paire, pas de relation demandee : la matrice seule repond, donc rien.
+        assert!(
+            resolve_relation_policy("VIS", "VIS", None).is_none(),
+            "sans relation demandee, une paire hors matrice ne doit rien resoudre — \
+             le retrait se DEMANDE, il ne s'infere jamais"
+        );
+        // Une AUTRE relation sur une paire hors matrice reste sans politique.
+        assert!(
+            resolve_relation_policy("VIS", "VIS", Some("BELONGS_TO")).is_none(),
+            "seul SUPERSEDES est ouvert par le repli"
+        );
+    }
+
+    /// CONTROLE POSITIF 2 — une paire DEJA dans la matrice garde SA politique,
+    /// meme quand un retrait est demande. Le repli ne doit pas masquer la
+    /// filiation existante ni deplacer son `default`.
+    #[test]
+    fn resolve_keeps_the_matrix_policy_when_the_pair_is_known() {
+        let direct = relation_policy_for_pair("MIL", "REQ").expect("MIL -> REQ existe");
+        let resolved = resolve_relation_policy("MIL", "REQ", None).expect("MIL -> REQ resout");
+        assert_eq!(
+            resolved.default, direct.default,
+            "resolve_relation_policy a deplace le defaut d'une paire connue"
+        );
+        assert_eq!(resolved.allowed, direct.allowed);
+    }
 
     /// REQ-AXO-902461 — le RETRAIT est exprimable entre deux noeuds SOLL
     /// QUELCONQUES, y compris quand la matrice de filiation ignore la paire.

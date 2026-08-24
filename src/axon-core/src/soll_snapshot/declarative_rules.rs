@@ -1678,6 +1678,129 @@ mod tests {
             .any(|fragment| body.contains(&fragment.to_lowercase()))
     }
 
+    /// REQ-AXO-902470 — GUI-PRO-013 (DRY) applique au moteur de regles lui-meme.
+    ///
+    /// Les 13 regles `soll_rule` vivent en DOUBLE : dans la base, et dans
+    /// `db/seed/01_global_soll.sql` qui amorce chaque nouveau tenant. Une seule
+    /// (`GUI-PRO-130`) avait une garde ; les 12 autres pouvaient diverger en
+    /// silence, et une divergence base/seed ne se paie qu'au BOOTSTRAP DU
+    /// PROCHAIN TENANT — invisible ici, visible chez le client.
+    ///
+    /// Ce n'est pas theorique : le 2026-08-24 j'ai edite base et seed
+    /// separement pour `GUI-PRO-130`, puis un autre agent y a ajoute 8
+    /// fragments. Les deux copies etaient coherentes PAR CHANCE.
+    ///
+    /// La garde eprouve le seed avec le PARSEUR REEL du moteur
+    /// (`parse_soll_rule`), pas avec un second parse maison : comparer deux
+    /// derives de la meme source ne prouve rien (lecon `REQ-AXO-902464`, ou
+    /// quatre gardes vertes comparaient un artefact perime a lui-meme).
+    #[test]
+    fn every_seeded_rule_parses_into_the_engine_form_the_runtime_will_load() {
+        let seeded = shipped_soll_rules();
+
+        // Sans ce plancher, une extraction cassee rendrait une liste vide et le
+        // test passerait au vert en n'eprouvant rien.
+        assert!(
+            seeded.len() >= 13,
+            "extraction du seed suspecte : {} regle(s) trouvee(s), 13 attendues au minimum. \
+             Le format du seed a-t-il change ?",
+            seeded.len()
+        );
+
+        for (id, title, rule_json) in &seeded {
+            let parsed = parse_soll_rule(id, title, rule_json).unwrap_or_else(|| {
+                panic!(
+                    "{id} : le moteur REFUSE la regle telle qu'elle est SEMEE. Un tenant \
+                     amorce sur ce seed n'aurait pas cette regle du tout.\n  {rule_json}"
+                )
+            });
+
+            assert_eq!(&parsed.id, id, "parse_soll_rule a renvoye un autre id");
+            assert!(
+                parsed.message.is_some(),
+                "{id} : regle semee sans `message`. Une violation sans phrase rend une \
+                 correspondance de motif et aucune idee de quoi faire (REQ-AXO-902409)."
+            );
+        }
+    }
+
+    /// CONTROLE POSITIF de la garde ci-dessus : elle doit REFUSER une regle
+    /// malformee. Sans lui, un `parse_soll_rule` devenu permissif — ou une
+    /// extraction qui rendrait des objets vides — passerait au vert.
+    #[test]
+    fn the_seed_guard_rejects_a_rule_the_engine_cannot_parse() {
+        // Deux predicats a la fois : refuse au parse par design
+        // (`DEC-AXO-901673` interdit la conjonction, aucune violation univoque).
+        let ambiguous = serde_json::json!({
+            "subject_status_in": ["superseded"],
+            "body_contains_any": ["caduc"],
+            "metadata_required": ["acceptance_criteria"],
+            "message": "deux predicats"
+        });
+        assert!(
+            parse_soll_rule("GUI-TST-999", "regle a deux predicats", &ambiguous).is_none(),
+            "le parseur accepte une regle a DEUX predicats — la garde du seed ne \
+             prouverait alors plus rien"
+        );
+
+        // Aucun predicat du tout : un sujet sans verbe n'est pas une regle.
+        let subjectless = serde_json::json!({ "message": "sans predicat" });
+        assert!(
+            parse_soll_rule("GUI-TST-998", "regle sans predicat", &subjectless).is_none(),
+            "le parseur accepte une regle SANS predicat"
+        );
+    }
+
+    /// REQ-AXO-902470 — toutes les règles SEMÉES, telles que le seed les livre.
+    ///
+    /// Généralise `shipped_gui_pro_130_fragments` : même extraction, mais sur
+    /// CHAQUE ligne portant un `soll_rule`. Rend `(id, titre, metadata JSON)`
+    /// pour que la garde puisse les passer au parseur RÉEL du moteur.
+    fn shipped_soll_rules() -> Vec<(String, String, serde_json::Value)> {
+        let seed_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../db/seed/01_global_soll.sql");
+        let seed = std::fs::read_to_string(&seed_path)
+            .unwrap_or_else(|e| panic!("seed illisible ({}) : {e}", seed_path.display()));
+
+        let mut out = Vec::new();
+        for chunk in seed.split("INSERT INTO soll.Node").skip(1) {
+            if !chunk.contains("\"soll_rule\"") {
+                continue;
+            }
+            let Some(after_values) = chunk.split("VALUES ('").nth(1) else {
+                continue;
+            };
+            let Some(id) = after_values.split('\'').next() else {
+                continue;
+            };
+            // Le titre est le 4e champ ; on ne le compare pas, mais `parse_soll_rule`
+            // l'exige et le porte dans la règle rendue.
+            let title = after_values
+                .split("', '")
+                .nth(3)
+                .unwrap_or("")
+                .to_string();
+            // Le JSON de metadata va de la première accolade du bloc `'{...}'::jsonb`
+            // jusqu'au marqueur de fin. Le seed double les apostrophes SQL.
+            let Some(meta_start) = chunk.find("'{\"soll_rule\"") else {
+                continue;
+            };
+            let rest = &chunk[meta_start + 1..];
+            let Some(meta_end) = rest.find("'::jsonb") else {
+                continue;
+            };
+            let raw = rest[..meta_end].replace("''", "'");
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                panic!("metadata de {id} dans le seed n'est pas du JSON valide :\n{raw}");
+            };
+            let Some(rule) = value.get("soll_rule").cloned() else {
+                continue;
+            };
+            out.push((id.to_string(), title, rule));
+        }
+        out
+    }
+
     /// Extrait `body_contains_any` de la définition de `GUI-PRO-130` telle qu'elle
     /// est SEMÉE. Le seed est la source d'amorçage de tous les tenants : une
     /// divergence entre lui et la base se paie au prochain bootstrap.

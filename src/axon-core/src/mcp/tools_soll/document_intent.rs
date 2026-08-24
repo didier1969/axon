@@ -62,26 +62,30 @@ const CONCEPT_KEYWORDS: &[&str] = &[
     "the loop",
 ];
 
-/// REQ-AXO-901615 — Default relation type for `entity → Pillar` fallback parent.
-/// Mirrors `relation_policy_for_pair(_, "PIL")` defaults: REQ/CPT/GUI/SKI all
-/// use BELONGS_TO; Decision/Milestone/Validation default to attaching against
-/// a Requirement, but absent any anchor we still pick the project pillar with
-/// `BELONGS_TO` because the canonical policy table accepts that as a fallback
-/// for the methodology entities used by document_intent (REQ/DEC/CPT/GUI). The
-/// classifier only ever produces these four types, so this is well-defined.
+/// REQ-AXO-901615 — relation par defaut pour le parent de repli `entite -> Pillar`.
+///
+/// REQ-AXO-902470 (GUI-PRO-013, DRY) — cette fonction RECOPIAIT a la main les
+/// defauts de `relation_policy_for_pair(_, "PIL")` ; son commentaire disait
+/// « Mirrors ». Une copie manuelle d'une table de politique diverge : elle codait
+/// `DEC -> PIL` en `BELONGS_TO` alors que cette paire est ABSENTE de la matrice,
+/// donc elle emettait une relation que l'ecriture refuse.
+///
+/// Elle INTERROGE desormais la matrice. Le repli `BELONGS_TO` ne subsiste que
+/// pour les paires que la matrice ignore (`DEC -> PIL`) : `soll_manager` rendra
+/// alors un `parameter_repair` precis pointant vers `soll_relation_schema`, qui
+/// est le chemin de recuperation documente (REQ-AXO-901615, critere 3). Le repli
+/// est un aveu d'absence, pas une seconde source de verite.
 fn default_relation_for_entity_to_pillar(entity_type: &str) -> &'static str {
-    match entity_type {
-        // CPT→PIL = BELONGS_TO (REQ-AXO-115)
-        // REQ→PIL = BELONGS_TO
-        // GUI→PIL = BELONGS_TO (REQ-AXO-274)
-        // DEC→PIL has no direct policy; we fall through to BELONGS_TO which
-        // soll_manager will accept iff the (DEC, PIL) pair is registered.
-        // When the policy rejects it the LLM gets a precise parameter_repair
-        // pointing to soll_relation_schema, which is the documented recovery
-        // path (see REQ-AXO-901615 acceptance criterion 3).
-        "requirement" | "concept" | "guideline" | "decision" => "BELONGS_TO",
-        _ => "BELONGS_TO",
-    }
+    let prefix = match entity_type {
+        "requirement" => "REQ",
+        "concept" => "CPT",
+        "guideline" => "GUI",
+        "decision" => "DEC",
+        _ => return "BELONGS_TO",
+    };
+    relation_policy_for_pair(prefix, "PIL")
+        .and_then(|policy| policy.default)
+        .unwrap_or("BELONGS_TO")
 }
 
 /// REQ-AXO-902081 — target-aware default relation. A Decision pointed at a
@@ -479,16 +483,55 @@ mod document_intent_classifier_tests {
     /// REQ-AXO-901615 — fallback relation table must produce BELONGS_TO for
     /// all four classifier outputs so document_intent without attach_to lands
     /// the node on the default project Pillar.
+    /// REQ-AXO-902470 — la garde lit la MATRICE, elle ne reecrit pas la table
+    /// attendue en dur. L'ancienne version assertait `== "BELONGS_TO"` : elle
+    /// aurait valide la fonction meme apres une divergence, puisqu'elle
+    /// comparait la copie a une TROISIEME copie ecrite dans le test.
     #[test]
-    fn default_relation_to_pillar_is_belongs_to_for_all_classifier_outputs() {
+    fn default_relation_to_pillar_follows_the_relation_matrix() {
         use super::default_relation_for_entity_to_pillar;
-        for entity_type in ["requirement", "decision", "concept", "guideline"] {
-            assert_eq!(
-                default_relation_for_entity_to_pillar(entity_type),
-                "BELONGS_TO",
-                "entity_type={entity_type}"
-            );
+        use crate::mcp::tools_soll::relation_policy::relation_policy_for_pair;
+
+        for (entity_type, prefix) in [
+            ("requirement", "REQ"),
+            ("concept", "CPT"),
+            ("guideline", "GUI"),
+            ("decision", "DEC"),
+        ] {
+            let from_matrix = relation_policy_for_pair(prefix, "PIL").and_then(|p| p.default);
+            let produced = default_relation_for_entity_to_pillar(entity_type);
+            match from_matrix {
+                Some(expected) => assert_eq!(
+                    produced, expected,
+                    "{entity_type} ({prefix} -> PIL) : la fonction diverge de la matrice"
+                ),
+                // La matrice ignore la paire (cas mesure : DEC -> PIL). Le repli
+                // est alors legitime, et c'est `soll_manager` qui tranchera avec
+                // un parameter_repair.
+                None => assert_eq!(
+                    produced, "BELONGS_TO",
+                    "{entity_type} ({prefix} -> PIL) : paire absente de la matrice, \
+                     le repli documente est BELONGS_TO"
+                ),
+            }
         }
+    }
+
+    /// CONTROLE POSITIF — au moins UNE des paires doit exister dans la matrice.
+    /// Sans lui, une matrice vide ferait passer le test ci-dessus par la branche
+    /// de repli sur les quatre types, sans rien eprouver.
+    #[test]
+    fn at_least_one_classifier_pair_is_actually_in_the_matrix() {
+        use crate::mcp::tools_soll::relation_policy::relation_policy_for_pair;
+        let known = ["REQ", "CPT", "GUI", "DEC"]
+            .iter()
+            .filter(|p| relation_policy_for_pair(p, "PIL").is_some())
+            .count();
+        assert!(
+            known > 0,
+            "aucune paire entite -> PIL dans la matrice : la garde ci-dessus ne \
+             testerait plus que son propre repli"
+        );
     }
 
     #[test]
