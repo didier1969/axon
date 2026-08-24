@@ -218,7 +218,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "axon_pre_flight_check",
-                "description": "[DX/SOLL] Mandatory dry-run validation before commit. Checks modified files against SOLL Guidelines without creating a commit.",
+                "description": "[DX/SOLL] Dry-run gate before commit: evaluates the modified files against the project's SOLL Guidelines (and the commit message form) without creating a commit. REQ-AXO-902451 — what it does NOT do, stated because 'mandatory validation' made LLMs stop looking: it runs NO formatter, NO tests, and NOT the project's own oracle. A green pre-flight does NOT mean the repo would accept the commit. Run your formatter and your test gate yourself; declare the project oracle in a Guideline so a future slice can check its freshness.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

@@ -683,3 +683,46 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
         exercised.len()
     );
 }
+
+/// REQ-AXO-902451 — une porte qui s'annonce OBLIGATOIRE doit dire ce qu'elle NE
+/// vérifie pas.
+///
+/// `axon_pre_flight_check` délègue à `axon_commit_work(dry_run)` : il évalue les
+/// Guidelines SOLL et la forme du message. Il ne lance **ni formateur, ni tests,
+/// ni l'oracle du projet** — vérifié en source. Sa description disait pourtant
+/// « Mandatory dry-run validation before commit », et APS (#208) a mesuré le
+/// coût exact de cette phrase : *« un LLM lit ça et arrête de chercher »*. Leur
+/// mémoire projet a dû porter, session après session, le rappel de lancer
+/// `mix format` — pour compenser un outil dont c'était le rôle supposé.
+///
+/// Constaté aussi chez le tenant zéro : `cargo fmt` sur l'arbre AXO reformate
+/// 140 fichiers sans rapport avec le lot, et rien ne le signale au pré-vol.
+///
+/// PIL-AXO-002, « promise without delivery » (REQ-AXO-088). Cette garde ne
+/// vérifie pas le comportement — elle vérifie que la PROMESSE est honnête.
+#[test]
+fn the_pre_flight_gate_states_what_it_does_not_check() {
+    let catalog = crate::mcp::catalog::tools_catalog(true);
+    let description = catalog["tools"]
+        .as_array()
+        .and_then(|tools| {
+            tools
+                .iter()
+                .find(|t| t.get("name").and_then(Value::as_str) == Some("axon_pre_flight_check"))
+        })
+        .and_then(|t| t.get("description").and_then(Value::as_str))
+        .expect("axon_pre_flight_check doit figurer au catalogue")
+        .to_lowercase();
+
+    for absent in ["formatter", "test", "oracle"] {
+        assert!(
+            description.contains(absent),
+            "la description doit nommer `{absent}` parmi ce qu'elle ne verifie PAS — \
+             sinon elle promet un filet qu'elle ne tend pas (PIL-AXO-002). Description : {description}"
+        );
+    }
+    assert!(
+        description.contains("does not") || description.contains("no "),
+        "nommer les limites ne suffit pas : la description doit dire qu'elle ne les COUVRE pas"
+    );
+}
