@@ -173,6 +173,12 @@ impl McpServer {
     // returns a job_id immediately. Gated by mcp_mutation_jobs_enabled (sync by
     // default, unchanged); reserve_mutation_ids no-ops for it (only soll_apply_plan
     // reserves a preview_id), so launch_mutation_job runs it generically.
+    // REQ-AXO-902412 — ces inventaires sont compares au nom CANONIQUE
+    // (`canonical_tool_name`, prefixe `axon_` retire), jamais au nom publie :
+    // `is_async_job_tool(normalized_name)` en dispatch.rs, idem pour
+    // `should_refresh_derived_docs_for_tool`. Ecrire `axon_apply_guidelines`
+    // ici DESARMERAIT le mecanisme au lieu de le reparer — verifie par un test
+    // rouge le 2026-08-24.
     pub(crate) const ASYNC_JOB_TOOL_NAMES: &[&str] =
         &["restore_soll", "soll_apply_plan", "apply_guidelines"];
     pub(crate) const MONITORED_SYNC_MUTATION_TOOLS: &[&str] = &["soll_commit_revision"];
@@ -1576,24 +1582,68 @@ impl McpServer {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn is_mutating_tool(name: &str) -> bool {
-        matches!(
-            name,
-            "restore_soll"
-                | "soll_apply_plan"
-                | "soll_commit_revision"
-                | "soll_attach_evidence"
-                | "soll_remove_evidence"
-                | "soll_rollback_revision"
-                | "soll_export"
-                | "soll_generate_docs"
-                | "soll_manager"
-                | "entrench_nuance"
-                | "apply_guidelines"
-                | "commit_work"
-                | "resume_vectorization"
-        )
-    }
+    /// REQ-AXO-902412 — la liste des outils qui MUTENT, en un seul endroit.
+    ///
+    /// Elle était un `matches!` fermé, doublé d'une seconde liste `RUNTIME_MUTATORS`
+    /// tenue à la main dans la garde de balayage. Deux listes pour une seule
+    /// vérité (GUI-PRO-013), et la duplication a masqué une dérive : trois noms
+    /// d'ici ne correspondaient à AUCUN outil publié — `apply_guidelines` et
+    /// `commit_work`, tous deux renommés `axon_*` sans que cette liste suive —
+    /// pendant que la garde ajoutait les VRAIS noms de son côté.
+    ///
+    /// (`resume_vectorization`, lui, est bien VIVANT : publié au catalogue et
+    /// routé par le dispatcher. C'est `help` qui ne le trouve pas — défaut
+    /// distinct, cf. REQ-AXO-902435 sur l'identité éclatée d'un outil.)
+    ///
+    /// Exposée en constante pour qu'un test puisse l'énumérer et vérifier que
+    /// chaque nom existe encore au catalogue — c'est cette vérification, et non
+    /// la liste elle-même, qui empêche la dérive de revenir.
+    pub(crate) const MUTATING_TOOLS: &[&str] = &[
+        // SOLL — écriture d'intention
+        "restore_soll",
+        "resume_vectorization",
+        "soll_apply_plan",
+        "soll_commit_revision",
+        "soll_attach_evidence",
+        "soll_remove_evidence",
+        "soll_rollback_revision",
+        "soll_export",
+        "soll_generate_docs",
+        "soll_manager",
+        "entrench_nuance",
+        "document_intent",
+        "infer_soll_mutation",
+        "contract_evolve",
+        "fuse",
+        // Dépôt et méthodologie
+        "axon_apply_guidelines",
+        "axon_apply_methodology_bundle",
+        "axon_commit_work",
+        "axon_init_project",
+        // Runtime — mutent un état de PROCESSUS ou de contrôle
+        "embed_provider",
+        "idle_drop",
+        "rescan_project",
+        "ist_snapshot_warm",
+        "re_anchor",
+        "skill_invoke",
+        // Mémoire gouvernée
+        "practice_put",
+        "practice_retire",
+        "practice_tick",
+        // Boîte aux lettres et doléances
+        "mcp_feedback",
+        "mcp_inbox_read",
+        "mcp_inbox_archive",
+        "mcp_outbox_send",
+        "mailbox_lease",
+        "mailbox_room_create",
+        "mailbox_room_join",
+        "mailbox_sweep",
+        "mailbox_tap",
+        "mailbox_topic_subscribe",
+        "mailbox_topic_unsubscribe",
+    ];
 
     /// REQ-AXO-902239 — tools whose project scope may be auto-resolved from the cwd,
     /// with the ARGUMENT KEY each one expects (`project` vs `project_code` — never

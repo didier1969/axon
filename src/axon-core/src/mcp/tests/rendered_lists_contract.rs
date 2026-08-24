@@ -264,14 +264,14 @@ const ENUMERATION_PROMISES: &[&str] = &[
 ];
 
 /// Outils que le balayage ne doit PAS appeler, en plus de ceux que
-/// `McpServer::is_mutating_tool` classe déjà comme mutants.
+/// `McpServer::MUTATING_TOOLS` classe déjà comme mutants.
 ///
 /// Un balayage aveugle du catalogue **invoque tout**, y compris ce qui écrit.
 /// `embed_provider action=set` bascule le fournisseur d'embed via une variable
 /// d'environnement du PROCESSUS — donc partagée avec tous les autres tests ;
 /// `idle_drop action=set` écrit une ligne de contrôle DURABLE et
 /// cross-processus ; `mcp_inbox_read` en mode `unread` AVANCE le curseur de
-/// lecture. Aucun n'est dans `is_mutating_tool`, dont la liste sert la politique
+/// lecture. Aucun n'est dans `MUTATING_TOOLS`, dont la liste sert la politique
 /// async/monitoring et n'a jamais eu vocation à borner un balayage.
 ///
 /// Cette liste locale existe donc parce que la classification canonique est
@@ -279,39 +279,96 @@ const ENUMERATION_PROMISES: &[&str] = &[
 /// absent des DEUX listes serait appelé. C'est la raison pour laquelle le
 /// balayage tourne contre un serveur de test à base éphémère — le rayon
 /// d'action reste le processus de test, jamais le runtime live.
-const RUNTIME_MUTATORS: &[&str] = &[
-    "embed_provider",
-    "idle_drop",
-    "rescan_project",
-    "practice_put",
-    "practice_retire",
-    "practice_tick",
-    "mcp_feedback",
-    "mcp_inbox_read",
-    "mcp_inbox_archive",
-    "mcp_outbox_send",
-    "mailbox_lease",
-    "mailbox_room_create",
-    "mailbox_room_join",
-    "mailbox_sweep",
-    "mailbox_tap",
-    "mailbox_topic_subscribe",
-    "mailbox_topic_unsubscribe",
-    "axon_init_project",
-    "axon_commit_work",
-    "axon_apply_guidelines",
-    "axon_apply_methodology_bundle",
-    "document_intent",
-    "infer_soll_mutation",
-    "contract_evolve",
-    "fuse",
-    "re_anchor",
-    "ist_snapshot_warm",
-    "skill_invoke",
-];
 
+/// REQ-AXO-902412 — UNE liste, pas deux.
+///
+/// Ce fichier tenait un second inventaire (`RUNTIME_MUTATORS`, 28 noms) à côté
+/// de `McpServer::MUTATING_TOOLS` (13 noms alors). Deux listes pour une seule vérité
+/// (GUI-PRO-013) — et la duplication ne faisait pas que coûter : elle MASQUAIT
+/// une dérive. Trois noms côté production ne désignaient plus aucun outil publié
+/// (`apply_guidelines`, `commit_work`, `resume_vectorization`), pendant que la
+/// garde ajoutait discrètement les vrais de son côté. La liste de production
+/// était donc fausse sans que rien ne le dise.
 fn is_write_capable(tool: &str) -> bool {
-    McpServer::is_mutating_tool(tool) || RUNTIME_MUTATORS.contains(&tool)
+    McpServer::MUTATING_TOOLS.contains(&tool)
+}
+
+/// La garde qui empêche la dérive de revenir — c'est elle le livrable, pas la
+/// liste.
+///
+/// `McpServer::MUTATING_TOOLS` protège le balayage en l'empêchant d'appeler un
+/// outil qui écrit. Un nom périmé y est donc INVISIBLE : il ne protège plus
+/// rien, et rien ne le signale. Cette garde ancre chaque nom au catalogue
+/// publié, qui est la seule définition de « un outil existe ».
+///
+/// Falsifiée en réintroduisant `resume_vectorization` (outil supprimé) dans la
+/// liste : rouge, avec le nom en clair.
+#[test]
+fn every_declared_mutating_tool_still_exists_in_the_catalog() {
+    // `include_internal = true` : la question est « ce nom designe-t-il un outil
+    // qui EXISTE », pas « est-il public ». Un outil interne (`resume_vectorization`)
+    // est un nom parfaitement legitime dans ces inventaires ; le comparer au seul
+    // catalogue public produirait un faux positif, et un faux positif pousse a
+    // assouplir la garde — exactement ce que REQ-AXO-902409 a deja paye une fois.
+    let catalog = crate::mcp::catalog::tools_catalog(true);
+    let published: std::collections::HashSet<&str> = catalog["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t.get("name").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !published.is_empty(),
+        "catalogue vide : la garde ne mesurerait rien"
+    );
+
+    // Les QUATRE inventaires de noms d'outils tenus à la main dans `mcp.rs`.
+    // Chacun décide d'un comportement — mode async, surveillance, régénération
+    // des docs dérivées, protection en écriture — et chacun peut dériver seul.
+    let inventaires: [(&str, &[&str]); 4] = [
+        ("MUTATING_TOOLS", McpServer::MUTATING_TOOLS),
+        ("ASYNC_JOB_TOOL_NAMES", McpServer::ASYNC_JOB_TOOL_NAMES),
+        (
+            "MONITORED_SYNC_MUTATION_TOOLS",
+            McpServer::MONITORED_SYNC_MUTATION_TOOLS,
+        ),
+        (
+            "SOLL_DERIVED_DOCS_REFRESH_TOOLS",
+            McpServer::SOLL_DERIVED_DOCS_REFRESH_TOOLS,
+        ),
+    ];
+
+    let mut orphelins: Vec<String> = Vec::new();
+    for (inventaire, noms) in inventaires {
+        for name in noms {
+            // REQ-AXO-902434 — deux ecritures peuvent designer le MEME outil.
+            // Ces inventaires portent le nom CANONIQUE (`init_project`), le
+            // catalogue publie le nom prefixe (`axon_init_project`), et les
+            // consommateurs comparent au nom canonique. Une egalite stricte
+            // rendrait 3 faux positifs — et un faux positif ne pousse pas
+            // seulement a assouplir la garde : il pousse a « corriger » du code
+            // correct. Mesure du 2026-08-24 : il l'a fait, et la suite a rougi.
+            if !published
+                .iter()
+                .any(|publie| crate::mcp::catalog::tool_names_denote_the_same_tool(publie, name))
+            {
+                orphelins.push(format!("{inventaire} → `{name}`"));
+            }
+        }
+    }
+
+    assert!(
+        orphelins.is_empty(),
+        "{} nom(s) d'outil declare(s) ne designent AUCUN outil publie au catalogue :\n  {}\n\
+         Un nom perime ne decide plus de rien, et son absence est SILENCIEUSE — \
+         le comportement qu'il devait declencher ne s'applique simplement jamais. \
+         Corriger le nom ou retirer l'entree ; ne jamais assouplir cette garde.",
+        orphelins.len(),
+        orphelins.join("\n  ")
+    );
 }
 
 /// Valeur plausible pour un paramètre REQUIS, choisie par NOM de paramètre —
