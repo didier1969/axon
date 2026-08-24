@@ -70,7 +70,23 @@ axon_artifact_carries_build_id() {
     [[ -n "$artifact" && -f "$artifact" ]] || return 1
     [[ -n "$build_id" ]] || return 1
 
-    strings -a "$artifact" 2>/dev/null | grep -qF -- "$build_id"
+    # REQ-AXO-902464 — `grep -q` sort a la PREMIERE correspondance et ferme le
+    # tube ; `strings`, qui a encore des dizaines de Mo a produire, recoit
+    # SIGPIPE et meurt avec 141. Sous `set -o pipefail` (preflight.sh l'active),
+    # le pipeline herite de ce 141 : la sonde repondait « ne porte pas »
+    # PRECISEMENT quand le binaire portait l'identite. Une garde inversee, qui
+    # echoue sur le succes et ne peut jamais valider un promote correct.
+    #
+    # Mesure : bin/axon-brain fait 66 Mo, les fixtures du test 8 Ko — `strings`
+    # les epuise avant que `grep` ne sorte, donc pas de SIGPIPE et le test
+    # restait vert. La discipline etait la (`set -euo pipefail` ligne 25), c'est
+    # l'ECHELLE qui manquait.
+    #
+    # `grep -c` lit tout le flux : pas de fermeture prematuree, donc pas de
+    # SIGPIPE, et le compte reste utile au diagnostic.
+    local hits
+    hits="$(strings -a "$artifact" 2>/dev/null | grep -cF -- "$build_id" || true)"
+    [[ "${hits:-0}" -gt 0 ]]
 }
 
 axon_write_export_file() {

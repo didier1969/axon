@@ -72,6 +72,47 @@ else
     pass "sonde de contenu : refuse le binaire de la veille sous l'étiquette du jour"
 fi
 
+# REQ-AXO-902464 (2026-08-24) — LA GARDE QUI MANQUAIT : L'ÉCHELLE.
+#
+# Les fixtures ci-dessus font quelques dizaines d'octets. `strings` les épuise
+# avant que `grep -q` n'ait le temps de sortir, donc aucun SIGPIPE, donc le test
+# restait VERT sur une sonde qui échouait systématiquement en production.
+#
+# Le vrai binaire fait 66 Mo. `grep -q` sort à la PREMIÈRE correspondance et
+# ferme le tube ; `strings`, qui a encore des dizaines de Mo à produire, reçoit
+# SIGPIPE et meurt avec 141. Sous `set -o pipefail` — que preflight.sh active
+# ligne 2 et que ce test active ligne 25 — le pipeline hérite du 141 : la sonde
+# répondait « ne porte pas » PRÉCISÉMENT quand le binaire portait l'identité.
+#
+# Une garde inversée : elle échoue sur le succès. Le promote du 2026-08-24 a été
+# refusé à l'étape 1b sur un binaire parfaitement conforme.
+#
+# La discipline était là (pipefail dans les deux). C'est la TAILLE du fixture qui
+# rendait le test aveugle — un fixture qui ne peut pas déclencher le mécanisme ne
+# peut pas falsifier la garde.
+BIG_BIN="$WORK_DIR/big-bin"
+{
+    printf 'AXON_COMPILED_BUILD_ID=%s\n' "$PROMOTED_ID"
+    # ~8 Mo de chaînes APRÈS la correspondance : de quoi garantir que `strings`
+    # a encore beaucoup à écrire quand un `grep -q` fermerait le tube.
+    head -c 8388608 /dev/urandom | base64
+} > "$BIG_BIN"
+
+if axon_artifact_carries_build_id "$BIG_BIN" "$PROMOTED_ID"; then
+    pass "sonde de contenu : tient sur un artefact volumineux (pas de SIGPIPE sous pipefail)"
+else
+    fail "sonde de contenu : SIGPIPE sur gros artefact — la sonde échoue sur le SUCCÈS (incident du 2026-08-24)"
+fi
+
+# Contrôle positif de la même garde : sur ce même gros artefact, une identité
+# absente doit toujours être refusée. Sans lui, une sonde qui rendrait `true`
+# inconditionnellement passerait le test ci-dessus.
+if axon_artifact_carries_build_id "$BIG_BIN" "$STALE_ID"; then
+    fail "sonde de contenu : gros artefact — identité absente ACCEPTÉE, la sonde ne lit plus rien"
+else
+    pass "sonde de contenu : gros artefact — une identité absente reste refusée"
+fi
+
 # Un artefact absent ne doit pas rendre « vrai par défaut » : un contrôle muet est
 # pire que pas de contrôle (il se lit comme un verdict).
 if axon_artifact_carries_build_id "$WORK_DIR/does-not-exist" "$PROMOTED_ID"; then
