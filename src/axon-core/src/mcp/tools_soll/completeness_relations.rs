@@ -492,7 +492,30 @@ impl McpServer {
                 }
             };
 
-            let Some(policy) = relation_policy_for_pair(source_kind.label(), target_kind.label())
+            // REQ-AXO-902461 — le VALIDATEUR doit lire la meme regle que
+            // l'ECRITURE. `select_relation_type_for_link` consulte le fallback
+            // de retrait quand la paire n'est pas dans la matrice de filiation ;
+            // sans le meme appel ici, une arete que `soll_manager` vient
+            // d'accepter est immediatement declaree « pair forbidden ». Mesure
+            // au promote du 2026-08-24 : `VIS-AXO-001 -SUPERSEDES-> VIS-AXO-901`
+            // ecrite avec succes, puis signalee « pair VIS -> VIS forbidden »
+            // par `soll_validate` dans la foulee.
+            //
+            // C'est le motif « une porte a DEUX endroits » (#1395) : ouvrir
+            // l'ecriture sans ouvrir la lecture laisse le tenant devant un
+            // registre qui se contredit lui-meme — et OPV l'a formule mieux que
+            // moi : « un validateur qui affirme faux coute une decision ».
+            let pair_policy = relation_policy_for_pair(source_kind.label(), target_kind.label());
+            let policy_for_relation = if relation_type == "SUPERSEDES"
+                && !pair_policy
+                    .map(|p| p.allowed.iter().any(|r| *r == "SUPERSEDES"))
+                    .unwrap_or(false)
+            {
+                supersedes_policy_for_soll_pair(source_kind.label(), target_kind.label())
+            } else {
+                None
+            };
+            let Some(policy) = policy_for_relation.or(pair_policy)
             else {
                 violations.push(format!(
                     "{}: {} -> {} (pair {} -> {} forbidden)",

@@ -1566,6 +1566,96 @@ fn test_soll_manager_link_never_auto_canonizes_a_requested_supersedes() {
 }
 
 #[test]
+fn soll_validate_does_not_condemn_a_retirement_edge_that_the_writer_accepted() {
+    // REQ-AXO-902461 — l'ECRITURE et la LECTURE doivent lire la meme regle.
+    // `select_relation_type_for_link` consulte le fallback de retrait ; le
+    // validateur (`collect_relation_policy_violations`) ne consultait que la
+    // matrice de filiation. Resultat mesure au promote du 2026-08-24 :
+    // `VIS-AXO-001 -SUPERSEDES-> VIS-AXO-901` ecrite AVEC SUCCES, puis signalee
+    // « pair VIS -> VIS forbidden » par `soll_validate` dans la foulee.
+    //
+    // Un registre qui se contredit lui-meme est pire qu'un registre qui refuse :
+    // le tenant ne sait plus lequel des deux croire.
+    let server = create_test_server();
+    let code = "TST".to_string();
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec) VALUES ('{code}', 'AXON_GLOBAL', 0, 1, 0, 1) ON CONFLICT (project_code) DO UPDATE SET last_req = 1"
+        ))
+        .unwrap();
+    for (id, ty) in [
+        (format!("VIS-{code}-971"), "Vision"),
+        (format!("VIS-{code}-972"), "Vision"),
+        (format!("DEC-{code}-971"), "Decision"),
+        (format!("REQ-{code}-971"), "Requirement"),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('{id}', '{ty}', '{code}', 't', 'corps', 'current', '{{}}') ON CONFLICT (id) DO UPDATE SET status = 'current'"
+            ))
+            .unwrap();
+    }
+    server
+        .graph_store
+        .execute(&format!("DELETE FROM soll.Edge WHERE source_id LIKE '%-{code}-97%' OR target_id LIKE '%-{code}-97%'"))
+        .unwrap();
+
+    // Les deux paires que la matrice de filiation ignore, et que le fallback de
+    // retrait autorise depuis REQ-AXO-902461.
+    for (src, tgt) in [
+        (format!("VIS-{code}-971"), format!("VIS-{code}-972")),
+        (format!("DEC-{code}-971"), format!("REQ-{code}-971")),
+    ] {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('{src}', '{tgt}', 'SUPERSEDES', '{code}') ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
+            ))
+            .unwrap();
+    }
+    server.soll_cache().invalidate(&code);
+
+    let report = server
+        .execute_tool_direct("soll_validate", &json!({ "project_code": code }))
+        .expect("soll_validate repond")["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    assert!(
+        !report.contains("pair VIS -> VIS forbidden"),
+        "le validateur condamne une arete que l'ecriture accepte :\n---\n{report}"
+    );
+    assert!(
+        !report.contains("pair DEC -> REQ forbidden"),
+        "le validateur condamne une arete que l'ecriture accepte :\n---\n{report}"
+    );
+
+    // CONTROLE POSITIF — le validateur ne devient pas permissif pour autant :
+    // une relation qui n'est PAS un retrait, sur une paire sans politique, doit
+    // rester signalee. Sans lui, un validateur qui accepterait tout passerait.
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('VIS-{code}-971', 'VIS-{code}-972', 'BELONGS_TO', '{code}') ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
+        ))
+        .unwrap();
+    server.soll_cache().invalidate(&code);
+    let report2 = server
+        .execute_tool_direct("soll_validate", &json!({ "project_code": code }))
+        .expect("soll_validate repond")["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        report2.contains("BELONGS_TO") && report2.contains(&format!("VIS-{code}-971")),
+        "une relation NON-retrait sur une paire sans politique doit rester signalee :\n---\n{report2}"
+    );
+}
+
+#[test]
 fn test_soll_manager_link_supersedes_is_expressible_between_any_two_soll_nodes() {
     // REQ-AXO-902461 — le RETRAIT est exprimable entre deux noeuds SOLL
     // QUELCONQUES. Trois tenants (APS, OPV, AXO) ont remonte la meme cause le
