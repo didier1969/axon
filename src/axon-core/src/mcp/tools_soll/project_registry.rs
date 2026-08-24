@@ -68,7 +68,11 @@ impl McpServer {
         Ok(())
     }
 
-    pub(super) fn known_project_codes_hint(&self) -> String {
+    /// REQ-AXO-902467 — `pub(crate)` : le refus canonique `unresolved_project_error`
+    /// (guidance.rs) doit nommer les candidats depuis N'IMPORTE quel outil, pas
+    /// seulement depuis `tools_soll`. Elargir la visibilite d'un helper existant
+    /// plutot que d'en recopier un second (GUI-PRO-013).
+    pub(crate) fn known_project_codes_hint(&self) -> String {
         self.query_single_column(
             "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code ASC",
         )

@@ -56,7 +56,13 @@ impl McpServer {
         } else {
             None
         };
-        let project = explicit_project.or(auto.as_deref()).unwrap_or("AXO");
+        // REQ-AXO-902467 — ne plus deviner le projet courant.
+        let Some(project) = explicit_project.or(auto.as_deref()) else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "nli",
+                &self.known_project_codes_hint(),
+            ));
+        };
         let threshold = args
             .get("threshold")
             .and_then(Value::as_f64)

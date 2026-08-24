@@ -7,10 +7,21 @@ use super::McpServer;
 
 impl McpServer {
     pub(super) fn axon_snapshot_history_impl(&self, args: &Value) -> Value {
-        let project_code = args
+        // REQ-AXO-902467 — ne plus DEVINER le projet. Ce site passait de
+        // « argument absent » a `"AXO"` sans meme tenter la resolution : le
+        // brain live etant un singleton dont le cwd propre est le depot Axon,
+        // l'appelant recevait un paquet bien forme sur le MAUVAIS projet.
+        let resolved = args
             .get("project_code")
             .and_then(|value| value.as_str())
-            .unwrap_or("AXO");
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let Some(project_code) = resolved.as_deref() else {
+            return crate::mcp::guidance::unresolved_project_error(
+                "snapshot_history",
+                &self.known_project_codes_hint(),
+            );
+        };
         let limit = args
             .get("limit")
             .and_then(|value| value.as_u64())
@@ -37,10 +48,21 @@ impl McpServer {
     }
 
     pub(super) fn axon_snapshot_diff_impl(&self, args: &Value) -> Value {
-        let project_code = args
+        // REQ-AXO-902467 — ne plus DEVINER le projet. Ce site passait de
+        // « argument absent » a `"AXO"` sans meme tenter la resolution : le
+        // brain live etant un singleton dont le cwd propre est le depot Axon,
+        // l'appelant recevait un paquet bien forme sur le MAUVAIS projet.
+        let resolved = args
             .get("project_code")
             .and_then(|value| value.as_str())
-            .unwrap_or("AXO");
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let Some(project_code) = resolved.as_deref() else {
+            return crate::mcp::guidance::unresolved_project_error(
+                "snapshot_diff",
+                &self.known_project_codes_hint(),
+            );
+        };
         let snapshots = load_structural_snapshots(project_code);
         if snapshots.is_empty() {
             return json!({

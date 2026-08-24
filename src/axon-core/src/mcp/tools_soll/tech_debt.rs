@@ -201,12 +201,20 @@ impl McpServer {
     /// Filters: `migration_id`, `from_tech`/`to_tech` (matched against metadata),
     /// `status` (all|active|complete|…), `group_by` (file|symbol|chunk).
     pub(crate) fn axon_tech_debt_inventory(&self, args: &Value) -> Option<Value> {
-        let project_code = args
+        // REQ-AXO-902467 — ne plus deviner le projet courant.
+        let resolved = args
             .get("project_code")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|v| !v.is_empty())
-            .unwrap_or("AXO");
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let Some(project_code) = resolved.as_deref() else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "tech_debt_inventory",
+                &self.known_project_codes_hint(),
+            ));
+        };
         let migration_id = args
             .get("migration_id")
             .and_then(Value::as_str)

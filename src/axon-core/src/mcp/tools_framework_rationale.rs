@@ -40,10 +40,19 @@ impl McpServer {
 
     pub(super) fn axon_project_status_impl(&self, args: &Value) -> Option<Value> {
         let mode = args.get("mode").and_then(|value| value.as_str());
-        let project_code = args
+        // REQ-AXO-902467 — ne plus deviner : ce site passait de « argument
+        // absent » a `"AXO"` sans tenter la resolution.
+        let resolved = args
             .get("project_code")
             .and_then(|value| value.as_str())
-            .unwrap_or("AXO");
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let Some(project_code) = resolved.as_deref() else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "project_status",
+                &self.known_project_codes_hint(),
+            ));
+        };
 
         // REQ-AXO-901982 — per-stage timing so the next measurement pinpoints
         // the occasional multi-second spike (telemetry shows project_status avg

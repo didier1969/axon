@@ -697,11 +697,21 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or("unspecified")
             .to_string();
-        let project_code = arguments
+        // REQ-AXO-902467 — `re_anchor` codait `"AXO"` en dur sans meme APPELER le
+        // resolveur : c'est l'outil que la doleance APS #197 cite en premier. Un
+        // agent qui se re-ancre apres un compact recevait le contexte du depot
+        // Axon au lieu du sien, et rien dans la reponse ne le lui disait.
+        let Some(project_code) = arguments
             .get("project_code")
             .and_then(Value::as_str)
             .map(String::from)
-            .unwrap_or_else(|| "AXO".to_string());
+            .or_else(|| self.auto_resolve_project_code_str())
+        else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "re_anchor",
+                &self.known_project_codes_hint(),
+            ));
+        };
         let escaped_code = project_code.replace('\'', "''");
 
         let query_string = |sql: &str| -> Vec<Vec<String>> {

@@ -287,6 +287,16 @@ fn axis_recall_set(caller: &str) -> Vec<String> {
 }
 
 impl McpServer {
+    /// REQ-AXO-902467 — DERNIER repli `"AXO"` assume de la surface MCP, et la
+    /// raison est structurelle : cette fonction rend `String`, donc elle n'a
+    /// AUCUN canal d'erreur. Lui en donner un obligerait a changer sa signature
+    /// et tous ses appelants — un chantier distinct, pas un ajout de fin de
+    /// serie.
+    ///
+    /// Le risque est ici borne, contrairement aux 15 sites corriges : une
+    /// `practice` mal scopee est recuperable (elle reste lisible, et le scope
+    /// global `*` est de toute facon toujours inclus au recall), alors qu'une
+    /// mauvaise ancre de projet contamine une session entiere.
     fn resolve_practice_scope(&self, args: &Value) -> String {
         args.get("scope")
             .and_then(Value::as_str)

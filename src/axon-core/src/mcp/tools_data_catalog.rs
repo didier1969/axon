@@ -150,12 +150,19 @@ impl McpServer {
     /// REQ-AXO-902017 slice 1 — read a project's normalized data catalog
     /// (`data/CATALOG.json`) and answer its inventory through MCP.
     pub(crate) fn axon_data_catalog(&self, args: &Value) -> Option<Value> {
-        let project_code = args
+        // REQ-AXO-902467 — ne plus deviner le projet courant.
+        let Some(project_code) = args
             .get("project_code")
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "AXO".to_string());
+            .or_else(|| self.auto_resolve_project_code_str())
+        else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "data_catalog",
+                &self.known_project_codes_hint(),
+            ));
+        };
 
         // Resolve the project root from the registry (shared with rescan).
         let project_path = match self.lookup_project_path(&project_code) {

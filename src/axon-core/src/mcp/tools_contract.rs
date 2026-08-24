@@ -74,13 +74,19 @@ impl McpServer {
     }
 
     fn contract_status_list(&self, args: &Value, verbose: bool) -> Option<Value> {
-        let project = args
+        // REQ-AXO-902467 — ne plus deviner le projet courant.
+        let Some(project) = args
             .get("project")
             .and_then(Value::as_str)
             .map(str::to_string)
             .filter(|s| !s.trim().is_empty())
             .or_else(|| self.auto_resolve_project_code_str())
-            .unwrap_or_else(|| "AXO".to_string());
+        else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "contract_status",
+                &self.known_project_codes_hint(),
+            ));
+        };
         let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(25).clamp(1, 100) as i64;
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as i64;
 

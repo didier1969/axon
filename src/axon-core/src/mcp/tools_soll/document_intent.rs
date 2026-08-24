@@ -157,17 +157,6 @@ impl McpServer {
                     .collect()
             })
             .unwrap_or_default();
-        let explicit_project = args.get("project_code").and_then(|v| v.as_str());
-        let auto_project = if explicit_project.is_none() {
-            self.auto_resolve_project_code_str()
-        } else {
-            None
-        };
-        let project_code = explicit_project
-            .map(str::to_string)
-            .or(auto_project)
-            .unwrap_or_else(|| "AXO".to_string());
-
         let (entity_type, classifier_reason) = match suggest_type {
             Some(t) if matches!(t, "requirement" | "decision" | "concept" | "guideline") => {
                 (t, "explicit_suggest_type")
@@ -189,6 +178,26 @@ impl McpServer {
                 }));
             }
             None => classify_intent(intent, body),
+        };
+
+        // REQ-AXO-902467 — la resolution de projet vient APRES la validation des
+        // arguments : un `suggest_type` invalide doit etre signale COMME TEL,
+        // quel que soit le projet. Place en premier, ce refus masquait l'erreur
+        // d'argument derriere une erreur de projet — deux diagnostics pour un
+        // seul appel, dont le mauvais en premier. Le test
+        // `test_document_intent_rejects_invalid_suggest_type_with_parameter_repair`
+        // l'a attrape.
+        let explicit_project = args.get("project_code").and_then(|v| v.as_str());
+        let auto_project = if explicit_project.is_none() {
+            self.auto_resolve_project_code_str()
+        } else {
+            None
+        };
+        let Some(project_code) = explicit_project.map(str::to_string).or(auto_project) else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "document_intent",
+                &self.known_project_codes_hint(),
+            ));
         };
 
         // REQ-AXO-901615 — accept optional `attach_to` + `relation_type`.

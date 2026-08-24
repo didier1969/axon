@@ -172,12 +172,19 @@ impl McpServer {
     /// only writes are idempotent edge inserts + a one-time baseline metadata
     /// set on first run.
     pub(crate) fn axon_detect_remnants(&self, args: &Value) -> Option<Value> {
-        let project_code = args
+        // REQ-AXO-902467 — ne plus deviner le projet courant.
+        let Some(project_code) = args
             .get("project_code")
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "AXO".to_string());
+            .or_else(|| self.auto_resolve_project_code_str())
+        else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "detect_remnants",
+                &self.known_project_codes_hint(),
+            ));
+        };
         let only_key = args
             .get("detect_key")
             .and_then(|v| v.as_str())

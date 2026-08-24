@@ -456,10 +456,18 @@ impl McpServer {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let project_code = payload
+        // REQ-AXO-902467 — ne plus deviner le projet courant.
+        let resolved = payload
             .get("project_code")
             .and_then(|v| v.as_str())
-            .unwrap_or("AXO");
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let Some(project_code) = resolved.as_deref() else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "soll_work_plan",
+                &self.known_project_codes_hint(),
+            ));
+        };
 
         let revision_id = if let Some(reserved_revision_id) = args
             .get("reserved_revision_id")
@@ -963,10 +971,18 @@ impl McpServer {
     }
 
     pub(crate) fn axon_soll_query_context(&self, args: &Value) -> Option<Value> {
-        let project_code_input = args
+        // REQ-AXO-902467 — ne plus deviner le projet courant.
+        let resolved_input = args
             .get("project_code")
             .and_then(|v| v.as_str())
-            .unwrap_or("AXO");
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let Some(project_code_input) = resolved_input.as_deref() else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "soll_roadmap",
+                &self.known_project_codes_hint(),
+            ));
+        };
         // REQ-AXO-043 — wrong_project_scope contract via shared helper.
         let project_code = match self.resolve_project_code(project_code_input) {
             Ok(code) => code,

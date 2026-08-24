@@ -379,3 +379,49 @@ pub(crate) fn build_guided_response(mut payload: Value, outcome: GuidanceOutcome
 
     payload
 }
+
+/// REQ-AXO-902467 — LE refus canonique quand le projet courant n'est pas
+/// resolvable.
+///
+/// Doleance APS #197 (severite blocking, reproduite deux fois) : 31 sites de la
+/// surface MCP retombaient sur `"AXO"` en dur quand la resolution rendait
+/// `None`. Le brain live etant un singleton dont le cwd propre est le depot
+/// Axon, tout appel non resolu atterrissait silencieusement sur AXO — et
+/// l'appelant recevait un paquet BIEN FORME sur le MAUVAIS projet, sans rien qui
+/// le lui dise.
+///
+/// Un refus coute un tour ; une mauvaise ancre coute une session, et contamine
+/// tout ce qui est ecrit ensuite. C'est `REQ-AXO-087` (la mauvaise
+/// classification EST le defaut) applique a la surface entiere, et une atteinte
+/// directe a `PIL-AXO-001` : une seule verite runtime, observable identiquement
+/// par tous les consommateurs.
+///
+/// Le refus NOMME les candidats : un refus qui ne dit pas ou aller est une
+/// impasse (`PIL-AXO-002`). `missing_project_code` est deja cable plus haut dans
+/// ce fichier, donc `operator_guidance` se remplit sans travail supplementaire.
+pub(crate) fn unresolved_project_error(tool: &str, known_codes: &str) -> Value {
+    let candidates = if known_codes.trim().is_empty() {
+        "aucun projet enregistre".to_string()
+    } else {
+        known_codes.to_string()
+    };
+    json!({
+        "content": [{
+            "type": "text",
+            "text": format!(
+                "{tool}: impossible de determiner le projet courant depuis ce cwd.                  Passe `project_code` explicitement. Projets enregistres : {candidates}."
+            )
+        }],
+        "isError": true,
+        "data": {
+            "status": "missing_project_code",
+            "parameter_repair": {
+                "invalid_field": "project_code",
+                "tool": tool,
+                "candidate_project_codes": candidates,
+                "follow_up_tools": ["project_registry_lookup", "help"],
+                "hint": "le brain est partage : sans `project_code` ni cwd client resolvable,                          repondre sur un projet devine serait repondre faux"
+            }
+        }
+    })
+}

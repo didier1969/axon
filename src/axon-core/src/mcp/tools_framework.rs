@@ -810,7 +810,16 @@ impl McpServer {
                 return Some(self.wrong_project_scope_response(code, "conception_view"));
             }
         }
-        let project_code = explicit_project_code.unwrap_or("AXO");
+        // REQ-AXO-902467 — ne plus deviner le projet courant.
+        let resolved = explicit_project_code
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let Some(project_code) = resolved.as_deref() else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "conception_view",
+                &self.known_project_codes_hint(),
+            ));
+        };
         let mode = args
             .get("mode")
             .and_then(|value| value.as_str())
@@ -928,7 +937,16 @@ impl McpServer {
                 return Some(self.wrong_project_scope_response(code, "change_safety"));
             }
         }
-        let project_code = explicit_project_code.unwrap_or("AXO");
+        // REQ-AXO-902467 — ne plus deviner le projet courant.
+        let resolved = explicit_project_code
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let Some(project_code) = resolved.as_deref() else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "change_safety",
+                &self.known_project_codes_hint(),
+            ));
+        };
         let target = args.get("target")?.as_str()?.trim();
         if target.is_empty() {
             return Some(json!({

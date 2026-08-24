@@ -13,10 +13,18 @@ impl McpServer {
         args: &Value,
         cached_coverage: Option<&RequirementCoverageSummary>,
     ) -> Option<Value> {
-        let project_code_input = args
+        // REQ-AXO-902467 — ne plus deviner le projet courant.
+        let resolved_input = args
             .get("project_code")
             .and_then(|v| v.as_str())
-            .unwrap_or("AXO");
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let Some(project_code_input) = resolved_input.as_deref() else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "soll_verify_requirements",
+                &self.known_project_codes_hint(),
+            ));
+        };
         // REQ-AXO-043 — wrong_project_scope contract via shared helper.
         // Previously `.ok()?` swallowed resolve_project_code errors and the
         // framework rendered a generic "Invalid arguments".

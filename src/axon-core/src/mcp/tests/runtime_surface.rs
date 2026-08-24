@@ -2123,6 +2123,81 @@ fn test_explicit_project_code_is_never_overwritten_and_source_is_reported() {
     }
 }
 
+/// REQ-AXO-902467 — doleance APS #197, severite BLOCKING, reproduite deux fois.
+///
+/// Quand le projet n'est PAS resolvable, 31 sites de la surface MCP retombent
+/// sur `"AXO"` en dur. Le brain live etant un singleton dont le cwd propre est
+/// le depot Axon, tout appel non resolu atterrit silencieusement sur AXO — et
+/// l'appelant recoit un paquet BIEN FORME sur le MAUVAIS projet, sans rien qui
+/// le lui dise.
+///
+/// Un refus coute un tour ; une mauvaise ancre coute une session, et contamine
+/// tout ce qui est ecrit ensuite. C'est aussi une atteinte a PIL-AXO-001 : une
+/// seule verite runtime, observable identiquement par tous les consommateurs.
+///
+/// `re_anchor` est le pire cas et celui que la doleance cite en premier : il ne
+/// resout MEME PAS, il code `"AXO"` directement (tools_skill.rs:704).
+#[test]
+fn an_unresolvable_project_is_refused_not_silently_answered_as_axo() {
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/test/axo-fixture"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry("BKS", Some("BookingSystem"), Some("/home/test/bks-fixture"))
+        .unwrap();
+
+    // Un cwd qui n'appartient a AUCUN projet enregistre : la resolution ne peut
+    // pas trancher, et c'est le cas ou la doleance mord.
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/tmp/appartient-a-aucun-projet");
+    }
+    assert!(
+        server.auto_resolve_project_code_str().is_none(),
+        "prealable du test : ce cwd doit etre non resolvable"
+    );
+
+    // `re_anchor` sans project_code explicite. Il doit REFUSER en nommant les
+    // candidats, jamais repondre sur AXO.
+    let response = server
+        .execute_tool_direct("re_anchor", &json!({ "reason": "post_compact" }))
+        .expect("re_anchor repond");
+
+    let is_error = response
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let rendered = serde_json::to_string(&response).unwrap_or_default();
+
+    assert!(
+        is_error,
+        "re_anchor a REPONDU sur un projet qu'il n'a pas resolu — c'est la doleance \
+         APS #197 : un paquet bien forme sur le mauvais projet.\n---\n{rendered}"
+    );
+
+    let status = response["data"]["status"].as_str().unwrap_or_default();
+    assert!(
+        status == "missing_project_code" || status == "wrong_project_scope",
+        "le refus doit porter un `status` canonique deja cable dans guidance.rs \
+         (missing_project_code / wrong_project_scope), pas un statut ad hoc : {status:?}"
+    );
+
+    // Demande n. 2 du tenant : NOMMER les candidats. Un refus qui ne dit pas ou
+    // aller est une impasse (PIL-AXO-002).
+    assert!(
+        rendered.contains("BKS") || rendered.contains("project_registry_lookup"),
+        "le refus doit nommer les projets candidats ou l'outil qui les liste — \
+         sinon l'appelant est dans une impasse.\n---\n{rendered}"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+    }
+}
+
 #[test]
 fn test_auto_resolve_project_code_str_helper() {
     // REQ-AXO-089 (helper coverage) — auto_resolve_project_code_str is
