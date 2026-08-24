@@ -21,6 +21,17 @@ fn is_work_plan_relation(relation_type: &str) -> bool {
 /// TARGETS (MIL→REQ), REFINES (REQ→REQ, DEC→REQ), EXPLAINS (CPT→REQ),
 /// VERIFIES (VAL→REQ). Cycle detection and Kahn waves keep the narrow
 /// SOLVES+BELONGS_TO filter to preserve topological semantics.
+/// REQ-AXO-902427 / REQ-AXO-902459 — un jalon `current` est le CONTENANT du
+/// travail, pas son obstacle ; un jalon `planned` est bien une attente.
+///
+/// Cette distinction est lue à DEUX endroits — le filtre de parking (qui doit
+/// alors ne PAS parquer) et la marche de filiation (qui doit alors rattacher) —
+/// et elle n'a le droit d'être écrite qu'une fois : les deux lectures divergentes
+/// sont exactement le défaut que `REQ-AXO-902459` a mesuré.
+fn blocked_by_target_is_containing_milestone(target_id: &str, target_status: &str) -> bool {
+    target_id.starts_with("MIL-") && target_status.trim().eq_ignore_ascii_case("current")
+}
+
 fn is_descendant_relation(relation_type: &str) -> bool {
     matches!(
         relation_type,
@@ -177,30 +188,61 @@ fn build_actionable_leaves_wave(
         // strategic breadcrumb MIL → DEC for this actionable leaf.
         let mut best_mil: Option<(i64, String)> = None;
         let mut best_dec: Option<(i64, String)> = None;
-        if let Some(idx) = snapshot.node_index(id) {
-            for e in snapshot.graph().edges_directed(idx, Direction::Incoming) {
-                if !is_descendant_relation(e.weight().as_str()) {
-                    continue;
-                }
-                let parent_id = &snapshot.graph()[e.source()];
+        {
+            // Un parent est absorbé de la même façon quelle que soit la voie qui
+            // l'a désigné : c'est ce qui permet d'en ajouter une sans dupliquer
+            // la règle de sélection (GUI-PRO-013).
+            let mut absorb_parent = |parent_id: &str| {
                 if !schedulable_ids.contains(parent_id) {
+                    return;
+                }
+                let Some(parent_node) = nodes.get(parent_id) else {
+                    return;
+                };
+                parent_score =
+                    Some(parent_score.map_or(parent_node.score, |cur| cur.max(parent_node.score)));
+                let label = format!("{} {}", parent_id, parent_node.title);
+                let slot = match parent_node.entity_type {
+                    WorkPlanEntityType::Milestone => Some(&mut best_mil),
+                    WorkPlanEntityType::Decision => Some(&mut best_dec),
+                    WorkPlanEntityType::Requirement => None,
+                };
+                if let Some(slot) = slot {
+                    if slot.as_ref().is_none_or(|(s, _)| parent_node.score > *s) {
+                        *slot = Some((parent_node.score, label));
+                    }
+                }
+            };
+
+            if let Some(idx) = snapshot.node_index(id) {
+                for e in snapshot.graph().edges_directed(idx, Direction::Incoming) {
+                    if !is_descendant_relation(e.weight().as_str()) {
+                        continue;
+                    }
+                    absorb_parent(&snapshot.graph()[e.source()]);
+                }
+            }
+
+            // REQ-AXO-902459 — le rattachement que l'ÉCRITURE pose.
+            //
+            // `soll_relation_schema` prescrit `REQ -BLOCKED_BY-> MIL` : c'est la
+            // SEULE relation que la matrice admet pour cette paire, et
+            // `soll_manager` y auto-canonise. Une exigence rangée sous un jalon
+            // par la voie que l'outil IMPOSE était pourtant traitée en orpheline
+            // — elle retombait sur son propre score — parce que la marche de
+            // filiation ne lisait que les arêtes entrantes. Mesuré sur
+            // `MIL-AXO-054` : 13 arêtes dans ce cas contre 53 `TARGETS`.
+            //
+            // Le prédicat est le MÊME que celui du filtre de parking : seul un
+            // jalon `current` contient. Un jalon `planned` bloque vraiment — on
+            // attend qu'il démarre — et il ne doit donc pas rattacher.
+            for (target, rel) in snapshot.outgoing_edges(id) {
+                if rel != "BLOCKED_BY" {
                     continue;
                 }
-                if let Some(parent_node) = nodes.get(parent_id) {
-                    parent_score = Some(
-                        parent_score.map_or(parent_node.score, |cur| cur.max(parent_node.score)),
-                    );
-                    let label = format!("{} {}", parent_id, parent_node.title);
-                    let slot = match parent_node.entity_type {
-                        WorkPlanEntityType::Milestone => Some(&mut best_mil),
-                        WorkPlanEntityType::Decision => Some(&mut best_dec),
-                        WorkPlanEntityType::Requirement => None,
-                    };
-                    if let Some(slot) = slot {
-                        if slot.as_ref().is_none_or(|(s, _)| parent_node.score > *s) {
-                            *slot = Some((parent_node.score, label));
-                        }
-                    }
+                let target_status = nodes.get(target).map(|n| n.status.as_str()).unwrap_or("");
+                if blocked_by_target_is_containing_milestone(target, target_status) {
+                    absorb_parent(target);
                 }
             }
         }
@@ -546,10 +588,11 @@ impl McpServer {
                                     // là on attend bien qu'il démarre. C'est le
                                     // `current` qui distingue « je fais partie
                                     // de » de « j'attends ».
-                                    let target_is_current_milestone = target.starts_with("MIL-")
-                                        && target_node.status.trim().eq_ignore_ascii_case("current");
                                     !is_terminal_status(&target_node.status)
-                                        && !target_is_current_milestone
+                                        && !blocked_by_target_is_containing_milestone(
+                                            target,
+                                            &target_node.status,
+                                        )
                                 })
                                 .unwrap_or(true)
                     })
@@ -1821,6 +1864,159 @@ mod tests {
             wave.items[0].reasons[0].contains("parent_score=42"),
             "expected own-score fallback in reasons, got {:?}",
             wave.items[0].reasons
+        );
+    }
+
+    /// REQ-AXO-902459 — l'arête que l'ÉCRITURE pose n'est pas celle que le RANG lit.
+    ///
+    /// `soll_relation_schema` prescrit `REQ -BLOCKED_BY-> MIL` (c'est la seule
+    /// relation que la matrice admet pour cette paire, et `soll_manager` l'auto-
+    /// canonise). Mais `build_actionable_leaves_wave` ne remonte que les arêtes
+    /// ENTRANTES filtrées par `is_descendant_relation`, où `BLOCKED_BY` ne figure
+    /// pas : l'exigence rattachée par la voie que l'outil impose est traitée en
+    /// ORPHELINE, et retombe sur son propre score.
+    ///
+    /// Le filtre de parking (REQ-AXO-902427, l. ~535) tranche déjà la sémantique :
+    /// un jalon `current` est le CONTENANT du travail, pas son obstacle. Ce test
+    /// exige que la marche de filiation lise la même chose.
+    ///
+    /// Deux exigences identiques sous le MÊME jalon, rattachées chacune par une
+    /// voie : elles doivent obtenir le MÊME `parent_score`.
+    #[test]
+    fn actionable_wave_reads_blocked_by_to_a_current_milestone_as_filiation() {
+        use crate::soll_snapshot::{SnapshotEdge, SnapshotNode};
+
+        fn mk_node(id: &str, t: &str, status: &str) -> (String, SnapshotNode) {
+            (
+                id.to_string(),
+                SnapshotNode {
+                    id: id.to_string(),
+                    entity_type: t.to_string(),
+                    title: id.to_string(),
+                    status: status.to_string(),
+                    metadata_raw: String::new(),
+                    description: String::new(),
+                },
+            )
+        }
+        fn mk_edge(src: &str, tgt: &str, rel: &str) -> SnapshotEdge {
+            SnapshotEdge {
+                source_id: src.to_string(),
+                target_id: tgt.to_string(),
+                relation_type: rel.to_string(),
+            }
+        }
+
+        let snapshot_nodes: HashMap<String, SnapshotNode> = [
+            mk_node("MIL-AXO-900", "Milestone", "current"),
+            mk_node("MIL-AXO-901", "Milestone", "planned"),
+            mk_node("REQ-AXO-10", "Requirement", "current"),
+            mk_node("REQ-AXO-11", "Requirement", "current"),
+            mk_node("REQ-AXO-12", "Requirement", "current"),
+        ]
+        .into_iter()
+        .collect();
+        let edges = vec![
+            // La voie que le scoring reconnaît déjà.
+            mk_edge("MIL-AXO-900", "REQ-AXO-10", "TARGETS"),
+            // La voie que l'outil d'écriture IMPOSE — même jalon, même intention.
+            mk_edge("REQ-AXO-11", "MIL-AXO-900", "BLOCKED_BY"),
+            // Contrôle négatif : un jalon `planned` bloque VRAIMENT. Il ne doit
+            // pas devenir un parent, sinon on ferait passer une attente pour une
+            // appartenance et le remède serait pire que le défaut.
+            mk_edge("REQ-AXO-12", "MIL-AXO-901", "BLOCKED_BY"),
+        ];
+        let snapshot = SollSnapshot::build("AXO", 1, snapshot_nodes, edges, Vec::new());
+
+        let mut nodes: HashMap<String, WorkPlanNode> = HashMap::new();
+        let add = |nodes: &mut HashMap<String, WorkPlanNode>,
+                   id: &str,
+                   t: WorkPlanEntityType,
+                   status: &str,
+                   score: i64| {
+            nodes.insert(
+                id.to_string(),
+                WorkPlanNode {
+                    id: id.to_string(),
+                    title: id.to_string(),
+                    entity_type: t,
+                    status: status.to_string(),
+                    priority: "P1".to_string(),
+                    requirement_state: None,
+                    evidence_count: 0,
+                    descendants: 0,
+                    ist_degraded_links: 0,
+                    backlog_visible: false,
+                    score,
+                    proof_gap_score: 0,
+                    reasons: Vec::new(),
+                    validation_gates: Vec::new(),
+                    ist_signals: Vec::new(),
+                    updated_at_ms: None,
+                    centrality: None,
+                    breadcrumb: None,
+                },
+            );
+        };
+        add(
+            &mut nodes,
+            "MIL-AXO-900",
+            WorkPlanEntityType::Milestone,
+            "current",
+            500,
+        );
+        add(
+            &mut nodes,
+            "MIL-AXO-901",
+            WorkPlanEntityType::Milestone,
+            "planned",
+            400,
+        );
+        add(&mut nodes, "REQ-AXO-10", WorkPlanEntityType::Requirement, "current", 20);
+        add(&mut nodes, "REQ-AXO-11", WorkPlanEntityType::Requirement, "current", 20);
+        add(&mut nodes, "REQ-AXO-12", WorkPlanEntityType::Requirement, "current", 20);
+
+        let schedulable: HashSet<String> = [
+            "MIL-AXO-900",
+            "MIL-AXO-901",
+            "REQ-AXO-10",
+            "REQ-AXO-11",
+            "REQ-AXO-12",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let wave = build_actionable_leaves_wave(&nodes, &snapshot, &schedulable);
+        let reason_of = |id: &str| -> String {
+            wave.items
+                .iter()
+                .find(|i| i.id == id)
+                .unwrap_or_else(|| panic!("{id} absent de la vague"))
+                .reasons
+                .first()
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // Le rattachement TARGETS remonte le score du jalon : référence.
+        assert!(
+            reason_of("REQ-AXO-10").contains("parent_score=500"),
+            "TARGETS devrait porter le score du jalon, got {:?}",
+            reason_of("REQ-AXO-10")
+        );
+        // Le cœur du défaut : la voie que l'outil impose doit donner LE MÊME.
+        assert!(
+            reason_of("REQ-AXO-11").contains("parent_score=500"),
+            "REQ -BLOCKED_BY-> MIL(current) est un rattachement, pas une orpheline \
+             — got {:?}",
+            reason_of("REQ-AXO-11")
+        );
+        // Contrôle négatif : un jalon `planned` reste un blocage, pas un parent.
+        assert!(
+            reason_of("REQ-AXO-12").contains("parent_score=20"),
+            "un jalon `planned` bloque et ne rattache pas, got {:?}",
+            reason_of("REQ-AXO-12")
         );
     }
 }
