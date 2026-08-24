@@ -17,6 +17,101 @@ fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+/// REQ-AXO-902430 — par quelle voie les pratiques ont-elles été SÉLECTIONNÉES.
+///
+/// `practice_recall` échouait DUR quand le travailleur d'embed était absent :
+/// « embed failed … Use structural search ». Or `GUI-PRO-102` step 3c en fait la
+/// mémoire PRIMAIRE de l'init — une panne transitoire d'un worker GPU annulait
+/// donc, le temps de la session, toute la migration de mémoire de REQ-AXO-902131.
+/// FSF l'a chiffré (`mcp_feedback` #91, `blocking`) : aucune de leurs ~90 pratiques
+/// n'était récupérable ce jour-là.
+///
+/// Le point du signalement n'est pas la panne, qui était environnementale, mais
+/// la DIFFÉRENCE DE TRAITEMENT : `query` absorbe la même panne (« Mode: lexical —
+/// embedding skipped ») et reste utilisable. Deux des trois facteurs de
+/// classement — confiance et rétrievabilité FSRS — ne dépendent pas de l'embed :
+/// il reste donc de quoi répondre honnêtement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PracticeLane {
+    /// Nominal : proximité sémantique sur l'embedding de la question.
+    Semantic,
+    /// L'embed est indisponible : correspondance TEXTUELLE sur le corps.
+    Lexical,
+    /// Ni embed, ni correspondance textuelle : les mieux établies du scope.
+    Governance,
+}
+
+/// La voie découle de ce qui est DISPONIBLE, jamais d'un réglage d'appelant.
+pub(crate) fn practice_lane_for(vec_lit: Option<&str>, lexical_matched: bool) -> PracticeLane {
+    match (vec_lit, lexical_matched) {
+        (Some(_), _) => PracticeLane::Semantic,
+        (None, true) => PracticeLane::Lexical,
+        (None, false) => PracticeLane::Governance,
+    }
+}
+
+/// Ce que la réponse DIT de sa propre voie.
+///
+/// ⚠️ Un résultat dégradé NON ANNONCÉ serait pire que l'erreur qu'il remplace :
+/// c'est exactement la classe de défaut que `MIL-AXO-054` poursuit. La voie
+/// nominale ne dit rien — il n'y a rien à signaler.
+pub(crate) fn practice_lane_note(lane: PracticeLane) -> &'static str {
+    match lane {
+        PracticeLane::Semantic => "",
+        PracticeLane::Lexical => " · ⚠️ Mode LEXICAL — l'embed est indisponible, \
+la sélection est textuelle et le classement reste gouverné (confiance × rétrievabilité). \
+Une pratique pertinente mais formulée autrement peut manquer.",
+        PracticeLane::Governance => " · ⚠️ Mode GOUVERNANCE — l'embed est indisponible ET \
+aucune pratique ne correspond textuellement à la question. Voici les mieux établies du \
+scope : elles ne répondent PAS à la question posée.",
+    }
+}
+
+/// La requête de sélection, dérivée de la voie — une seule liste de colonnes.
+///
+/// En voie non sémantique, `dist` vaut 0 : le score conserve alors sa forme
+/// `(1 - dist) × (0,5 + 0,5·confiance) × rétrievabilité`, donc le classement reste
+/// celui de la gouvernance au lieu d'être réinventé. Et le filtre
+/// `embedding IS NOT NULL` saute : une pratique sans vecteur est parfaitement
+/// récupérable par son texte.
+pub(crate) fn practice_selection_sql(
+    scope_filter: &str,
+    lane: PracticeLane,
+    vec_lit: Option<&str>,
+    query: &str,
+    pool: usize,
+) -> String {
+    const COLS: &str = "id, scope, COALESCE(NULLIF(dense,''), practice) AS practice, evidence, \
+trust, stability, EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since";
+    const TAIL: &str = "tier, perishability, role, model";
+    match lane {
+        PracticeLane::Semantic => {
+            let v = vec_lit.unwrap_or("NULL");
+            format!(
+                "SELECT {COLS}, ({v}::vector <=> embedding) AS dist, {TAIL} \
+                 FROM axon.practice \
+                 WHERE status='active' AND embedding IS NOT NULL AND {scope_filter} \
+                 ORDER BY embedding <=> {v}::vector LIMIT {pool}"
+            )
+        }
+        PracticeLane::Lexical => format!(
+            "SELECT {COLS}, 0.0 AS dist, {TAIL} \
+             FROM axon.practice \
+             WHERE status='active' AND {scope_filter} \
+               AND to_tsvector('simple', coalesce(dense,'') || ' ' || coalesce(practice,'') \
+                   || ' ' || coalesce(context,'')) @@ plainto_tsquery('simple', '{q}') \
+             ORDER BY trust DESC, last_used_at DESC LIMIT {pool}",
+            q = esc(query)
+        ),
+        PracticeLane::Governance => format!(
+            "SELECT {COLS}, 0.0 AS dist, {TAIL} \
+             FROM axon.practice \
+             WHERE status='active' AND {scope_filter} \
+             ORDER BY trust DESC, last_used_at DESC LIMIT {pool}"
+        ),
+    }
+}
+
 fn practice_err(msg: &str, status: &str) -> Value {
     json!({
         "content": [{"type":"text","text": format!("### 🧠 practice — {msg}")}],
@@ -612,14 +707,14 @@ impl McpServer {
         if query.is_empty() {
             return Some(practice_err("query is required", "input_invalid"));
         }
-        let emb = match crate::embedder::batch_embed(vec![query.to_string()]) {
-            Ok(v) => v.into_iter().next(),
-            Err(e) => return Some(practice_err(&format!("embed failed: {e}"), "degraded")),
-        };
-        let vec_lit = match emb.as_ref().and_then(|e| crate::postgres::vector::vector_literal(e).ok()) {
-            Some(l) => l,
-            None => return Some(practice_err("query produced no embedding", "degraded")),
-        };
+        // REQ-AXO-902430 — l'embed peut manquer ; ce n'est PAS une raison d'échouer.
+        // `query` absorbe déjà la même panne et reste utilisable ; cette surface est
+        // la mémoire PRIMAIRE de l'init (GUI-PRO-102 step 3c), donc son échec dur
+        // coûtait bien plus cher qu'un outil indisponible.
+        let vec_lit: Option<String> = crate::embedder::batch_embed(vec![query.to_string()])
+            .ok()
+            .and_then(|v| v.into_iter().next())
+            .and_then(|e| crate::postgres::vector::vector_literal(&e).ok());
 
         // REQ-AXO-902149 — partition: hierarchical scope inheritance × role × model.
         // scope covers its ancestors (NEX/coder → NEX → '*'); role/model each recall
@@ -642,23 +737,35 @@ impl McpServer {
             ))
             .unwrap_or(-1);
         let pool = (top_k * 3).clamp(top_k, 60);
-        let sql = format!(
-            "SELECT id, scope, COALESCE(NULLIF(dense,''), practice) AS practice, evidence, trust, stability, \
-                    EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since, \
-                    (embedding <=> {vec_lit}::vector) AS dist, tier, perishability, role, model \
-             FROM axon.practice \
-             WHERE status='active' AND embedding IS NOT NULL AND {scope_filter} \
-             ORDER BY embedding <=> {vec_lit}::vector LIMIT {pool}"
-        );
-        let ann = if scope_count > 0 && scope_count <= EXACT_SCAN_MAX {
-            self.graph_store.query_exact_scan_json(&sql)
-        } else {
-            self.graph_store.query_ann_json(&sql, (pool as u32).max(40).min(1000))
+        let run = |sql: &str, semantic: bool| -> Result<Vec<Vec<Value>>, String> {
+            let raw = if semantic && !(scope_count > 0 && scope_count <= EXACT_SCAN_MAX) {
+                self.graph_store.query_ann_json(sql, (pool as u32).max(40).min(1000))
+            } else {
+                self.graph_store.query_exact_scan_json(sql)
+            };
+            raw.map(|s| serde_json::from_str(&s).unwrap_or_default())
+                .map_err(|e| e.to_string())
         };
-        let rows: Vec<Vec<Value>> = match ann {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+
+        // La voie découle de ce qui répond, dans cet ordre : sémantique, puis
+        // textuelle, puis gouvernance. Chaque repli est ANNONCÉ (practice_lane_note) —
+        // un résultat dégradé muet serait pire que l'erreur qu'il remplace.
+        let mut lane = practice_lane_for(vec_lit.as_deref(), false);
+        let mut rows: Vec<Vec<Value>> = match run(
+            &practice_selection_sql(&scope_filter, lane, vec_lit.as_deref(), query, pool),
+            lane == PracticeLane::Semantic,
+        ) {
+            Ok(r) => r,
             Err(e) => return Some(practice_err(&format!("recall failed: {e}"), "degraded")),
         };
+        if lane == PracticeLane::Lexical && rows.is_empty() {
+            lane = PracticeLane::Governance;
+            rows = run(
+                &practice_selection_sql(&scope_filter, lane, None, query, pool),
+                false,
+            )
+            .unwrap_or_default();
+        }
 
         let f = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0) as f32;
         let mut scored: Vec<(f32, i64, Value)> = rows
@@ -710,8 +817,9 @@ impl McpServer {
         let body = render_practice_list(&practices);
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_recall — {} practice(s) · scope=`{scope}`{prov} (+global)\n\n{body}",
+                "### 🧠 practice_recall — {} practice(s) · scope=`{scope}`{prov} (+global){lane_note}\n\n{body}",
                 practices.len(),
+                lane_note = practice_lane_note(lane),
                 prov = if scope_inferred {
                     " _(déduit du cwd — passe `scope=` pour un autre)_"
                 } else {
@@ -966,8 +1074,9 @@ mod tests {
     use super::{
         axis_recall_set, consolidate_tier, covering_scopes, is_failure_mode,
         is_imperative_directive, merge_provenance, normalize_axis_tag, normalize_perishability,
-        perishability_decays_by_time, provenance_count, render_practice_list, resolve_dense_form,
-        retirement_trail,
+        perishability_decays_by_time, practice_lane_for, practice_lane_note,
+        practice_selection_sql, provenance_count, render_practice_list, resolve_dense_form,
+        retirement_trail, PracticeLane,
     };
     use serde_json::json;
 
@@ -1148,5 +1257,98 @@ mod tests {
         // declarative factual assertions → NOT a directive (anti-poison reject preserved)
         assert!(!is_imperative_directive("database choice", "Axon uses MongoDB for everything"));
         assert!(!is_imperative_directive("storage", "the canonical store is PostgreSQL"));
+    }
+
+    /// REQ-AXO-902430 — la voie découle de ce qui est DISPONIBLE.
+    #[test]
+    fn the_recall_lane_follows_what_actually_answered() {
+        assert_eq!(
+            practice_lane_for(Some("'[0.1]'"), false),
+            PracticeLane::Semantic,
+            "un embed disponible impose la voie semantique"
+        );
+        assert_eq!(
+            practice_lane_for(None, true),
+            PracticeLane::Lexical,
+            "sans embed mais avec correspondance textuelle : voie lexicale"
+        );
+        assert_eq!(
+            practice_lane_for(None, false),
+            PracticeLane::Governance,
+            "ni embed ni correspondance : les mieux etablies du scope"
+        );
+    }
+
+    /// Le cœur du signalement FSF : un repli MUET serait pire que l'erreur.
+    ///
+    /// C'est la classe de defaut de MIL-AXO-054 — un verdict qui ne dit pas ce
+    /// qu'il a mesure. Ce test refuse qu'une voie degradee reponde sans le dire,
+    /// et exige que l'annonce nomme la CAUSE (l'embed) plutot qu'un vague
+    /// « mode degrade ».
+    #[test]
+    fn every_degraded_lane_says_so_and_names_the_cause() {
+        assert!(
+            practice_lane_note(PracticeLane::Semantic).is_empty(),
+            "la voie nominale n'a rien a signaler"
+        );
+        for lane in [PracticeLane::Lexical, PracticeLane::Governance] {
+            let note = practice_lane_note(lane);
+            assert!(
+                !note.trim().is_empty(),
+                "{lane:?} repond de facon degradee : elle DOIT l'annoncer"
+            );
+            assert!(
+                note.contains("embed"),
+                "{lane:?} doit nommer la cause (l'embed), pas seulement dire « degrade » : {note}"
+            );
+        }
+        assert!(
+            practice_lane_note(PracticeLane::Governance).contains("PAS"),
+            "la voie gouvernance doit dire explicitement qu'elle ne repond pas a la question posee"
+        );
+    }
+
+    /// La requete derive de la voie, et les deux filtres qui changent sont les
+    /// bons : `embedding IS NOT NULL` ne doit PAS survivre hors voie semantique
+    /// (une pratique sans vecteur reste recuperable par son texte), et la
+    /// correspondance textuelle n'existe que dans la voie lexicale.
+    #[test]
+    fn the_selection_query_derives_from_the_lane() {
+        let f = "scope IN ('*') AND role IN ('*') AND model IN ('*')";
+
+        let semantic = practice_selection_sql(f, PracticeLane::Semantic, Some("'[0.1]'"), "q", 10);
+        assert!(semantic.contains("embedding IS NOT NULL"));
+        assert!(semantic.contains("<=>"), "la voie semantique classe par distance");
+        assert!(!semantic.contains("plainto_tsquery"));
+
+        let lexical = practice_selection_sql(f, PracticeLane::Lexical, None, "verrou env", 10);
+        assert!(
+            !lexical.contains("embedding IS NOT NULL"),
+            "une pratique sans vecteur reste recuperable par son texte"
+        );
+        assert!(lexical.contains("plainto_tsquery"));
+        assert!(lexical.contains("verrou env"), "la question doit atteindre la requete");
+        assert!(
+            lexical.contains("0.0 AS dist"),
+            "dist=0 preserve la forme du score gouverne au lieu de la reinventer"
+        );
+        assert!(lexical.contains("trust DESC"));
+
+        let gov = practice_selection_sql(f, PracticeLane::Governance, None, "q", 10);
+        assert!(!gov.contains("plainto_tsquery"), "la voie gouvernance ne filtre pas sur le texte");
+        assert!(gov.contains("0.0 AS dist") && gov.contains("trust DESC"));
+
+        // Le filtre de partition (scope × role × model) survit dans les TROIS voies :
+        // un repli ne doit jamais elargir la portee au-dela de ce qui etait demande.
+        for sql in [semantic.as_str(), lexical.as_str(), gov.as_str()] {
+            assert!(sql.contains(f), "le filtre de partition doit survivre a tout repli");
+        }
+    }
+
+    /// L'apostrophe d'une question ne doit pas casser la requete lexicale.
+    #[test]
+    fn a_quote_in_the_question_is_escaped_in_the_lexical_lane() {
+        let sql = practice_selection_sql("scope IN ('*')", PracticeLane::Lexical, None, "l'init", 5);
+        assert!(sql.contains("l''init"), "l'apostrophe doit etre echappee, got {sql}");
     }
 }
