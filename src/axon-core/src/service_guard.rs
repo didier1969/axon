@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::bridge::RuntimeTruthFeed;
 
@@ -591,7 +591,7 @@ pub enum McpRequestClass {
 }
 
 pub fn record_latency(kind: ServiceKind, latency_ms: u64) {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     match kind {
         ServiceKind::Sql => LAST_SQL_LATENCY_MS.store(latency_ms, Ordering::Relaxed),
         ServiceKind::Mcp => {
@@ -606,19 +606,19 @@ pub fn record_latency(kind: ServiceKind, latency_ms: u64) {
 }
 
 pub fn recent_peak_latency_ms() -> u64 {
-    recent_peak_latency_ms_at(now_ms())
+    recent_peak_latency_ms_at(crate::clock::now_unix_ms() as u64)
 }
 
 pub fn recent_mcp_latency_ms() -> u64 {
-    recent_mcp_latency_ms_at(now_ms())
+    recent_mcp_latency_ms_at(crate::clock::now_unix_ms() as u64)
 }
 
 pub fn current_pressure() -> ServicePressure {
-    current_pressure_at(now_ms())
+    current_pressure_at(crate::clock::now_unix_ms() as u64)
 }
 
 pub fn mcp_request_started_with_class(class: McpRequestClass) {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     if matches!(class, McpRequestClass::Control) {
         INTERACTIVE_REQUESTS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
     }
@@ -630,7 +630,7 @@ pub fn mcp_request_started() {
 }
 
 pub fn mcp_request_finished_with_class(class: McpRequestClass) {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     if matches!(class, McpRequestClass::Control) {
         let _ = INTERACTIVE_REQUESTS_IN_FLIGHT.fetch_update(
             Ordering::Relaxed,
@@ -654,7 +654,7 @@ pub fn interactive_priority_active() -> bool {
 }
 
 pub fn current_interactive_priority() -> InteractivePriority {
-    current_interactive_priority_at(now_ms())
+    current_interactive_priority_at(crate::clock::now_unix_ms() as u64)
 }
 
 pub fn current_runtime_quiescent_state(
@@ -689,7 +689,7 @@ pub fn record_runtime_wakeup(
     graph_backlog_depth: u64,
     semantic_backlog_depth: u64,
 ) {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     LAST_RUNTIME_WAKEUP_AT_MS.store(now, Ordering::Relaxed);
     LAST_RUNTIME_WAKE_SOURCE_CODE.store(source.code(), Ordering::Relaxed);
     match source {
@@ -760,7 +760,7 @@ pub fn runtime_wake_summary(
     graph_backlog_depth: u64,
     semantic_backlog_depth: u64,
 ) -> RuntimeWakeSummary {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     let state = current_runtime_quiescent_state(graph_backlog_depth, semantic_backlog_depth);
     let resume_latency = summarize_runtime_window(&quiescent_resume_latencies_ms());
     let useful_resume_latency = summarize_runtime_window(&quiescent_useful_resume_latencies_ms());
@@ -944,7 +944,7 @@ pub fn record_vector_embed_call(chunks: u64, files_touched: u64) {
     VECTOR_CHUNKS_EMBEDDED_TOTAL.fetch_add(chunks, Ordering::Relaxed);
     VECTOR_FILES_TOUCHED_TOTAL.fetch_add(files_touched, Ordering::Relaxed);
     if chunks > 0 {
-        record_vector_embed_throughput_sample(now_ms(), chunks);
+        record_vector_embed_throughput_sample(crate::clock::now_unix_ms() as u64, chunks);
     }
 }
 
@@ -960,7 +960,7 @@ pub fn record_vector_embed_breakdown(transform_ms: u64, export_ms: u64) {
 }
 
 pub fn record_vector_embed_attempt(texts: u64, text_bytes: u64) {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     VECTOR_EMBED_ATTEMPTS_TOTAL.fetch_add(1, Ordering::Relaxed);
     let last_finished_at = VECTOR_LAST_EMBED_FINISHED_AT_MS.load(Ordering::Relaxed);
     if last_finished_at > 0 && now >= last_finished_at {
@@ -976,7 +976,7 @@ pub fn record_vector_embed_attempt(texts: u64, text_bytes: u64) {
 }
 
 pub fn record_vector_embed_attempt_finished() {
-    let finished_at = now_ms();
+    let finished_at = crate::clock::now_unix_ms() as u64;
     let started_at = VECTOR_EMBED_INFLIGHT_STARTED_AT_MS.load(Ordering::Relaxed);
     if started_at > 0 && finished_at >= started_at {
         let wall_ms = finished_at.saturating_sub(started_at);
@@ -997,7 +997,7 @@ pub fn current_last_embed_finished_at_ms() -> u64 {
 pub fn record_vector_worker_started() {
     VECTOR_WORKERS_STARTED_TOTAL.fetch_add(1, Ordering::Relaxed);
     VECTOR_WORKERS_ACTIVE_CURRENT.fetch_add(1, Ordering::Relaxed);
-    VECTOR_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    VECTOR_WORKER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
     record_vector_lane_state(VectorLaneState::Starting);
 }
 
@@ -1008,11 +1008,11 @@ pub fn record_vector_worker_stopped() {
         Ordering::Relaxed,
         |current| Some(current.saturating_sub(1)),
     );
-    VECTOR_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    VECTOR_WORKER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 pub fn record_vector_worker_heartbeat() {
-    VECTOR_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    VECTOR_WORKER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 pub fn record_vector_worker_restart() {
@@ -1021,15 +1021,15 @@ pub fn record_vector_worker_restart() {
 
 // REQ-AXO-270 AC1.5 — per-stage heartbeat writers for the 3-stage pipeline.
 pub fn record_vector_pipeline_producer_heartbeat() {
-    VECTOR_PIPELINE_PRODUCER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    VECTOR_PIPELINE_PRODUCER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 pub fn record_vector_pipeline_embedder_heartbeat() {
-    VECTOR_PIPELINE_EMBEDDER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    VECTOR_PIPELINE_EMBEDDER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 pub fn record_vector_pipeline_persister_heartbeat() {
-    VECTOR_PIPELINE_PERSISTER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    VECTOR_PIPELINE_PERSISTER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 // Read accessors — Phase 1 only used by tests; Phase 2 wires them into
@@ -1052,7 +1052,7 @@ pub fn vector_pipeline_persister_heartbeat_at_ms() -> u64 {
 pub fn record_graph_worker_started() {
     GRAPH_WORKERS_STARTED_TOTAL.fetch_add(1, Ordering::Relaxed);
     GRAPH_WORKERS_ACTIVE_CURRENT.fetch_add(1, Ordering::Relaxed);
-    GRAPH_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    GRAPH_WORKER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 pub fn record_graph_worker_stopped() {
@@ -1062,27 +1062,27 @@ pub fn record_graph_worker_stopped() {
         Ordering::Relaxed,
         |current| Some(current.saturating_sub(1)),
     );
-    GRAPH_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    GRAPH_WORKER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 pub fn record_graph_worker_heartbeat() {
-    GRAPH_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    GRAPH_WORKER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 pub fn record_vector_lane_state(state: VectorLaneState) {
     VECTOR_LANE_STATE_CODE.store(state.code(), Ordering::Relaxed);
-    VECTOR_LANE_LAST_TRANSITION_AT_MS.store(now_ms(), Ordering::Relaxed);
+    VECTOR_LANE_LAST_TRANSITION_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 pub fn record_vector_lane_success() {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     VECTOR_LANE_LAST_SUCCESS_AT_MS.store(now, Ordering::Relaxed);
     VECTOR_LANE_STATE_CODE.store(VectorLaneState::Healthy.code(), Ordering::Relaxed);
     VECTOR_LANE_LAST_TRANSITION_AT_MS.store(now, Ordering::Relaxed);
 }
 
 pub fn record_vector_lane_fault() {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     VECTOR_LANE_LAST_FAULT_AT_MS.store(now, Ordering::Relaxed);
     VECTOR_LANE_STATE_CODE.store(VectorLaneState::Degraded.code(), Ordering::Relaxed);
     VECTOR_LANE_LAST_TRANSITION_AT_MS.store(now, Ordering::Relaxed);
@@ -1362,7 +1362,7 @@ pub fn vector_chunks_embedded_cumulative() -> u64 {
 }
 
 pub fn vector_chunk_embeddings_per_second() -> f64 {
-    vector_chunk_embeddings_per_second_at(now_ms(), VECTOR_EMBED_THROUGHPUT_WINDOW_MS)
+    vector_chunk_embeddings_per_second_at(crate::clock::now_unix_ms() as u64, VECTOR_EMBED_THROUGHPUT_WINDOW_MS)
 }
 
 pub fn vector_chunk_embeddings_rate_window_ms() -> u64 {
@@ -1761,7 +1761,7 @@ fn quiescent_useful_resume_latencies_ms() -> &'static Mutex<VecDeque<u64>> {
 }
 
 fn observe_quiescent_transition(state: RuntimeQuiescentState) {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     let code = state.code();
     let previous = LAST_OBSERVED_QUIESCENT_STATE_CODE.swap(code, Ordering::Relaxed);
     if previous == code {
@@ -1799,7 +1799,7 @@ fn observe_quiescent_transition(state: RuntimeQuiescentState) {
 }
 
 fn observe_useful_resume_after_quiescent() {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     let exited_at = LAST_QUIESCENT_EXITED_AT_MS.load(Ordering::Relaxed);
     if exited_at == 0 {
         return;
@@ -1909,7 +1909,7 @@ fn runtime_truth_feed_at(now_ms: u64) -> RuntimeTruthFeed {
 }
 
 pub fn current_runtime_truth_feed() -> RuntimeTruthFeed {
-    runtime_truth_feed_at(now_ms())
+    runtime_truth_feed_at(crate::clock::now_unix_ms() as u64)
 }
 
 /// REQ-AXO-901854 — build a runtime-truth feed sourced from a paired
@@ -1919,7 +1919,7 @@ pub fn current_runtime_truth_feed() -> RuntimeTruthFeed {
 /// so it reflects the truth of the indexer it is paired with: a fresh peer
 /// heartbeat ⇒ runtime truth present and good (no degraded_reason).
 pub fn runtime_truth_feed_from_peer_heartbeat(peer_heartbeat_ms: u64) -> RuntimeTruthFeed {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     let stale_after_ms = RUNTIME_TRUTH_STALE_AFTER_MS.load(Ordering::Relaxed).max(1);
     RuntimeTruthFeed::from_observed_times(
         now,
@@ -1948,7 +1948,7 @@ pub fn current_runtime_truth_snapshot() -> RuntimeTruthFeed {
     };
 
     RuntimeTruthFeed::from_observed_times(
-        now_ms(),
+        crate::clock::now_unix_ms() as u64,
         last_good_payload_at_ms,
         last_good_payload_at_ms,
         stale_after_ms,
@@ -1957,7 +1957,7 @@ pub fn current_runtime_truth_snapshot() -> RuntimeTruthFeed {
 }
 
 pub fn record_runtime_truth_bridge_dispatch(degraded_reason: Option<&str>) -> RuntimeTruthFeed {
-    let now = now_ms();
+    let now = crate::clock::now_unix_ms() as u64;
     RUNTIME_TRUTH_LAST_HEARTBEAT_AT_MS.store(now, Ordering::Relaxed);
     if degraded_reason.is_none() {
         RUNTIME_TRUTH_LAST_GOOD_PAYLOAD_AT_MS.store(now, Ordering::Relaxed);
@@ -2054,13 +2054,6 @@ fn recent_mcp_latency_ms_at(now_ms: u64) -> u64 {
     }
 
     LAST_MCP_LATENCY_MS.load(Ordering::Relaxed)
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[cfg(test)]

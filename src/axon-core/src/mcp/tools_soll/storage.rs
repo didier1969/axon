@@ -288,13 +288,6 @@ pub(super) fn project_scope_clause_for_relation(project_code: Option<&str>) -> S
         .unwrap_or_default()
 }
 
-pub(super) fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 pub(super) fn escape_sql(value: &str) -> String {
     value.replace('\'', "''")
 }

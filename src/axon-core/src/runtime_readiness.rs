@@ -21,7 +21,6 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Canonical subsystem identifiers. Future subsystems are added here
 /// explicitly so the contract is stable across releases.
@@ -165,13 +164,6 @@ fn registry() -> &'static Mutex<HashMap<&'static str, ReporterSlot>> {
 /// the watchdog flips after 15s of silence.
 pub const HEARTBEAT_STALENESS_MULTIPLIER: u64 = 3;
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Report a subsystem's current state. Replaces any prior state for
 /// that subsystem and bumps `last_observed_at_ms`. Calling repeatedly
 /// with the same state is allowed and acts as a heartbeat (the
@@ -187,7 +179,7 @@ pub fn report_subsystem_state(subsystem: Subsystem, state: SubsystemState) {
         subsystem.as_str(),
         ReporterSlot {
             state,
-            last_observed_at_ms: now_ms(),
+            last_observed_at_ms: crate::clock::now_unix_ms() as u64,
             heartbeat_period_ms: preserved_period,
         },
     );
@@ -206,7 +198,7 @@ pub fn require_heartbeat(subsystem: Subsystem, period_ms: u64) {
         .entry(subsystem.as_str())
         .or_insert_with(|| ReporterSlot {
             state: SubsystemState::Ready,
-            last_observed_at_ms: now_ms(),
+            last_observed_at_ms: crate::clock::now_unix_ms() as u64,
             heartbeat_period_ms: None,
         });
     slot.heartbeat_period_ms = Some(period_ms);

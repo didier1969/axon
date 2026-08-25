@@ -220,7 +220,7 @@ impl McpServer {
             .load_soll_doc_edges(project_code)
             .map_err(|error| format!("SOLL relation read error: {}", error))?;
 
-        let generated_at_ms = now_unix_ms();
+        let generated_at_ms = crate::clock::now_unix_ms();
         let project_manifest_path = project_output_root.join("_manifest.json");
         let refresh_mode = if self.should_use_incremental_project_docs(&project_manifest_path) {
             "incremental"

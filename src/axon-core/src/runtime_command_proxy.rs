@@ -173,7 +173,7 @@ impl RuntimeCommandProxy {
     pub(crate) fn request_for_resume_vectorization(
         arguments: &Value,
     ) -> RuntimeCommandProxyRequest {
-        let requested_at_ms = crate::mcp::McpServer::now_unix_ms();
+        let requested_at_ms = crate::clock::now_unix_ms();
         let arguments_json = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string());
         let idempotency_key =
             format!("runtime-command-proxy:resume_vectorization:{arguments_json}");
@@ -486,7 +486,7 @@ impl RuntimeCommandProxy {
                         .unwrap_or("unknown-request")
                         .to_string(),
                     tool_name: "unknown".to_string(),
-                    finished_at_ms: crate::mcp::McpServer::now_unix_ms(),
+                    finished_at_ms: crate::clock::now_unix_ms(),
                     ok: false,
                     response: Value::Null,
                     error_text: "invalid runtime command bridge request".to_string(),
@@ -507,7 +507,7 @@ impl RuntimeCommandProxy {
         store: &Arc<GraphStore>,
         request: RuntimeCommandBridgeEnvelope,
     ) -> RuntimeCommandBridgeReply {
-        let finished_at_ms = crate::mcp::McpServer::now_unix_ms();
+        let finished_at_ms = crate::clock::now_unix_ms();
         match request.tool_name.as_str() {
             "resume_vectorization" => match store.backfill_file_vectorization_queue() {
                 Ok(count) => {

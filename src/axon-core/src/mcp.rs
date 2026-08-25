@@ -2308,14 +2308,6 @@ impl McpServer {
         Some(result)
     }
 
-    pub(crate) fn now_unix_ms() -> i64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64
-    }
 
     /// REQ-AXO-210: monotonic counter that pairs with `now_unix_ms` to
     /// build a job id immune to same-millisecond collisions. The
@@ -2333,7 +2325,7 @@ impl McpServer {
     /// the atomic counter so two calls in the same ms differ in the
     /// suffix.
     pub(crate) fn next_job_id() -> String {
-        let ms = Self::now_unix_ms();
+        let ms = crate::clock::now_unix_ms();
         let seq = Self::next_job_seq();
         format!("JOB-{ms}-{seq:08}")
     }
@@ -2421,7 +2413,7 @@ impl McpServer {
             }));
         }
 
-        let submitted_at = Self::now_unix_ms();
+        let submitted_at = crate::clock::now_unix_ms();
         // REQ-AXO-210: collision-proof job id (atomic seq paired with ms).
         let job_id = Self::next_job_id();
         let public_tool_name = Self::public_tool_name_for(requested_tool_name, normalized_name);
@@ -2560,7 +2552,7 @@ impl McpServer {
         let proxy_request_for_thread = proxy_request.clone();
         thread::spawn(move || {
             let server = McpServer::new(graph_store.clone());
-            let started_at = McpServer::now_unix_ms();
+            let started_at = crate::clock::now_unix_ms();
             let _ = graph_store.execute_param(
                 "UPDATE soll.McpJob SET status = $status, started_at = $started_at WHERE job_id = $job_id",
                 &json!({
@@ -2605,7 +2597,7 @@ impl McpServer {
                         &queued_args,
                         result,
                     );
-                    let finished_at = McpServer::now_unix_ms();
+                    let finished_at = crate::clock::now_unix_ms();
                     let is_error = result
                         .get("isError")
                         .and_then(|value| value.as_bool())
@@ -2635,7 +2627,7 @@ impl McpServer {
                     );
                 }
                 Ok(None) => {
-                    let finished_at = McpServer::now_unix_ms();
+                    let finished_at = crate::clock::now_unix_ms();
                     let _ = graph_store.execute_param(
                         "UPDATE soll.McpJob SET status = $status, finished_at = $finished_at, error_text = $error_text WHERE job_id = $job_id",
                         &json!({
@@ -2647,7 +2639,7 @@ impl McpServer {
                     );
                 }
                 Err(_) => {
-                    let finished_at = McpServer::now_unix_ms();
+                    let finished_at = crate::clock::now_unix_ms();
                     let _ = graph_store.execute_param(
                         "UPDATE soll.McpJob SET status = $status, finished_at = $finished_at, error_text = $error_text WHERE job_id = $job_id",
                         &json!({

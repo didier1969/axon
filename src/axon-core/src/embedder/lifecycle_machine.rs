@@ -68,7 +68,7 @@ impl EmbedderLifecycle {
     pub fn new() -> Self {
         Self {
             phase: AtomicU8::new(EmbedderPhase::Ready as u8),
-            last_used_ms: AtomicI64::new(now_unix_ms()),
+            last_used_ms: AtomicI64::new(crate::clock::now_unix_ms()),
             wake_count: AtomicI64::new(0),
             sleep_count: AtomicI64::new(0),
         }
@@ -97,7 +97,7 @@ impl EmbedderLifecycle {
     /// awake forever — that is the 901931 failure-mode reincarnated at the
     /// queue layer (advisor review, s101).
     pub fn mark_used(&self) {
-        self.last_used_ms.store(now_unix_ms(), Ordering::Release);
+        self.last_used_ms.store(crate::clock::now_unix_ms(), Ordering::Release);
     }
 
     /// REQ-AXO-902220 — the ORT session was just rebuilt after an idle drop.
@@ -108,7 +108,7 @@ impl EmbedderLifecycle {
         self.phase
             .store(EmbedderPhase::Ready as u8, Ordering::Release);
         self.wake_count.fetch_add(1, Ordering::AcqRel);
-        self.last_used_ms.store(now_unix_ms(), Ordering::Release);
+        self.last_used_ms.store(crate::clock::now_unix_ms(), Ordering::Release);
     }
 
     /// REQ-AXO-902220 — the ORT session was just dropped (VRAM released).
@@ -137,7 +137,7 @@ impl EmbedderLifecycle {
     /// REQ-AXO-902220 — [`should_drop`] evaluated against the wall clock.
     /// Used by the runtime watchdog; the injectable variant backs the tests.
     pub fn should_drop_now(&self, t_idle: Duration) -> bool {
-        self.should_drop(t_idle, now_unix_ms())
+        self.should_drop(t_idle, crate::clock::now_unix_ms())
     }
 }
 
@@ -203,7 +203,7 @@ impl LifecycleHeartbeatSnapshot {
             wake_count: lc.wake_count(),
             sleep_count: lc.sleep_count(),
             pending_count: super::lifecycle::process_state().pending_count() as i64,
-            heartbeat_ms: now_unix_ms(),
+            heartbeat_ms: crate::clock::now_unix_ms(),
             compute: compute.to_string(),
             compute_source: compute_source.to_string(),
             build_id: std::env::var("AXON_BUILD_ID")
@@ -234,13 +234,6 @@ where
             publish(LifecycleHeartbeatSnapshot::capture());
         }
     });
-}
-
-fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

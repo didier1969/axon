@@ -197,7 +197,7 @@ pub fn persist_seal(
     seal: &StructuralSeal,
     adequate: bool,
 ) -> Result<i64> {
-    let revision = now_ms();
+    let revision = crate::clock::now_unix_ms();
     store.execute_param(
         "UPDATE soll.Contract SET
             seal_hash        = $seal_hash,
@@ -585,13 +585,6 @@ fn upsert_edge(
             "project_code": project_code,
         }),
     )
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// `TYPE-PROJ-N` → `PROJ` (DEC-AXO-085) ; défaut `AXO` pour les ids hors-format.

@@ -813,7 +813,7 @@ impl McpServer {
             "metadata": {
                 "algorithm_version": "v1",
                 "include_ist": include_ist,
-                "generated_at": now_unix_ms(),
+                "generated_at": crate::clock::now_unix_ms(),
                 "truncated": truncated,
                 "limit": limit,
                 "top": top,

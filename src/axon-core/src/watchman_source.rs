@@ -579,7 +579,7 @@ async fn run_root_subscription(
                     let Some(action) = maybe else { break }; // sender dropped → drain done
                     match action {
                         FeedAction::Upsert(path) => {
-                            let now = now_unix_ms();
+                            let now = crate::clock::now_unix_ms();
                             if guard.admit(&path, now) {
                                 if feeder_input_tx.send(path).await.is_err() {
                                     return; // pipeline A closed
@@ -603,7 +603,7 @@ async fn run_root_subscription(
                 _ = flush.tick() => {
                     // Trailing edge: feed the latest content of any path whose
                     // cooldown has now elapsed.
-                    let now = now_unix_ms();
+                    let now = crate::clock::now_unix_ms();
                     for path in guard.drain_due(now) {
                         if feeder_input_tx.send(path).await.is_err() {
                             return; // pipeline A closed
@@ -759,13 +759,6 @@ fn watch_cooldown_ms_from_env(raw: Option<&str>) -> i64 {
             .unwrap_or(DEFAULT_WATCH_COOLDOWN_MS),
         None => DEFAULT_WATCH_COOLDOWN_MS,
     }
-}
-
-fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
 }
 
 /// REQ-AXO-902049 — per-file churn guard (trailing-edge debounce). Lives in the

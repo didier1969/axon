@@ -289,7 +289,7 @@ impl McpServer {
         if let Err(e) = self.graph_store.execute_param(
             "INSERT INTO soll.RevisionPreview (preview_id, author, project_code, payload, created_at) VALUES (?, ?, ?, ?, ?)
              ON CONFLICT (preview_id) DO UPDATE SET author = EXCLUDED.author, project_code = EXCLUDED.project_code, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at",
-            &json!([preview_id, author, canonical_project_code, payload.to_string(), now_unix_ms()]),
+            &json!([preview_id, author, canonical_project_code, payload.to_string(), crate::clock::now_unix_ms()]),
         ) {
             return Some(json!({
                 "content": [{"type":"text","text": format!("SOLL apply_plan error: {}", e)}],
@@ -489,11 +489,11 @@ impl McpServer {
             format!(
                 "REV-{}-{}-{}",
                 project_code,
-                now_unix_ms(),
+                crate::clock::now_unix_ms(),
                 REV_NONCE.fetch_add(1, Ordering::Relaxed)
             )
         };
-        let now = now_unix_ms();
+        let now = crate::clock::now_unix_ms();
         // REQ-AXO-254: deadpool serves a fresh connection per `pg_execute`,
         // so a wrapping BEGIN/COMMIT lands on different sessions and leaves
         // the first one "idle in transaction" with row locks held. Each

@@ -544,7 +544,7 @@ impl McpServer {
             let entry = json!({
                 "statement": statement,
                 "source": "entrench_nuance",
-                "entrenched_at": now_unix_ms()
+                "entrenched_at": crate::clock::now_unix_ms()
             });
             if !metadata
                 .get("nuances")
@@ -558,7 +558,7 @@ impl McpServer {
             {
                 items.push(entry);
             }
-            metadata["updated_at"] = json!(now_unix_ms());
+            metadata["updated_at"] = json!(crate::clock::now_unix_ms());
 
             if let Err(error) = self.graph_store.execute_param(
                 "UPDATE soll.Node SET metadata = ? WHERE id = ?",

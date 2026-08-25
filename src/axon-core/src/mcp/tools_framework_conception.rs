@@ -154,7 +154,7 @@ impl McpServer {
     }
 
     pub(super) fn cached_conception_view(&self, project_code: &str) -> Value {
-        let now_ms = Self::now_unix_ms();
+        let now_ms = crate::clock::now_unix_ms();
         let cache_key = project_code.to_string();
         if let Some(cached) = cache_read(
             Self::conception_cache(),

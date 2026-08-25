@@ -138,8 +138,8 @@ impl McpServer {
         let previous_summary = previous_snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.get("anomaly_summary"));
-        let snapshot_id = format!("project-status-{}-{}", project_code, Self::now_unix_ms());
-        let generated_at = Self::now_unix_ms();
+        let snapshot_id = format!("project-status-{}-{}", project_code, crate::clock::now_unix_ms());
+        let generated_at = crate::clock::now_unix_ms();
         let delta_vs_previous =
             Self::build_project_status_delta(previous_summary, &anomaly_summary);
         let degraded_notes = status_data
@@ -405,7 +405,7 @@ impl McpServer {
                 .and_then(|value| value.as_bool())
                 .unwrap_or(mode != "brief")
         );
-        let now_ms = Self::now_unix_ms();
+        let now_ms = crate::clock::now_unix_ms();
         if let Some(cached) = cache_read(Self::why_cache(), &cache_key, now_ms, WHY_CACHE_TTL_MS) {
             return Some(cached);
         }

@@ -46,7 +46,7 @@ le label « Runtime mode: brain_only » ci-dessus est le rôle de CE process, PA
 impl McpServer {
     pub(super) fn axon_status_status_impl(&self, args: &Value) -> Option<Value> {
         let mode = args.get("mode").and_then(|value| value.as_str());
-        let now_ms = Self::now_unix_ms();
+        let now_ms = crate::clock::now_unix_ms();
         let runtime_mode = AxonRuntimeMode::from_env();
         let runtime_shadow_role = current_runtime_shadow_role();
         let split_runtime_is_indexer = matches!(

@@ -946,7 +946,7 @@ impl McpServer {
         if sha.is_empty() {
             return String::new();
         }
-        let now = now_unix_ms();
+        let now = crate::clock::now_unix_ms();
         let subject = message.lines().next().unwrap_or("").to_string();
         let files: Vec<&str> = diff_paths.iter().filter_map(|p| p.as_str()).collect();
         let metadata = serde_json::json!({

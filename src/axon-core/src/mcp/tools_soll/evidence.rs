@@ -300,7 +300,7 @@ impl McpServer {
         }
 
         let mut attached = 0usize;
-        let now = now_unix_ms();
+        let now = crate::clock::now_unix_ms();
         let normalized_entity_type = normalize_traceability_entity_type(entity_type);
         let accepted_schema = accepted_evidence_artifact_schema(&normalized_entity_type)
             .into_iter()

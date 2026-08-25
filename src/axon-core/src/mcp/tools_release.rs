@@ -29,7 +29,7 @@ impl McpServer {
         // in-process sources `status` trusts (never the declared mode of this
         // brain_only process). Indexer = PG heartbeat → resolve_indexer_liveness;
         // brain = a real `SELECT 1` DB probe (catches up-but-DB-disconnected).
-        let now_ms = Self::now_unix_ms();
+        let now_ms = crate::clock::now_unix_ms();
         let hb = self
             .graph_store
             .latest_lifecycle_heartbeat("indexer")

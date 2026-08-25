@@ -27,7 +27,7 @@
 //!   freshness.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::runtime_readiness::{tick_watchdog, SubsystemState};
 
@@ -45,13 +45,6 @@ pub const DEFAULT_HEARTBEAT_PERIOD_MS: u64 = 5_000;
 
 /// Idempotency guard: only spawn one watchdog task per process.
 static WATCHDOG_SPAWNED: AtomicBool = AtomicBool::new(false);
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 /// Spawn the watchdog tokio task. Idempotent: subsequent calls in
 /// the same process are a no-op so test harnesses and re-init code
@@ -76,7 +69,7 @@ pub fn spawn_watchdog_task(tick_interval_ms: u64) -> Option<tokio::task::JoinHan
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            let transitions = tick_watchdog(now_ms());
+            let transitions = tick_watchdog(crate::clock::now_unix_ms() as u64);
             for (subsystem, state) in transitions {
                 emit_transition_event(&subsystem, &state);
             }

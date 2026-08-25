@@ -69,7 +69,7 @@ impl SollSnapshot {
     pub fn empty(project_code: impl Into<String>, generation: u64) -> Self {
         Self {
             project_code: project_code.into(),
-            loaded_at_ms: now_unix_ms(),
+            loaded_at_ms: crate::clock::now_unix_ms(),
             generation,
             nodes: HashMap::new(),
             edges: Vec::new(),
@@ -135,7 +135,7 @@ impl SollSnapshot {
 
         Self {
             project_code: project_code.into(),
-            loaded_at_ms: now_unix_ms(),
+            loaded_at_ms: crate::clock::now_unix_ms(),
             generation,
             nodes,
             edges,
@@ -391,13 +391,6 @@ impl SollSnapshot {
     pub fn edge_count(&self) -> usize {
         self.edges.len()
     }
-}
-
-fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

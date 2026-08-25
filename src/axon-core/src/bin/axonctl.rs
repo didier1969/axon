@@ -828,17 +828,17 @@ impl RealCutoverIo {
             brain_pids.len(),
             indexer_pids.len(),
         );
-        let stop_t0 = now_ms();
+        let stop_t0 = axon_core::clock::now_unix_ms() as u128;
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done_sampler = done.clone();
         let sampler = std::thread::spawn(move || {
             let (mut brain_gone, mut indexer_gone) = (0u128, 0u128);
             while !done_sampler.load(std::sync::atomic::Ordering::Relaxed) {
                 if brain_gone == 0 && find_instance_all_pids(&brain_cfg).is_empty() {
-                    brain_gone = now_ms();
+                    brain_gone = axon_core::clock::now_unix_ms() as u128;
                 }
                 if indexer_gone == 0 && find_instance_all_pids(&indexer_cfg).is_empty() {
-                    indexer_gone = now_ms();
+                    indexer_gone = axon_core::clock::now_unix_ms() as u128;
                 }
                 if brain_gone != 0 && indexer_gone != 0 {
                     break;
@@ -957,22 +957,15 @@ fn cutover_phase(phase: &str, started_ms: u128) {
     );
 }
 
-fn now_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
 impl CutoverIo for RealCutoverIo {
     fn snapshot_current(&mut self) -> Result<(), String> {
-        let t0 = now_ms();
+        let t0 = axon_core::clock::now_unix_ms() as u128;
         let r = cutover_snapshot(&self.release_dir).map(|_| ()).map_err(|e| format!("{e:#}"));
         cutover_phase("snapshot_current", t0);
         r
     }
     fn stage_candidate(&mut self) -> Result<(), String> {
-        let t0 = now_ms();
+        let t0 = axon_core::clock::now_unix_ms() as u128;
         let r = cutover_stage_files(&self.candidate_manifest, &self.release_dir, &self.bin_dir)
             .map_err(|e| format!("{e:#}"));
         cutover_phase("stage_candidate", t0);
@@ -988,7 +981,7 @@ impl CutoverIo for RealCutoverIo {
         // numbers show `stop_instance` dominating, the remedy is to restart only what
         // changed — which REQ-AXO-902148 had already delivered before the cutover became
         // the single path — and NOT a topology change.
-        let t0 = now_ms();
+        let t0 = axon_core::clock::now_unix_ms() as u128;
         let stop = self.stop_instance().map_err(|e| format!("{e:#}"));
         cutover_phase("stop_instance", t0);
         stop?;
@@ -998,7 +991,7 @@ impl CutoverIo for RealCutoverIo {
         // installed anything yet — checking now would race. The proof lives in finalize(),
         // which the FSM only reaches after the liveness gate.
         let pending = self.release_dir.join("pending.json");
-        let t1 = now_ms();
+        let t1 = axon_core::clock::now_unix_ms() as u128;
         let spawned = self.spawn_start(&pending).map_err(|e| format!("{e:#}"));
         // NOTE: this measures the SPAWN only — the child is detached, so the runtime's own
         // boot continues past this line. The gap between here and the first green probe is
@@ -1105,15 +1098,15 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
     let indexer_green_ms = std::cell::Cell::new(0u128);
     let probe = || {
         if gate_t0.get() == 0 {
-            gate_t0.set(now_ms());
+            gate_t0.set(axon_core::clock::now_unix_ms() as u128);
         }
         let brain_ok = http_ready(&brain_url, 3);
         if brain_ok && brain_green_ms.get() == 0 {
-            brain_green_ms.set(now_ms());
+            brain_green_ms.set(axon_core::clock::now_unix_ms() as u128);
         }
         let indexer_ok = !indexer_expected || http_ready(&indexer_url, 3);
         if indexer_ok && indexer_green_ms.get() == 0 {
-            indexer_green_ms.set(now_ms());
+            indexer_green_ms.set(axon_core::clock::now_unix_ms() as u128);
         }
         brain_ok && indexer_ok
     };

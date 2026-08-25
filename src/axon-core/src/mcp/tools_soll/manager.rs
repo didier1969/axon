@@ -286,12 +286,12 @@ impl McpServer {
     ///
     /// `after: None` ecrit NULL : une suppression n'a pas d'apres.
     fn record_revision(&self, record: RevisionRecord<'_>) -> anyhow::Result<String> {
-        // REQ-AXO-902432 — `now_unix_ms()` est deja importe dans ce fichier et
+        // REQ-AXO-902432 — `crate::clock::now_unix_ms()` est deja importe dans ce fichier et
         // utilise vingt lignes plus haut ; j'avais recopie l'expression en ligne.
         // `debt_digest` nomme la famille : `now_ms` existe en CINQ exemplaires
         // dans le depot (service_guard, runtime_watchdog, contract::store,
         // axonctl, watchman_source). J'en ajoutais un sixieme sans le voir.
-        let now_ms = now_unix_ms();
+        let now_ms = crate::clock::now_unix_ms();
         // La forme de l'id est preservee telle quelle pour chaque appelant : la
         // cle discriminante est fournie, pas devinee (`unlink` indexe sur la
         // SOURCE de l'arete, `update` sur le noeud).
@@ -849,7 +849,7 @@ impl McpServer {
 
                 apply_metadata_routed_fields(data, &mut meta);
 
-                meta["updated_at"] = json!(now_unix_ms());
+                meta["updated_at"] = json!(crate::clock::now_unix_ms());
 
                 // MIL-AXO-020 slice 3 (REQ-AXO-91543) — atomic create+attach.
                 // attach_to + relation_type are REQUIRED for every entity
@@ -1466,7 +1466,7 @@ impl McpServer {
                     }
                     apply_metadata_routed_fields(data, &mut meta);
 
-                    meta["updated_at"] = json!(now_unix_ms());
+                    meta["updated_at"] = json!(crate::clock::now_unix_ms());
 
                     // REQ-AXO-902425 — journaliser AVANT d'écraser. L'ordre est
                     // le contrat : si l'audit échoue, la mutation n'a pas lieu.

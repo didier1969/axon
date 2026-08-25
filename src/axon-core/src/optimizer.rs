@@ -123,7 +123,7 @@ pub fn collect_host_snapshot() -> HostSnapshot {
     });
     let provider = current_embedding_provider_diagnostics();
     HostSnapshot {
-        captured_at_ms: now_ms(),
+        captured_at_ms: crate::clock::now_unix_ms(),
         source: "optimizer.host.detect".to_string(),
         platform: std::env::consts::OS.to_string(),
         is_wsl: detect_is_wsl(),
@@ -152,7 +152,7 @@ pub fn collect_host_snapshot() -> HostSnapshot {
 }
 
 pub fn collect_operator_policy_snapshot(host: &HostSnapshot) -> OperatorPolicySnapshot {
-    let captured_at_ms = now_ms();
+    let captured_at_ms = crate::clock::now_unix_ms();
     let max_vram_used_mb =
         env_u64("AXON_OPT_MAX_VRAM_USED_MB", host.vram_total_mb).min(host.vram_total_mb.max(1));
     let max_vram_used_ratio = if host.vram_total_mb > 0 {
@@ -201,7 +201,7 @@ fn optimizer_allowed_actuators() -> Vec<String> {
 }
 
 pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindow {
-    let now_ms = now_ms();
+    let now_ms = crate::clock::now_unix_ms();
     let runtime_mode = AxonRuntimeMode::from_env();
     let vector_runtime_enabled = runtime_mode.semantic_workers_enabled();
     let memory = process_memory_snapshot();
@@ -359,7 +359,7 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
 }
 
 pub fn collect_recent_analytics_window(store: &GraphStore) -> RecentAnalyticsWindow {
-    let now_ms = now_ms();
+    let now_ms = crate::clock::now_unix_ms();
     let bucket_start_ms = (now_ms / 3_600_000) * 3_600_000;
     if !AxonRuntimeMode::from_env().semantic_workers_enabled() {
         return RecentAnalyticsWindow {
@@ -422,10 +422,6 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .ok()
         .and_then(|raw| raw.trim().parse::<f64>().ok())
         .unwrap_or(default)
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 fn detect_is_wsl() -> bool {

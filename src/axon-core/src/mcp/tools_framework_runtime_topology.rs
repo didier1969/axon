@@ -116,7 +116,7 @@ impl McpServer {
         // provably alive and we say so loudly rather than infer from launch
         // mode.
         let indexer_liveness = resolve_indexer_liveness(
-            Self::now_unix_ms(),
+            crate::clock::now_unix_ms(),
             indexer_heartbeat_row.as_ref().map(|row| row.heartbeat_ms),
             EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
         );

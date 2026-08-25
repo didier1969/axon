@@ -33,7 +33,7 @@ impl McpServer {
         }
         let mode = args.get("mode").and_then(|value| value.as_str());
         let brief_mode = mode.unwrap_or("brief") == "brief";
-        let now_ms = Self::now_unix_ms();
+        let now_ms = crate::clock::now_unix_ms();
         let cache_key = format!("{}::{}", project, mode.unwrap_or("brief"));
         if let Some(cached) = cache_read(
             Self::anomalies_cache(),
@@ -808,7 +808,7 @@ impl McpServer {
                         .unwrap_or(false)
                 },
                 "snapshot": {
-                    "generated_at": Self::now_unix_ms(),
+                    "generated_at": crate::clock::now_unix_ms(),
                     "provenance": "aggregated_graph_analytics",
                     "confidence": "medium",
                     "semantic_boundary": "heuristic anomaly overlays must not silently override canonical SOLL completeness"

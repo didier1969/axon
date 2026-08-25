@@ -159,7 +159,7 @@ impl McpServer {
                 kind,
                 before.to_string(),
                 after.to_string(),
-                now_unix_ms()
+                crate::clock::now_unix_ms()
             ]),
         )?;
 
