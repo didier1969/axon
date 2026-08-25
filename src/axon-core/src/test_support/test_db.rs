@@ -12,9 +12,227 @@
 //! `axon_dev` database (the historical `GraphStore::new` path that leaked test
 //! writes into dev and broke isolation — REQ-AXO-901718/720/721 root cause).
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// ---------------------------------------------------------------------------
+// REQ-AXO-902272 — aucun sous-processus du harnais n'attend sans borne.
+//
+// Le defaut mesure (session 107) : la suite est restee pendue >10 min a
+// 1678/1693, sans rien dire. `std::process` n'offre AUCUNE attente bornee —
+// ni `Child::wait`, ni `Command::output` — donc les NEUF lancements de ce
+// fichier pendaient tous indefiniment si leur `psql` / `createdb` / `dropdb`
+// ne rendait pas la main. Le symptome est le pire possible : un test qui ne
+// rend jamais la main se lit « c'est long », pas « c'est casse ».
+//
+// La borne vit ICI, au point de passage commun, et nulle part ailleurs
+// (GUI-PRO-013) : la classe entiere est fermee d'un coup, pas le seul site
+// ou le blocage a ete observe.
+//
+// DEUX proprietes distinctes, et le noeud n'en demandait qu'une explicitement :
+// « ne plus PENDRE » (la borne : kill + reap) et « ne plus etre SILENCIEUX »
+// (le message + la commande de recuperation). Faire ECHOUER n'en est ni l'une
+// ni l'autre — c'est un moyen, qui ne convient qu'aux chemins ou le
+// depassement rend la suite du test impossible. D'ou la separation :
+//   · CREATION / SEED  -> `run_or_panic` : sans base, le test ne peut rien.
+//   · DESTRUCTION / SWEEP -> `run_bounded` : degrade, ecrit, continue.
+// Mesure du 2026-08-25 qui a impose cette separation : paniquer sur le chemin
+// de destruction a fait echouer **20 tests qui avaient REUSSI**, parce que
+// sous 16 threads paralleles un `dropdb --force` depasse couramment 60 s.
+//
+// ⚠️ Ce qui est DELIBEREMENT exclu : ajouter `WITH (FORCE)` au DROP genere
+// par le sweep. `REQ-AXO-901906` (FIX 2) raconte pourquoi — le sweep a deja
+// droppe la base partagee VIVANTE une fois. `FORCE` termine les backends :
+// il autoriserait le sweep a tuer les connexions d'un binaire de test
+// parallele, exactement ce que la garde `NOT EXISTS (pg_stat_activity)` +
+// l'exclusion `axon_test_shared_<pid>` interdisent. Et un `DROP DATABASE`
+// sans FORCE sur une base occupee echoue IMMEDIATEMENT — il ne bloque pas,
+// donc FORCE n'expliquerait de toute facon aucune pendaison.
+// ---------------------------------------------------------------------------
+
+/// Budget d'un `dropdb` unitaire. Genereux, et surtout **degrade** au lieu
+/// d'echouer : mesure sous 16 threads paralleles, un `dropdb --force` depasse
+/// couramment 60 s — c'est le regime NORMAL sous contention, pas une panne.
+const BUDGET_DROP: Duration = Duration::from_secs(120);
+/// Budget d'un `createdb -T <template>` (clone d'une base seedee).
+const BUDGET_CREATE: Duration = Duration::from_secs(120);
+/// Budget du sweep de reclamation. Genereux : il peut avoir a DROP les bases
+/// laissees par plusieurs runs tues, et un `DROP DATABASE` est un `rm -rf` du
+/// repertoire de la base suivi d'un checkpoint.
+const BUDGET_SWEEP: Duration = Duration::from_secs(180);
+/// Budget d'UN fichier `.sql` applique par `psql -f`.
+const BUDGET_SQL_FILE: Duration = Duration::from_secs(120);
+
+/// Cadence de scrutation de `try_wait`. `std::process` n'expose pas d'attente
+/// bornee ; ce sondage est l'idiome std, et non le « polling par sleep » que
+/// la regle projet proscrit pour l'orchestration de services.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Un enfant qui a depasse son budget : tue, jamais attendu indefiniment.
+#[derive(Debug)]
+pub(crate) struct BudgetExceeded {
+    pub(crate) budget: Duration,
+}
+
+/// Ce qu'un lancement borne a donne. Trois issues DISTINCTES — les confondre
+/// est precisement ce qui a casse le premier jet : « psql absent » et « psql
+/// n'a pas rendu la main » n'appellent pas la meme reaction.
+#[derive(Debug)]
+pub(crate) enum RunOutcome {
+    /// L'enfant a rendu la main dans les temps (stderr draine).
+    Ran(ExitStatus, String),
+    /// Le binaire n'existe pas — environnement unitaire sans PG. Le harnais
+    /// est best-effort la-dessus, c'est le comportement d'origine.
+    NoBinary,
+    /// Budget depasse : l'enfant a ete TUE et moissonne.
+    TimedOut,
+}
+
+/// Attend `child` au plus `budget`. Au-dela : **tue** l'enfant, le moissonne
+/// (pas de zombie) et rend `Err`.
+///
+/// Ne panique pas : la decision d'echouer appartient a l'appelant, ce qui
+/// laisse ce coeur-ci testable finement — y compris « l'enfant est-il
+/// reellement mort ».
+pub(crate) fn wait_within(
+    child: &mut Child,
+    budget: Duration,
+) -> Result<ExitStatus, BudgetExceeded> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            // Un enfant deja moissonne ne peut plus etre attendu : traiter
+            // l'erreur comme un depassement laisserait croire a une pendaison.
+            Err(_) => return Ok(ExitStatus::default()),
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(BudgetExceeded { budget });
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Le remede, ecrit UNE fois (GUI-PRO-013) — cite par le message de
+/// depassement comme par la panique.
+fn recovery_hint() -> String {
+    let port = pg_port();
+    format!(
+        "  Compter ce qui traine :\n    psql -h 127.0.0.1 -p {port} -U axon -d postgres \
+         -Atc \"SELECT count(*) FROM pg_database WHERE datname LIKE 'axon\\_test\\_%'\"\n\
+         \x20 Recuperer d'un coup :\n    psql -h 127.0.0.1 -p {port} -U axon -d postgres -Atc \
+         \"SELECT format('DROP DATABASE IF EXISTS %I', datname) FROM pg_database WHERE datname \
+         LIKE 'axon\\_test\\_%' AND datname <> 'axon_test_template'\" \
+         | psql -h 127.0.0.1 -p {port} -U axon -d postgres"
+    )
+}
+
+/// Lance `cmd` sous budget, en lui poussant `stdin_data` s'il y en a.
+/// **Ne panique jamais** : au depassement, l'enfant est tue et le fait est
+/// ECRIT sur stderr — « ne plus pendre » et « ne plus etre silencieux » sont
+/// deux proprietes distinctes, et aucune des deux n'exige de faire echouer un
+/// test qui a reussi.
+fn run_bounded(
+    cmd: &mut Command,
+    stdin_data: Option<&[u8]>,
+    budget: Duration,
+    what: &str,
+) -> RunOutcome {
+    let Ok(mut child) = cmd
+        .stdin(if stdin_data.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        return RunOutcome::NoBinary;
+    };
+
+    if let Some(data) = stdin_data {
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            let _ = stdin.write_all(data);
+        }
+    }
+    // Fermer stdin signale EOF : sans ca, `psql` attend indefiniment d'autres
+    // commandes et le budget se declencherait sur un faux positif.
+    drop(child.stdin.take());
+
+    // Drainer stderr dans un thread : un tube plein bloquerait l'enfant, et un
+    // enfant bloque sur son tube ressemble a une pendaison sans en etre une.
+    let drain = child.stderr.take().map(|mut e| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = e.read_to_string(&mut buf);
+            buf
+        })
+    });
+
+    match wait_within(&mut child, budget) {
+        Ok(status) => {
+            let stderr = drain.and_then(|h| h.join().ok()).unwrap_or_default();
+            RunOutcome::Ran(status, stderr)
+        }
+        Err(BudgetExceeded { budget }) => {
+            // Le kill ferme le tube, donc le drain atteint EOF et se joint.
+            // Ce que l'enfant a DIT avant de bloquer est la seule information
+            // que le budget seul ne donne pas — « ne plus etre silencieux »
+            // vaut aussi pour sa sortie d'erreur, pas seulement pour la notre.
+            let dit = drain
+                .and_then(|h| h.join().ok())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let dit = if dit.is_empty() {
+                "(rien sur stderr)".to_string()
+            } else {
+                dit.lines().take(5).collect::<Vec<_>>().join("\n      ")
+            };
+            eprintln!(
+                "[REQ-AXO-902272] {what} n'a pas rendu la main en {budget:?} — enfant TUE.\n\
+                 \x20     stderr de l'enfant : {dit}\n{}",
+                recovery_hint()
+            );
+            RunOutcome::TimedOut
+        }
+    }
+}
+
+/// Variante pour les chemins ou le depassement rend la suite du test IMPOSSIBLE
+/// (creer la base, la seeder) : la panique y porte une information, alors que
+/// laisser continuer produirait une erreur obscure trois appels plus loin.
+///
+/// ⚠️ A NE PAS utiliser sur un chemin de DESTRUCTION. Mesure le 2026-08-25 :
+/// paniquer dans `force_dropdb` — appele depuis `impl Drop for TestDb` et
+/// depuis le handler `atexit` — a fait echouer **20 tests qui avaient REUSSI**,
+/// simplement parce que sous 16 threads paralleles un `dropdb --force` depasse
+/// couramment 60 s. Une base non droppee n'est pas une perte : le sweep du run
+/// suivant la reclame (REQ-AXO-901848). Faire echouer le test, si.
+fn run_or_panic(
+    cmd: &mut Command,
+    stdin_data: Option<&[u8]>,
+    budget: Duration,
+    what: &str,
+) -> Option<(ExitStatus, String)> {
+    match run_bounded(cmd, stdin_data, budget, what) {
+        RunOutcome::Ran(status, stderr) => Some((status, stderr)),
+        RunOutcome::NoBinary => None,
+        RunOutcome::TimedOut => panic!(
+            "{what} n'a pas rendu la main en {budget:?} — enfant TUE plutot que d'attendre \
+             indefiniment (REQ-AXO-902272).\n{}",
+            recovery_hint()
+        ),
+    }
+}
 
 /// Test-cluster port (devenv PG). Overridden by `PGPORT`.
 pub(crate) fn pg_port() -> String {
@@ -29,21 +247,25 @@ fn template_name() -> String {
 /// résiduelles puis DROP. Remplace le `dropdb` best-effort qui leakait dès
 /// qu'une connexion subsistait. Renvoie `true` si la base n'existe plus après.
 fn force_dropdb(db_name: &str, pg_port: &str) -> bool {
-    std::process::Command::new("dropdb")
-        .args([
-            "-h",
-            "127.0.0.1",
-            "-p",
-            pg_port,
-            "-U",
-            "axon",
-            "--force",
-            "--if-exists",
-            db_name,
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut cmd = std::process::Command::new("dropdb");
+    cmd.args([
+        "-h",
+        "127.0.0.1",
+        "-p",
+        pg_port,
+        "-U",
+        "axon",
+        "--force",
+        "--if-exists",
+        db_name,
+    ]);
+    // Chemin de DESTRUCTION (appele depuis `Drop` et depuis `atexit`) : une
+    // base non droppee est reclamee par le sweep du run suivant, alors qu'une
+    // panique ici ferait echouer un test deja reussi.
+    match run_bounded(&mut cmd, None, BUDGET_DROP, &format!("dropdb {db_name}")) {
+        RunOutcome::Ran(status, _) => status.success(),
+        RunOutcome::NoBinary | RunOutcome::TimedOut => false,
+    }
 }
 
 /// REQ-AXO-901873 — registre des bases créées par CE process, force-droppées à
@@ -123,27 +345,28 @@ impl TestDb {
             .replace(')', "");
         let template = template_name();
 
-        let output = std::process::Command::new("createdb")
-            .args([
-                "-h",
-                "127.0.0.1",
-                "-p",
-                &port,
-                "-U",
-                "axon",
-                "-T",
-                &template,
-                &db_name,
-            ])
-            .output()
-            .expect("createdb command failed to execute");
+        let mut cmd = std::process::Command::new("createdb");
+        cmd.args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port,
+            "-U",
+            "axon",
+            "-T",
+            &template,
+            &db_name,
+        ]);
+        let (status, stderr) = run_or_panic(
+            &mut cmd,
+            None,
+            BUDGET_CREATE,
+            &format!("createdb -T {template} {db_name}"),
+        )
+        .expect("createdb command failed to execute");
 
-        if !output.status.success() {
-            panic!(
-                "TestDb create failed for {}: {}",
-                db_name,
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if !status.success() {
+            panic!("TestDb create failed for {db_name}: {stderr}");
         }
 
         // REQ-AXO-901873 — réclamation systématique à la fin du run (couvre les
@@ -206,26 +429,27 @@ pub(crate) fn shared_test_db_url() -> String {
             // A prior run that crashed carrying this PID could have left a stale
             // one; force-drop before cloning so createdb -T never collides.
             force_dropdb(&db_name, &port);
-            let output = std::process::Command::new("createdb")
-                .args([
-                    "-h",
-                    "127.0.0.1",
-                    "-p",
-                    &port,
-                    "-U",
-                    "axon",
-                    "-T",
-                    &template_name(),
-                    &db_name,
-                ])
-                .output()
-                .expect("createdb (shared test db) failed to execute");
-            if !output.status.success() {
-                panic!(
-                    "shared TestDb create failed for {}: {}",
-                    db_name,
-                    String::from_utf8_lossy(&output.stderr)
-                );
+            let mut cmd = std::process::Command::new("createdb");
+            cmd.args([
+                "-h",
+                "127.0.0.1",
+                "-p",
+                &port,
+                "-U",
+                "axon",
+                "-T",
+                &template_name(),
+                &db_name,
+            ]);
+            let (status, stderr) = run_or_panic(
+                &mut cmd,
+                None,
+                BUDGET_CREATE,
+                &format!("createdb -T (shared) {db_name}"),
+            )
+            .expect("createdb (shared test db) failed to execute");
+            if !status.success() {
+                panic!("shared TestDb create failed for {db_name}: {stderr}");
             }
             register_for_atexit_cleanup(&db_name, &port);
             format!("postgres://axon@127.0.0.1:{port}/{db_name}")
@@ -238,12 +462,24 @@ pub(crate) fn shared_test_db_url() -> String {
 /// the first database is created.
 ///
 /// Concurrency safety: only databases with **zero** active backends in
-/// `pg_stat_activity` are dropped, so a database currently in use by a
-/// parallel test binary is never touched. Fresh databases created by *this*
-/// run carry unique nanosecond+thread-id names that cannot collide with the
-/// leaked names being swept, so there is no create/sweep race. The template
-/// (`axon_test_template`) and any non-test database are excluded by the
-/// `LIKE 'axon\_test\_%'` filter plus an explicit guard.
+/// `pg_stat_activity` are dropped. The template (`axon_test_template`) and any
+/// non-test database are excluded by the `LIKE 'axon\_test\_%'` filter plus an
+/// explicit guard.
+///
+/// ⚠️ REQ-AXO-902272 — ce commentaire affirmait qu'il n'y a « pas de course
+/// create/sweep » parce que les noms frais (nanosecondes + thread-id) ne
+/// peuvent pas COLLISIONNER avec les noms fuites balayes. Le raisonnement est
+/// faux : la collision de noms n'a jamais ete le mecanisme. Le mecanisme, c'est
+/// qu'une base per-test VIVANTE se retrouve a **zero backend entre deux tests**
+/// (depuis que `NativePgCtx::drop` ferme les pools sans attendre) — elle passe
+/// alors le filtre `pg_stat_activity` et se fait DROP sous les pieds du test
+/// qui l'utilise encore. `REQ-AXO-901906` FIX 2 a nomme exactement ce danger et
+/// l'a ferme pour la seule base partagee ; les bases per-test y sont exposees
+/// de la meme facon. D'ou l'exclusion du registre de CE process ci-dessous.
+///
+/// Le contrat du sweep — « reclamer les fuites des runs PRECEDENTS » — en sort
+/// mieux respecte, pas relache : les bases des autres process gardent des noms
+/// absents de ce registre et restent reclamees.
 pub(crate) fn sweep_stale_test_databases(pg_port: &str) {
     // `DROP DATABASE` cannot run inside a transaction block, so a DO/loop is
     // not an option; `\gexec` executes each generated statement as its own
@@ -259,6 +495,27 @@ pub(crate) fn sweep_stale_test_databases(pg_port: &str) {
     // fail to connect ("pool init failed"). Other processes'/prior runs' shared
     // + per-test DBs (different names) are still reclaimed.
     let own_shared = format!("axon_test_shared_{}", std::process::id());
+    // Les bases que CE process a créées et n'a pas encore rendues. Un mutex
+    // empoisonné ne doit JAMAIS vider cette liste : elle échouerait alors
+    // « ouverte » — le sweep se remettrait à DROP des bases vivantes, ce qui
+    // est précisément le danger qu'on ferme ici. Même traitement que
+    // `drop_registered_test_dbs`.
+    let own_live: Vec<String> = match registered_test_dbs().lock() {
+        Ok(v) => v.iter().map(|(name, _)| name.clone()).collect(),
+        Err(poisoned) => poisoned.into_inner().iter().map(|(n, _)| n.clone()).collect(),
+    };
+    // L'exclusion vit dans le SQL, jamais en post-filtrage : filtrer après le
+    // SELECT rouvrirait la course SELECT/DROP que cette requête évite.
+    let own_live_clause = if own_live.is_empty() {
+        String::new()
+    } else {
+        let liste = own_live
+            .iter()
+            .map(|n| format!("'{}'", n.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("          AND d.datname <> ALL (ARRAY[{liste}])\n")
+    };
     let script = format!(
         "\\set ON_ERROR_STOP 0\n\
         SELECT format('DROP DATABASE IF EXISTS %I', d.datname)\n\
@@ -266,13 +523,67 @@ pub(crate) fn sweep_stale_test_databases(pg_port: &str) {
         WHERE d.datname LIKE 'axon\\_test\\_%'\n\
           AND d.datname <> 'axon_test_template'\n\
           AND d.datname <> '{own_shared}'\n\
+        {own_live_clause}\
           AND NOT EXISTS (\n\
             SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname\n\
           )\n\
         \\gexec\n"
     );
 
-    let mut child = match std::process::Command::new("psql")
+    let mut cmd = std::process::Command::new("psql");
+    cmd.args([
+        "-h",
+        "127.0.0.1",
+        "-p",
+        pg_port,
+        "-U",
+        "axon",
+        "-d",
+        "postgres",
+        "-X", // ignore ~/.psqlrc for deterministic behaviour
+        "-q",
+    ]);
+    // REQ-AXO-902272 — le sweep est le seul appel dont la duree soit une
+    // INFORMATION : c'est elle que le noeud decrit (« >10 min »). On la mesure
+    // et on l'ecrit avec le nombre de candidats, au lieu de la deviner. Sans le
+    // denominateur, « lent » ne dit pas si le probleme est le VOLUME ou le
+    // DROP lui-meme — et le budget se choisirait au doigt mouille.
+    let candidats = count_sweep_candidates(pg_port, &own_shared, &own_live);
+    let debut = Instant::now();
+
+    // Best-effort des DEUX cotes : psql absent (environnement unitaire sans PG)
+    // comme budget depasse. Les bases fuitees sont un RESIDU, jamais une
+    // precondition du test courant — faire echouer toute la suite parce que le
+    // menage traine remplacerait une pendaison par un echec systematique.
+    // Le depassement reste ECRIT sur stderr : c'est « ne plus etre silencieux »,
+    // qui est la vraie demande de REQ-AXO-902272, pas la panique.
+    let _ = run_bounded(
+        &mut cmd,
+        Some(script.as_bytes()),
+        BUDGET_SWEEP,
+        "sweep des bases de test fuitees",
+    );
+
+    let ecoule = debut.elapsed();
+    if ecoule > Duration::from_secs(5) {
+        eprintln!(
+            "[REQ-AXO-902272] sweep : {ecoule:?} pour {} candidat(s) \
+             ({} base(s) de ce process exclue(s), {} base(s) axon_test_* au total)",
+            candidats
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+            own_live.len(),
+            total_test_databases(pg_port)
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".to_string())
+        );
+    }
+}
+
+/// Combien de bases `axon_test_*` existent, toutes origines confondues ?
+/// Situe le candidat : 1 candidat parmi 400 bases ne se lit pas comme 1 sur 2.
+fn total_test_databases(pg_port: &str) -> Option<usize> {
+    let out = Command::new("psql")
         .args([
             "-h",
             "127.0.0.1",
@@ -282,25 +593,52 @@ pub(crate) fn sweep_stale_test_databases(pg_port: &str) {
             "axon",
             "-d",
             "postgres",
-            "-X", // ignore ~/.psqlrc for deterministic behaviour
-            "-q",
+            "-X",
+            "-At",
+            "-c",
+            "SELECT count(*) FROM pg_database WHERE datname LIKE 'axon\\_test\\_%'",
         ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        // psql unavailable (e.g. unit-only environment without PG): the sweep
-        // is best-effort, so a missing binary must not fail the test run.
-        Err(_) => return,
-    };
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
 
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        let _ = stdin.write_all(script.as_bytes());
-    }
-    let _ = child.wait();
+/// Combien de bases le sweep va-t-il tenter de DROP ? Meme predicat que le
+/// script, denominateur de la mesure ci-dessus. `None` si psql est injoignable.
+fn count_sweep_candidates(pg_port: &str, own_shared: &str, own_live: &[String]) -> Option<usize> {
+    let exclusion = if own_live.is_empty() {
+        String::new()
+    } else {
+        let liste = own_live
+            .iter()
+            .map(|n| format!("'{}'", n.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" AND d.datname <> ALL (ARRAY[{liste}])")
+    };
+    let sql = format!(
+        "SELECT count(*) FROM pg_database d WHERE d.datname LIKE 'axon\\_test\\_%' \
+         AND d.datname <> 'axon_test_template' AND d.datname <> '{own_shared}'{exclusion} \
+         AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)"
+    );
+    let out = Command::new("psql")
+        .args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            pg_port,
+            "-U",
+            "axon",
+            "-d",
+            "postgres",
+            "-X",
+            "-At",
+            "-c",
+            &sql,
+        ])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
 /// Run [`sweep_stale_test_databases`] at most once per test process.
@@ -335,9 +673,14 @@ pub(crate) fn ensure_template_once(pg_port: &str) {
         // Create the template database if absent. A pre-existing (possibly
         // empty) template is fine — the idempotent DDL+seed below brings it
         // to canonical state. A failure here (already exists) is ignored.
-        let _ = std::process::Command::new("createdb")
-            .args(["-h", "127.0.0.1", "-p", pg_port, "-U", "axon", &template])
-            .output();
+        let mut cmd = std::process::Command::new("createdb");
+        cmd.args(["-h", "127.0.0.1", "-p", pg_port, "-U", "axon", &template]);
+        let _ = run_or_panic(
+            &mut cmd,
+            None,
+            BUDGET_CREATE,
+            &format!("createdb {template} (template)"),
+        );
 
         // Apply canonical DDL then seed in lexical order, mirroring
         // scripts/lib/ensure-runtime.sh {apply_canonical_ddl,
@@ -378,34 +721,27 @@ INSERT INTO soll.Registry (project_code, id) VALUES\n\
     ('PJA', 'AXON_GLOBAL'),\n\
     ('PJB', 'AXON_GLOBAL')\n\
 ON CONFLICT (project_code) DO NOTHING;\n";
-    let mut child = match std::process::Command::new("psql")
-        .args([
-            "-h",
-            "127.0.0.1",
-            "-p",
-            pg_port,
-            "-U",
-            "axon",
-            "-d",
-            dbname,
-            "-X",
-            "-q",
-            "-v",
-            "ON_ERROR_STOP=1",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return,
-    };
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        let _ = stdin.write_all(SQL.as_bytes());
-    }
-    let _ = child.wait();
+    let mut cmd = std::process::Command::new("psql");
+    cmd.args([
+        "-h",
+        "127.0.0.1",
+        "-p",
+        pg_port,
+        "-U",
+        "axon",
+        "-d",
+        dbname,
+        "-X",
+        "-q",
+        "-v",
+        "ON_ERROR_STOP=1",
+    ]);
+    let _ = run_or_panic(
+        &mut cmd,
+        Some(SQL.as_bytes()),
+        BUDGET_SQL_FILE,
+        &format!("psql seed des project codes ({dbname})"),
+    );
 }
 
 /// REQ-AXO-91560 / REQ-AXO-901721 — install BEFORE INSERT auto-seed triggers
@@ -520,34 +856,27 @@ DROP TRIGGER IF EXISTS a_test_autofill_soll_edge ON soll.Edge;\n\
 CREATE TRIGGER a_test_autofill_soll_edge BEFORE INSERT ON soll.Edge\n\
     FOR EACH ROW EXECUTE FUNCTION ist.test_autofill_soll_edge();\n";
 
-    let mut child = match std::process::Command::new("psql")
-        .args([
-            "-h",
-            "127.0.0.1",
-            "-p",
-            pg_port,
-            "-U",
-            "axon",
-            "-d",
-            dbname,
-            "-X",
-            "-q",
-            "-v",
-            "ON_ERROR_STOP=1",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return,
-    };
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        let _ = stdin.write_all(SQL.as_bytes());
-    }
-    let _ = child.wait();
+    let mut cmd = std::process::Command::new("psql");
+    cmd.args([
+        "-h",
+        "127.0.0.1",
+        "-p",
+        pg_port,
+        "-U",
+        "axon",
+        "-d",
+        dbname,
+        "-X",
+        "-q",
+        "-v",
+        "ON_ERROR_STOP=1",
+    ]);
+    let _ = run_or_panic(
+        &mut cmd,
+        Some(SQL.as_bytes()),
+        BUDGET_SQL_FILE,
+        &format!("psql triggers d'auto-seed ({dbname})"),
+    );
 }
 
 /// Apply every `NN_*.sql` file in `dir` (lexical order) to `dbname` via
@@ -570,23 +899,246 @@ fn apply_sql_dir(pg_port: &str, dbname: &str, dir: &Path) {
     files.sort();
     for f in files {
         let Some(path) = f.to_str() else { continue };
-        let _ = std::process::Command::new("psql")
+        let mut cmd = std::process::Command::new("psql");
+        cmd.args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            pg_port,
+            "-U",
+            "axon",
+            "-d",
+            dbname,
+            "-X",
+            "-q",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-f",
+            path,
+        ]);
+        let _ = run_or_panic(
+            &mut cmd,
+            None,
+            BUDGET_SQL_FILE,
+            &format!("psql -f {path} ({dbname})"),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lance un enfant qui ne rendra pas la main de lui-meme. `None` quand le
+    /// binaire manque : le test se retire alors au lieu de rougir pour une
+    /// raison etrangere a ce qu'il mesure.
+    fn spawn_hung_child() -> Option<Child> {
+        Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+    }
+
+    /// CONTROLE POSITIF — sans lui, le test suivant passerait aussi si
+    /// `wait_within` rendait `Err` pour TOUT enfant.
+    #[test]
+    fn a_child_that_finishes_within_its_budget_returns_its_status() {
+        let Some(mut child) = Command::new("true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+        else {
+            return; // pas de /bin/true : rien a mesurer
+        };
+        let status = wait_within(&mut child, Duration::from_secs(30))
+            .expect("un enfant qui sort tout de suite ne depasse aucun budget");
+        assert!(status.success(), "`true` doit sortir en succes");
+    }
+
+    /// REQ-AXO-902272 — la seconde garde, ecrite APRES une mesure qui a
+    /// invalide le premier jet.
+    ///
+    /// Un chemin de DESTRUCTION qui depasse son budget doit DEGRADER, jamais
+    /// faire echouer. Le premier jet paniquait au chokepoint sans distinguer
+    /// les natures : `force_dropdb` est appele depuis `impl Drop for TestDb` et
+    /// depuis le handler `atexit`, si bien que **20 tests deja REUSSIS** sont
+    /// tombes — non parce qu'ils avaient un defaut, mais parce que sous 16
+    /// threads paralleles un `dropdb --force` depasse couramment 60 s.
+    ///
+    /// Falsifiable en une ligne : remettre `panic!` dans `run_bounded` et ce
+    /// test rougit.
+    #[test]
+    fn a_destruction_path_that_overruns_degrades_instead_of_failing() {
+        if spawn_hung_child().is_none() {
+            return; // pas de `sleep` : rien a mesurer
+        }
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60");
+        let outcome = run_bounded(
+            &mut cmd,
+            None,
+            Duration::from_millis(200),
+            "sonde de chemin de destruction",
+        );
+        assert!(
+            matches!(outcome, RunOutcome::TimedOut),
+            "un depassement sur un chemin de destruction doit rendre TimedOut \
+             sans paniquer — obtenu {outcome:?}"
+        );
+    }
+
+    /// CONTROLE SYMETRIQUE — sur un chemin de CREATION, le depassement DOIT
+    /// faire echouer : sans base, le test n'a rien a faire, et le laisser
+    /// continuer produirait une erreur obscure trois appels plus loin.
+    #[test]
+    #[should_panic(expected = "REQ-AXO-902272")]
+    fn a_creation_path_that_overruns_fails_loudly() {
+        if spawn_hung_child().is_none() {
+            panic!("REQ-AXO-902272 — pas de `sleep` sur cet hote, test sans objet");
+        }
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60");
+        let _ = run_or_panic(
+            &mut cmd,
+            None,
+            Duration::from_millis(200),
+            "sonde de chemin de creation",
+        );
+    }
+
+    /// Une base existe-t-elle ? Interroge PG, jamais un cache.
+    fn database_exists(port: &str, name: &str) -> Option<bool> {
+        let out = Command::new("psql")
             .args([
                 "-h",
                 "127.0.0.1",
                 "-p",
-                pg_port,
+                port,
                 "-U",
                 "axon",
                 "-d",
-                dbname,
+                "postgres",
                 "-X",
-                "-q",
-                "-v",
-                "ON_ERROR_STOP=1",
-                "-f",
-                path,
+                "-At",
+                "-c",
+                &format!(
+                    "SELECT 1 FROM pg_database WHERE datname = '{}'",
+                    name.replace('\'', "''")
+                ),
             ])
-            .output();
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim() == "1")
+    }
+
+    /// REQ-AXO-902272 — la garde de l'EXCLUSION, et les deux cas tiennent dans
+    /// le MEME test : sans cela il passerait aussi bien en ne droppant rien
+    /// qu'en droppant tout.
+    ///
+    /// Ce que le sweep doit distinguer : une fuite d'un run PRECEDENT (a
+    /// reclamer) d'une base VIVANTE de ce process-ci (a epargner). Le second
+    /// cas n'etait pas couvert : depuis que `NativePgCtx::drop` ferme les pools
+    /// sans attendre, une base per-test vivante sit a ZERO backend entre deux
+    /// tests, passe le filtre `pg_stat_activity`, et se fait DROP sous les
+    /// pieds du test qui l'utilise. `REQ-AXO-901906` FIX 2 avait ferme ce
+    /// danger pour la seule base partagee.
+    ///
+    /// Falsifiable en une ligne : retirer le `AND d.datname <> ALL (ARRAY[…])`
+    /// du script du sweep, et la base vivante disparait.
+    #[test]
+    fn the_sweep_reclaims_a_foreign_leak_but_spares_a_live_database_of_this_process() {
+        let port = pg_port();
+        if database_exists(&port, "postgres").is_none() {
+            return; // pas de psql / PG injoignable : rien a mesurer
+        }
+
+        // (a) VIVANTE et enregistree : passe par TestDb, donc au registre.
+        //     Elle ne tient AUCUNE connexion — c'est tout l'interet du cas.
+        let live = TestDb::create();
+        let live_name = live.db_name.clone();
+
+        // (b) Fuite d'un « run precedent » : createdb direct, HORS registre.
+        let leaked = format!("axon_test_sweepexcl_{:x}", std::process::id());
+        let mut cmd = Command::new("createdb");
+        cmd.args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port,
+            "-U",
+            "axon",
+            "-T",
+            &template_name(),
+            &leaked,
+        ]);
+        let Some((status, _)) = run_or_panic(
+            &mut cmd,
+            None,
+            BUDGET_CREATE,
+            &format!("createdb (fixture de fuite) {leaked}"),
+        ) else {
+            return;
+        };
+        assert!(status.success(), "la fixture de fuite doit exister avant le sweep");
+
+        sweep_stale_test_databases(&port);
+
+        assert_eq!(
+            database_exists(&port, &live_name),
+            Some(true),
+            "le sweep a DROP une base vivante de ce process ({live_name}) — \
+             l'exclusion du registre ne mord pas"
+        );
+        assert_eq!(
+            database_exists(&port, &leaked),
+            Some(false),
+            "le sweep n'a PAS reclame une fuite hors registre ({leaked}) — \
+             l'exclusion est trop large"
+        );
+    }
+
+    /// REQ-AXO-902272 — LA garde. Le defaut mesure n'etait pas « c'est lent »,
+    /// c'etait « la suite ne dit RIEN » : `std::process` n'offre aucune attente
+    /// bornee, donc un `psql` qui ne rend pas la main pendait indefiniment et se
+    /// lisait comme du travail en cours.
+    ///
+    /// Falsifiee avant d'etre ecrite : avec un `child.wait()` nu a la place du
+    /// sondage borne, ce test ne rougit pas — il PEND 60 s, ce qui est
+    /// exactement le symptome d'origine.
+    #[test]
+    fn a_hung_child_is_killed_at_its_budget_instead_of_hanging_forever() {
+        let Some(mut child) = spawn_hung_child() else {
+            return; // pas de `sleep` : rien a mesurer
+        };
+        let pid = child.id();
+
+        let started = Instant::now();
+        let verdict = wait_within(&mut child, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+
+        assert!(
+            verdict.is_err(),
+            "un enfant qui dort 60 s DOIT depasser un budget de 200 ms"
+        );
+        // La propriete qui compte n'est pas la precision de la borne, c'est
+        // qu'on rende la main SANS attendre la fin naturelle de l'enfant.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "wait_within a rendu la main en {elapsed:?} — il a attendu, pas borne"
+        );
+        // Tue ET moissonne : sous Linux l'entree /proc disparait au reap. Sans
+        // le `wait()` qui suit le `kill()`, on laisserait un zombie par
+        // depassement — une fuite silencieuse de plus.
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "le pid {pid} vit encore : l'enfant n'a pas ete tue puis moissonne"
+        );
     }
 }
