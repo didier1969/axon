@@ -43,6 +43,62 @@ le label « Runtime mode: brain_only » ci-dessus est le rôle de CE process, PA
     }
 }
 
+
+/// REQ-AXO-902478 — la ligne code-intel de `status`, rendue DANS TOUS LES CAS.
+///
+/// Elle disparaissait sur trois portes de sortie silencieuses : projet non
+/// resolu, `project_scope_summary` absent, ou `total_files == 0`. Chacune renvoyait
+/// « rien du tout » — et c'est precisement quand un projet n'a AUCUN fichier
+/// porteur de symboles que le lecteur a besoin de le savoir.
+///
+/// Doléance DVM #257, mesuree : le controle d'ouverture de session est prescrit
+/// par DEUX contrats (le `CLAUDE.md` global via `GUI-PRO-114`, et le texte de
+/// remediation de `query` lui-meme) qui routent vers DEUX outils, et **aucun ne
+/// rendait la ligne** sur un projet a 0 fichier indexe sur 192 eligibles. Le
+/// rapporteur a du passer par `health(project=…)` pour etablir un fait que le
+/// controle officiel devait donner en un appel — *« et ce detour n'est trouvable
+/// que si l'on soupconne deja le probleme »*.
+///
+/// C'est le meme defaut que `REQ-AXO-902409` sous son autre face : taire une
+/// grandeur non mesuree n'est pas mieux que d'en fabriquer la valeur. Dans les
+/// deux cas le lecteur ignore jusqu'a l'existence de la question.
+///
+/// Fonction PURE, pour que les quatre cas soient testables sans PG ni serveur —
+/// les trois branches muettes ne se reproduisent pas dans un fixture.
+pub(crate) fn ligne_code_intel(
+    projet: Option<&str>,
+    portee: Option<&crate::mcp::tools_dx::ProjectScopeSummary>,
+) -> String {
+    let Some(projet) = projet else {
+        return "**Code-intel:** portee INCONNUE — aucun projet resolu depuis le cwd.                 `query`/`inspect` ne peuvent pas etre juges ici ; passer `project=<CODE>`                 explicitement, ou voir `project_registry_lookup`.\n"
+            .to_string();
+    };
+    let Some(portee) = portee else {
+        return format!(
+            "**Code-intel:** NON MESUREE — `{projet}` n'a pas de resume de portee              (projet inconnu du registre, ou portee `*`). Un resultat VIDE de              `query`/`inspect` ne prouve RIEN ici.\n"
+        );
+    };
+    if portee.total_files <= 0 {
+        return format!(
+            "**Code-intel:** VIDE — `{projet}` ne compte AUCUN fichier porteur de              symboles. `query`/`inspect`/`impact`/`why` ne rendront rien, et leur              silence ne prouve pas l'absence : voir `diagnose_indexing`, puis `health              project={projet}` pour l'ecart eligible/indexe.\n"
+        );
+    }
+    if portee.symbol_coverage_is_trustworthy() {
+        format!(
+            "**Code-intel:** LIVE — `{}` {}/{} fichier(s) enrole(s) portent des symboles (query/inspect/impact/why operational — prefer over grep)\n",
+            projet, portee.completed_files, portee.total_files,
+        )
+    } else {
+        format!(
+            "**Code-intel:** PARTIAL — `{}` seulement {}/{} fichier(s) enrole(s) portent des symboles ({:.0} % sans). Un resultat VIDE de `query`/`inspect` ne prouve PAS l'absence : recouper par `retrieve_context`, et voir `diagnose_indexing`.\n",
+            projet,
+            portee.completed_files,
+            portee.total_files,
+            portee.symbol_shortfall_ratio() * 100.0,
+        )
+    }
+}
+
 impl McpServer {
     pub(super) fn axon_status_status_impl(&self, args: &Value) -> Option<Value> {
         let mode = args.get("mode").and_then(|value| value.as_str());
@@ -572,20 +628,27 @@ impl McpServer {
             .get("oldest_modified_age_seconds")
             .and_then(Value::as_i64)
             .unwrap_or(0);
+        // REQ-AXO-902478 — `valid` decrit le SERVICE, pas le projet courant.
+        //
+        // Doléance DVM #257 : « \"valid\" decrit la sante du service ; la deuxieme
+        // lecture qu'en fait un LLM est \"je peux m'en servir ici\", et elle est
+        // fausse » — rendu sur un projet a 0 fichier indexe sur 192 eligibles.
+        // La portee est desormais nommee dans le verdict lui-meme ; le chiffre
+        // projet suit immediatement, sur la ligne `Code-intel:`.
         if indexed_projection_fresh {
             evidence.push_str(
                 "**IST reads:** live — reflects latest indexed source\n\
-**Structural tools (query/inspect/impact/why/anomalies/path):** valid\n",
+**Structural tools (query/inspect/impact/why/anomalies/path):** valid (service) — la couverture du PROJET courant est sur la ligne `Code-intel` ci-dessous\n",
             );
         } else if modified_since == 0 {
             evidence.push_str(
                 "**IST reads:** usable — snapshot in sync with source (0 files changed since last index; indexer idle)\n\
-**Structural tools (query/inspect/impact/why/anomalies/path):** valid\n",
+**Structural tools (query/inspect/impact/why/anomalies/path):** valid (service) — la couverture du PROJET courant est sur la ligne `Code-intel` ci-dessous\n",
             );
         } else {
             evidence.push_str(&format!(
                 "**IST reads:** usable with lag — {n} file(s) changed since last index (oldest {oldest_age}s)\n\
-**Structural tools (query/inspect/impact/why/anomalies/path):** valid; cross-check the {n} changed file(s) before high-stakes mutations\n",
+**Structural tools (query/inspect/impact/why/anomalies/path):** valid (service); cross-check the {n} changed file(s) before high-stakes mutations — la couverture du PROJET courant est sur la ligne `Code-intel` ci-dessous\n",
                 n = modified_since,
             ));
         }
@@ -609,32 +672,17 @@ impl McpServer {
         // so an LLM never assumes query/inspect/impact return empty and falls back
         // to grep. Availability ≠ process-liveness (CPT-AXO-029): the N/N derives
         // from indexed ist.Chunk rows, present whether or not the indexer is live.
-        if let Some(code_intel_project) = self.auto_resolve_project_code_str() {
-            if let Some(scope) = self.project_scope_summary(Some(&code_intel_project)) {
-                if scope.total_files > 0 {
-                    // REQ-AXO-902424 — `backlog_files` valait 0 par construction
-                    // (`completed_files` etait assigne `total_files`), donc cette
-                    // branche annoncait LIVE quoi qu'il arrive. Le verdict lit
-                    // desormais la couverture REELLE, via le seuil partage avec la
-                    // note de portee de `query`/`inspect` — un seuil recopie a la
-                    // main aurait diverge, comme le reste de cette session le montre.
-                    if scope.symbol_coverage_is_trustworthy() {
-                        evidence.push_str(&format!(
-                            "**Code-intel:** LIVE — `{}` {}/{} fichier(s) enrole(s) portent des symboles (query/inspect/impact/why operational — prefer over grep)\n",
-                            code_intel_project, scope.completed_files, scope.total_files,
-                        ));
-                    } else {
-                        evidence.push_str(&format!(
-                            "**Code-intel:** PARTIAL — `{}` seulement {}/{} fichier(s) enrole(s) portent des symboles ({:.0} % sans). Un resultat VIDE de `query`/`inspect` ne prouve PAS l'absence : recouper par `retrieve_context`, et voir `diagnose_indexing`.\n",
-                            code_intel_project,
-                            scope.completed_files,
-                            scope.total_files,
-                            scope.symbol_shortfall_ratio() * 100.0,
-                        ));
-                    }
-                }
-            }
-        }
+        // REQ-AXO-902478 — la ligne est rendue DANS TOUS LES CAS (voir
+        // `ligne_code_intel`) : les trois portes de sortie muettes la faisaient
+        // disparaitre exactement quand elle sert.
+        let code_intel_project = self.auto_resolve_project_code_str();
+        let code_intel_scope = code_intel_project
+            .as_deref()
+            .and_then(|p| self.project_scope_summary(Some(p)));
+        evidence.push_str(&ligne_code_intel(
+            code_intel_project.as_deref(),
+            code_intel_scope.as_ref(),
+        ));
         if !indexed_projection_fresh {
             if let Some(cmd) = recovery_command {
                 evidence.push_str(&format!("**Optional refresh (live reads):** `{}`\n", cmd));
@@ -2001,5 +2049,87 @@ mod tests {
         assert!(system_indexer_topology_note("brain", false, true).is_none());
         assert!(system_indexer_topology_note("indexer", true, true).is_none());
         assert!(system_indexer_topology_note("unknown", true, true).is_none());
+    }
+}
+
+#[cfg(test)]
+mod tests_ligne_code_intel {
+    use super::ligne_code_intel;
+    use crate::mcp::tools_dx::ProjectScopeSummary;
+
+    fn portee(total: i64, complets: i64) -> ProjectScopeSummary {
+        ProjectScopeSummary {
+            total_files: total,
+            completed_files: complets,
+            backlog_files: total - complets,
+            pending_reasons: Vec::new(),
+        }
+    }
+
+    /// REQ-AXO-902478 — les QUATRE cas, dont les trois qui ne rendaient RIEN.
+    ///
+    /// Le controle code-intel d'ouverture de session est prescrit par deux
+    /// contrats. Sur un projet a 0 fichier porteur de symboles, aucun des deux
+    /// ne rendait la ligne — donc le controle etait inexecutable exactement
+    /// quand il servait. Ces trois branches muettes ne se reproduisent pas dans
+    /// un fixture d'integration : c'est pour ca que la decision est une fonction
+    /// PURE, et qu'elle est testee ici.
+    #[test]
+    fn the_code_intel_line_is_rendered_in_every_case_including_the_three_silent_ones() {
+        // 1. Aucun projet resolu — la ligne existait-elle ? Non : rien.
+        let sans_projet = ligne_code_intel(None, None);
+        assert!(
+            sans_projet.contains("Code-intel:"),
+            "aucune ligne rendue quand le projet n'est pas resolu : {sans_projet}"
+        );
+        assert!(sans_projet.contains("INCONNUE"), "{sans_projet}");
+
+        // 2. Projet resolu mais AUCUN resume de portee.
+        let sans_portee = ligne_code_intel(Some("DVM"), None);
+        assert!(sans_portee.contains("Code-intel:"), "{sans_portee}");
+        assert!(sans_portee.contains("NON MESUREE"), "{sans_portee}");
+        assert!(sans_portee.contains("DVM"), "le projet doit etre nomme : {sans_portee}");
+
+        // 3. Le cas DVM mesure : 0 fichier porteur de symboles.
+        let vide = ligne_code_intel(Some("DVM"), Some(&portee(0, 0)));
+        assert!(vide.contains("Code-intel:"), "{vide}");
+        assert!(vide.contains("VIDE"), "{vide}");
+        assert!(
+            vide.contains("diagnose_indexing"),
+            "la ligne doit donner le GESTE, pas seulement le constat : {vide}"
+        );
+
+        // 4. Les deux cas nominaux, inchanges.
+        let live = ligne_code_intel(Some("AXO"), Some(&portee(907, 844)));
+        assert!(live.contains("LIVE"), "{live}");
+        assert!(live.contains("844/907"), "{live}");
+
+        let partiel = ligne_code_intel(Some("AXO"), Some(&portee(100, 10)));
+        assert!(partiel.contains("PARTIAL"), "{partiel}");
+    }
+
+    /// REQ-AXO-902478 — un silence ne doit JAMAIS se lire comme un feu vert.
+    ///
+    /// Le defaut mesure côte DVM etait qu'a cote de la ligne absente, `status`
+    /// rendait « Structural tools: valid » — un verdict de SERVICE que le lecteur
+    /// lit comme « je peux m'en servir ici ». Cette garde verifie l'autre moitie :
+    /// aucun des trois cas degrades ne doit produire un texte qui encourage a se
+    /// fier a `query`/`inspect`.
+    #[test]
+    fn a_degraded_scope_never_reads_as_an_invitation_to_trust_query() {
+        for ligne in [
+            ligne_code_intel(None, None),
+            ligne_code_intel(Some("DVM"), None),
+            ligne_code_intel(Some("DVM"), Some(&portee(0, 0))),
+        ] {
+            assert!(
+                !ligne.contains("prefer over grep"),
+                "une portee degradee invite a preferer query a grep : {ligne}"
+            );
+            assert!(
+                !ligne.contains("operational"),
+                "une portee degradee se declare operationnelle : {ligne}"
+            );
+        }
     }
 }
