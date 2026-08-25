@@ -346,7 +346,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string" },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
                         "limit": { "type": "integer" },
                         "search": { "type": "string", "description": "REQ-AXO-901757: full-text search query. When set, returns SOLL nodes whose title+description match (to_tsvector @@ plainto_tsquery), ranked by ts_rank, instead of the project overview." }
                     },
@@ -455,7 +455,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string" }
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." }
                     },
                     "required": []
                 }
@@ -533,7 +533,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
                         "migration_id": { "type": "string", "description": "Optional: scope to one TechnologyMigration id (TMG-…)." },
                         "from_tech": { "type": "string", "description": "Optional filter: source technology (matched against migration metadata.from_tech)." },
                         "to_tech": { "type": "string", "description": "Optional filter: target technology (matched against migration metadata.to_tech)." },
@@ -549,7 +549,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. OPV). Default: AXO." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. OPV). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
                         "action": { "type": "string", "enum": ["read", "index"], "description": "read (default) = summarize on demand; index = persist artifacts into the IST (ist.Symbol kind='data_artifact' + ist.DataArtifact)." },
                         "catalog_path": { "type": "string", "description": "Optional override for the catalog location (absolute, or relative to the project root). Default: data/CATALOG.json." },
                         "mode": { "type": "string", "enum": ["brief", "verbose"], "description": "REQ-AXO-902486 — brief (DEFAULT) lists at most 10 artifacts; the counters above them always cover the WHOLE catalog, and the answer states how many were not listed. verbose lists every artifact. Nothing is ever truncated silently." }
@@ -563,7 +563,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
                         "detect_key": { "type": "string", "description": "Optional: scope to one migration ruleset (pipeline_v1_to_v2 | nvidia_smi_to_nvml | duckdb_to_pg | age_to_pg)." },
                         "reset_baseline": { "type": "boolean", "description": "Optional (default false): re-record baseline_remnants to the current count even if one exists. Use after cleaning residue or a ruleset fix so progress is measured honestly." }
                     },
@@ -732,7 +732,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": []
@@ -782,7 +782,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
                         "limit": { "type": "integer", "description": "Maximum number of snapshots returned (default 10)." }
                     },
                     "required": []
@@ -794,7 +794,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
                         "from_snapshot_id": { "type": "string", "description": "Optional source snapshot; default: previous." },
                         "to_snapshot_id": { "type": "string", "description": "Optional target snapshot; default: latest." }
                     },
@@ -807,7 +807,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
                         "mode": { "type": "string", "enum": ["brief", "full"] }
                     },
                     "required": []
@@ -819,7 +819,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (default: AXO)." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
                         "target": { "type": "string", "description": "Target symbol, file, or entity." },
                         "target_type": { "type": "string", "enum": ["symbol", "file", "intent"] },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }

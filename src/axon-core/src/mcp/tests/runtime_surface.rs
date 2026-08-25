@@ -4382,3 +4382,79 @@ fn test_sql_repair_names_the_identifier_folding_trap() {
         "no folding note for an all-lowercase identifier: {text}"
     );
 }
+
+/// REQ-AXO-902380 — le CONTRAT PUBLIÉ doit décrire ce que le serveur FAIT.
+///
+/// Rapporté par OPV : « le contrat des outils annonce `project_code` auto-résolu
+/// depuis la cwd », alors qu'ils lisaient `Default: AXO` sur les outils qu'ils
+/// utilisent. Conclusion rationnelle de leur part : passer `project=OPV` partout.
+///
+/// La mesure du 2026-08-26 donne le mécanisme exact, et ce n'est pas celui que la
+/// doléance suppose. Le transport (REQ-AXO-902286) et le chokepoint
+/// (REQ-AXO-902239) sont corrects : la résolution suit BIEN le cwd du client. Ce
+/// qui ment, c'est la DESCRIPTION — **8 des 24 outils auto-résolus** annonçaient
+/// `default: AXO`. Ce sont exactement les dix de la seconde vague
+/// (REQ-AXO-902291) : on les a ajoutés à l'allow-list sans toucher à leur schéma.
+///
+/// ⚠️ C'est la sixième fois cette semaine qu'une règle vit à DEUX endroits et
+/// qu'un seul est corrigé. Cette garde est le second endroit rendu dépendant du
+/// premier : l'allow-list reste la source, et une divergence ne peut plus passer.
+///
+/// Elle lit le CODE (`PROJECT_AUTORESOLVE_TOOLS`) et le CATALOGUE, jamais la doc.
+#[test]
+fn le_contrat_publie_ne_peut_pas_contredire_l_auto_resolution() {
+    let catalogue = crate::mcp::catalog::tools_catalog(true);
+    let outils = catalogue
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .expect("le catalogue expose `tools`");
+
+    let mut menteurs: Vec<String> = Vec::new();
+    let mut muets: Vec<String> = Vec::new();
+
+    for (nom, cle) in McpServer::PROJECT_AUTORESOLVE_TOOLS {
+        let Some(outil) = outils
+            .iter()
+            .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(*nom))
+        else {
+            // Un outil de l'allow-list absent du catalogue est un défaut à part
+            // entière : on auto-résout pour un outil que personne ne voit.
+            menteurs.push(format!("{nom} (ABSENT du catalogue)"));
+            continue;
+        };
+        let desc = outil
+            .get("inputSchema")
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.get(*cle))
+            .and_then(|f| f.get("description"))
+            .and_then(|d| d.as_str());
+        let Some(desc) = desc else {
+            muets.push(format!("{nom}.{cle}"));
+            continue;
+        };
+        let annonce_axo = desc.contains("default: AXO")
+            || desc.contains("Default: AXO")
+            || desc.contains("(default AXO)");
+        let annonce_resolution = desc.contains("uto-resolved") || desc.contains("cwd");
+        if annonce_axo && !annonce_resolution {
+            menteurs.push(format!("{nom}.{cle} — « {desc} »"));
+        } else if !annonce_resolution {
+            muets.push(format!("{nom}.{cle}"));
+        }
+    }
+
+    assert!(
+        menteurs.is_empty(),
+        "{} outil(s) auto-résolus annoncent AXO comme défaut — un tenant qui lit ça \
+         passe `project=` partout, ce qui est exactement la friction rapportée :\n  {}",
+        menteurs.len(),
+        menteurs.join("\n  ")
+    );
+    assert!(
+        muets.is_empty(),
+        "{} outil(s) auto-résolus ne disent RIEN de la résolution — le silence laisse \
+         le lecteur supposer, et il suppose le pire :\n  {}",
+        muets.len(),
+        muets.join("\n  ")
+    );
+}
