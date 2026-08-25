@@ -15827,3 +15827,62 @@ fn cross_project_edge_invalidates_both_ends_902466() {
         "sans charge utile, aucun projet ne doit être supposé"
     );
 }
+
+/// REQ-AXO-902488 (doleance SWT #241) — `re_anchor` dit D'OU vient le projet.
+///
+/// Cas rapporte : cwd = `/home/dstadel/projects/sow-th` (projet SWT), reprise
+/// apres `/compact`, appel `re_anchor(reason="post_compact")` sans project_code —
+/// le geste que le hook post-compact prescrit litteralement. Recu : le paquet
+/// d'AXO (13 pillars, session pointer CPT-AXO-052), presente comme le sien.
+///
+/// ## Ce que la mesure a corrige dans le diagnostic
+///
+/// Le rapporteur en concluait que la resolution auto de `re_anchor` diverge de
+/// celle de `practice_recall`. **Verifie en source : elle ne diverge plus** — le
+/// codage en dur de `"AXO"` a ete retire par `REQ-AXO-902467` (commit `5a414f89`),
+/// qui appelle desormais `auto_resolve_project_code_str`. Ce commit fait partie des
+/// **12 commits non deployes** au moment du rapport : le binaire live etait
+/// anterieur. Le symptome etait reel, le mecanisme suppose ne l'etait plus.
+///
+/// Verifie aussi : le point 3 de la doleance (« si la resolution echoue, le DIRE
+/// au lieu de servir un repli ») est DEJA tenu — `unresolved_project_error` nomme
+/// le geste et liste les projets enregistres. C'est d'ailleurs ce chemin-la que ce
+/// fixture emprunte, faute de cwd enregistre.
+///
+/// ## Ce qui restait a faire, et que cette garde tient
+///
+/// *« La sortie ne porte AUCUN signal de doute : ni "deduit du cwd", ni le chemin
+/// resolu. »* Sans elle, un projet affiche ne peut pas etre CONTREDIT par son
+/// lecteur — au moment ou il a le moins de contexte pour le faire.
+#[test]
+fn re_anchor_says_where_the_project_came_from() {
+    use crate::mcp::tools_skill::mention_provenance_projet;
+
+    // Resolution AUTO : la provenance et le chemin doivent etre dits.
+    let auto = mention_provenance_projet(false, "/home/dstadel/projects/sow-th");
+    assert!(
+        auto.contains("deduit du cwd"),
+        "la provenance n'est pas dite : un lecteur ne peut pas contredire le projet \
+         affiche, et c'est le geste prescrit APRES un compact (SWT #241).\n{auto}"
+    );
+    assert!(
+        auto.contains("/home/dstadel/projects/sow-th"),
+        "le CHEMIN resolu manque — c'est lui qui permet de trancher sans second \
+         appel.\n{auto}"
+    );
+    assert!(
+        auto.contains("project_code="),
+        "la mention ne donne pas le GESTE de correction.\n{auto}"
+    );
+
+    // Valeur EXPLICITE : aucune mention. Decorer ce qui est certain envoie douter
+    // de la bonne valeur.
+    assert_eq!(
+        mention_provenance_projet(true, "/home/dstadel/projects/sow-th"),
+        "",
+        "un projet passe explicitement ne doit pas etre annonce comme deduit"
+    );
+
+    // Chemin inconnu : pas de mention vide et trompeuse (« deduit du cwd `` »).
+    assert_eq!(mention_provenance_projet(false, ""), "");
+}

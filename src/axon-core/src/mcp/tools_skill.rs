@@ -210,6 +210,27 @@ pub(crate) fn render_mustache_template(template: &str, params: &Value) -> Result
         .map_err(|e| format!("render error: {}", e))
 }
 
+
+/// REQ-AXO-902488 — la mention de provenance de `re_anchor`, en fonction PURE.
+///
+/// Extraite parce que le cas qu'elle couvre — une resolution auto qui REUSSIT —
+/// n'est pas atteignable dans le fixture de test (le cwd du serveur de test n'y
+/// correspond a aucun projet enregistre, et le refus est alors rendu par
+/// `unresolved_project_error`, qui fait deja son travail). Tester en boite noire
+/// aurait demande de fabriquer un cwd enregistre, couteux et fragile ; c'est le
+/// meme arbitrage que pour `ligne_code_intel` (REQ-AXO-902478), le meme soir.
+///
+/// ⚠️ Une valeur EXPLICITE ne recoit aucune mention : decorer ce qui est certain
+/// envoie douter de la bonne valeur, et c'est le faux positif qui fait desaffuter
+/// une regle.
+pub(crate) fn mention_provenance_projet(explicite: bool, chemin: &str) -> String {
+    if explicite || chemin.is_empty() {
+        String::new()
+    } else {
+        format!(" _(deduit du cwd `{chemin}` — passe `project_code=` pour un autre)_")
+    }
+}
+
 impl McpServer {
     /// REQ-AXO-91580 — `mcp__axon__skill_list(applicable_to?, mode_filter?, project_code?)`.
     ///
@@ -701,10 +722,26 @@ impl McpServer {
         // resolveur : c'est l'outil que la doleance APS #197 cite en premier. Un
         // agent qui se re-ancre apres un compact recevait le contexte du depot
         // Axon au lieu du sien, et rien dans la reponse ne le lui disait.
-        let Some(project_code) = arguments
+        // REQ-AXO-902488 (doleance SWT #241) — dire D'OU vient le projet.
+        //
+        // Le codage en dur de `"AXO"` a bien ete retire par REQ-AXO-902467, mais il
+        // manquait l'autre moitie : la sortie ne portait AUCUN signal de provenance
+        // — ni « deduit du cwd », ni le chemin resolu. Le rapporteur, qui a recu le
+        // paquet d'un projet sans rapport apres un compact, le formule exactement :
+        // « un projet affiche sans sa provenance ne peut pas etre CONTREDIT par le
+        // lecteur ». C'est le moment ou l'agent a le moins de contexte pour reperer
+        // l'erreur — le geste est prescrit APRES un compact.
+        //
+        // `practice_recall` et `mcp_inbox_read` le font deja (« _(deduit du cwd) _»),
+        // et ce sont precisement les deux outils qui ont rendu le BON projet dans le
+        // meme message. Meme forme ici, plus le CHEMIN : c'est lui qui permet au
+        // lecteur de trancher sans second appel.
+        let project_explicite = arguments
             .get("project_code")
             .and_then(Value::as_str)
-            .map(String::from)
+            .map(String::from);
+        let Some(project_code) = project_explicite
+            .clone()
             .or_else(|| self.auto_resolve_project_code_str())
         else {
             return Some(crate::mcp::guidance::unresolved_project_error(
@@ -848,8 +885,15 @@ impl McpServer {
             })
             .collect();
 
+        // Le chemin EXACT sur lequel la resolution a porte : sans lui, un lecteur qui
+        // doute ne peut que redemander. Avec lui, il compare et tranche seul.
+        let provenance = mention_provenance_projet(
+            project_explicite.is_some(),
+            &crate::mcp::effective_project_search_path(),
+        );
+
         let summary_text = format!(
-            "## 🧭 Re-anchor `{}` (reason: {})\n\n\
+            "## 🧭 Re-anchor `{}`{} (reason: {})\n\n\
              - **Active Pillars** : {} ({})\n\
              - **Recent Decisions** : {} (last 10 current+delivered)\n\
              - **MANDATED-tagged Skills** : {} (full list in `data.mandated_skills`)\n\
@@ -858,6 +902,7 @@ impl McpServer {
              - **Session pointer** : {}\n\n\
              Call `skill_invoke` next per methodology mandate, or `soll_work_plan` for full scoring.",
             project_code,
+            provenance,
             reason,
             pillars.len(),
             pillars
