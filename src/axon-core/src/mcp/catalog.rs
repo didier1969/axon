@@ -545,13 +545,14 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "data_catalog",
-                "description": "[DATA] REQ-AXO-902017 — inventory of a DATA-CENTRIC project's data artifacts (CSV lakes, fixtures, manifests) from its normalized pivot catalog `data/CATALOG.json`. `action=read` (default) answers 'how many assets, what kinds, how many rows, which lack a manifest' in one call instead of a shell dredge (ls/head/wc). `action=index` PERSISTS the catalog into the IST: each artifact becomes a `data_artifact` node (kind) + an ist.DataArtifact metadata row so it joins the structural graph (and code symbols gain READS_ARTIFACT edges). CSV column names are read from data/<name> when present.",
+                "description": "[DATA] REQ-AXO-902017 — inventory of a DATA-CENTRIC project's data artifacts (CSV lakes, fixtures, manifests) from its normalized pivot catalog `data/CATALOG.json`. `action=read` (default) answers 'how many assets, what kinds, how many rows, which lack a manifest' in one call instead of a shell dredge (ls/head/wc). `action=index` PERSISTS the catalog into the IST: each artifact becomes a `data_artifact` node (kind) + an ist.DataArtifact metadata row so it joins the structural graph (and code symbols gain READS_ARTIFACT edges). CSV column names are read from data/<name> when present. REQ-AXO-902486 — `mode=\"brief\"` is the DEFAULT: it lists at most 10 artifacts (the summary counters still cover the whole catalog, and the answer says how many are not listed); pass `mode=\"verbose\"` for the full inventory. It used to return every artifact with nine fields each — 15 000 tokens for 5 useful lines, more than the `wc -l` it replaces.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Canonical project code (e.g. OPV). Default: AXO." },
                         "action": { "type": "string", "enum": ["read", "index"], "description": "read (default) = summarize on demand; index = persist artifacts into the IST (ist.Symbol kind='data_artifact' + ist.DataArtifact)." },
-                        "catalog_path": { "type": "string", "description": "Optional override for the catalog location (absolute, or relative to the project root). Default: data/CATALOG.json." }
+                        "catalog_path": { "type": "string", "description": "Optional override for the catalog location (absolute, or relative to the project root). Default: data/CATALOG.json." },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"], "description": "REQ-AXO-902486 — brief (DEFAULT) lists at most 10 artifacts; the counters above them always cover the WHOLE catalog, and the answer states how many were not listed. verbose lists every artifact. Nothing is ever truncated silently." }
                     },
                     "required": []
                 }

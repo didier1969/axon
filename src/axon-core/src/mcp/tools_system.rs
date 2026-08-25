@@ -1341,9 +1341,100 @@ impl McpServer {
             }));
         }
 
+        // REQ-AXO-902479 (doléance OPV #259) — dédupliquer AU NIVEAU DU LOT.
+        //
+        // Mesuré : **58 Ko pour 25 mutations triviales**, au-delà du cap de sortie —
+        // donc deux allers-retours de PLUS qu'une simple boucle d'appels unitaires.
+        // Un outil censé économiser des appels en coûtait davantage.
+        //
+        // La cause n'est pas le nombre d'appels, c'est la RÉPÉTITION : chaque mutation
+        // SOLL rend un `mutation_feedback` dont `remaining_blockers` porte 49 ids —
+        // les MÊMES 49 à chaque fois. Sur 25 appels, ces ids sont écrits 1 225 fois
+        // pour une information qui vaut d'être écrite une fois.
+        //
+        // ⚠️ Rien n'est tronqué : la valeur est DÉPLACÉE en tête du lot, pas supprimée
+        // (troncage silencieux interdit — REQ-AXO-902409). Et elle n'est factorisée
+        // que si elle est STRICTEMENT identique partout : deux lots différents ne
+        // peuvent pas être confondus.
+        let commun = Self::facteur_commun_du_lot(&mut all_results);
+        let charge = if commun == json!({}) {
+            json!(all_results)
+        } else {
+            json!({
+                "contexte_commun_du_lot": commun,
+                "note": "ces champs étaient IDENTIQUES dans tous les résultats : \
+                         écrits une fois ici, retirés de chaque résultat. Rien n'est tronqué.",
+                "results": all_results,
+            })
+        };
+
         Some(
-            json!({ "content": [{ "type": "text", "text": serde_json::to_string(&all_results).unwrap_or_default() }] }),
+            json!({ "content": [{ "type": "text", "text": serde_json::to_string(&charge).unwrap_or_default() }] }),
         )
+    }
+
+    /// REQ-AXO-902479 — sort du lot les champs de contexte identiques partout.
+    ///
+    /// Fermé volontairement à une liste de clés : factoriser TOUT champ identique
+    /// ferait disparaître des valeurs qui se trouvent coïncider (deux `status: "ok"`),
+    /// et un lecteur ne saurait plus si un résultat porte la valeur ou l'a héritée.
+    /// Ces quatre clés-là sont du contexte de PROJET, pas du résultat d'appel : elles
+    /// décrivent l'état du monde après la mutation, identique par construction.
+    fn facteur_commun_du_lot(resultats: &mut [Value]) -> Value {
+        const CLES: [&str; 4] = [
+            "remaining_blockers",
+            "next_best_actions",
+            "completeness_before",
+            "completeness_after",
+        ];
+        // Il faut au moins deux résultats pour qu'une répétition existe.
+        if resultats.len() < 2 {
+            return json!({});
+        }
+        let feedbacks = |v: &Value| -> Option<Value> {
+            v.get("result")
+                .and_then(|r| r.get("data"))
+                .and_then(|d| d.get("mutation_feedback"))
+                .cloned()
+        };
+        let mut commun = serde_json::Map::new();
+        for cle in CLES {
+            let mut valeurs = resultats.iter().map(|r| {
+                feedbacks(r)
+                    .and_then(|f| f.get(cle).cloned())
+                    .unwrap_or(Value::Null)
+            });
+            let Some(premiere) = valeurs.next() else {
+                continue;
+            };
+            // Un `null` partout n'est pas un facteur commun, c'est une absence.
+            if premiere.is_null() || !valeurs.all(|v| v == premiere) {
+                continue;
+            }
+            commun.insert(cle.to_string(), premiere);
+        }
+        if commun.is_empty() {
+            return json!({});
+        }
+        for r in resultats.iter_mut() {
+            if let Some(f) = r
+                .get_mut("result")
+                .and_then(|r| r.get_mut("data"))
+                .and_then(|d| d.get_mut("mutation_feedback"))
+                .and_then(|f| f.as_object_mut())
+            {
+                for cle in CLES {
+                    if commun.contains_key(cle) {
+                        f.remove(cle);
+                    }
+                }
+                f.insert(
+                    "voir".to_string(),
+                    Value::from("contexte_commun_du_lot (champs identiques factorisés)"),
+                );
+            }
+        }
+        Value::Object(commun)
     }
 
     /// REQ-AXO-901676 — `rescan_project(project_code, full=false)`.
@@ -1822,5 +1913,91 @@ mod sql_shape_tests {
     fn preserves_digit_inside_identifier() {
         let s = normalize_sql_shape("SELECT * FROM pipeline WHERE port=44129");
         assert_eq!(s, "select * from pipeline where port=?");
+    }
+}
+
+#[cfg(test)]
+mod facteur_commun_lot_tests {
+    use super::McpServer;
+    use serde_json::{json, Value};
+
+    fn resultat(id: &str, blockers: Value) -> Value {
+        json!({
+            "name": "soll_manager",
+            "result": { "data": {
+                "id": id,
+                "mutation_feedback": {
+                    "remaining_blockers": blockers,
+                    "topology_delta": { "edges": 1 },
+                    "next_best_actions": ["rerun soll_work_plan"]
+                }
+            }}
+        })
+    }
+
+    /// REQ-AXO-902479 — LA garde : ce qui est identique partout est écrit UNE fois.
+    ///
+    /// OPV a mesuré 58 Ko pour 25 mutations triviales, au-delà du cap de sortie —
+    /// donc DEUX allers-retours de plus qu'une boucle d'appels unitaires. Un outil
+    /// censé économiser des appels en coûtait davantage. La cause : 49 ids de
+    /// blockers réécrits à chaque résultat.
+    #[test]
+    fn les_champs_identiques_partout_sortent_du_lot_et_rien_ne_disparait() {
+        let blockers = json!(["REQ-A", "REQ-B", "REQ-C"]);
+        let mut lot = vec![
+            resultat("REQ-1", blockers.clone()),
+            resultat("REQ-2", blockers.clone()),
+            resultat("REQ-3", blockers.clone()),
+        ];
+        let commun = McpServer::facteur_commun_du_lot(&mut lot);
+
+        assert_eq!(
+            commun.get("remaining_blockers"),
+            Some(&blockers),
+            "la valeur doit être DÉPLACÉE en tête, pas perdue : {commun}"
+        );
+        for r in &lot {
+            let f = &r["result"]["data"]["mutation_feedback"];
+            assert!(
+                f.get("remaining_blockers").is_none(),
+                "elle ne doit plus être répétée dans chaque résultat : {f}"
+            );
+            // Ce qui est PROPRE à l'appel reste : c'est la moitié utile.
+            assert!(f.get("topology_delta").is_some(), "topology_delta est par appel");
+            assert!(f.get("voir").is_some(), "le résultat doit dire où trouver le reste");
+        }
+        // L'identité de chaque mutation survit intacte.
+        assert_eq!(lot[1]["result"]["data"]["id"], json!("REQ-2"));
+    }
+
+    /// Contre-exemple : si les valeurs DIFFÈRENT, rien ne bouge. Sans ce test, une
+    /// factorisation trop gourmande écraserait des résultats distincts — et le
+    /// lecteur ne saurait plus si un résultat porte sa valeur ou l'a héritée.
+    #[test]
+    fn des_valeurs_differentes_ne_sont_jamais_factorisees() {
+        let mut lot = vec![
+            resultat("REQ-1", json!(["REQ-A"])),
+            resultat("REQ-2", json!(["REQ-B"])),
+        ];
+        let commun = McpServer::facteur_commun_du_lot(&mut lot);
+        assert!(
+            commun.get("remaining_blockers").is_none(),
+            "deux lots différents ne doivent pas être confondus : {commun}"
+        );
+        assert_eq!(
+            lot[0]["result"]["data"]["mutation_feedback"]["remaining_blockers"],
+            json!(["REQ-A"]),
+            "chaque résultat garde sa propre valeur"
+        );
+    }
+
+    /// Un lot d'UN seul appel n'a aucune répétition à factoriser : le coût de la
+    /// factorisation doit être nul quand il n'y a rien à gagner.
+    #[test]
+    fn un_lot_d_un_seul_appel_reste_inchange() {
+        let mut lot = vec![resultat("REQ-1", json!(["REQ-A"]))];
+        let commun = McpServer::facteur_commun_du_lot(&mut lot);
+        assert_eq!(commun, json!({}));
+        assert!(lot[0]["result"]["data"]["mutation_feedback"]["remaining_blockers"].is_array());
     }
 }

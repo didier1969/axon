@@ -260,13 +260,39 @@ impl McpServer {
                 summary.missing_manifest.join(", ")
             )
         };
+        // REQ-AXO-902486 (doléance DGD #265) — un outil doit coûter moins que ce
+        // qu'il remplace.
+        //
+        // Mesuré : **15 000 jetons pour 5 lignes utiles**, contre ~20 jetons pour le
+        // `wc -l` que cet outil est censé remplacer. Le rapporteur le dit sans
+        // détour : « il coûte plus cher que la commande shell qu'il remplace ». Un
+        // outil dans ce rapport-là n'est pas sous-utilisé par indiscipline — il est
+        // rationnellement évité. Le volume venait de `artifacts`, rendu INTÉGRALEMENT
+        // avec ses neuf champs par artefact, alors que le résumé au-dessus répond
+        // déjà à la question posée neuf fois sur dix.
+        //
+        // ⛔ **Pas de troncage silencieux** (REQ-AXO-902409) : le mode bref DIT ce
+        // qu'il ne montre pas et comment l'obtenir. Un total exact à côté d'une liste
+        // bornée, jamais un des deux pris pour l'autre.
+        let mode = args
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("brief");
+        let plafond = if mode == "verbose" {
+            summary.artifacts.len()
+        } else {
+            // 10 suffit à voir la forme du catalogue ; au-delà on lit un inventaire,
+            // et un inventaire se demande explicitement.
+            summary.artifacts.len().min(10)
+        };
+
         let report = format!(
             "## Data catalog — project {project_code}\n\n\
              Source: `{}`\n\n\
              - Artifacts: **{}**  (kinds: {})\n\
              - Total rows: {}\n\
              - Total bytes: {}\n\
-             - Manifests: {}/{} present — {}\n",
+             - Manifests: {}/{} present — {}\n{}",
             catalog_path.display(),
             summary.total_artifacts,
             if by_kind_text.is_empty() { "—".to_string() } else { by_kind_text },
@@ -275,11 +301,23 @@ impl McpServer {
             summary.with_manifest,
             summary.total_artifacts,
             missing_note,
+            if plafond < summary.artifacts.len() {
+                format!(
+                    "\n⚠️ `artifacts` ne liste que {} des {} artefacts (mode bref, \
+                     REQ-AXO-902486). Les compteurs ci-dessus portent sur le catalogue \
+                     ENTIER ; passe `mode=\"verbose\"` pour l'inventaire complet.\n",
+                    plafond,
+                    summary.artifacts.len()
+                )
+            } else {
+                String::new()
+            },
         );
 
         let artifacts_json: Vec<Value> = summary
             .artifacts
             .iter()
+            .take(plafond)
             .map(|a| {
                 json!({
                     "id": a.id,
@@ -308,6 +346,11 @@ impl McpServer {
                 "manifests_present": summary.with_manifest,
                 "missing_manifest": summary.missing_manifest,
                 "artifacts": artifacts_json,
+                // REQ-AXO-902486 — le lecteur sait TOUJOURS s'il lit un inventaire
+                // ou un échantillon, et le total reste exact à côté.
+                "artifacts_listed": plafond,
+                "artifacts_total": summary.total_artifacts,
+                "mode": mode,
             }
         }))
     }
