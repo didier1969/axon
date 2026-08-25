@@ -956,14 +956,99 @@ impl McpServer {
         let (node_type, title, body, status, project) =
             (cell(1), cell(2), cell(3), cell(4), cell(5));
 
+        // REQ-AXO-902496 (doléance DVM #262) — la contrepartie en LECTURE d'`append_section`.
+        //
+        // « `soll_get(id="CPT-DVM-009")` rend d'un bloc le corps entier — ici environ
+        // 6 000 jetons. À cet appel-là je ne voulais que la section "Les trois prochaines
+        // actions" (~120 jetons), et il n'existe aucun moyen de la demander. » Sur un corps
+        // relu à CHAQUE reprise de session — la définition d'un session pointer — l'écart
+        // se paie à chaque fois. L'écriture avait été optimisée (`append_section`,
+        // REQ-AXO-902161), la lecture non, alors qu'elle est le côté le plus fréquent.
+        //
+        // Sans paramètre, comportement STRICTEMENT inchangé.
+        let titres: Vec<&str> = body
+            .lines()
+            .filter(|l| l.trim_start().starts_with("## "))
+            .map(|l| l.trim_start().trim_start_matches("## ").trim())
+            .collect();
+
+        let veut_sommaire = args
+            .get("sections")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let fragment = args
+            .get("section")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|f| !f.is_empty());
+
+        let corps_rendu: String = if veut_sommaire {
+            format!(
+                "**{} section(s)** — passe `section=\"<fragment du titre>\"` pour en lire une :\n{}",
+                titres.len(),
+                if titres.is_empty() {
+                    "_(ce corps ne porte aucun titre `##`)_".to_string()
+                } else {
+                    titres
+                        .iter()
+                        .map(|t| format!("- {t}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            )
+        } else if let Some(frag) = fragment {
+            let bas = frag.to_lowercase();
+            let mut trouve: Option<String> = None;
+            let mut courant: Option<(String, Vec<&str>)> = None;
+            for l in body.lines() {
+                let t = l.trim_start();
+                if t.starts_with("## ") {
+                    if let Some((titre, lignes)) = courant.take() {
+                        if titre.to_lowercase().contains(&bas) {
+                            trouve = Some(format!("## {titre}\n{}", lignes.join("\n")));
+                            break;
+                        }
+                    }
+                    courant = Some((t.trim_start_matches("## ").trim().to_string(), Vec::new()));
+                } else if let Some((_, lignes)) = courant.as_mut() {
+                    lignes.push(l);
+                }
+            }
+            if trouve.is_none() {
+                if let Some((titre, lignes)) = courant {
+                    if titre.to_lowercase().contains(&bas) {
+                        trouve = Some(format!("## {titre}\n{}", lignes.join("\n")));
+                    }
+                }
+            }
+            match trouve {
+                Some(sec) => sec,
+                // Un fragment qui ne matche pas ne doit PAS coûter un aller-retour à
+                // l'aveugle : on rend les titres disponibles avec le refus.
+                None => format!(
+                    "_aucune section dont le titre contient « {frag} ». {} titre(s) \
+                     disponible(s) :_\n{}",
+                    titres.len(),
+                    titres
+                        .iter()
+                        .map(|t| format!("- {t}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            }
+        } else {
+            body.to_string()
+        };
+
         Some(json!({
             "content": [{ "type": "text", "text": format!(
-                "## {id} — {title}\n_{node_type} · {status} · {project}_\n\n{body}"
+                "## {id} — {title}\n_{node_type} · {status} · {project}_\n\n{corps_rendu}"
             ) }],
             "data": {
                 "status": "ok",
                 "id": id, "type": node_type, "title": title,
                 "node_status": status, "project_code": project,
+                "section_titles": titres,
                 "description": body,
                 "next_action": { "kind": "continue_with_follow_up_tool", "tool": "soll_query_context", "when": "if_more_context_needed" }
             }

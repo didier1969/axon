@@ -794,6 +794,9 @@ impl McpServer {
                 //     `allowed` field already inside policy_payload)
                 //   * reverse_canonical: when forbidden, the reverse
                 //     direction that IS canonical (alias for did_you_mean)
+                // REQ-AXO-902480 — l'identité de la matrice voyage avec la réponse.
+                // Un tenant qui a noté une règle il y a trois jours peut comparer.
+                payload["matrix_version"] = Value::from(relation_matrix_version());
                 payload["canonical_direction"] =
                     Value::from(format!("{} -> {}", source_kind, target_kind));
                 payload["allowed_relation_types"] = payload

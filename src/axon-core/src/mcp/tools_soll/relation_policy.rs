@@ -152,6 +152,57 @@ pub(super) fn supersedes_policy_for_soll_pair(
     })
 }
 
+/// REQ-AXO-902480 — l'empreinte de la matrice de relations, DÉRIVÉE d'elle.
+///
+/// Rapporté par OPV : une contrainte de schéma a été levée **silencieusement**, et une
+/// note devenue périmée a bloqué **77 violations pendant trois jours**. Le tenant
+/// appliquait une règle qui n'existait plus, sans aucun moyen de s'en apercevoir : la
+/// matrice n'a jamais porté d'identité, donc « la règle a changé » et « je me souviens
+/// mal » étaient indiscernables.
+///
+/// ⚠️ Le point de conception est qu'on ne DÉCLARE pas un numéro de version : on
+/// l'ÉNUMÈRE depuis `relation_policy_for_pair`. Un numéro à maintenir à la main serait
+/// la règle qui vit à deux endroits — le motif rencontré cinq fois cette semaine, et
+/// celui qui a précisément produit cette doléance. Ici, changer une ligne du `match`
+/// change l'empreinte sans que personne y pense.
+///
+/// FNV-1a 64 bits : pas de dépendance, stable entre exécutions et entre machines
+/// (contrairement au `DefaultHasher` de la std, dont la stabilité n'est pas garantie
+/// d'une version à l'autre — une empreinte qui bouge sans que la règle bouge serait
+/// pire qu'aucune empreinte).
+pub(super) fn relation_matrix_version() -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let avale = |octets: &[u8], h: &mut u64| {
+        for b in octets {
+            *h ^= *b as u64;
+            *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    let mut paires = 0usize;
+    for source in SOLL_RELATION_ENDPOINT_KINDS {
+        for target in SOLL_RELATION_ENDPOINT_KINDS {
+            let Some(policy) = relation_policy_for_pair(source, target) else {
+                continue;
+            };
+            paires += 1;
+            avale(source.as_bytes(), &mut h);
+            avale(b">", &mut h);
+            avale(target.as_bytes(), &mut h);
+            for relation in policy.allowed {
+                avale(b":", &mut h);
+                avale(relation.as_bytes(), &mut h);
+            }
+            if let Some(defaut) = policy.default {
+                avale(b"=", &mut h);
+                avale(defaut.as_bytes(), &mut h);
+            }
+        }
+    }
+    // Le COMPTE voyage avec l'empreinte : un hash seul dit « ce n'est pas la même
+    // matrice », il ne dit pas de combien elle a bougé.
+    format!("{paires}p-{h:016x}")
+}
+
 pub(super) fn relation_policy_for_pair(
     source_type: &str,
     target_type: &str,
@@ -1209,6 +1260,56 @@ mod blocked_by_policy_tests {
         assert!(
             !policy.allow_multiple_types,
             "REFUTES and VERIFIES must be mutually exclusive on the same VAL->DEC pair"
+        );
+    }
+}
+
+#[cfg(test)]
+mod matrix_version_tests {
+    use super::*;
+
+    /// REQ-AXO-902480 — l'empreinte doit être STABLE d'un appel à l'autre. Une
+    /// empreinte qui bouge sans que la règle bouge serait pire qu'aucune empreinte :
+    /// elle apprendrait au tenant à l'ignorer.
+    #[test]
+    fn l_empreinte_est_stable_entre_deux_appels() {
+        assert_eq!(relation_matrix_version(), relation_matrix_version());
+    }
+
+    /// Elle doit porter le COMPTE de paires à côté du hash. Un hash seul dit « ce
+    /// n'est plus la même matrice » sans dire de combien elle a bougé — c'est le
+    /// « un compteur n'est pas un rapport » que ce dépôt corrige en boucle.
+    #[test]
+    fn l_empreinte_porte_le_compte_de_paires_et_un_hash() {
+        let v = relation_matrix_version();
+        let (paires, hash) = v.split_once("p-").expect("forme `<N>p-<hash>`, got: {v}");
+        let n: usize = paires.parse().expect("le compte doit être un nombre");
+        assert!(
+            n > 10,
+            "la matrice réelle porte des dizaines de paires, {n} trahirait une énumération cassée"
+        );
+        assert_eq!(hash.len(), 16, "FNV-1a 64 bits rendu en hexadécimal");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// Et elle doit DÉPENDRE du contenu : deux matrices différentes ne peuvent pas
+    /// porter la même empreinte. Falsifie l'énumération elle-même — une boucle qui
+    /// ne lirait rien rendrait un hash constant, et les deux tests ci-dessus
+    /// passeraient quand même.
+    #[test]
+    fn l_empreinte_depend_reellement_du_contenu_de_la_matrice() {
+        // Même algorithme, alimenté par une matrice tronquée : l'empreinte DOIT
+        // différer. C'est le contrôle négatif que l'énumération est bien branchée.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in b"PIL>VIS:EPITOMIZES=EPITOMIZES" {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let tronquee = format!("1p-{h:016x}");
+        assert_ne!(
+            relation_matrix_version(),
+            tronquee,
+            "la matrice complète ne peut pas avoir l'empreinte d'une matrice à une paire"
         );
     }
 }

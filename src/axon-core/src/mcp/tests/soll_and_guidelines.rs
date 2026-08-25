@@ -1138,12 +1138,31 @@ fn an_unrepairable_artifact_type_is_still_rejected() {
     let server = create_test_server();
     seed_requirement(&server, "REQ-TST-916");
 
+    // REQ-AXO-902499 — l'exemple a changé, PAS l'intention du test.
+    //
+    // Ce test utilisait `rationale`, désormais ACCEPTÉ sur `requirement` (doléance
+    // VPC #245 : « le seul item perdu était le POURQUOI, le seul irreconstituible »).
+    // Il faut donc un type qui reste réellement irréparable — sinon la garde ne
+    // mesurerait plus rien. `screenshot` n'est dans aucun vocabulaire d'entité et
+    // n'est proche d'aucun accepté : c'est le contre-exemple que ce test réclame.
     let res = attach(
+        &server,
+        "REQ-TST-916",
+        json!([{ "artifact_type": "screenshot", "artifact_ref": "capture.png" }]),
+    );
+    assert_eq!(res["data"]["attached"].as_i64(), Some(0), "{res}");
+
+    // Et le contrôle POSITIF qui manquait : `rationale`, lui, doit passer.
+    let ok = attach(
         &server,
         "REQ-TST-916",
         json!([{ "artifact_type": "rationale", "artifact_ref": "parce que" }]),
     );
-    assert_eq!(res["data"]["attached"].as_i64(), Some(0), "{res}");
+    assert_eq!(
+        ok["data"]["attached"].as_i64(),
+        Some(1),
+        "`rationale` doit etre accepte sur une exigence (REQ-AXO-902499) : {ok}"
+    );
 }
 
 // ── REQ-AXO-902319 — le troisième état : refus correct et permanent ────────
@@ -9769,6 +9788,109 @@ fn test_axon_init_project_returns_global_guidelines() {
     assert_eq!(
         result["data"]["project_path"].as_str(),
         Some("/home/dstadel/projects/BookingSystem")
+    );
+}
+
+/// REQ-AXO-902500 — le digest des ~60 règles PRO ne doit PAS être réémis à chaque init.
+///
+/// Trois cas, trois réponses, et ce test les falsifie tous les trois. Sans ces contre-
+/// exemples le correctif serait invérifiable : `test_axon_init_project_returns_global_guidelines`
+/// n'exerce que la première branche, et une régression qui rendrait le digest partout
+/// le laisserait vert.
+///
+/// Convergence TE2 + KKI, mesurée : ~12 Ko par appel pour un contenu qui ne change
+/// quasiment jamais, y compris quand l'appel est MUTATIF — c'est-à-dire au moment exact
+/// où `GUI-PRO-028` prescrit d'appeler cet outil pour poser un `session_pointer`, en fin
+/// de handoff, quand le contexte est le plus rare.
+#[test]
+fn le_digest_des_regles_globales_nest_rendu_quaux_projets_qui_nont_pas_arbitre() {
+    let server = create_test_server();
+
+    let init = |args: serde_json::Value| -> String {
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": { "name": "axon_init_project", "arguments": args },
+            "id": 1
+        });
+        let response = server
+            .handle_request(serde_json::from_value(req).unwrap())
+            .unwrap();
+        response.result.unwrap().get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    // --- Cas 1 : projet neuf, aucune guideline propre ⇒ le digest ET la question.
+    let bootstrap = init(serde_json::json!({
+        "project_path": "/home/dstadel/projects/DigestBootstrap",
+        "concept_document_url_or_text": "un projet neuf."
+    }));
+    assert!(
+        bootstrap.contains("Available global rules") && bootstrap.contains("GUI-PRO-001"),
+        "un projet qui n'a jamais arbitré doit recevoir le digest, got: {bootstrap}"
+    );
+
+    // --- Cas 2 : appel MUTATIF (pose de session_pointer) ⇒ jamais de digest.
+    // C'est le cas que KKI nomme : la procédure censée PRÉSERVER du contexte avant
+    // compaction en consommait 12 Ko pour écrire trois champs.
+    let mutatif = init(serde_json::json!({
+        "project_path": "/home/dstadel/projects/DigestBootstrap",
+        "session_pointer": { "kind": "none", "value": "" }
+    }));
+    assert!(
+        !mutatif.contains("Available global rules"),
+        "un appel mutatif ne doit PAS resservir le digest, got: {mutatif}"
+    );
+    assert!(
+        mutatif.contains("appel mutatif"),
+        "l'omission doit se DÉCLARER, pas se produire en silence (invariant KKI #204), got: {mutatif}"
+    );
+
+    // --- Cas 3 : projet ayant DÉJÀ ses propres guidelines ⇒ une ligne, pas un digest.
+    // C'est littéralement le cas TE2 : « GUI-TE2-018 apparaît plus haut dans la même
+    // sortie. Je ne réponds jamais à la question — il n'y a rien à activer. »
+    // Le code projet est ALLOUÉ par le serveur, pas devinable — on le lit, on ne le
+    // suppose pas (c'est le défaut même que ce volet corrige ailleurs).
+    let codes: Vec<Vec<String>> = serde_json::from_str(
+        &server
+            .graph_store
+            .query_json(
+                "SELECT DISTINCT project_code FROM soll.Node \
+                 WHERE type = 'Vision' AND project_code <> 'PRO'",
+            )
+            .expect("lire le code projet"),
+    )
+    .expect("decoder le code projet");
+    assert_eq!(
+        codes.len(),
+        1,
+        "le harnais doit porter exactement un projet non-PRO, got: {codes:?}"
+    );
+    let code = &codes[0][0];
+
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, title, description, status, project_code) \
+             VALUES ('GUI-{code}-001', 'Guideline', 'regle locale', 'corps', 'current', '{code}')"
+        ))
+        .expect("seed guideline locale");
+
+    let continuation = init(serde_json::json!({
+        "project_path": "/home/dstadel/projects/DigestBootstrap"
+    }));
+    assert!(
+        !continuation.contains("Available global rules"),
+        "un projet qui a DÉJÀ arbitré ne doit pas revoir le digest, got: {continuation}"
+    );
+    assert!(
+        continuation.contains("règle(s) globale(s) active(s)")
+            && continuation.contains("soll_get"),
+        "la ligne de remplacement doit COMPTER les règles et dire où lire un corps, got: {continuation}"
     );
 }
 

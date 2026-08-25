@@ -2022,19 +2022,55 @@ impl McpServer {
         if let Ok(res) = self.graph_store.query_json_param(&body_q, &json!({})) {
             let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
             if let Some(first) = rows.first() {
+                // REQ-AXO-902492 (doleance KKI) — `0-0` etait un ZERO FABRIQUE.
+                //
+                // `unwrap_or(0)` transformait une borne ABSENTE en ligne 0. Sur une methode
+                // situee vers la ligne 2262, la sortie annoncait `:0`-`0` — et `mode=source`
+                // est vendu comme le chemin « preparer une edition sans lire le fichier ».
+                // Un modele qui suit ce contrat edite alors au mauvais endroit, et l'erreur
+                // lui est attribuee.
                 let file_path = first.first().and_then(Value::as_str).unwrap_or("");
-                let start = first.get(1).and_then(Value::as_i64).unwrap_or(0);
-                let end = rows
+                let start_opt = first.get(1).and_then(Value::as_i64).filter(|n| *n > 0);
+                let end_opt = rows
                     .last()
                     .and_then(|r| r.get(2))
                     .and_then(Value::as_i64)
-                    .unwrap_or(start);
+                    .filter(|n| *n > 0)
+                    .or(start_opt);
+                let bornes = match (start_opt, end_opt) {
+                    (Some(a), Some(b)) => format!("`{file_path}:{a}`-`{b}`"),
+                    _ => format!(
+                        "`{file_path}` (bornes de lignes NON disponibles pour ce symbole — \
+                         ne pas editer sur un numero de ligne deduit d'ici)"
+                    ),
+                };
+                // REQ-AXO-902492 (doleance KKI, `blocking`) — le corps rendu NE COMPILAIT
+                // PAS : chaque fragment repete le CONTEXTE d'ouverture du symbole (sa
+                // signature), et la concatenation la faisait donc apparaitre plusieurs fois
+                // AU MILIEU du corps. `mode=source` etant vendu comme « preparer une edition
+                // sans lire le fichier », un modele qui suit ce contrat edite du code qui
+                // n'existe pas — et l'erreur lui est attribuee.
+                //
+                // Deduplication CONSERVATRICE, appliquee AVANT la concatenation (apres, les
+                // frontieres de fragments sont perdues) : d'un fragment au suivant, on retire
+                // le plus long prefixe de lignes deja emis A L'IDENTIQUE en fin du corps
+                // courant. On ne touche jamais a du contenu qui n'est pas un rappel immediat
+                // — supprimer du vrai code coûterait plus cher que la repetition.
                 let mut body = String::new();
+                let mut fragments: Vec<String> = Vec::new();
                 for r in &rows {
                     if let Some(c) = r.get(3).and_then(Value::as_str) {
-                        body.push_str(c);
-                        body.push('\n');
+                        fragments.push(c.to_string());
                     }
+                }
+                for (i, frag) in fragments.iter().enumerate() {
+                    let frag = if i == 0 {
+                        frag.as_str()
+                    } else {
+                        Self::strip_repeated_context_prefix(&body, frag)
+                    };
+                    body.push_str(frag);
+                    body.push('\n');
                 }
                 let body = Self::strip_repeated_chunk_headers(&body);
                 let lines: Vec<&str> = body.lines().collect();
@@ -2074,10 +2110,8 @@ impl McpServer {
                 };
                 let _ = write!(
                     out,
-                    "\n\n#### Source — `{}:{}`-`{}`{}\n{}```\n{}\n```\n",
-                    file_path,
-                    start,
-                    end,
+                    "\n\n#### Source — {}{}\n{}```\n{}\n```\n",
+                    bornes,
                     cap_note,
                     miss_note,
                     shown.join("\n")
@@ -2127,6 +2161,53 @@ impl McpServer {
     /// header inside a 160-line window: the caller paid the overhead AND did not
     /// get what they came for. The first header stays (it names the symbol and
     /// its signature); the repeats and every `part: k/n` marker go.
+
+    /// REQ-AXO-902492 — retire du fragment `suivant` le prefixe de lignes qui figure
+    /// DEJA, a l'identique, dans le corps assemble.
+    ///
+    /// Chaque fragment d'un symbole long reporte le contexte d'ouverture (la signature).
+    /// Concatenes tels quels, ces rappels se retrouvent au milieu du corps et le rendent
+    /// syntaxiquement faux. On ne coupe QUE ce qui est deja present : une ligne inedite
+    /// arrete la coupe immediatement, meme si les suivantes sont des doublons.
+    ///
+    /// ⚠️ Une ligne vide ou une accolade seule ne suffit PAS a declencher la coupe : ces
+    /// lignes reviennent legitimement partout dans du code, et les supprimer casserait ce
+    /// qu'on cherche a reparer. Il faut au moins une ligne SUBSTANTIELLE deja vue.
+    fn strip_repeated_context_prefix<'a>(corps: &str, suivant: &'a str) -> &'a str {
+        let lignes: Vec<&str> = suivant.lines().collect();
+        let mut coupe = 0usize;
+        let mut substantielles = 0usize;
+        for l in &lignes {
+            let t = l.trim();
+            if t.is_empty() || t == "}" || t == "{" || t == ")" || t == "),"
+                || t.starts_with("symbol:") || t.starts_with("kind:") || t == "context:"
+                || t.starts_with("part:")
+            {
+                // Neutre : suit la coupe sans la justifier a elle seule.
+                coupe += l.len() + 1;
+                continue;
+            }
+            if corps.contains(t) {
+                coupe += l.len() + 1;
+                substantielles += 1;
+            } else {
+                break;
+            }
+        }
+        if substantielles == 0 || coupe >= suivant.len() {
+            return suivant;
+        }
+        &suivant[coupe.min(suivant.len())..]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn strip_repeated_context_prefix_for_tests<'a>(
+        corps: &str,
+        suivant: &'a str,
+    ) -> &'a str {
+        Self::strip_repeated_context_prefix(corps, suivant)
+    }
+
     fn strip_repeated_chunk_headers(body: &str) -> String {
         let mut seen_header = false;
         let mut kept: Vec<&str> = Vec::with_capacity(body.lines().count());
@@ -2179,10 +2260,41 @@ impl McpServer {
              ORDER BY source_id",
             in_list
         );
+        // REQ-AXO-902492 (doleances TE2 #239, KKI #242) — INTERROGER D'ABORD, ANNONCER
+        // ENSUITE.
+        //
+        // L'en-tete « Callers (3) — signatures: » etait ecrit AVANT la requete. Quand
+        // celle-ci ne rendait rien — cas frequent : les ids voisins sont justement ceux
+        // qui portaient un identifiant AMPUTE, donc sans chunk indexe — la sortie
+        // annoncait 3 puis ne listait RIEN. Deux tenants ont conclu que l'outil ne tenait
+        // pas sa promesse ; l'un a cesse de l'appeler.
+        //
+        // C'est l'invariant de REQ-AXO-902409 : un compte publie doit dire ce qu'il a
+        // reellement rendu. `Compte::borne` ne decore que si l'ecart existe.
+        let rows: Vec<Vec<Value>> = self
+            .graph_store
+            .query_json_param(&q, &json!({}))
+            .ok()
+            .and_then(|res| serde_json::from_str(&res).ok())
+            .unwrap_or_default();
+
         let mut out = String::new();
-        let _ = write!(out, "\n**{} ({}) — signatures:**\n", label, ids.len());
-        if let Ok(res) = self.graph_store.query_json_param(&q, &json!({})) {
-            let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        let _ = write!(
+            out,
+            "\n**{} ({}) — signatures:**\n",
+            label,
+            crate::mcp::format::Compte::borne(ids.len(), rows.len()).rendre()
+        );
+        if rows.is_empty() {
+            let _ = write!(
+                out,
+                "_aucune signature disponible : ces {} voisin(s) n'ont pas de fragment \
+                 indexe. Ce n'est PAS « aucun appelant » — c'est « je ne peux pas les \
+                 decrire » (REQ-AXO-902492)._\n",
+                ids.len()
+            );
+        }
+        {
             for r in &rows {
                 let sid = r.first().and_then(Value::as_str).unwrap_or("");
                 let fp = r.get(1).and_then(Value::as_str).unwrap_or("");
@@ -3487,5 +3599,70 @@ mod inspect_callers_query_tests {
         crate::ist_snapshot::process_view()
             .cache_handle()
             .evict("AXO");
+    }
+}
+
+#[cfg(test)]
+mod tests_source_dedup {
+    use crate::mcp::McpServer;
+
+    /// REQ-AXO-902492 (doleance KKI, `blocking`) — le corps rendu par
+    /// `inspect mode=source` doit COMPILER.
+    ///
+    /// Chaque fragment d'un symbole long reporte le contexte d'ouverture (sa
+    /// signature). Concatenes, ces rappels apparaissent AU MILIEU du corps :
+    /// « sa sortie duplique la signature de la methode au milieu de son propre
+    /// corps [...] le corps rendu ne compile pas ». Comme `mode=source` est
+    /// vendu comme le chemin « preparer une edition sans lire le fichier », un
+    /// modele qui suit ce contrat edite du code qui n'existe pas.
+    #[test]
+    fn a_repeated_opening_context_is_cut_from_the_next_fragment() {
+        let corps = "pub fn calculer(a: i64) -> i64 {\n    let x = a * 2;\n";
+        let suivant = "pub fn calculer(a: i64) -> i64 {\n    let y = x + 1;\n    y\n}\n";
+        let coupe = McpServer::strip_repeated_context_prefix_for_tests(corps, suivant);
+        assert!(
+            !coupe.starts_with("pub fn calculer"),
+            "le rappel de signature n'a pas ete coupe : {coupe}"
+        );
+        assert!(
+            coupe.contains("let y = x + 1;"),
+            "le vrai contenu du fragment a ete perdu : {coupe}"
+        );
+    }
+
+    /// ⚠️ LE CONTROLE QUI COMPTE — ne JAMAIS couper du vrai code.
+    ///
+    /// Supprimer une ligne legitime coute plus cher que la repetition qu'on
+    /// repare : le lecteur ne peut pas savoir qu'il manque quelque chose. Une
+    /// ligne inedite doit arreter la coupe immediatement.
+    #[test]
+    fn genuine_code_is_never_cut_even_when_it_repeats() {
+        // Aucune ligne substantielle deja vue -> rien ne doit bouger.
+        let corps = "fn autre() {}\n";
+        let suivant = "    let total = a + b;\n    total\n}\n";
+        assert_eq!(
+            McpServer::strip_repeated_context_prefix_for_tests(corps, suivant),
+            suivant,
+            "un fragment sans rappel a ete ampute"
+        );
+
+        // Les lignes NEUTRES (accolades, vides) ne justifient pas une coupe a
+        // elles seules : elles reviennent partout dans du code.
+        let corps2 = "}\n\n";
+        let suivant2 = "}\n\n    let inedit = 1;\n";
+        assert_eq!(
+            McpServer::strip_repeated_context_prefix_for_tests(corps2, suivant2),
+            suivant2,
+            "une accolade repetee a suffi a declencher la coupe — elle ne doit pas"
+        );
+
+        // Une ligne INEDITE arrete la coupe, meme si des doublons suivent.
+        let corps3 = "pub fn f() {\n    let deja_vu = 1;\n";
+        let suivant3 = "    let inedit = 0;\n    let deja_vu = 1;\n";
+        assert_eq!(
+            McpServer::strip_repeated_context_prefix_for_tests(corps3, suivant3),
+            suivant3,
+            "la coupe a saute par-dessus une ligne inedite"
+        );
     }
 }

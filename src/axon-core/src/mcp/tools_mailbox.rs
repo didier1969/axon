@@ -69,6 +69,107 @@ pub(crate) struct SentMessage {
     pub sig: String,
 }
 
+
+/// REQ-AXO-902494 (doléance APS #238) — TOUS les manquements d'un coup, et jamais un
+/// paramètre inconnu avalé en silence.
+///
+/// Cas rapporté : un appel portait `to` (au lieu de `to_project`), `body` (au lieu de
+/// `body_dense`) et n'avait pas d'`idempotency_key`. Le refus ne parlait QUE de
+/// `body_dense`. `to` a été **ignoré sans un mot** — et c'est le plus grave :
+///
+/// > « Le destinataire est le paramètre dont une erreur ne se rattrape pas. Ici l'appel a
+/// > échoué pour une autre raison, donc rien n'est parti au mauvais endroit — mais un
+/// > appel par ailleurs valide avec `to` au lieu de `to_project` aurait vu son
+/// > destinataire tomber dans le vide. »
+///
+/// Un paramètre silencieusement jeté est un contrat rompu SANS erreur.
+///
+/// Retourne `None` si l'appel est recevable, sinon le message de refus complet.
+fn valider_arguments_outbox(args: &Value) -> Option<String> {
+    const CONNUS: &[&str] = &[
+        "to_project", "to_topic", "to_room", "from", "subject", "body_dense",
+        "idempotency_key", "in_reply_to", "context_id", "kind", "priority",
+        "ref_soll_ids", "ttl_hours",
+    ];
+
+    let Some(obj) = args.as_object() else { return None };
+
+    // Distance d'édition bornée : on ne propose un voisin que s'il est PROCHE.
+    // Suggérer n'importe quoi serait pire que se taire — le lecteur corrigerait
+    // vers une valeur fausse en croyant suivre un conseil.
+    fn voisin(inconnu: &str) -> Option<&'static str> {
+        CONNUS
+            .iter()
+            .map(|c| (*c, distance_edition(inconnu, c)))
+            .filter(|(c, d)| *d <= 4 && (c.starts_with(inconnu) || inconnu.starts_with(&c[..c.len().min(inconnu.len())]) || *d <= 2))
+            .min_by_key(|(_, d)| *d)
+            .map(|(c, _)| c)
+    }
+
+    let mut inconnus: Vec<String> = Vec::new();
+    for cle in obj.keys() {
+        if CONNUS.contains(&cle.as_str()) {
+            continue;
+        }
+        match voisin(cle) {
+            Some(v) => inconnus.push(format!("`{cle}` inconnu — vouliez-vous dire `{v}` ?")),
+            None => inconnus.push(format!("`{cle}` inconnu")),
+        }
+    }
+
+    let mut manquants: Vec<&str> = Vec::new();
+    let vide = |k: &str| {
+        obj.get(k)
+            .and_then(Value::as_str)
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+    };
+    if vide("idempotency_key") {
+        manquants.push("`idempotency_key` (ancre la déduplication at-least-once)");
+    }
+    if vide("body_dense") {
+        manquants.push(
+            "`body_dense` (un sujet seul est une impasse : le destinataire lit la \
+             revendication et ne peut pas agir dessus)",
+        );
+    }
+
+    if inconnus.is_empty() && manquants.is_empty() {
+        return None;
+    }
+
+    let mut msg = String::from("mcp_outbox_send : appel refusé — TOUS les écarts, pas le premier.\n");
+    if !inconnus.is_empty() {
+        msg.push_str(&format!(
+            "\n⛔ Paramètre(s) INCONNU(S), qui seraient ignorés en silence :\n  - {}\n",
+            inconnus.join("\n  - ")
+        ));
+    }
+    if !manquants.is_empty() {
+        msg.push_str(&format!(
+            "\n⛔ Paramètre(s) REQUIS absent(s) :\n  - {}\n",
+            manquants.join("\n  - ")
+        ));
+    }
+    msg.push_str(&format!("\nAcceptés : {CONNUS:?}"));
+    Some(msg)
+}
+
+/// Distance de Levenshtein, bornée à ce dont on a besoin (noms de paramètres courts).
+fn distance_edition(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prec: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cour = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cout = usize::from(ca != cb);
+            cour.push((prec[j + 1] + 1).min(cour[j] + 1).min(prec[j] + cout));
+        }
+        prec = cour;
+    }
+    prec[b.len()]
+}
+
 impl McpServer {
     /// REQ-AXO-902278 — refuse a send whose `body_dense` is absent or blank.
     ///
@@ -168,6 +269,10 @@ impl McpServer {
         //
         // Checked BEFORE the fan-out branch on purpose: a broadcast is where a
         // body-less message wastes the most readers.
+        // REQ-AXO-902494 — valider TOUT l'appel avant d'en traiter une partie.
+        if let Some(msg) = valider_arguments_outbox(args) {
+            return Some(mbx_err(&msg, "input_invalid"));
+        }
         if let Some(err) = Self::reject_body_less_send(args) {
             return Some(err);
         }
@@ -489,8 +594,25 @@ impl McpServer {
         // monotone max(id) cursor never skips a message. Archived rows (TTL-swept,
         // see axon.mailbox_sweep) are excluded from the live inbox view.
         let cursor_advances = mode == "unread" && !view_only;
+        // REQ-AXO-902495 (doléance VPC #240) — `mode=all` rendait les N plus ANCIENS.
+        //
+        // Sur une boîte de plusieurs milliers de messages, c'est l'inverse de ce qu'on
+        // cherche à une reprise de session. Le rapporteur a dû faire TROIS appels, chacun
+        // très volumineux, avec des bornes DEVINÉES — rien dans la réponse ne disait où
+        // l'on se situait dans la boîte. Et le risque dépasse le coût : « un LLM pressé
+        // qui lit la première page prend des messages de trois semaines pour l'état du
+        // jour. J'ai failli traiter des demandes TE2/OPV déjà résolues. »
+        //
+        // ⚠️ `since` garde l'ordre ASCENDANT : on y avance DEPUIS un point, la progression
+        // est le sens même du mode. Seul `all` — la lecture « montre-moi la boîte » — passe
+        // aux plus récents. `unread` reste strictement id ASC (sécurité du curseur, voir
+        // ci-dessus) : l'inverser ferait sauter des messages sous le max(id).
+        let recents_dabord = mode == "all";
         let order_clause = if cursor_advances {
             "ORDER BY id ASC".to_string()
+        } else if recents_dabord {
+            "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, id DESC"
+                .to_string()
         } else {
             "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, id ASC"
                 .to_string()
@@ -567,6 +689,9 @@ impl McpServer {
         // Advance the read cursor only in `unread` mode (so `since`/`all`/search/
         // thread are non-destructive views). UPSERT, monotonic.
         let mut archived_count: i64 = 0;
+        // REQ-AXO-902485 — déclaré au niveau du rapport, pas dans la branche : c'est
+        // le rapport qui doit les nommer.
+        let mut archives_nommes: Vec<(i64, String)> = Vec::new();
         if cursor_advances && max_id > floor {
             let _ = self.graph_store.execute(&format!(
                 "INSERT INTO axon.mailbox_cursor (project_code, last_read_id, updated_at) \
@@ -598,26 +723,59 @@ impl McpServer {
             // removed. Archiving on read is a state change the caller did not spell
             // out; leaving it silent would be the same trust loss any undisclosed
             // input normalisation is (cf. `disclose_cwd_provenance`, mcp.rs).
-            archived_count = self
+            // REQ-AXO-902485 (doléance DGD #266) — le COMPTE ne suffit pas : il faut
+            // NOMMER ce qui disparaît. « Un effet de bord sur des données, réduit à un
+            // compteur » — on sait que trois messages ont quitté la boîte, pas
+            // lesquels, donc on ne peut ni les retrouver ni juger si c'était grave.
+            //
+            // `count(*) OVER ()` rend le total EXACT dans la même passe que
+            // l'échantillon : une seule requête, un compte non tronqué, une liste
+            // bornée qui le dit (invariant KKI #204 — un total et un échantillon ne
+            // sont pas le même nombre et ne doivent pas se lire pareil).
+            archives_nommes = self
                 .graph_store
                 .query_json(&format!(
-                    "SELECT count(*) FROM axon.mailbox_message \
+                    "SELECT id, COALESCE(subject,'(sans sujet)'), count(*) OVER () \
+                     FROM axon.mailbox_message \
                      WHERE to_project='{p}' AND id <= {mid} AND id > {floor} \
-                       AND archived_at IS NULL AND COALESCE(priority,'') <> 'high'",
+                       AND archived_at IS NULL AND COALESCE(priority,'') <> 'high' \
+                     ORDER BY id DESC LIMIT 8",
                     p = esc(&project),
                     mid = max_id,
                     floor = floor
                 ))
                 .ok()
                 .and_then(|s| serde_json::from_str::<Vec<Vec<Value>>>(&s).ok())
-                .and_then(|rows| rows.into_iter().next())
-                .and_then(|row| row.into_iter().next())
-                .and_then(|cell| match cell {
-                    Value::Number(n) => n.as_i64(),
-                    Value::String(s) => s.parse::<i64>().ok(),
-                    _ => None,
+                .map(|rows| {
+                    // Le total vient de la fenêtre, pas de `rows.len()` : la liste est
+                    // plafonnée à 8, le compte ne l'est pas.
+                    if let Some(first) = rows.first() {
+                        archived_count = first
+                            .get(2)
+                            .and_then(|cell| match cell {
+                                Value::Number(n) => n.as_i64(),
+                                Value::String(s) => s.parse::<i64>().ok(),
+                                _ => None,
+                            })
+                            .unwrap_or(0);
+                    }
+                    rows.into_iter()
+                        .filter_map(|row| {
+                            let id = row.first().and_then(|c| match c {
+                                Value::Number(n) => n.as_i64(),
+                                Value::String(s) => s.parse::<i64>().ok(),
+                                _ => None,
+                            })?;
+                            let sujet = row
+                                .get(1)
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("(sans sujet)")
+                                .to_string();
+                            Some((id, sujet))
+                        })
+                        .collect()
                 })
-                .unwrap_or(0);
+                .unwrap_or_default();
 
             let _ = self.graph_store.execute(&format!(
                 "UPDATE axon.mailbox_message SET archived_at = now() \
@@ -655,9 +813,58 @@ impl McpServer {
                 } else {
                     String::new()
                 };
-                format!(" · cursor advanced to {max_id} · {archived_count} archivé(s){kept_note}")
+                // REQ-AXO-902485 — les nommer, bornés, avec le total exact à côté.
+                let liste = if archives_nommes.is_empty() {
+                    String::new()
+                } else {
+                    let compte = crate::mcp::format::Compte::borne(
+                        archived_count.max(0) as usize,
+                        archives_nommes.len(),
+                    );
+                    format!(
+                        "\n\nArchivés par cette lecture ({}) — récupérables par \
+                         `mcp_inbox_read mode=all` :\n{}",
+                        compte.rendre(),
+                        archives_nommes
+                            .iter()
+                            .map(|(id, sujet)| format!("- [{id}] {sujet}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                };
+                format!(
+                    " · cursor advanced to {max_id} · {archived_count} archivé(s){kept_note}{liste}"
+                )
             } else {
-                String::new()
+                // REQ-AXO-902495 (doléance VPC #240) — DIRE OÙ L'ON SE SITUE.
+                //
+                // Sans repère, le rapporteur a dû DEVINER ses bornes : trois appels, trois
+                // sorties denses, pour atteindre le récent. « Rien dans la réponse ne dit où
+                // on se situe dans la boîte (ni total, ni id max, ni "il reste N plus
+                // récents") ». Avec cette ligne, le deuxième appel est EXACT au lieu d'être
+                // deviné — et le coût tombe de trois appels à deux.
+                let total_boite = self
+                    .graph_store
+                    .query_json(&format!(
+                        "SELECT count(*), COALESCE(max(id),0) FROM axon.mailbox_message \
+                         WHERE to_project='{}' AND archived_at IS NULL",
+                        esc(&project)
+                    ))
+                    .ok()
+                    .and_then(|r| serde_json::from_str::<Vec<Vec<Value>>>(&r).ok())
+                    .and_then(|rows| rows.first().cloned());
+                match total_boite {
+                    Some(r) if r.len() >= 2 => {
+                        let total = r[0].as_i64().unwrap_or(0);
+                        let id_max = r[1].as_i64().unwrap_or(0);
+                        let restants = (total - messages.len() as i64).max(0);
+                        format!(
+                            " · {} sur {total} · id max {id_max} · {restants} non listé(s)",
+                            messages.len()
+                        )
+                    }
+                    _ => String::new(),
+                }
             },
             if messages.is_empty() {
                 "\n\n(aucun message)".to_string()
@@ -796,6 +1003,45 @@ impl McpServer {
         if SKIP.contains(&normalized_name) {
             return response;
         }
+
+        // REQ-AXO-902497 (doléances DVM #258 ET VPC #249 — convergence) — une
+        // notification se justifie par un DELTA, pas par une occasion de parler.
+        //
+        // Mesuré chez les deux : le bandeau apparaissait sur 8 sorties (DVM) et une
+        // VINGTAINE (VPC), avec un compte FIGÉ — « 17 » huit fois, « 3 » vingt fois. Soit
+        // ~1 200 jetons pour une information qui en vaut 15, une seule fois. VPC nomme le
+        // vrai coût, et ce n'est pas le prix :
+        //
+        // > « Le problème n'est pas le coût, c'est L'HABITUATION. Un signal qui se répète à
+        // > l'identique quel que soit le contexte devient du décor : je l'ai filtré
+        // > mentalement dès la troisième occurrence. Le jour où le compte passera de 3 à 40,
+        // > il sera dans la même police, au même endroit, après un `sql` en échec. »
+        //
+        // Deux règles, chacune tirée d'une observation :
+        //   1. JAMAIS sur une réponse d'ERREUR — « l'appelant est en train de réparer autre
+        //      chose ; le courrier non lu est la dernière chose qui doit occuper la ligne
+        //      suivante ».
+        //   2. Seulement si le compte a AUGMENTÉ depuis la dernière émission de ce process.
+        //      Un courrier qui ARRIVE pendant qu'on travaille est une nouvelle ;
+        //      « toujours 3 » n'en est pas une.
+        let est_erreur = response
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || response
+                .pointer("/data/status")
+                .and_then(Value::as_str)
+                .map(|s| {
+                    matches!(
+                        s,
+                        "input_invalid" | "input_not_found" | "wrong_project_scope"
+                            | "degraded" | "error" | "rejected_all" | "writer_failed"
+                    )
+                })
+                .unwrap_or(false);
+        if est_erreur {
+            return response;
+        }
         let project = arguments
             .get("project")
             .or_else(|| arguments.get("project_code"))
@@ -806,6 +1052,34 @@ impl McpServer {
         let Some(banner) = self.mailbox_unread_banner(&project) else {
             return response; // unread == 0 → no-op
         };
+
+        // Le DELTA : n'émettre que si le compte a monté depuis la dernière émission.
+        // État de PROCESS, volontairement : « depuis le début de cette session » est la
+        // bonne granularité — c'est la session qui subit la répétition.
+        {
+            static DERNIER_COMPTE: std::sync::OnceLock<
+                std::sync::Mutex<std::collections::HashMap<String, i64>>,
+            > = std::sync::OnceLock::new();
+            let compte = banner
+                .get("unread")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            let carte = DERNIER_COMPTE.get_or_init(|| {
+                std::sync::Mutex::new(std::collections::HashMap::new())
+            });
+            let mut carte = match carte.lock() {
+                Ok(c) => c,
+                // Un mutex empoisonné ne doit pas TAIRE le bandeau : il échouerait
+                // fermé, et une vraie arrivée passerait inaperçue. On reprend l'état.
+                Err(p) => p.into_inner(),
+            };
+            match carte.get(&project) {
+                Some(precedent) if compte <= *precedent => return response,
+                _ => {
+                    carte.insert(project.clone(), compte);
+                }
+            }
+        }
         let line = banner.get("banner").and_then(Value::as_str).map(str::to_string);
         if let Some(obj) = response.as_object_mut() {
             // Structured channel.
@@ -1177,5 +1451,73 @@ mod req_902386_recipient_validation_tests {
         // Registre illisible : l'appelant laisse passer le message plutôt que de
         // bloquer le canal qui sert justement à SIGNALER ce genre de panne.
         assert_eq!(nearest_project_code("AXON", &[]), None);
+    }
+}
+
+#[cfg(test)]
+mod tests_validation_outbox {
+    use super::valider_arguments_outbox;
+    use serde_json::json;
+
+    /// REQ-AXO-902494 (doléance APS #238) — le cas EXACT du rapporteur.
+    ///
+    /// Appel fautif : `to` (au lieu de `to_project`), `body` (au lieu de
+    /// `body_dense`), et pas d'`idempotency_key`. L'ancien refus ne parlait QUE
+    /// de `body_dense` ; `to` était **ignoré sans un mot**.
+    ///
+    /// « Le destinataire est le paramètre dont une erreur ne se rattrape pas. »
+    #[test]
+    fn a_call_with_three_faults_is_refused_once_naming_all_three() {
+        let msg = valider_arguments_outbox(&json!({
+            "to": "AXO",
+            "subject": "…",
+            "body": "<mon message complet>"
+        }))
+        .expect("un appel à trois défauts doit être refusé");
+
+        assert!(msg.contains("`to`"), "le destinataire fautif n'est pas nommé : {msg}");
+        assert!(
+            msg.contains("to_project"),
+            "le voisin de `to` n'est pas proposé — la correction reste à deviner : {msg}"
+        );
+        assert!(msg.contains("`body`"), "`body` ignoré en silence : {msg}");
+        assert!(msg.contains("body_dense"), "le voisin de `body` manque : {msg}");
+        assert!(
+            msg.contains("idempotency_key"),
+            "le manquement requis n'est pas signalé dans le MÊME refus : {msg}"
+        );
+    }
+
+    /// Un appel valide ne doit RIEN déclencher — sinon la garde bloque le travail
+    /// qu'elle prétend protéger.
+    #[test]
+    fn a_valid_call_is_not_refused() {
+        assert!(valider_arguments_outbox(&json!({
+            "to_project": "AXO",
+            "subject": "sujet",
+            "body_dense": "corps",
+            "idempotency_key": "k-1",
+            "priority": "high",
+            "ttl_hours": 6
+        }))
+        .is_none());
+    }
+
+    /// ⚠️ Ne pas suggérer n'importe quoi. Un voisin proposé à tort ferait corriger
+    /// vers une valeur fausse en croyant suivre un conseil — pire que se taire.
+    #[test]
+    fn a_far_fetched_key_gets_no_bogus_suggestion() {
+        let msg = valider_arguments_outbox(&json!({
+            "to_project": "AXO",
+            "body_dense": "corps",
+            "idempotency_key": "k-1",
+            "zzzz_totalement_inconnu": 1
+        }))
+        .expect("un paramètre inconnu doit être refusé");
+        assert!(msg.contains("zzzz_totalement_inconnu"), "{msg}");
+        assert!(
+            !msg.contains("vouliez-vous dire"),
+            "un voisin a été proposé pour une clé sans rapport : {msg}"
+        );
     }
 }

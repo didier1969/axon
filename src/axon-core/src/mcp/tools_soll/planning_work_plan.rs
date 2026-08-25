@@ -613,6 +613,35 @@ impl McpServer {
             })
             .map(|(id, _)| id.clone())
             .collect::<HashSet<_>>();
+        // REQ-AXO-902503 — un plan qui n'écarte RIEN et un plan qui écarte du travail
+        // FINI se lisent exactement pareil : une liste plus courte.
+        //
+        // Rapporté par SWT : « `soll_work_plan` ne dit pas ce qu'il a écarté ; "rien
+        // d'autre n'existe" est indiscernable de "le reste est fini" ». Le coût n'est pas
+        // théorique — SWT a failli déposer un faux rapport de bug sur cette ambiguïté.
+        //
+        // Les quatre AUTRES motifs d'exclusion sont déjà nommés dans `blockers` (cycle,
+        // dépendance de cycle, statut `blocked`/`deferred`, arête `BLOCKED_BY` ouverte).
+        // Le cinquième — l'état TERMINAL — ne l'était nulle part : c'est le seul qui
+        // signifie « c'est fait », donc le seul dont le silence induit en erreur.
+        //
+        // C'est le même invariant que le reste de la soirée (KKI #204), appliqué au
+        // périmètre : un plan doit dire sur quoi il a porté, pas seulement ce qu'il rend.
+        let mut ecartes_par_statut: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (id, node) in nodes.iter() {
+            if is_terminal_status(&node.status) {
+                ecartes_par_statut
+                    .entry(node.status.trim().to_ascii_lowercase())
+                    .or_default()
+                    .push(id.clone());
+            }
+        }
+        for ids in ecartes_par_statut.values_mut() {
+            ids.sort();
+        }
+        let ecartes_total: usize = ecartes_par_statut.values().map(|v| v.len()).sum();
+
         // REQ-AXO-346 Slice 3 — descendant count via BFS on the existing
         // snapshot petgraph, filtered to SOLVES+BELONGS_TO + schedulable.
         let descendants = descendant_counts_snapshot(&snapshot, &schedulable_ids);
@@ -802,8 +831,21 @@ impl McpServer {
                 "wave_count": waves.len(),
                 "returned_items": returned_items,
                 "top_count": top_recommendations.len(),
-                "incomplete_retirements_count": incomplete_retirements.len()
+                "incomplete_retirements_count": incomplete_retirements.len(),
+                // REQ-AXO-902503 — le périmètre écarté, publié avec son motif.
+                "excluded_terminal_nodes": ecartes_total
             },
+            "excluded_terminal": ecartes_par_statut
+                .iter()
+                .map(|(statut, ids)| json!({
+                    "status": statut,
+                    "count": ids.len(),
+                    // Bornée à 20 ids : au-delà le motif suffit, et le compte reste
+                    // exact — c'est `Compte::borne` qui dit lequel des deux on lit.
+                    "ids": ids.iter().take(20).collect::<Vec<_>>(),
+                    "listed": ids.len().min(20)
+                }))
+                .collect::<Vec<_>>(),
             "blockers": blockers.iter().map(blocker_to_json).collect::<Vec<_>>(),
             "cycles": cycles.iter().map(cycle_to_json).collect::<Vec<_>>(),
             "ordered_waves": limited_waves.iter().map(wave_to_json).collect::<Vec<_>>(),
@@ -844,6 +886,7 @@ impl McpServer {
                 // REQ-AXO-902443 — the per-batch loop gets the folded blocker
                 // section; the audit surface keeps the full enumeration.
                 format == "verbose",
+                &ecartes_par_statut,
             )
         };
 

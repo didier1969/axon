@@ -2098,6 +2098,35 @@ impl McpServer {
         })
     }
 
+
+    /// REQ-AXO-902500 — le projet a-t-il DÉJÀ arbitré ses guidelines ?
+    ///
+    /// `bootstrap_required` ne convient PAS ici : un projet fraîchement enrôlé reçoit une
+    /// Vision auto-seedée, donc il sort du bootstrap avant même d'avoir vu le digest — et
+    /// le digest ne serait alors rendu à personne, jamais. Le critère fidèle à l'intention
+    /// est celui que TE2 nomme : *« TE2 est un projet mature qui a déjà ses guidelines
+    /// (`GUI-TE2-018` apparaît d'ailleurs plus haut dans la même sortie). Je n'y réponds
+    /// jamais — il n'y a rien à activer, c'est déjà fait. »*
+    ///
+    /// Donc : un projet qui porte au moins une `GUI-<CODE>-*` a arbitré ; on lui rend une
+    /// ligne. Un projet qui n'en a aucune n'a jamais choisi ; on lui rend le digest et la
+    /// question, qui ont alors un sens.
+    fn projet_sans_guidelines_propres(&self, project_code: &str) -> bool {
+        let sql = format!(
+            "SELECT count(*)::bigint FROM soll.Node \
+             WHERE type = 'Guideline' AND project_code = '{}'",
+            project_code.replace('\'', "''")
+        );
+        self.graph_store
+            .query_json(&sql)
+            .ok()
+            .and_then(|r| serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&r).ok())
+            .and_then(|rows| rows.first().and_then(|r| r.first().cloned()))
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .map(|n| n == 0)
+            .unwrap_or(true) // en cas de doute, RENDRE le digest : taire est pire
+    }
+
     fn bootstrap_required(&self, project_code: &str) -> bool {
         // DEC-AXO-091 / REQ-AXO-322 (v3) — snapshot-driven: bootstrap
         // phase = no Vision node yet. Replaces SQL existence probe.
@@ -2481,9 +2510,47 @@ impl McpServer {
         // REQ-AXO-902248 replaced and GUI-PRO-102 lists as an anti-pattern. Raw
         // `sql` is 63.5 % of MCP traffic not because LLMs prefer it but because
         // the procedures asked for it; each surviving line reopens the tap.
-        response_text.push_str("Available global rules (digest — read any body in full via `soll_get(id='<ID>')`). Which ones do you want to activate, ignore, or specialize for this project?\n");
-        response_text.push_str(&rules_text);
-        response_text.push_str("\n(Use `axon_apply_guidelines` to apply these choices).");
+        // REQ-AXO-902500 (doléances TE2 #244 ET KKI #246 — convergence) — le digest des
+        // ~60 guidelines et sa question de BOOTSTRAP étaient réémis à CHAQUE init.
+        //
+        // Mesuré par les deux : c'est à lui seul l'essentiel du volume de la réponse
+        // (~12 Ko), et son contenu ne change quasiment jamais. TE2 : « je n'y réponds
+        // jamais — il n'y a rien à activer, c'est déjà fait. La question est donc du bruit
+        // permanent qui se présente comme une action requise. » KKI relève le paradoxe :
+        // `GUI-PRO-028` prescrit d'appeler cet outil pour POSER un pointeur de session,
+        // c'est-à-dire un geste d'ÉCRITURE en fin de handoff — donc la procédure censée
+        // préserver du contexte avant compaction en consommait 12 Ko pour trois champs.
+        //
+        // Trois cas, trois réponses. La question de bootstrap n'a de sens qu'au BOOTSTRAP.
+        //
+        // ⚠️ NE PAS toucher à l'inline Vision + Pillars : les deux rapporteurs le citent
+        // comme le BON arbitrage (« ça m'évite six `soll_get` »). Le volume à couper est
+        // celui-ci, pas celui-là.
+        let appel_mutatif = args
+            .get("session_pointer")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+        if appel_mutatif {
+            // L'appelant qui pose un pointeur vient de travailler dans ce projet : il A
+            // le bundle. Lui resservir 12 Ko est exactement ce que GUI-PRO-029 (économie
+            // de cache) et GUI-PRO-100 (écriture économe) interdisent.
+            response_text.push_str(
+                "_(appel mutatif — `session_pointer` fourni : digest des règles globales                  omis. `axon_init_project` sans argument le rend en entier.)_",
+            );
+        } else if self.projet_sans_guidelines_propres(&project_code) {
+            response_text.push_str("Available global rules (digest — read any body in full via `soll_get(id='<ID>')`). Which ones do you want to activate, ignore, or specialize for this project?\n");
+            response_text.push_str(&rules_text);
+            response_text.push_str("\n(Use `axon_apply_guidelines` to apply these choices).");
+        } else {
+            // Continuation : une LIGNE, pas un digest. Le contenu reste atteignable par
+            // `soll_get`, exactement comme les Decisions le sont déjà.
+            let nb_regles = rules_text.lines().filter(|l| l.trim_start().starts_with("- **")).count();
+            response_text.push_str(&format!(
+                "{nb_regles} règle(s) globale(s) active(s) — `soll_get(id='GUI-PRO-…')` pour \
+                 un corps, `axon_apply_guidelines` pour changer la sélection. \
+                 _(digest complet au bootstrap, ou via `soll_query_context`.)_"
+            ));
+        }
 
         let warnings: Vec<serde_json::Value> = if path_exists_on_disk {
             Vec::new()

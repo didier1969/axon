@@ -86,6 +86,9 @@ impl McpServer {
                     "evidence_count": entry.evidence_count,
                     "validation_count": entry.validation_count,
                     "has_criteria": entry.has_criteria,
+                    // REQ-AXO-902501 — absent quand rien n'est déclaré : la sortie des
+                    // nœuds à l'ancienne forme ne change pas d'un octet.
+                    "criteres_declares": entry.criteres_resume,
                     "broken_file_evidence_count": entry.broken_file_evidence_count,
                     // REQ-AXO-902337 piste 1 — name the offenders so no raw
                     // SQL on soll.Traceability is needed to find what to purge.

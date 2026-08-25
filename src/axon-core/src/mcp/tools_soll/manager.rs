@@ -1029,15 +1029,53 @@ impl McpServer {
                 // require an explicit opt-in. Ambiguous pairs (>1 allowed) also stay a reject —
                 // picking for the caller would be guessing (REQ-902247). No-op when the supplied
                 // relation is already legal, so the match below accepts as usual.
-                if let Some(p) = &policy {
-                    if p.allowed.len() == 1
-                        && p.allowed[0] != "SUPERSEDES"
-                        && !p.allowed.iter().any(|a| *a == relation_type.as_str())
-                    {
-                        relation_type = p.allowed[0].to_string();
+                // REQ-AXO-902504 (doleance SVZ #237) — GARDER LE SENS avant de changer
+                // la relation.
+                //
+                // `soll_manager(create, attach_to=MIL, relation_type=TARGETS)` sur une REQ
+                // etait auto-canonise en `BLOCKED_BY` : l'INVERSE en direction ET en sens
+                // metier. `MIL --TARGETS--> REQ` dit « ce jalon vise cette exigence » ;
+                // `REQ --BLOCKED_BY--> MIL` dit « cette exigence est bloquee par ce jalon ».
+                // Consequences mesurees par le rapporteur : `soll_work_plan` ignorait
+                // l'arete, le gate comptait la REQ orpheline, et le jalon ne la voyait pas
+                // parmi ses enfants. Le tout annonce sur le ton d'un SUCCES.
+                //
+                // Quand la paire INVERSE admet la relation demandee, l'intention est sans
+                // ambiguite : c'est le SENS DE LECTURE qui est inverse, pas le lien. On
+                // pose donc `attach_to --relation--> nouveau_noeud` au lieu de fabriquer
+                // une relation differente. Ce test passe AVANT l'auto-canonisation
+                // single-legal, sinon `TARGETS` serait deja devenu `BLOCKED_BY`.
+                //
+                // ⚠️ JAMAIS pour `SUPERSEDES` : il est destructif (il bascule la cible en
+                // `superseded`), et l'inverser designerait la mauvaise victime.
+                let mut attache_inversee = false;
+                let pair_directe_admet = policy
+                    .as_ref()
+                    .map(|p| p.allowed.iter().any(|a| *a == relation_type.as_str()))
+                    .unwrap_or(false);
+                if !pair_directe_admet && relation_type != "SUPERSEDES" {
+                    let policy_inverse = relation_policy_for_pair(&target_prefix, source_prefix);
+                    if let Some(pi) = &policy_inverse {
+                        if pi.allowed.iter().any(|a| *a == relation_type.as_str()) {
+                            attache_inversee = true;
+                        }
+                    }
+                }
+
+                if !attache_inversee {
+                    if let Some(p) = &policy {
+                        if p.allowed.len() == 1
+                            && p.allowed[0] != "SUPERSEDES"
+                            && !p.allowed.iter().any(|a| *a == relation_type.as_str())
+                        {
+                            relation_type = p.allowed[0].to_string();
+                        }
                     }
                 }
                 match &policy {
+                    // REQ-AXO-902504 — une attache INVERSEE est legale par la paire
+                    // inverse, deja verifiee ci-dessus ; ne pas la refuser ici.
+                    _ if attache_inversee => {}
                     Some(p)
                         if p.allowed
                             .iter()
@@ -1153,6 +1191,17 @@ impl McpServer {
                     ) \
                     UPDATE soll.Node SET status = 'superseded' \
                     WHERE id IN (SELECT target_id FROM new_edge)"
+                } else if attache_inversee {
+                    // REQ-AXO-902504 — l'arete part du PARENT vers le nouveau noeud.
+                    // Seules source et cible changent de place : la relation demandee est
+                    // conservee telle quelle, c'est tout l'objet du correctif.
+                    "WITH new_node AS (\
+                        INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                        VALUES (?, ?, ?, ?, ?, ?, ?::JSONB) \
+                        RETURNING id\
+                    ) \
+                    INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                    SELECT ?, new_node.id, ?, ? FROM new_node"
                 } else {
                     "WITH new_node AS (\
                         INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
@@ -1182,10 +1231,27 @@ impl McpServer {
                 match insert_res {
                     Ok(()) => {
                         let created_id = formatted_id.clone();
-                        let mut report = format!(
-                            "SOLL entity created: `{}`\nCanonical link applied: `{}` -> `{}` via `{}`",
-                            created_id, created_id, attach_to, relation_type
-                        );
+                        // REQ-AXO-902504 — quand l'arete a ete INVERSEE, le rapport doit
+                        // montrer le sens REELLEMENT pose, pas celui demande. L'ancienne
+                        // formulation annoncait « created -> attach_to » quoi qu'il arrive :
+                        // un lecteur ne pouvait pas voir que l'arete partait de l'autre bout.
+                        let mut report = if attache_inversee {
+                            format!(
+                                "SOLL entity created: `{}`\n\
+                                 ⚠️ Lien pose DEPUIS le parent (sens conserve) : `{}` -> `{}` via `{}`\n\
+                                 `{}` -> `{}` via `{}` n'est pas canonique ; la paire inverse l'est, \
+                                 et c'est le SENS DE LECTURE qui etait inverse, pas le lien. \
+                                 L'arete posee est celle que `soll_work_plan` et les gates lisent.",
+                                created_id,
+                                attach_to, created_id, relation_type,
+                                created_id, attach_to, relation_type
+                            )
+                        } else {
+                            format!(
+                                "SOLL entity created: `{}`\nCanonical link applied: `{}` -> `{}` via `{}`",
+                                created_id, created_id, attach_to, relation_type
+                            )
+                        };
                         // REQ-AXO-902312 — say what was DEDUCED. A field the caller never
                         // wrote is a field they cannot check; announcing it is the same
                         // rule as `disclose_cwd_provenance` (mcp.rs). Silence here would
@@ -1520,13 +1586,44 @@ impl McpServer {
                                 .and_then(|value| self.soll_completeness_snapshot(Some(value))),
                         ) {
                             let _ = code;
+                            // REQ-AXO-902498 (doléance OPV #256) — ne lister que les champs
+                            // RÉELLEMENT envoyés.
+                            //
+                            // Cette liste était CODÉE EN DUR : `["title","description",
+                            // "status","metadata"]`. Un appel ne portant que `status`
+                            // recevait quand même les quatre. Répété 75 fois sur des corps
+                            // de 1 000 à 9 000 caractères — la mémoire du projet — cette
+                            // phrase se lit « j'ai écrasé 75 corps ». Le rapporteur a dû
+                            // vérifier en SQL brut que rien n'était perdu, et écrit : « dans
+                            // le doute j'aurais pu déclencher 75 rollbacks inutiles ».
+                            //
+                            // Un rapport qui pousse à une action destructrice inutile est
+                            // pire qu'un rapport muet.
+                            let champs_envoyes: Vec<&str> = {
+                                let mut v: Vec<&str> = ["title", "description", "status",
+                                    "priority", "tags", "acceptance_criteria", "metadata"]
+                                    .into_iter()
+                                    .filter(|c| data.get(*c).is_some())
+                                    .collect();
+                                // `metadata` est DÉRIVÉ quand priority/tags/criteria sont
+                                // fournis : le nommer alors, sans le fabriquer si rien ne
+                                // l'a touché.
+                                if !v.contains(&"metadata")
+                                    && v.iter().any(|c| {
+                                        matches!(*c, "priority" | "tags" | "acceptance_criteria")
+                                    })
+                                {
+                                    v.push("metadata");
+                                }
+                                v
+                            };
                             payload["data"]["mutation_feedback"] = self.mutation_feedback_payload(
                                 before,
                                 &after,
                                 vec![json!({
                                     "id": id,
                                     "change_kind": "updated",
-                                    "fields": ["title", "description", "status", "metadata"]
+                                    "fields": champs_envoyes
                                 })],
                                 json!({
                                     "nodes_created": 0,

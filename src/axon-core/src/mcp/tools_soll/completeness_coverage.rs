@@ -282,12 +282,17 @@ impl McpServer {
                 _ => summary.missing += 1,
             }
 
+            // REQ-AXO-902501 — un critère volontairement non tenu doit être LISIBLE
+            // par la machine. VPC l'avait écrit trois fois en prose faute de champ.
+            let criteres_resume = resume_criteres(&parse_acceptance_criteria(&criteria));
+
             summary.entries.push(RequirementCoverageEntry {
                 id: id.clone(),
                 status,
                 evidence_count,
                 validation_count,
                 has_criteria,
+                criteres_resume,
                 broken_file_evidence_count,
                 broken_file_evidence,
                 state: state.to_string(),

@@ -38,6 +38,16 @@ fn err_json(msg: String, status: &str) -> Value {
     })
 }
 
+/// REQ-AXO-902502 — fraction de `net_margin` au-dessus de laquelle un verdict `neutral`
+/// devient `neutral_borderline` (« je ne tranche pas ») au lieu de « pas un finding ».
+///
+/// 0,90 = les 10 % sous le seuil. Choisi, pas hérité : le cas d'OPV était à 0,5 % du
+/// seuil, donc n'importe quelle bande raisonnable l'attrape ; 10 % laisse de la marge
+/// sans transformer tout `neutral` en alerte. À REMESURER si le taux de
+/// `neutral_borderline` dépasse ~15 % des appels — ce serait le signe que `net_margin`
+/// lui-même est mal calibré, pas que la bande est trop large.
+const BORDERLINE_RATIO: f32 = 0.90;
+
 impl McpServer {
     pub(crate) fn axon_contradiction_check(&self, args: &Value) -> Option<Value> {
         let candidate = match args.get("candidate").and_then(Value::as_str) {
@@ -241,16 +251,38 @@ impl McpServer {
         let margin = max_contradiction - max_entailment;
         let contradicted =
             !conflicts.is_empty() && max_contradiction >= threshold && margin >= net_margin;
+        // REQ-AXO-902502 — un verdict rendu à 0,003 près ne peut pas être catégorique.
+        //
+        // Mesuré chez OPV : `margin = 0,597` contre `net_margin = 0,60`. L'outil a rendu
+        // `neutral` ET la phrase « flagged passages are noise, NOT A FINDING ». C'était
+        // une vraie contradiction ; elle a survécu trois jours parce que le message
+        // fermait la question au lieu de la poser.
+        //
+        // Un seuil ne cesse pas d'être arbitraire parce qu'on l'a écrit. À 0,5 % en
+        // dessous, la seule chose honnête est : « je ne tranche pas ». C'est l'invariant
+        // KKI #204 appliqué non plus à un COMPTE mais à un VERDICT — « non calculé » est
+        // un état de premier rang, et « non concluant » aussi.
+        //
+        // ⚠️ Le corollaire est aussi important que le seuil : dans ce cas on ne VIDE PAS
+        // `conflicts`. Un verdict qui dit « à relire » sans montrer quoi relire est une
+        // alarme sans adresse.
+        let borderline = !contradicted
+            && !conflicts.is_empty()
+            && max_contradiction >= threshold
+            && margin >= net_margin * BORDERLINE_RATIO;
         let verdict = if rows.is_empty() || truncated {
             "inconclusive"
         } else if contradicted {
             "contradicts"
+        } else if borderline {
+            "neutral_borderline"
         } else {
             "neutral"
         };
-        // Only present conflict passages when the verdict is actually `contradicts`;
-        // otherwise they are noise below the net-margin, not a finding.
-        if !contradicted {
+        // Only present conflict passages when the verdict is actually `contradicts` —
+        // or when it is BORDERLINE, where the passages are precisely what the caller
+        // must re-read. Below that they are noise, not a finding.
+        if !contradicted && !borderline {
             conflicts.clear();
         }
 
@@ -270,10 +302,22 @@ impl McpServer {
             } else {
                 String::new()
             };
-            let margin_note = if verdict == "neutral" && max_contradiction >= threshold {
+            let margin_note = if verdict == "neutral_borderline" {
+                // REQ-AXO-902502 — dire l'écart, pas un verdict. Le lecteur décide.
                 format!(
-                    " Contradiction does not outweigh support (margin {:.3} < {:.2}) — flagged passages are noise, not a finding.",
-                    margin, net_margin
+                    " ⚠️ NON CONCLUANT — À RELIRE : la contradiction ({:.3}) manque le seuil de {:.3} seulement ({:.1} % sous `net_margin`={:.2}). Ce n'est PAS un feu vert : les {} passage(s) ci-dessus sont conservés exprès pour que vous jugiez. Un écart de cette taille est du bruit de mesure, pas une décision.",
+                    margin,
+                    net_margin - margin,
+                    (net_margin - margin) / net_margin * 100.0,
+                    net_margin,
+                    conflicts.len()
+                )
+            } else if verdict == "neutral" && max_contradiction >= threshold {
+                format!(
+                    " Contradiction does not outweigh support (margin {:.3} < {:.2}, soit {:.1} % sous le seuil) — flagged passages are noise, not a finding.",
+                    margin,
+                    net_margin,
+                    (net_margin - margin) / net_margin * 100.0
                 )
             } else {
                 String::new()

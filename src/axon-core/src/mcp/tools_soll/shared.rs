@@ -17,6 +17,9 @@ pub(super) struct RequirementCoverageEntry {
     pub(super) evidence_count: usize,
     pub(super) validation_count: usize,
     pub(super) has_criteria: bool,
+    /// REQ-AXO-902501 — l'état DÉCLARÉ des critères, quand il l'est. `None` sur la
+    /// forme historique (liste de chaînes) : un état non déclaré ne se publie pas.
+    pub(super) criteres_resume: Option<String>,
     pub(super) broken_file_evidence_count: usize,
     /// REQ-AXO-902337 piste 1 — the named offenders behind
     /// `broken_file_evidence_count` (empty when the count is 0).
@@ -190,6 +193,154 @@ pub(super) fn is_terminal_requirement_status(status: &str) -> bool {
             | "wont_do"
             | "obsolete"
     )
+}
+
+/// REQ-AXO-902501 — un critère d'acceptation VOLONTAIREMENT non tenu.
+///
+/// Rapporté par VPC : sur 8 critères, 7 étaient tenus et le 8ᵉ exigeait `root` + une VM.
+/// Le registre n'avait aucune manière de le dire, alors l'exigence est restée `partial`
+/// et l'explication a été écrite **trois fois en prose** dans le corps — donc invisible
+/// à la machine, et re-relue à chaque passage.
+///
+/// ⚠️ **La garde est plus importante que la fonctionnalité.** Un `waived` sans raison
+/// serait la porte de sortie de tout ce qu'on ne veut pas faire : il vaut `Unmet`, pas
+/// « tenu ». C'est la seule chose qui empêche ce troisième état de devenir un
+/// contournement du deuxième.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum EtatCritere {
+    /// Forme historique (une simple chaîne) : rien n'est affirmé sur son état.
+    NonDeclare,
+    Tenu,
+    /// Écarté AVEC une raison non vide. `levee` dit à quelle condition il redeviendrait
+    /// exigible — facultative, parce qu'un écart peut être définitif (« nécessite un
+    /// matériel qu'on n'aura pas »).
+    Ecarte { raison: String, levee: Option<String> },
+    /// Écarté SANS raison — délibérément replié sur « non tenu ».
+    NonTenu,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CritereAcceptation {
+    pub(super) texte: String,
+    pub(super) etat: EtatCritere,
+}
+
+/// Lit `acceptance_criteria` sous ses DEUX formes, l'ancienne et la nouvelle.
+///
+/// Ancienne (inchangée, majoritaire) : `["le test X est vert", "la métrique Y < Z"]`.
+/// Nouvelle : `[{"criterion": "…", "state": "waived", "reason": "…", "lift_condition": "…"}]`.
+///
+/// Les deux cohabitent dans la même liste : une migration n'est pas exigée, et un nœud
+/// écrit avant cette REQ continue de se lire exactement comme avant.
+pub(super) fn parse_acceptance_criteria(brut: &str) -> Vec<CritereAcceptation> {
+    let brut = brut.trim();
+    if brut.is_empty() || brut == "[]" {
+        return Vec::new();
+    }
+    // La métadonnée arrive tantôt comme JSON, tantôt comme chaîne CONTENANT du JSON
+    // (selon le chemin d'écriture) — accepter les deux plutôt que d'en imposer un.
+    let valeur: Value = match serde_json::from_str::<Value>(brut) {
+        Ok(Value::String(interne)) => {
+            serde_json::from_str::<Value>(&interne).unwrap_or(Value::String(interne))
+        }
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let Some(items) = valeur.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Value::String(texte) => Some(CritereAcceptation {
+                texte: texte.clone(),
+                etat: EtatCritere::NonDeclare,
+            }),
+            Value::Object(map) => {
+                let texte = map
+                    .get("criterion")
+                    .or_else(|| map.get("text"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if texte.trim().is_empty() {
+                    return None;
+                }
+                let etat = match map.get("state").and_then(|v| v.as_str()).unwrap_or("") {
+                    "met" => EtatCritere::Tenu,
+                    "waived" => {
+                        let raison = map
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if raison.is_empty() {
+                            // LA règle. Sans elle, `waived` remplace `unmet` partout.
+                            EtatCritere::NonTenu
+                        } else {
+                            EtatCritere::Ecarte {
+                                raison,
+                                levee: map
+                                    .get("lift_condition")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty()),
+                            }
+                        }
+                    }
+                    "unmet" => EtatCritere::NonTenu,
+                    _ => EtatCritere::NonDeclare,
+                };
+                Some(CritereAcceptation { texte, etat })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Une ligne lisible : « 8 critère(s) — 7 tenu(s) · 1 écarté(s) assumé(s) ».
+///
+/// Rend `None` quand rien n'est déclaré : sur les nœuds à l'ancienne forme, la sortie
+/// ne change pas d'un octet. Un état qu'on n'a pas mesuré ne se publie pas.
+pub(super) fn resume_criteres(criteres: &[CritereAcceptation]) -> Option<String> {
+    if criteres.is_empty() {
+        return None;
+    }
+    let tenus = criteres
+        .iter()
+        .filter(|c| c.etat == EtatCritere::Tenu)
+        .count();
+    let ecartes: Vec<&CritereAcceptation> = criteres
+        .iter()
+        .filter(|c| matches!(c.etat, EtatCritere::Ecarte { .. }))
+        .collect();
+    let non_tenus = criteres
+        .iter()
+        .filter(|c| c.etat == EtatCritere::NonTenu)
+        .count();
+    if tenus == 0 && ecartes.is_empty() && non_tenus == 0 {
+        // Que de l'ancienne forme : ne rien affirmer.
+        return None;
+    }
+    let mut ligne = format!("{} critère(s) — {} tenu(s)", criteres.len(), tenus);
+    if non_tenus > 0 {
+        ligne.push_str(&format!(" · {non_tenus} non tenu(s)"));
+    }
+    for c in &ecartes {
+        if let EtatCritere::Ecarte { raison, levee } = &c.etat {
+            ligne.push_str(&format!(
+                " · ÉCARTÉ assumé : « {} » — {}{}",
+                c.texte,
+                raison,
+                levee
+                    .as_ref()
+                    .map(|l| format!(" (levée si : {l})"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    Some(ligne)
 }
 
 pub(super) fn requirement_state_from(
@@ -413,7 +564,31 @@ pub(super) fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'stat
     // "sollref" et non "soll_ref" — attrapé par le test de schéma.
     let mut accepted = vec!["commit", "sollref", "url"];
     accepted.extend(match normalize_traceability_entity_type(entity_type).as_str() {
-        "requirement" => vec!["document", "file", "symbol", "test", "metric", "validation"],
+        // REQ-AXO-902499 (doléance VPC #245) — `rationale` est ACCEPTÉ sur `requirement`.
+        //
+        // Il ne l'était pas, et c'était le type qui en a le plus besoin. Cas rapporté :
+        // sur six preuves attachées à `REQ-VPC-220`, la SEULE rejetée portait
+        // `rationale` — et c'était le récit de ce que l'auteur avait cassé en vérifiant
+        // son propre travail (cinq vraies alertes parties d'un banc censé être isolé,
+        // en échouant SILENCIEUSEMENT).
+        //
+        // > « Les cinq items acceptés disent ce qui EST. Le sixième disait POURQUOI c'est
+        // > comme ça et ce qu'il ne faut pas refaire. C'est le seul qu'un successeur ne
+        // > peut pas reconstruire en lisant le dépôt, et c'est exactement celui qui n'a
+        // > pas de place. »
+        //
+        // Une exigence qui documente pourquoi elle existe sous cette forme est le cas
+        // NOMINAL, pas l'exception. `document`/`url` sont de mauvais substituts : ils
+        // pointent ailleurs au lieu de PORTER le texte.
+        "requirement" => vec![
+            "document",
+            "file",
+            "symbol",
+            "test",
+            "metric",
+            "validation",
+            "rationale",
+        ],
         "decision" => vec![
             "document",
             "file",
@@ -1115,3 +1290,93 @@ mod req_902390_artifact_ref_shape_tests {
     }
 }
 
+#[cfg(test)]
+mod criteres_acceptation_tests {
+    use super::{parse_acceptance_criteria, resume_criteres, EtatCritere};
+
+    /// REQ-AXO-902501 — LA garde, et elle porte sur l'abus, pas sur la fonctionnalité.
+    ///
+    /// Un `waived` sans raison serait la porte de sortie de tout ce qu'on ne veut pas
+    /// faire : n'importe quel critère gênant deviendrait « écarté » d'un mot. Il vaut
+    /// `NonTenu`, exactement comme s'il n'avait pas été écarté du tout.
+    #[test]
+    fn un_waived_sans_raison_vaut_non_tenu() {
+        let c = parse_acceptance_criteria(
+            r#"[{"criterion":"tourne sous root","state":"waived"}]"#,
+        );
+        assert_eq!(c.len(), 1);
+        assert_eq!(
+            c[0].etat,
+            EtatCritere::NonTenu,
+            "sans raison, `waived` ne doit RIEN accorder"
+        );
+
+        let vide = parse_acceptance_criteria(
+            r#"[{"criterion":"tourne sous root","state":"waived","reason":"   "}]"#,
+        );
+        assert_eq!(
+            vide[0].etat,
+            EtatCritere::NonTenu,
+            "une raison faite d'espaces n'est pas une raison"
+        );
+    }
+
+    /// Avec raison, l'écart est reconnu — et la condition de levée voyage avec lui.
+    /// C'est le cas exact de VPC : 7/8 tenus, le 8ᵉ exige `root` + une VM.
+    #[test]
+    fn un_waived_justifie_est_reconnu_et_porte_sa_condition_de_levee() {
+        let c = parse_acceptance_criteria(
+            r#"[{"criterion":"tourne sous root","state":"waived",
+                 "reason":"exige root + une VM dediee","lift_condition":"quand le runner CI aura une VM"}]"#,
+        );
+        match &c[0].etat {
+            EtatCritere::Ecarte { raison, levee } => {
+                assert!(raison.contains("root"));
+                assert_eq!(levee.as_deref(), Some("quand le runner CI aura une VM"));
+            }
+            autre => panic!("attendu Ecarte, obtenu {autre:?}"),
+        }
+    }
+
+    /// La forme historique doit continuer de se lire EXACTEMENT comme avant — aucune
+    /// migration exigée, et surtout aucune sortie modifiée sur les nœuds existants.
+    #[test]
+    fn la_forme_historique_ne_declare_rien_et_ne_publie_rien() {
+        let c = parse_acceptance_criteria(r#"["le test X est vert","la metrique Y < Z"]"#);
+        assert_eq!(c.len(), 2);
+        assert!(c.iter().all(|x| x.etat == EtatCritere::NonDeclare));
+        assert!(
+            resume_criteres(&c).is_none(),
+            "un état non déclaré ne se publie pas — c'est l'invariant KKI #204"
+        );
+        assert!(resume_criteres(&[]).is_none());
+    }
+
+    /// Le résumé doit CHIFFRER et NOMMER : c'est ce qui rend l'écart visible à la
+    /// machine au lieu d'être noyé trois fois dans la prose du corps.
+    #[test]
+    fn le_resume_chiffre_les_tenus_et_nomme_les_ecartes() {
+        let c = parse_acceptance_criteria(
+            r#"[{"criterion":"A","state":"met"},
+                {"criterion":"B","state":"met"},
+                {"criterion":"tourne sous root","state":"waived","reason":"exige root"}]"#,
+        );
+        let r = resume_criteres(&c).expect("un état déclaré doit se publier");
+        assert!(r.contains("3 critère(s)") && r.contains("2 tenu(s)"), "got: {r}");
+        assert!(
+            r.contains("ÉCARTÉ assumé") && r.contains("tourne sous root") && r.contains("exige root"),
+            "l'écart doit être nommé AVEC sa raison, got: {r}"
+        );
+    }
+
+    /// Les deux formes cohabitent dans la même liste : une migration n'est pas exigée.
+    #[test]
+    fn les_deux_formes_cohabitent_dans_la_meme_liste() {
+        let c = parse_acceptance_criteria(
+            r#"["ancien critere",{"criterion":"nouveau","state":"met"}]"#,
+        );
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].etat, EtatCritere::NonDeclare);
+        assert_eq!(c[1].etat, EtatCritere::Tenu);
+    }
+}

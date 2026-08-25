@@ -86,6 +86,8 @@ impl McpServer {
         top_recommendations: &[Value],
         truncated: bool,
         verbose: bool,
+        // REQ-AXO-902503 — statut terminal -> ids écartés, déjà triés.
+        ecartes_par_statut: &std::collections::BTreeMap<String, Vec<String>>,
     ) -> String {
         let mut evidence = String::new();
         if !top_recommendations.is_empty() {
@@ -124,6 +126,10 @@ impl McpServer {
             }
             evidence.push('\n');
         }
+        // REQ-AXO-902503 — dire le PÉRIMÈTRE, pas seulement le résultat. Un plan vide
+        // parce que tout est livré et un plan vide parce que rien n'existe sont deux
+        // mondes différents ; sans cette ligne ils rendent le même texte.
+        evidence.push_str(&render_ecartes_section(ecartes_par_statut, verbose));
         if truncated {
             evidence.push_str("[truncated=true]\n");
         }
@@ -143,6 +149,61 @@ impl McpServer {
             )
         )
     }
+}
+
+/// REQ-AXO-902503 — le périmètre écarté, rendu à part pour être falsifiable.
+///
+/// Extraite du corps de `render_work_plan_text` pour une raison précise : le défaut
+/// que SWT rapporte n'est pas « la ligne manque », c'est que **deux mondes rendent le
+/// même texte**. Un plan vide parce que tout est livré et un plan vide parce que rien
+/// n'existe étaient indiscernables. Falsifier ça demande de comparer DEUX sorties —
+/// impossible à travers un `McpServer` sans monter deux projets entiers.
+pub(super) fn render_ecartes_section(
+    ecartes_par_statut: &std::collections::BTreeMap<String, Vec<String>>,
+    verbose: bool,
+) -> String {
+    let mut out = String::new();
+    let ecartes_total: usize = ecartes_par_statut.values().map(|v| v.len()).sum();
+    if ecartes_total > 0 {
+        // Le COMPTE est toujours rendu — c'est lui qui lève l'ambiguïté. Les IDS
+        // ne le sont qu'en `verbose`, exactement comme REQ-AXO-902443 a plié la
+        // section blockers : sur AXO il y a 128+ nœuds `delivered`, et les lister
+        // à chaque appel de la boucle per-batch rajouterait du volume dans la
+        // session même où la Vague 3 le combat. Un plan doit dire son périmètre,
+        // pas le réciter.
+        out.push_str(&format!(
+            "Écartés du plan — {} nœud(s) en état terminal (ce n'est PAS de l'absence, c'est du travail fini) :\n",
+            ecartes_total
+        ));
+        // Budget global, pas par statut : 6 statuts × 6 ids feraient 36 lignes
+        // pour une information qui en vaut une.
+        let mut budget = if verbose { 24usize } else { 0 };
+        for (statut, ids) in ecartes_par_statut {
+            if budget == 0 {
+                out.push_str(&format!("- {} : {}\n", statut, ids.len()));
+                continue;
+            }
+            let montres = ids.len().min(budget);
+            // `Compte::borne` dit lequel des deux nombres on lit : le total est
+            // exact, la liste est tronquée, et la sortie ne les confond pas.
+            let compte = crate::mcp::format::Compte::borne(ids.len(), montres);
+            out.push_str(&format!(
+                "- {} : {} — {}{}\n",
+                statut,
+                compte.rendre(),
+                ids.iter().take(montres).cloned().collect::<Vec<_>>().join(", "),
+                if ids.len() > montres { ", …" } else { "" }
+            ));
+            budget -= montres;
+        }
+        if !verbose {
+            out.push_str(
+                "  _(ids en `format=verbose` — le compte suffit à distinguer « fini » de « inexistant »)_\n",
+            );
+        }
+        out.push('\n');
+    }
+    out
 }
 
 pub(super) fn build_top_recommendations(waves: &[WorkPlanWave], top: usize) -> Vec<Value> {
@@ -260,6 +321,80 @@ mod blocker_section_tests {
         assert!(
             verbose.contains("status_deferred"),
             "the raw reason survives in the audit surface: {verbose}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ecartes_section_tests {
+    use super::render_ecartes_section;
+    use std::collections::BTreeMap;
+
+    fn livres(n: usize) -> BTreeMap<String, Vec<String>> {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "delivered".to_string(),
+            (0..n).map(|i| format!("REQ-TST-{i:03}")).collect(),
+        );
+        m
+    }
+
+    /// REQ-AXO-902503 — LA garde : les deux mondes doivent RENDRE DIFFÉREMMENT.
+    ///
+    /// C'est l'assertion que le comportement d'avant ne peut pas satisfaire : avant,
+    /// les écartés n'étaient rendus nulle part, donc « projet vide » et « projet
+    /// entièrement livré » produisaient la même chaîne — vide. SWT a failli déposer
+    /// un faux rapport de bug sur cette confusion, et c'est le coût réel du défaut.
+    ///
+    /// Un test qui vérifierait seulement « la ligne apparaît quand il y a des nœuds
+    /// terminaux » passerait sans rien prouver de l'ambiguïté.
+    #[test]
+    fn un_projet_vide_et_un_projet_tout_livre_ne_rendent_pas_le_meme_texte() {
+        let vide = render_ecartes_section(&BTreeMap::new(), false);
+        let tout_livre = render_ecartes_section(&livres(4), false);
+
+        assert_ne!(
+            vide, tout_livre,
+            "« rien n'existe » et « tout est fini » DOIVENT se distinguer — c'est tout le défaut"
+        );
+        assert!(
+            vide.is_empty(),
+            "un projet sans écarté n'ajoute rien : le coût est nul quand il n'y a rien à dire, got: {vide:?}"
+        );
+        assert!(
+            tout_livre.contains('4') && tout_livre.contains("delivered"),
+            "l'écart doit être CHIFFRÉ et son motif NOMMÉ, got: {tout_livre}"
+        );
+    }
+
+    /// REQ-AXO-902503 + précédent REQ-AXO-902443 — le compte survit toujours, les ids
+    /// non. Le compte est ce qui lève l'ambiguïté ; les ids sont du volume, et cette
+    /// session combat le volume par ailleurs (Vague 3).
+    #[test]
+    fn le_compte_est_toujours_rendu_les_ids_seulement_en_verbose() {
+        let brief = render_ecartes_section(&livres(40), false);
+        let verbeux = render_ecartes_section(&livres(40), true);
+
+        assert!(
+            brief.contains("40"),
+            "le compte doit survivre au mode brief, got: {brief}"
+        );
+        assert!(
+            !brief.contains("REQ-TST-000"),
+            "le mode brief ne doit PAS lister les ids, got: {brief}"
+        );
+        assert!(
+            verbeux.contains("REQ-TST-000"),
+            "le mode verbose doit les lister, got: {verbeux}"
+        );
+        let rendus = verbeux.matches("REQ-TST-").count();
+        assert!(
+            rendus <= 24,
+            "la liste doit rester bornée même en verbose, {rendus} ids rendus"
+        );
+        assert!(
+            verbeux.contains("sur 40"),
+            "et le TOTAL doit rester exact à côté de la liste tronquée, got: {verbeux}"
         );
     }
 }

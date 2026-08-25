@@ -93,6 +93,16 @@ pub(crate) struct SollChildrenInput {
 pub(crate) struct SollGetInput {
     /// Canonical SOLL id, e.g. "GUI-PRO-028", "REQ-AXO-902248", "CPT-AXO-052".
     pub id: String,
+    /// REQ-AXO-902496 — rendre UNIQUEMENT la table des titres `##` du corps, sans le
+    /// corps. Un session pointer fait couramment 6 000 jetons quand on en veut 120 :
+    /// deux allers-retours bon marché valent mieux qu'un aller cher.
+    #[serde(default)]
+    pub sections: Option<bool>,
+    /// REQ-AXO-902496 — rendre la SECTION dont le titre contient ce fragment
+    /// (insensible à la casse), plus la liste des titres disponibles — pour qu'un
+    /// fragment qui ne matche pas ne coûte pas un aller-retour à l'aveugle.
+    #[serde(default)]
+    pub section: Option<String>,
 }
 
 /// `idle_drop` operation.

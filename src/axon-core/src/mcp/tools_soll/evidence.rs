@@ -505,10 +505,29 @@ impl McpServer {
                     accepted_schema,
                     minimal_evidence_example(&accepted_schema)
                 )),
+                // REQ-AXO-902493 (doléance VPC #236) — dire la casse RÉELLEMENT stockée.
+                //
+                // Le rapporteur a repris cette liste telle quelle dans un `sql` de
+                // vérification : `WHERE artifact_type='commit'` a rendu `[]` sur QUATRE
+                // commits présents, stockés `Commit`. Il a failli conclure « aucun commit
+                // attaché ». Sa formulation : « le vide ne ressemble pas à une erreur ;
+                // un `[]` se lit "il n'y a rien", pas "tu as mal demandé" ».
+                //
+                // ⚠️ Migrer le stockage vers les minuscules a été ÉCARTÉ, mesure à
+                // l'appui : 16 365 lignes stockées capitalisées et au moins 10 lecteurs
+                // (SQL et Rust) comparent à cette forme. Le défaut n'est pas la casse
+                // choisie — c'est que l'écriture et la lecture ne l'annoncent pas.
                 Some("artifact_type_not_allowed_for_entity") => Some(format!(
-                    "use one of the accepted `artifact_type` values for {}: {:?}. Example: {}",
+                    "use one of the accepted `artifact_type` values for {}: {:?}. \
+                     ⚠️ {}Example: {}",
                     normalized_entity_type,
                     accepted_schema,
+                    "Ces valeurs sont celles de l'ÉCRITURE : \
+                     `soll.traceability.artifact_type` les STOCKE capitalisées \
+                     (`commit` → `Commit`, `file` → `File`, `symbol` → `Symbol`…). \
+                     Une requête `sql` reprenant la casse ci-dessus rend 0 ligne sur des \
+                     données présentes — un vide qui ne ressemble pas à une erreur \
+                     (REQ-AXO-902493). ",
                     minimal_evidence_example(&accepted_schema)
                 )),
                 // REQ-AXO-901619 — surface project root + did-you-mean hint
@@ -636,15 +655,48 @@ impl McpServer {
                 entity_id,
                 next_action.as_deref().unwrap_or("see artifact_diagnostics"),
             ),
-            "partial" => format!(
-                "Attached {} of {} evidence item(s) to {}:{} — {} rejected. {}",
-                attached,
-                total,
-                entity_type,
-                entity_id,
-                total - attached,
-                next_action.as_deref().unwrap_or("see artifact_diagnostics"),
-            ),
+            // REQ-AXO-902499 (doléance VPC #245) — NOMMER ce qui est tombé.
+            //
+            // « Le rejet partiel (5 of 6) ne dit pas LEQUEL est tombé. Sur six items je
+            // l'ai retrouvé par élimination ; sur vingt ce serait coûteux. » Un compte
+            // sans l'élément est la classe de REQ-AXO-902409 : le lecteur sait qu'il
+            // s'est passé quelque chose, pas quoi.
+            "partial" => {
+                let rejetes: Vec<String> = artifact_diagnostics
+                    .iter()
+                    .filter(|d| {
+                        d.get("accepted")
+                            .and_then(Value::as_bool)
+                            .map(|a| !a)
+                            .unwrap_or(false)
+                    })
+                    .map(|d| {
+                        let r = d
+                            .get("artifact_ref")
+                            .and_then(Value::as_str)
+                            .unwrap_or("(sans ref)");
+                        match d.get("reason").and_then(Value::as_str) {
+                            Some(raison) => format!("`{r}` ({raison})"),
+                            None => format!("`{r}`"),
+                        }
+                    })
+                    .collect();
+                let nommes = if rejetes.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nRejeté(s) : {}.", rejetes.join(", "))
+                };
+                format!(
+                    "Attached {} of {} evidence item(s) to {}:{} — {} rejected.{} {}",
+                    attached,
+                    total,
+                    entity_type,
+                    entity_id,
+                    total - attached,
+                    nommes,
+                    next_action.as_deref().unwrap_or("see artifact_diagnostics"),
+                )
+            }
             _ => format!(
                 "Attached {} evidence item(s) to {}:{}",
                 attached, entity_type, entity_id

@@ -241,6 +241,20 @@ pub struct SollRule {
     pub title: String,
     /// Les nœuds auxquels la règle s'applique.
     pub subject: EndpointMatcher,
+    /// REQ-AXO-902476 — GARDE DE CORPS : la règle ne s'applique qu'aux sujets dont
+    /// le corps contient l'un de ces fragments (sans casse). Vide = pas de garde.
+    ///
+    /// Demandé DEUX fois par OPV : « aucun outil ne croise le CORPS et la STRUCTURE ».
+    /// `soll_validate` voit le graphe, `contradiction_check` voit le texte, et le
+    /// défaut vit exactement entre les deux — un corps qui annonce « supersédé par
+    /// X » sans que l'arête existe, ou l'inverse. Mesuré chez OPV : 4 cas sur 77.
+    ///
+    /// Le choix de conception est de faire de la condition une GARDE DE SUJET et non
+    /// un neuvième prédicat : elle compose alors avec les huit existants (« si le
+    /// corps dit X alors l'arête Y est interdite », « … alors telle métadonnée est
+    /// requise », …) au lieu d'ajouter une combinaison par paire. Aucune expression
+    /// régulière — c'est le langage de requête que `DEC-AXO-901673` interdit.
+    pub body_guard: Vec<String>,
     pub predicate: RulePredicate,
     /// Phrase rendue avec chaque violation. Sans elle le lecteur reçoit une
     /// correspondance de motif et aucune idée de quoi faire — c'est le « un
@@ -442,6 +456,7 @@ pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<S
         id: id.to_string(),
         title: title.to_string(),
         subject,
+        body_guard: string_list("if_body_contains_any"),
         predicate,
         message: text("message"),
     })
@@ -486,10 +501,34 @@ fn violation(rule: &SollRule, subject: &str) -> SollRuleViolation {
 
 /// Les sujets de la règle, triés — un rapport dont l'ordre change d'un appel à
 /// l'autre ne se compare pas (même raison que REQ-AXO-902452).
-fn subjects<'a>(rule: &SollRule, facts: &NodeFacts<'a>) -> Vec<&'a str> {
+fn subjects<'a>(
+    snapshot: &SollSnapshot,
+    rule: &SollRule,
+    facts: &NodeFacts<'a>,
+) -> Vec<&'a str> {
+    // REQ-AXO-902476 — la garde de corps se pose ICI, au même endroit que le filtre
+    // de type/statut. C'est ce qui la fait composer avec les huit prédicats sans en
+    // toucher aucun : un prédicat ne sait pas qu'il a été conditionné, il voit
+    // simplement moins de sujets.
+    let needles: Vec<String> = rule.body_guard.iter().map(|f| f.to_lowercase()).collect();
     let mut out: Vec<&str> = facts
         .iter()
         .filter(|(_, (kind, status))| rule.subject.matches(kind, status))
+        .filter(|(id, _)| {
+            if needles.is_empty() {
+                return true;
+            }
+            // Un nœud absent du snapshot n'est pas jugé — même règle que partout
+            // ailleurs ici : on n'invente pas un corps qu'on n'a pas chargé.
+            snapshot
+                .nodes
+                .get(**id)
+                .map(|node| {
+                    let body = node.description.to_lowercase();
+                    needles.iter().any(|n| body.contains(n.as_str()))
+                })
+                .unwrap_or(false)
+        })
         .map(|(id, _)| *id)
         .collect();
     out.sort_unstable();
@@ -567,7 +606,7 @@ fn evaluate_rule_with_facts(
                         return out;
                     }
                     let mut satisfied: HashMap<&str, bool> =
-                        subjects(rule, facts).into_iter().map(|id| (id, false)).collect();
+                        subjects(snapshot, rule, facts).into_iter().map(|id| (id, false)).collect();
                     for edge in &snapshot.edges {
                         if !rel_ok(&edge.relation_type) {
                             continue;
@@ -612,7 +651,7 @@ fn evaluate_rule_with_facts(
             artifact_types,
         } => {
             let subjects: std::collections::HashSet<&str> =
-                subjects(rule, facts).into_iter().collect();
+                subjects(snapshot, rule, facts).into_iter().collect();
             for trace in &snapshot.traceability {
                 if !subjects.contains(trace.soll_entity_id.as_str()) {
                     continue;
@@ -640,7 +679,7 @@ fn evaluate_rule_with_facts(
             if rule.subject.is_unconstrained() {
                 return out;
             }
-            for id in subjects(rule, facts) {
+            for id in subjects(snapshot, rule, facts) {
                 let Some(node) = snapshot.nodes.get(id) else {
                     continue;
                 };
@@ -664,7 +703,7 @@ fn evaluate_rule_with_facts(
             // cause : un compteur de doublons n'ouvre aucune action
             // (REQ-AXO-902409).
             let mut by_value: HashMap<String, Vec<&str>> = HashMap::new();
-            for id in subjects(rule, facts) {
+            for id in subjects(snapshot, rule, facts) {
                 let Some(node) = snapshot.nodes.get(id) else {
                     continue;
                 };
@@ -702,7 +741,7 @@ fn evaluate_rule_with_facts(
             group_by_relation,
             group_direction,
         } => {
-            let subject_ids: Vec<&str> = subjects(rule, facts);
+            let subject_ids: Vec<&str> = subjects(snapshot, rule, facts);
             if subject_ids.is_empty() {
                 return out;
             }
@@ -760,7 +799,7 @@ fn evaluate_rule_with_facts(
                 return out;
             }
             let needles: Vec<String> = fragments.iter().map(|f| f.to_lowercase()).collect();
-            for id in subjects(rule, facts) {
+            for id in subjects(snapshot, rule, facts) {
                 let Some(node) = snapshot.nodes.get(id) else {
                     continue;
                 };
@@ -785,7 +824,7 @@ fn evaluate_rule_with_facts(
                 relations.iter().cloned().collect()
             };
             let member: std::collections::HashSet<&str> =
-                subjects(rule, facts).into_iter().collect();
+                subjects(snapshot, rule, facts).into_iter().collect();
             for cycle in snapshot.cycle_sets_via_relations(&rel_set) {
                 let mut cited: Vec<&str> = cycle
                     .iter()
@@ -828,7 +867,7 @@ fn evaluate_rule_with_facts(
                 .filter(|(_, (kind, status))| other.matches(kind, status))
                 .map(|(id, _)| *id)
                 .collect();
-            for id in subjects(rule, facts) {
+            for id in subjects(snapshot, rule, facts) {
                 let reached = targets
                     .iter()
                     .any(|target| snapshot.reaches_via_relations(id, target, &rel_set));
@@ -1825,5 +1864,116 @@ mod tests {
 
         serde_json::from_str::<Vec<String>>(&format!("[{list}]"))
             .expect("body_contains_any du seed n'est pas une liste JSON de chaînes")
+    }
+}
+
+#[cfg(test)]
+mod garde_de_corps_tests {
+    use super::*;
+    use crate::soll_snapshot::snapshot::{SnapshotEdge, SnapshotNode};
+    use serde_json::json;
+
+    fn noeud(id: &str, entity_type: &str, status: &str, corps: &str) -> SnapshotNode {
+        SnapshotNode {
+            id: id.to_string(),
+            entity_type: entity_type.to_string(),
+            title: id.to_string(),
+            status: status.to_string(),
+            metadata_raw: "{}".to_string(),
+            description: corps.to_string(),
+        }
+    }
+
+    fn construit(nodes: Vec<SnapshotNode>, edges: Vec<SnapshotEdge>) -> SollSnapshot {
+        let map: HashMap<String, SnapshotNode> =
+            nodes.into_iter().map(|n| (n.id.clone(), n)).collect();
+        SollSnapshot::build("TST", 1, map, edges, Vec::new())
+    }
+
+    /// REQ-AXO-902476 — le croisement CORPS ↔ STRUCTURE, demandé DEUX fois par OPV.
+    ///
+    /// Le défaut vit entre deux outils : `soll_validate` voit le graphe et ignore le
+    /// texte ; `contradiction_check` voit le texte et ignore le graphe. Un corps qui
+    /// annonce « supersédé par X » sans que l'arête `SUPERSEDES` existe n'est vu par
+    /// NI L'UN NI L'AUTRE — mesuré chez OPV : 4 cas sur 77.
+    ///
+    /// La garde falsifie les deux sens : le nœud qui annonce ET ne porte pas l'arête
+    /// est signalé ; celui qui n'annonce rien ne l'est pas, même s'il ne porte pas
+    /// l'arête non plus. C'est la CONDITION qui est testée, pas le prédicat.
+    #[test]
+    fn une_regle_gardee_par_le_corps_ne_juge_que_les_noeuds_qui_annoncent() {
+        let regle = parse_soll_rule(
+            "GUI-TST-030",
+            "Un corps qui annonce un remplacement doit porter l'arête",
+            &json!({
+                "subject_kind": "Requirement",
+                "if_body_contains_any": ["supersédé par", "remplacé par"],
+                "mode": "required",
+                "direction": "outgoing",
+                "relations": ["SUPERSEDES"],
+                "message": "le corps annonce un remplacement que le graphe ne porte pas"
+            }),
+        )
+        .expect("la règle doit se parser");
+        assert_eq!(regle.body_guard.len(), 2, "la garde doit être lue");
+
+        let snap = construit(
+            vec![
+                // (a) annonce le remplacement, PAS d'arête → doit être signalé.
+                noeud("REQ-TST-301", "Requirement", "current", "Ce point est supersédé par REQ-TST-999."),
+                // (b) n'annonce rien, pas d'arête non plus → ne doit PAS être signalé.
+                //     C'est CE cas qui distingue une garde d'un simple filtre de statut :
+                //     sans elle, la règle exigerait une arête de TOUS les Requirements.
+                noeud("REQ-TST-302", "Requirement", "current", "Un corps ordinaire."),
+            ],
+            Vec::new(),
+        );
+
+        let violations = evaluate_rule(&snap, &regle);
+        let ids: Vec<&str> = violations.iter().map(|v| v.source_id.as_str()).collect();
+        assert!(
+            ids.contains(&"REQ-TST-301"),
+            "le nœud qui ANNONCE sans porter l'arête doit être signalé, got: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"REQ-TST-302"),
+            "le nœud qui n'annonce RIEN ne doit pas être jugé — c'est toute la garde, got: {ids:?}"
+        );
+    }
+
+    /// Sans garde, la même règle juge TOUT LE MONDE. C'est le contre-exemple qui
+    /// donne sa valeur au test ci-dessus : il montre que la garde change le verdict,
+    /// et non qu'elle décore la règle.
+    #[test]
+    fn sans_garde_la_meme_regle_juge_tous_les_sujets() {
+        let regle = parse_soll_rule(
+            "GUI-TST-031",
+            "Tout Requirement porte une arête SUPERSEDES",
+            &json!({
+                "subject_kind": "Requirement",
+                "mode": "required",
+                "direction": "outgoing",
+                "relations": ["SUPERSEDES"]
+            }),
+        )
+        .expect("la règle doit se parser");
+        assert!(regle.body_guard.is_empty());
+
+        let snap = construit(
+            vec![
+                noeud("REQ-TST-301", "Requirement", "current", "Ce point est supersédé par REQ-TST-999."),
+                noeud("REQ-TST-302", "Requirement", "current", "Un corps ordinaire."),
+            ],
+            Vec::new(),
+        );
+
+        let ids: Vec<String> = evaluate_rule(&snap, &regle)
+            .iter()
+            .map(|v| v.source_id.clone())
+            .collect();
+        assert!(
+            ids.contains(&"REQ-TST-301".to_string()) && ids.contains(&"REQ-TST-302".to_string()),
+            "sans garde les DEUX sont jugés — got: {ids:?}"
+        );
     }
 }
