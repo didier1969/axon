@@ -1,3 +1,20 @@
+-- REQ-AXO-902328 — ce fichier est appliqué par le brain à CHAQUE boot.
+-- Il ne l'était PAS avant le 2026-08-25 : il manquait à la liste `include_str!`
+-- écrite à la main de `postgres/ddl.rs` (9 fichiers sur 25 absents), donc il
+-- n'avait jamais reçu la discipline de REQ-AXO-902339 — « ne pas réclamer un
+-- verrou avant de tester si l'on a quelque chose à faire ». `ADD COLUMN IF NOT
+-- EXISTS`, `CREATE INDEX IF NOT EXISTS`, `DROP INDEX/TRIGGER IF EXISTS` prennent
+-- tous leur verrou AVANT le test d'existence : sur `axon.practice` et
+-- `axon.mailbox_message`, écrites en continu, c'est une famine, pas une course.
+-- Les `ADD COLUMN` de ce fichier passent désormais par `add_column_if_absent`.
+--
+-- ⚠️ Les `CREATE INDEX IF NOT EXISTS` NE sont PAS convertis, et c'est délibéré :
+-- les 16 fichiers appliqués au boot depuis toujours en portent 26 de la même
+-- forme, sans incident mesuré. Les convertir ici seulement donnerait DEUX
+-- disciplines pour une seule classe d'énoncé — exactement la divergence que
+-- REQ-AXO-902328 ferme. La classe entière (45 CREATE INDEX + 3 DROP nus sur les
+-- 25 fichiers) est logée en REQ, à traiter d'un bloc ou pas du tout.
+
 -- REQ-AXO-902131 — CROSS-TENANT BEST-PRACTICE MEMORY (governed, self-improving).
 -- Generalises the proven Nexus lesson-loop (DEC-NEX-008) into an Axon product so
 -- every project inherits governed best practices. COMPOSES existing Axon surface:
@@ -37,14 +54,14 @@ CREATE TABLE IF NOT EXISTS axon.practice (
 
 -- REQ-AXO-902136 — idempotent migration for ALREADY-EXISTING instances (the
 -- CREATE TABLE above is a no-op once the table exists; this back-fills `dense`).
-ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS dense TEXT NOT NULL DEFAULT '';
+SELECT public.add_column_if_absent('axon', 'practice', 'dense', $def$TEXT NOT NULL DEFAULT ''$def$);
 -- REQ-AXO-902138 — consolidation tier (episode → rule → principle).
-ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'episode';
+SELECT public.add_column_if_absent('axon', 'practice', 'tier', $def$TEXT NOT NULL DEFAULT 'episode'$def$);
 -- REQ-AXO-902141 — classe de périssabilité (durable = pas de decay temps).
-ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS perishability TEXT NOT NULL DEFAULT 'durable';
+SELECT public.add_column_if_absent('axon', 'practice', 'perishability', $def$TEXT NOT NULL DEFAULT 'durable'$def$);
 -- REQ-AXO-902149 — axes de partitionnement multi-agent (rôle + modèle), '*' = partagé/agnostique.
-ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS role  TEXT NOT NULL DEFAULT '*';
-ALTER TABLE axon.practice ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '*';
+SELECT public.add_column_if_absent('axon', 'practice', 'role',  $def$TEXT NOT NULL DEFAULT '*'$def$);
+SELECT public.add_column_if_absent('axon', 'practice', 'model', $def$TEXT NOT NULL DEFAULT '*'$def$);
 
 -- PR-1 dedup: same (scope, role, model) + same practice text = idempotent (UPSERT
 -- reinforces, no dup). REQ-AXO-902149 extended the key with role+model so the same

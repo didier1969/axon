@@ -1,3 +1,20 @@
+-- REQ-AXO-902328 — ce fichier est appliqué par le brain à CHAQUE boot.
+-- Il ne l'était PAS avant le 2026-08-25 : il manquait à la liste `include_str!`
+-- écrite à la main de `postgres/ddl.rs` (9 fichiers sur 25 absents), donc il
+-- n'avait jamais reçu la discipline de REQ-AXO-902339 — « ne pas réclamer un
+-- verrou avant de tester si l'on a quelque chose à faire ». `ADD COLUMN IF NOT
+-- EXISTS`, `CREATE INDEX IF NOT EXISTS`, `DROP INDEX/TRIGGER IF EXISTS` prennent
+-- tous leur verrou AVANT le test d'existence : sur `axon.practice` et
+-- `axon.mailbox_message`, écrites en continu, c'est une famine, pas une course.
+-- Les `ADD COLUMN` de ce fichier passent désormais par `add_column_if_absent`.
+--
+-- ⚠️ Les `CREATE INDEX IF NOT EXISTS` NE sont PAS convertis, et c'est délibéré :
+-- les 16 fichiers appliqués au boot depuis toujours en portent 26 de la même
+-- forme, sans incident mesuré. Les convertir ici seulement donnerait DEUX
+-- disciplines pour une seule classe d'énoncé — exactement la divergence que
+-- REQ-AXO-902328 ferme. La classe entière (45 CREATE INDEX + 3 DROP nus sur les
+-- 25 fichiers) est logée en REQ, à traiter d'un bloc ou pas du tout.
+
 -- REQ-AXO-902119 (MBX-7) — MAILBOX pub/sub + broadcast/multicast + rooms.
 -- Decouples the emitter from N subscribers (topics), supports broadcast decisions
 -- (fan-out to every registered project via '*'), and multi-party rooms. Runtime
@@ -59,9 +76,8 @@ CREATE INDEX IF NOT EXISTS mailbox_room_member_room_idx
 -- Materialised fan-out provenance: every delivered broadcast/multicast row records
 -- the topic / room it was stamped from (NULL for a point-to-point send). IF NOT
 -- EXISTS so re-apply over the MVP store is a no-op.
-ALTER TABLE axon.mailbox_message
-    ADD COLUMN IF NOT EXISTS topic   TEXT,
-    ADD COLUMN IF NOT EXISTS room_id TEXT;
+SELECT public.add_column_if_absent('axon', 'mailbox_message', 'topic',   'TEXT');
+SELECT public.add_column_if_absent('axon', 'mailbox_message', 'room_id', 'TEXT');
 
 -- CRITICAL (dedup vs. fan-out) — the MVP UNIQUE(from_project, idempotency_key)
 -- rejects rows 2..N of a single broadcast (same sender + key, different recipient).

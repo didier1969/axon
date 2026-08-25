@@ -788,7 +788,8 @@ old_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo
 # REQ-AXO-902165 / DEC-AXO-901666 — health-gated cutover with NATIVE auto-rollback
 # (the Rust control-plane executor). One command: snapshot (current.json = rollback
 # target) → stage (candidate bin/*) → full restart (re-bootstraps DDL, unlike the retired
-# in-place path → step 5b is now a cheap idempotent no-op kept as a guard) → `axonctl
+# in-place path → step 5b is a cheap idempotent guard — TRUE only since REQ-AXO-902328
+# closed the 9-file gap between the compiled list and db/ddl/) → `axonctl
 # liveness` gate (FULL runtime_contract: brain + indexer /readyz) → finalize
 # (pending→current) OR auto-rollback (restore the PREVIOUS build + restart). A bad
 # candidate is reverted to the last-good build, not just restarted. bin/axonctl was
@@ -838,6 +839,21 @@ promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
 # regression in the cutover's bootstrap and a live DB silently missing a table. A cheap
 # idempotent guard is not the redundancy worth removing — two divergent promote
 # executors was.
+#
+# REQ-AXO-902328 (2026-08-25) — « expected to be a no-op » N'ÉTAIT PAS VRAI, et
+# l'incident cité juste au-dessus en est la preuve. Le brain re-bootstrappait bien le
+# DDL au restart, mais depuis une LISTE `include_str!` écrite à la main, à laquelle il
+# manquait 9 des 25 fichiers — dont `15_mailbox.sql`. C'est pourquoi
+# `axon.mailbox_message` manquait après un promote : pas parce que le restart
+# in-place ne rejouait pas le DDL, mais parce que le DDL rejoué ne CONTENAIT pas cette
+# table. Un restart complet ne l'aurait pas créée non plus.
+#
+# Pour ces 9 fichiers, ce step n'était donc pas un garde-fou redondant : il était le
+# SEUL applicateur, et le retirer aurait cassé le schéma. La liste est désormais
+# dérivée du répertoire par `build.rs`, et une garde
+# (`postgres::ddl::tests::the_compiled_ddl_list_matches_the_directory`) refuse qu'elle
+# redevienne un souvenir. À partir de maintenant, et pas avant, la phrase ci-dessus
+# dit la vérité.
 #
 # Observed 2026-07-26 (promote 1399, in-place path): the runtime started BEFORE this
 # step ran, so axon.EmbedderControl did not exist when the indexer tried to seed its

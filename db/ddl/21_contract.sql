@@ -1,3 +1,20 @@
+-- REQ-AXO-902328 — ce fichier est appliqué par le brain à CHAQUE boot.
+-- Il ne l'était PAS avant le 2026-08-25 : il manquait à la liste `include_str!`
+-- écrite à la main de `postgres/ddl.rs` (9 fichiers sur 25 absents), donc il
+-- n'avait jamais reçu la discipline de REQ-AXO-902339 — « ne pas réclamer un
+-- verrou avant de tester si l'on a quelque chose à faire ». `ADD COLUMN IF NOT
+-- EXISTS`, `CREATE INDEX IF NOT EXISTS`, `DROP INDEX/TRIGGER IF EXISTS` prennent
+-- tous leur verrou AVANT le test d'existence : sur `axon.practice` et
+-- `axon.mailbox_message`, écrites en continu, c'est une famine, pas une course.
+-- Les `ADD COLUMN` de ce fichier passent désormais par `add_column_if_absent`.
+--
+-- ⚠️ Les `CREATE INDEX IF NOT EXISTS` NE sont PAS convertis, et c'est délibéré :
+-- les 16 fichiers appliqués au boot depuis toujours en portent 26 de la même
+-- forme, sans incident mesuré. Les convertir ici seulement donnerait DEUX
+-- disciplines pour une seule classe d'énoncé — exactement la divergence que
+-- REQ-AXO-902328 ferme. La classe entière (45 CREATE INDEX + 3 DROP nus sur les
+-- 25 fichiers) est logée en REQ, à traiter d'un bloc ou pas du tout.
+
 -- REQ-AXO-902088 (S1 store canonique) + REQ-AXO-902093 (S6 réconciliation) —
 -- persistance du squelette ContractNode (REQ-AXO-902087, modèle A : tables soll.*
 -- dédiées, ADOSSÉES à la machinerie SOLL — PAS une duplication de soll.Node).

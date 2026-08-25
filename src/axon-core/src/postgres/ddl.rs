@@ -65,6 +65,41 @@ pub fn generate_global_schema() -> Vec<String> {
     load_canonical_ddl_files()
 }
 
+// REQ-AXO-902328 — la liste des fichiers DDL compilés est DÉRIVÉE du répertoire
+// `db/ddl/` par `build.rs`, plus jamais écrite à la main.
+//
+// Elle l'était, et il lui manquait **9 fichiers sur 25** — tout le mailbox
+// cross-projet, le schéma `axon` des pratiques, les contrats, les secrets projet.
+// Le brain rejoue cette liste à CHAQUE boot ; les deux autres applicateurs
+// (`scripts/lib/ensure-runtime.sh::apply_canonical_ddl`, au start ET au step 5b du
+// promote) parcourent le répertoire. Un brain démarré sans le chemin shell ne
+// créait donc aucune des tables de ces 9 fichiers.
+//
+// Le trou était ÉCRIT, pas distrait : « the other 14..22 files are unrelated » —
+// vrai pour le commit qui l'a posé (un NOTIFY sur soll.Traceability), faux pour le
+// bootstrap. Une liste manuelle invite ce raisonnement local sur une décision
+// globale ; un répertoire l'interdit. C'est GUI-PRO-013 au chokepoint.
+//
+// Définit `const CANONICAL_DDL_FILES: &[(&str, &str)]` — (nom de fichier, contenu).
+include!(concat!(env!("OUT_DIR"), "/canonical_ddl_files.rs"));
+
+
+
+/// REQ-AXO-902328 — les NOMS des fichiers DDL canoniques, dans l'ordre d'application.
+///
+/// Existe pour que le harnais de test applique EXACTEMENT ce que le brain compile,
+/// au lieu de re-parcourir `db/ddl/` avec sa propre règle. Il y avait trois règles
+/// de sélection pour une seule question (« quel est le schéma canonique ? ») ; c'est
+/// justement parce que les tests en avaient une troisième, plus complète, qu'ils
+/// n'ont jamais vu les 9 fichiers manquants au brain.
+// Consommé par le seul harnais de test : en production c'est le CONTENU qui sert
+// (`load_canonical_ddl_files`), pas les noms. Le gate dit cette portée au lieu de
+// laisser un `#[allow(dead_code)]` la taire.
+#[cfg(test)]
+pub(crate) fn canonical_ddl_file_names() -> Vec<&'static str> {
+    CANONICAL_DDL_FILES.iter().map(|(nom, _)| *nom).collect()
+}
+
 /// MIL-AXO-020 — canonical DDL files compiled into the binary via
 /// `include_str!`. Each file is split into top-level statements,
 /// respecting `$tag$ … $tag$` dollar-quoted regions used by PL/pgSQL
@@ -74,79 +109,8 @@ pub fn generate_global_schema() -> Vec<String> {
 /// File order matches numeric prefix (00 → 05) so dependencies resolve
 /// in the same order as `./scripts/start.sh` applies them at runtime.
 pub fn load_canonical_ddl_files() -> Vec<String> {
-    const FILES: &[(&str, &str)] = &[
-        (
-            "00_extensions.sql",
-            include_str!("../../../../db/ddl/00_extensions.sql"),
-        ),
-        (
-            "01_soll_schema.sql",
-            include_str!("../../../../db/ddl/01_soll_schema.sql"),
-        ),
-        (
-            "02_axon_runtime.sql",
-            include_str!("../../../../db/ddl/02_axon_runtime.sql"),
-        ),
-        (
-            "03_ist_schema.sql",
-            include_str!("../../../../db/ddl/03_ist_schema.sql"),
-        ),
-        (
-            "04_graph_functions.sql",
-            include_str!("../../../../db/ddl/04_graph_functions.sql"),
-        ),
-        (
-            "05_ist_notify.sql",
-            include_str!("../../../../db/ddl/05_ist_notify.sql"),
-        ),
-        (
-            "06_pgmq_tsv_async.sql",
-            include_str!("../../../../db/ddl/06_pgmq_tsv_async.sql"),
-        ),
-        (
-            "07_registry_notify.sql",
-            include_str!("../../../../db/ddl/07_registry_notify.sql"),
-        ),
-        (
-            "08_dashboard_state.sql",
-            include_str!("../../../../db/ddl/08_dashboard_state.sql"),
-        ),
-        (
-            "09_embedder_observed.sql",
-            include_str!("../../../../db/ddl/09_embedder_observed.sql"),
-        ),
-        (
-            "10_mcp_friction.sql",
-            include_str!("../../../../db/ddl/10_mcp_friction.sql"),
-        ),
-        (
-            "11_mcp_telemetry.sql",
-            include_str!("../../../../db/ddl/11_mcp_telemetry.sql"),
-        ),
-        (
-            "12_llm_feedback.sql",
-            include_str!("../../../../db/ddl/12_llm_feedback.sql"),
-        ),
-        (
-            "13_soll_revision_notify.sql",
-            include_str!("../../../../db/ddl/13_soll_revision_notify.sql"),
-        ),
-        // REQ-AXO-902178 — evidence-changed NOTIFY on soll.Traceability (reuses the
-        // 'soll_revision_committed' channel so the RAM snapshot invalidates on an
-        // attach/remove that writes no soll.Revision). Ordered after 01 (table) + 13
-        // (channel semantics); the other 14..22 files are unrelated (IST/mailbox/etc.).
-        (
-            "23_soll_traceability_notify.sql",
-            include_str!("../../../../db/ddl/23_soll_traceability_notify.sql"),
-        ),
-        // REQ-AXO-902234 — embedder control plane (desired state, brain → indexer).
-        (
-            "24_embedder_control.sql",
-            include_str!("../../../../db/ddl/24_embedder_control.sql"),
-        ),
-    ];
     let mut stmts = Vec::new();
-    for (_name, body) in FILES {
+    for (_name, body) in CANONICAL_DDL_FILES {
         stmts.extend(split_top_level_statements(body));
     }
     stmts
@@ -490,5 +454,125 @@ mod tests {
         assert!(generate_project_schema("axo;DROP TABLE Node").is_err());
         assert!(generate_project_schema("").is_err());
         assert!(generate_project_schema("AXO").is_ok());
+    }
+
+    /// REQ-AXO-902328 — la liste compilée doit être le répertoire, pas un souvenir.
+    ///
+    /// Le dépôt applique le DDL canonique par TROIS chemins, et un seul choisissait
+    /// ses fichiers à la main :
+    ///
+    /// | chemin | règle | appliquait |
+    /// |---|---|---|
+    /// | `scripts/lib/ensure-runtime.sh::apply_canonical_ddl` (start **et** promote 5b) | glob `[0-9][0-9]_*.sql` | 25 / 25 |
+    /// | `bootstrap_global_pg_schema` (brain, à chaque boot) | cette liste | **16 / 25** |
+    /// | `test_support::test_db::apply_sql_dir` | `read_dir` | 25 / 25 |
+    ///
+    /// Les 9 absents étaient `14_ist_data_artifacts`, `15/18/19/20_mailbox*`,
+    /// `16_practice`, `17_agent_card`, `21_contract`, `22_project_secret` — soit
+    /// le schéma `axon` des pratiques et tout le mailbox cross-projet, c'est-à-dire
+    /// les surfaces que `CLAUDE.md` désigne comme canaux PRIMAIRES. Un brain démarré
+    /// sans le chemin shell ne créait aucune de leurs tables.
+    ///
+    /// Le trou n'était pas un oubli : il était **écrit** (« *the other 14..22 files
+    /// are unrelated (IST/mailbox/etc.)* »), et ce jugement était juste pour le
+    /// commit qui l'a posé et faux pour le bootstrap. C'est la liste manuelle qui
+    /// rend ce glissement possible ; un répertoire ne le permet pas.
+    ///
+    /// ⚠️ **Ce que cette garde vaut, dit franchement.** Depuis que `build.rs` dérive
+    /// la liste du répertoire, elle compare deux dérivés d'une même source : elle est
+    /// proche de la tautologie, et le vrai anti-régression est
+    /// `cargo:rerun-if-changed=db/ddl`. Sa valeur a été d'être le **témoin de
+    /// falsification** — rouge en nommant les 9 avant le correctif — et cette valeur
+    /// se dépense une fois. Elle reste parce qu'elle attrape encore un cas réel :
+    /// un binaire compilé sur un arbre différent de celui qu'on teste, exactement ce
+    /// qu'a servi le promote du 2026-08-23.
+    #[test]
+    fn the_compiled_ddl_list_matches_the_directory() {
+        let ddl_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("db")
+            .join("ddl");
+
+        // La règle du SHELL, à l'identique : `[0-9][0-9]_*.sql` — deux chiffres,
+        // un souligné, puis n'importe quoi. C'est elle qui a réellement appliqué
+        // les 25 fichiers en live ; c'est donc elle qui fait autorité.
+        let mut sur_disque: Vec<String> = std::fs::read_dir(&ddl_dir)
+            .unwrap_or_else(|e| panic!("db/ddl illisible ({}): {e}", ddl_dir.display()))
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .filter(|nom| {
+                let o = nom.as_bytes();
+                nom.ends_with(".sql")
+                    && o.len() > 3
+                    && o[0].is_ascii_digit()
+                    && o[1].is_ascii_digit()
+                    && o[2] == b'_'
+            })
+            .collect();
+        sur_disque.sort();
+
+        let mut compiles: Vec<String> = CANONICAL_DDL_FILES
+            .iter()
+            .map(|(nom, _)| (*nom).to_owned())
+            .collect();
+        compiles.sort();
+
+        let manquants: Vec<&String> = sur_disque.iter().filter(|n| !compiles.contains(n)).collect();
+        let fantomes: Vec<&String> = compiles.iter().filter(|n| !sur_disque.contains(n)).collect();
+
+        assert!(
+            manquants.is_empty() && fantomes.is_empty(),
+            "le DDL compilé dans le binaire diverge de `db/ddl/` — {} sur disque, {} compilé(s).\n\
+             \x20 JAMAIS appliqué par le brain ({}) :\n   {}\n\
+             \x20 compilé mais absent du disque ({}) :\n   {}\n\
+             Le brain applique cette liste à CHAQUE boot ; le shell applique le répertoire. \
+             Un fichier qui n'est que sur le disque n'existe pour le brain d'aucune façon — \
+             ses tables manquent sur tout déploiement qui ne passe pas par \
+             `scripts/lib/ensure-runtime.sh`. Ne pas rattraper à la main : la liste est \
+             dérivée du répertoire par `build.rs` (REQ-AXO-902328).",
+            sur_disque.len(),
+            compiles.len(),
+            manquants.len(),
+            manquants
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n   "),
+            fantomes.len(),
+            fantomes
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n   "),
+        );
+    }
+
+    /// REQ-AXO-902328 — contrôle POSITIF : le bootstrap du brain porte enfin les
+    /// surfaces que `CLAUDE.md` désigne comme canaux PRIMAIRES.
+    ///
+    /// La garde de non-divergence compare des noms de fichiers ; elle ne dit rien
+    /// de ce qu'ils CONTIENNENT. Ce test-ci vérifie la conséquence qui comptait :
+    /// un brain qui boote crée le schéma `axon` des pratiques, les tables du
+    /// mailbox cross-projet, les contrats. Avant le correctif, ces trois familles
+    /// n'existaient que si l'on passait par `scripts/lib/ensure-runtime.sh`.
+    #[test]
+    fn the_brain_bootstrap_now_carries_practice_mailbox_and_contract() {
+        let joined = generate_global_schema().join("\n");
+        for objet in [
+            "axon.practice",
+            "axon.mailbox_message",
+            "axon.mailbox_lease",
+            "axon.agent_card",
+            "soll.Contract",
+            "axon.project_secret",
+        ] {
+            assert!(
+                joined.to_lowercase().contains(&objet.to_lowercase()),
+                "le DDL compilé dans le brain ne porte pas `{objet}` — un déploiement \
+                 qui ne passe pas par ensure-runtime.sh n'aurait pas cette table \
+                 (REQ-AXO-902328)"
+            );
+        }
     }
 }

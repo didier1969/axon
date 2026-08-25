@@ -480,7 +480,22 @@ pub(crate) fn shared_test_db_url() -> String {
 /// Le contrat du sweep — « reclamer les fuites des runs PRECEDENTS » — en sort
 /// mieux respecte, pas relache : les bases des autres process gardent des noms
 /// absents de ce registre et restent reclamees.
-pub(crate) fn sweep_stale_test_databases(pg_port: &str) {
+/// REQ-AXO-902473 — rend `true` si le balayage est allé AU BOUT, `false` s'il a été
+/// tronqué par son budget.
+///
+/// Ce n'est pas une commodité : sans ce retour, un appelant ne peut pas distinguer
+/// « le sweep a fait son travail et il ne restait rien » de « le sweep a été coupé au
+/// milieu ». Les deux se lisent identiquement — silence et base encore là — alors que
+/// l'un est un verdict et l'autre une absence de mesure. C'est la distinction que
+/// `REQ-AXO-902328` a dû rétablir ailleurs le même jour, et que `e5a39851` a écrite pour
+/// le lock timeout : « ceci ne dit RIEN sur l'état, ceci dit que je n'ai pas pu mesurer ».
+///
+/// Mesuré le 2026-08-25 : 180,02 s pour **293 candidats**, budget épuisé, aucun DROP
+/// abouti — toutes les connexions bloquées sur `IPC / CheckpointDone`. `DROP DATABASE`
+/// demande un checkpoint, et le checkpointer est un processus unique : N drops concurrents
+/// font la queue. Le volume de candidats est donc lui-même le produit des drops abandonnés
+/// par la passe précédente.
+pub(crate) fn sweep_stale_test_databases(pg_port: &str) -> bool {
     // `DROP DATABASE` cannot run inside a transaction block, so a DO/loop is
     // not an option; `\gexec` executes each generated statement as its own
     // top-level command. ON_ERROR_STOP=0 keeps one failed drop (e.g. a
@@ -557,12 +572,15 @@ pub(crate) fn sweep_stale_test_databases(pg_port: &str) {
     // menage traine remplacerait une pendaison par un echec systematique.
     // Le depassement reste ECRIT sur stderr : c'est « ne plus etre silencieux »,
     // qui est la vraie demande de REQ-AXO-902272, pas la panique.
-    let _ = run_bounded(
+    let issue = run_bounded(
         &mut cmd,
         Some(script.as_bytes()),
         BUDGET_SWEEP,
         "sweep des bases de test fuitees",
     );
+    // `NoBinary` compte comme « pas abouti » : sans psql, rien n'a été balayé. Seul un
+    // processus qui a rendu la main de lui-même prouve que la passe est complète.
+    let abouti = matches!(issue, RunOutcome::Ran(_, _));
 
     let ecoule = debut.elapsed();
     if ecoule > Duration::from_secs(5) {
@@ -578,6 +596,7 @@ pub(crate) fn sweep_stale_test_databases(pg_port: &str) {
                 .unwrap_or_else(|| "?".to_string())
         );
     }
+    abouti
 }
 
 /// Combien de bases `axon_test_*` existent, toutes origines confondues ?
@@ -682,15 +701,30 @@ pub(crate) fn ensure_template_once(pg_port: &str) {
             &format!("createdb {template} (template)"),
         );
 
-        // Apply canonical DDL then seed in lexical order, mirroring
-        // scripts/lib/ensure-runtime.sh {apply_canonical_ddl,
-        // apply_canonical_seed}. `generate_global_schema()` compiles the
-        // same db/ddl files (DEC-AXO-082), so there is no schema divergence.
+        // REQ-AXO-902328 — le DDL vient de la MÊME liste que le brain compile.
+        //
+        // Ce commentaire affirmait exactement l'inverse de ce que le code faisait :
+        // « `generate_global_schema()` compiles the same db/ddl files (DEC-AXO-082),
+        // so there is no schema divergence ». Il y avait divergence, et de 9 fichiers
+        // sur 25 : ce chemin-ci parcourait le répertoire (25) pendant que le brain
+        // rejouait une liste écrite à la main (16). Le harnais appliquait donc un
+        // schéma que la production n'avait pas — ce qui est précisément la raison
+        // pour laquelle aucun test n'a jamais vu le trou.
+        //
+        // Désormais `canonical_ddl_file_names()` est la seule règle : le template de
+        // test reçoit ce que le brain grave dans son binaire, ni plus ni moins. Le
+        // seed garde `read_dir` — `db/seed/` n'est pas compilé, il n'a pas de second
+        // applicateur avec qui diverger.
         let db_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("db");
-        apply_sql_dir(pg_port, &template, &db_dir.join("ddl"));
+        let ddl_dir = db_dir.join("ddl");
+        let ddl_files: Vec<PathBuf> = crate::postgres::ddl::canonical_ddl_file_names()
+            .into_iter()
+            .map(|nom| ddl_dir.join(nom))
+            .collect();
+        apply_sql_files(pg_port, &template, &ddl_files);
         apply_sql_dir(pg_port, &template, &db_dir.join("seed"));
         apply_test_autoseed_triggers(pg_port, &template);
         seed_test_project_codes(pg_port, &template);
@@ -882,21 +916,12 @@ CREATE TRIGGER a_test_autofill_soll_edge BEFORE INSERT ON soll.Edge\n\
 /// Apply every `NN_*.sql` file in `dir` (lexical order) to `dbname` via
 /// psql. Best-effort: a missing directory or psql binary is a silent no-op
 /// (unit-only environments without PG), matching the sweep's tolerance.
-fn apply_sql_dir(pg_port: &str, dbname: &str, dir: &Path) {
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.extension().is_some_and(|x| x == "sql")
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .and_then(|n| n.bytes().next())
-                        .is_some_and(|b| b.is_ascii_digit())
-            })
-            .collect(),
-        Err(_) => return,
-    };
-    files.sort();
+/// REQ-AXO-902328 — applique une LISTE de fichiers SQL, dans l'ordre donné.
+///
+/// Extrait de `apply_sql_dir` pour que le DDL puisse venir de la liste compilée
+/// (celle que le brain rejoue) et le seed du répertoire, sans dupliquer la
+/// mécanique `psql`.
+fn apply_sql_files(pg_port: &str, dbname: &str, files: &[PathBuf]) {
     for f in files {
         let Some(path) = f.to_str() else { continue };
         let mut cmd = std::process::Command::new("psql");
@@ -923,6 +948,26 @@ fn apply_sql_dir(pg_port: &str, dbname: &str, dir: &Path) {
             &format!("psql -f {path} ({dbname})"),
         );
     }
+}
+
+fn apply_sql_dir(pg_port: &str, dbname: &str, dir: &Path) {
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == "sql")
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.bytes().next())
+                        .is_some_and(|b| b.is_ascii_digit())
+            })
+            .collect(),
+        Err(_) => return,
+    };
+    files.sort();
+    // Une seule mécanique `psql` dans ce fichier : ce chemin ne fait que CHOISIR
+    // les fichiers (par répertoire), `apply_sql_files` les applique.
+    apply_sql_files(pg_port, dbname, &files);
 }
 
 #[cfg(test)]
@@ -1088,7 +1133,40 @@ mod tests {
         };
         assert!(status.success(), "la fixture de fuite doit exister avant le sweep");
 
-        sweep_stale_test_databases(&port);
+        let abouti = sweep_stale_test_databases(&port);
+
+        // REQ-AXO-902473 — un sweep TRONQUE ne prouve RIEN, dans aucun sens.
+        //
+        // Ce test a echoue le 2026-08-25 sur sa seconde assertion, seul, sans
+        // contention : « sweep : 180,02 s pour 293 candidat(s) », budget epuise,
+        // zero DROP abouti — toutes les connexions bloquees sur
+        // `IPC / CheckpointDone`. La fuite avait survecu, mais PAS parce que
+        // l'exclusion etait trop large : parce que le balayage n'etait jamais
+        // arrive jusqu'a elle.
+        //
+        // Il serait FAUX de conclure dans un sens comme dans l'autre. La premiere
+        // assertion, elle, passerait trivialement — un sweep qui ne DROP rien
+        // n'efface evidemment aucune base vivante : elle serait verte pour la
+        // mauvaise raison, ce qui est pire qu'un echec.
+        //
+        // Donc : on ne verdit pas, on ne rougit pas, on DIT qu'on n'a pas pu
+        // mesurer. C'est la meme distinction que `e5a39851` a ecrite pour le lock
+        // timeout (« ceci ne dit RIEN sur l'etat du schema ») et que
+        // `REQ-AXO-902328` a rétablie le meme jour. Assouplir le budget ou
+        // reessayer serait accepter le residu au lieu de le nommer.
+        if !abouti {
+            eprintln!(
+                "[REQ-AXO-902473] garde NON CONCLUANTE : le sweep a ete tronque par son \
+                 budget ({BUDGET_SWEEP:?}) avant d'avoir traite tous les candidats. Ni la \
+                 fuite ({leaked}) ni la base vivante ({live_name}) ne prouvent quoi que ce \
+                 soit. Cause etablie : `DROP DATABASE` attend `CheckpointDone`, le \
+                 checkpointer est unique, les drops font la queue. Remede de fond = le PG \
+                 ephemere de REQ-AXO-901906, PAS un budget plus grand."
+            );
+            // La fuite reste derriere nous : la nommer vaut mieux que la taire.
+            let _ = force_dropdb(&leaked, &port);
+            return;
+        }
 
         assert_eq!(
             database_exists(&port, &live_name),
