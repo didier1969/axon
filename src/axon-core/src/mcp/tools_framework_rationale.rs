@@ -8,6 +8,7 @@ use super::tools_framework_support::{
     structural_history_path,
 };
 use super::McpServer;
+use crate::mcp::format::Compte;
 
 impl McpServer {
     /// REQ-AXO-901926 — resolve the CANONICAL current Vision for a project.
@@ -283,6 +284,43 @@ impl McpServer {
                 }
             });
 
+        // REQ-AXO-902409 (doleance DVM #255) — lire la couverture d'index AVANT de
+        // publier des metriques derivees du CODE.
+        //
+        // Le rapporteur proposait de lire `eligible` ET `indexed`. `eligible` exige un
+        // parcours DISQUE — mesure a 3,1 s pour le seul depot AXO, sur un chemin appele
+        // a chaque ouverture de session : le mettre ici serait un mauvais echange, et
+        // c'est deja tranche ailleurs. Mais `indexed` seul SUFFIT et ne coute qu'un
+        // COUNT : si aucun fichier n'est indexe, aucune metrique derivee du code ne
+        // peut avoir ete mesuree, quel que soit le nombre de fichiers sur le disque.
+        let fichiers_indexes = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.indexedfile WHERE project_code = '{}'",
+                project_code.replace('\'', "''")
+            ))
+            .unwrap_or(0);
+
+        // Trois etats, jamais deux. Deux lectures distinctes, parce que les grandeurs
+        // n'ont pas la meme source — le rapporteur le releve lui-meme et exclut
+        // `orphan_intent` de son reproche : c'est un compte SOLL, il reste valide sur
+        // un projet non indexe.
+        let compte_code = |cle: &str| -> String {
+            if fichiers_indexes == 0 {
+                return Compte::non_calcule("aucun fichier indexe pour ce projet").rendre();
+            }
+            match anomaly_summary.get(cle) {
+                Some(v) if v.is_i64() || v.is_u64() => v.to_string(),
+                _ => Compte::non_calcule("anomalies n'a pas mesure cette grandeur").rendre(),
+            }
+        };
+        let compte_soll = |cle: &str| -> String {
+            match anomaly_summary.get(cle) {
+                Some(v) if v.is_i64() || v.is_u64() => v.to_string(),
+                _ => Compte::non_calcule("anomalies n'a pas mesure cette grandeur").rendre(),
+            }
+        };
+
         let evidence = format!(
             "**Vision:** `{}` - {}\n\
 **Vision status:** `{}`\n\
@@ -317,20 +355,28 @@ impl McpServer {
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown"),
             public_tools_evidence,
-            anomaly_summary
-                .get("wrapper_count")
-                .and_then(|value| value.as_i64())
-                .unwrap_or(0),
-            anomaly_summary
-                .get("orphan_code_count")
-                .and_then(|value| value.as_i64())
-                .unwrap_or(0),
-            anomaly_summary
-                .get("orphan_intent_count")
-                .and_then(|value| value.as_i64())
-                .unwrap_or(0),
+            // REQ-AXO-902409 (doleance DVM #255) — `.unwrap_or(0)` rendait
+            // « 0 / 0 / 0 » indistinguable d'un projet sain sur un projet dont
+            // `health` disait, dans la MEME minute, « eligible 192, indexed 0 ».
+            // `anomalies` publie desormais `null` pour une grandeur non calculee ;
+            // ce lecteur-ci le RELAIE au lieu de le convertir en zero.
+            compte_code("wrapper_count"),
+            compte_code("orphan_code_count"),
+            compte_soll("orphan_intent_count"),
             validation_coverage_display,
-            if degraded_notes.is_empty() {
+            // REQ-AXO-902409 — « none » etait FAUX sur un projet non indexe : la
+            // degradation y est totale. Le rapporteur (DVM #255) l'a mesure — son
+            // `project_status` disait « Degradation notes: none » et « Confidence:
+            // high » pendant que `health` disait « indexed: 0 » sur le meme scope.
+            if fichiers_indexes == 0 {
+                let mut notes = degraded_notes.clone();
+                notes.push(
+                    "aucun fichier indexe pour ce projet — les metriques derivees du \
+                     code ne sont PAS mesurees ; voir `diagnose_indexing`"
+                        .to_string(),
+                );
+                notes.join(", ")
+            } else if degraded_notes.is_empty() {
                 "none".to_string()
             } else {
                 degraded_notes.join(", ")

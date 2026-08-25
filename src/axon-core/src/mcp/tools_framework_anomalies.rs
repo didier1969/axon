@@ -8,6 +8,30 @@ use super::tools_framework_anomaly_heuristics::{
 };
 use super::tools_framework_support::{cache_read, cache_write};
 use super::McpServer;
+use crate::mcp::format::Compte;
+
+
+/// REQ-AXO-902409 tranche 3 — raison publiée quand une grandeur n'a PAS été calculée.
+///
+/// `&'static str` À DESSEIN : elle décrit une BRANCHE du code (`ram_view == None`),
+/// pas une donnée d'exécution. Une raison fabriquée à partir d'une valeur observée
+/// serait exactement le défaut que cette tranche corrige.
+const RAISON_SANS_INSTANTANE: &str = "instantané IST indisponible pour cette portée";
+
+/// Dérive le compte d'une collecte bornée : `Some((rendus, total))` ⇒ mesuré,
+/// `None` ⇒ non calculé. Le `None` n'est PLUS écrasé en vec vide.
+fn compte_depuis(mesure: &Option<(Vec<String>, usize)>) -> Compte {
+    match mesure {
+        Some((rendus, total)) => Compte::borne(*total, rendus.len()),
+        None => Compte::non_calcule(RAISON_SANS_INSTANTANE),
+    }
+}
+
+/// La liste seule, pour les surfaces qui l'énumèrent. Un `None` y devient bien un
+/// vec vide — mais le COMPTE, lui, a déjà été prélevé avant, et il dit la vérité.
+fn liste_depuis(mesure: Option<(Vec<String>, usize)>) -> Vec<String> {
+    mesure.map(|(rendus, _)| rendus).unwrap_or_default()
+}
 
 impl McpServer {
     pub(super) fn axon_anomalies_impl(&self, args: &Value) -> Option<Value> {
@@ -65,33 +89,56 @@ impl McpServer {
         } else {
             None
         };
-        let wrappers = ram_view
+        // REQ-AXO-902409 tranche 3 — NE PAS écraser le `None`.
+        //
+        // Ces quatre collectes faisaient `.unwrap_or_default()`, donc un instantané
+        // froid (ou `project == "*"`) produisait un vec vide, donc le rendu publiait
+        // `0`. Mesuré sur `anomalies project="*"` : DIX zéros fabriqués et un vrai
+        // chiffre, visuellement identiques — un lecteur conclut « aucune anomalie »
+        // là où rien n'a été cherché. L'`Option` PORTAIT l'information ; c'est
+        // `unwrap_or_default()` qui la détruisait.
+        //
+        // Second défaut du même bloc : le `20` est un PLAFOND de collecte, et le
+        // rendu publiait `vec.len()`. « Wrappers: 20 » voulait donc dire « au moins
+        // 20 ». Les collecteurs rendent désormais leur total avant troncature (il
+        // était déjà calculé, puis jeté), et `Compte::borne` ne décore QUE ce qui
+        // est réellement tronqué — `Detours: 7`, sous le plafond, reste `7`.
+        let wrappers_mesure = ram_view
             .as_ref()
-            .and_then(|view| view.wrapper_candidates(project, 20))
-            .unwrap_or_default();
-        let feature_envy = ram_view
+            .and_then(|view| view.wrapper_candidates(project, 20));
+        let feature_envy_mesure = ram_view
             .as_ref()
-            .and_then(|view| view.feature_envy_candidates(project, 20))
-            .unwrap_or_default();
-        let detours = ram_view
+            .and_then(|view| view.feature_envy_candidates(project, 20));
+        let detours_mesure = ram_view
             .as_ref()
-            .and_then(|view| view.detour_candidates(project, 20))
-            .unwrap_or_default();
-        let abstraction_detours = ram_view
+            .and_then(|view| view.detour_candidates(project, 20));
+        let abstraction_detours_mesure = ram_view
             .as_ref()
-            .and_then(|view| view.abstraction_detour_candidates(project, 20))
-            .unwrap_or_default();
+            .and_then(|view| view.abstraction_detour_candidates(project, 20));
+        let compte_wrappers = compte_depuis(&wrappers_mesure);
+        let compte_feature_envy = compte_depuis(&feature_envy_mesure);
+        let compte_detours = compte_depuis(&detours_mesure);
+        let compte_abstraction_detours = compte_depuis(&abstraction_detours_mesure);
+        let wrappers = liste_depuis(wrappers_mesure);
+        let feature_envy = liste_depuis(feature_envy_mesure);
+        let detours = liste_depuis(detours_mesure);
+        let abstraction_detours = liste_depuis(abstraction_detours_mesure);
         // RAM structural orphans, then a SOLL-layer Traceability filter via the
         // SOLL RAM snapshot (soll.Traceability is intent, not IST graph). The
         // candidate is a short name (name_from_id); match an artifact_ref that
         // equals it OR ends with `::<candidate>` (canonical id form). Cold / "*"
         // → empty (no PG IST full-scan fallback).
-        let orphan_code = match ram_view
+        // REQ-AXO-902409 — `total_orphelins` est le total STRUCTUREL avant troncature
+        // ET avant le filtre de traçabilité SOLL ci-dessous. Le rendu « N sur M » dit
+        // donc « M orphelins structurels trouvés, N publiés après retrait de ceux
+        // qu'une trace SOLL couvre » — l'écart est une information, pas une perte.
+        let orphan_code_mesure = ram_view
             .as_ref()
-            .and_then(|view| view.orphan_code_symbols(project, 20))
-        {
-            Some(candidates) if candidates.is_empty() => Vec::new(),
-            Some(candidates) => match self.soll_cache().snapshot(project).ok() {
+            .and_then(|view| view.orphan_code_symbols(project, 20));
+        let total_orphelins = orphan_code_mesure.as_ref().map(|(_, total)| *total);
+        let orphan_code = match orphan_code_mesure {
+            Some((candidates, _)) if candidates.is_empty() => Vec::new(),
+            Some((candidates, _)) => match self.soll_cache().snapshot(project).ok() {
                 Some(snap) => candidates
                     .into_iter()
                     .filter(|cand| {
@@ -105,6 +152,10 @@ impl McpServer {
                 None => candidates,
             },
             None => Vec::new(),
+        };
+        let compte_orphan_code = match total_orphelins {
+            Some(total) => Compte::borne(total, orphan_code.len()),
+            None => Compte::non_calcule(RAISON_SANS_INSTANTANE),
         };
         // orphan_intent is a SOLL query (intent nodes without traceability), not
         // an IST graph traversal — stays on the SOLL surface.
@@ -159,9 +210,13 @@ impl McpServer {
             (cycles, cycle_count)
         };
         // REQ-AXO-901970 — RAM-only god-objects (no PG fallback; cold / "*" → empty).
-        let god_objects = ram_view
-            .as_ref()
-            .and_then(|view| view.god_objects(project))
+        let god_objects_mesure = ram_view.as_ref().and_then(|view| view.god_objects(project));
+        // Pas de plafond ici : le compte est complet OU absent, jamais tronqué.
+        let compte_god_objects = match &god_objects_mesure {
+            Some(pairs) => Compte::exact(pairs.len()),
+            None => Compte::non_calcule(RAISON_SANS_INSTANTANE),
+        };
+        let god_objects = god_objects_mesure
             .map(|pairs| {
                 pairs
                     .into_iter()
@@ -657,17 +712,20 @@ impl McpServer {
 **Cycles:** {}\n\
 **God objects:** {}\n",
             project,
-            wrappers.len(),
-            feature_envy.len(),
-            detours.len(),
-            abstraction_detours.len(),
-            orphan_code.len(),
+            // REQ-AXO-902409 — chaque compte dit COMMENT il a été obtenu : un
+            // nombre s'il est mesuré et complet, « N sur M » s'il est tronqué,
+            // « non calculé (raison) » si la grandeur n'a pas été cherchée.
+            compte_wrappers.rendre(),
+            compte_feature_envy.rendre(),
+            compte_detours.rendre(),
+            compte_abstraction_detours.rendre(),
+            compte_orphan_code.rendre(),
             canonical_orphan_intent_count,
             heuristic_intent_gap_count,
             phantom_dead_refs.len(),
             phantom_multi_declare.len(),
             cycle_count,
-            god_objects.len()
+            compte_god_objects.rendre()
         );
         let report = format!(
             "## 🚨 Axon Anomalies\n\n{}",
@@ -778,14 +836,26 @@ impl McpServer {
             "data": {
                 "summary": {
                     "project": project,
-                    "wrapper_count": wrappers.len(),
+                    // REQ-AXO-902409 — `null` quand la grandeur n'a PAS ete calculee,
+                    // jamais 0. Doleance DVM #255 : `project_status` lit ce champ avec
+                    // `.unwrap_or(0)` et publiait « Wrappers / Orphan code : 0 / 0 » sur
+                    // un projet dont `health` disait au meme instant « eligible 192,
+                    // indexed 0 ». Un zero fabrique traverse ainsi DEUX outils et arrive
+                    // au lecteur comme « projet structurellement sain ».
+                    "wrapper_count": match &compte_wrappers {
+                        Compte::NonCalcule(_) => serde_json::Value::Null,
+                        _ => serde_json::Value::from(wrappers.len()),
+                    },
                     "feature_envy_count": feature_envy.len(),
                     "detour_count": detours.len(),
                     "abstraction_detour_count": abstraction_detours.len(),
                     "alignment_proxy_score": alignment_proxy_score,
                     "rectitude_proxy_score": rectitude_proxy_score,
                     "cycle_health_score": cycle_health_score,
-                    "orphan_code_count": orphan_code.len(),
+                    "orphan_code_count": match &compte_orphan_code {
+                        Compte::NonCalcule(_) => serde_json::Value::Null,
+                        _ => serde_json::Value::from(orphan_code.len()),
+                    },
                     "orphan_code_rate": orphan_code_rate,
                     "orphan_intent_count": canonical_orphan_intent_count,
                     "orphan_intent_rate": orphan_intent_rate,

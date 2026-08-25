@@ -11,6 +11,7 @@ use crate::ist_snapshot::algorithms::{
     bridges_and_articulation, pagerank_top, shortest_path, structural_sccs,
 };
 use crate::ist_snapshot::{process_view, IstGraph, IstSnapshotCache, NodeKind};
+use crate::mcp::format::Compte;
 use crate::mcp::tools_framework_support::{diff_shi_snapshots, load_shi_snapshots, persist_shi_snapshot};
 use crate::mcp::McpServer;
 use std::collections::{HashMap, HashSet};
@@ -1228,7 +1229,28 @@ impl McpServer {
                 })
             })
             .collect();
-        let count_of = |cat: &str| ranked_candidates.iter().filter(|c| c["category"] == cat).count();
+        // REQ-AXO-902409 tranche 3 — compter sur TOUS les candidats, pas sur le top.
+        //
+        // `count_of` filtrait `ranked_candidates`, c'est-a-dire la liste DEJA tronquee
+        // a `top`. « 0 coverage » signifiait donc « aucun candidat de couverture dans
+        // les 15 premiers », et se lisait « aucun probleme de couverture » — deux
+        // choses tres differentes quand le tri est fait par ROI et qu'une categorie
+        // entiere peut se retrouver sous la barre. Mesure du 2026-08-25 : « 15
+        // target(s) — 0 coverage, 15 coupling » sur un `top` valant 15, sans qu'aucun
+        // total ne soit publie.
+        // …mais ce total n'en est PAS un, et il faut le dire : `scan_cap` vaut
+        // `top * 3`, donc la PROFONDEUR DE RECHERCHE depend du parametre
+        // d'AFFICHAGE. Mesure : `coupling` = 4 a `top=200`, 3 a `top=1`. Aucun de
+        // ces deux nombres n'est un inventaire ; publier l'un comme tel serait faux
+        // quel que soit l'endroit ou l'on compte. Un compte qui a sature sa borne
+        // est un PLANCHER — leçon deja payee ailleurs (« le compte d'un outil de
+        // detection est un plancher fixe par son seuil, jamais un inventaire »).
+        let count_of = |cat: &str| candidates.iter().filter(|c| c.category == cat).count();
+        let compte_de = |cat: &str| {
+            Compte::plancher_si_sature(count_of(cat), scan_cap, "recherche bornee a 3x top")
+                .rendre()
+        };
+        let compte_cibles = Compte::borne(candidates.len(), ranked_candidates.len());
 
         // REQ-AXO-902201 — surface the ranked targets IN THE TEXT so an LLM client can act.
         let target_list = ranked_candidates
@@ -1245,13 +1267,14 @@ impl McpServer {
             .collect::<Vec<_>>()
             .join(", ");
         let summary = format!(
-            "structural_health_worklist {} : {} target(s) ranked by ROI (ΔSHI÷blast-radius) — {} coverage, {} coupling, {} resilience, {} acyclicity. Fix the top first, then re-run structural_health_index — ΔSHI confirms (REQ-AXO-902187).\nRanked: {}",
+            "structural_health_worklist {} : {} target(s) ranked by ROI (ΔSHI÷blast-radius) — {} coverage, {} coupling, {} resilience, {} acyclicity (comptes sur TOUS les candidats, pas sur les seuls affiches). Fix the top first, then re-run structural_health_index — ΔSHI confirms (REQ-AXO-902187).\nRanked: {}",
             project,
-            ranked_candidates.len(),
-            count_of("coverage"),
-            count_of("coupling"),
-            count_of("resilience"),
-            count_of("acyclicity"),
+            // REQ-AXO-902409 — « N sur M » quand le `top` a mordu, « N » sinon.
+            compte_cibles.rendre(),
+            compte_de("coverage"),
+            compte_de("coupling"),
+            compte_de("resilience"),
+            compte_de("acyclicity"),
             if target_list.is_empty() { "—".to_string() } else { target_list }
         );
         Some(json!({

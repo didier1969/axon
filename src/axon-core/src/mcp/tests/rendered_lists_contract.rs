@@ -726,3 +726,378 @@ fn the_pre_flight_gate_states_what_it_does_not_check() {
         "nommer les limites ne suffit pas : la description doit dire qu'elle ne les COUVRE pas"
     );
 }
+
+/// REQ-AXO-902409 tranche 3 — un compteur ne dit pas ZERO quand il n'a rien mesure.
+///
+/// Invariant KKI (doleance #204, `blocking`), adopte par ce noeud parce qu'il est
+/// plus general que le notre : **aucun outil ne rend une valeur numerique ou
+/// nommee pour une grandeur qu'il n'a pas calculee. L'etat « non calcule » est un
+/// etat de premier rang, distinct de zero et distinct de vide.**
+///
+/// `anomalies` le violait sur ONZE compteurs a la fois, et la falsification tient
+/// en un appel. `ram_view` vaut `None` des que `project == "*"` (ou que
+/// l'instantane IST est froid), et chaque collecte fait
+/// `.and_then(...).unwrap_or_default()` : l'`Option` PORTE l'information « pas
+/// calcule », et `unwrap_or_default()` la detruit. Mesure du 2026-08-25 sur
+/// `anomalies project="*"` :
+///
+/// ```text
+/// Wrappers: 0 · Feature envy: 0 · Detours: 0 · Abstraction detours: 0
+/// Orphan code: 0 · Orphan intent: 0 · Heuristic intent gaps: 8
+/// Phantom dead refs: 0 · Phantom multi-declare: 0 · Cycles: 0 · God objects: 0
+/// ```
+///
+/// **Dix zeros fabriques et un vrai chiffre (8, qui vient d'une autre surface),
+/// visuellement IDENTIQUES.** Un lecteur conclut « aucune anomalie » — sur un
+/// outil de la table de routage du CLAUDE.md.
+///
+/// ## Pourquoi la liste d'etiquettes est ecrite ici
+///
+/// Elle n'est pas « tenue a la main » au sens que ce noeud reproche : ce sont
+/// EXACTEMENT les grandeurs qui passent par `ram_view` dans
+/// `tools_framework_anomalies.rs`, donc exactement celles que `project="*"` rend
+/// incalculables. Les autres lignes du bloc (`Heuristic intent gaps`, et selon la
+/// portee `Cycles` / `Orphan intent`) viennent d'autres surfaces et restent des
+/// nombres legitimes — une garde qui exigerait « non calcule » PARTOUT serait
+/// fausse, et c'est le faux positif qui pousse a desaffuter la regle (voir les
+/// deux formulations refutees plus haut dans ce module).
+#[test]
+fn a_counter_never_says_zero_for_a_quantity_it_did_not_compute() {
+    let _guard = env_lock();
+    let _sg_guard = crate::service_guard::lock_for_tests();
+    let server = create_test_server();
+
+    // `project="*"` force `ram_view = None` dans tools_framework_anomalies.rs :
+    // c'est le chemin « je ne peux rien calculer », et il est DETERMINISTE —
+    // contrairement a « instantane froid », qui depend de ce qui a tourne avant.
+    let Some(result) = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({ "name": "anomalies", "arguments": json!({ "project": "*" }) })),
+            id: Some(json!(902_409)),
+        })
+        .and_then(|response| response.result)
+    else {
+        panic!("anomalies n'a rendu aucun resultat — la garde ne peut rien mesurer");
+    };
+
+    let texte = result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    // Les grandeurs derivees de l'instantane IST — celles qui passent par
+    // `ram_view` et que `project="*"` rend incalculables.
+    const DERIVEES_DU_SNAPSHOT: &[&str] = &[
+        "Wrappers",
+        "Feature envy",
+        "Detours",
+        "Abstraction detours",
+        "Orphan code",
+        "God objects",
+    ];
+
+    let mut fabriques: Vec<String> = Vec::new();
+    let mut manquantes: Vec<String> = Vec::new();
+    let mut annoncees_non_calculees = 0usize;
+    for etiquette in DERIVEES_DU_SNAPSHOT {
+        let motif = format!("**{etiquette}:** ");
+        // L'etiquette DOIT rester presente. Sans cette exigence, la garde serait
+        // satisfaite par un rendu qui SUPPRIME la ligne — « pas de zero fabrique »
+        // parce que plus rien n'est publie. Taire une grandeur non calculee est le
+        // meme defaut que d'en fabriquer la valeur : le lecteur ne sait toujours pas
+        // qu'elle existe et qu'elle n'a pas ete mesuree.
+        let Some(debut) = texte.find(&motif) else {
+            manquantes.push((*etiquette).to_string());
+            continue;
+        };
+        let reste = &texte[debut + motif.len()..];
+        let valeur = reste.lines().next().unwrap_or_default().trim();
+        // Un ENTIER NU est le defaut : il se lit comme une mesure alors que rien
+        // n'a ete mesure. Toute forme qui dit son ignorance passe.
+        if valeur.parse::<u64>().is_ok() {
+            fabriques.push(format!("{etiquette} = {valeur}"));
+        } else if valeur.contains("non calculé") {
+            annoncees_non_calculees += 1;
+        }
+    }
+
+    assert!(
+        manquantes.is_empty(),
+        "{} grandeur(s) ont DISPARU du rendu au lieu de se declarer non calculees :\n  {}\n\
+         Taire une grandeur non mesuree n'est pas mieux que d'en fabriquer la valeur — \
+         le lecteur ignore alors jusqu'a son existence.",
+        manquantes.len(),
+        manquantes.join("\n  ")
+    );
+
+    assert!(
+        fabriques.is_empty(),
+        "sur une portee ou RIEN ne peut etre calcule (`project=\"*\"` ⇒ ram_view=None), \
+         {} compteur(s) rendent quand meme un nombre :\n  {}\n\
+         Ces nombres ne sont pas des mesures : `unwrap_or_default()` a remplace un \
+         `None` — « je n'ai pas calcule » — par un vec vide, donc par 0. Le lecteur \
+         ne peut pas distinguer « aucune anomalie » de « aucune recherche ». \
+         Invariant KKI #204 : l'etat « non calcule » est de PREMIER RANG, distinct \
+         de zero et de vide. L'information existe deja dans le code — c'est un \
+         `Option` — il suffit de ne pas la detruire.",
+        fabriques.len(),
+        fabriques.join("\n  ")
+    );
+
+    // Controle POSITIF : la garde ci-dessus rougit sur un nombre. Celle-ci exige
+    // que le remplacement soit bien la declaration d'ignorance attendue, et non
+    // une chaine quelconque (« - », « ? », « n/a ») qui passerait le parse sans
+    // rien dire au lecteur.
+    assert_eq!(
+        annoncees_non_calculees,
+        DERIVEES_DU_SNAPSHOT.len(),
+        "{} grandeur(s) sur {} se declarent explicitement « non calculé » ; \
+         les autres rendent autre chose qu'un nombre SANS dire pourquoi. \
+         Un tiret ou un point d'interrogation n'est pas une declaration d'ignorance.",
+        annoncees_non_calculees,
+        DERIVEES_DU_SNAPSHOT.len()
+    );
+}
+
+/// REQ-AXO-902409 tranche 3 — un compte issu d'une recherche BORNEE se declare
+/// comme un plancher.
+///
+/// `structural_health_worklist` publiait quatre comptes par categorie comme s'ils
+/// etaient des totaux. Deux defauts empiles, tous deux mesures le 2026-08-25 :
+///
+/// 1. `count_of` filtrait `ranked_candidates`, la liste DEJA tronquee a `top` —
+///    « 0 coverage » signifiait « aucun dans les 15 premiers au sens du ROI », et
+///    se lisait « aucun probleme de couverture ».
+/// 2. Plus profond : `scan_cap = top * 3` fait dependre la PROFONDEUR DE RECHERCHE
+///    du parametre d'AFFICHAGE. Mesure : `coupling` = 4 a `top=200`, 3 a `top=1`.
+///    Compter sur tous les candidats ne suffit donc pas — **aucun de ces nombres
+///    n'est un inventaire**.
+///
+/// ## Ce que cette garde peut et ne peut PAS exiger
+///
+/// Elle ne peut pas exiger la STABILITE des comptes entre deux bornes : leur
+/// variation est legitime, c'est la consequence assumee d'un scan borne. La
+/// premiere version de cette garde l'exigeait et rougissait pour la bonne raison
+/// mais avec le mauvais remede — elle aurait pousse a decoupler `scan_cap` de
+/// `top`, donc a payer un cout de calcul, la ou le defaut est de MENTIR sur la
+/// nature du chiffre.
+///
+/// Ce qu'elle exige : **un compte qui a sature sa borne de recherche porte `≥`**,
+/// et un compte qui ne l'a pas saturee n'en porte PAS (le faux positif qui pousse
+/// a desaffuter la regle — voir les deux formulations mortes plus haut).
+#[test]
+fn a_count_from_a_bounded_search_declares_itself_a_floor() {
+    let _guard = env_lock();
+    let _sg_guard = crate::service_guard::lock_for_tests();
+    let server = create_test_server();
+    seed_listable_content(&server);
+
+    let appeler = |top: i64| -> Option<String> {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "structural_health_worklist",
+                    "arguments": json!({ "project_code": "RLC", "top": top })
+                })),
+                id: Some(json!(902_409)),
+            })
+            .and_then(|response| response.result)
+            .and_then(|r| {
+                r.get("content")?
+                    .get(0)?
+                    .get("text")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+    };
+
+    // `top=1` ⇒ `scan_cap = 3`. Toute categorie qui atteint 3 a sature sa borne.
+    let Some(etroit) = appeler(1) else {
+        eprintln!(
+            "[REQ-AXO-902409] garde NON CONCLUANTE : `structural_health_worklist` n'a rendu \
+             aucun texte sur le fixture (instantane IST probablement froid). Rien n'est \
+             prouve — ni dans un sens ni dans l'autre."
+        );
+        return;
+    };
+
+    // Extrait « <nombre> <categorie> » ou « ≥ <nombre> (...) <categorie> ».
+    let lire = |texte: &str, cat: &str| -> Option<(usize, bool)> {
+        let pos = texte.find(&format!(" {cat}"))?;
+        let avant = texte[..pos].trim_end();
+        // Un plancher est rendu « ≥ N (raison) » : le nombre precede la parenthese.
+        let plancher = avant.contains('≥') && avant.ends_with(')');
+        // Le nombre est le DERNIER groupe de chiffres avant la categorie — que la
+        // forme soit « 3 coupling » ou « ≥ 3 (raison) coupling ». Prendre le
+        // dernier groupe marche pour les deux sans deux chemins d'extraction : un
+        // extracteur qui se ramifie sur la forme qu'il attend rate celle qu'il
+        // n'attendait pas, et rend alors « rien lu » — indiscernable de « rien a
+        // lire ». C'est ce qui vient d'arriver a la premiere version.
+        let zone = if plancher {
+            &avant[..avant.rfind('(')?]
+        } else {
+            avant
+        };
+        let nombre: String = zone
+            .chars()
+            .rev()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        nombre.parse::<usize>().ok().map(|n| (n, plancher))
+    };
+
+    const SCAN_CAP_A_TOP_1: usize = 3; // scan_cap = top * 3
+    let mut manquent_le_plancher: Vec<String> = Vec::new();
+    let mut decores_a_tort: Vec<String> = Vec::new();
+    let mut lues = 0usize;
+    // Anti-vacuite : si AUCUNE categorie n'atteint la borne, cette garde ne mesure
+    // rien et son vert ne veut rien dire. Le noeud le dit ailleurs : « un balayage
+    // qui n'exerce plus rien passerait au vert en ne mesurant rien ». Falsifie le
+    // 2026-08-25 : en retirant le plancher, `coupling = 3` rougit — la garde MORD.
+    let mut saturees = 0usize;
+
+    for cat in ["coverage", "coupling", "resilience", "acyclicity"] {
+        let Some((n, plancher)) = lire(&etroit, cat) else {
+            continue;
+        };
+        lues += 1;
+        if n >= SCAN_CAP_A_TOP_1 {
+            saturees += 1;
+            if !plancher {
+                manquent_le_plancher.push(format!("{cat} = {n}"));
+            }
+        }
+        if n < SCAN_CAP_A_TOP_1 && plancher {
+            decores_a_tort.push(format!("{cat} = {n}"));
+        }
+    }
+
+    if lues == 0 {
+        eprintln!(
+            "[REQ-AXO-902409] garde NON CONCLUANTE : aucun compte par categorie lisible \
+             dans le resume — la forme du texte a change, la garde doit etre reecrite \
+             avant d'etre crue. Resume recu : {etroit}"
+        );
+        return;
+    }
+
+    assert!(
+        manquent_le_plancher.is_empty(),
+        "avec `top=1` la recherche est bornee a {SCAN_CAP_A_TOP_1} candidat(s) par \
+         categorie ; {} compteur(s) l'ont ATTEINTE et se rendent quand meme comme un \
+         total :\n  {}\n\
+         Un compte qui a sature sa borne de recherche est un PLANCHER : le vrai total \
+         est inconnu. Le publier comme un inventaire, c'est le defaut que ce noeud \
+         corrige — `scan_cap = top * 3` fait dependre la profondeur de recherche du \
+         parametre d'affichage (REQ-AXO-902409).",
+        manquent_le_plancher.len(),
+        manquent_le_plancher.join("\n  ")
+    );
+
+    assert!(
+        saturees > 0,
+        "AUCUNE des {lues} categorie(s) lues n'atteint la borne de recherche \
+         ({SCAN_CAP_A_TOP_1} a `top=1`) : cette garde n'a donc rien mesure, et son vert \
+         ne prouve rien. Le fixture a change — enrichir `seed_listable_content` jusqu'a \
+         ce qu'au moins une categorie sature, sinon retirer la garde plutot que de la \
+         laisser rassurer a vide."
+    );
+
+    assert!(
+        decores_a_tort.is_empty(),
+        "{} compteur(s) portent « ≥ » alors qu'ils sont SOUS la borne de recherche, \
+         donc complets :\n  {}\n\
+         Decorer un compte juste envoie le lecteur chercher une troncature qui n'existe \
+         pas — et c'est ce genre de faux positif qui fait desaffuter une regle (deux \
+         formulations de ce noeud sont deja mortes ainsi).",
+        decores_a_tort.len(),
+        decores_a_tort.join("\n  ")
+    );
+}
+
+/// REQ-AXO-902409 tranche 3 — un zero fabrique ne traverse pas DEUX outils.
+///
+/// Doleance DVM #255 (2026-08-25, `token_cost`/`bug`, avec preuve independante) :
+/// `project_status(project_code="DVM")` rendait « **Wrappers / Orphan code /
+/// Orphan intent:** 0 / 0 / 0 », « **Degradation notes:** none »,
+/// « **Confidence:** high » — pendant que `health` sur le MEME scope, a la minute
+/// pres, rendait « eligible (would be indexed): **192** · indexed: **0** ». Le
+/// projet n'etait pas sain : il n'etait pas indexe.
+///
+/// Le zero naissait dans `anomalies` (`unwrap_or_default()` sur un `ram_view`
+/// absent), puis `project_status` le relisait avec `.unwrap_or(0)` — un zero
+/// fabrique traversant DEUX outils et arrivant au lecteur comme un verdict.
+/// Le rapporteur le formule mieux que nous : « ce n'est pas du cout de jetons,
+/// c'est de la soundness. Un LLM qui ouvre sa session par `project_status` en
+/// repart avec "projet structurellement sain" et le dira a l'operateur. »
+///
+/// Corrige des DEUX cotes, parce qu'un seul n'aurait pas suffi : `anomalies`
+/// publie `null` (et non 0) pour une grandeur non mesuree, et `project_status`
+/// RELAIE cet etat au lieu de le convertir.
+#[test]
+fn a_fabricated_zero_does_not_travel_through_a_second_tool() {
+    let _guard = env_lock();
+    let _sg_guard = crate::service_guard::lock_for_tests();
+    let server = create_test_server();
+
+    // Un code de projet ENREGISTRE mais sans corpus indexe : la situation de DVM.
+    // `PJB` est seme au registre par `seed_test_project_codes` sans corpus.
+    let Some(result) = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_status",
+                "arguments": json!({ "project_code": "PJB", "mode": "brief" })
+            })),
+            id: Some(json!(902_409)),
+        })
+        .and_then(|response| response.result)
+    else {
+        eprintln!(
+            "[REQ-AXO-902409] garde NON CONCLUANTE : `project_status` n'a rendu aucun \
+             resultat sur `PJB`. Rien n'est prouve."
+        );
+        return;
+    };
+
+    let texte = result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let Some(pos) = texte.find("**Wrappers / Orphan code / Orphan intent:**") else {
+        eprintln!(
+            "[REQ-AXO-902409] garde NON CONCLUANTE : la ligne de metriques a change de \
+             forme — reecrire la garde avant de la croire."
+        );
+        return;
+    };
+    let ligne = texte[pos..].lines().next().unwrap_or_default().to_string();
+
+    // Sur un projet sans corpus indexe, ces grandeurs derivees du CODE ne peuvent
+    // pas etre mesurees. Elles doivent le DIRE.
+    assert!(
+        ligne.contains("non calculé"),
+        "sur un projet enregistre mais sans corpus indexe, les metriques derivees du \
+         CODE rendent :\n  {ligne}\n\
+         Un nombre y est indistinguable d'un projet sain, alors que rien n'a ete \
+         mesure. C'est le trajet complet du defaut : le zero nait dans `anomalies` \
+         (ram_view absent) et `project_status` le relaie. Doleance DVM #255, \
+         REQ-AXO-902409."
+    );
+}

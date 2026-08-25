@@ -91,7 +91,14 @@ fn project_matches(graph: &IstGraph, idx: u32, project: &str) -> bool {
 /// REQ-AXO-901595 — RAM equivalent of `GraphStore::get_wrapper_candidates`.
 /// A wrapper is a non-public function/method with exactly one outgoing CALLS
 /// edge ; result format mirrors the PG path : `"source_name -> target_name"`.
-pub fn wrapper_candidates(graph: &IstGraph, project: &str, limit: usize) -> Vec<String> {
+/// REQ-AXO-902409 — rend AUSSI le total avant troncature.
+///
+/// Le total etait calcule puis jete par `.take(limit)`, et l'appelant publiait
+/// `vec.len()` comme s'il s'agissait du nombre d'anomalies. `anomalies` affichait
+/// donc « Wrappers: 20 » pour un plafond de 20 : « au moins 20 » se lisait
+/// « exactement 20 ». Le total est disponible GRATUITEMENT (la collecte est
+/// complete avant le tri), donc le divulguer ne coute aucun parcours.
+pub fn wrapper_candidates(graph: &IstGraph, project: &str, limit: usize) -> (Vec<String>, usize) {
     let file_map = build_file_path_map(graph);
     let mut scored: Vec<(usize, String, String)> = Vec::new();
 
@@ -136,17 +143,30 @@ pub fn wrapper_candidates(graph: &IstGraph, project: &str, limit: usize) -> Vec<
     }
 
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    scored
+    let total = scored.len();
+    let rendus = scored
         .into_iter()
         .take(limit.max(1).min(ANALYTICS_LIMIT))
         .map(|(_, src, tgt)| format!("{} -> {}", src, tgt))
-        .collect()
+        .collect();
+    (rendus, total)
 }
 
 /// REQ-AXO-901595 — RAM equivalent of `GraphStore::get_feature_envy_candidates`.
 /// Returns entries formatted as `"source -> dominant_foreign_path (foreign/total)"`
 /// matching the PG output shape.
-pub fn feature_envy_candidates(graph: &IstGraph, project: &str, limit: usize) -> Vec<String> {
+/// REQ-AXO-902409 — rend AUSSI le total avant troncature.
+///
+/// Le total etait calcule puis jete par `.take(limit)`, et l'appelant publiait
+/// `vec.len()` comme s'il s'agissait du nombre d'anomalies. `anomalies` affichait
+/// donc « Wrappers: 20 » pour un plafond de 20 : « au moins 20 » se lisait
+/// « exactement 20 ». Le total est disponible GRATUITEMENT (la collecte est
+/// complete avant le tri), donc le divulguer ne coute aucun parcours.
+pub fn feature_envy_candidates(
+    graph: &IstGraph,
+    project: &str,
+    limit: usize,
+) -> (Vec<String>, usize) {
     let file_map = build_file_path_map(graph);
     let mut scored: Vec<(usize, usize, String, String)> = Vec::new();
 
@@ -203,11 +223,13 @@ pub fn feature_envy_candidates(graph: &IstGraph, project: &str, limit: usize) ->
             .then_with(|| b.1.cmp(&a.1))
             .then_with(|| a.2.cmp(&b.2))
     });
-    scored
+    let total_trouve = scored.len();
+    let rendus = scored
         .into_iter()
         .take(limit.max(1).min(ANALYTICS_LIMIT))
         .map(|(foreign, total, name, path)| format!("{} -> {} ({}/{})", name, path, foreign, total))
-        .collect()
+        .collect();
+    (rendus, total_trouve)
 }
 
 /// REQ-AXO-901595 / REQ-AXO-901924 — RAM equivalent of
@@ -266,7 +288,14 @@ pub fn god_objects(graph: &IstGraph, project: &str) -> Vec<(String, usize)> {
 /// soll.Traceability link ; that filter requires SOLL state outside the
 /// IstGraph and is left to the caller (this method is therefore a
 /// strict superset of the PG candidate set).
-pub fn orphan_code_symbols(graph: &IstGraph, project: &str, limit: usize) -> Vec<String> {
+/// REQ-AXO-902409 — rend AUSSI le total avant troncature.
+///
+/// Le total etait calcule puis jete par `.take(limit)`, et l'appelant publiait
+/// `vec.len()` comme s'il s'agissait du nombre d'anomalies. `anomalies` affichait
+/// donc « Wrappers: 20 » pour un plafond de 20 : « au moins 20 » se lisait
+/// « exactement 20 ». Le total est disponible GRATUITEMENT (la collecte est
+/// complete avant le tri), donc le divulguer ne coute aucun parcours.
+pub fn orphan_code_symbols(graph: &IstGraph, project: &str, limit: usize) -> (Vec<String>, usize) {
     let file_map = build_file_path_map(graph);
     let mut names: Vec<String> = Vec::new();
 
@@ -305,8 +334,9 @@ pub fn orphan_code_symbols(graph: &IstGraph, project: &str, limit: usize) -> Vec
 
     names.sort();
     names.dedup();
+    let total = names.len();
     names.truncate(limit.max(1).min(ANALYTICS_LIMIT));
-    names
+    (names, total)
 }
 
 /// REQ-AXO-901596 — RAM lexical match over symbol names. Implements the
@@ -754,7 +784,14 @@ pub fn telemetry_log_call_count(graph: &IstGraph, project: &str) -> usize {
 
 /// REQ-AXO-901970 — RAM detour candidates: `src -> mid -> dst`, all same file,
 /// `mid` private with EXACTLY one inbound + one outbound CALLS, `src != dst`.
-pub fn detour_candidates(graph: &IstGraph, project: &str, limit: usize) -> Vec<String> {
+/// REQ-AXO-902409 — rend AUSSI le total avant troncature.
+///
+/// Le total etait calcule puis jete par `.take(limit)`, et l'appelant publiait
+/// `vec.len()` comme s'il s'agissait du nombre d'anomalies. `anomalies` affichait
+/// donc « Wrappers: 20 » pour un plafond de 20 : « au moins 20 » se lisait
+/// « exactement 20 ». Le total est disponible GRATUITEMENT (la collecte est
+/// complete avant le tri), donc le divulguer ne coute aucun parcours.
+pub fn detour_candidates(graph: &IstGraph, project: &str, limit: usize) -> (Vec<String>, usize) {
     let file_map = build_file_path_map(graph);
     let mut out: Vec<(String, String, String)> = Vec::new();
     for mid in 0..(graph.node_count() as u32) {
@@ -797,15 +834,29 @@ pub fn detour_candidates(graph: &IstGraph, project: &str, limit: usize) -> Vec<S
         ));
     }
     out.sort();
-    out.into_iter()
+    let total = out.len();
+    let rendus = out
+        .into_iter()
         .take(limit.max(1).min(ANALYTICS_LIMIT))
         .map(|(s, m, d)| format!("{} -> {} -> {}", s, m, d))
-        .collect()
+        .collect();
+    (rendus, total)
 }
 
 /// REQ-AXO-901970 — RAM abstraction-detour: an interface with EXACTLY one
 /// same-file impl (class/struct/module) named `<iface>impl|_impl|…adapter…`.
-pub fn abstraction_detour_candidates(graph: &IstGraph, project: &str, limit: usize) -> Vec<String> {
+/// REQ-AXO-902409 — rend AUSSI le total avant troncature.
+///
+/// Le total etait calcule puis jete par `.take(limit)`, et l'appelant publiait
+/// `vec.len()` comme s'il s'agissait du nombre d'anomalies. `anomalies` affichait
+/// donc « Wrappers: 20 » pour un plafond de 20 : « au moins 20 » se lisait
+/// « exactement 20 ». Le total est disponible GRATUITEMENT (la collecte est
+/// complete avant le tri), donc le divulguer ne coute aucun parcours.
+pub fn abstraction_detour_candidates(
+    graph: &IstGraph,
+    project: &str,
+    limit: usize,
+) -> (Vec<String>, usize) {
     let file_map = build_file_path_map(graph);
     let is_impl_kind = |k: u8| {
         matches!(
@@ -860,10 +911,13 @@ pub fn abstraction_detour_candidates(graph: &IstGraph, project: &str, limit: usi
         }
     }
     out.sort();
-    out.into_iter()
+    let total = out.len();
+    let rendus = out
+        .into_iter()
         .take(limit.max(1).min(ANALYTICS_LIMIT))
         .map(|(i, m)| format!("{} -> {}", i, m))
-        .collect()
+        .collect();
+    (rendus, total)
 }
 
 /// REQ-AXO-901970 — RAM domain leakage: CALLS from a `domain` file into an
@@ -1776,8 +1830,11 @@ mod tests {
             ),
         ];
         let g = IstGraph::build(nodes, edges);
-        let wrappers = wrapper_candidates(&g, "AXO", 5);
+        // REQ-AXO-902409 — la fonction rend aussi son TOTAL avant troncature ;
+        // l'assertion le vérifie, sinon le total pourrait mentir sans rougir.
+        let (wrappers, total) = wrapper_candidates(&g, "AXO", 5);
         assert_eq!(wrappers, vec!["wrap -> real".to_string()]);
+        assert_eq!(total, 1, "un seul candidat trouvé, donc total = 1");
     }
 
     #[test]
@@ -1805,7 +1862,7 @@ mod tests {
             ),
         ];
         let g = IstGraph::build(nodes, edges);
-        assert!(wrapper_candidates(&g, "AXO", 5).is_empty());
+        assert!(wrapper_candidates(&g, "AXO", 5).0.is_empty());
     }
 
     #[test]
@@ -1833,7 +1890,7 @@ mod tests {
             ),
         ];
         let g = IstGraph::build(nodes, edges);
-        assert!(wrapper_candidates(&g, "AXO", 5).is_empty());
+        assert!(wrapper_candidates(&g, "AXO", 5).0.is_empty());
     }
 
     #[test]
@@ -1872,7 +1929,7 @@ mod tests {
             ),
         ];
         let g = IstGraph::build(nodes, edges);
-        assert!(wrapper_candidates(&g, "AXO", 5).is_empty());
+        assert!(wrapper_candidates(&g, "AXO", 5).0.is_empty());
     }
 
     #[test]
@@ -2007,7 +2064,7 @@ mod tests {
             ),
         ];
         let g = IstGraph::build(nodes, edges);
-        let envy = feature_envy_candidates(&g, "AXO", 5);
+        let (envy, _total_envy) = feature_envy_candidates(&g, "AXO", 5);
         assert_eq!(envy.len(), 1);
         assert!(envy[0].starts_with("source -> AXO::src/b.rs"));
         assert!(envy[0].ends_with("(2/3)"));
@@ -2050,7 +2107,7 @@ mod tests {
             ),
         ];
         let g = IstGraph::build(nodes, edges);
-        let orphans = orphan_code_symbols(&g, "AXO", 10);
+        let (orphans, total_orphans) = orphan_code_symbols(&g, "AXO", 10);
         // orphan_one calls something but has zero callers itself → orphan
         // orphan_two has zero callers → orphan
         // called has a caller → not orphan
@@ -2059,6 +2116,7 @@ mod tests {
             orphans,
             vec!["orphan_one".to_string(), "orphan_two".to_string()]
         );
+        assert_eq!(total_orphans, 2, "deux orphelins trouvés, donc total = 2");
     }
 
     #[test]
@@ -2308,7 +2366,10 @@ mod tests {
             edge("src/m.rs::mid", "src/m.rs::dst", RelationType::Calls),
         ];
         let g = IstGraph::build(nodes, edges);
-        assert_eq!(detour_candidates(&g, "AXO", 10), vec!["src -> mid -> dst".to_string()]);
+        assert_eq!(
+            detour_candidates(&g, "AXO", 10),
+            (vec!["src -> mid -> dst".to_string()], 1)
+        );
     }
 
     #[test]
@@ -2325,7 +2386,7 @@ mod tests {
         let g = IstGraph::build(nodes, edges);
         assert_eq!(
             abstraction_detour_candidates(&g, "AXO", 10),
-            vec!["Service -> ServiceImpl".to_string()]
+            (vec!["Service -> ServiceImpl".to_string()], 1)
         );
     }
 

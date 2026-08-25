@@ -180,16 +180,22 @@ impl IstGraphView {
     }
 
     /// REQ-AXO-901970 — RAM anomalies/audit sub-checks. `None` ⇒ cold cache.
-    pub fn detour_candidates(&self, project: &str, limit: usize) -> Option<Vec<String>> {
+    /// REQ-AXO-902409 — rend `(elements rendus, total avant troncature)`.
+    /// `None` reste « instantane froid » : un appelant ne doit PAS pouvoir
+    /// confondre « rien trouve » avec « rien cherche ».
+    pub fn detour_candidates(&self, project: &str, limit: usize) -> Option<(Vec<String>, usize)> {
         let snap = self.try_snapshot(project)?;
         Some(code_smells::detour_candidates(&snap, project, limit))
     }
 
+    /// REQ-AXO-902409 — rend `(elements rendus, total avant troncature)`.
+    /// `None` reste « instantane froid » : un appelant ne doit PAS pouvoir
+    /// confondre « rien trouve » avec « rien cherche ».
     pub fn abstraction_detour_candidates(
         &self,
         project: &str,
         limit: usize,
-    ) -> Option<Vec<String>> {
+    ) -> Option<(Vec<String>, usize)> {
         let snap = self.try_snapshot(project)?;
         Some(code_smells::abstraction_detour_candidates(
             &snap, project, limit,
@@ -254,7 +260,10 @@ impl IstGraphView {
     /// REQ-AXO-901595 — RAM wrapper candidates. `None` ⇒ caller falls back
     /// to `GraphStore::get_wrapper_candidates`. Result format mirrors the
     /// PG path : `"source_name -> target_name"`.
-    pub fn wrapper_candidates(&self, project: &str, limit: usize) -> Option<Vec<String>> {
+    /// REQ-AXO-902409 — rend `(elements rendus, total avant troncature)`.
+    /// `None` reste « instantane froid » : un appelant ne doit PAS pouvoir
+    /// confondre « rien trouve » avec « rien cherche ».
+    pub fn wrapper_candidates(&self, project: &str, limit: usize) -> Option<(Vec<String>, usize)> {
         let snap = self.try_snapshot(project)?;
         Some(code_smells::wrapper_candidates(&snap, project, limit))
     }
@@ -262,7 +271,10 @@ impl IstGraphView {
     /// REQ-AXO-901595 — RAM feature-envy candidates. `None` ⇒ caller falls
     /// back to `GraphStore::get_feature_envy_candidates`. Result format
     /// mirrors the PG path : `"source -> dominant_foreign_path (foreign/total)"`.
-    pub fn feature_envy_candidates(&self, project: &str, limit: usize) -> Option<Vec<String>> {
+    /// REQ-AXO-902409 — rend `(elements rendus, total avant troncature)`.
+    /// `None` reste « instantane froid » : un appelant ne doit PAS pouvoir
+    /// confondre « rien trouve » avec « rien cherche ».
+    pub fn feature_envy_candidates(&self, project: &str, limit: usize) -> Option<(Vec<String>, usize)> {
         let snap = self.try_snapshot(project)?;
         Some(code_smells::feature_envy_candidates(&snap, project, limit))
     }
@@ -316,7 +328,10 @@ impl IstGraphView {
     /// link — that filter requires SOLL state outside the IstGraph, so
     /// callers requiring the canonical orphan_code set must keep the PG
     /// path.
-    pub fn orphan_code_symbols(&self, project: &str, limit: usize) -> Option<Vec<String>> {
+    /// REQ-AXO-902409 — rend `(elements rendus, total avant troncature)`.
+    /// `None` reste « instantane froid » : un appelant ne doit PAS pouvoir
+    /// confondre « rien trouve » avec « rien cherche ».
+    pub fn orphan_code_symbols(&self, project: &str, limit: usize) -> Option<(Vec<String>, usize)> {
         let snap = self.try_snapshot(project)?;
         Some(code_smells::orphan_code_symbols(&snap, project, limit))
     }
