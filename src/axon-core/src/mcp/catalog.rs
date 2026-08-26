@@ -752,6 +752,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "project_registry_remove",
+                "description": "[SYSTEM/SOLL] REQ-AXO-902369 — RETIRE un projet du registre. Le pendant manquant d'`axon_init_project` : on pouvait enregistrer un projet, jamais le désenregistrer — `ELE` a survécu SIX JOURS à une demande de suppression explicite, et un tenant a dû câbler une table de correspondance pour contourner un code qui n'aurait plus dû exister. Trois gardes qui REFUSENT par défaut : (1) le projet porte des REQ/DEC/MIL/CPT/GUI réelles ⇒ refus, reporter l'intention d'abord (une Vision/Pillar auto-seedée ne compte pas) ; (2) des fichiers lui appartiennent qu'un projet plus spécifique n'a pas encore repris ⇒ refus, réindexer d'abord ; (3) sans `confirm=true`, rend une SIMULATION disant exactement ce qui serait effacé. Les messages ENVOYÉS par le projet sont toujours conservés — ils vivent dans la boîte du destinataire. Voir CPT-PRO-101 (territoires) et REQ-AXO-902507 (le refus symétrique à la création).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code canonique du projet à retirer (ex. \"PRP\")." },
+                        "confirm": { "type": "boolean", "description": "false/absent (DÉFAUT) = simulation : rend ce qui serait effacé sans rien toucher. true = exécute. Le retrait du registre est irréversible ; l'IST se régénère, pas l'entrée." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
                 "name": "soll_id_registry",
                 "description": "[SOLL] Returns the per-type `soll.Registry` allocation counters and the NEXT canonical id each `soll_manager(create)` would assign, so an id can be referenced in a doc/memo before it is allocated (REQ-AXO-901618). `next_id` is a lower bound (allocate_node_id gap-skips).",
                 "inputSchema": {

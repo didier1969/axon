@@ -820,6 +820,170 @@ impl McpServer {
     /// allocation still goes through `soll.allocate_node_id`, which gap-skips —
     /// `next_id` is therefore the lower bound the next create will land on or
     /// after, never below).
+    /// REQ-AXO-902369 / REQ-AXO-902507 — RETIRER un projet du registre.
+    ///
+    /// On pouvait entrer, jamais sortir. `VIS-ELE-001` l'écrivait noir sur blanc : *« La
+    /// ligne de `soll.ProjectCodeRegistry` n'a pas pu être retirée : aucun outil MCP ne le
+    /// permet. »* Résultat : `ELE` a survécu **six jours** à une demande de suppression
+    /// explicite de l'opérateur, et un tenant (VPC) a dû câbler une table de correspondance
+    /// `ELE → FSF` pour contourner un code qui n'aurait plus dû exister.
+    ///
+    /// Un registre où l'on peut entrer sans pouvoir sortir accumule les fantômes — quatre à
+    /// ce jour, qui détenaient 90 % des fichiers du parc.
+    ///
+    /// Trois gardes, dans cet ordre. Elles refusent par défaut ; c'est l'inverse d'une
+    /// suppression qui demanderait confirmation après coup.
+    pub(crate) fn axon_project_registry_remove(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let code = args
+            .get("project_code")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_ascii_uppercase());
+        let Some(code) = code else {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text":
+                    "`project_registry_remove` attend `project_code`." }],
+                "isError": true,
+                "data": { "status": "input_invalid",
+                          "parameter_repair": { "invalid_field": "project_code",
+                                                "follow_up_tools": ["project_registry_lookup"] } }
+            }));
+        };
+        let esc = code.replace('\'', "''");
+        let compte = |sql: &str| -> i64 {
+            self.graph_store
+                .query_json(sql)
+                .ok()
+                .and_then(|r| serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&r).ok())
+                .and_then(|rows| rows.into_iter().next())
+                .and_then(|row| row.into_iter().next())
+                .and_then(|c| c.as_i64().or_else(|| c.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(-1)
+        };
+        let refus = |raison: String, remede: &str| -> Option<serde_json::Value> {
+            Some(serde_json::json!({
+                "content": [{ "type": "text", "text": raison }],
+                "isError": true,
+                "data": { "status": "refused", "project_code": code,
+                          "next_action": { "kind": "operator_decision", "detail": remede } }
+            }))
+        };
+
+        let chemin: String = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT project_path FROM soll.ProjectCodeRegistry WHERE project_code = '{esc}'"
+            ))
+            .ok()
+            .and_then(|r| serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&r).ok())
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|row| row.into_iter().next())
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        if chemin.is_empty() {
+            return refus(
+                format!("`{code}` n'est pas dans le registre — rien à retirer."),
+                "vérifier le code via `project_registry_lookup`",
+            );
+        }
+
+        // GARDE 1 — de l'intention réelle : ce n'est pas une coquille.
+        // Vision/Pillar auto-seedés ne comptent pas : `axon_init_project` les crée seul.
+        let fond = compte(&format!(
+            "SELECT count(*)::bigint FROM soll.Node WHERE project_code = '{esc}' \
+             AND type IN ('Requirement','Decision','Milestone','Concept','Guideline')"
+        ));
+        if fond > 0 {
+            return refus(
+                format!(
+                    "⛔ `{code}` porte {fond} nœud(s) SOLL de fond (REQ/DEC/MIL/CPT/GUI). \
+                     Ce n'est pas une coquille : quelqu'un y a écrit de l'intention.\n\n\
+                     Reporter cette intention vers un projet légitime AVANT tout retrait — \
+                     `soll_manager(action=append_section)` sur la Vision qui l'absorbe. \
+                     Effacer un nœud sans reporter ce qu'il dit, c'est perdre la seule chose \
+                     qui ne se régénère pas."
+                ),
+                "reporter l'intention, puis relancer",
+            );
+        }
+
+        // GARDE 2 — des fichiers qu'un autre projet n'a pas encore repris.
+        let a_reprendre = compte(&format!(
+            "SELECT count(*)::bigint FROM ist.IndexedFile f WHERE f.project_code = '{esc}' \
+             AND EXISTS (SELECT 1 FROM soll.ProjectCodeRegistry r \
+                          WHERE r.project_code <> '{esc}' AND r.project_path IS NOT NULL \
+                            AND starts_with(f.path, r.project_path || '/'))"
+        ));
+        if a_reprendre > 0 {
+            return refus(
+                format!(
+                    "⛔ {a_reprendre} fichier(s) de `{code}` appartiennent en réalité à un projet \
+                     plus spécifique qui ne les a pas encore repris.\n\n\
+                     Les retirer maintenant perdrait leur index. Réindexer d'abord les projets \
+                     concernés (`rescan_project full=true`) : l'attribution se corrige seule \
+                     depuis REQ-AXO-902506, et ce compte tombera à 0."
+                ),
+                "réindexer les projets qui doivent reprendre ces fichiers, puis relancer",
+            );
+        }
+
+        // GARDE 3 — confirmation explicite. Un retrait est irréversible côté registre.
+        if args.get("confirm").and_then(|v| v.as_bool()) != Some(true) {
+            let orphelins = compte(&format!(
+                "SELECT count(*)::bigint FROM ist.IndexedFile WHERE project_code = '{esc}'"
+            ));
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!(
+                    "✅ `{code}` ({chemin}) est retirable — les deux gardes passent.\n\n\
+                     Ce que le retrait effacera : {orphelins} fichier(s) indexés qu'AUCUN autre \
+                     projet ne réclame, plus les symboles/chunks associés et les coquilles SOLL \
+                     (Vision/Pillar auto-seedés). Les messages ENVOYÉS par `{code}` sont \
+                     conservés : ils vivent dans la boîte du destinataire.\n\n\
+                     Relancer avec `confirm=true` pour exécuter."
+                )}],
+                "data": { "status": "ok", "dry_run": true, "project_code": code,
+                          "project_path": chemin, "indexed_files_dropped": orphelins }
+            }));
+        }
+
+        let sql = format!(
+            "DELETE FROM ist.Edge WHERE project_code='{esc}'; \
+             DELETE FROM ist.ChunkEmbedding WHERE project_code='{esc}'; \
+             DELETE FROM ist.Chunk WHERE project_code='{esc}'; \
+             DELETE FROM ist.Symbol WHERE project_code='{esc}'; \
+             DELETE FROM ist.IndexedFile WHERE project_code='{esc}'; \
+             DELETE FROM axon.mailbox_message WHERE to_project='{esc}'; \
+             DELETE FROM axon.mailbox_cursor WHERE project_code='{esc}'; \
+             DELETE FROM soll.Edge WHERE source_id IN (SELECT id FROM soll.Node WHERE project_code='{esc}') \
+                                      OR target_id IN (SELECT id FROM soll.Node WHERE project_code='{esc}'); \
+             DELETE FROM soll.Node WHERE project_code='{esc}'; \
+             DELETE FROM soll.ProjectCodeRegistry WHERE project_code='{esc}';"
+        );
+        if let Err(e) = self.graph_store.execute(&sql) {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Retrait de `{code}` échoué : {e}") }],
+                "isError": true,
+                "data": { "status": "writer_failed", "diagnostic_excerpt": e.to_string() }
+            }));
+        }
+        let reste = compte(&format!(
+            "SELECT count(*)::bigint FROM soll.ProjectCodeRegistry WHERE project_code='{esc}'"
+        ));
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": format!(
+                "🗑️ `{code}` retiré du registre ({chemin}).\n\n\
+                 Entrées restantes portant ce code : {reste} (attendu 0). Les messages ENVOYÉS \
+                 par `{code}` sont conservés chez leurs destinataires."
+            )}],
+            "data": { "status": "ok", "project_code": code, "removed": true,
+                      "registry_rows_left": reste }
+        }))
+    }
+
     pub(crate) fn axon_soll_id_registry(
         &self,
         args: &serde_json::Value,

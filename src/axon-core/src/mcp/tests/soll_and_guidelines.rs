@@ -16175,3 +16175,158 @@ fn la_porte_compte_les_recouvrements_mais_pas_ceux_qui_sont_declares() {
          que l'opérateur veut garder : {apres}"
     );
 }
+
+/// REQ-AXO-902369 — le registre offre enfin une SORTIE, et elle refuse par défaut.
+///
+/// `VIS-ELE-001` l'écrivait : *« La ligne de `soll.ProjectCodeRegistry` n'a pas pu être
+/// retirée : aucun outil MCP ne le permet. »* `ELE` a donc survécu **six jours** à une
+/// demande de suppression explicite, et VPC a dû câbler une table `ELE → FSF` pour
+/// contourner un code qui n'aurait plus dû exister.
+///
+/// Ce test falsifie les TROIS gardes plus le chemin nominal. Une seule d'entre elles qui
+/// s'ouvrirait ferait de cet outil un moyen de perdre du travail.
+#[test]
+fn le_retrait_d_un_projet_refuse_par_defaut_et_dit_pourquoi() {
+    let server = create_test_server();
+    let appel = |args: serde_json::Value| -> serde_json::Value {
+        server
+            .execute_tool_direct("project_registry_remove", &args)
+            .expect("project_registry_remove répond")
+    };
+    let texte = |v: &serde_json::Value| -> String {
+        v.get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|e| e.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    // Code inconnu → refus net, pas un succès silencieux.
+    let inconnu = appel(serde_json::json!({ "project_code": "ZZZ" }));
+    assert_eq!(inconnu["isError"], serde_json::json!(true));
+    assert!(texte(&inconnu).contains("n'est pas dans le registre"));
+
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) \
+             VALUES ('GHO', '/tmp/ghost-territoire', 'ghost') \
+             ON CONFLICT (project_code) DO UPDATE SET project_path = EXCLUDED.project_path",
+        )
+        .unwrap();
+
+    // GARDE 1 — de l'intention réelle. C'est la plus importante : effacer un nœud sans
+    // reporter ce qu'il dit, c'est perdre la seule chose qui ne se régénère pas.
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, title, description, status, project_code) \
+             VALUES ('DEC-GHO-001','Decision','un vrai choix','corps','current','GHO')",
+        )
+        .unwrap();
+    let avec_fond = appel(serde_json::json!({ "project_code": "GHO", "confirm": true }));
+    assert_eq!(
+        avec_fond["isError"],
+        serde_json::json!(true),
+        "un projet portant une Decision ne doit PAS être retirable, même avec confirm"
+    );
+    assert!(
+        texte(&avec_fond).contains("nœud(s) SOLL de fond"),
+        "et le refus doit dire POURQUOI : {}",
+        texte(&avec_fond)
+    );
+
+    // L'intention reportée, la garde 1 s'ouvre. Une Vision/Pillar auto-seedée ne compte
+    // pas — sinon aucun projet ne serait jamais retirable, `axon_init_project` en créant
+    // systématiquement.
+    server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id = 'DEC-GHO-001'")
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, title, description, status, project_code) \
+             VALUES ('VIS-GHO-001','Vision','Project north-star (draft)','x','planned','GHO')",
+        )
+        .unwrap();
+
+    // GARDE 2 — des fichiers qu'un projet plus spécifique n'a pas repris.
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) \
+             VALUES ('DEE', '/tmp/ghost-territoire/dedans', 'dedans') \
+             ON CONFLICT (project_code) DO NOTHING",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO axon.Project (code, enrolled_at_ms) VALUES ('GHO',1) \
+             ON CONFLICT (code) DO NOTHING",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) \
+             VALUES ('/tmp/ghost-territoire/dedans/a.rs','GHO','h',1) \
+             ON CONFLICT (path) DO NOTHING",
+        )
+        .unwrap();
+    let a_reprendre = appel(serde_json::json!({ "project_code": "GHO", "confirm": true }));
+    assert_eq!(
+        a_reprendre["isError"],
+        serde_json::json!(true),
+        "un fichier qui revient à un projet plus spécifique interdit le retrait"
+    );
+    assert!(
+        texte(&a_reprendre).contains("plus spécifique"),
+        "le refus doit nommer le mécanisme : {}",
+        texte(&a_reprendre)
+    );
+
+    // GARDE 3 — sans `confirm`, SIMULATION. Le fichier redevient orphelin (DEE retiré),
+    // donc les gardes 1 et 2 passent : seule la confirmation manque.
+    server
+        .graph_store
+        .execute("DELETE FROM soll.ProjectCodeRegistry WHERE project_code = 'DEE'")
+        .unwrap();
+    let simulation = appel(serde_json::json!({ "project_code": "GHO" }));
+    assert_ne!(
+        simulation["isError"],
+        serde_json::json!(true),
+        "la simulation n'est pas une erreur : {simulation}"
+    );
+    assert_eq!(simulation["data"]["dry_run"], serde_json::json!(true));
+    assert!(
+        texte(&simulation).contains("Relancer avec `confirm=true`"),
+        "la simulation doit dire le geste exact : {}",
+        texte(&simulation)
+    );
+    // Et surtout : elle n'a RIEN touché.
+    let encore = server
+        .graph_store
+        .query_count("SELECT count(*) FROM soll.ProjectCodeRegistry WHERE project_code='GHO'")
+        .unwrap();
+    assert_eq!(encore, 1, "une simulation qui supprime n'est pas une simulation");
+
+    // Chemin nominal.
+    let fait = appel(serde_json::json!({ "project_code": "GHO", "confirm": true }));
+    assert_ne!(fait["isError"], serde_json::json!(true), "{fait}");
+    for table in [
+        "soll.ProjectCodeRegistry",
+        "soll.Node",
+        "ist.IndexedFile",
+    ] {
+        let n = server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM {table} WHERE project_code='GHO'"
+            ))
+            .unwrap();
+        assert_eq!(n, 0, "{table} doit être vide de GHO après retrait");
+    }
+}

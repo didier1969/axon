@@ -2180,6 +2180,8 @@ impl McpServer {
             "mcp_surface_diagnostics" => self.axon_mcp_surface_diagnostics(arguments),
             "project_status" => self.axon_project_status(arguments),
             "project_registry_lookup" => self.axon_project_registry_lookup(arguments),
+            // REQ-AXO-902369 — on pouvait entrer dans le registre, jamais en sortir.
+            "project_registry_remove" => self.axon_project_registry_remove(arguments),
             "soll_id_registry" => self.axon_soll_id_registry(arguments),
             "soll_relation_schema" => self.axon_soll_relation_schema(arguments),
             "snapshot_history" => self.axon_snapshot_history(arguments),
