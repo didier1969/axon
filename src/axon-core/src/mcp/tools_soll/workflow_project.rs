@@ -2635,7 +2635,8 @@ impl McpServer {
             // le bundle. Lui resservir 12 Ko est exactement ce que GUI-PRO-029 (économie
             // de cache) et GUI-PRO-100 (écriture économe) interdisent.
             response_text.push_str(
-                "_(appel mutatif — `session_pointer` fourni : digest des règles globales                  omis. `axon_init_project` sans argument le rend en entier.)_",
+                "_(appel mutatif — `session_pointer` fourni : digest des règles globales omis. \
+                 `axon_init_project` sans argument le rend en entier.)_",
             );
         } else if self.projet_sans_guidelines_propres(&project_code) {
             response_text.push_str("Available global rules (digest — read any body in full via `soll_get(id='<ID>')`). Which ones do you want to activate, ignore, or specialize for this project?\n");

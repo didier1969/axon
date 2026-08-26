@@ -368,3 +368,72 @@ impl McpServer {
         }))
     }
 }
+
+#[cfg(test)]
+mod contrat_publie_tests {
+    /// REQ-AXO-902502 / REQ-AXO-902513 — le contrat PUBLIÉ doit énumérer tous les
+    /// verdicts que le code peut rendre.
+    ///
+    /// `neutral_borderline` a été ajouté au code sans être ajouté à la description
+    /// de `contradiction_check` : le schéma annonçait toujours trois verdicts. Un
+    /// appelant qui se fie au schéma — c'est-à-dire tout LLM — rencontrait un
+    /// quatrième état non documenté et n'avait aucune raison de le traiter autrement
+    /// qu'un `neutral` mal orthographié. Le correctif de fond était donc invisible
+    /// pour ses destinataires.
+    ///
+    /// C'est la même classe que `entier_json` (REQ-AXO-902509) une strate plus haut :
+    /// **une règle vit à deux endroits — le code et le contrat publié — et un seul
+    /// est corrigé.** Ici le contrat affirmait le CONTRAIRE du code, ce qui est pire
+    /// qu'un silence.
+    ///
+    /// La garde lit les DEUX sources : les littéraux que le code affecte au verdict,
+    /// et la description que le catalogue publie. Elle n'a rien à savoir de la liste
+    /// — c'est ce qui l'empêche de vieillir avec elle.
+    #[test]
+    fn tout_verdict_rendu_par_le_code_est_annonce_dans_la_description_publiee() {
+        let source = include_str!("tools_nli.rs");
+        // Le bloc `let verdict = if … };` est la SEULE origine du verdict rendu.
+        let debut = source
+            .find("let verdict = if")
+            .expect("le bloc qui décide du verdict a été renommé — cette garde ne lit plus rien");
+        let bloc = &source[debut..];
+        let fin = bloc
+            .find("\n        };")
+            .expect("bloc de verdict non terminé comme attendu");
+        let verdicts: Vec<&str> = bloc[..fin]
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert!(
+            verdicts.len() >= 3,
+            "seulement {} littéral(aux) trouvé(s) dans le bloc de verdict — la garde \
+             lit mal le code, elle ne prouve rien : {verdicts:?}",
+            verdicts.len()
+        );
+
+        let catalogue = crate::mcp::catalog::tools_catalog(true);
+        let description = catalogue["tools"]
+            .as_array()
+            .expect("catalogue sans tableau `tools`")
+            .iter()
+            .find(|t| t["name"] == "contradiction_check")
+            .expect("`contradiction_check` absent du catalogue publié")["description"]
+            .as_str()
+            .expect("description non textuelle")
+            .to_string();
+
+        let muets: Vec<&&str> = verdicts
+            .iter()
+            .filter(|v| !description.contains(**v))
+            .collect();
+        assert!(
+            muets.is_empty(),
+            "{} verdict(s) que le code peut rendre sont ABSENTS de la description \
+             publiée : {muets:?} — un appelant qui se fie au schéma les rencontrera \
+             sans savoir quoi en faire",
+            muets.len()
+        );
+    }
+}
