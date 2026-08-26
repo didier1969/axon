@@ -3715,6 +3715,80 @@ fn test_axon_why_empty_symbol_returns_recovery_contract() {
 }
 
 #[test]
+fn test_axon_why_prioritizes_explicit_soll_id_and_keeps_tenant_scope() {
+    // REQ-AXO-902524 / feedback #320 — DGD asked why `acquerir` existed while
+    // naming REQ-DGD-009. The old retrieval returned traceable but weaker
+    // REQ-DGD-002/004 correlations and silently omitted the explicit anchor.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO axon.Project (code) VALUES ('DGD'), ('OTH') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('DGD::acquerir', 'acquerir', 'function', true, true, false, 'DGD')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-DGD-002', 'Requirement', 'DGD', 'Weak correlated requirement', 'acquerir legacy correlation', 'current', '{}'), ('REQ-DGD-009', 'Requirement', 'DGD', 'Explicit acquisition contract', 'the exact requested rationale', 'current', '{}'), ('REQ-OTH-009', 'Requirement', 'OTH', 'Other tenant contract', 'must never cross the boundary', 'current', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, artifact_status, created_at) VALUES ('TRC-DGD-WEAK', 'Requirement', 'REQ-DGD-002', 'Symbol', 'acquerir', 0.4, 'valid', 0), ('TRC-DGD-EXPLICIT', 'Requirement', 'REQ-DGD-009', 'Test', 'tests/acquerir_contract.rs', 1.0, 'valid', 0)").unwrap();
+
+    let call = |question: &str, id: i64| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "why",
+                    "arguments": {
+                        "symbol": "acquerir",
+                        "question": question,
+                        "project": "DGD",
+                        "mode": "brief"
+                    }
+                })),
+                id: Some(json!(id)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    let explicit = call("Pourquoi acquerir existe selon REQ-DGD-009 ?", 902_524);
+    let governing = explicit["data"]["why"]["governing_requirements"]
+        .as_array()
+        .expect("governing requirements");
+    assert_eq!(governing[0]["id"].as_str(), Some("REQ-DGD-009"));
+    assert_eq!(governing[0]["link_mode"].as_str(), Some("direct"));
+    assert_eq!(
+        governing[0]["inclusion_reason"].as_str(),
+        Some("explicit_soll_id")
+    );
+    assert_eq!(
+        governing[0]["attached_evidence"][0]["artifact_ref"].as_str(),
+        Some("tests/acquerir_contract.rs")
+    );
+    assert_eq!(
+        explicit["data"]["why"]["explicit_soll_anchors"]["resolved"][0].as_str(),
+        Some("REQ-DGD-009")
+    );
+    let rendered = explicit["content"][0]["text"].as_str().unwrap_or("");
+    assert!(rendered.contains("REQ-DGD-009"), "{rendered}");
+
+    let cross_tenant = call("Pourquoi acquerir existe selon REQ-OTH-009 ?", 902_525);
+    assert_eq!(
+        cross_tenant["data"]["why"]["explicit_soll_anchors"]["unresolved"][0].as_str(),
+        Some("REQ-OTH-009")
+    );
+    assert!(cross_tenant["data"]["why"]["linked_intentions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["id"].as_str() != Some("REQ-OTH-009")));
+    let rendered = cross_tenant["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        rendered.contains("REQ-OTH-009") && rendered.contains("no inferred item replaces it"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn test_axon_impact_unknown_symbol_with_no_suggestions_recommends_widening() {
     // REQ-AXO-043 — `impact` had the same dead-end as inspect/path: report
     // and operator_guidance said "retry with one suggested symbol" even

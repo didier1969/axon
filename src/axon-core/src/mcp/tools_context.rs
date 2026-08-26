@@ -472,6 +472,7 @@ impl McpServer {
             excluded_because.push("planner_terms_empty_fell_back_to_full_question".to_string());
         }
         let rationale_requested = Self::has_rationale_language(question);
+        let explicit_soll_ids = Self::explicit_soll_ids(question);
 
         let mut diagnostics = RetrievalDiagnostics::default();
         let stage_started_at = Instant::now();
@@ -746,6 +747,32 @@ impl McpServer {
                 }
             }
         }
+        // REQ-AXO-902524 — a canonical id cited by the caller outranks every
+        // inferred lane. Resolve it independently of service pressure, prepend
+        // it in the caller's order, and retain inferred entities only after it.
+        let explicit_soll_entities =
+            self.collect_explicit_soll_entities(&explicit_soll_ids, project);
+        let resolved_explicit_ids = explicit_soll_entities
+            .iter()
+            .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect::<HashSet<_>>();
+        let unresolved_explicit_ids = explicit_soll_ids
+            .iter()
+            .filter(|id| !resolved_explicit_ids.contains(id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !explicit_soll_entities.is_empty() {
+            relevant_soll_entities.retain(|row| {
+                row.get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| !resolved_explicit_ids.contains(id))
+                    .unwrap_or(true)
+            });
+            let mut anchored = explicit_soll_entities;
+            anchored.append(&mut relevant_soll_entities);
+            relevant_soll_entities = anchored;
+            diagnostics.soll_entities_selected = relevant_soll_entities.len();
+        }
         timings.soll_join_ms = stage_started_at.elapsed().as_millis() as u64;
 
         let stage_started_at = Instant::now();
@@ -847,6 +874,15 @@ impl McpServer {
             "confidence": confidence,
             "missing_evidence": missing_evidence,
             "why_these_items": why_these_items,
+            "explicit_soll_anchors": {
+                "requested": explicit_soll_ids,
+                "resolved": relevant_soll_entities.iter()
+                    .filter(|row| row.get("evidence_class").and_then(Value::as_str) == Some("soll_explicit_anchor"))
+                    .filter_map(|row| row.get("id").cloned())
+                    .collect::<Vec<_>>(),
+                "unresolved": unresolved_explicit_ids,
+                "authority": "caller_explicit",
+            },
             "retrieval_policy": {
                 "rationale_requested": rationale_requested,
                 "has_direct_soll_traceability": has_direct_soll_traceability,
@@ -3050,6 +3086,20 @@ impl McpServer {
                     row.get("detail")
                         .and_then(|value| value.as_str())
                         .unwrap_or("")
+                ));
+            }
+        }
+
+        let unresolved_explicit = packet
+            .pointer("/explicit_soll_anchors/unresolved")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !unresolved_explicit.is_empty() {
+            rendered.push_str("\n### Unresolved explicit SOLL anchors\n");
+            for id in unresolved_explicit.iter().filter_map(Value::as_str) {
+                rendered.push_str(&format!(
+                    "- `{id}` was not found in the requested project scope; no inferred item replaces it.\n"
                 ));
             }
         }

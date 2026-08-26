@@ -172,6 +172,16 @@ impl McpServer {
             .get("confidence")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let explicit_soll_anchors =
+            packet
+                .get("explicit_soll_anchors")
+                .cloned()
+                .unwrap_or_else(|| {
+                    json!({
+                        "requested": [], "resolved": [], "unresolved": [],
+                        "authority": "none"
+                    })
+                });
 
         let mut relevant_soll_entities = governing_requirements
             .iter()
@@ -220,6 +230,7 @@ impl McpServer {
             },
             "missing_evidence": missing_evidence,
             "confidence": confidence,
+            "explicit_soll_anchors": explicit_soll_anchors,
             "provenance": "aggregated",
             "evidence_sources": ["retrieve_context", "soll_query_context", "traceability"],
             "safe_to_act": false,

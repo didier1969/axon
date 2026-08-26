@@ -165,7 +165,9 @@ impl McpServer {
                     .and_then(|items| items.first())
                     .and_then(|value| value.as_str())
                     .unwrap_or("unknown");
-                let link_mode = if evidence_class == "soll_traceability"
+                let link_mode = if evidence_class == "soll_explicit_anchor" {
+                    "direct"
+                } else if evidence_class == "soll_traceability"
                     && (ranking_reason.starts_with("direct_")
                         || ranking_reason.starts_with("requirement_"))
                 {

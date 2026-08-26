@@ -10,6 +10,122 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 
 impl McpServer {
+    /// REQ-AXO-902524 — canonical SOLL ids written in the question are not
+    /// search terms: they are explicit intent anchors. Keep this extractor
+    /// deliberately strict so ordinary hyphenated prose cannot become an id.
+    pub(super) fn explicit_soll_ids(question: &str) -> Vec<String> {
+        let Ok(pattern) = regex::Regex::new(r"(?i)\b[A-Z]{3}-[A-Z0-9]{3}-[0-9]+\b") else {
+            return Vec::new();
+        };
+        let mut seen = HashSet::new();
+        pattern
+            .find_iter(question)
+            .map(|hit| hit.as_str().to_ascii_uppercase())
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
+    }
+
+    /// Resolve explicit anchors exactly and tenant-safely, together with the
+    /// evidence rows actually attached to them. Missing/cross-tenant ids stay
+    /// missing; the caller exposes that fact instead of substituting a lexical
+    /// or ANN correlation.
+    pub(super) fn collect_explicit_soll_entities(
+        &self,
+        ids: &[String],
+        project: Option<&str>,
+    ) -> Vec<Value> {
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let id_list = ids
+            .iter()
+            .map(|id| format!("'{}'", Self::escape_sql(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let project_filter = project
+            .map(|value| {
+                format!(
+                    " AND lower(project_code) IN ({})",
+                    Self::project_scope_variants(Some(value))
+                        .iter()
+                        .map(|variant| format!(
+                            "'{}'",
+                            Self::escape_sql(&variant.to_ascii_lowercase())
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .unwrap_or_default();
+        let node_query = format!(
+            "SELECT id, type, COALESCE(title, ''), COALESCE(description, ''), status \
+             FROM soll.Node WHERE id IN ({id_list}){project_filter}"
+        );
+        let raw = self
+            .graph_store
+            .query_json(&node_query)
+            .unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let resolved_id_list = rows
+            .iter()
+            .filter_map(|row| row.first().and_then(Value::as_str))
+            .map(|id| format!("'{}'", Self::escape_sql(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if resolved_id_list.is_empty() {
+            return Vec::new();
+        }
+
+        let evidence_query = format!(
+            "SELECT soll_entity_id, artifact_type, artifact_ref, \
+                    confidence, COALESCE(artifact_status, 'unknown') \
+             FROM soll.Traceability WHERE soll_entity_id IN ({resolved_id_list}) \
+             ORDER BY soll_entity_id, artifact_type, artifact_ref"
+        );
+        let evidence_raw = self
+            .graph_store
+            .query_json(&evidence_query)
+            .unwrap_or_else(|_| "[]".to_string());
+        let evidence_rows: Vec<Vec<Value>> =
+            serde_json::from_str(&evidence_raw).unwrap_or_default();
+
+        ids.iter()
+            .filter_map(|requested_id| {
+                let row = rows.iter().find(|row| {
+                    row.first().and_then(Value::as_str) == Some(requested_id.as_str())
+                })?;
+                let attached_evidence = evidence_rows
+                    .iter()
+                    .filter(|evidence| {
+                        evidence.first().and_then(Value::as_str) == Some(requested_id.as_str())
+                    })
+                    .map(|evidence| {
+                        json!({
+                            "artifact_type": evidence.get(1).cloned().unwrap_or(Value::Null),
+                            "artifact_ref": evidence.get(2).cloned().unwrap_or(Value::Null),
+                            "confidence": evidence.get(3).cloned().unwrap_or(Value::Null),
+                            "artifact_status": evidence.get(4).cloned().unwrap_or(Value::Null),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Some(json!({
+                    "id": requested_id,
+                    "type": row.get(1).cloned().unwrap_or(Value::Null),
+                    "title": row.get(2).cloned().unwrap_or(Value::Null),
+                    "description": row.get(3).cloned().unwrap_or(Value::Null),
+                    "status": row.get(4).cloned().unwrap_or(Value::Null),
+                    "relation_type": "",
+                    "source_symbol": "",
+                    "artifact_type": "SOLL-ID",
+                    "ranking_reasons": ["explicit_soll_id"],
+                    "ranking_score": 1_000,
+                    "evidence_class": "soll_explicit_anchor",
+                    "attached_evidence": attached_evidence,
+                }))
+            })
+            .collect()
+    }
+
     pub(super) fn collect_soll_entities_pg(
         &self,
         entry_candidates: &[EntryCandidate],
