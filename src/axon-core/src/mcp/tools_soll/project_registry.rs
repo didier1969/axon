@@ -891,16 +891,27 @@ impl McpServer {
             );
         }
 
-        // GARDE 1 — de l'intention réelle : ce n'est pas une coquille.
-        // Vision/Pillar auto-seedés ne comptent pas : `axon_init_project` les crée seul.
+        // GARDE 1 — de l'intention VIVANTE : ce n'est pas une coquille.
+        //
+        // Deux exclusions, chacune pour une raison différente :
+        //  - Vision/Pillar auto-seedés ne comptent pas : `axon_init_project` les crée seul,
+        //    donc les compter rendrait AUCUN projet retirable, jamais.
+        //  - un nœud RETIRÉ (`superseded`/`rejected`/`archived`) ne compte pas non plus :
+        //    son intention a déjà été reportée ailleurs, c'est même le geste que cette
+        //    garde exige. Sans cette seconde exclusion, reporter l'intention comme demandé
+        //    ne débloquerait rien — la garde punirait le fait de lui avoir obéi.
+        //    Découvert en retirant `DSD` : son unique Concept réel, une fois superséded
+        //    vers `CPT-INI-001`, laissait toujours la garde fermée.
         let fond = compte(&format!(
             "SELECT count(*)::bigint FROM soll.Node WHERE project_code = '{esc}' \
-             AND type IN ('Requirement','Decision','Milestone','Concept','Guideline')"
+             AND type IN ('Requirement','Decision','Milestone','Concept','Guideline') \
+             AND COALESCE(status,'') NOT IN ('superseded','rejected','archived')"
         ));
         if fond > 0 {
             return refus(
                 format!(
-                    "⛔ `{code}` porte {fond} nœud(s) SOLL de fond (REQ/DEC/MIL/CPT/GUI). \
+                    "⛔ `{code}` porte {fond} nœud(s) SOLL de fond VIVANT(S) (REQ/DEC/MIL/CPT/GUI \
+                     non retirés). \
                      Ce n'est pas une coquille : quelqu'un y a écrit de l'intention.\n\n\
                      Reporter cette intention vers un projet légitime AVANT tout retrait — \
                      `soll_manager(action=append_section)` sur la Vision qui l'absorbe. \
