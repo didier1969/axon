@@ -1645,6 +1645,90 @@ fn test_retrieve_context_auto_resolves_project_code_from_cwd() {
 }
 
 #[test]
+fn retrieve_context_honors_explicit_project_code_through_tools_call() {
+    // REQ-AXO-902521 / DGD #309 — the public project_code must win over
+    // server-cwd auto-resolution. The old handler read only `project` and
+    // silently answered from AXO.
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/test/axo-scope"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry("DGD", Some("dgd"), Some("/home/test/dgd-scope"))
+        .unwrap();
+    let catalog = crate::mcp::catalog::tools_catalog(true);
+    let retrieve_schema = catalog["tools"]
+        .as_array()
+        .and_then(|tools| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == json!("retrieve_context"))
+        })
+        .expect("retrieve_context in public catalog");
+    assert!(
+        retrieve_schema["inputSchema"]["properties"]["project_code"].is_object(),
+        "canonical tenant scope must be discoverable by generated MCP clients"
+    );
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/home/test/axo-scope");
+    }
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context",
+                "arguments": {
+                    "question": "where is dgd_only_missing_symbol defined?",
+                    "project_code": "DGD",
+                    "semantic": "lexical",
+                    "include_soll": false
+                }
+            })),
+            id: Some(json!(9025211)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let content = response["content"][0]["text"].as_str().unwrap();
+    assert!(content.contains("project:DGD"), "{content}");
+    assert!(!content.contains("project:AXO"), "{content}");
+
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+    }
+}
+
+#[test]
+fn retrieve_context_rejects_conflicting_project_aliases() {
+    // REQ-AXO-902521 — ambiguity at the tenant boundary must fail closed.
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context",
+                "arguments": {
+                    "question": "where is the router?",
+                    "project": "AXO",
+                    "project_code": "DGD"
+                }
+            })),
+            id: Some(json!(9025212)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(response["isError"], json!(true), "{response}");
+    assert_eq!(response["data"]["status"], json!("wrong_project_scope"));
+}
+
+#[test]
 fn test_client_cwd_header_overrides_server_cwd_for_project_resolution() {
     // REQ-AXO-902286 — the shared brain must resolve project_code against the
     // CALLING agent's directory (carried by the tunnel's `X-Axon-Client-Cwd`

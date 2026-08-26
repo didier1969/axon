@@ -352,7 +352,48 @@ impl McpServer {
 
         let mode = args.get("mode").and_then(|value| value.as_str());
         let prefer_project_intent = Self::prefer_project_intent(question, mode);
-        // REQ-AXO-089 — when `project` is omitted, auto-resolve from
+        // REQ-AXO-089 / REQ-AXO-902521 — `project_code` is canonical and
+        // `project` remains a backward-compatible alias. Resolve the alias
+        // exactly once here so every retrieval lane and the cache share the
+        // same tenant boundary. Contradictory explicit values fail closed.
+        let canonical_project = args
+            .get("project_code")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let legacy_project = args
+            .get("project")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let (Some(project_code), Some(project)) = (canonical_project, legacy_project) {
+            if project_code != project {
+                return Some(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "retrieve_context refused contradictory tenant scopes: project_code=`{project_code}` but project=`{project}`. Keep only canonical `project_code`, or pass the same value to both aliases."
+                        )
+                    }],
+                    "isError": true,
+                    "data": {
+                        "status": "wrong_project_scope",
+                        "project_code": project_code,
+                        "legacy_project": project,
+                        "parameter_repair": {
+                            "invalid_field": "project",
+                            "hint": "remove the legacy `project` field and keep canonical `project_code`",
+                            "corrected_arguments": {
+                                "project_code": project_code,
+                                "question": question
+                            }
+                        }
+                    }
+                }));
+            }
+        }
+
+        // When explicit scope is omitted, auto-resolve from
         // AXON_PROJECT_ROOT or cwd by matching against the registry. The
         // global CLAUDE.md promises "project_code is auto-resolved from
         // your working directory" but retrieve_context previously fell
@@ -361,7 +402,7 @@ impl McpServer {
         // workspace-wide. The auto-resolution only applies when exactly
         // one registered project matches the cwd; ambiguous matches
         // fall back to workspace:*.
-        let explicit_project = args.get("project").and_then(|value| value.as_str());
+        let explicit_project = canonical_project.or(legacy_project);
         let auto_project = if explicit_project.is_none() {
             self.auto_resolve_project_code_str()
         } else {

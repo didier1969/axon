@@ -888,7 +888,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "question": { "type": "string" },
-                        "project": { "type": "string" },
+                        "project_code": { "type": "string", "description": "Canonical tenant scope. Explicit values are honored end-to-end and never replaced by server-cwd auto-resolution." },
+                        "project": { "type": "string", "description": "Deprecated compatibility alias for project_code. If both are supplied they must be identical." },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] },
                         "token_budget": { "type": "integer" },
                         "top_k": { "type": "integer" },
