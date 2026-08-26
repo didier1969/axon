@@ -9919,6 +9919,13 @@ fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
     let bundle = result["data"]["kickoff_bundle"]
         .as_object()
         .expect("first init must return a kickoff_bundle in data");
+    let client_bundle = result["structuredContent"]["kickoff_bundle"]
+        .as_object()
+        .expect("REQ-AXO-902517: MCP clients must receive kickoff_bundle in structuredContent");
+    assert_eq!(
+        client_bundle, bundle,
+        "structuredContent must mirror the canonical producer data without drift"
+    );
     assert!(bundle.contains_key("kickoff_prompt"));
     assert!(bundle.contains_key("methodology_summary"));
     assert!(bundle.contains_key("entry_points"));

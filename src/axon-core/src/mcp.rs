@@ -880,6 +880,36 @@ impl McpServer {
             }
         } // end attach_full (REQ-AXO-901947 terse-default gate)
 
+        // REQ-AXO-902517 — `data` is Axon's canonical internal tool payload,
+        // while MCP clients consume `structuredContent`. Producers historically
+        // returned one, the other, or both; clients that expose only the protocol
+        // field therefore lost kickoff bundles and diagnostics. Normalize at this
+        // single dispatch chokepoint. Existing producer-owned structured fields
+        // win, and canonical `data` fills only missing keys.
+        let data_snapshot = object
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        match object.get_mut("structuredContent") {
+            Some(structured) => {
+                if !structured.is_object() {
+                    *structured = json!({ "value": structured.clone() });
+                }
+                if let (Some(structured_object), Some(data_object)) =
+                    (structured.as_object_mut(), data_snapshot.as_object())
+                {
+                    for (key, value) in data_object {
+                        structured_object
+                            .entry(key.clone())
+                            .or_insert_with(|| value.clone());
+                    }
+                }
+            }
+            None => {
+                object.insert("structuredContent".to_string(), data_snapshot);
+            }
+        }
+
         response
     }
 

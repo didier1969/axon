@@ -381,6 +381,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tools_call_http_exposes_init_bundle_as_structured_content() {
+        // REQ-AXO-902517 — exercise the actual HTTP boundary consumed by MCP
+        // clients, not only the producer or in-process dispatcher.
+        let store = Arc::new(
+            crate::tests::test_helpers::create_test_db()
+                .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_http_structured").unwrap()),
+        );
+        let mcp_server = Arc::new(McpServer::new(store));
+        let app = app_router(mcp_server);
+        let scope = crate::tests::test_helpers::unique_test_scope("http-structured-init");
+        let project_path = format!("/tmp/{scope}");
+        let request_body = json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 902517,
+            "params": {
+                "name": "axon_init_project",
+                "arguments": { "project_path": project_path }
+            }
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .body(Body::from(serde_json::to_string(&request_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_json: Value = serde_json::from_slice(&body).unwrap();
+        let result = &body_json["result"];
+        assert!(result["content"][0]["text"].is_string(), "{result}");
+        assert!(
+            result["structuredContent"]["kickoff_bundle"].is_object(),
+            "HTTP tools/call must expose the machine kickoff bundle: {result}"
+        );
+        assert_eq!(
+            result["structuredContent"]["kickoff_bundle"],
+            result["data"]["kickoff_bundle"],
+            "the HTTP envelope must not fork canonical producer data"
+        );
+    }
+
+    #[tokio::test]
     async fn test_mcp_http_initialize_negotiates_protocol_version_and_sets_header() {
         let store = Arc::new(
             crate::tests::test_helpers::create_test_db()
