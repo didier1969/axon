@@ -4326,8 +4326,8 @@ fn test_axon_audit_technical_debt_comments() {
 fn test_axon_audit_secrets_detection() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    // REQ-AXO-901860 — enroll project + IndexedFile (path = CONTAINS source)
-    // so audit isn't gated and the secrets tech-debt JOIN matches.
+    // REQ-AXO-902522 — enroll one typed, redacted finding. A secret is audit
+    // evidence, never a Symbol and never technical debt.
     server
         .graph_store
         .execute("INSERT INTO axon.Project (code) VALUES ('PRJ') ON CONFLICT (code) DO NOTHING")
@@ -4337,10 +4337,9 @@ fn test_axon_audit_secrets_detection() {
         .graph_store
         .execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/config.rs', 'symbol', 'sym-src/config.rs', 'PRJ', 'src/config.rs', 'hash-src/config.rs')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::secret1', 'SECRET_API_KEY: Found potential hardcoded credential', 'SECRET_API_KEY', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/config.rs', 'prj::secret1', 'CONTAINS', 'PRJ', 0)")
+        .execute("INSERT INTO ist.SecurityFinding (project_code, file_path, rule_id, line, severity, redacted_excerpt, detected_ms) VALUES ('PRJ', 'src/config.rs', 'SECRET_API_KEY', 7, 'high', 'let token = <redacted>', 0)")
         .unwrap();
 
     // REQ-AXO-901970 — secrets audit reads the RAM snapshot; evict so it warms
@@ -4369,9 +4368,11 @@ fn test_axon_audit_secrets_detection() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Technical Debt"));
+    assert!(content.contains("Anchored security findings"));
     assert!(content.contains("SECRET_API_KEY"));
-    assert!(content.contains("hardcoded credential"));
+    assert!(content.contains("src/config.rs`:7"));
+    assert!(content.contains("<redacted>"));
+    assert!(!content.contains("Found potential hardcoded credential"));
 }
 
 #[test]

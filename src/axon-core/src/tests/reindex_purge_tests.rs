@@ -38,6 +38,7 @@ mod tests {
             size_bytes: content.len() as u64,
             symbols,
             relations: Vec::new(),
+            security_findings: Vec::new(),
         }
     }
 

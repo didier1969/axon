@@ -59,6 +59,22 @@ CREATE TABLE IF NOT EXISTS ist.IndexedFile (
         ))
 );
 
+-- REQ-AXO-902522 — detector evidence is not structural code. Keeping typed,
+-- redacted findings beside IndexedFile prevents secret regex hits from being
+-- represented as Symbol rows (and from corrupting graph/debt analytics).
+CREATE TABLE IF NOT EXISTS ist.SecurityFinding (
+    project_code     TEXT   NOT NULL REFERENCES axon.Project(code) ON DELETE CASCADE,
+    file_path        TEXT   NOT NULL REFERENCES ist.IndexedFile(path) ON DELETE CASCADE,
+    rule_id          TEXT   NOT NULL,
+    line             BIGINT NOT NULL,
+    severity         TEXT   NOT NULL,
+    redacted_excerpt TEXT   NOT NULL,
+    detected_ms      BIGINT NOT NULL,
+    PRIMARY KEY (project_code, file_path, rule_id, line)
+);
+CREATE INDEX IF NOT EXISTS security_finding_project_idx
+    ON ist.SecurityFinding (project_code, severity, file_path, line);
+
 -- REQ-AXO-901897 (DBQ slice 1) — idempotent ALTERs so an EXISTING live table
 -- (30k rows) is migrated forward at the next boot's `apply_canonical_ddl`
 -- (scripts/lib/ensure-runtime.sh runs every db/ddl/NN_*.sql with

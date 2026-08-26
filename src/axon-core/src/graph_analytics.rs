@@ -18,6 +18,34 @@ fn structural_graph_analytics_available() -> bool {
 }
 
 impl GraphStore {
+    /// Return anchored, redacted secret-detector evidence for one tenant.
+    /// Database/query failure is an error, not an empty successful audit.
+    pub fn get_security_findings(&self, project: &str) -> Result<Vec<serde_json::Value>> {
+        if project == "*" {
+            return Ok(Vec::new());
+        }
+        let raw = self.query_json_param(
+            "SELECT rule_id, file_path, line, severity, redacted_excerpt
+               FROM SecurityFinding
+              WHERE project_code = $project
+              ORDER BY severity DESC, file_path, line, rule_id",
+            &serde_json::json!({"project": project}),
+        )?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(serde_json::json!({
+                    "rule_id": row.first()?.as_str()?,
+                    "file": row.get(1)?.as_str()?,
+                    "line": row.get(2)?.as_i64().or_else(|| row.get(2)?.as_str()?.parse().ok())?,
+                    "severity": row.get(3)?.as_str()?,
+                    "redacted_excerpt": row.get(4)?.as_str()?,
+                }))
+            })
+            .collect())
+    }
+
     pub fn get_security_audit(&self, project: &str) -> Result<(i64, String)> {
         // REQ-AXO-901970 — RAM-only taint walk (no PG fallback). 1+2-hop reverse
         // CALLS/CALLS_NIF from the dangerous set (unsafe / eval / unwrap) over the

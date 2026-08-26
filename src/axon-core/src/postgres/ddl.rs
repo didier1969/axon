@@ -374,6 +374,7 @@ mod tests {
         let joined = generate_global_schema().join("\n");
         for tbl in [
             "ist.IndexedFile",
+            "ist.SecurityFinding",
             "ist.Symbol",
             "ist.Chunk",
             "ist.ChunkEmbedding",

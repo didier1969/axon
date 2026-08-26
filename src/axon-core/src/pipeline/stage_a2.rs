@@ -64,12 +64,17 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
             size_bytes: prep.size_bytes,
             symbols: Vec::new(),
             relations: Vec::new(),
+            security_findings: Vec::new(),
         });
     }
     let path_for_skip = prep.path.clone();
     let hash_for_skip = prep.content_hash.clone();
     let mtime_for_skip = prep.mtime_ms;
     let size_for_skip = prep.size_bytes;
+    // The bounded regex engine is independent from language parsing. Run it
+    // before the parser timeout so a slow grammar cannot erase security truth.
+    let security_findings = crate::parser::scan_secrets(&prep.content);
+    let security_findings_for_timeout = security_findings.clone();
     let parse_fut = tokio::task::spawn_blocking(move || {
         // REQ-AXO-901919/901918 — register INSIDE the blocking closure so the
         // entry lives for the ACTUAL parse-thread lifetime. On a per-file parse
@@ -101,15 +106,6 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
         // unconditionally per-file, same as phantom_extract above: a secret
         // can leak from ANY file regardless of language or even whether a
         // parser is registered for its extension.
-        let mut secrets_extraction = crate::parser::ExtractionResult {
-            project_code: None,
-            symbols: Vec::new(),
-            relations: Vec::new(),
-        };
-        crate::parser::scan_secrets(&prep.content, &mut secrets_extraction);
-        symbols.extend(secrets_extraction.symbols);
-        relations.extend(secrets_extraction.relations);
-
         // REQ-AXO-901885 — a parsed file that yields zero symbols AND zero
         // relations is NOT an error: it is "seen, nothing structural to
         // extract" (data/config/markup, a code file with only top-level
@@ -131,6 +127,7 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
             size_bytes: prep.size_bytes,
             symbols,
             relations,
+            security_findings,
         })
     });
     let parse_budget = Duration::from_millis(crate::indexing_policy::parse_timeout_ms());
@@ -171,6 +168,7 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
                 size_bytes: size_for_skip,
                 symbols: Vec::new(),
                 relations: Vec::new(),
+                security_findings: security_findings_for_timeout,
             });
         }
     };
@@ -321,9 +319,16 @@ mod tests {
         );
         let parsed = a2_transform(prep).await.unwrap();
         assert!(
-            parsed.symbols.iter().any(|s| s.kind == "SECRET_AWS_KEY"),
-            "AWS key pattern must surface as a SECRET_AWS_KEY finding: {:?}",
-            parsed.symbols
+            parsed
+                .security_findings
+                .iter()
+                .any(|finding| finding.rule_id == "SECRET_AWS_KEY"),
+            "AWS key pattern must surface as a typed finding: {:?}",
+            parsed.security_findings
+        );
+        assert!(
+            parsed.symbols.iter().all(|symbol| !symbol.kind.starts_with("SECRET_")),
+            "security findings must never masquerade as graph symbols"
         );
         // The language parser must ALSO still run (scan_secrets is additive,
         // not a replacement).

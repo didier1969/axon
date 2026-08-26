@@ -76,8 +76,9 @@ pub async fn a3_enroll(
     let content_for_block = parsed.content.clone();
     let symbols_for_block = parsed.symbols.clone();
     let relations_for_block = parsed.relations.clone();
+    let findings_for_block = parsed.security_findings.clone();
     let chunk_ids = tokio::task::spawn_blocking(move || {
-        store_clone.upsert_graph(
+        let chunk_ids = store_clone.upsert_graph(
             &path_for_block,
             &project_code_str,
             &content_for_block,
@@ -85,7 +86,14 @@ pub async fn a3_enroll(
             now_ms,
             &symbols_for_block,
             &relations_for_block,
-        )
+        )?;
+        store_clone.replace_security_findings(
+            &path_for_block,
+            &project_code_str,
+            &findings_for_block,
+            now_ms,
+        )?;
+        Ok::<_, anyhow::Error>(chunk_ids)
     })
     .await??;
 
@@ -255,7 +263,15 @@ pub fn spawn_a3_batched_worker(
                 // include the prior groups' write time.
                 let group_started = Instant::now();
                 let join_result = tokio::task::spawn_blocking(move || {
-                    store_clone.upsert_graph_batch(&group_batch, &pc_for_block)
+                    let chunk_metas =
+                        store_clone.upsert_graph_batch(&group_batch, &pc_for_block)?;
+                    let detected_ms = Utc::now().timestamp_millis();
+                    store_clone.replace_security_findings_batch(
+                        &group_batch,
+                        &pc_for_block,
+                        detected_ms,
+                    )?;
+                    Ok::<_, anyhow::Error>(chunk_metas)
                 })
                 .await;
 
@@ -383,6 +399,7 @@ mod tests {
             size_bytes: content.len() as u64,
             symbols: symbols.into_iter().map(sym).collect(),
             relations: vec![],
+            security_findings: Vec::new(),
         }
     }
 
@@ -415,6 +432,90 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn a3_enroll_replaces_typed_security_findings_outside_symbol_graph() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let path = "/tmp/security-finding.rs";
+        let mut parsed = parsed_with(path, "fn demo() {}", "hash-security-1", vec!["demo"]);
+        parsed.security_findings = vec![crate::parser::SecurityFinding {
+            rule_id: "SECRET_AWS_KEY".to_string(),
+            line: 4,
+            severity: "high".to_string(),
+            redacted_excerpt: "let key = <redacted>".to_string(),
+        }];
+
+        a3_enroll(
+            parsed,
+            store.clone(),
+            super::super::const_resolver("AXO"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM SecurityFinding WHERE file_path = '/tmp/security-finding.rs' AND rule_id = 'SECRET_AWS_KEY' AND line = 4")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM Symbol WHERE kind LIKE 'SECRET_%'")
+                .unwrap(),
+            0
+        );
+
+        let clean = parsed_with(path, "fn demo() {}", "hash-security-2", vec!["demo"]);
+        a3_enroll(
+            clean,
+            store.clone(),
+            super::super::const_resolver("AXO"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM SecurityFinding WHERE file_path = '/tmp/security-finding.rs'")
+                .unwrap(),
+            0,
+            "a clean re-index must remove stale findings"
+        );
+    }
+
+    #[test]
+    fn batched_security_replacement_uses_one_project_snapshot() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let mut risky = parsed_with(
+            "/tmp/security-batch-a.rs",
+            "fn risky() {}",
+            "hash-security-a",
+            vec!["risky"],
+        );
+        risky.security_findings = vec![crate::parser::SecurityFinding {
+            rule_id: "SECRET_DB_URL".to_string(),
+            line: 2,
+            severity: "high".to_string(),
+            redacted_excerpt: "DATABASE_URL=<redacted>".to_string(),
+        }];
+        let clean = parsed_with(
+            "/tmp/security-batch-b.rs",
+            "fn clean() {}",
+            "hash-security-b",
+            vec!["clean"],
+        );
+        let batch = vec![risky, clean];
+        store.upsert_graph_batch(&batch, "AXO").unwrap();
+        store
+            .replace_security_findings_batch(&batch, "AXO", 123)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM SecurityFinding WHERE file_path IN ('/tmp/security-batch-a.rs', '/tmp/security-batch-b.rs')")
+                .unwrap(),
+            1
+        );
     }
 
     // REQ-AXO-901897 — the `upsert_indexed_file_advances_claim_to_parsed_and_clears_lease`
@@ -520,6 +621,7 @@ mod tests {
             size_bytes: 48,
             symbols: vec![entry, plain],
             relations: vec![],
+            security_findings: Vec::new(),
         };
 
         a3_enroll(parsed, store.clone(), super::super::const_resolver("AXO"))

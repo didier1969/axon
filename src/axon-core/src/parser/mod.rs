@@ -116,6 +116,17 @@ pub struct ExtractionResult {
     pub relations: Vec<Relation>,
 }
 
+/// A security detector result is evidence about source text, not a code symbol.
+/// Keeping it out of `Symbol` prevents credential patterns from polluting the
+/// call graph, technical-debt inventory, and unsafe-code score.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecurityFinding {
+    pub rule_id: String,
+    pub line: usize,
+    pub severity: String,
+    pub redacted_excerpt: String,
+}
+
 pub trait Parser: Send + Sync {
     fn parse(&self, content: &str) -> ExtractionResult;
 }
@@ -126,16 +137,16 @@ pub trait Parser: Send + Sync {
 // unconditionally for every indexed file).
 static SECRET_PATTERNS: Lazy<Vec<(&'static str, regex::Regex)>> = Lazy::new(|| {
     let raw: [(&str, &str); 4] = [
-        (
-            "SECRET_API_KEY",
-            r#"(?i)(?:key|api|token|secret|password|passwd|auth)[\s:='\"\[\{]+[a-z0-9\/+]{32,45}"#,
-        ),
         ("SECRET_AWS_KEY", r#"AKIA[0-9A-Z]{16}"#),
         (
             "SECRET_PRIVATE_KEY",
             r#"-----BEGIN [A-Z ]+ PRIVATE KEY-----"#,
         ),
         ("SECRET_DB_URL", r#"[a-zA-Z]+://[^:]+:[^@]+@[^/]+/[^?]+"#),
+        (
+            "SECRET_API_KEY",
+            r#"(?i)(?:key|api|token|secret|password|passwd|auth)[\s:='\"\[\{]+[a-z0-9\/+]{32,45}"#,
+        ),
     ];
     raw.iter()
         .filter_map(|(kind, pattern)| {
@@ -146,25 +157,73 @@ static SECRET_PATTERNS: Lazy<Vec<(&'static str, regex::Regex)>> = Lazy::new(|| {
         .collect()
 });
 
-pub fn scan_secrets(content: &str, result: &mut ExtractionResult) {
+pub fn scan_secrets(content: &str) -> Vec<SecurityFinding> {
+    let mut findings = Vec::new();
+    let mut occupied_ranges: Vec<std::ops::Range<usize>> = Vec::new();
     for (kind, re) in SECRET_PATTERNS.iter() {
         for mat in re.find_iter(content) {
-            let line = content[..mat.start()].lines().count() + 1;
-            result.symbols.push(Symbol {
-                name: format!("{}: Found potential hardcoded credential", kind),
-                kind: kind.to_string(),
-                start_line: line,
-                end_line: line,
-                docstring: None,
-                is_entry_point: false,
-                is_public: false,
-                tested: false,
-                is_nif: false,
-                is_unsafe: true,
-                properties: HashMap::new(),
-                embedding: None,
+            if occupied_ranges
+                .iter()
+                .any(|seen| mat.start() < seen.end && mat.end() > seen.start)
+            {
+                continue;
+            }
+            let line_start = content[..mat.start()]
+                .rfind('\n')
+                .map_or(0, |idx| idx + 1);
+            let line_end = content[mat.end()..]
+                .find('\n')
+                .map_or(content.len(), |idx| mat.end() + idx);
+            let source_line = &content[line_start..line_end];
+            let normalized = source_line.to_ascii_lowercase();
+            if normalized.contains("noqa") || normalized.contains("security-scan:ignore") {
+                continue;
+            }
+            let line = content[..mat.start()]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1;
+            let relative_start = mat.start() - line_start;
+            let relative_end = mat.end() - line_start;
+            let redacted = format!(
+                "{}<redacted>{}",
+                &source_line[..relative_start],
+                &source_line[relative_end..]
+            );
+            findings.push(SecurityFinding {
+                rule_id: kind.to_string(),
+                line,
+                severity: "high".to_string(),
+                redacted_excerpt: redacted.chars().take(200).collect(),
             });
+            occupied_ranges.push(mat.start()..mat.end());
         }
+    }
+    findings
+}
+
+#[cfg(test)]
+mod security_finding_tests {
+    use super::scan_secrets;
+
+    #[test]
+    fn secret_finding_is_typed_anchored_and_redacted() {
+        let secret = "AKIAABCDEFGHIJKLMNOP";
+        let findings = scan_secrets(&format!("let credential = \"{secret}\";\n"));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, "SECRET_AWS_KEY");
+        assert_eq!(findings[0].line, 1);
+        assert_eq!(findings[0].severity, "high");
+        assert!(findings[0].redacted_excerpt.contains("<redacted>"));
+        assert!(!findings[0].redacted_excerpt.contains(secret));
+    }
+
+    #[test]
+    fn noqa_suppresses_a_documented_database_url_example() {
+        let source =
+            "DATABASE_URL=postgres://example:example@localhost/demo # noqa: documentation\n";
+        assert!(scan_secrets(source).is_empty());
     }
 }
 

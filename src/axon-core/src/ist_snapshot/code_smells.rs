@@ -745,6 +745,12 @@ pub fn technical_debt(graph: &IstGraph, project: &str) -> Vec<(String, String)> 
         // suffix (which is a slug). Same for the CALLS-target dangerous check.
         let name = graph.name_of(idx);
         let name_lower = name.to_ascii_lowercase();
+        // REQ-AXO-902522 — rows emitted by the retired secret-as-Symbol
+        // representation may remain until a file is re-indexed. Never launder
+        // those detector artifacts into the technical-debt surface.
+        if name.starts_with("SECRET_") && name_lower.contains("hardcoded credential") {
+            continue;
+        }
         let name_hit = DEBT_NAME_FRAGMENTS.iter().any(|f| name_lower.contains(f));
         let calls_dangerous = name_hit
             || graph.forward_neighbors(idx).any(|(tgt, rel)| {
@@ -2534,14 +2540,15 @@ mod tests {
         ];
         let g = IstGraph::build(nodes, edges);
         let debt = technical_debt(&g, "AXO");
-        // The returned name is the canonical comment/secret text, NOT the slug.
+        // The returned TODO name is canonical, while legacy detector pseudo-
+        // symbols are quarantined from technical debt.
         assert!(
             debt.iter().any(|(f, n)| f == "src/parser.rs" && n == "// TODO: fix the parser"),
             "TODO text must be matched + returned via name_of: {debt:?}"
         );
         assert!(
-            debt.iter().any(|(f, n)| f == "src/cfg.rs" && n.contains("hardcoded credential")),
-            "secret finding must be matched via name_of: {debt:?}"
+            debt.iter().all(|(f, _)| f != "src/cfg.rs"),
+            "legacy secret pseudo-symbol must not pollute technical debt: {debt:?}"
         );
     }
 

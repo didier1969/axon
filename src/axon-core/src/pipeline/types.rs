@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use crate::parser::{Relation, Symbol};
+use crate::parser::{Relation, SecurityFinding, Symbol};
 
 /// Output of stage A1 — Preparation.
 ///
@@ -59,4 +59,7 @@ pub struct ParsedFile {
     /// Relations (CALLS / CALLS_NIF / CONTAINS / etc.) extracted alongside
     /// symbols.
     pub relations: Vec<Relation>,
+    /// Typed, redacted detector output. These findings are persisted outside
+    /// the structural graph and therefore can never masquerade as symbols.
+    pub security_findings: Vec<SecurityFinding>,
 }

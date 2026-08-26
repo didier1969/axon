@@ -696,10 +696,18 @@ impl McpServer {
             return Some(json!({ "content": [{ "type": "text", "text": report }] }));
         }
 
-        let (sec_score, paths) = self
-            .graph_store
-            .get_security_audit(project)
-            .unwrap_or((100, "[]".to_string()));
+        let path_audit = if ram_warm {
+            self.graph_store.get_security_audit(project).ok()
+        } else {
+            None
+        };
+        let secret_findings = self.graph_store.get_security_findings(project).ok();
+        let sec_score = path_audit
+            .as_ref()
+            .zip(secret_findings.as_ref())
+            .map(|((path_score, _), findings)| {
+                (*path_score - findings.len() as i64 * 20).max(0)
+            });
         let cov_score = self.graph_store.get_coverage_score(project).unwrap_or(0);
         let tech_debt = self
             .graph_store
@@ -744,13 +752,35 @@ impl McpServer {
             evidence.push_str(&note);
             evidence.push('\n');
         }
-        evidence.push_str(&format!("### 🔒 Security: {}/100\n", sec_score));
-
-        if sec_score < 100 {
-            evidence.push_str("🚨 **Potential vulnerabilities detected.**\n");
-            evidence.push_str(&format!("Critical paths found: {}\n", paths));
+        if let (Some(score), Some((_, paths)), Some(findings)) =
+            (sec_score, path_audit.as_ref(), secret_findings.as_ref())
+        {
+            evidence.push_str(&format!("### 🔒 Security: {score}/100\n"));
+            if score < 100 {
+                evidence.push_str("🚨 **Anchored security findings detected.**\n");
+                if paths != "[]" {
+                    evidence.push_str(&format!("Critical call paths: {paths}\n"));
+                }
+                for finding in findings.iter().take(10) {
+                    evidence.push_str(&format!(
+                        "* `{}` — `{}`:{} ({}) — `{}`\n",
+                        finding["rule_id"].as_str().unwrap_or("unknown_rule"),
+                        finding["file"].as_str().unwrap_or("unknown_file"),
+                        finding["line"].as_i64().unwrap_or(0),
+                        finding["severity"].as_str().unwrap_or("unknown"),
+                        finding["redacted_excerpt"]
+                            .as_str()
+                            .unwrap_or("<redacted>")
+                    ));
+                }
+            } else {
+                evidence.push_str("✅ No anchored critical path or secret finding detected.\n");
+            }
         } else {
-            evidence.push_str("✅ No critical path to dangerous functions detected.\n");
+            evidence.push_str("### 🔒 Security: inconclusive\n");
+            evidence.push_str(
+                "⚠️ Security evidence is unavailable or unanchored; no numeric security score or penalty was inferred. Warm the project snapshot and verify the SecurityFinding projection, then retry.\n",
+            );
         }
 
         if !tech_debt.is_empty() {
@@ -924,7 +954,11 @@ impl McpServer {
         {
             0
         } else {
-            (sec_score + cov_score + hygiene_score + telemetry_score) / 4
+            let mut scores = vec![cov_score, hygiene_score, telemetry_score];
+            if let Some(score) = sec_score {
+                scores.push(score);
+            }
+            scores.iter().sum::<i64>() / scores.len() as i64
         };
 
         let report = format!(

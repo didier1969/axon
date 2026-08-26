@@ -1118,6 +1118,90 @@ impl GraphStore {
         Ok(chunk_ids_emitted)
     }
 
+    /// Replace the complete detector snapshot for one file. Findings contain
+    /// only redacted evidence and are deliberately stored outside `Symbol`.
+    pub fn replace_security_findings(
+        &self,
+        path: &str,
+        project_code: &str,
+        findings: &[crate::parser::SecurityFinding],
+        detected_ms: i64,
+    ) -> Result<()> {
+        let safe_path = path.replace('\'', "''");
+        let safe_project = project_code.replace('\'', "''");
+        let mut sql = format!(
+            "BEGIN; DELETE FROM SecurityFinding WHERE project_code = '{safe_project}' AND file_path = '{safe_path}';"
+        );
+        if !findings.is_empty() {
+            let values = findings
+                .iter()
+                .map(|finding| {
+                    let rule = finding.rule_id.replace('\'', "''");
+                    let severity = finding.severity.replace('\'', "''");
+                    let excerpt = finding.redacted_excerpt.replace('\'', "''");
+                    format!(
+                        "('{safe_project}', '{safe_path}', '{rule}', {}, '{severity}', '{excerpt}', {detected_ms})",
+                        finding.line
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(
+                " INSERT INTO SecurityFinding (project_code, file_path, rule_id, line, severity, redacted_excerpt, detected_ms) VALUES {values} ON CONFLICT (project_code, file_path, rule_id, line) DO UPDATE SET severity = EXCLUDED.severity, redacted_excerpt = EXCLUDED.redacted_excerpt, detected_ms = EXCLUDED.detected_ms;"
+            ));
+        }
+        sql.push_str(" COMMIT;");
+        self.execute(&sql)
+    }
+
+    /// Batched counterpart used by A3: one replacement transaction per
+    /// project batch, never one PostgreSQL round-trip per indexed file.
+    pub fn replace_security_findings_batch(
+        &self,
+        files: &[crate::pipeline::types::ParsedFile],
+        project_code: &str,
+        detected_ms: i64,
+    ) -> Result<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let safe_project = project_code.replace('\'', "''");
+        let paths = files
+            .iter()
+            .map(|parsed| {
+                format!("'{}'", parsed.path.to_string_lossy().replace('\'', "''"))
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut sql = format!(
+            "BEGIN; DELETE FROM SecurityFinding WHERE project_code = '{safe_project}' AND file_path IN ({paths});"
+        );
+        let values = files
+            .iter()
+            .flat_map(|parsed| {
+                let safe_path = parsed.path.to_string_lossy().replace('\'', "''");
+                let safe_project_for_row = safe_project.clone();
+                parsed.security_findings.iter().map(move |finding| {
+                    let rule = finding.rule_id.replace('\'', "''");
+                    let severity = finding.severity.replace('\'', "''");
+                    let excerpt = finding.redacted_excerpt.replace('\'', "''");
+                    format!(
+                        "('{safe_project_for_row}', '{safe_path}', '{rule}', {}, '{severity}', '{excerpt}', {detected_ms})",
+                        finding.line
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            sql.push_str(&format!(
+                " INSERT INTO SecurityFinding (project_code, file_path, rule_id, line, severity, redacted_excerpt, detected_ms) VALUES {} ON CONFLICT (project_code, file_path, rule_id, line) DO UPDATE SET severity = EXCLUDED.severity, redacted_excerpt = EXCLUDED.redacted_excerpt, detected_ms = EXCLUDED.detected_ms;",
+                values.join(",")
+            ));
+        }
+        sql.push_str(" COMMIT;");
+        self.execute(&sql)
+    }
+
     /// REQ-AXO-295 — Batched variant of [`Self::upsert_graph`].
     ///
     /// Aggregates Symbol/Chunk/relation [`rows`] across `files` into one
