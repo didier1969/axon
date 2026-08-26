@@ -13,6 +13,22 @@ fn esc(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+/// REQ-AXO-902509 — lire un compte rendu par `query_json`.
+///
+/// Le pont SQL rend les entiers tantôt en nombres JSON, tantôt en CHAÎNES selon
+/// le type PG de la colonne (`count(*)` → `bigint` → chaîne). Un `as_i64()` seul
+/// échoue alors en SILENCE et retombe sur 0 : c'est ce qui faisait dire à
+/// `mcp_inbox_read` « 2 sur 0 · id max 0 » alors que la boîte portait 70
+/// messages non archivés. Le repli existait déjà — à QUATRE endroits de ce
+/// fichier sur cinq. Une règle recopiée est une règle qu'on finit par oublier ;
+/// elle vit désormais ici, et [`lecture_des_comptes_tests`] refuse qu'on la
+/// ré-écrive ailleurs.
+fn entier_json(v: &Value) -> i64 {
+    v.as_i64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        .unwrap_or(0)
+}
+
 /// REQ-AXO-902386 — nearest canonical project code to a mistyped one.
 ///
 /// Pure so the matching rules are testable without a registry. Deliberately
@@ -668,10 +684,7 @@ impl McpServer {
         let mut body_lines = String::new();
         let mut max_id = floor;
         for row in &rows {
-            let id = row
-                .first()
-                .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-                .unwrap_or(0);
+            let id = row.first().map(entier_json).unwrap_or(0);
             let g = |i: usize| row.get(i).and_then(Value::as_str).unwrap_or("");
             // REQ-AXO-902419 — décider AVANT de toucher `max_id`. Le premier message
             // passe toujours, quelle que soit sa taille : rendre zéro message parce que
@@ -908,8 +921,10 @@ impl McpServer {
                     .and_then(|rows| rows.first().cloned());
                 match total_boite {
                     Some(r) if r.len() >= 2 => {
-                        let total = r[0].as_i64().unwrap_or(0);
-                        let id_max = r[1].as_i64().unwrap_or(0);
+                        // REQ-AXO-902509 — c'est CE site qui n'avait pas le repli,
+                        // d'où « 2 sur 0 · id max 0 » sur une boîte de 70 messages.
+                        let total = entier_json(&r[0]);
+                        let id_max = entier_json(&r[1]);
                         let restants = (total - messages.len() as i64).max(0);
                         format!(
                             " · {} sur {total} · id max {id_max} · {restants} non listé(s)",
@@ -984,10 +999,7 @@ impl McpServer {
         let json_str = self.graph_store.query_json(&sql).ok()?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&json_str).ok()?;
         let row = rows.into_iter().next()?;
-        let as_i64 = |v: Option<&Value>| {
-            v.and_then(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
-                .unwrap_or(0)
-        };
+        let as_i64 = |v: Option<&Value>| v.map(entier_json).unwrap_or(0);
         let count = as_i64(row.first());
         if count <= 0 {
             return None;
@@ -1181,7 +1193,7 @@ impl McpServer {
         let swept = rows
             .first()
             .and_then(|r| r.first())
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .map(entier_json)
             .unwrap_or(0);
         let report = format!(
             "### 🧹 mailbox_sweep\n\n{swept} expired message(s) archived (ttl_at < now)."
@@ -1257,7 +1269,8 @@ impl McpServer {
         let owned_ids: Vec<i64> = owned
             .iter()
             .filter_map(|r| r.first())
-            .filter_map(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .map(entier_json)
+            .filter(|id| *id > 0)
             .collect();
         let foreign: Vec<i64> = ids.iter().copied().filter(|i| !owned_ids.contains(i)).collect();
         if !foreign.is_empty() {
@@ -1577,6 +1590,48 @@ mod tests_validation_outbox {
         assert!(
             !msg.contains("vouliez-vous dire"),
             "un voisin a été proposé pour une clé sans rapport : {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lecture_des_comptes_tests {
+    use super::*;
+
+    /// REQ-AXO-902509 — `query_json` rend les entiers en CHAÎNES.
+    #[test]
+    fn un_entier_rendu_en_chaine_est_lu_comme_un_entier() {
+        assert_eq!(entier_json(&json!(70)), 70, "entier natif");
+        assert_eq!(entier_json(&json!("70")), 70, "entier rendu en chaîne");
+        assert_eq!(entier_json(&json!(null)), 0, "absent → 0, pas de panique");
+        assert_eq!(entier_json(&json!("pas un nombre")), 0, "illisible → 0");
+    }
+
+    /// REQ-AXO-902509 — la garde qui vaut vraiment : ce n'est pas le repli qui
+    /// manquait, c'est UN site sur cinq qui ne l'avait pas. Une règle qui vit à
+    /// cinq endroits est appliquée à quatre tôt ou tard. Cette garde lit le CODE
+    /// et refuse qu'un sixième site réinvente le repli à la main.
+    #[test]
+    fn aucune_lecture_de_compte_ne_reinvente_le_repli() {
+        let source = include_str!("tools_mailbox.rs");
+        // Motif composé à l'exécution : écrit en clair, cette garde se citerait
+        // elle-même comme coupable.
+        let motif = format!("{}{}", "as_str().and_then(|s|", " s.parse()");
+        let corps = source
+            .lines()
+            .position(|l| l.contains("fn entier_json"))
+            .expect("`entier_json` a disparu : la règle n'a plus de domicile");
+        let coupables: Vec<(usize, &str)> = source
+            .lines()
+            .enumerate()
+            .filter(|(i, l)| l.contains(&motif) && !(corps..corps + 5).contains(i))
+            .map(|(i, l)| (i + 1, l.trim()))
+            .collect();
+        assert!(
+            coupables.is_empty(),
+            "{} site(s) ré-écrivent le repli chaîne au lieu d'appeler `entier_json` : {:?}",
+            coupables.len(),
+            coupables
         );
     }
 }
