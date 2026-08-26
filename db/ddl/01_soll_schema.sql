@@ -40,6 +40,24 @@ CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (
     registered_at_ms     BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000)::BIGINT
 );
 
+-- CPT-PRO-101 / REQ-AXO-902505 — TERRITOIRE d'un projet.
+--
+-- Un `project_path` qui est ANCETRE ou DESCENDANT d'un autre est une anomalie, SAUF
+-- si la relation est DECLAREE ici. Trois fantomes sont nes de l'absence de cette
+-- declaration, tous de la meme facon — un `axon_init_project` lance sur un repertoire
+-- quelconque, le nom derive du dernier segment du chemin :
+--
+--   ELE « elixir »   /projects/Fiscaly/elixir   descendant de FSF   (supprime 2026-08-26)
+--   PRP « projects » /home/dstadel/projects     ancetre de 62       (42 764 fichiers accapares)
+--   DSD « dstadel »  /home/dstadel              ancetre de 64       (18 728 fichiers accapares)
+--
+-- Aucun de ces noms ne designe un produit. La signature du defaut etait dans le nom.
+--
+-- Un mega-projet legitime (KKI et son sous-projet KKD, INK et HXH) se DECLARE et reste
+-- valide ; un accident d'enregistrement ne se declare pas, donc il se voit. La colonne
+-- ne cree pas la hierarchie — elle rend explicite celle qui existe deja dans les chemins.
+SELECT public.add_column_if_absent('soll', 'projectcoderegistry', 'parent_project_code', 'TEXT');
+
 -- Per-project canonical-ID counter. One row per project_code; counters
 -- bumped atomically by soll.allocate_node_id (VIS/PIL/REQ/CPT/DEC/MIL/VAL/
 -- STK/GUI/SKI/PRT) and directly by storage.rs for PRV/REV. ALL 15 columns

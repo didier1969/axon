@@ -886,7 +886,7 @@ async fn flush_batch_tx(
         // REQ-AXO-902011 — re-index-safe purge BEFORE the COPY merge, same tx:
         // an edited-in-place file (renamed/removed symbol, fewer chunk parts)
         // must not leave orphan Symbol/Chunk/Edge/ChunkEmbedding behind.
-        purge_reindexed_files_in_tx(&tx, &batch.indexed_files, &batch.project_code).await?;
+        purge_reindexed_files_in_tx(&tx, &batch.indexed_files).await?;
         copy_indexed_files_in_tx(&tx, &batch.indexed_files, &batch.project_code).await?;
     }
     if !batch.symbols.is_empty() {
@@ -940,20 +940,29 @@ async fn flush_batch_tx(
 async fn purge_reindexed_files_in_tx(
     tx: &deadpool_postgres::Transaction<'_>,
     indexed_files: &[(String, String, i64, i64, i64)],
-    project_code: &str,
 ) -> Result<()> {
+    // REQ-AXO-902506 — purger par CHEMIN, plus par (chemin, code du lot).
+    //
+    // Le filtre `project_code = $2` supposait qu'un fichier reste toujours dans le meme
+    // projet. Quand l'attribution CHANGE — ce que l'ON CONFLICT ci-dessous rend enfin
+    // possible — la purge cherchait sous le NOUVEAU code et ne trouvait rien : les
+    // chunks et embeddings de l'ANCIEN survivaient a la reindexation, orphelins.
+    //
+    // Mesure : `PRP` portait 122 328 symboles pour des fichiers que d'autres projets
+    // avaient depuis reindexes. Purger par chemin seul est correct — un fichier n'a
+    // qu'un proprietaire, et on est precisement en train de le reecrire.
     for (path, ..) in indexed_files {
-        let chunk_params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [path, &project_code];
+        let path_only: [&(dyn tokio_postgres::types::ToSql + Sync); 1] = [path];
         tx.execute(
             "DELETE FROM ist.ChunkEmbedding WHERE chunk_id IN \
-                 (SELECT id FROM ist.Chunk WHERE project_code = $2 AND file_path = $1)",
-            &chunk_params,
+                 (SELECT id FROM ist.Chunk WHERE file_path = $1)",
+            &path_only,
         )
         .await
         .context("purge_reindexed: ChunkEmbedding")?;
         tx.execute(
-            "DELETE FROM ist.Chunk WHERE project_code = $2 AND file_path = $1",
-            &chunk_params,
+            "DELETE FROM ist.Chunk WHERE file_path = $1",
+            &path_only,
         )
         .await
         .context("purge_reindexed: Chunk")?;
@@ -1445,6 +1454,26 @@ async fn flush_edges_resilient_async(
     Ok(())
 }
 
+/// REQ-AXO-902506 — le merge d'`ist.IndexedFile`, extrait en constante pour qu'une garde
+/// puisse l'EXÉCUTER contre PostgreSQL au lieu de se contenter de le relire. Un test qui
+/// vérifie la présence d'une chaîne dans du SQL ne prouve pas que le SQL fait ce qu'il dit.
+pub(crate) const INDEXEDFILE_MERGE_SQL: &str = "INSERT INTO indexedfile \
+             (path, project_code, content_hash, last_seen_ms, status, mtime_ms, size_bytes, lease_until_ms) \
+         SELECT DISTINCT ON (s.path) \
+                s.path, $1, s.content_hash, s.last_seen_ms, 'parsed', s.mtime_ms, s.size_bytes, 0 \
+             FROM _bulk_indexedfile_stage s \
+         ORDER BY s.path, s.last_seen_ms DESC \
+         ON CONFLICT (path) DO UPDATE SET \
+             project_code    = EXCLUDED.project_code, \
+             content_hash    = EXCLUDED.content_hash, \
+             last_seen_ms    = EXCLUDED.last_seen_ms, \
+             mtime_ms        = EXCLUDED.mtime_ms, \
+             size_bytes      = EXCLUDED.size_bytes, \
+             status          = 'parsed', \
+             retry_count     = 0, \
+             last_attempt_ms = NULL, \
+             lease_until_ms  = 0";
+
 /// REQ-AXO-901747 — COPY BINARY for IndexedFile rows.
 async fn copy_indexed_files_in_tx(
     tx: &deadpool_postgres::Transaction<'_>,
@@ -1499,8 +1528,30 @@ async fn copy_indexed_files_in_tx(
     // already-discovered IndexedFile row silently DROPPED any file the
     // scanner hadn't enrolled yet — the bootstrap walk feeds A1 directly, so
     // those files reached A3 first and their chunks then failed the
-    // chunk_file_path FK. ON CONFLICT keeps an existing row's project_code
-    // (DO UPDATE doesn't touch it) so a scanner-discovered file is unaffected.
+    // chunk_file_path FK.
+    //
+    // REQ-AXO-902506 — l'ON CONFLICT met desormais `project_code` A JOUR.
+    //
+    // Il ne le faisait pas, et le commentaire d'origine assumait ce choix : « keeps an
+    // existing row's project_code so a scanner-discovered file is unaffected ». La
+    // protection est devenue une PRISON : une attribution erronee etait IMMORTELLE.
+    // Rien ne pouvait plus la corriger — ni un rescan, ni un `full=true`, ni le temps.
+    //
+    // Mesure du 2026-08-26 : **38 525 fichiers sur 68 015 (57 %)** appartenaient a un
+    // projet qui n'est pas le plus specifique pour leur chemin. `KKI` ne possedait que
+    // **5** de ses 17 318 fichiers ; `HXH` et `KKD` en possedaient **0**. Ils n'etaient
+    // pas vides, ils etaient DEPOSSEDES — et le rescan de BKS a 02h11 a recree ses
+    // 664 fichiers sous `PRP`, la minute meme ou il tentait de les recuperer.
+    //
+    // ⚠️ Ce qui rend la mise a jour SURE aujourd'hui, et ne l'etait peut-etre pas quand
+    // le commentaire a ete ecrit : A3 resout le code **par fichier**
+    // (`stage_a3.rs:71`, `resolver(&parsed.path)`) puis GROUPE le flush par code resolu
+    // (`stage_a3.rs:117`). `EXCLUDED.project_code` est donc le code du resolveur
+    // longest-prefix, pas un code de lot approximatif. La valeur ecrite est correcte par
+    // construction ; refuser de l'ecrire ne protegeait plus rien.
+    //
+    // Corollaire : `purge_reindexed_files_in_tx` cesse de filtrer sur le code du lot —
+    // sinon les chunks de l'ANCIENNE attribution survivent a la reindexation.
     // REQ-AXO-901884 — DISTINCT ON (s.path) collapses duplicate staging rows so
     // the merge cannot affect the same ON CONFLICT target twice (SQLSTATE 21000)
     // when a batch re-sees the same path. Keep the latest by last_seen_ms.
@@ -1508,21 +1559,7 @@ async fn copy_indexed_files_in_tx(
     // done), not legacy 'indexed'. 'parsed' is an A-DONE state: it leaves the
     // claimable index/feeder set and feeds the dedup cache at next boot. The
     // claim lease is released (lease_until_ms=0).
-    let merge_sql = "INSERT INTO indexedfile \
-             (path, project_code, content_hash, last_seen_ms, status, mtime_ms, size_bytes, lease_until_ms) \
-         SELECT DISTINCT ON (s.path) \
-                s.path, $1, s.content_hash, s.last_seen_ms, 'parsed', s.mtime_ms, s.size_bytes, 0 \
-             FROM _bulk_indexedfile_stage s \
-         ORDER BY s.path, s.last_seen_ms DESC \
-         ON CONFLICT (path) DO UPDATE SET \
-             content_hash    = EXCLUDED.content_hash, \
-             last_seen_ms    = EXCLUDED.last_seen_ms, \
-             mtime_ms        = EXCLUDED.mtime_ms, \
-             size_bytes      = EXCLUDED.size_bytes, \
-             status          = 'parsed', \
-             retry_count     = 0, \
-             last_attempt_ms = NULL, \
-             lease_until_ms  = 0";
+    let merge_sql = INDEXEDFILE_MERGE_SQL;
     tx.execute(merge_sql, &[&project_code])
         .await
         .context("bulk_writer indexedfile stage merge")?;
@@ -1543,7 +1580,7 @@ async fn copy_indexed_files_tx(
         .transaction()
         .await
         .context("bulk_writer indexedfile begin tx (resilient)")?;
-    purge_reindexed_files_in_tx(&tx, rows, project_code).await?;
+    purge_reindexed_files_in_tx(&tx, rows).await?;
     copy_indexed_files_in_tx(&tx, rows, project_code).await?;
     tx.commit().await.context("bulk_writer indexedfile commit (resilient)")?;
     Ok(())
@@ -1602,6 +1639,87 @@ async fn flush_indexed_files_resilient_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    /// REQ-AXO-902506 — LA garde : une attribution erronée doit se CORRIGER, pas survivre.
+    ///
+    /// L'`ON CONFLICT` ne touchait pas `project_code` — délibérément, et le commentaire
+    /// l'assumait. La protection est devenue une prison : rien ne pouvait plus corriger
+    /// une attribution fausse, ni un rescan, ni un `full=true`, ni le temps.
+    ///
+    /// Mesuré sur le parc le 2026-08-26 : **38 525 fichiers sur 68 015 (57 %)**
+    /// appartenaient à un projet qui n'était pas le plus spécifique pour leur chemin.
+    /// `KKI` ne possédait que **5** de ses 17 318 fichiers. Le rescan de `BKS` à 02h11 a
+    /// recréé ses 664 fichiers sous `PRP` — la minute même où il tentait de les reprendre.
+    ///
+    /// Ce test EXÉCUTE le vrai SQL de production (`INDEXEDFILE_MERGE_SQL`) contre
+    /// PostgreSQL. Vérifier qu'une chaîne est présente dans le SQL ne prouverait rien de
+    /// ce que le SQL fait.
+    #[test]
+    fn une_attribution_erronee_se_corrige_au_lieu_de_survivre() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let chemin = "/home/dstadel/projects/codeforge-v3/src/exemple.rs";
+
+        for code in ["PRP", "CDV"] {
+            store
+                .execute(&format!(
+                    "INSERT INTO axon.Project (code, enrolled_at_ms) VALUES ('{code}', 1) \
+                     ON CONFLICT (code) DO NOTHING"
+                ))
+                .unwrap();
+        }
+
+        // L'état de départ : le fichier appartient au fantôme qui l'a vu en premier.
+        store
+            .execute(&format!(
+                "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) \
+                 VALUES ('{chemin}', 'PRP', 'h0', 1) ON CONFLICT (path) DO NOTHING"
+            ))
+            .unwrap();
+
+        // Le pipeline le réécrit avec le code que le résolveur longest-prefix donne.
+        store
+            .execute(
+                "CREATE TEMP TABLE IF NOT EXISTS _bulk_indexedfile_stage \
+                 (path TEXT, content_hash TEXT, last_seen_ms BIGINT, mtime_ms BIGINT, size_bytes BIGINT)",
+            )
+            .unwrap();
+        store.execute("TRUNCATE _bulk_indexedfile_stage").unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO _bulk_indexedfile_stage VALUES ('{chemin}', 'h1', 2, 2, 10)"
+            ))
+            .unwrap();
+        store
+            .execute(&INDEXEDFILE_MERGE_SQL.replace("$1", "'CDV'"))
+            .unwrap();
+
+        let a_cdv = store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.IndexedFile WHERE path='{chemin}' AND project_code='CDV'"
+            ))
+            .unwrap();
+        assert_eq!(
+            a_cdv, 1,
+            "le fichier doit revenir à CDV — sans quoi l'erreur d'attribution est immortelle"
+        );
+
+        let reste_prp = store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.IndexedFile WHERE path='{chemin}' AND project_code='PRP'"
+            ))
+            .unwrap();
+        assert_eq!(reste_prp, 0, "et il ne doit plus appartenir au fantôme");
+
+        // Contrôle négatif : le reste de la ligne est bien mis à jour aussi, sinon on
+        // aurait corrigé le propriétaire en laissant un contenu périmé derrière.
+        let frais = store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.IndexedFile WHERE path='{chemin}' AND content_hash='h1'"
+            ))
+            .unwrap();
+        assert_eq!(frais, 1, "le contenu doit suivre le propriétaire");
+    }
 
     #[test]
     fn bulk_writer_env_override_and_adaptive_dispatch() {
