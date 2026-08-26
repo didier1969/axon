@@ -129,4 +129,4 @@ Pick exactly one : (1) hallucination → `schema_overview` + 3 repros, drop if e
 
 ## Pointers
 
-Sub-agents : MCP-accessible first-class (GUI-PRO-027 ; pass `project="AXO"` explicit) — use for parallel RCA/research ; shell/docs delegable (worktree) ; Rust edits/builds serial orchestrator-side ; SOLL/promote-live never delegated. Arch : CPT-AXO-054 (streaming pipeline v2), CPT-AXO-053 (canonical product split). Hand Off : GUI-PRO-028 (5 steps, body via `soll_query_context`) ; SKILL.md edits in step 4 forbidden except tool rename / surface change / runtime authority change / methodology change (GUI-AXO-1002).
+Sub-agents : MCP-accessible first-class (GUI-PRO-027 ; pass `project="AXO"` explicit) — use for parallel RCA/research ; shell/docs delegable (worktree) ; Rust edits/builds serial orchestrator-side ; SOLL/promote-live never delegated. Arch : CPT-AXO-054 (streaming pipeline v2), CPT-AXO-053 (canonical product split). Hand Off : GUI-PRO-028 (6 steps, body via `soll_get`) ; SKILL.md edits in step 5 forbidden except tool rename / surface change / runtime authority change / methodology change (GUI-AXO-1002).
