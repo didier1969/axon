@@ -2099,6 +2099,91 @@ impl McpServer {
     }
 
 
+    /// REQ-AXO-902507 — un TERRITOIRE ne se prend pas en silence.
+    ///
+    /// `axon_init_project` acceptait n'importe quel chemin et dérivait le nom du dernier
+    /// segment. Quatre projets fantômes en sont nés, tous de la même façon :
+    ///
+    /// | code | nom dérivé | chemin | nature |
+    /// |---|---|---|---|
+    /// | `ELE` | « elixir » | `.../Fiscaly/elixir` | DESCENDANT de FSF |
+    /// | `KKD` | « kki-domain-… » | `.../kie/kki-domain-…` | DESCENDANT de KKI |
+    /// | `PRP` | « projects » | `/home/dstadel/projects` | ANCÊTRE de 62 projets |
+    /// | `DSD` | « dstadel » | `/home/dstadel` | ANCÊTRE de 64 projets |
+    ///
+    /// Aucun de ces noms ne désigne un produit — ce sont des noms de répertoire. Et le
+    /// coût est mesuré : `PRP` et `DSD` avaient accaparé **61 492 des 68 015 fichiers du
+    /// parc (90 %)**, laissant `KKI` avec 5 fichiers sur 17 318.
+    ///
+    /// La règle (`CPT-PRO-101` R2) : un recouvrement de chemins doit être **DÉCLARÉ**,
+    /// jamais subi. Un méga-projet légitime se déclare via `parent_project_code` et reste
+    /// valide ; un accident d'enregistrement ne se déclare pas, donc il se voit.
+    ///
+    /// Rend `Some(message)` quand il faut refuser — le message NOMME le projet en cause et
+    /// porte le geste de réparation, jamais un refus générique.
+    fn territoire_deja_pris(&self, project_code: &str, project_path: &str) -> Option<String> {
+        let chemin = project_path.trim_end_matches('/');
+        if chemin.is_empty() {
+            return None;
+        }
+        let esc = |v: &str| v.replace('\'', "''");
+        // Un projet qui se ré-enregistre sur SON propre chemin n'est pas un recouvrement.
+        let sql = format!(
+            "SELECT project_code, project_path, COALESCE(parent_project_code,'') \
+             FROM soll.ProjectCodeRegistry \
+             WHERE project_path IS NOT NULL AND project_code <> '{code}' \
+               AND ( starts_with('{p}/', project_path || '/') \
+                  OR starts_with(project_path || '/', '{p}/') ) \
+             ORDER BY length(project_path) DESC LIMIT 1",
+            code = esc(project_code),
+            p = esc(chemin)
+        );
+        let rows: Vec<Vec<String>> = self
+            .graph_store
+            .query_json(&sql)
+            .ok()
+            .and_then(|r| serde_json::from_str(&r).ok())
+            .unwrap_or_default();
+        let voisin = rows.first()?;
+        let (autre_code, autre_chemin) = (voisin.first()?, voisin.get(1)?);
+        // Relation déjà déclarée dans un sens ou dans l'autre ⇒ méga-projet assumé.
+        let declare_ici = voisin.get(2).map(|v| v == autre_code).unwrap_or(false);
+        if declare_ici {
+            return None;
+        }
+        let descendant = chemin.starts_with(&format!("{autre_chemin}/"));
+        let (sens, consequence) = if descendant {
+            (
+                format!("est DANS le projet `{autre_code}` (`{autre_chemin}`)"),
+                format!(
+                    "Les fichiers de ce dossier appartiennent déjà à `{autre_code}`. Un second \
+                     code les coupe en deux selon l'ordre des scans — c'est ce qui est arrivé à \
+                     `ELE` et `KKD`."
+                ),
+            )
+        } else {
+            (
+                format!("CONTIENT le projet `{autre_code}` (`{autre_chemin}`)"),
+                format!(
+                    "Un projet qui contient d'autres projets accapare leurs fichiers : `PRP` et \
+                     `DSD` en avaient pris 90 % du parc. Et un `rescan_project(full=true)` sur \
+                     lui effacerait l'index de TOUS ceux qu'il contient."
+                ),
+            )
+        };
+        Some(format!(
+            "Le chemin `{chemin}` {sens}.\n\n{consequence}\n\n\
+             Trois issues, dans l'ordre de préférence :\n\
+             1. **Ne pas créer ce projet** — travailler sous `{autre_code}`, qui couvre déjà ce \
+                chemin. C'est le cas le plus fréquent : un sous-dossier n'est pas un projet.\n\
+             2. **Choisir un chemin qui ne recouvre rien** — un dépôt à lui, à côté et non dedans.\n\
+             3. **Déclarer le méga-projet**, si les deux sont de vrais projets imbriqués :\n\
+             `sql \"UPDATE soll.ProjectCodeRegistry SET parent_project_code='{autre_code}' \
+             WHERE project_code='<le code enfant>'\"` — puis relancer.\n\n\
+             Règle : CPT-PRO-101 (R2, territoires) · mesure : REQ-AXO-902506."
+        ))
+    }
+
     /// REQ-AXO-902500 — le projet a-t-il DÉJÀ arbitré ses guidelines ?
     ///
     /// `bootstrap_required` ne convient PAS ici : un projet fraîchement enrôlé reçoit une
@@ -2394,6 +2479,21 @@ impl McpServer {
         let concept_text = args
             .get("concept_document_url_or_text")
             .and_then(|v| v.as_str());
+
+        // REQ-AXO-902507 — refuser AVANT d'écrire : une entrée fantôme créée est bien plus
+        // coûteuse à retirer qu'à ne pas créer. `ELE` a survécu SIX JOURS à une demande de
+        // suppression explicite, faute d'outil de retrait.
+        if let Some(refus) = self.territoire_deja_pris(&project_code, project_path) {
+            return Some(project_workflow_error(
+                "project_path",
+                Some(project_path),
+                &["project_registry_lookup", "status"],
+                refus,
+                "un territoire déjà couvert ne se reprend pas en silence : soit on travaille \
+                 sous le projet qui le couvre, soit on déclare explicitement l'imbrication",
+                None,
+            ));
+        }
 
         if let Err(e) = self.graph_store.sync_project_registry_entry(
             &project_code,

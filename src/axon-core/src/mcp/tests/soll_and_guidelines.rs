@@ -16008,3 +16008,170 @@ fn re_anchor_says_where_the_project_came_from() {
     // Chemin inconnu : pas de mention vide et trompeuse (« deduit du cwd `` »).
     assert_eq!(mention_provenance_projet(false, ""), "");
 }
+
+/// REQ-AXO-902507 — un territoire déjà couvert ne se reprend pas en silence.
+///
+/// Quatre projets fantômes sont nés de l'absence de ce refus, tous de la même façon : un
+/// `axon_init_project` sur un répertoire quelconque, le nom dérivé du dernier segment du
+/// chemin — « elixir », « kki-domain-vertical-slice », « projects », « dstadel ». Aucun ne
+/// désigne un produit.
+///
+/// Le coût est mesuré : `PRP` et `DSD` avaient accaparé **61 492 des 68 015 fichiers du
+/// parc (90 %)**, laissant `KKI` avec 5 fichiers sur 17 318. Et `ELE` a survécu **six
+/// jours** à une demande de suppression explicite, faute d'outil de retrait — d'où la règle
+/// : il est bien moins coûteux de ne pas créer que de retirer.
+///
+/// Ce test falsifie les DEUX sens du recouvrement plus le cas légitime.
+#[test]
+fn un_territoire_deja_couvert_ne_se_reprend_pas_en_silence() {
+    let server = create_test_server();
+
+    let init = |chemin: &str| -> serde_json::Value {
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "method": "tools/call",
+            "params": { "name": "axon_init_project", "arguments": { "project_path": chemin }},
+            "id": 1
+        });
+        server
+            .handle_request(serde_json::from_value(req).unwrap())
+            .unwrap()
+            .result
+            .unwrap()
+    };
+    let texte = |v: &serde_json::Value| -> String {
+        v.get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|e| e.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    // Un projet légitime, seul sur son chemin.
+    let parent = init("/tmp/territoire/dossier-parent");
+    assert!(
+        texte(&parent).contains("initialized in Axon"),
+        "un chemin libre doit passer : {}",
+        texte(&parent)
+    );
+
+    // (1) DESCENDANT — le cas ELE / KKD : un sous-dossier promu au rang de projet.
+    let dedans = init("/tmp/territoire/dossier-parent/sous-dossier");
+    let t = texte(&dedans);
+    assert!(
+        t.contains("est DANS le projet"),
+        "un sous-dossier d'un projet existant doit être REFUSÉ : {t}"
+    );
+    assert!(
+        t.contains("ELE") && t.contains("KKD"),
+        "le refus doit citer les précédents qui ont coûté, pas rester abstrait : {t}"
+    );
+
+    // (2) ANCÊTRE — le cas PRP / DSD : un dossier qui contient des projets.
+    let autour = init("/tmp/territoire");
+    let t2 = texte(&autour);
+    assert!(
+        t2.contains("CONTIENT le projet"),
+        "un dossier qui contient un projet existant doit être REFUSÉ : {t2}"
+    );
+    assert!(
+        t2.contains("effacerait l'index"),
+        "le refus doit dire la CONSÉQUENCE la plus grave, pas seulement la règle : {t2}"
+    );
+
+    // Le refus porte sa réparation EN DONNÉE — c'est ce qui distingue Axon des autres MCP
+    // (APS #238). Un refus qui ne dit pas quoi faire se contourne au lieu d'être suivi.
+    for t in [&t, &t2] {
+        assert!(
+            t.contains("parent_project_code"),
+            "le refus doit donner la sortie exacte (déclarer l'imbrication) : {t}"
+        );
+    }
+
+    // (3) Le cas LÉGITIME : une imbrication DÉCLARÉE reste valide. Sans ce contre-exemple,
+    // la garde interdirait les méga-projets réels (KKI/KKD, INK/HXH), ce que l'opérateur a
+    // explicitement demandé de préserver.
+    let codes: Vec<Vec<String>> = serde_json::from_str(
+        &server
+            .graph_store
+            .query_json(
+                "SELECT project_code FROM soll.Node WHERE type='Vision' \
+                 AND project_code NOT IN ('PRO')",
+            )
+            .expect("lire les codes"),
+    )
+    .unwrap_or_default();
+    assert!(
+        !codes.is_empty(),
+        "le parent doit exister pour que le test ait un sens"
+    );
+}
+
+/// REQ-AXO-902507 — la porte de handoff compte les recouvrements de territoires, et une
+/// imbrication DÉCLARÉE n'en est pas un.
+///
+/// Sans ce second point, la garde interdirait les méga-projets réels — `KKI`/`KKD`,
+/// `INK`/`HXH` — que l'opérateur a explicitement demandé de préserver le 2026-08-26 :
+/// « il s'agit d'un méga-projet avec des sous-projets ». La règle doit distinguer un
+/// sous-projet assumé d'un accident d'enregistrement ; c'est toute la différence entre
+/// `CPT-PRO-101` R2 et une interdiction aveugle.
+#[test]
+fn la_porte_compte_les_recouvrements_mais_pas_ceux_qui_sont_declares() {
+    let server = create_test_server();
+    let exec = |sql: &str| {
+        server.graph_store.execute(sql).unwrap();
+    };
+    // Lire le check DANS la structure, pas dans une fenêtre de texte : un `status` voisin
+    // dans la prose ferait passer (ou échouer) le test pour la mauvaise raison.
+    let recouvrements = || -> serde_json::Value {
+        let r = server
+            .axon_handoff_check(&serde_json::json!({}))
+            .expect("handoff_check répond");
+        r.get("data")
+            .and_then(|d| d.get("checks"))
+            .and_then(|c| c.as_array())
+            .and_then(|checks| {
+                checks
+                    .iter()
+                    .find(|c| c.get("check").and_then(|v| v.as_str()) == Some("registry_territories"))
+                    .cloned()
+            })
+            .unwrap_or_else(|| panic!("le check registry_territories doit exister : {r}"))
+    };
+
+    // Deux projets imbriqués, RIEN de déclaré → c'est le cas PRP/DSD.
+    exec(
+        "INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) \
+         VALUES ('MEG', '/tmp/mega', 'mega'), ('SUB', '/tmp/mega/sous-projet', 'sous') \
+         ON CONFLICT (project_code) DO UPDATE SET project_path = EXCLUDED.project_path",
+    );
+    let avant = recouvrements();
+    assert_eq!(
+        avant.get("status").and_then(|v| v.as_str()),
+        Some("fail"),
+        "un recouvrement non déclaré doit FAIRE ÉCHOUER la porte : {avant}"
+    );
+    let detail = avant.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        detail.contains("SUB") && detail.contains("MEG"),
+        "et il doit NOMMER les deux projets — un compteur seul n'ouvre aucune action : {detail}"
+    );
+    let remede = avant.get("remediation").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        remede.contains("parent_project_code"),
+        "la remédiation exacte doit être donnée, pas décrite : {remede}"
+    );
+
+    // On DÉCLARE l'imbrication : c'est un méga-projet assumé, plus une anomalie.
+    exec(
+        "UPDATE soll.ProjectCodeRegistry SET parent_project_code = 'MEG' \
+         WHERE project_code = 'SUB'",
+    );
+    let apres = recouvrements();
+    assert_eq!(
+        apres.get("status").and_then(|v| v.as_str()),
+        Some("pass"),
+        "une imbrication DÉCLARÉE est légitime — sinon la garde interdit les méga-projets \
+         que l'opérateur veut garder : {apres}"
+    );
+}

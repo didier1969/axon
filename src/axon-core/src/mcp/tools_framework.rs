@@ -504,6 +504,67 @@ impl McpServer {
             }
         }));
 
+        // 3b. REQ-AXO-902507 — territoires du registre : aucun recouvrement NON DÉCLARÉ.
+        //
+        // Un `project_path` qui est ancêtre ou descendant d'un autre accapare ses fichiers.
+        // Mesuré le 2026-08-26 : `PRP` (`/home/dstadel/projects`) et `DSD` (`/home/dstadel`)
+        // détenaient **61 492 des 68 015 fichiers du parc (90 %)**, laissant `KKI` avec 5
+        // fichiers sur 17 318 — non pas vide, DÉPOSSÉDÉ.
+        //
+        // Un méga-projet légitime se DÉCLARE (`parent_project_code`) et ne compte pas ici :
+        // c'est ce qui distingue `KKI`/`KKD` d'un accident d'enregistrement. La règle est
+        // `CPT-PRO-101` R2 ; le refus à la création est dans `axon_init_project`.
+        //
+        // `fail`, pas `warn` : c'est une RÈGLE, et un registre qui se recouvre fausse tout
+        // ce qui se calcule par projet. La distinction règle/incohérence est celle que
+        // `2e9ee329` a câblée dans cette porte.
+        let recouvrements: Vec<Vec<String>> = self
+            .graph_store
+            .query_json(
+                "SELECT e.project_code, pa.project_code, pa.project_path \
+                 FROM soll.ProjectCodeRegistry e \
+                 JOIN soll.ProjectCodeRegistry pa \
+                   ON pa.project_code <> e.project_code AND pa.project_path IS NOT NULL \
+                  AND starts_with(e.project_path, pa.project_path || '/') \
+                 WHERE e.project_path IS NOT NULL \
+                   AND e.parent_project_code IS DISTINCT FROM pa.project_code \
+                 ORDER BY length(pa.project_path), e.project_code",
+            )
+            .ok()
+            .and_then(|r| serde_json::from_str(&r).ok())
+            .unwrap_or_default();
+        let n_recouvrements = recouvrements.len();
+        if n_recouvrements > 0 {
+            fails += 1;
+        }
+        // Nommer les coupables, bornés : un compteur seul n'ouvre aucune action
+        // (REQ-AXO-902409). Les ANCÊTRES d'abord — ce sont eux qui accaparent.
+        let exemples = recouvrements
+            .iter()
+            .take(6)
+            .filter_map(|r| Some(format!("{} ⊂ {}", r.first()?, r.get(1)?)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        checks.push(json!({
+            "check": "registry_territories",
+            "status": if n_recouvrements == 0 { "pass" } else { "fail" },
+            "detail": if n_recouvrements == 0 {
+                "aucun recouvrement de chemins non déclaré".to_string()
+            } else {
+                format!(
+                    "{n_recouvrements} recouvrement(s) de chemins NON déclaré(s){}{} — le projet \
+                     contenant accapare les fichiers de celui qu'il contient",
+                    if exemples.is_empty() { "" } else { " : " },
+                    exemples
+                )
+            },
+            "remediation": if n_recouvrements == 0 { "".to_string() } else {
+                "soit retirer l'entrée fantôme du registre, soit déclarer l'imbrication : \
+                 `UPDATE soll.ProjectCodeRegistry SET parent_project_code='<PARENT>' \
+                 WHERE project_code='<ENFANT>'` (CPT-PRO-101 R2)".to_string()
+            }
+        }));
+
         // 4. live runtime health (reuse status brief)
         let st = self.axon_status(&json!({ "mode": "brief" }));
         let st_ok = st
