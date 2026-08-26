@@ -19,7 +19,7 @@ impl McpServer {
                 "intent": "understand_symbol",
                 "minimal_sequence": ["status", "project_status", "query", "inspect", "retrieve_context", "why"],
                 "stop_rule": "stop after exact target, context packet, and governing rationale are available",
-                "avoid": ["status full unless brief is degraded", "fs_read before inspect identifies the file"],
+                "avoid": ["status verbose unless brief is degraded", "fs_read before inspect identifies the file"],
                 "requires_explicit_input_if": ["target remains ambiguous after query", "project_code is unknown"],
                 "fallbacks": [
                     {"if": "query_empty", "do": "broaden query terms or call project_status"},
@@ -30,7 +30,7 @@ impl McpServer {
                 "intent": "prepare_edit",
                 "minimal_sequence": ["status", "project_status", "query", "inspect", "impact", "change_safety"],
                 "stop_rule": "stop discovery after exact target, blast radius, and safety signal are known",
-                "avoid": ["editing before impact", "status full unless brief is degraded"],
+                "avoid": ["editing before impact", "status verbose unless brief is degraded"],
                 "requires_explicit_input_if": ["business intent is missing", "change_safety reports irreversible or high-risk mutation"],
                 "fallbacks": [
                     {"if": "impact_partial", "do": "call path or retrieve_context for missing edges"},
@@ -78,7 +78,7 @@ impl McpServer {
                 "requires_explicit_input_if": ["client endpoint binding is stale", "truth_status is not canonical"],
                 "fallbacks": [
                     {"if": "surface_mismatch", "do": "call mcp_surface_diagnostics"},
-                    {"if": "health_degraded", "do": "call status with mode=full"}
+                    {"if": "health_degraded", "do": "call status with mode=verbose"}
                 ]
             }),
             _ => json!({
@@ -151,7 +151,7 @@ impl McpServer {
                 vec![
                     "Public MCP authority is brain.",
                     "IST writer authority is indexer.",
-                    "Use status(mode=full) only for deep diagnostics.",
+                    "Use status(mode=verbose) only for deep diagnostics.",
                 ],
             ),
             _ => (
@@ -167,9 +167,9 @@ impl McpServer {
                     "6. axon_pre_flight_check \u{2192} axon_commit_work \u{2192} delivery",
                 ],
                 vec![
-                    "Call status() first \u{2014} it returns your project_code and next best action.",
+                    "Call axon_init_project(project_path=<repo root>) first; use status() next only when runtime detail is needed.",
                     "Use help(tool=X) to see any tool's JSON input schema and examples.",
-                    "Use mode=brief first; escalate to full only for missing diagnostics.",
+                    "Use mode=brief first; escalate to verbose only for missing diagnostics.",
                     "Skill: axon-engineering-protocol",
                 ],
             ),
@@ -344,14 +344,25 @@ fn tool_help_response(tool_name: &str) -> Value {
         });
     };
 
-    let examples = usage_examples_for_tool(normalized);
-    let next_action = next_action_for_tool(normalized);
     let input_schema = tool
         .get("inputSchema")
         .cloned()
         .unwrap_or_else(|| json!({"type": "object"}));
+    let declared_examples = usage_examples_for_tool(normalized);
+    let examples = if declared_examples
+        .as_array()
+        .is_some_and(|items| !items.is_empty())
+    {
+        declared_examples
+    } else {
+        json!([{
+            "purpose": "schema-derived starter",
+            "arguments": example_value_for_schema(&input_schema, "arguments")
+        }])
+    };
+    let next_action = next_action_for_tool(normalized);
     let schema_compact = serde_json::to_string(&input_schema).unwrap_or_default();
-    let first_example = usage_examples_for_tool(normalized)
+    let first_example = examples
         .as_array()
         .and_then(|arr| arr.first().cloned())
         .and_then(|ex| {
@@ -363,8 +374,13 @@ fn tool_help_response(tool_name: &str) -> Value {
         .get("description")
         .and_then(Value::as_str)
         .unwrap_or("");
+    let execution_instruction = if McpServer::is_async_job_tool(normalized) {
+        "This tool is asynchronous: if the response returns `job_id`, poll `job_status` until terminal."
+    } else {
+        "This tool is synchronous: consume its response directly."
+    };
     let text = format!(
-        "## Axon Tool Help\n\nTool: `{}`\n\n{}\n\n### Input Schema\n```json\n{}\n```\n{}### Usage\nStart with the first example. If async, poll `job_status` until terminal.",
+        "## Axon Tool Help\n\nTool: `{}`\n\n{}\n\n### Input Schema\n```json\n{}\n```\n{}### Usage\nStart with the example above. {}",
         normalized,
         description,
         schema_compact,
@@ -373,6 +389,7 @@ fn tool_help_response(tool_name: &str) -> Value {
         } else {
             format!("\n### Example\n```json\n{}\n```\n\n", first_example)
         },
+        execution_instruction,
     );
 
     json!({
@@ -390,6 +407,37 @@ fn tool_help_response(tool_name: &str) -> Value {
             }
         }
     })
+}
+
+fn example_value_for_schema(schema: &Value, field_name: &str) -> Value {
+    if let Some(value) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+    {
+        return value.clone();
+    }
+    match schema.get("type").and_then(Value::as_str).unwrap_or("object") {
+        "object" => {
+            let required = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let properties = schema.get("properties").and_then(Value::as_object);
+            let mut object = serde_json::Map::new();
+            for name in required.iter().filter_map(Value::as_str) {
+                let child = properties.and_then(|items| items.get(name)).unwrap_or(&Value::Null);
+                object.insert(name.to_string(), example_value_for_schema(child, name));
+            }
+            Value::Object(object)
+        }
+        "array" => Value::Array(Vec::new()),
+        "integer" => json!(1),
+        "number" => json!(1.0),
+        "boolean" => Value::Bool(false),
+        _ => Value::String(format!("<{field_name}>")),
+    }
 }
 
 fn usage_examples_for_tool(tool_name: &str) -> Value {
@@ -580,5 +628,34 @@ mod unknown_tool_tests {
     fn known_tool_still_answers_with_its_contract() {
         let known = tool_help_response("query");
         assert_ne!(known["data"]["problem_class"].as_str(), Some("unknown_tool"));
+    }
+
+    #[test]
+    fn synchronous_tool_help_has_a_real_example_and_no_async_instruction() {
+        // REQ-AXO-902516 / DGD #304 — help previously promised a first
+        // example when none existed and told every synchronous tool to poll.
+        let help = tool_help_response("query");
+        let examples = help["data"]["usage_examples"]
+            .as_array()
+            .expect("usage_examples array");
+        assert!(!examples.is_empty(), "every public tool needs one JSON example");
+        let text = help["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("### Example"), "{text}");
+        assert!(!text.contains("If async"), "{text}");
+        assert!(!text.contains("poll `job_status`"), "{text}");
+    }
+
+    #[test]
+    fn runtime_help_recommends_only_a_schema_valid_status_mode() {
+        let store = std::sync::Arc::new(
+            crate::tests::test_helpers::create_test_db().expect("test database"),
+        );
+        let server = McpServer::new(store);
+        let help = server
+            .axon_help(&json!({"topic": "runtime"}))
+            .expect("help response");
+        let text = help["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(!text.contains("mode=full"), "{text}");
+        assert!(text.contains("mode=verbose"), "{text}");
     }
 }

@@ -13337,6 +13337,20 @@ fn test_axon_apply_methodology_bundle_dry_run_returns_summary() {
 #[test]
 fn test_skill_entity_type_create_with_canonical_inherit_from_guideline() {
     let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("TSK", Some("skill-test"), Some("/tmp/skill-test"))
+        .unwrap();
+    let _ = server.graph_store.execute(
+        "DELETE FROM soll.Edge WHERE source_id LIKE 'SKI-TSK-%' OR target_id LIKE 'SKI-TSK-%'",
+    );
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE project_code='TSK'");
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('GUI-TSK-001', 'Guideline', 'TSK', 'TDD fixture', 'red green refactor', 'current', '{}')")
+        .unwrap();
 
     let req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -13347,10 +13361,10 @@ fn test_skill_entity_type_create_with_canonical_inherit_from_guideline() {
                 "action": "create",
                 "entity": "skill",
                 "data": {
-                    "project_code": "PRO",
+                    "project_code": "TSK",
                     "title": "Test skill — TDD obligatoire procedure",
                     "description": "Procedural body invoked by LLM via mcp__axon__skill_invoke. Implements GUI-PRO-001 (TDD obligatoire) as an executable skill : red → green → refactor loop using Axon MCP for query/inspect/commit.",
-                    "attach_to": "GUI-PRO-001",
+                    "attach_to": "GUI-TSK-001",
                     "relation_type": "INHERITS_FROM",
                     "status": "current"
                 }
@@ -13378,18 +13392,26 @@ fn test_skill_entity_type_create_with_canonical_inherit_from_guideline() {
         "SKI entity create should succeed, got: {content}"
     );
     assert!(
-        content.contains("SKI-PRO-"),
+        content.contains("SKI-TSK-"),
         "Response should include canonical SKI id, got: {content}"
     );
 
     let count = server
         .graph_store
-        .query_count("SELECT count(*) FROM soll.Node WHERE type='Skill' AND project_code='PRO'")
+        .query_count("SELECT count(*) FROM soll.Node WHERE type='Skill' AND project_code='TSK'")
         .unwrap();
     assert!(
         count >= 1,
-        "at least one SKI-PRO row expected after create, got {count}"
+        "at least one isolated SKI-TSK row expected after create, got {count}"
     );
+    server
+        .graph_store
+        .execute("DELETE FROM soll.Edge WHERE source_id LIKE 'SKI-TSK-%' OR target_id LIKE 'SKI-TSK-%'")
+        .unwrap();
+    server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE project_code='TSK'")
+        .unwrap();
 }
 
 // REQ-AXO-91578 — SKI entity must reject create when NO canonical relation
@@ -13513,6 +13535,10 @@ fn test_prompt_template_entity_type_create_with_canonical_inherit_from_guideline
 #[test]
 fn test_skill_list_and_invoke_round_trip() {
     let server = create_test_server();
+    server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id IN ('SKI-PRO-997', 'SKI-PRO-998')")
+        .unwrap();
 
     // Seed a SKI directly (faster than going through soll_manager).
     server
@@ -13521,6 +13547,13 @@ fn test_skill_list_and_invoke_round_trip() {
             "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
              VALUES ('SKI-PRO-998', 'Skill', 'PRO', 'Test TDD skill', 'Body : red green refactor. Test fixture for SKI MCP surface.', 'current', '{\"invocation_mode\":\"MANDATED\",\"applicable_to\":[\"delivery\"]}'::jsonb) \
              ON CONFLICT (id) DO NOTHING",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('SKI-PRO-997', 'Skill', 'PRO', 'Retired test skill', 'Must stay hidden.', 'rejected', '{\"invocation_mode\":\"OPTIONAL\",\"applicable_to\":[\"test\"]}'::jsonb)",
         )
         .unwrap();
 
@@ -13547,6 +13580,16 @@ fn test_skill_list_and_invoke_round_trip() {
         list_text.contains("SKI-PRO-998"),
         "skill_list output should contain seeded id, got: {list_text}"
     );
+    assert!(
+        !list_text.contains("SKI-PRO-997"),
+        "terminal fixtures must not pollute the invocable catalogue: {list_text}"
+    );
+    let listed = list_result["data"]["skills"]
+        .as_array()
+        .and_then(|skills| skills.iter().find(|skill| skill["id"] == json!("SKI-PRO-998")))
+        .expect("seeded current skill in structured list");
+    assert_eq!(listed["invocation_mode"], json!("MANDATED"));
+    assert_eq!(listed["applicable_to"], json!(["delivery"]));
 
     // skill_invoke by id — should return body.
     let invoke_req = serde_json::json!({
@@ -13596,6 +13639,39 @@ fn test_skill_list_and_invoke_round_trip() {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     assert!(nf_is_error, "skill_invoke should reject unknown id");
+    server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id IN ('SKI-PRO-997', 'SKI-PRO-998')")
+        .unwrap();
+}
+
+#[test]
+fn re_anchor_without_mandated_skills_routes_directly_to_work_plan() {
+    // REQ-AXO-902516 / DGD #306 — zero mandated skills must never produce an
+    // impossible, ID-less skill_invoke instruction.
+    let server = create_test_server();
+    let code = "NSK";
+    server
+        .graph_store
+        .sync_project_registry_entry(&code, Some("no-skill-fixture"), Some("/tmp/no-skill"))
+        .unwrap();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "re_anchor",
+                "arguments": {"project_code": code, "reason": "test"}
+            })),
+            id: Some(json!(902516)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let content = response["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(!content.contains("skill_invoke"), "{content}");
+    assert_eq!(response["data"]["mandated_skills"], json!([]));
+    assert_eq!(response["data"]["next_action"]["tool"], json!("soll_work_plan"));
 }
 
 // REQ-AXO-91581 slice 2 — prompt_template_get applies Mustache substitution

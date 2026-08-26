@@ -259,7 +259,7 @@ impl McpServer {
         let sql = format!(
             "SELECT id, COALESCE(title, ''), COALESCE(description, ''), COALESCE(status, 'current'), COALESCE(metadata::text, '{{}}') \
              FROM soll.Node \
-             WHERE type='Skill' AND project_code='{}' \
+             WHERE type='Skill' AND project_code='{}' AND status='current' \
              ORDER BY id",
             escaped_code
         );
@@ -329,6 +329,14 @@ impl McpServer {
                 "title": title,
                 "description": description,
                 "status": status,
+                "invocation_mode": metadata
+                    .get("invocation_mode")
+                    .cloned()
+                    .unwrap_or_else(|| json!("OPTIONAL")),
+                "applicable_to": metadata
+                    .get("applicable_to")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
                 "metadata": metadata,
             }));
         }
@@ -805,6 +813,9 @@ impl McpServer {
                 .and_then(Value::as_str)
                 .unwrap_or("OPTIONAL")
                 .to_ascii_uppercase();
+            if mode != "MANDATED" {
+                continue;
+            }
             mandated_skills.push(json!({
                 "id": row[0],
                 "title": row[1],
@@ -891,6 +902,21 @@ impl McpServer {
             project_explicite.is_some(),
             &crate::mcp::effective_project_search_path(),
         );
+        let next_action = mandated_skills
+            .first()
+            .and_then(|skill| skill.get("id").and_then(Value::as_str))
+            .map(|id| json!({"tool": "skill_invoke", "arguments": {"id": id}}))
+            .unwrap_or_else(|| {
+                json!({
+                    "tool": "soll_work_plan",
+                    "arguments": {"project_code": project_code, "limit": 8, "format": "brief"}
+                })
+            });
+        let next_instruction = if mandated_skills.is_empty() {
+            "No MANDATED skill applies; call `soll_work_plan` next for scored work."
+        } else {
+            "Call the first listed `skill_invoke(id=…)` next, then `soll_work_plan`."
+        };
 
         let summary_text = format!(
             "## 🧭 Re-anchor `{}`{} (reason: {})\n\n\
@@ -900,7 +926,7 @@ impl McpServer {
              - **Recent SOLL revisions** : {} (last 10)\n\
              - **Work plan top** : {} (current REQ/MIL)\n\
              - **Session pointer** : {}\n\n\
-             Call `skill_invoke` next per methodology mandate, or `soll_work_plan` for full scoring.",
+             {next_instruction}",
             project_code,
             provenance,
             reason,
@@ -934,6 +960,7 @@ impl McpServer {
                 "recent_revisions": recent_revisions,
                 "session_pointer": session_pointer,
                 "work_plan_top": work_plan_top,
+                "next_action": next_action,
             }
         }))
     }

@@ -293,7 +293,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "skill_list",
-                "description": "[SOLL/SKI] List available SKI (Skill) entities for invocation. REQ-AXO-91580. Filter by `applicable_to` (task domain) or `mode_filter` (MANDATED|RECOMMENDED|OPTIONAL). Default project_code=PRO (cross-tenant methodology surface per PIL-AXO-9003 Two-Sided Identity). Cheap discovery — call FIRST in a session before invoking skills.",
+                "description": "[SOLL/SKI] List current SKI (Skill) entities available for invocation. REQ-AXO-91580. Use after axon_init_project/re_anchor when their mandated_skills signal requires discovery; it is not a competing first-session call. Filter by `applicable_to` or `mode_filter`. Default project_code=PRO (cross-tenant methodology surface).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
