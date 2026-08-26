@@ -1778,6 +1778,46 @@ fn test_client_cwd_header_overrides_server_cwd_for_project_resolution() {
 }
 
 #[test]
+fn test_status_cache_is_isolated_by_calling_client_project() {
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("SCA", Some("status-a"), Some("/home/test/status-a"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry("SCB", Some("status-b"), Some("/home/test/status-b"))
+        .unwrap();
+
+    let status_for = |path: &str| {
+        let _cwd = crate::mcp::ClientCwdGuard::install(Some(path.to_string()));
+        server.axon_status(&json!({"mode": "brief"})).unwrap()
+    };
+    let first = status_for("/home/test/status-a/worktree");
+    let second = status_for("/home/test/status-b/worktree");
+    let unresolved = status_for("/home/test/status-unregistered");
+
+    let first_text = first["content"][0]["text"].as_str().unwrap();
+    let second_text = second["content"][0]["text"].as_str().unwrap();
+    assert!(first_text.contains("`SCA`"), "{first_text}");
+    assert!(second_text.contains("`SCB`"), "{second_text}");
+    assert!(!second_text.contains("`SCA`"), "{second_text}");
+    assert_eq!(
+        first["data"]["instance_identity"]["auto_detected_project"],
+        json!("SCA")
+    );
+    assert_eq!(
+        second["data"]["instance_identity"]["auto_detected_project"],
+        json!("SCB")
+    );
+    assert!(unresolved["data"]["instance_identity"]["auto_detected_project"].is_null());
+    let unresolved_text = unresolved["content"][0]["text"].as_str().unwrap();
+    assert!(!unresolved_text.contains("`SCA`"), "{unresolved_text}");
+    assert!(!unresolved_text.contains("`SCB`"), "{unresolved_text}");
+}
+
+#[test]
 fn test_cwd_provenance_disclosed_only_when_auto_resolved() {
     // REQ-AXO-902287 (M1) — an auto-resolved project scope gets a one-line
     // provenance note so the LLM knows the project was inferred, not chosen; an

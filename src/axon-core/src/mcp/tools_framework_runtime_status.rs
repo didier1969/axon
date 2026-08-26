@@ -103,6 +103,11 @@ impl McpServer {
     pub(super) fn axon_status_status_impl(&self, args: &Value) -> Option<Value> {
         let mode = args.get("mode").and_then(|value| value.as_str());
         let now_ms = crate::clock::now_unix_ms();
+        // REQ-AXO-902523 — status is cached on a shared brain. Resolve the
+        // caller exactly once and bind the whole response/cache entry to it;
+        // otherwise the first client in the TTL window lends its tenant scope
+        // to every following client.
+        let status_project = self.auto_resolve_project_code_str();
         let runtime_mode = AxonRuntimeMode::from_env();
         let runtime_shadow_role = current_runtime_shadow_role();
         let split_runtime_is_indexer = matches!(
@@ -116,8 +121,9 @@ impl McpServer {
                 .as_deref(),
         );
         let cache_key = format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}",
             mode.unwrap_or("brief"),
+            status_project.as_deref().unwrap_or("unresolved"),
             runtime_mode.as_str(),
             runtime_profile.as_str(),
             // REQ-AXO-901657 slice 4 cluster A : canonical = AXON_INSTANCE.
@@ -130,7 +136,7 @@ impl McpServer {
             std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string())
         );
         let status_cache_ttl_ms = match mode.unwrap_or("brief") {
-            "full" => STATUS_FULL_CACHE_TTL_MS,
+            "verbose" => STATUS_FULL_CACHE_TTL_MS,
             _ => STATUS_CACHE_TTL_MS,
         };
         if let Some(cached) = cache_read(
@@ -675,12 +681,11 @@ impl McpServer {
         // REQ-AXO-902478 — la ligne est rendue DANS TOUS LES CAS (voir
         // `ligne_code_intel`) : les trois portes de sortie muettes la faisaient
         // disparaitre exactement quand elle sert.
-        let code_intel_project = self.auto_resolve_project_code_str();
-        let code_intel_scope = code_intel_project
+        let code_intel_scope = status_project
             .as_deref()
             .and_then(|p| self.project_scope_summary(Some(p)));
         evidence.push_str(&ligne_code_intel(
-            code_intel_project.as_deref(),
+            status_project.as_deref(),
             code_intel_scope.as_ref(),
         ));
         if !indexed_projection_fresh {
@@ -1296,7 +1301,7 @@ impl McpServer {
                 // project, so a waking session sees its inbox without an explicit
                 // read. 0 when the mailbox table is absent (older deploy).
                 "inbox_unread": self.mailbox_unread_count(
-                    self.auto_resolve_project_code_str().as_deref().unwrap_or("")
+                    status_project.as_deref().unwrap_or("")
                 ),
                 "availability": {
                     // REQ-AXO-106 — `ist_projection_fresh` is the
@@ -1323,7 +1328,7 @@ impl McpServer {
                 "instance_identity": {
                     "instance_kind": instance_kind,
                     "runtime_identity": runtime_identity,
-                    "auto_detected_project": self.auto_detect_project_code_from_cwd(),
+                    "auto_detected_project": status_project.clone(),
                     "data_root": data_root,
                     "data_root_absolute": data_root_absolute,
                     "run_root": run_root,
@@ -1336,7 +1341,7 @@ impl McpServer {
                     // the auto-detected project. `null` when no pointer is
                     // configured and no legacy handoff fallback applies.
                     "session_pointer": self.resolve_session_pointer(
-                        self.auto_resolve_project_code_str().as_deref().unwrap_or(""),
+                        status_project.as_deref().unwrap_or(""),
                         Some(project_root.as_str())
                     )
                 },
@@ -1609,18 +1614,8 @@ impl McpServer {
         ist_call_graph_coverage_build(&rows)
     }
 
-    /// Auto-detect project_code from cwd by matching against ProjectCodeRegistry.
-    /// Returns the code if exactly one project matches, null otherwise.
-    /// Uses AXON_PROJECT_ROOT (set by runtime scripts) first, then falls back to cwd.
-    fn auto_detect_project_code_from_cwd(&self) -> Value {
-        match self.auto_resolve_project_code_str() {
-            Some(code) => json!(code),
-            None => Value::Null,
-        }
-    }
-
-    /// REQ-AXO-089 — same logic as `auto_detect_project_code_from_cwd` but
-    /// returns `Option<String>` for callers that want a borrowable code
+    /// REQ-AXO-089 — resolve project_code from the effective request cwd and
+    /// return `Option<String>` for callers that want a borrowable code
     /// without unwrapping a `Value`. Used by IST/DX tools (retrieve_context,
     /// query, inspect, ...) when the caller omits `project` so the response
     /// scope matches the project the user is actually working in instead of
