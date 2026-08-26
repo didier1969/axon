@@ -990,7 +990,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "mcp_inbox_read",
-                "description": "[MAILBOX] REQ-AXO-902114 (MBX-1/2) — read THIS project's inbox. mode=unread (since the read cursor, ADVANCES it), since (since `since_id`, non-destructive), or all. Each message carries `signature_verified` (HMAC). Pair with `inbox_unread` in status/axon_init_project for the wake case.",
+                "description": "[MAILBOX] REQ-AXO-902114 (MBX-1/2) — read THIS project's inbox. mode=unread (since the read cursor, ADVANCES it), since (since `since_id`, non-destructive), or all. Each message carries `signature_verified` (HMAC). Pair with `inbox_unread` in status/axon_init_project for the wake case. REQ-AXO-902419 — the batch is bounded in VOLUME (`budget_chars`, default 20000), not just in count: what the budget holds back is neither consumed nor archived, and the answer says how much.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -999,7 +999,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "since_id": { "type": "integer", "description": "Floor id for mode=since." },
                         "context_id": { "type": "string", "description": "MBX-4 — filter to one thread (non-destructive view, cursor not advanced)." },
                         "search": { "type": "string", "description": "MBX-4 — full-text search over subject+body (non-destructive view)." },
-                        "limit": { "type": "integer", "description": "Max messages (1-100, default 20)." }
+                        "limit": { "type": "integer", "description": "Max messages (1-100, default 20). REQ-AXO-902419 — bounds the COUNT, never the VOLUME: 31 messages once rendered 62 390 characters because sizes ranged from 2 to 80 lines. Use `budget_chars` for the size." },
+                        "budget_chars": { "type": "integer", "description": "REQ-AXO-902419 — character budget for the batch (default 20000). A message dropped by the budget is NEITHER consumed NOR archived: it comes back on the next call, and the answer states how many were held back. The first message always passes, however large — a tiny budget must never wedge the inbox." }
                     },
                     "required": []
                 }

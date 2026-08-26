@@ -561,3 +561,105 @@ fn c6_body_less_send_is_refused_on_direct_and_fanout_paths() {
     assert_eq!(ok["data"]["status"].as_str(), Some("ok"));
     assert_eq!(inbox_count(&server, TO), 1);
 }
+
+// ── C10 — le lot est borné en VOLUME, et ce qu'il écarte survit (REQ-AXO-902419) ──
+//
+// Mesuré par TE2 (#184), jumelle VPC #181 marquée `blocking` : `limit=31` a rendu
+// **62 390 caractères sur 563 lignes**, au-delà du plafond du client, dérouté vers un
+// fichier relu en trois passes de `sed`. Sur ces 31 messages la taille allait de deux
+// lignes à quatre-vingts : `limit` borne le NOMBRE, le débordement vient du VOLUME, et
+// le volume est inconnaissable AVANT l'appel.
+//
+// L'échec tombe à l'étape 3c de `GUI-PRO-102` — donc avant tout travail utile.
+
+/// La propriété qui rend la troncature acceptable : un message écarté par le budget
+/// n'est **ni consommé ni archivé**. Sans elle, borner en volume ne serait pas une
+/// protection mais une perte de courrier — bien pire que le débordement d'origine.
+#[test]
+fn c10_le_budget_de_volume_ne_consomme_ni_n_archive_ce_qu_il_n_a_pas_rendu() {
+    let server = create_test_server();
+    // Cinq messages d'environ 400 caractères de corps chacun.
+    for i in 0..5 {
+        send(
+            &server,
+            json!({
+                "from": FROM, "to_project": TO,
+                "idempotency_key": format!("c10-{i}"),
+                "subject": format!("gros {i}"),
+                "body_dense": "x".repeat(400)
+            }),
+        );
+    }
+    let avant = message_ids(&server, TO);
+    assert_eq!(avant.len(), 5, "cinq messages en boîte");
+
+    // Budget volontairement serré : deux messages doivent passer, pas cinq.
+    let lot = read(
+        &server,
+        json!({ "project": TO, "mode": "unread", "budget_chars": 1100 }),
+    );
+    let rendus = lot["data"]["count"].as_i64().unwrap_or(-1);
+    assert!(
+        (1..5).contains(&rendus),
+        "le budget doit tronquer sans tout jeter, got {rendus}"
+    );
+    assert!(
+        lot["data"]["messages_non_rendus_budget"].as_i64().unwrap_or(0) > 0,
+        "le débordement doit être une DONNÉE, pas seulement une phrase : {}",
+        lot["data"]
+    );
+    assert!(
+        lot["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("borné en VOLUME"),
+        "et il doit être DIT dans le canal que l'agent lit"
+    );
+
+    // LE point : les non-rendus sont toujours là, non archivés.
+    let apres = message_ids(&server, TO);
+    assert_eq!(
+        apres.len() as i64,
+        5 - rendus,
+        "seuls les messages RENDUS sont archivés — les autres survivent : {apres:?}"
+    );
+
+    // Et le rappel les délivre : rien n'est perdu, seulement différé.
+    let suite = read(&server, json!({ "project": TO, "mode": "unread" }));
+    assert_eq!(
+        suite["data"]["count"].as_i64(),
+        Some(5 - rendus),
+        "le second appel rend EXACTEMENT ce que le premier avait écarté"
+    );
+    assert!(
+        message_ids(&server, TO).is_empty(),
+        "après les deux appels la boîte est vide — aucun message n'a été sauté"
+    );
+}
+
+/// Contre-exemple : un premier message plus gros que le budget passe QUAND MÊME.
+/// Rendre zéro message parce que le premier dépasse remplacerait un débordement par
+/// un blocage, et le lecteur n'aurait aucun moyen d'avancer dans sa boîte.
+#[test]
+fn c10b_un_message_plus_gros_que_le_budget_passe_quand_meme() {
+    let server = create_test_server();
+    send(
+        &server,
+        json!({
+            "from": FROM, "to_project": TO,
+            "idempotency_key": "c10b-enorme",
+            "subject": "rapport d'incident",
+            "body_dense": "y".repeat(5_000)
+        }),
+    );
+    let lot = read(
+        &server,
+        json!({ "project": TO, "mode": "unread", "budget_chars": 10 }),
+    );
+    assert_eq!(
+        lot["data"]["count"].as_i64(),
+        Some(1),
+        "un budget minuscule ne doit jamais bloquer la boîte : {}",
+        lot["data"]
+    );
+}

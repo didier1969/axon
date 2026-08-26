@@ -636,6 +636,34 @@ impl McpServer {
             Err(e) => return Some(mbx_err(&format!("inbox read failed: {e}"), "degraded")),
         };
 
+        // REQ-AXO-902419 (doléance TE2 #184, jumelle VPC #181 `blocking`) — `limit`
+        // borne le NOMBRE de messages, jamais le VOLUME, et le volume est
+        // inconnaissable AVANT l'appel.
+        //
+        // Mesuré : `limit=31` a rendu **62 390 caractères sur 563 lignes**, au-delà du
+        // plafond du client, dérouté vers un fichier que le rapporteur a dû relire en
+        // trois passes de `sed`. Sur ces 31 messages, la taille allait de deux lignes
+        // (notifications de promote) à quatre-vingts (rapports d'incident) : **aucune
+        // valeur de `limit` ne pouvait deviner ça.**
+        //
+        // Et l'échec tombe au pire moment : `GUI-PRO-102` place la relève d'inbox à
+        // l'étape 3c de l'init, donc AVANT tout travail utile, sur la surface dont le
+        // rôle est justement d'orienter la session.
+        //
+        // ⚠️ **La sûreté du curseur tient à un détail** : `max_id` n'est mis à jour que
+        // pour les messages RÉELLEMENT rendus. Le curseur et l'archivage travaillent
+        // sur `id <= max_id` : un message écarté par le budget n'est donc ni consommé
+        // ni archivé, il repasse au prochain appel. Casser la boucle AVANT d'avoir
+        // touché `max_id` est ce qui rend cette troncature non destructive — un test
+        // le verrouille.
+        let budget_chars = args
+            .get("budget_chars")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(20_000);
+        let mut volume = 0usize;
+        let mut ecartes_budget = 0usize;
+
         let mut messages: Vec<Value> = Vec::with_capacity(rows.len());
         let mut body_lines = String::new();
         let mut max_id = floor;
@@ -644,8 +672,18 @@ impl McpServer {
                 .first()
                 .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
                 .unwrap_or(0);
-            max_id = max_id.max(id);
             let g = |i: usize| row.get(i).and_then(Value::as_str).unwrap_or("");
+            // REQ-AXO-902419 — décider AVANT de toucher `max_id`. Le premier message
+            // passe toujours, quelle que soit sa taille : rendre zéro message parce que
+            // le premier dépasse le budget serait remplacer un débordement par un
+            // blocage, et le lecteur n'aurait aucun moyen d'avancer.
+            let taille = g(7).len() + g(8).len() + 120;
+            if !messages.is_empty() && volume + taille > budget_chars {
+                ecartes_budget = rows.len() - messages.len();
+                break;
+            }
+            volume += taille;
+            max_id = max_id.max(id);
             let (message_id, context_id, from, kind, idem, irt, subject, body, sig) =
                 (g(1), g(2), g(3), g(4), g(5), g(6), g(7), g(8), g(9));
             let canonical =
@@ -787,8 +825,23 @@ impl McpServer {
             ));
         }
 
+        // REQ-AXO-902419 — un lot tronqué le DIT, avec le geste exact pour la suite.
+        // Un troncage silencieux ici serait pire qu'ailleurs : le lecteur croirait sa
+        // boîte vide et passerait à côté de rapports d'incident.
+        let note_budget = if ecartes_budget > 0 {
+            format!(
+                "\n\n⚠️ **Lot borné en VOLUME** : {volume} caractères rendus (budget \
+                 {budget_chars}), **{ecartes_budget} message(s) non rendus**. Ils ne sont \
+                 NI consommés NI archivés — rappelle `mcp_inbox_read` pour la suite, ou \
+                 passe `budget_chars=<N>` pour un lot plus gros. `limit` borne le nombre \
+                 de messages, pas leur taille (REQ-AXO-902419)."
+            )
+        } else {
+            String::new()
+        };
+
         let report = format!(
-            "### 📥 mcp_inbox_read\n\n`{}`{} · mode={} · {} message(s){}{}",
+            "### 📥 mcp_inbox_read\n\n`{}`{} · mode={} · {} message(s){}{}{}",
             project,
             if project_inferred {
                 " _(déduit du cwd — passe `project=` pour un autre)_"
@@ -870,11 +923,17 @@ impl McpServer {
                 "\n\n(aucun message)".to_string()
             } else {
                 body_lines
-            }
+            },
+            note_budget
         );
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
+                // REQ-AXO-902419 — l'automate ne lit pas la prose : le débordement de
+                // budget doit être une DONNÉE, pas seulement une phrase.
+                "budget_chars": budget_chars,
+                "volume_chars": volume,
+                "messages_non_rendus_budget": ecartes_budget,
                 "status": "ok",
                 "project": project,
                 "mode": mode,
