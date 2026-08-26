@@ -148,9 +148,35 @@ mod tests {
                 .expect("seed IndexedFile row");
         }
 
+        // REQ-AXO-902505 — a broad registry path may contain rows owned by a
+        // more-specific tenant. A full rescan must invalidate by project_code,
+        // never by path prefix alone.
+        let foreign_scope = unique_test_scope("rpf-foreign");
+        let foreign_code = three_char_code_from_scope(&foreign_scope);
+        let safe_foreign_code = foreign_code.replace('\'', "''");
+        let foreign_path = root.join("nested-tenant-only-in-index.rs");
+        let escaped_foreign_path = foreign_path.to_string_lossy().replace('\'', "''");
+        store
+            .execute_raw_sql_gateway(&format!(
+                "INSERT INTO axon.Project (code) VALUES ('{}') ON CONFLICT (code) DO NOTHING",
+                safe_foreign_code
+            ))
+            .expect("seed foreign axon.Project parent");
+        store
+            .execute_raw_sql_gateway(&format!(
+                "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) \
+                 VALUES ('{}', '{}', 'foreign-hash', {})",
+                escaped_foreign_path, safe_foreign_code, now_ms
+            ))
+            .expect("seed foreign IndexedFile row under the same path prefix");
+
         // Pre-condition : rows present.
         let count_before = read_indexed_count(&store, &project_path);
-        assert_eq!(count_before, files.len() as i64, "seed step must succeed");
+        assert_eq!(
+            count_before,
+            files.len() as i64 + 1,
+            "seed step must include the foreign tenant row"
+        );
 
         let args = serde_json::json!({ "project_code": code, "full": true });
         let envelope = server
@@ -191,11 +217,24 @@ mod tests {
             stale_hash_rows, 0,
             "full=true must invalidate the cached content_hash (seeded 'stale-hash' must be gone)"
         );
-        let discovered_rows = read_count_where(&store, &project_path, "status = 'discovered'");
+        let discovered_rows = read_count_where(
+            &store,
+            &project_path,
+            &format!("status = 'discovered' AND project_code = '{}'", safe_code),
+        );
         assert_eq!(
             discovered_rows,
             files.len() as i64,
             "full=true must re-enrol every file as status='discovered' for re-parse"
+        );
+        let foreign_rows = read_count_where(
+            &store,
+            &project_path,
+            &format!("project_code = '{}'", safe_foreign_code),
+        );
+        assert_eq!(
+            foreign_rows, 1,
+            "full=true must preserve another tenant even when its path shares the prefix"
         );
 
         let _ = std::fs::remove_dir_all(&root);

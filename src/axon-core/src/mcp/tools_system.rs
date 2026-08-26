@@ -1500,10 +1500,10 @@ impl McpServer {
         // content_hash. Best-effort : a failure here is logged in the
         // returned envelope's `cache_invalidation` field but does not
         // abort the rescan trigger (degraded path still beats nothing).
-        let cache_invalidation = if full {
-            self.rescan_wipe_indexed_files(&project_path)
+        let (cache_invalidation, invalidated_rows) = if full {
+            self.rescan_wipe_indexed_files(&project_code, &project_path)
         } else {
-            "skipped (delta mode)".to_string()
+            ("skipped (delta mode)".to_string(), Some(0))
         };
 
         // Step 3 — enumerate files on disk to compute
@@ -1536,6 +1536,7 @@ impl McpServer {
              **mode:** {mode_label} (full={full})\n\
              **files_scheduled:** {files_scheduled}\n\
              **projection_eta_ms:** {projection_eta_ms}\n\
+             **invalidated_rows:** {invalidated_rows_display}\n\
              **cache_invalidation:** {cache_invalidation}\n\
              **notify_outcome:** {notify_outcome}\n\n\
              Re-scan triggered via `axon_registry_changed` NOTIFY ; \
@@ -1545,6 +1546,9 @@ impl McpServer {
              --indexer-graph` and the next boot will replay IndexedFile from \
              PG before scanning.",
             project_path_display = project_path,
+            invalidated_rows_display = invalidated_rows
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
         );
         let structured = json!({
             "status": "ok",
@@ -1554,6 +1558,7 @@ impl McpServer {
             "full": full,
             "files_scheduled": files_scheduled,
             "projection_eta_ms": projection_eta_ms,
+            "invalidated_rows": invalidated_rows,
             "cache_invalidation": cache_invalidation,
             "notify_outcome": notify_outcome,
         });
@@ -1589,10 +1594,10 @@ impl McpServer {
         }
     }
 
-    /// Internal helper — wipe IndexedFile rows under `project_path`
-    /// so the scanner is forced to re-parse every file regardless of
-    /// the cached `content_hash`. Returns a human-readable status
-    /// string for the envelope. Failure is non-fatal : the NOTIFY
+    /// Internal helper — wipe only IndexedFile rows owned by `project_code`
+    /// so a broad registry path cannot invalidate a more-specific tenant.
+    /// The path remains the cache-invalidation signal consumed by the indexer.
+    /// Returns a human-readable status and the exact deleted-row count. Failure is non-fatal : the NOTIFY
     /// still fires and the indexer will at minimum re-touch
     /// `last_seen_ms` on next pass.
     /// REQ-AXO-902262 — wipe the PG rows AND tell the indexer to forget them.
@@ -1614,26 +1619,50 @@ impl McpServer {
     /// The NOTIFY is best-effort AND its outcome is REPORTED: if the cache could not be
     /// signalled, the caller is told the re-index will not happen on its own rather than
     /// being handed a success that means nothing.
-    fn rescan_wipe_indexed_files(&self, project_path: &str) -> String {
+    fn rescan_wipe_indexed_files(
+        &self,
+        project_code: &str,
+        project_path: &str,
+    ) -> (String, Option<usize>) {
+        let escaped_code = project_code.replace('\'', "''");
         let escaped = project_path.replace('\'', "''");
         let sql = format!(
-            "DELETE FROM ist.IndexedFile WHERE path LIKE '{}/%'",
-            escaped
+            "WITH deleted AS (\
+                 DELETE FROM ist.IndexedFile \
+                 WHERE project_code = '{}' \
+                 RETURNING 1\
+             ) SELECT count(*) FROM deleted",
+            escaped_code
         );
-        if let Err(err) = self.graph_store.execute_raw_sql_gateway(&sql) {
-            return format!("wipe_failed: {err}");
-        }
+        let invalidated_rows = match self.graph_store.execute_raw_sql_gateway(&sql) {
+            Ok(raw) => serde_json::from_str::<Vec<Vec<Value>>>(&raw)
+                .ok()
+                .and_then(|rows| rows.first().and_then(|row| row.first()).cloned())
+                .and_then(|value| {
+                    value
+                        .as_u64()
+                        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+                })
+                .map(|count| count as usize),
+            Err(err) => return (format!("wipe_failed: {err}"), None),
+        };
         let notify_sql = format!(
             "SELECT pg_notify('{}', '{}')",
             crate::pipeline::cache_invalidate_listener::LISTEN_CHANNEL,
             escaped
         );
         match self.graph_store.execute_raw_sql_gateway(&notify_sql) {
-            Ok(_) => "wiped (full mode) + indexer dedup-cache invalidated".to_string(),
-            Err(err) => format!(
-                "wiped (full mode) BUT cache-invalidate NOTIFY failed ({err}) — the indexer \
-                 will keep skipping these files as unchanged; restart axon-indexer to force \
-                 the re-index (REQ-AXO-902262)"
+            Ok(_) => (
+                "wiped by project_code (full mode) + indexer dedup-cache invalidated".to_string(),
+                invalidated_rows,
+            ),
+            Err(err) => (
+                format!(
+                    "wiped (full mode) BUT cache-invalidate NOTIFY failed ({err}) — the indexer \
+                     will keep skipping these files as unchanged; restart axon-indexer to force \
+                     the re-index (REQ-AXO-902262)"
+                ),
+                invalidated_rows,
             ),
         }
     }
