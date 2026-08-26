@@ -66,6 +66,21 @@ fn indexing_verdict(
 }
 
 impl McpServer {
+    fn append_security_findings(evidence: &mut String, findings: &[Value]) {
+        for finding in findings.iter().take(10) {
+            evidence.push_str(&format!(
+                "* `{}` — `{}`:{} ({}) — `{}`\n",
+                finding["rule_id"].as_str().unwrap_or("unknown_rule"),
+                finding["file"].as_str().unwrap_or("unknown_file"),
+                finding["line"].as_i64().unwrap_or(0),
+                finding["severity"].as_str().unwrap_or("unknown"),
+                finding["redacted_excerpt"]
+                    .as_str()
+                    .unwrap_or("<redacted>")
+            ));
+        }
+    }
+
     fn json_to_i64(value: &Value) -> Option<i64> {
         match value {
             Value::Number(n) => n
@@ -702,13 +717,23 @@ impl McpServer {
             None
         };
         let secret_findings = self.graph_store.get_security_findings(project).ok();
-        let sec_score = path_audit
-            .as_ref()
-            .zip(secret_findings.as_ref())
-            .map(|((path_score, _), findings)| {
-                (*path_score - findings.len() as i64 * 20).max(0)
-            });
-        let cov_score = self.graph_store.get_coverage_score(project).unwrap_or(0);
+        let sensitive_path_count = path_audit.as_ref().and_then(|(_, paths)| {
+            serde_json::from_str::<Vec<Vec<String>>>(paths)
+                .ok()
+                .map(|items| items.len())
+        });
+        // Reachability to a sensitive capability is not taint evidence. It is
+        // advisory and makes this axis inconclusive until source→sink evidence
+        // can be anchored; it must never manufacture a numeric penalty.
+        let sec_score = secret_findings.as_ref().and_then(|findings| {
+            (sensitive_path_count == Some(0))
+                .then_some((100 - findings.len() as i64 * 20).max(0))
+        });
+        // The legacy ratio is "symbols carrying a tested marker / symbols",
+        // not executable coverage. Publishing it as test coverage contradicted
+        // SHI and change_safety, so audit now says n/a until a canonical oracle
+        // supplies a real measurement.
+        let cov_score: Option<i64> = None;
         let tech_debt = self
             .graph_store
             .get_technical_debt(project)
@@ -730,7 +755,12 @@ impl McpServer {
         } else {
             serde_json::Map::new()
         };
-        let telemetry_score = self.graph_store.get_telemetry_score(project).unwrap_or(100);
+        let telemetry_log_count = if ram_warm {
+            crate::ist_snapshot::process_view().telemetry_log_call_count(project)
+        } else {
+            None
+        };
+        let telemetry_score = telemetry_log_count.and_then(|count| (count == 0).then_some(100));
         // REQ-AXO-901970 — RAM-only dead-code count (no PG fallback; cold → 0).
         let dead_code = if ram_warm {
             crate::ist_snapshot::process_view()
@@ -752,35 +782,27 @@ impl McpServer {
             evidence.push_str(&note);
             evidence.push('\n');
         }
-        if let (Some(score), Some((_, paths)), Some(findings)) =
-            (sec_score, path_audit.as_ref(), secret_findings.as_ref())
-        {
+        if let (Some(score), Some(findings)) = (sec_score, secret_findings.as_ref()) {
             evidence.push_str(&format!("### 🔒 Security: {score}/100\n"));
             if score < 100 {
                 evidence.push_str("🚨 **Anchored security findings detected.**\n");
-                if paths != "[]" {
-                    evidence.push_str(&format!("Critical call paths: {paths}\n"));
-                }
-                for finding in findings.iter().take(10) {
-                    evidence.push_str(&format!(
-                        "* `{}` — `{}`:{} ({}) — `{}`\n",
-                        finding["rule_id"].as_str().unwrap_or("unknown_rule"),
-                        finding["file"].as_str().unwrap_or("unknown_file"),
-                        finding["line"].as_i64().unwrap_or(0),
-                        finding["severity"].as_str().unwrap_or("unknown"),
-                        finding["redacted_excerpt"]
-                            .as_str()
-                            .unwrap_or("<redacted>")
-                    ));
-                }
+                Self::append_security_findings(&mut evidence, findings);
             } else {
                 evidence.push_str("✅ No anchored critical path or secret finding detected.\n");
             }
         } else {
             evidence.push_str("### 🔒 Security: inconclusive\n");
-            evidence.push_str(
-                "⚠️ Security evidence is unavailable or unanchored; no numeric security score or penalty was inferred. Warm the project snapshot and verify the SecurityFinding projection, then retry.\n",
-            );
+            match sensitive_path_count {
+                Some(count) if count > 0 => evidence.push_str(&format!(
+                    "⚠️ {count} production reachability candidate(s) lead to a sensitive capability, but no tainted source + anchored sink proves a vulnerability. They are not scored and are not labelled vulnerabilities.\n"
+                )),
+                _ => evidence.push_str(
+                    "⚠️ Security evidence is unavailable or unanchored; no numeric security score or penalty was inferred. Warm the project snapshot and verify the SecurityFinding projection, then retry.\n",
+                ),
+            }
+            if let Some(findings) = secret_findings.as_ref() {
+                Self::append_security_findings(&mut evidence, findings);
+            }
         }
 
         if !tech_debt.is_empty() {
@@ -799,7 +821,10 @@ impl McpServer {
             }
         }
 
-        evidence.push_str(&format!("\n### 🧪 Quality & Tests: {}%\n", cov_score));
+        evidence.push_str("\n### 🧪 Quality & Tests: n/a\n");
+        evidence.push_str(
+            "⚠️ No canonical executable-coverage measurement is available. The former tested-symbol ratio is not presented as coverage.\n",
+        );
 
         evidence.push_str(&format!(
             "\n### 🧹 Code Hygiene (Clean-As-You-Go): {}/100\n",
@@ -820,14 +845,20 @@ impl McpServer {
             }
         }
 
-        evidence.push_str(&format!(
-            "\n### 📡 Telemetry & Observability: {}/100\n",
-            telemetry_score
-        ));
-        if telemetry_score < 100 {
-            evidence.push_str("🚨 Raw text logging calls (`println!`, `console.log`, etc.) detected. Use structured telemetry.\n");
+        if let Some(score) = telemetry_score {
+            evidence.push_str(&format!(
+                "\n### 📡 Telemetry & Observability: {score}/100\n"
+            ));
+            evidence.push_str("✅ Zero raw-log call candidates detected in production scope.\n");
         } else {
-            evidence.push_str("✅ Observability compliant (zero raw log calls detected).\n");
+            evidence.push_str("\n### 📡 Telemetry & Observability: n/a\n");
+            if let Some(count) = telemetry_log_count {
+                evidence.push_str(&format!(
+                    "⚠️ {count} raw-log call candidate(s) detected, but file+line evidence is not available on this surface. No alert or numeric penalty was inferred.\n"
+                ));
+            } else {
+                evidence.push_str("⚠️ Telemetry evidence unavailable; no score inferred.\n");
+            }
         }
 
         let circular_deps = self
@@ -946,20 +977,21 @@ impl McpServer {
             }
         }
 
-        let overall_score = if !circular_deps.is_empty()
+        let structural_blocker = !circular_deps.is_empty()
             || !domain_leaks.is_empty()
             || !unsafe_exposure.is_empty()
             || !nif_blocking_risks.is_empty()
-            || !injection_risk_paths.is_empty()
-        {
-            0
-        } else {
-            let mut scores = vec![cov_score, hygiene_score, telemetry_score];
-            if let Some(score) = sec_score {
-                scores.push(score);
-            }
-            scores.iter().sum::<i64>() / scores.len() as i64
-        };
+            || !injection_risk_paths.is_empty();
+        let overall_score = sec_score
+            .zip(cov_score)
+            .zip(telemetry_score)
+            .map(|((security, coverage), telemetry)| {
+                if structural_blocker {
+                    0
+                } else {
+                    (security + coverage + hygiene_score + telemetry) / 4
+                }
+            });
 
         let report = format!(
             "## 🛡️ Compliance Audit: {}\n\n{}",
@@ -970,11 +1002,11 @@ impl McpServer {
                 &format!("project:{}", project),
                 &evidence_by_mode(&evidence, mode),
                 &[
-                    "review critical security paths first",
+                    "review anchored security findings first",
                     "delete dead code",
                     "triage top technical debt items"
                 ],
-                if overall_score >= 90 {
+                if overall_score.is_some_and(|score| score >= 90) {
                     "high"
                 } else {
                     "medium"

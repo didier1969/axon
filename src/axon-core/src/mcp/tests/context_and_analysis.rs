@@ -4376,6 +4376,48 @@ fn test_axon_audit_secrets_detection() {
 }
 
 #[test]
+fn test_axon_audit_dgd_candidates_are_inconclusive_not_fake_zero_scores() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO axon.Project (code) VALUES ('DGA') ON CONFLICT (code) DO NOTHING")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('/repo/src/ops.py', 'DGA', 'hash-dga-ops', 0) ON CONFLICT (path) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-dga-ops', 'symbol', 'DGA::probe', 'DGA', '/repo/src/ops.py', 'hash-dga-ops') ON CONFLICT (id) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('DGA::probe', 'peupler_te2', 'function', false, true, false, true, 'DGA'), ('DGA::subprocess', 'subprocess.run', 'function', false, false, false, false, 'DGA'), ('DGA::println', 'println!', 'function', false, false, false, false, 'DGA') ON CONFLICT (id) DO NOTHING").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('/repo/src/ops.py', 'DGA::probe', 'CONTAINS', 'DGA', 0), ('DGA::probe', 'DGA::subprocess', 'CALLS', 'DGA', 0), ('DGA::probe', 'DGA::println', 'CALLS', 'DGA', 0) ON CONFLICT DO NOTHING").unwrap();
+    crate::ist_snapshot::evict_process_snapshot("DGA");
+    server.soll_cache().invalidate("DGA");
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "audit",
+                "arguments": {"project": "DGA"}
+            })),
+            id: Some(json!(120321)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let content = result["content"][0]["text"].as_str().unwrap();
+    assert!(content.contains("Security: inconclusive"), "{content}");
+    assert!(content.contains("not labelled vulnerabilities"), "{content}");
+    assert!(!content.contains("Potential vulnerabilities"), "{content}");
+    assert!(content.contains("Quality & Tests: n/a"), "{content}");
+    assert!(content.contains("Telemetry & Observability: n/a"), "{content}");
+    assert!(content.contains("raw-log call candidate"), "{content}");
+    assert!(!content.contains("Use structured telemetry"), "{content}");
+    assert!(result["data"]["security_score"].is_null());
+    assert!(result["data"]["coverage_score"].is_null());
+    assert!(result["data"]["telemetry_score"].is_null());
+    assert!(result["data"]["overall_score"].is_null());
+}
+
+#[test]
 fn test_axon_audit_cross_language_taint() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
@@ -4421,8 +4463,8 @@ fn test_axon_audit_cross_language_taint() {
         .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{rn}', '{ub}', 'CALLS', '{code}', 0)"))
         .unwrap();
 
-    // REQ-AXO-901970 — cross-language taint audit reads the RAM snapshot; evict
-    // so it warms fresh from this test's raw-SQL inserts (scoped unique code).
+    // REQ-AXO-902522 — a cross-language reachability chain ending at a symbol
+    // merely marked `is_unsafe` is capability metadata, not taint proof.
     crate::ist_snapshot::evict_process_snapshot(&code);
     server.soll_cache().invalidate(&code);
 
@@ -4446,9 +4488,9 @@ fn test_axon_audit_cross_language_taint() {
         .as_str()
         .unwrap();
 
-    assert!(!content.contains("Score 100/100"));
-    assert!(content.contains("elixir_func"));
-    assert!(content.contains("unsafe_block"));
+    assert!(content.contains("Security: 100/100"), "{content}");
+    assert!(!content.contains("Potential vulnerabilities"), "{content}");
+    assert!(!content.contains("Critical call paths"), "{content}");
 }
 
 #[test]

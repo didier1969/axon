@@ -659,7 +659,7 @@ pub fn cross_file_call_flows(
     (flows, total)
 }
 
-const DANGEROUS_NAMES: &[&str] = &["eval", "unwrap"];
+const DANGEROUS_NAMES: &[&str] = &["eval", "exec", "os.system", "subprocess.run", "unwrap"];
 const LOG_CALL_NAMES: &[&str] = &[
     "println!", "dbg!", "console.log", "io.puts", "print", "printf",
 ];
@@ -680,12 +680,9 @@ const DEBT_NAME_FRAGMENTS: &[&str] = &[
 ];
 
 fn is_dangerous(graph: &IstGraph, idx: u32) -> bool {
-    let (_, _, flags) = graph.node_meta(idx);
-    if flags.unsafe_() {
-        return true;
-    }
-    // REQ-AXO-901970 — match the canonical name (ist.symbol.name), not the id
-    // suffix : a macro/method call target's display name is authoritative.
+    // `is_unsafe` is a capability marker on an enclosing function, not proof
+    // that the function is a vulnerability. Only explicit sensitive callees
+    // are candidates; audit decides separately whether evidence is sufficient.
     let name = graph.name_of(idx).to_ascii_lowercase();
     DANGEROUS_NAMES.contains(&name.as_str())
 }
@@ -697,6 +694,7 @@ fn is_dangerous(graph: &IstGraph, idx: u32) -> bool {
 /// query). Capped at 100 (the score saturates at 5 findings anyway).
 pub fn security_audit_paths(graph: &IstGraph, project: &str) -> Vec<(String, String)> {
     let rels = |r: &RelationType| matches!(r, RelationType::Calls | RelationType::CallsNif);
+    let file_map = build_file_path_map(graph);
     let mut pairs: Vec<(String, String)> = Vec::new();
     for d in 0..(graph.node_count() as u32) {
         if !is_dangerous(graph, d) {
@@ -707,7 +705,8 @@ pub fn security_audit_paths(graph: &IstGraph, project: &str) -> Vec<(String, Str
             if !rels(&rel) {
                 continue;
             }
-            if project_matches(graph, src, project) {
+            let src_file = file_map.get(&src).map(String::as_str).unwrap_or("");
+            if project_matches(graph, src, project) && !is_test_path(src_file) {
                 pairs.push((graph.name_of(src).to_string(), dname.clone()));
                 if pairs.len() >= 100 {
                     return pairs;
@@ -715,7 +714,11 @@ pub fn security_audit_paths(graph: &IstGraph, project: &str) -> Vec<(String, Str
             }
             // indirect (2-hop): callers of the direct caller.
             for (src2, rel2) in graph.reverse_neighbors(src) {
-                if rels(&rel2) && project_matches(graph, src2, project) {
+                let src2_file = file_map.get(&src2).map(String::as_str).unwrap_or("");
+                if rels(&rel2)
+                    && project_matches(graph, src2, project)
+                    && !is_test_path(src2_file)
+                {
                     pairs.push((graph.name_of(src2).to_string(), dname.clone()));
                     if pairs.len() >= 100 {
                         return pairs;
@@ -2589,6 +2592,33 @@ mod tests {
         assert!(
             pairs.iter().any(|(c, d)| c == "caller" && d == "eval"),
             "dangerous callee must be recognised by name_of, not id suffix: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn security_audit_excludes_test_paths_and_unsafe_capability_markers() {
+        let mut unsafe_capability = named(
+            "AXO::src/ops.py::probe",
+            "probe",
+            NodeKind::Function,
+        );
+        unsafe_capability.flags = NodeFlags::new(false, true, false, true);
+        let nodes = vec![
+            file("/repo/src/ops.py"),
+            file("/repo/tests/test_ops.py"),
+            unsafe_capability,
+            named("AXO::tests::caller", "test_probe", NodeKind::Function),
+            named("AXO::subprocess::run", "subprocess.run", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("/repo/src/ops.py", "AXO::src/ops.py::probe", RelationType::Contains),
+            edge("/repo/tests/test_ops.py", "AXO::tests::caller", RelationType::Contains),
+            edge("AXO::tests::caller", "AXO::subprocess::run", RelationType::Calls),
+        ];
+        let graph = IstGraph::build(nodes, edges);
+        assert!(
+            security_audit_paths(&graph, "AXO").is_empty(),
+            "test callers and enclosing is_unsafe capability markers are not vulnerabilities"
         );
     }
 
