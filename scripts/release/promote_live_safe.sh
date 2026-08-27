@@ -1281,14 +1281,18 @@ HOOK_STATE_ROOT="$LOG_DIR/hooks"
 dispatch_durable_hook() {
   local hook_name="$1" timeout_seconds="$2"
   shift 2
-  nohup python3 "$ROOT_DIR/scripts/release/durable_hook.py" \
+  # `nohup ... &` reste un descendant du job de promotion. Les runners d'exécution
+  # et certains superviseurs nettoient tout ce groupe quand le shell principal sort :
+  # le hook keeper observé le 2026-08-27 est mort avec attempts_made=0 et status=running.
+  # Une nouvelle session forkée n'appartient plus au job parent et peut publier son
+  # verdict terminal après la fin du promote.
+  setsid --fork python3 "$ROOT_DIR/scripts/release/durable_hook.py" \
     --state-root "$HOOK_STATE_ROOT" --attempt-id "$RELEASE_ATTEMPT_ID" \
     --hook-name "$hook_name" --max-attempts 3 --timeout-seconds "$timeout_seconds" \
-    --retry-delay-seconds 2 -- "$@" >> "$PROMOTE_LOG" 2>&1 &
-  local hook_pid=$!
+    --retry-delay-seconds 2 -- "$@" </dev/null >> "$PROMOTE_LOG" 2>&1
   axon_promote_journal_event hook_dispatched finalize deferred \
-    "hook=${hook_name} pid=${hook_pid}; final hook verdict is independent from cutover verdict"
-  promote_log "   ▶ durable hook ${hook_name} dispatched pid=${hook_pid} (bounded retry; status=${HOOK_STATE_ROOT}/${RELEASE_ATTEMPT_ID}/${hook_name}.json)"
+    "hook=${hook_name} detached_session=true; final hook verdict is independent from cutover verdict"
+  promote_log "   ▶ durable hook ${hook_name} dispatched in detached session (bounded retry; status=${HOOK_STATE_ROOT}/${RELEASE_ATTEMPT_ID}/${hook_name}.json)"
 }
 
 soll_export_args=$(printf '{"project_code":"%s"}' "$PROJECT_CODE")

@@ -79,6 +79,7 @@ class ReleaseAttemptTests(unittest.TestCase):
             )
             self.assertEqual(state["release_attempt_id"], "attempt-123")
             self.assertEqual(state["status"], "completed")
+            self.assertGreater(state["runner_pid"], 1)
             self.assertEqual(state["attempts_made"], 2)
             self.assertEqual(
                 [entry["status"] for entry in state["history"]],

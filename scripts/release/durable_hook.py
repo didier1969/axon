@@ -66,6 +66,7 @@ def run_hook(
         "hook": hook_name,
         "command": list(command),
         "status": "running",
+        "runner_pid": os.getpid(),
         "attempts_made": 0,
         "max_attempts": max_attempts,
         "timeout_seconds": timeout_seconds,
