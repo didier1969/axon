@@ -63,7 +63,7 @@ else
   fail "no post-DEV candidate recheck precedes manifest creation"
 fi
 
-parent_path_line="$(grep -n 'PROMOTE_FROZEN_WORKTREE=.*axon-promote.*PROMOTE_SHA' "$PROMOTE" | tail -1 | cut -d: -f1 || true)"
+parent_path_line="$(grep -n 'PROMOTE_FROZEN_WORKTREE=.*promote-worktrees.*PROMOTE_SHA' "$PROMOTE" | tail -1 | cut -d: -f1 || true)"
 build_step_line="$(grep -n 'run_step 1 build build_from_frozen_worktree' "$PROMOTE" | head -1 | cut -d: -f1 || true)"
 if [[ -n "$parent_path_line" && -n "$build_step_line" && "$parent_path_line" -lt "$build_step_line" ]]; then
   pass "candidate path is published in the parent before run_step's pipeline subshell"
@@ -97,6 +97,13 @@ if grep -q '_cleanup_frozen_worktree "$rc"' "$PROMOTE" && \
   pass "a controlled pre-cutover failure preserves the immutable checkpoint for retry"
 else
   fail "controlled gate failures still destroy the expensive immutable checkpoint"
+fi
+
+if grep -q 'ROOT_DIR/.axon/promote-worktrees' "$PROMOTE" && \
+   ! grep -q 'TMPDIR:-/tmp.*axon-promote' "$PROMOTE"; then
+  pass "candidate targets are disk-backed and cannot exhaust the /tmp tmpfs"
+else
+  fail "promotion still stores its multi-gigabyte Cargo target in tmpfs"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

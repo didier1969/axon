@@ -728,7 +728,11 @@ BROADCAST_PREFLIGHT_SENT=1
 # en lisant le CONTENU, seul contrôle qui ne soit pas auto-référentiel.
 build_from_frozen_worktree() {
   local sha="$1"
-  PROMOTE_FROZEN_WORKTREE="${TMPDIR:-/tmp}/axon-promote-${sha:0:12}"
+  # Le target Cargo d'un candidat release+tests dépasse 20 Gio. Sur cette machine,
+  # /tmp est un tmpfs de 31 Gio : y placer le worktree transforme les artefacts de
+  # compilation en mémoire engagée et finit en ENOSPC/OOM pendant `cargo build
+  # --tests`. Les checkpoints de promotion sont donc disk-backed sous .axon.
+  PROMOTE_FROZEN_WORKTREE="$ROOT_DIR/.axon/promote-worktrees/${sha:0:12}"
   local worktree="$PROMOTE_FROZEN_WORKTREE"
 
   # Un SIGKILL/OOM ne peut exécuter aucun trap. S'il survient après le build, le
@@ -787,7 +791,7 @@ if [[ "$SKIP_BUILD" -ne 1 ]]; then
     # `run_step` streams through tee, so its command executes in a pipeline subshell.
     # Publish these paths in the parent first; otherwise DEV silently falls back to a
     # mutable workspace rebuild after the child assignment disappears.
-    PROMOTE_FROZEN_WORKTREE="${TMPDIR:-/tmp}/axon-promote-${PROMOTE_SHA:0:12}"
+    PROMOTE_FROZEN_WORKTREE="$ROOT_DIR/.axon/promote-worktrees/${PROMOTE_SHA:0:12}"
     CANDIDATE_BIN_DIR="$PROMOTE_FROZEN_WORKTREE/bin"
     # Un binaire live doit correspondre à un commit que quelqu'un d'autre peut
     # retrouver. Sans ça, « quelle version tourne en production » n'a pas de
