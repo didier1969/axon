@@ -707,9 +707,9 @@ fn cutover_record_gate(release_dir: &Path, gate: &str, status: &str, evidence: &
             "unknown promotion gate {gate}; expected one of {REQUIRED_PROMOTION_GATES:?}"
         ));
     }
-    if !matches!(status, "passed" | "failed" | "skipped" | "error") {
+    if !matches!(status, "passed" | "failed" | "skipped" | "timeout" | "error") {
         return Err(anyhow!(
-            "invalid gate status {status}; expected passed|failed|skipped|error"
+            "invalid gate status {status}; expected passed|failed|skipped|timeout|error"
         ));
     }
     let path = release_dir.join("pending.json");

@@ -27,6 +27,8 @@ DRY_RUN=0
 SKIP_DEV_VALIDATION=0
 # REQ-AXO-902391 — 0 = build from a FROZEN worktree at the resolved SHA.
 BUILD_FROM_TREE=0
+BREAK_GLASS_REASON=""
+BREAK_GLASS_ACTOR=""
 # REQ-AXO-902165 / DEC-AXO-901666 / REQ-AXO-902256 — step 5 runs via `axonctl cutover`
 # (the Rust health-gated cutover with NATIVE auto-rollback). There is no longer a second
 # step-5 implementation to choose between: the `USE_CUTOVER` toggle and the
@@ -90,6 +92,8 @@ while [[ $# -gt 0 ]]; do
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-qualify) SKIP_QUALIFY=1; shift ;;
     --skip-dev-validation) SKIP_DEV_VALIDATION=1; shift ;;
+    --break-glass-reason) BREAK_GLASS_REASON="${2:-}"; shift 2 ;;
+    --break-glass-actor) BREAK_GLASS_ACTOR="${2:-}"; shift 2 ;;
     # REQ-AXO-902391 — build from the WORKING TREE instead of a frozen worktree.
     # Never the default: the whole point is that the binary's identity must be a
     # function of the SHA alone.
@@ -134,6 +138,21 @@ promote_log() {
   ts="$(date -u +%H:%M:%S)"
   echo "[$ts] $*" >> "$PROMOTE_LOG"
   echo "$*"
+}
+
+promotion_gate_summary() {
+  python3 - "$LOG_DIR/pending.json" "$LOG_DIR/current.json" <<'PY' 2>/dev/null || printf 'unavailable'
+import json, pathlib, sys
+for raw in sys.argv[1:]:
+    path = pathlib.Path(raw)
+    if path.exists():
+        data = json.loads(path.read_text())
+        gates = data.get("promotion_gates", {})
+        print(json.dumps(gates, sort_keys=True, separators=(",", ":")))
+        break
+else:
+    print("{}")
+PY
 }
 
 # REQ-AXO-902285 — refuse the promote FAIL-FAST (0s of MCP outage) when the WSL2 GPU
@@ -328,6 +347,7 @@ on_promote_exit() {
   # removes the human-readable owner record on every trappable exit.
   set +e
   if [[ "$rc" -ne 0 && "$CUTOVER_PREPARED" -eq 1 ]]; then
+    promote_log "   promotion_gates=$(promotion_gate_summary)"
     promote_log "   ↩ prepared transaction failed after activation; invoking LKG rollback"
     "$ROOT_DIR/bin/axonctl" cutover --project-root "$ROOT_DIR" --instance-kind live \
       --phase rollback --max-polls 120 --poll-interval-ms 2000 --json >> "$PROMOTE_LOG" 2>&1
@@ -429,6 +449,21 @@ promote_log "project=${PROJECT_CODE} head=${start_head} skip_build=${SKIP_BUILD}
 promote_log "release_attempt_id=${RELEASE_ATTEMPT_ID} lease_deadline_unix_ms=${AXON_PROMOTE_DEADLINE_UNIX_MS} journal=${AXON_PROMOTE_JOURNAL_PATH}"
 axon_promote_journal_event script_started preflight running \
   "log=${PROMOTE_LOG}; release state reconciliation begins before mutation"
+
+# Canonical promotion never turns a bypass into a qualified release. Emergency recovery
+# is a separate operator workflow; here we only audit the request and refuse before build.
+if [[ "$SKIP_QUALIFY" -eq 1 || "$SKIP_DEV_VALIDATION" -eq 1 ]]; then
+  if [[ -z "$BREAK_GLASS_REASON" || -z "$BREAK_GLASS_ACTOR" ]]; then
+    axon_promote_journal_event break_glass_refused preflight failed \
+      "skip requested without --break-glass-reason and --break-glass-actor"
+    echo "❌ skip flags require --break-glass-reason and --break-glass-actor; canonical promotion remains unqualified" >&2
+    exit 78
+  fi
+  axon_promote_journal_event break_glass_refused preflight failed \
+    "actor=${BREAK_GLASS_ACTOR}; reason=${BREAK_GLASS_REASON}; canonical promote cannot qualify bypassed gates"
+  echo "❌ break-glass request audited but refused by canonical promotion; use the explicit recovery workflow" >&2
+  exit 78
+fi
 
 # REQ-AXO-902064 — fail-fast tracked-dirty gate BEFORE the (~2 min) build. The
 # authoritative gate is step 3 release-preflight, but it runs AFTER the build, so
@@ -751,7 +786,7 @@ else
     bash "$ROOT_DIR/tests/shell/test_role_restart_live.sh" || rc=$?
     if [[ "$rc" -eq 77 ]]; then
       echo "⚠️ lifecycle gate SKIPPED (nothing measured) — the per-role restart was NOT verified for this release"
-      return 0
+      return 77
     fi
     return "$rc"
   }
@@ -900,9 +935,16 @@ gate_with_attestation() {
   shift
   local rc=0
   "$@" || rc=$?
+  local gate_status="failed"
+  case "$rc" in
+    0) gate_status="passed" ;;
+    124) gate_status="timeout" ;;
+    77) gate_status="skipped" ;;
+    65) gate_status="error" ;;
+  esac
   "$ROOT_DIR/bin/axonctl" cutover --project-root "$ROOT_DIR" --instance-kind live \
     --phase record-gate --gate "$gate" \
-    --gate-status "$([[ "$rc" -eq 0 ]] && printf passed || printf failed)" \
+    --gate-status "$gate_status" \
     --evidence "release_attempt_id=${RELEASE_ATTEMPT_ID}; exit_code=${rc}; log=${PROMOTE_LOG}" \
     --json >> "$PROMOTE_LOG" 2>&1 || true
   return "$rc"
@@ -993,8 +1035,18 @@ else
   # `promote_status` deliberately reports `staged` while pending.json exists, so polling
   # for `clean` here would deadlock the two-phase transaction by definition.
   if true; then
-    run_step 6 qualify_mcp gate_with_attestation core_qualification \
-      "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE"
+    qualify_core_gate() {
+      local output rc=0
+      output="$(mktemp)"
+      timeout 180 "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE" 2>&1 | tee "$output" || rc=${PIPESTATUS[0]}
+      if [[ "$rc" -eq 0 ]] && ! grep -q '^verdict=ok$' "$output"; then
+        echo "qualify-mcp returned success without parseable verdict=ok" >&2
+        rc=65
+      fi
+      rm -f "$output"
+      return "$rc"
+    }
+    run_step 6 qualify_mcp gate_with_attestation core_qualification qualify_core_gate
     QUALIFY_RAN+=("qualify_mcp(surface=core)")
 
     # Advisory: a red result here must SURFACE, not abort a cutover that already
@@ -1010,7 +1062,7 @@ else
       echo "qualify_indexer_truth.py absent" >&2
       exit 69
     }
-    run_step 6b qualify_indexer_truth gate_with_attestation indexer_truth env \
+    run_step 6b qualify_indexer_truth gate_with_attestation indexer_truth timeout 180 env \
       AXON_DEV_DATABASE_URL="${AXON_LIVE_DATABASE_URL:-postgres://axon@127.0.0.1:${AXON_CANONICAL_PG_PORT:?axon-pg-port.sh not sourced}/axon_live}" \
       python3 "$ROOT_DIR/scripts/qualify_indexer_truth.py"
     QUALIFY_RAN+=("qualify_indexer_truth")
@@ -1201,6 +1253,7 @@ promote_log "   log=${PROMOTE_LOG}"
 promote_log "   release_attempt_id=${RELEASE_ATTEMPT_ID}"
 promote_log "   chronology=${AXON_PROMOTE_JOURNAL_PATH}"
 promote_log "   hooks=${HOOK_STATE_ROOT}/${RELEASE_ATTEMPT_ID} (running/retrying/completed/failed/deferred; hook failure does not rewrite cutover verdict)"
+promote_log "   promotion_gates=$(promotion_gate_summary)"
 
 # Disable the ERR trap — we succeeded
 trap - ERR
