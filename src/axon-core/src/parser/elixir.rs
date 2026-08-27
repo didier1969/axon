@@ -846,14 +846,32 @@ impl ElixirParser {
 
     fn extract_def_name<'a>(node: Node<'a>, source_bytes: &[u8]) -> Option<String> {
         let args = Self::find_child_by_type(node, "arguments")?;
-        let mut cursor = args.walk();
-        for child in args.named_children(&mut cursor) {
+        Self::extract_def_head_name(args, source_bytes)
+    }
+
+    /// REQ-AXO-902532 — a guarded definition is wrapped by the Elixir grammar:
+    /// `def f(args) when guard(args)` puts the function-head `call` below a
+    /// `binary_operator` instead of directly below `arguments`.  Looking only
+    /// at direct children therefore skipped selected public functions while the
+    /// file and their unguarded neighbours indexed normally.
+    ///
+    /// Walk the definition HEAD in source order and return the first callable
+    /// name.  This helper receives only the outer `def` arguments, never its
+    /// `do_block`, so calls in the function body cannot be mistaken for the
+    /// definition name.  On a guard, the left-hand function call precedes the
+    /// right-hand guard call by construction.
+    fn extract_def_head_name<'a>(node: Node<'a>, source_bytes: &[u8]) -> Option<String> {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
             if child.kind() == "call" {
-                if let Some(ident) = Self::find_child_by_type(child, "identifier") {
-                    return Some(ident.utf8_text(source_bytes).unwrap_or("").to_string());
+                if let Some(ident) = Self::call_identifier(child, source_bytes) {
+                    return Some(ident);
                 }
             } else if child.kind() == "identifier" || child.kind() == "alias" {
                 return Some(child.utf8_text(source_bytes).unwrap_or("").to_string());
+            }
+            if let Some(name) = Self::extract_def_head_name(child, source_bytes) {
+                return Some(name);
             }
         }
         None
@@ -898,6 +916,104 @@ impl Parser for ElixirParser {
 mod tests {
     use super::ElixirParser;
     use crate::parser::Parser;
+
+    #[test]
+    fn req_902532_guarded_controller_function_is_not_skipped() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule APS3DWeb.MESController do
+          alias APS3D.MES.{SCADAInterface, OPCUAClient}
+
+          def read_tag(conn, %{"name" => name}) do
+            SCADAInterface.read_tag(org(conn), name)
+          end
+
+          def read_tags(conn, %{"names" => names}) when is_list(names) do
+            case SCADAInterface.read_tags(org(conn), names) do
+              {:ok, tags} -> json(conn, %{data: tags})
+              {:error, reason} ->
+                conn
+                |> put_status(500)
+                |> json(%{error: format_error(reason)})
+            end
+          end
+
+          def update_tag(conn, %{"name" => name, "value" => value}) do
+            SCADAInterface.update_tag(org(conn), name, value)
+          end
+
+          def opcua_read(conn, %{"node_ids" => node_ids}) when is_list(node_ids) do
+            OPCUAClient.read(org(conn), node_ids)
+          end
+
+          def opcua_read(conn, %{"node_id" => node_id}) do
+            OPCUAClient.read(org(conn), node_id)
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+        let names: Vec<&str> = result.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"APS3DWeb.MESController.read_tags"),
+            "guarded read_tags missing; symbols={names:?}"
+        );
+        for adjacent in ["read_tag", "update_tag", "opcua_read"] {
+            assert!(
+                names.contains(&format!("APS3DWeb.MESController.{adjacent}").as_str()),
+                "adjacent function {adjacent} regressed; symbols={names:?}"
+            );
+        }
+        for callee in [
+            "APS3D.MES.SCADAInterface.read_tags",
+            "APS3DWeb.MESController.org",
+            "APS3DWeb.MESController.json",
+            "APS3DWeb.MESController.put_status",
+            "APS3DWeb.MESController.format_error",
+        ] {
+            assert!(
+                result.relations.iter().any(|rel| {
+                    rel.from == "APS3DWeb.MESController.read_tags"
+                        && rel.to == callee
+                        && rel.rel_type == "CALLS"
+                }),
+                "read_tags -> {callee} missing; relations={:?}",
+                result.relations
+            );
+        }
+    }
+
+    #[test]
+    fn req_902532_guarded_function_with_struct_pattern_is_not_skipped() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule APS3D.Scheduling.Model do
+          def count_site_transfers(%__MODULE__{} = model, assignments)
+              when is_list(assignments) do
+            calculate_transfers(model, assignments)
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+        assert!(
+            result
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "APS3D.Scheduling.Model.count_site_transfers"),
+            "guarded struct-pattern function missing; symbols={:?}",
+            result.symbols
+        );
+        assert!(
+            result.relations.iter().any(|rel| {
+                rel.from == "APS3D.Scheduling.Model.count_site_transfers"
+                    && rel.to == "APS3D.Scheduling.Model.calculate_transfers"
+                    && rel.rel_type == "CALLS"
+            }),
+            "guarded struct-pattern body was not attributed; relations={:?}",
+            result.relations
+        );
+    }
 
     #[test]
     fn test_elixir_parser_resolves_multi_alias_to_canonical_symbols() {
