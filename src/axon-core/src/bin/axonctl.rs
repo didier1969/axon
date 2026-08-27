@@ -3216,6 +3216,38 @@ mod tests {
     }
 
     #[test]
+    fn post_prepare_gate_failure_restores_old_bytes_and_current_manifest() {
+        let (root, release, bin, archive) = cutover_tmp("two-phase-rollback");
+        let old_artifact = archive.join("old-brain");
+        let new_artifact = archive.join("new-brain");
+        fs::write(&old_artifact, b"OLD-LKG").unwrap();
+        fs::write(&new_artifact, b"NEW-CANDIDATE").unwrap();
+        let current = serde_json::json!({
+            "state":"promoted","runtime_version":{"install_generation":"old","build_id":"old"},
+            "artifacts":{"axon-brain":{"path":old_artifact.to_string_lossy()}}
+        });
+        let candidate = serde_json::json!({
+            "state":"qualified","runtime_version":{"install_generation":"new","build_id":"new"},
+            "artifacts":{"axon-brain":{"path":new_artifact.to_string_lossy()}}
+        });
+        write_json_file(&release.join("current.json"), &current).unwrap();
+        write_json_file(&root.join("candidate.json"), &candidate).unwrap();
+        cutover_stage_files(&root.join("candidate.json"), &release, &bin).unwrap();
+        cutover_mark_prepared(&release).unwrap();
+        cutover_record_gate(&release, "ddl", "failed", "fault injection").unwrap();
+        assert_eq!(fs::read(bin.join("axon-brain")).unwrap(), b"NEW-CANDIDATE");
+
+        cutover_rollback_files(&release, &bin).unwrap();
+        assert_eq!(fs::read(bin.join("axon-brain")).unwrap(), b"OLD-LKG");
+        assert_eq!(
+            read_json_file(&release.join("current.json")).unwrap(),
+            current
+        );
+        assert!(!release.join("pending.json").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn cutover_phase_parser_keeps_full_backward_compatible() {
         let root = Path::new("/srv/axon");
         let full =

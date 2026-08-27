@@ -54,13 +54,16 @@ def load_build_info(path: pathlib.Path) -> dict[str, str]:
 
 
 def runtime_primary_artifact(
-    repo: pathlib.Path, artifact_arg: str | None, build_info_arg: str | None
+    repo: pathlib.Path,
+    bin_dir: pathlib.Path,
+    artifact_arg: str | None,
+    build_info_arg: str | None,
 ) -> tuple[str, pathlib.Path, pathlib.Path]:
-    artifact = pathlib.Path(artifact_arg).resolve() if artifact_arg else (repo / "bin" / "axon-brain")
+    artifact = pathlib.Path(artifact_arg).resolve() if artifact_arg else (bin_dir / "axon-brain")
     build_info = (
         pathlib.Path(build_info_arg).resolve()
         if build_info_arg
-        else (repo / "bin" / "axon-brain.build-info")
+        else (bin_dir / "axon-brain.build-info")
     )
     return "axon-brain", artifact, build_info
 
@@ -83,6 +86,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Create a canonical Axon release manifest.")
     parser.add_argument("--artifact")
     parser.add_argument("--build-info")
+    parser.add_argument("--bin-dir")
     parser.add_argument("--state", choices=["pushed", "qualified"], default="qualified")
     parser.add_argument("--release-version")
     parser.add_argument("--install-generation")
@@ -90,15 +94,16 @@ def main() -> int:
     parser.add_argument("--output")
     parser.add_argument("--release-attempt-id")
     args = parser.parse_args()
+    bin_dir = pathlib.Path(args.bin_dir).resolve() if args.bin_dir else repo / "bin"
     primary_bin_name, artifact, build_info_path = runtime_primary_artifact(
-        repo, args.artifact, args.build_info
+        repo, bin_dir, args.artifact, args.build_info
     )
     if not artifact.exists():
         print(f"Artifact not found: {artifact}", file=sys.stderr)
         return 2
 
     preflight = repo / "scripts" / "release" / "preflight.sh"
-    preflight_cmd = ["bash", str(preflight)]
+    preflight_cmd = ["bash", str(preflight), "--bin-dir", str(bin_dir)]
     subprocess.run(preflight_cmd, check=True)
     build_info = load_build_info(build_info_path)
 
@@ -204,8 +209,8 @@ def main() -> int:
     }
 
     for bin_name in runtime_artifact_names():
-        bin_path = repo / "bin" / bin_name
-        build_info = repo / "bin" / f"{bin_name}.build-info"
+        bin_path = bin_dir / bin_name
+        build_info = bin_dir / f"{bin_name}.build-info"
         if not bin_path.exists():
             continue
         bin_sha = sha256_file(bin_path)

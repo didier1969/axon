@@ -195,7 +195,7 @@ fi
 # leaves the indexer down, and the post-check enforces indexer_ready=true via
 # runtime_authority_contract("brain") → 150s timeout (operator hit this twice in
 # session 59).
-if ! grep -q '"start", "full"' "$cutover_src"; then
+if ! tr -d '[:space:]' < "$cutover_src" | grep -q '"start","full"'; then
     fail "Case 10a — RealCutoverIo::spawn_start no longer passes 'start full' (REQ-AXO-901782 regression). Inspect spawn_start."
 fi
 pass "Case 10a — cutover restart spawns 'start full' (brain+indexer+dashboard)"

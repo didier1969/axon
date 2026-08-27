@@ -251,6 +251,8 @@ broadcast_promote() {
 MCP_SAMPLE_FILE="$LOG_DIR/mcp-availability-${PROMOTE_TIMESTAMP}.csv"
 MCP_SAMPLER_PID=""
 PROMOTE_FROZEN_WORKTREE=""
+CANDIDATE_BIN_DIR=""
+CUTOVER_PREPARED=0
 
 _cleanup_frozen_worktree() {
   [[ -n "$PROMOTE_FROZEN_WORKTREE" ]] || return 0
@@ -325,6 +327,15 @@ on_promote_exit() {
   # already exiting. The kernel is the final safety net; this path closes the journal and
   # removes the human-readable owner record on every trappable exit.
   set +e
+  if [[ "$rc" -ne 0 && "$CUTOVER_PREPARED" -eq 1 ]]; then
+    promote_log "   ↩ prepared transaction failed after activation; invoking LKG rollback"
+    "$ROOT_DIR/bin/axonctl" cutover --project-root "$ROOT_DIR" --instance-kind live \
+      --phase rollback --max-polls 120 --poll-interval-ms 2000 --json >> "$PROMOTE_LOG" 2>&1
+    rollback_rc=$?
+    axon_promote_journal_event rollback_result rollback \
+      "$([[ "$rollback_rc" -eq 0 ]] && printf completed || printf rollback_failed)" \
+      "exit_code=${rollback_rc}" || true
+  fi
   # REQ-AXO-902233 — report the measured outage on EVERY exit, including the failure path.
   # `run_step` calls `exit "$rc"` when a step fails, which skipped the nominal call to
   # `_report_mcp_outage` at the end of the script — so the availability number was missing
@@ -541,29 +552,16 @@ except Exception:
 # Set PROMOTE_SKIP_AUTORESUME=1 to bypass.
 pending_manifest="$ROOT_DIR/.axon/live-release/pending.json"
 if [[ -f "$pending_manifest" && "${PROMOTE_SKIP_AUTORESUME:-0}" != "1" ]]; then
-  pending_build="$(jq -r '.build_id // empty' "$pending_manifest" 2>/dev/null || true)"
-  promote_log "⚠️ Unfinalized pending promote detected (build_id=${pending_build:-?}) — auto-resuming before any fresh promote (REQ-AXO-902104)."
-  candidate_manifest="$(ls -1 "$ROOT_DIR"/.axon/releases/candidates/*"${pending_build}".json 2>/dev/null | head -1)"
-  if [[ -n "$candidate_manifest" && -f "$candidate_manifest" ]]; then
-    # REQ-AXO-902256 — resume through the CUTOVER, not `promote-live --resume`. This was
-    # the last thing keeping promote_live.sh alive, and keeping it meant keeping two
-    # divergent executors for the same job. Re-running the cutover on the stranded build's
-    # candidate manifest IS the resume: snapshot (current.json is still a valid rollback
-    # target — the stranded run never finalized), stage (rewrites pending.json + bin/*,
-    # idempotent), restart, liveness gate, then finalize. It is strictly stronger than the
-    # old path because the byte check of REQ-AXO-902258 now runs on the way through, so a
-    # resume cannot re-commit a wrong binary.
-    "$ROOT_DIR/bin/axonctl" cutover \
-      --project-root "$ROOT_DIR" --instance-kind live --manifest "$candidate_manifest" \
-      --max-polls 120 --poll-interval-ms 2000 --json >> "$PROMOTE_LOG" 2>&1
-    resume_rc=$?
-    promote_log "   auto-resume via cutover exit=$resume_rc (build_id=$pending_build)"
-    exit $resume_rc
-  fi
-  promote_log "   ⚠️ candidate manifest for $pending_build not found — aborting to avoid stacking."
-  promote_log "      Recover with: bin/axonctl cutover --project-root $ROOT_DIR --instance-kind live --manifest <candidate>"
-  promote_log "      Or roll back:  bash scripts/release/rollback_live.sh"
-  exit 1
+  pending_build="$(jq -r '.runtime_version.build_id // empty' "$pending_manifest" 2>/dev/null || true)"
+  pending_state="$(jq -r '.state // "unknown"' "$pending_manifest" 2>/dev/null || true)"
+  promote_log "⚠️ Unfinalized transaction detected (state=${pending_state}, build_id=${pending_build:-?}) — fail-safe rollback before any fresh promote."
+  # Never auto-finalize a stranded candidate: after `prepare`, the process may have died
+  # before DDL/core/indexer gates. Replaying the legacy full cutover would erase that fact.
+  "$ROOT_DIR/bin/axonctl" cutover --project-root "$ROOT_DIR" --instance-kind live \
+    --phase rollback --max-polls 120 --poll-interval-ms 2000 --json >> "$PROMOTE_LOG" 2>&1
+  resume_rc=$?
+  promote_log "   stranded transaction rollback exit=$resume_rc; rerun to start a fresh attempt"
+  exit "$resume_rc"
 fi
 
 # REQ-AXO-902285 — fresh-promote fail-fast gate. Placed AFTER the auto-resume block (so a
@@ -635,13 +633,11 @@ build_from_frozen_worktree() {
   AXON_BUILD_ID="$frozen_build_id" \
     "$worktree/scripts/axon" setup --artifact-only
 
-  # Les artefacts sont produits dans le worktree ; le reste du promote lit
-  # `$ROOT_DIR/bin`. Copier plutôt que repointer ROOT_DIR : repointer emmènerait
-  # aussi `.axon/live-release/` dans le temporaire, donc l'état de release.
+  # Les artefacts candidats restent dans le worktree jusqu'à l'activation. `bin/axonctl`
+  # demeure ainsi le contrôleur LKG et aucun gate ne peut exécuter le candidat par accident.
   local installed=0
   shopt -s nullglob
   for artifact in "$worktree"/bin/*; do
-    install -m 755 "$artifact" "$ROOT_DIR/bin/$(basename "$artifact")"
     installed=$((installed + 1))
   done
   shopt -u nullglob
@@ -649,6 +645,7 @@ build_from_frozen_worktree() {
     echo "❌ build depuis le worktree figé : aucun artefact produit dans $worktree/bin" >&2
     return 1
   fi
+  CANDIDATE_BIN_DIR="$worktree/bin"
   echo "  ✅ $installed artefact(s) construits depuis le SHA figé $sha (worktree détaché, arbre de travail non lu)"
 }
 
@@ -658,6 +655,11 @@ if [[ "$SKIP_BUILD" -ne 1 ]]; then
     run_step 1 build "$ROOT_DIR/scripts/axon" setup --artifact-only
   else
     PROMOTE_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+    # `run_step` streams through tee, so its command executes in a pipeline subshell.
+    # Publish these paths in the parent first; otherwise DEV silently falls back to a
+    # mutable workspace rebuild after the child assignment disappears.
+    PROMOTE_FROZEN_WORKTREE="${TMPDIR:-/tmp}/axon-promote-${PROMOTE_SHA:0:12}"
+    CANDIDATE_BIN_DIR="$PROMOTE_FROZEN_WORKTREE/bin"
     # Un binaire live doit correspondre à un commit que quelqu'un d'autre peut
     # retrouver. Sans ça, « quelle version tourne en production » n'a pas de
     # réponse vérifiable par un tiers.
@@ -681,7 +683,7 @@ fi
 # part plus loin dans la séquence. Aucune vérification n'est perdue : elles sont
 # toutes faites, plus tôt, sur l'artefact fraîchement installé.
 ensure_head_stable
-run_step 1b preflight "$ROOT_DIR/scripts/axon" release-preflight
+run_step 1b preflight "$ROOT_DIR/scripts/axon" release-preflight --bin-dir "${CANDIDATE_BIN_DIR:-$ROOT_DIR/bin}"
 ensure_head_stable
 
 # --- Step 2: dev gate ---
@@ -784,14 +786,15 @@ ensure_head_stable
 
 # REQ-AXO-902529 — re-certify digests + embedded build identity after every DEV
 # lifecycle action and frozen test compilation, immediately before the manifest.
-run_step 3 candidate_recheck "$ROOT_DIR/scripts/axon" release-preflight
+run_step 3 candidate_recheck "$ROOT_DIR/scripts/axon" release-preflight --bin-dir "${CANDIDATE_BIN_DIR:-$ROOT_DIR/bin}"
 ensure_head_stable
 
 # --- Step 4: manifest — synchronous, after all candidate gates -----------------------
 manifest_out="$(mktemp)"
 create_manifest_step() {
   "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified \
-    --release-attempt-id "$RELEASE_ATTEMPT_ID" > "$manifest_out" 2>&1 || {
+    --release-attempt-id "$RELEASE_ATTEMPT_ID" \
+    --bin-dir "${CANDIDATE_BIN_DIR:-$ROOT_DIR/bin}" > "$manifest_out" 2>&1 || {
     cat "$manifest_out"
     return 1
   }
@@ -847,9 +850,10 @@ old_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo
 # is DELETED. `--resume` now means: re-run this script; it detects the stranded
 # pending.json and replays the cutover on that build's candidate manifest, byte-check
 # included. One executor, one path.
-run_step 5 cutover "$ROOT_DIR/bin/axonctl" cutover \
+run_step 5 cutover_prepare "$ROOT_DIR/bin/axonctl" cutover \
   --project-root "$ROOT_DIR" --instance-kind live --manifest "$manifest_path" \
-  --max-polls 120 --poll-interval-ms 2000 --json
+  --phase prepare --max-polls 120 --poll-interval-ms 2000 --json
+CUTOVER_PREPARED=1
 new_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
 promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
 # NOTE: an UNCHANGED md5 is NOT a failure — re-promoting an identical build
@@ -891,7 +895,19 @@ promote_log "   bin/axon-brain md5: ${old_md5} → ${new_md5}"
 # step ran, so axon.EmbedderControl did not exist when the indexer tried to seed its
 # idle-drop control row. The cutover ordering removes that window.
 # Runs in devenv so psql resolves.
-run_step 5b apply_ddl_live bash -lc "cd '$ROOT_DIR' && devenv shell --no-reload --no-tui -- bash -lc 'source scripts/lib/ensure-runtime.sh && apply_canonical_ddl live'"
+gate_with_attestation() {
+  local gate="$1"
+  shift
+  local rc=0
+  "$@" || rc=$?
+  "$ROOT_DIR/bin/axonctl" cutover --project-root "$ROOT_DIR" --instance-kind live \
+    --phase record-gate --gate "$gate" \
+    --gate-status "$([[ "$rc" -eq 0 ]] && printf passed || printf failed)" \
+    --evidence "release_attempt_id=${RELEASE_ATTEMPT_ID}; exit_code=${rc}; log=${PROMOTE_LOG}" \
+    --json >> "$PROMOTE_LOG" 2>&1 || true
+  return "$rc"
+}
+run_step 5b apply_ddl_live gate_with_attestation ddl bash -lc "cd '$ROOT_DIR' && devenv shell --no-reload --no-tui -- bash -lc 'source scripts/lib/ensure-runtime.sh && apply_canonical_ddl live'"
 
 # --- promote_status full-contract poll (shared by step 6 pre-gate + step 6c) ---
 # REQ-AXO-902189 — hoisted above step 6 so the qualify pre-gate and the 6c health-gate
@@ -973,8 +989,12 @@ if [[ "$SKIP_QUALIFY" -eq 1 ]]; then
   QUALIFY_SKIPPED+=("all (--skip-qualify)")
 else
   ensure_head_stable
-  if _poll_promote_clean 24; then
-    run_step 6 qualify_mcp "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE"
+  # The prepare phase already proved full-contract liveness and persisted that gate.
+  # `promote_status` deliberately reports `staged` while pending.json exists, so polling
+  # for `clean` here would deadlock the two-phase transaction by definition.
+  if true; then
+    run_step 6 qualify_mcp gate_with_attestation core_qualification \
+      "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE"
     QUALIFY_RAN+=("qualify_mcp(surface=core)")
 
     # Advisory: a red result here must SURFACE, not abort a cutover that already
@@ -983,26 +1003,28 @@ else
     QUALIFY_SKIPPED+=("qualify_runtime (targets dev :44139, down during a live promote)")
     QUALIFY_SKIPPED+=("qualify_ingestion_run (needs a corpus)")
     QUALIFY_SKIPPED+=("qualify_mcp_guidance/robustness/retrieval_context (overlap surface=core)")
-    for extra in qualify_indexer_truth; do
-      if [[ ! -f "$ROOT_DIR/scripts/${extra}.py" ]]; then
-        QUALIFY_SKIPPED+=("${extra} (script absent)")
-        continue
-      fi
-      # The gate needs PG; the live URL is the one that describes what just shipped.
-      if AXON_DEV_DATABASE_URL="${AXON_LIVE_DATABASE_URL:-postgres://axon@127.0.0.1:${AXON_CANONICAL_PG_PORT:?axon-pg-port.sh not sourced}/axon_live}" \
-         python3 "$ROOT_DIR/scripts/${extra}.py" >>"$PROMOTE_LOG" 2>&1; then
-        QUALIFY_RAN+=("${extra}")
-        promote_log "   ✅ ${extra}: pass"
-      else
-        QUALIFY_RAN+=("${extra}:FAIL")
-        promote_log "   ⚠️ ${extra}: FAIL — see log above (advisory; step 6c owns the fail-closed verdict)"
-      fi
-    done
+    [[ -f "$ROOT_DIR/scripts/qualify_indexer_truth.py" ]] || {
+      "$ROOT_DIR/bin/axonctl" cutover --project-root "$ROOT_DIR" --instance-kind live \
+        --phase record-gate --gate indexer_truth --gate-status failed \
+        --evidence "qualification script absent" --json >> "$PROMOTE_LOG" 2>&1 || true
+      echo "qualify_indexer_truth.py absent" >&2
+      exit 69
+    }
+    run_step 6b qualify_indexer_truth gate_with_attestation indexer_truth env \
+      AXON_DEV_DATABASE_URL="${AXON_LIVE_DATABASE_URL:-postgres://axon@127.0.0.1:${AXON_CANONICAL_PG_PORT:?axon-pg-port.sh not sourced}/axon_live}" \
+      python3 "$ROOT_DIR/scripts/qualify_indexer_truth.py"
+    QUALIFY_RAN+=("qualify_indexer_truth")
   else
     QUALIFY_SKIPPED+=("all (runtime not clean after ~120s warmup, phase=${recon_phase:-unreachable})")
     promote_log "   ⚠️ step 6: runtime not clean after ~120s warmup (phase=${recon_phase:-unreachable}) — SKIP qualify, DEFER to step 6c recovery gate (REQ-AXO-902189: cold-start must not preempt the fail-closed verdict)."
   fi
 fi
+
+# Commit point: axonctl refuses this transition unless liveness, DDL, core qualification,
+# and indexer truth are all durably attested `passed` in pending.json.
+run_step 6f cutover_finalize "$ROOT_DIR/bin/axonctl" cutover \
+  --project-root "$ROOT_DIR" --instance-kind live --phase finalize --json
+CUTOVER_PREPARED=0
 
 # --- Step 6c: reconcile + FAIL-CLOSED health-gate (REQ-AXO-902111 / REQ-AXO-902157) ---
 # Dogfood promote_status as the post-swap verdict over the FULL runtime_contract

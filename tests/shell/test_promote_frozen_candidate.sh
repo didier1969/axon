@@ -63,5 +63,19 @@ else
   fail "no post-DEV candidate recheck precedes manifest creation"
 fi
 
+parent_path_line="$(grep -n 'PROMOTE_FROZEN_WORKTREE=.*axon-promote.*PROMOTE_SHA' "$PROMOTE" | tail -1 | cut -d: -f1 || true)"
+build_step_line="$(grep -n 'run_step 1 build build_from_frozen_worktree' "$PROMOTE" | head -1 | cut -d: -f1 || true)"
+if [[ -n "$parent_path_line" && -n "$build_step_line" && "$parent_path_line" -lt "$build_step_line" ]]; then
+  pass "candidate path is published in the parent before run_step's pipeline subshell"
+else
+  fail "candidate path is only assigned inside the streamed build subshell"
+fi
+
+if grep -q 'install -m 755.*ROOT_DIR/bin' "$PROMOTE"; then
+  fail "build still replaces LKG bin/* before activation"
+else
+  pass "candidate build cannot overwrite LKG bin/* before activation"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

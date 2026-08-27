@@ -10,10 +10,11 @@ ARTIFACT_PATH="$ROOT_DIR/bin/axon-core"
 BUILD_INFO_PATH="$ROOT_DIR/bin/axon-core.build-info"
 CHECK_PENDING=0
 SKIP_BUILD_MATCH=0
+BIN_DIR="$ROOT_DIR/bin"
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/release/preflight.sh [--artifact <path>] [--build-info <path>] [--check-pending] [--skip-build-match]
+Usage: bash scripts/release/preflight.sh [--artifact <path>] [--build-info <path>] [--bin-dir <path>] [--check-pending] [--skip-build-match]
 EOF
 }
 
@@ -22,6 +23,7 @@ preflight_parse_args() {
     case "$1" in
       --artifact) ARTIFACT_PATH="${2:-}"; shift 2 ;;
       --build-info) BUILD_INFO_PATH="${2:-}"; shift 2 ;;
+      --bin-dir) BIN_DIR="$(realpath "${2:-}")"; shift 2 ;;
       --check-pending) CHECK_PENDING=1; shift ;;
       --skip-build-match) SKIP_BUILD_MATCH=1; shift ;;
       --help|-h) usage; exit 0 ;;
@@ -121,8 +123,8 @@ preflight_main() {
   declare -A split_package_versions=()
   local bin_name build_info_path artifact_path
   for bin_name in axon-brain axon-indexer; do
-    build_info_path="$(axon_build_info_path_for "$ROOT_DIR" "$bin_name")"
-    artifact_path="$ROOT_DIR/bin/$bin_name"
+    build_info_path="$BIN_DIR/${bin_name}.build-info"
+    artifact_path="$BIN_DIR/$bin_name"
     verify_one_artifact "$artifact_path" "$build_info_path" "$bin_name" || exit 1
     # shellcheck disable=SC1090
     source "$build_info_path"

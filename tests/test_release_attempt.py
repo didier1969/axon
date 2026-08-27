@@ -28,6 +28,17 @@ create_manifest = load_module(
 
 
 class ReleaseAttemptTests(unittest.TestCase):
+    def test_manifest_bin_dir_selects_frozen_candidate(self):
+        with tempfile.TemporaryDirectory() as raw:
+            bin_dir = pathlib.Path(raw)
+            (bin_dir / "axon-brain").write_bytes(b"candidate")
+            (bin_dir / "axon-brain.build-info").write_text("AXON_BUILD_ID=v-test\n")
+            _, artifact, build_info = create_manifest.runtime_primary_artifact(
+                ROOT, bin_dir, None, None
+            )
+            self.assertEqual(artifact, bin_dir / "axon-brain")
+            self.assertEqual(build_info, bin_dir / "axon-brain.build-info")
+
     def test_release_attempt_id_prefers_explicit_then_environment(self):
         with mock.patch.dict("os.environ", {"AXON_RELEASE_ATTEMPT_ID": "attempt-from-env"}):
             self.assertEqual(
