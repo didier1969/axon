@@ -13,6 +13,10 @@ source "$ROOT_DIR/scripts/lib/axon-gpu-detect.sh"
 # survive across reboots.
 # shellcheck source=scripts/lib/axon-pg-port.sh
 source "$ROOT_DIR/scripts/lib/axon-pg-port.sh"
+# shellcheck source=scripts/lib/axon-promote-lease.sh
+# REQ-AXO-902526 — one kernel-owned live promotion at a time, with a durable
+# attempt journal that survives SIGKILL and makes recovery distinguishable.
+source "$ROOT_DIR/scripts/lib/axon-promote-lease.sh"
 AXON_INSTANCE_KIND=live
 axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
 
@@ -100,10 +104,25 @@ done
 
 [[ -n "$PROJECT_CODE" ]] || { echo "--project is required" >&2; exit 1; }
 
-# --- REQ-AXO-901758: logging + step tracking + error trap ---
+# --- REQ-AXO-902526: exclusive lease BEFORE build/install/stage -----------------------
+#
+# `flock` is authoritative: process death releases it in the kernel. The adjacent owner
+# JSON is diagnostic and deliberately survives SIGKILL, so the next lease holder can
+# record an interrupted attempt and reconcile pending/current/runtime before proceeding.
+# A contender returns 75 before it creates a log/journal or touches release artifacts.
 PROMOTE_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_DIR="$ROOT_DIR/.axon/live-release"
-mkdir -p "$LOG_DIR"
+start_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+RELEASE_ATTEMPT_ID="${PROMOTE_TIMESTAMP}-$$-${start_head:0:12}"
+lease_rc=0
+axon_promote_lease_acquire \
+  "$LOG_DIR" "$AXON_INSTANCE_KIND" "$PROJECT_CODE" "$start_head" \
+  "$RELEASE_ATTEMPT_ID" "${PROMOTE_LEASE_TTL_SECONDS:-14400}" || lease_rc=$?
+if [[ "$lease_rc" -ne 0 ]]; then
+  exit "$lease_rc"
+fi
+
+# --- REQ-AXO-901758: logging + step tracking + error trap ---
 PROMOTE_LOG="$LOG_DIR/promote-${PROMOTE_TIMESTAMP}.log"
 
 CURRENT_STEP=0
@@ -279,6 +298,10 @@ _report_mcp_outage() {
 BROADCAST_PREFLIGHT_SENT=0
 on_promote_exit() {
   local rc=$?
+  # Cleanup must run even if an observability/broadcast helper fails while the process is
+  # already exiting. The kernel is the final safety net; this path closes the journal and
+  # removes the human-readable owner record on every trappable exit.
+  set +e
   # REQ-AXO-902233 — report the measured outage on EVERY exit, including the failure path.
   # `run_step` calls `exit "$rc"` when a step fails, which skipped the nominal call to
   # `_report_mcp_outage` at the end of the script — so the availability number was missing
@@ -286,24 +309,30 @@ on_promote_exit() {
   # It is a no-op when the sampler never started or has already been reported (the function
   # clears MCP_SAMPLER_PID).
   _report_mcp_outage || true
-  [[ "$BROADCAST_PREFLIGHT_SENT" -eq 1 ]] || return 0
-  curl -fsS --max-time 5 "http://127.0.0.1:44129/readyz" >/dev/null 2>&1 || return 0
-  if [[ "$rc" -eq 0 ]]; then
-    broadcast_promote "✅ Promote ${PROJECT_CODE} terminé — MCP rétabli" \
-      "build_id=${final_build_id:-?} live. Si ton MCP est tombé depuis ${PROMOTE_TIMESTAMP} c'était CE promote (restart brain), pas un incident. Reconnecte via /mcp si ton binding de catalogue est stale. Tout est de nouveau disponible." \
-      "promote-clear-${PROMOTE_TIMESTAMP}"
-  else
-    broadcast_promote "⚠️ Promote ${PROJECT_CODE} sorti (rc=${rc}) — brain UP" \
-      "Le brain live RÉPOND (/readyz ok). Si ton MCP est tombé c'était le restart de CE promote (${PROMOTE_TIMESTAMP}), PAS un incident à diagnostiquer. Reconnecte via /mcp. (Le promote a pu false-fail au qualify cold-start ; l'opérateur AXO vérifie.)" \
-      "promote-clear-${PROMOTE_TIMESTAMP}"
+  if [[ "$BROADCAST_PREFLIGHT_SENT" -eq 1 ]] && \
+     curl -fsS --max-time 5 "http://127.0.0.1:44129/readyz" >/dev/null 2>&1; then
+    if [[ "$rc" -eq 0 ]]; then
+      broadcast_promote "✅ Promote ${PROJECT_CODE} terminé — MCP rétabli" \
+        "build_id=${final_build_id:-?} live. Si ton MCP est tombé depuis ${PROMOTE_TIMESTAMP} c'était CE promote (restart brain), pas un incident. Reconnecte via /mcp si ton binding de catalogue est stale. Tout est de nouveau disponible." \
+        "promote-clear-${PROMOTE_TIMESTAMP}"
+    else
+      broadcast_promote "⚠️ Promote ${PROJECT_CODE} sorti (rc=${rc}) — brain UP" \
+        "Le brain live RÉPOND (/readyz ok). Si ton MCP est tombé c'était le restart de CE promote (${PROMOTE_TIMESTAMP}), PAS un incident à diagnostiquer. Reconnecte via /mcp. (Le promote a pu false-fail au qualify cold-start ; l'opérateur AXO vérifie.)" \
+        "promote-clear-${PROMOTE_TIMESTAMP}"
+    fi
+    # REQ-AXO-902304 — celui qui pollue nettoie. Le TTL ne sert à rien sans balayage
+    # périodique, et `mailbox_sweep` était documenté « on demand (operator/cron) »
+    # sans qu'aucun cron ne l'appelle : d'où 8217 avis accumulés. Le promote est le
+    # producteur de ces messages, c'est donc le bon endroit pour les faire expirer.
+    # Best-effort strict : un balayage qui échoue ne doit JAMAIS peser sur un promote.
+    timeout 20 "$ROOT_DIR/scripts/axon" --instance live mcp-call call mailbox_sweep \
+      --args '{}' --format text >> "$PROMOTE_LOG" 2>&1 || true
   fi
-  # REQ-AXO-902304 — celui qui pollue nettoie. Le TTL ne sert à rien sans balayage
-  # périodique, et `mailbox_sweep` était documenté « on demand (operator/cron) »
-  # sans qu'aucun cron ne l'appelle : d'où 8217 avis accumulés. Le promote est le
-  # producteur de ces messages, c'est donc le bon endroit pour les faire expirer.
-  # Best-effort strict : un balayage qui échoue ne doit JAMAIS peser sur un promote.
-  timeout 20 "$ROOT_DIR/scripts/axon" --instance live mcp-call call mailbox_sweep \
-    --args '{}' --format text >> "$PROMOTE_LOG" 2>&1 || true
+  if [[ "$rc" -eq 0 ]]; then
+    axon_promote_lease_release completed "promotion process exited with rc=0"
+  else
+    axon_promote_lease_release failed "promotion process exited with rc=${rc}; reconcile before retry"
+  fi
 }
 trap on_promote_exit EXIT
 
@@ -325,6 +354,7 @@ run_step() {
   shift 2
   CURRENT_STEP="$step_num"
   CURRENT_STEP_NAME="$step_name"
+  axon_promote_journal_event step_started "$step_name" running "step=${step_num}"
   promote_log ""
   promote_log "== step ${step_num}: ${step_name} =="
   local _step_t0=$SECONDS
@@ -343,6 +373,8 @@ run_step() {
   local rc="${PIPESTATUS[0]}"
   set -e
   if [[ "$rc" -ne 0 ]]; then
+    axon_promote_journal_event step_failed "$step_name" failed \
+      "step=${step_num} exit_code=${rc}" || true
     promote_log "   step ${step_num} (${step_name}) returned exit code ${rc} after $((SECONDS - _step_t0))s"
     promote_log ""
     promote_log "❌ PROMOTE FAILED at step ${step_num}: ${step_name}"
@@ -352,12 +384,16 @@ run_step() {
     echo "❌ PROMOTE FAILED at step ${step_num}: ${step_name} — see ${PROMOTE_LOG}" >&2
     exit "$rc"
   fi
+  axon_promote_journal_event step_completed "$step_name" passed \
+    "step=${step_num} elapsed_seconds=$((SECONDS - _step_t0))"
   promote_log "   ✅ step ${step_num} (${step_name}) done in $((SECONDS - _step_t0))s"
 }
 
-start_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 promote_log "promote_live_safe.sh started at ${PROMOTE_TIMESTAMP}"
 promote_log "project=${PROJECT_CODE} head=${start_head} skip_build=${SKIP_BUILD} skip_qualify=${SKIP_QUALIFY} skip_dev=${SKIP_DEV_VALIDATION}"
+promote_log "release_attempt_id=${RELEASE_ATTEMPT_ID} lease_deadline_unix_ms=${AXON_PROMOTE_DEADLINE_UNIX_MS} journal=${AXON_PROMOTE_JOURNAL_PATH}"
+axon_promote_journal_event script_started preflight running \
+  "log=${PROMOTE_LOG}; release state reconciliation begins before mutation"
 
 # REQ-AXO-902064 — fail-fast tracked-dirty gate BEFORE the (~2 min) build. The
 # authoritative gate is step 3 release-preflight, but it runs AFTER the build, so
