@@ -283,6 +283,69 @@ mod tests {
         driver.abort();
     }
 
+    // REQ-AXO-902466 E2E — the Revision row announces the source tenant, while
+    // its edge RevisionChange announces a distinct target tenant.  Both ends of
+    // a cross-project link must therefore invalidate in every process.
+    #[tokio::test]
+    async fn cross_project_edge_revision_notifies_both_endpoints_902466() {
+        let test_db = crate::test_support::test_db::TestDb::create();
+        let url = test_db.url();
+        let (client, mut connection) = tokio_postgres::connect(&url, NoTls)
+            .await
+            .expect("connect to ephemeral test db");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<tokio_postgres::Notification>(16);
+        let driver = tokio::spawn(async move {
+            let stream = futures_util::stream::poll_fn(move |cx| connection.poll_message(cx));
+            tokio::pin!(stream);
+            while let Some(msg) = stream.next().await {
+                if let Ok(AsyncMessage::Notification(n)) = msg {
+                    let _ = tx.send(n).await;
+                }
+            }
+        });
+        client
+            .batch_execute("LISTEN soll_revision_committed")
+            .await
+            .expect("LISTEN");
+
+        client
+            .batch_execute(
+                "INSERT INTO soll.Revision (revision_id, project_code) \
+                 VALUES ('link-902466-REQ-TE2-104', 'TE2')",
+            )
+            .await
+            .expect("insert source revision");
+        let source = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("source NOTIFY within 5s")
+            .expect("source notification");
+
+        client
+            .batch_execute(
+                "INSERT INTO soll.RevisionChange \
+                 (revision_id, entity_type, entity_id, project_code, action, before_json, after_json) \
+                 VALUES ('link-902466-REQ-TE2-104', 'edge', \
+                 'REQ-TE2-104:SUPERSEDES:REQ-VPC-067', 'TE2', 'link', NULL, \
+                 '{\"source_id\":\"REQ-TE2-104\",\"target_id\":\"REQ-VPC-067\",\"relation_type\":\"SUPERSEDES\"}'::jsonb)",
+            )
+            .await
+            .expect("insert cross-project edge revision change");
+        let target = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("target NOTIFY within 5s")
+            .expect("target notification");
+
+        let mut projects = HashSet::new();
+        push_payload(source.payload(), &mut projects);
+        push_payload(target.payload(), &mut projects);
+        assert_eq!(
+            projects,
+            HashSet::from(["TE2".to_string(), "VPC".to_string()]),
+            "a cross-project edge must invalidate both endpoint projects"
+        );
+        driver.abort();
+    }
+
     // REQ-AXO-902178 E2E — an evidence write to soll.Traceability (attach/remove)
     // must fire the SAME 'soll_revision_committed' channel so the RAM snapshot
     // invalidates cross-process, even though no soll.Revision is written. Covers

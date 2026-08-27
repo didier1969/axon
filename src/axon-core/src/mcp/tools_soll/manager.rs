@@ -92,7 +92,7 @@ fn apply_metadata_routed_fields(data: &serde_json::Value, meta: &mut serde_json:
 /// intervertir `entity_type` et `entity_id` produirait des lignes syntaxiquement
 /// valides et semantiquement fausses, que rien ne rattraperait a la relecture.
 pub(super) struct RevisionRecord<'a> {
-    /// `update` | `unlink` — porte aussi la `source` (`mcp.<action>`) et le prefixe d'id.
+    /// `update` | `link` | `unlink` — porte aussi la `source` (`mcp.<action>`) et le prefixe d'id.
     pub action: &'a str,
     /// Partie discriminante de `revision_id`, fournie par l'appelant : `unlink`
     /// indexe sur la SOURCE de l'arete, `update` sur le noeud.
@@ -269,6 +269,37 @@ impl McpServer {
             summary: &format!("update: {entity_id}"),
             before,
             after: Some(after),
+        })
+    }
+
+    /// REQ-AXO-902466 — journalise la création d'une arête comme `unlink`
+    /// journalise sa suppression. Sans cette ligne, un autre processus ne peut
+    /// ni dater le lien ni invalider son snapshot depuis le journal de révisions.
+    fn record_link_revision(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        relation_type: &str,
+    ) -> anyhow::Result<String> {
+        let project_code = project_code_from_canonical_entity_id(source_id)
+            .or_else(|| project_code_from_canonical_entity_id(target_id))
+            .unwrap_or_else(|| "AXO".to_string());
+        let entity_id = format!("{source_id}:{relation_type}:{target_id}");
+        let before = Value::Null;
+        let after = json!({
+            "source_id": source_id,
+            "target_id": target_id,
+            "relation_type": relation_type,
+        });
+        self.record_revision(RevisionRecord {
+            action: "link",
+            revision_key: source_id,
+            entity_type: "edge",
+            entity_id: &entity_id,
+            project_code: &project_code,
+            summary: &format!("link: {source_id} -[{relation_type}]-> {target_id}"),
+            before: &before,
+            after: Some(&after),
         })
     }
 
@@ -1906,37 +1937,83 @@ impl McpServer {
                             // Superseder B avec A dit quelque chose de B, rien de
                             // A. Si le statut de A doit changer, l'appelant le
                             // demande.
+                            let edge_existed = self
+                                .graph_store
+                                .query_count_param(
+                                    "SELECT count(*) FROM soll.Edge WHERE source_id = $s AND target_id = $t AND relation_type = 'SUPERSEDES'",
+                                    &json!({ "s": src, "t": tgt }),
+                                )
+                                .unwrap_or(0)
+                                > 0;
                             let cte = "WITH inserted AS (INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES (?, ?, 'SUPERSEDES', ?) ON CONFLICT (source_id, target_id, relation_type) DO NOTHING RETURNING source_id) UPDATE soll.Node SET status = 'superseded' WHERE id = ?";
                             let exec = self
                                 .graph_store
                                 .execute_param(cte, &json!([src, tgt, target_project, tgt]));
                             return match exec {
-                                Ok(()) => Some(json!({
-                                    "content": [{
-                                        "type": "text",
-                                        // REQ-AXO-902428 — « (status flipped) » se
-                                        // lisait comme portant sur la CIBLE, sujet
-                                        // de la phrase. Il portait AUSSI sur la
-                                        // source, en silence. Chaque bout nomme
-                                        // desormais ce qui lui arrive.
-                                        "text": format!(
-                                            "SUPERSEDES applied: `{src}` retires `{tgt}`. \
-                                             `{tgt}` -> superseded ; `{src}` inchange (statut `{}`).",
-                                            if src_status.is_empty() { "?" } else { src_status.as_str() }
-                                        )
-                                    }],
-                                    "data": {
-                                        "status": "ok",
-                                        "edge": {
-                                            "source_id": src,
-                                            "target_id": tgt,
-                                            "relation_type": "SUPERSEDES"
-                                        },
-                                        "source_status_after": src_status,
-                                        "source_status_changed": false,
-                                        "target_status_after": "superseded"
+                                Ok(()) => {
+                                    let revision_id = if edge_existed {
+                                        None
+                                    } else {
+                                        match self.record_link_revision(src, tgt, "SUPERSEDES") {
+                                            Ok(id) => Some(id),
+                                            Err(e) => {
+                                                // Restore both mutations made by the CTE:
+                                                // the edge and the target's prior status.
+                                                let rolled_back = self
+                                                    .graph_store
+                                                    .execute_param(
+                                                        "WITH removed AS (DELETE FROM soll.Edge WHERE source_id = ? AND target_id = ? AND relation_type = 'SUPERSEDES') UPDATE soll.Node SET status = ? WHERE id = ?",
+                                                        &json!([src, tgt, tgt_status, tgt]),
+                                                    )
+                                                    .is_ok();
+                                                return Some(json!({
+                                                    "content": [{
+                                                        "type": "text",
+                                                        "text": format!(
+                                                            "soll_manager(link): revision insert failed; SUPERSEDES mutation rolled back={rolled_back}: {e}"
+                                                        )
+                                                    }],
+                                                    "isError": true,
+                                                    "data": {
+                                                        "status": "internal_error",
+                                                        "edge_rolled_back": rolled_back,
+                                                        "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>(),
+                                                    }
+                                                }));
+                                            }
+                                        }
+                                    };
+                                    let mut payload = json!({
+                                        "content": [{
+                                            "type": "text",
+                                            // REQ-AXO-902428 — « (status flipped) » se
+                                            // lisait comme portant sur la CIBLE, sujet
+                                            // de la phrase. Il portait AUSSI sur la
+                                            // source, en silence. Chaque bout nomme
+                                            // desormais ce qui lui arrive.
+                                            "text": format!(
+                                                "SUPERSEDES applied: `{src}` retires `{tgt}`. \
+                                                 `{tgt}` -> superseded ; `{src}` inchange (statut `{}`).",
+                                                if src_status.is_empty() { "?" } else { src_status.as_str() }
+                                            )
+                                        }],
+                                        "data": {
+                                            "status": "ok",
+                                            "edge": {
+                                                "source_id": src,
+                                                "target_id": tgt,
+                                                "relation_type": "SUPERSEDES"
+                                            },
+                                            "source_status_after": src_status,
+                                            "source_status_changed": false,
+                                            "target_status_after": "superseded"
+                                        }
+                                    });
+                                    if let Some(revision_id) = revision_id {
+                                        payload["data"]["revision_id"] = json!(revision_id);
                                     }
-                                })),
+                                    Some(payload)
+                                }
                                 Err(e) => Some(json!({
                                     "content": [{
                                         "type": "text",
@@ -1953,6 +2030,40 @@ impl McpServer {
 
                         match self.insert_validated_relation(relation_type, src, tgt, policy) {
                             Ok(inserted) => {
+                                let revision_id = if inserted {
+                                    match self.record_link_revision(src, tgt, relation_type) {
+                                        Ok(id) => Some(id),
+                                        Err(e) => {
+                                            // Fail closed: do not leave behind the exact
+                                            // unjournaled edge that made cross-process
+                                            // snapshots stale. The compensation is scoped
+                                            // to the edge this call just inserted.
+                                            let rolled_back = self
+                                                .graph_store
+                                                .execute_param(
+                                                    "DELETE FROM soll.Edge WHERE source_id = ? AND target_id = ? AND relation_type = ?",
+                                                    &json!([src, tgt, relation_type]),
+                                                )
+                                                .is_ok();
+                                            return Some(json!({
+                                                "content": [{
+                                                    "type": "text",
+                                                    "text": format!(
+                                                        "soll_manager(link): revision insert failed; newly inserted edge rolled back={rolled_back}: {e}"
+                                                    )
+                                                }],
+                                                "isError": true,
+                                                "data": {
+                                                    "status": "internal_error",
+                                                    "edge_rolled_back": rolled_back,
+                                                    "diagnostic_excerpt": e.to_string().chars().take(240).collect::<String>(),
+                                                }
+                                            }));
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
                                 // REQ-AXO-901939 — when the requested relation
                                 // was non-canonical but the pair had exactly one
                                 // canonical relation, select_relation_type_for_link
@@ -1983,6 +2094,9 @@ impl McpServer {
                                 // REQ-AXO-901949 inv.5 — auto-continue (single source).
                                 if let Some(next) = crate::mcp::tool_contracts::next_links("soll_manager") {
                                     payload["data"]["next"] = next;
+                                }
+                                if let Some(revision_id) = revision_id {
+                                    payload["data"]["revision_id"] = json!(revision_id);
                                 }
                                 if inserted {
                                     if let (Some(before), Some(code), Ok(after)) = (

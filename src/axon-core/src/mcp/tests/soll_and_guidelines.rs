@@ -7799,6 +7799,22 @@ fn test_axon_soll_manager_link_same_type_supersedes_allowed() {
                 .unwrap(),
             1
         );
+        let revision_id = result["data"]["revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("SUPERSEDES doit annoncer sa revision : {result}"));
+        assert!(revision_id.starts_with("link-"), "revision_id: {revision_id}");
+        assert_eq!(
+            server
+                .graph_store
+                .query_count_param(
+                    "SELECT count(*) FROM soll.RevisionChange \
+                     WHERE revision_id = $r AND action = 'link' AND entity_type = 'edge'",
+                    &json!({ "r": revision_id }),
+                )
+                .unwrap(),
+            1,
+            "le lien SUPERSEDES doit etre journalise : {result}"
+        );
     }
 }
 
@@ -12130,7 +12146,7 @@ fn test_remove_evidence_previews_before_it_deletes_in_the_mode_that_decides_alon
 /// mécanisme dont la raison d'être est qu'on puisse revenir en arrière.
 ///
 /// Attrapé à la relecture, pas par le compilateur : les deux chaînes se
-/// compilent. Cette garde le rend mesurable, sur les DEUX chemins — c'est ce
+/// compilent. Cette garde le rend mesurable, sur les TROIS chemins — c'est ce
 /// que l'unification doit garantir et ce qu'une seule copie testée ne dirait
 /// pas.
 #[test]
@@ -12212,11 +12228,34 @@ fn test_every_announced_revision_id_exists_in_the_journal() {
          reconstruisait son id de son côté."
     );
 
-    // Les deux chemins passent par le MÊME écrivain : leurs ids ne peuvent pas
+    // Chemin 3 — `link`. REQ-AXO-902466 : avant cette garde, les retraits
+    // d'arêtes étaient journalisés mais pas leurs créations. Un autre process
+    // ne pouvait donc ni dater le lien ni invalider son snapshot depuis le
+    // journal de révisions.
+    let linked = call(json!({
+        "action": "link",
+        "entity": "requirement",
+        "data": {
+            "source_id": "REQ-NAN-601",
+            "target_id": "REQ-NAN-602",
+            "relation_type": "REFINES"
+        }
+    }));
+    let link_rev = linked["data"]["revision_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`link` doit nommer sa révision : {linked}"));
+    assert!(
+        journal_has(link_rev),
+        "la révision `{link_rev}` annoncée par `link` doit EXISTER dans le journal"
+    );
+
+    // Les trois chemins passent par le MÊME écrivain : leurs ids ne peuvent pas
     // se ressembler par hasard, ils partagent leur forme.
     assert!(
-        update_rev.starts_with("update-") && unlink_rev.starts_with("unlink-"),
-        "chaque révision porte son action en préfixe : {update_rev} / {unlink_rev}"
+        update_rev.starts_with("update-")
+            && unlink_rev.starts_with("unlink-")
+            && link_rev.starts_with("link-"),
+        "chaque révision porte son action en préfixe : {update_rev} / {unlink_rev} / {link_rev}"
     );
 }
 
