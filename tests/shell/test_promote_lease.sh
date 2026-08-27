@@ -189,5 +189,30 @@ else
   fail "owner record remains after clean lease release"
 fi
 
+# A partially executed EXIT trap can remove owner.json before an OOM kills the shell.
+# The atomic projection then remains the only durable witness of the interrupted run.
+PROJECTION_ONLY_DIR="$WORK_DIR/projection-only"
+mkdir -p "$PROJECTION_ONLY_DIR/attempts"
+printf '{"release_attempt_id":"attempt-oom","status":"running"}\n' \
+  > "$PROJECTION_ONLY_DIR/attempt-current.json"
+bash -c '
+  set -euo pipefail
+  source "$1"
+  axon_promote_lease_acquire "$2" live AXO "$3" attempt-after-oom 60
+  axon_promote_lease_release completed "projection-only recovery complete"
+' _ "$LEASE_LIB" "$PROJECTION_ONLY_DIR" "$SHA"
+if python3 - "$PROJECTION_ONLY_DIR/attempts/attempt-after-oom.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+matches = [row for row in rows if row["event"] == "stale_projection_detected"]
+assert len(matches) == 1
+assert matches[0]["previous_release_attempt_id"] == "attempt-oom"
+PY
+then
+  pass "recovery links a running projection even when the stale owner document is gone"
+else
+  fail "projection-only OOM recovery loses the interrupted attempt identity"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

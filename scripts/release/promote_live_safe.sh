@@ -717,8 +717,26 @@ build_from_frozen_worktree() {
   PROMOTE_FROZEN_WORKTREE="${TMPDIR:-/tmp}/axon-promote-${sha:0:12}"
   local worktree="$PROMOTE_FROZEN_WORKTREE"
 
-  git -C "$ROOT_DIR" worktree remove --force "$worktree" >/dev/null 2>&1 || true
-  git -C "$ROOT_DIR" worktree add --detach "$worktree" "$sha" >/dev/null
+  # Un SIGKILL/OOM ne peut exécuter aucun trap. S'il survient après le build, le
+  # worktree figé et son target Cargo constituent un checkpoint coûteux mais sûr à
+  # réutiliser. On ne le reprend que si Git prouve l'identité exacte du SHA ET
+  # l'absence de toute modification de source; le preflight de contenu recertifie
+  # ensuite chaque binaire. Toute ambiguïté retombe sur une création neuve.
+  local reuse_checkpoint=0
+  if [[ -d "$worktree/.git" || -f "$worktree/.git" ]]; then
+    if [[ "$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)" == "$sha" ]] && \
+       git -C "$worktree" diff --quiet HEAD -- && \
+       git -C "$worktree" diff --cached --quiet HEAD -- && \
+       [[ -z "$(git -C "$worktree" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+      reuse_checkpoint=1
+    fi
+  fi
+  if [[ "$reuse_checkpoint" -eq 1 ]]; then
+    echo "  ↻ reprise du checkpoint figé $worktree (SHA exact, sources propres)"
+  else
+    git -C "$ROOT_DIR" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+    git -C "$ROOT_DIR" worktree add --detach "$worktree" "$sha" >/dev/null
+  fi
   # Retained through DEV validation and test-target compilation; the process EXIT trap
   # removes it on success and every trappable failure.
 
@@ -873,7 +891,7 @@ test_targets_compile_step() {
   (
     cd "$source_root"
     devenv shell --no-reload --no-tui -- bash -lc \
-      "cd '$source_root/src/axon-core' && cargo build --tests 2>&1 | tail -20"
+      "cd '$source_root/src/axon-core' && CARGO_BUILD_JOBS=1 cargo build --tests -j 1 2>&1 | tail -20"
   )
 }
 run_step 2e test_targets_compile test_targets_compile_step

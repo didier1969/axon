@@ -19,6 +19,7 @@ AXON_PROMOTE_ACTOR=""
 AXON_PROMOTE_STARTED_UNIX_MS=""
 AXON_PROMOTE_DEADLINE_UNIX_MS=""
 AXON_PROMOTE_PREVIOUS_ATTEMPT_ID=""
+AXON_PROMOTE_PREVIOUS_PROJECTION_ATTEMPT_ID=""
 
 _axon_promote_owner_attempt_id() {
   local owner_path="$1"
@@ -29,6 +30,21 @@ try:
     value = json.load(open(sys.argv[1], encoding="utf-8")).get("release_attempt_id")
     if isinstance(value, str):
         print(value)
+except Exception:
+    pass
+PY
+}
+
+_axon_promote_running_projection_attempt_id() {
+  local projection_path="$1"
+  [[ -s "$projection_path" ]] || return 0
+  python3 - "$projection_path" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    attempt_id = value.get("release_attempt_id")
+    if value.get("status") == "running" and isinstance(attempt_id, str):
+        print(attempt_id)
 except Exception:
     pass
 PY
@@ -170,6 +186,9 @@ axon_promote_lease_acquire() {
   mkdir -p "$release_dir/attempts"
   AXON_PROMOTE_JOURNAL_PATH="$release_dir/attempts/${attempt_id}.jsonl"
   AXON_PROMOTE_PROJECTION_PATH="$release_dir/attempt-current.json"
+  AXON_PROMOTE_PREVIOUS_PROJECTION_ATTEMPT_ID="$(
+    _axon_promote_running_projection_attempt_id "$AXON_PROMOTE_PROJECTION_PATH"
+  )"
 
   read -r AXON_PROMOTE_STARTED_UNIX_MS AXON_PROMOTE_DEADLINE_UNIX_MS < <(
     python3 - "$ttl_seconds" <<'PY'
@@ -226,6 +245,18 @@ PY
     axon_promote_journal_event stale_owner_detected reconcile required \
       "previous owner is not holding the kernel lease; reconcile pending/current/runtime before new work" \
       "$AXON_PROMOTE_PREVIOUS_ATTEMPT_ID"
+  fi
+  # Un OOM peut tuer le shell pendant son trap EXIT : le flock et même le document
+  # owner peuvent alors avoir disparu, tandis que la projection atomique dit encore
+  # `running`. Le nouveau propriétaire du lock est la preuve mécanique que cette
+  # projection n'est plus active. Relier les deux tentatives empêche ce faux état
+  # éternel sans inventer un résultat pour le travail interrompu.
+  if [[ -n "$AXON_PROMOTE_PREVIOUS_PROJECTION_ATTEMPT_ID" && \
+        "$AXON_PROMOTE_PREVIOUS_PROJECTION_ATTEMPT_ID" != "$attempt_id" && \
+        "$AXON_PROMOTE_PREVIOUS_PROJECTION_ATTEMPT_ID" != "$AXON_PROMOTE_PREVIOUS_ATTEMPT_ID" ]]; then
+    axon_promote_journal_event stale_projection_detected reconcile required \
+      "previous running projection has no active kernel lease; reconcile before new work" \
+      "$AXON_PROMOTE_PREVIOUS_PROJECTION_ATTEMPT_ID"
   fi
 }
 

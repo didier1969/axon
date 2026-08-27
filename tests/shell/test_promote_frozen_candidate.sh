@@ -77,5 +77,20 @@ else
   pass "candidate build cannot overwrite LKG bin/* before activation"
 fi
 
+if grep -q 'reuse_checkpoint=1' "$PROMOTE" && \
+   grep -q 'rev-parse HEAD' "$PROMOTE" && \
+   grep -q 'diff --quiet HEAD' "$PROMOTE" && \
+   grep -q 'status --porcelain --untracked-files=normal' "$PROMOTE"; then
+  pass "an OOM-surviving worktree is reused only at the exact clean candidate SHA"
+else
+  fail "frozen candidate checkpoints are not safely reusable after OOM"
+fi
+
+if grep -q 'CARGO_BUILD_JOBS=1 cargo build --tests -j 1' "$PROMOTE"; then
+  pass "test-target compilation has an explicit one-job memory backpressure guard"
+else
+  fail "test-target compilation can still fan out under memory pressure"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
