@@ -100,7 +100,7 @@ def parse(path):
     with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
             parts = line.strip().split(",")
-            if len(parts) != 2:
+            if len(parts) < 2:
                 continue
             try:
                 ts = int(parts[0])

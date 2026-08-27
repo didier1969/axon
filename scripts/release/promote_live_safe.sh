@@ -17,6 +17,8 @@ source "$ROOT_DIR/scripts/lib/axon-pg-port.sh"
 # REQ-AXO-902526 — one kernel-owned live promotion at a time, with a durable
 # attempt journal that survives SIGKILL and makes recovery distinguishable.
 source "$ROOT_DIR/scripts/lib/axon-promote-lease.sh"
+# shellcheck source=scripts/lib/axon-time.sh
+source "$ROOT_DIR/scripts/lib/axon-time.sh"
 AXON_INSTANCE_KIND=live
 axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
 
@@ -152,6 +154,28 @@ for raw in sys.argv[1:]:
         break
 else:
     print("{}")
+PY
+}
+
+historical_promote_estimate() {
+  python3 - "$LOG_DIR/attempts" <<'PY' 2>/dev/null || printf 'historique indisponible'
+import json, pathlib, statistics, sys
+durations=[]
+for path in sorted(pathlib.Path(sys.argv[1]).glob("*.jsonl"))[-20:]:
+    try:
+        rows=[json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    except Exception:
+        continue
+    if not rows or not any(r.get("event")=="lease_released" and r.get("status")=="completed" for r in rows):
+        continue
+    start=rows[0].get("monotonic_ms")
+    cut=next((r.get("monotonic_ms") for r in rows if r.get("event")=="step_started" and r.get("phase") in {"cutover","cutover_prepare"}), None)
+    if isinstance(start, int) and isinstance(cut, int) and cut >= start:
+        durations.append((cut-start)//1000)
+if durations:
+    print(f"médiane historique jusqu'au cutover={int(statistics.median(durations))}s sur {len(durations)} tentative(s) réussie(s)")
+else:
+    print("historique insuffisant; aucune durée promise")
 PY
 }
 
@@ -294,18 +318,27 @@ _start_mcp_sampler() {
       #      then silence, i.e. it died exactly when it had something to record.
       # `|| true` is what both needed: the substitution still captures the "000" that -w
       # printed, and the exit status is neutralised so `set -e` leaves the loop alone.
-      code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
+      local_body="$LOG_DIR/.mcp-sample-body.$$"
+      curl_meta="$(curl -sS -m 2 -o "$local_body" -w '%{http_code}|%{exitcode}' \
         "http://127.0.0.1:${AXON_BRAIN_PORT:-44129}/mcp" \
         -H 'content-type: application/json' \
         -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' 2>/dev/null)" || true
-      # Any real HTTP status means the endpoint answered; 000 (or empty, if curl itself
-      # could not run) = connection refused/timeout — exactly what a third-party MCP
-      # client experiences as "server down".
-      if [[ -z "$code" || "$code" == "000" ]]; then
-        printf '%s,down\n' "$(date -u +%s)"
-      else
-        printf '%s,up\n' "$(date -u +%s)"
+      code="${curl_meta%%|*}"; curl_rc="${curl_meta##*|}"
+      state="up"; diagnosis="ready"
+      if [[ "$curl_rc" == "7" ]]; then state="down"; diagnosis="connection_refused"
+      elif [[ "$curl_rc" == "28" || -z "$curl_meta" ]]; then state="down"; diagnosis="timeout"
+      elif [[ "$code" == 5* ]]; then state="down"; diagnosis="http_5xx"
+      elif ! python3 -m json.tool "$local_body" >/dev/null 2>&1; then state="down"; diagnosis="invalid_json"
+      elif ! python3 - "$local_body" <<'PY' >/dev/null 2>&1
+import json, sys
+d=json.load(open(sys.argv[1], encoding="utf-8"))
+assert isinstance(d.get("result",{}).get("tools"), list)
+PY
+      then state="down"; diagnosis="mcp_nonready"
+      elif ! grep -q '"promote_status"' "$local_body"; then state="down"; diagnosis="functional_failure"
       fi
+      printf '%s,%s,%s\n' "$(date -u +%s)" "$state" "$diagnosis"
+      rm -f "$local_body"
       sleep 1
     done
   ) >> "$MCP_SAMPLE_FILE" 2>/dev/null &
@@ -331,6 +364,7 @@ _report_mcp_outage() {
   # not a measurement.
   promote_log "   ${n} samples over ${span}s · measured resolution ${res}s (a blip shorter than that can fall between two samples)"
   promote_log "   samples: $MCP_SAMPLE_FILE"
+  promote_log "   classifications: $(cut -d, -f3 "$MCP_SAMPLE_FILE" | sort | uniq -c | tr '\n' ';' || true)"
   if [[ "${worst:-0}" -gt 60 ]]; then
     promote_log "   ⚠️ outage > 60s — third-party MCP clients may have declared a crash and self-restarted (REQ-AXO-902256 acceptance breach)."
   fi
@@ -409,7 +443,11 @@ run_step() {
   shift 2
   CURRENT_STEP="$step_num"
   CURRENT_STEP_NAME="$step_name"
-  axon_promote_journal_event step_started "$step_name" running "step=${step_num}"
+  local timeout_seconds deadline_monotonic_ms
+  timeout_seconds="$(step_timeout_seconds "$step_name")"
+  deadline_monotonic_ms="$(axon_deadline_after_seconds "$timeout_seconds")"
+  axon_promote_journal_event step_started "$step_name" running \
+    "step=${step_num} timeout_seconds=${timeout_seconds} deadline_monotonic_ms=${deadline_monotonic_ms}"
   promote_log ""
   promote_log "== step ${step_num}: ${step_name} =="
   local _step_t0=$SECONDS
@@ -424,8 +462,22 @@ run_step() {
   # `pipefail` is already set (line 2), so the pipeline's status is the COMMAND's status,
   # not tee's. PIPESTATUS is captured anyway to stay correct if that ever changes.
   set +e
-  "$@" 2>&1 | tee -a "$PROMOTE_LOG"
-  local rc="${PIPESTATUS[0]}"
+  "$@" > >(tee -a "$PROMOTE_LOG") 2>&1 &
+  local command_pid=$! timed_out=0 now_monotonic_ms rc
+  while kill -0 "$command_pid" 2>/dev/null; do
+    now_monotonic_ms="$(axon_monotonic_ms)"
+    if (( now_monotonic_ms >= deadline_monotonic_ms )); then
+      timed_out=1
+      promote_log "   deadline_exceeded step=${step_num} name=${step_name} timeout_seconds=${timeout_seconds}"
+      pkill -TERM -P "$command_pid" 2>/dev/null || true
+      kill -TERM "$command_pid" 2>/dev/null || true
+      break
+    fi
+    sleep 1
+  done
+  wait "$command_pid"
+  rc=$?
+  [[ "$timed_out" -eq 1 ]] && rc=124
   set -e
   if [[ "$rc" -ne 0 ]]; then
     axon_promote_journal_event step_failed "$step_name" failed \
@@ -442,6 +494,16 @@ run_step() {
   axon_promote_journal_event step_completed "$step_name" passed \
     "step=${step_num} elapsed_seconds=$((SECONDS - _step_t0))"
   promote_log "   ✅ step ${step_num} (${step_name}) done in $((SECONDS - _step_t0))s"
+}
+
+step_timeout_seconds() {
+  case "$1" in
+    build) echo 1200 ;; dev_restart) echo 480 ;; test_targets_compile) echo 600 ;;
+    lifecycle_gate) echo 240 ;; cutover_prepare) echo 420 ;;
+    qualify_mcp|qualify_indexer_truth) echo 240 ;;
+    preflight|candidate_recheck|manifest|apply_ddl_live) echo 180 ;;
+    cutover_finalize) echo 60 ;; *) echo 300 ;;
+  esac
 }
 
 promote_log "promote_live_safe.sh started at ${PROMOTE_TIMESTAMP}"
@@ -609,7 +671,7 @@ require_gpu_channel_free "pre-flight (fresh promote)"
 # --- REQ-AXO-902194: pre-notice (brain still up) — warn peers the step-5 restart
 # will drop MCP briefly. Async, so mostly read on reconnect; harmless to send early. ---
 broadcast_promote "🔧 Promote ${PROJECT_CODE} en cours — coupure MCP brève à venir" \
-  "Un promote AXO démarre (${PROMOTE_TIMESTAMP}). Au restart du brain (dans ~3-6 min) le MCP tombera pour TOUS les clients connectés. Ordre de grandeur mesuré: le brain met ~8 s entre son lancement et /readyz, plus la durée de son arrêt — donc DIZAINES DE SECONDES, pas quelques secondes. C'est PLANIFIÉ: NE relance PAS le serveur toi-même, ton self-heal entrerait en course avec la bascule (incident du 2026-07-26, REQ-AXO-902256). Attends l'all-clear, qui suit dès que le brain répond. Si ton binding reste stale ensuite, reconnecte via /mcp." \
+  "Un promote AXO démarre (${PROMOTE_TIMESTAMP}); $(historical_promote_estimate). Au restart du brain le MCP tombera pour TOUS les clients connectés. La coupure est mesurée en direct et chaque phase possède une deadline monotone. C'est PLANIFIÉ: NE relance PAS le serveur toi-même, ton self-heal entrerait en course avec la bascule. Attends l'all-clear, qui suit dès que le brain répond." \
   "promote-notice-${PROMOTE_TIMESTAMP}"
 BROADCAST_PREFLIGHT_SENT=1
 
@@ -955,10 +1017,13 @@ run_step 5b apply_ddl_live gate_with_attestation ddl bash -lc "cd '$ROOT_DIR' &&
 # REQ-AXO-902189 — hoisted above step 6 so the qualify pre-gate and the 6c health-gate
 # reuse ONE definition. Sets recon_phase / recon_failed; returns 0 iff phase==clean.
 recon_phase=""; recon_failed=""
-_poll_promote_clean() {  # $1 = max attempts (×5s); sets recon_phase / recon_failed; 0 iff clean
-  local attempts="$1" _a recon_json recon_eval
+_poll_promote_clean() {  # $1 = monotonic budget seconds
+  local budget_seconds="$1" deadline recon_json recon_eval jitter_seconds
+  deadline="$(axon_deadline_after_seconds "$budget_seconds")"
+  axon_promote_journal_event readiness_wait reconcile running \
+    "source=mcp_promote_status; deadline_monotonic_ms=${deadline}; budget_seconds=${budget_seconds}; residual_polling_jitter_seconds=1..3; supervisor readiness events are consumed by axonctl prepare"
   recon_phase=""; recon_failed=""
-  for _a in $(seq 1 "$attempts"); do
+  while (( $(axon_monotonic_ms) < deadline )); do
     recon_json="$(curl -s -m 8 "http://127.0.0.1:${AXON_BRAIN_PORT:-44129}/mcp" \
       -H 'content-type: application/json' \
       -d '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"promote_status","arguments":{}}}' 2>/dev/null || true)"
@@ -975,7 +1040,8 @@ for l in sys.stdin.read().splitlines():
 print(f'{ph}|{fg}')" 2>/dev/null || true)"
     recon_phase="${recon_eval%%|*}"; recon_failed="${recon_eval##*|}"
     [[ "$recon_phase" == "clean" ]] && return 0
-    sleep 5
+    jitter_seconds=$((1 + RANDOM % 3))
+    sleep "$jitter_seconds"
   done
   return 1
 }
@@ -1103,7 +1169,7 @@ promote_log "== step 6c: reconcile + health-gate (promote_status) =="
 
 # First gate: extended warmup (~120s) — a fresh live indexer's BGE-Large GPU cold-start
 # can take minutes to publish its first heartbeat.
-_poll_promote_clean 24 || true
+_poll_promote_clean 120 || true
 
 # REQ-AXO-902256 — ESCALATION LADDER, not a single hammer. The previous code went
 # straight to `stop --hard + start full`, which takes the BRAIN down to recover the
@@ -1140,7 +1206,7 @@ if [[ "$recon_phase" != "clean" ]]; then
       promote_log "   ⚠️ TIER-1 could not verify the indexer restart — escalating to TIER-2"
     fi
     set -e
-    _poll_promote_clean 36 || true   # ~180s: BGE-Large GPU cold-start budget
+    _poll_promote_clean 180 || true
     [[ "$recon_phase" == "clean" ]] && promote_log "   ✅ step 6c tier-1: recovered WITHOUT a brain outage (blast radius contained)."
   else
     promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) — not indexer-only, skipping tier 1."
@@ -1153,7 +1219,7 @@ if [[ "$recon_phase" != "clean" ]]; then
     bash "$ROOT_DIR/scripts/axon-live" stop --hard >> "$PROMOTE_LOG" 2>&1
     bash "$ROOT_DIR/scripts/axon-live" start full  >> "$PROMOTE_LOG" 2>&1
     set -e
-    _poll_promote_clean 36 || true   # re-verify on a fuller cold-start budget (~180s)
+    _poll_promote_clean 180 || true
   fi
 fi
 

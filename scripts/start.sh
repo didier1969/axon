@@ -48,6 +48,8 @@ source "$PROJECT_ROOT/scripts/lib/axon-supervisor.sh"
 # REQ-AXO-902163 — detect_gpu() extracted here: NVML-based, non-blocking (never wedges).
 # shellcheck source=scripts/lib/axon-gpu-detect.sh
 source "$PROJECT_ROOT/scripts/lib/axon-gpu-detect.sh"
+# shellcheck source=scripts/lib/axon-time.sh
+source "$PROJECT_ROOT/scripts/lib/axon-time.sh"
 cd "$PROJECT_ROOT"
 
 axon_load_worktree_env "$PROJECT_ROOT"
@@ -401,7 +403,7 @@ export AXON_PGREADY_BIN="$(run_devenv 'which pg_isready' 2>/dev/null | tail -1)"
 # every promote prints the brain-boot contribution to MCP downtime (the comment
 # at the readyz wait names ORT init + per-project IST snapshot boot-warm as the
 # cost; this quantifies it before any optimization). Pure echo, zero risk.
-AXON_LAUNCH_T0_MS=$(date +%s%3N)
+AXON_LAUNCH_T0_MS="$(axon_monotonic_ms)"
 echo "🚀 Starting Axon (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
 echo "   Brain: $BRAIN_BIN | Indexer: $INDEXER_BIN"
 echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
@@ -503,7 +505,7 @@ for ((i=1; i<=BRAIN_TIMEOUT_S; i++)); do
         echo "✅ Axon ready (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
         # REQ-AXO-902064 slice 1 — brain launch→readyz wall-time (the boot
         # contribution to MCP downtime during a promote/restart).
-        echo "   [timing] brain launch→readyz: $(( $(date +%s%3N) - AXON_LAUNCH_T0_MS ))ms"
+        echo "   [timing] brain launch→readyz: $(( $(axon_monotonic_ms) - AXON_LAUNCH_T0_MS ))ms"
         echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
         if [[ "$RUNTIME_MODE" == indexer_* ]]; then
             echo "   Indexer: initializing in background (GPU model load)"
