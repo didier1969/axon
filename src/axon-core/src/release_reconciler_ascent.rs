@@ -190,6 +190,10 @@ mod tests {
                                 pending_present: pending,
                                 pending_build_id: None,
                                 runtime_contract: Some("brain_mcp_indexer_ist".to_string()),
+                                release_attempt_id: None,
+                                pending_release_attempt_id: None,
+                                artifact_sha256: None,
+                                attempt: None,
                             };
                             let l = LivenessFacts {
                                 brain_serving: brain,
@@ -229,8 +233,16 @@ mod tests {
                     };
                     let gates = evaluate_liveness_gates(&l);
                     let rust = (
-                        gates.iter().find(|g| g.name == "brain_serving").unwrap().pass,
-                        gates.iter().find(|g| g.name == "indexer_alive").unwrap().pass,
+                        gates
+                            .iter()
+                            .find(|g| g.name == "brain_serving")
+                            .unwrap()
+                            .pass,
+                        gates
+                            .iter()
+                            .find(|g| g.name == "indexer_alive")
+                            .unwrap()
+                            .pass,
                     );
                     assert_eq!(
                         rust,
@@ -264,12 +276,28 @@ mod tests {
                             None
                         },
                         runtime_contract: Some("brain_mcp_indexer_ist".to_string()),
+                        release_attempt_id: None,
+                        pending_release_attempt_id: None,
+                        artifact_sha256: None,
+                        attempt: None,
                     };
                     let gates = evaluate_gates(&f);
                     let rust = (
-                        gates.iter().find(|g| g.name == "manifest_runtime_match").unwrap().pass,
-                        gates.iter().find(|g| g.name == "no_stale_pending").unwrap().pass,
-                        gates.iter().find(|g| g.name == "qualification_passed").unwrap().pass,
+                        gates
+                            .iter()
+                            .find(|g| g.name == "manifest_runtime_match")
+                            .unwrap()
+                            .pass,
+                        gates
+                            .iter()
+                            .find(|g| g.name == "no_stale_pending")
+                            .unwrap()
+                            .pass,
+                        gates
+                            .iter()
+                            .find(|g| g.name == "qualification_passed")
+                            .unwrap()
+                            .pass,
                     );
                     let asc = ascent_release_gates(&f);
                     assert_eq!(

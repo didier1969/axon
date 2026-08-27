@@ -10,6 +10,7 @@ AXON_PROMOTE_LEASE_FD=""
 AXON_PROMOTE_LEASE_PATH=""
 AXON_PROMOTE_OWNER_PATH=""
 AXON_PROMOTE_JOURNAL_PATH=""
+AXON_PROMOTE_PROJECTION_PATH=""
 AXON_PROMOTE_RELEASE_ATTEMPT_ID=""
 AXON_PROMOTE_PROJECT_CODE=""
 AXON_PROMOTE_INSTANCE_KIND=""
@@ -57,7 +58,10 @@ axon_promote_journal_event() {
     "$phase" \
     "$status" \
     "$detail" \
-    "$previous_id" <<'PY'
+    "$previous_id" \
+    "$AXON_PROMOTE_PROJECTION_PATH" \
+    "$AXON_PROMOTE_STARTED_UNIX_MS" \
+    "$AXON_PROMOTE_DEADLINE_UNIX_MS" <<'PY'
 import datetime as dt
 import json
 import os
@@ -65,7 +69,7 @@ import sys
 import time
 
 (path, attempt_id, project, instance, sha, pid, actor, event, phase, status,
- detail, previous_id) = sys.argv[1:]
+ detail, previous_id, projection_path, started, deadline) = sys.argv[1:]
 record = {
     "schema_version": 1,
     "release_attempt_id": attempt_id,
@@ -91,6 +95,33 @@ try:
     os.fsync(fd)
 finally:
     os.close(fd)
+
+# The JSONL is the audit authority. This small atomic projection is the bounded,
+# single-read status surface used by promote_status and operators.
+projection = {
+    "schema_version": 1,
+    "release_attempt_id": attempt_id,
+    "project_code": project,
+    "instance_kind": instance,
+    "sha": sha,
+    "pid": int(pid),
+    "actor": actor,
+    "phase": phase,
+    "status": status,
+    "last_event": event,
+    "last_event_detail": detail,
+    "last_event_unix_ms": record["unix_ms"],
+    "started_unix_ms": int(started),
+    "deadline_unix_ms": int(deadline),
+    "journal_path": path,
+}
+tmp = f"{projection_path}.tmp.{os.getpid()}"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(projection, f, sort_keys=True, separators=(",", ":"))
+    f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(tmp, projection_path)
 PY
 }
 
@@ -138,6 +169,7 @@ axon_promote_lease_acquire() {
   AXON_PROMOTE_ACTOR="${USER:-unknown}@$(hostname 2>/dev/null || printf 'unknown')"
   mkdir -p "$release_dir/attempts"
   AXON_PROMOTE_JOURNAL_PATH="$release_dir/attempts/${attempt_id}.jsonl"
+  AXON_PROMOTE_PROJECTION_PATH="$release_dir/attempt-current.json"
 
   read -r AXON_PROMOTE_STARTED_UNIX_MS AXON_PROMOTE_DEADLINE_UNIX_MS < <(
     python3 - "$ttl_seconds" <<'PY'

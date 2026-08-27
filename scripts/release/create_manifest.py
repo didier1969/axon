@@ -74,6 +74,10 @@ def runtime_artifact_names() -> tuple[str, ...]:
     return ("axon-brain", "axon-indexer", "axonctl")
 
 
+def resolve_release_attempt_id(explicit: str | None) -> str | None:
+    return explicit or os.environ.get("AXON_RELEASE_ATTEMPT_ID") or None
+
+
 def main() -> int:
     repo = pathlib.Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description="Create a canonical Axon release manifest.")
@@ -84,6 +88,7 @@ def main() -> int:
     parser.add_argument("--install-generation")
     parser.add_argument("--evidence", action="append", default=[])
     parser.add_argument("--output")
+    parser.add_argument("--release-attempt-id")
     args = parser.parse_args()
     primary_bin_name, artifact, build_info_path = runtime_primary_artifact(
         repo, args.artifact, args.build_info
@@ -167,6 +172,7 @@ def main() -> int:
 
     manifest = {
         "schema_version": 1,
+        "release_attempt_id": resolve_release_attempt_id(args.release_attempt_id),
         "created_at": created_at,
         "state": args.state,
         "runtime_contract": "brain_mcp_indexer_ist",

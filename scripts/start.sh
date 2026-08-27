@@ -256,9 +256,11 @@ rv = m.get('runtime_version', {})
 bp = arts.get('axon-brain', {}).get('path', '')
 ip = arts.get('axon-indexer', {}).get('path', '')
 ig = rv.get('install_generation', '')
+attempt = m.get('release_attempt_id', '')
 if bp: print(f'BRAIN_ARTIFACT={bp}')
 if ip: print(f'INDEXER_ARTIFACT={ip}')
 if ig: print(f'export AXON_INSTALL_GENERATION={ig}')
+if attempt: print(f'export AXON_RELEASE_ATTEMPT_ID={attempt}')
 ")"
         if [[ -n "${BRAIN_ARTIFACT:-}" && -f "$BRAIN_ARTIFACT" ]]; then
             mkdir -p bin

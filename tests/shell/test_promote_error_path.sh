@@ -95,12 +95,11 @@ else
     echo '#!/usr/bin/env bash'
     echo 'set -uo pipefail'
     echo 'PROJECT_CODE=AXO'
-    # Take the python heredoc plus the two lines of the function that build `args`,
-    # then stop before the network call.
-    sed -n "${py_start},$(( fn_start + 5 ))p" "$PROMOTE" \
-      | sed 's|^  timeout 20.*|  printf "%s" "$args"; return 0|; s|^    --args .*||'
-    echo '}'
-    echo 'broadcast_promote "$1" "$2" "$3"'
+    # Take only the expansion-free heredoc. The function now delegates delivery to
+    # durable_hook.py (multi-line retry state machine), so extracting a fixed number
+    # of function lines would test the test's line-count assumption, not JSON safety.
+    sed -n "${py_start},$(( fn_start - 2 ))p" "$PROMOTE"
+    echo 'python3 -c "$_BROADCAST_PY" AXO "$1" "$2" "$3"'
   } > "$harness"
   # Hostile-but-plausible operator text: accents, an apostrophe, a dollar and a
   # backtick — all of which the previous form would have re-parsed.

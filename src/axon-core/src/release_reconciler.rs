@@ -38,6 +38,14 @@ pub struct ReleaseFacts {
     /// declarative source for "is an indexer expected" — the answering brain's own
     /// runtime mode is `brain_only` and would lie.
     pub runtime_contract: Option<String>,
+    /// Correlation id written by the promotion transaction into current.json.
+    pub release_attempt_id: Option<String>,
+    /// Correlation id of a staged candidate, when present.
+    pub pending_release_attempt_id: Option<String>,
+    /// Primary artifact digest recorded by the promoted manifest.
+    pub artifact_sha256: Option<String>,
+    /// Last durable attempt projection (`attempt-current.json`).
+    pub attempt: Option<Value>,
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -76,6 +84,23 @@ impl ReleaseFacts {
             .and_then(|c| c.get("runtime_contract"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        let release_attempt_id = current
+            .as_ref()
+            .and_then(|c| c.get("release_attempt_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let pending_release_attempt_id = pending
+            .as_ref()
+            .and_then(|c| c.get("release_attempt_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let artifact_sha256 = current
+            .as_ref()
+            .and_then(|c| c.get("artifact"))
+            .and_then(|a| a.get("sha256"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let attempt = read_json(&release_dir.join("attempt-current.json"));
         ReleaseFacts {
             live_build_id,
             manifest_build_id,
@@ -84,6 +109,10 @@ impl ReleaseFacts {
             pending_present: pending.is_some(),
             pending_build_id: pending.as_ref().and_then(extract_build_id),
             runtime_contract,
+            release_attempt_id,
+            pending_release_attempt_id,
+            artifact_sha256,
+            attempt,
         }
     }
 
@@ -489,7 +518,11 @@ where
 
 /// Restore the old release and build the `RolledBack` verdict, recording whether the
 /// restore itself succeeded (a failed rollback = a real outage, surfaced distinctly).
-fn rolled_back<Io: CutoverIo>(io: &mut Io, failed_step: &'static str, detail: String) -> CutoverVerdict {
+fn rolled_back<Io: CutoverIo>(
+    io: &mut Io,
+    failed_step: &'static str,
+    detail: String,
+) -> CutoverVerdict {
     let rollback_ok = io.rollback().is_ok();
     CutoverVerdict::RolledBack {
         failed_step,
@@ -584,7 +617,10 @@ pub fn evaluate_stop_gates(f: &StopFacts) -> Vec<Gate> {
             detail: if f.writer_locks_held.is_empty() {
                 "no writer locks held".to_string()
             } else {
-                format!("writer locks still held: {}", f.writer_locks_held.join(", "))
+                format!(
+                    "writer locks still held: {}",
+                    f.writer_locks_held.join(", ")
+                )
             },
         },
         Gate {
@@ -669,12 +705,26 @@ mod tests {
             manifest_state: Some("promoted".to_string()),
             qualification_ok: Some(true),
             pending_present: pending,
-            pending_build_id: if pending { Some("v0.0.0-staged".to_string()) } else { None },
+            pending_build_id: if pending {
+                Some("v0.0.0-staged".to_string())
+            } else {
+                None
+            },
             runtime_contract: Some("brain_mcp_indexer_ist".to_string()),
+            release_attempt_id: None,
+            pending_release_attempt_id: None,
+            artifact_sha256: None,
+            attempt: None,
         }
     }
 
-    fn live(brain: bool, expected: bool, ready: bool, lifecycle: &str, source: &str) -> LivenessFacts {
+    fn live(
+        brain: bool,
+        expected: bool,
+        ready: bool,
+        lifecycle: &str,
+        source: &str,
+    ) -> LivenessFacts {
         LivenessFacts {
             brain_serving: brain,
             indexer_expected: expected,
@@ -706,16 +756,26 @@ mod tests {
         let l = live(false, true, true, "healthy", "pg_heartbeat");
         assert_eq!(liveness_phase(&l), Some("brain_down"));
         assert!(liveness_next_action(&l).unwrap().contains("DB probe"));
-        assert!(evaluate_liveness_gates(&l).iter().any(|g| g.name == "brain_serving" && !g.pass));
+        assert!(evaluate_liveness_gates(&l)
+            .iter()
+            .any(|g| g.name == "brain_serving" && !g.pass));
     }
 
     #[test]
     fn indexer_stale_vs_never_launched_actions_differ() {
-        let stale = live(true, true, false, "crashed_or_abandoned", "pg_heartbeat_stale");
+        let stale = live(
+            true,
+            true,
+            false,
+            "crashed_or_abandoned",
+            "pg_heartbeat_stale",
+        );
         assert_eq!(liveness_phase(&stale), Some("indexer_down"));
         assert!(liveness_next_action(&stale).unwrap().contains("restart"));
         let never = live(true, true, false, "never_launched", "no_heartbeat");
-        assert!(liveness_next_action(&never).unwrap().contains("start the full runtime"));
+        assert!(liveness_next_action(&never)
+            .unwrap()
+            .contains("start the full runtime"));
     }
 
     #[test]
@@ -740,7 +800,9 @@ mod tests {
         assert_eq!(phase(&f), "drift");
         assert!(next_action(&f).unwrap().contains("Re-promote"));
         let gates = evaluate_gates(&f);
-        assert!(gates.iter().any(|g| g.name == "manifest_runtime_match" && !g.pass));
+        assert!(gates
+            .iter()
+            .any(|g| g.name == "manifest_runtime_match" && !g.pass));
     }
 
     #[test]
@@ -749,7 +811,9 @@ mod tests {
         let f = facts("v1-gabc", Some("v1-gabc"), true);
         assert_eq!(phase(&f), "staged");
         let gates = evaluate_gates(&f);
-        assert!(gates.iter().any(|g| g.name == "no_stale_pending" && !g.pass));
+        assert!(gates
+            .iter()
+            .any(|g| g.name == "no_stale_pending" && !g.pass));
         assert!(next_action(&f).unwrap().contains("resume"));
     }
 
@@ -765,7 +829,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("current.json"),
-            r#"{"runtime_version":{"build_id":"v-old"},"state":"promoted","qualification":{"verdict":"ok"},"runtime_contract":"brain_mcp_indexer_ist"}"#,
+            r#"{"release_attempt_id":"attempt-current","runtime_version":{"build_id":"v-old"},"state":"promoted","qualification":{"verdict":"ok"},"runtime_contract":"brain_mcp_indexer_ist","artifact":{"sha256":"abc123"}}"#,
         )
         .unwrap();
 
@@ -776,19 +840,37 @@ mod tests {
         assert_eq!(f.qualification_ok, Some(true));
         assert!(!f.pending_present);
         assert!(f.indexer_expected()); // "brain_mcp_indexer_ist" names an indexer
+        assert_eq!(f.release_attempt_id.as_deref(), Some("attempt-current"));
+        assert_eq!(f.artifact_sha256.as_deref(), Some("abc123"));
 
         // A stranded/mid-flight staging: pending.json present with its own build_id.
         fs::write(
             dir.join("pending.json"),
-            r#"{"runtime_version":{"build_id":"v-staged"}}"#,
+            r#"{"release_attempt_id":"attempt-pending","runtime_version":{"build_id":"v-staged"}}"#,
         )
         .unwrap();
         let f2 = ReleaseFacts::collect(&dir, "v-running".to_string());
         assert!(f2.pending_present);
         assert_eq!(f2.pending_build_id.as_deref(), Some("v-staged"));
+        assert_eq!(
+            f2.pending_release_attempt_id.as_deref(),
+            Some("attempt-pending")
+        );
+
+        fs::write(
+            dir.join("attempt-current.json"),
+            r#"{"release_attempt_id":"attempt-pending","phase":"qualify","status":"running","last_event":"step_started"}"#,
+        )
+        .unwrap();
+        let f3 = ReleaseFacts::collect(&dir, "v-running".to_string());
+        assert_eq!(
+            f3.attempt.as_ref().and_then(|v| v["phase"].as_str()),
+            Some("qualify")
+        );
 
         // Absent manifest → all-None, indexer not expected (safe default).
-        let empty = std::env::temp_dir().join(format!("axon-relfacts-empty-{}", std::process::id()));
+        let empty =
+            std::env::temp_dir().join(format!("axon-relfacts-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&empty);
         fs::create_dir_all(&empty).unwrap();
         let f3 = ReleaseFacts::collect(&empty, "v-x".to_string());
@@ -804,8 +886,12 @@ mod tests {
         let mut f = facts("v1-gabc", Some("v1-gabc"), false);
         f.qualification_ok = Some(false);
         let gates = evaluate_gates(&f);
-        assert!(gates.iter().any(|g| g.name == "qualification_passed" && !g.pass));
-        assert!(gates.iter().any(|g| g.name == "manifest_runtime_match" && g.pass));
+        assert!(gates
+            .iter()
+            .any(|g| g.name == "qualification_passed" && !g.pass));
+        assert!(gates
+            .iter()
+            .any(|g| g.name == "manifest_runtime_match" && g.pass));
     }
 
     // --- Cutover FSM ------------------------------------------------------
@@ -1025,7 +1111,10 @@ mod tests {
                 "rollback"
             ]
         );
-        assert!(!io.calls.contains(&"finalize"), "must NOT finalize a bad candidate");
+        assert!(
+            !io.calls.contains(&"finalize"),
+            "must NOT finalize a bad candidate"
+        );
     }
 
     #[test]
@@ -1035,7 +1124,11 @@ mod tests {
         let mut io = FakeIo::failing("snapshot_current");
         let verdict = drive_cutover(&mut io, || true, 5, || {});
         match verdict {
-            CutoverVerdict::RolledBack { failed_step, rollback_ok, .. } => {
+            CutoverVerdict::RolledBack {
+                failed_step,
+                rollback_ok,
+                ..
+            } => {
                 assert_eq!(failed_step, "snapshot_current");
                 assert!(rollback_ok, "nothing mutated → old release still serves");
             }
@@ -1052,7 +1145,11 @@ mod tests {
         let verdict = drive_cutover(&mut io, || true, 5, || {});
         assert!(matches!(
             verdict,
-            CutoverVerdict::RolledBack { failed_step: "stage_candidate", rollback_ok: true, .. }
+            CutoverVerdict::RolledBack {
+                failed_step: "stage_candidate",
+                rollback_ok: true,
+                ..
+            }
         ));
         assert_eq!(
             io.calls,
@@ -1067,11 +1164,19 @@ mod tests {
         let verdict = drive_cutover(&mut io, || true, 5, || {});
         assert!(matches!(
             verdict,
-            CutoverVerdict::RolledBack { failed_step: "restart_runtime", .. }
+            CutoverVerdict::RolledBack {
+                failed_step: "restart_runtime",
+                ..
+            }
         ));
         assert_eq!(
             io.calls,
-            vec!["snapshot_current", "stage_candidate", "restart_runtime", "rollback"]
+            vec![
+                "snapshot_current",
+                "stage_candidate",
+                "restart_runtime",
+                "rollback"
+            ]
         );
     }
 
@@ -1083,7 +1188,10 @@ mod tests {
         let verdict = drive_cutover(&mut io, || true, 5, || {});
         assert!(matches!(
             verdict,
-            CutoverVerdict::RolledBack { failed_step: "finalize", .. }
+            CutoverVerdict::RolledBack {
+                failed_step: "finalize",
+                ..
+            }
         ));
         assert_eq!(
             io.calls,
@@ -1108,7 +1216,11 @@ mod tests {
         let verdict = drive_cutover(&mut io, || false, 2, || {});
         assert!(matches!(
             verdict,
-            CutoverVerdict::RolledBack { failed_step: "health_gate", rollback_ok: false, .. }
+            CutoverVerdict::RolledBack {
+                failed_step: "health_gate",
+                rollback_ok: false,
+                ..
+            }
         ));
     }
 
@@ -1128,7 +1240,10 @@ mod tests {
         );
         assert_eq!(verdict, CutoverVerdict::Promoted);
         assert_eq!(n, 2);
-        assert_eq!(waits, 1, "one wait between the failed first poll and the healthy second");
+        assert_eq!(
+            waits, 1,
+            "one wait between the failed first poll and the healthy second"
+        );
     }
 
     // --- Stop FSM ---------------------------------------------------------
@@ -1160,7 +1275,9 @@ mod tests {
         f.supervisor_healthy = true;
         assert_eq!(stop_phase(&f), "orphaned");
         let gates = evaluate_stop_gates(&f);
-        assert!(gates.iter().any(|g| g.name == "supervisor_quiesced" && !g.pass));
+        assert!(gates
+            .iter()
+            .any(|g| g.name == "supervisor_quiesced" && !g.pass));
         // Supervisor takes priority: the action is reap + --hard, not kill-by-pid.
         let action = stop_next_action(&f).unwrap();
         assert!(action.contains("--hard"));
@@ -1173,7 +1290,9 @@ mod tests {
         f.canonical_listeners = vec![4242, 4243];
         assert_eq!(stop_phase(&f), "orphaned");
         let gates = evaluate_stop_gates(&f);
-        assert!(gates.iter().any(|g| g.name == "no_canonical_listeners" && !g.pass));
+        assert!(gates
+            .iter()
+            .any(|g| g.name == "no_canonical_listeners" && !g.pass));
         let action = stop_next_action(&f).unwrap();
         assert!(action.contains("kill -9 4242 4243"));
     }
@@ -1188,7 +1307,9 @@ mod tests {
         f.supervisor_healthy = true;
         assert_eq!(stop_phase(&f), "partial");
         let gates = evaluate_stop_gates(&f);
-        assert!(gates.iter().any(|g| g.name == "supervisor_quiesced" && g.pass));
+        assert!(gates
+            .iter()
+            .any(|g| g.name == "supervisor_quiesced" && g.pass));
         assert!(gates.iter().all(|g| g.pass));
         assert!(stop_next_action(&f).is_none());
     }

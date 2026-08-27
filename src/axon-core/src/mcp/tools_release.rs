@@ -54,6 +54,26 @@ impl McpServer {
         // Liveness failures take precedence over the release-state phase/action.
         let ph = liveness_phase(&lf).unwrap_or_else(|| phase(&facts));
         let action = liveness_next_action(&lf).or_else(|| next_action(&facts));
+        let mut trace = facts.attempt.clone().unwrap_or_else(|| {
+            json!({
+                "release_attempt_id": facts.release_attempt_id.clone(),
+                "phase": ph,
+                "status": "unknown",
+                "sha": Value::Null,
+                "deadline_unix_ms": Value::Null,
+                "last_event": Value::Null,
+            })
+        });
+        if let Some(object) = trace.as_object_mut() {
+            object.insert(
+                "artifact_sha256".to_string(),
+                facts
+                    .artifact_sha256
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            );
+        }
 
         let gates_json: Vec<Value> = gates
             .iter()
@@ -93,6 +113,9 @@ impl McpServer {
                     "pending_present": facts.pending_present,
                     "pending_build_id": facts.pending_build_id,
                     "runtime_contract": facts.runtime_contract,
+                    "release_attempt_id": facts.release_attempt_id,
+                    "pending_release_attempt_id": facts.pending_release_attempt_id,
+                    "artifact_sha256": facts.artifact_sha256,
                     "liveness": {
                         "brain_serving": lf.brain_serving,
                         "indexer_expected": lf.indexer_expected,
@@ -102,6 +125,7 @@ impl McpServer {
                     },
                 },
                 "gates": gates_json,
+                "trace": trace,
                 "failed_gates": failed,
                 "next_action": action,
                 // REQ-AXO-902256 — `promote_live.sh` is deleted; the resume path is a

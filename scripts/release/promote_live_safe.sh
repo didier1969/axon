@@ -114,6 +114,7 @@ PROMOTE_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_DIR="$ROOT_DIR/.axon/live-release"
 start_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 RELEASE_ATTEMPT_ID="${PROMOTE_TIMESTAMP}-$$-${start_head:0:12}"
+export AXON_RELEASE_ATTEMPT_ID="$RELEASE_ATTEMPT_ID"
 lease_rc=0
 axon_promote_lease_acquire \
   "$LOG_DIR" "$AXON_INSTANCE_KIND" "$PROJECT_CODE" "$start_head" \
@@ -123,7 +124,7 @@ if [[ "$lease_rc" -ne 0 ]]; then
 fi
 
 # --- REQ-AXO-901758: logging + step tracking + error trap ---
-PROMOTE_LOG="$LOG_DIR/promote-${PROMOTE_TIMESTAMP}.log"
+PROMOTE_LOG="$LOG_DIR/promote-${RELEASE_ATTEMPT_ID}.log"
 
 CURRENT_STEP=0
 CURRENT_STEP_NAME="init"
@@ -212,11 +213,25 @@ print(json.dumps({
 PY
 
 broadcast_promote() {
-  local subject="$1" body="$2" key="$3" args
+  local subject="$1" body="$2" key="$3" args hook_rc
   args="$(python3 -c "$_BROADCAST_PY" "$PROJECT_CODE" "$subject" "$body" "$key" 2>/dev/null || true)"
-  [[ -z "$args" ]] && return 0
-  timeout 20 "$ROOT_DIR/scripts/axon" --instance live mcp-call call mcp_outbox_send \
-    --args "$args" --format text >> "$PROMOTE_LOG" 2>&1 || true
+  if [[ -z "$args" ]]; then
+    python3 "$ROOT_DIR/scripts/release/durable_hook.py" \
+      --state-root "$LOG_DIR/hooks" --attempt-id "$RELEASE_ATTEMPT_ID" \
+      --hook-name "broadcast-${key}" --defer-reason "broadcast arguments could not be encoded" || true
+    return 0
+  fi
+  hook_rc=0
+  python3 "$ROOT_DIR/scripts/release/durable_hook.py" \
+    --state-root "$LOG_DIR/hooks" --attempt-id "$RELEASE_ATTEMPT_ID" \
+    --hook-name "broadcast-${key}" --max-attempts 3 --timeout-seconds 20 \
+    --retry-delay-seconds 1 -- \
+    "$ROOT_DIR/scripts/axon" --instance live mcp-call call mcp_outbox_send \
+    --args "$args" --format text >> "$PROMOTE_LOG" 2>&1 || hook_rc=$?
+  axon_promote_journal_event hook_result notification \
+    "$([[ "$hook_rc" -eq 0 ]] && printf completed || printf failed)" \
+    "hook=broadcast-${key} exit_code=${hook_rc}" || true
+  return 0
 }
 
 # REQ-AXO-902327 — ce bloc était DÉFINI ~400 lignes plus bas, alors que le trap EXIT
@@ -775,7 +790,8 @@ ensure_head_stable
 # --- Step 4: manifest — synchronous, after all candidate gates -----------------------
 manifest_out="$(mktemp)"
 create_manifest_step() {
-  "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified > "$manifest_out" 2>&1 || {
+  "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified \
+    --release-attempt-id "$RELEASE_ATTEMPT_ID" > "$manifest_out" 2>&1 || {
     cat "$manifest_out"
     return 1
   }
@@ -1083,11 +1099,26 @@ CURRENT_STEP=7; CURRENT_STEP_NAME="finalize"
 promote_log ""
 promote_log "== step 7: finalize =="
 
-# REQ-AXO-126 — SOLL snapshot for release lineage (best-effort)
+# REQ-AXO-902531 — non-cutover side effects are durable jobs. Their bounded retry
+# outcome is projected separately and never confused with the already-qualified cutover.
+HOOK_STATE_ROOT="$LOG_DIR/hooks"
+dispatch_durable_hook() {
+  local hook_name="$1" timeout_seconds="$2"
+  shift 2
+  nohup python3 "$ROOT_DIR/scripts/release/durable_hook.py" \
+    --state-root "$HOOK_STATE_ROOT" --attempt-id "$RELEASE_ATTEMPT_ID" \
+    --hook-name "$hook_name" --max-attempts 3 --timeout-seconds "$timeout_seconds" \
+    --retry-delay-seconds 2 -- "$@" >> "$PROMOTE_LOG" 2>&1 &
+  local hook_pid=$!
+  axon_promote_journal_event hook_dispatched finalize deferred \
+    "hook=${hook_name} pid=${hook_pid}; final hook verdict is independent from cutover verdict"
+  promote_log "   ▶ durable hook ${hook_name} dispatched pid=${hook_pid} (bounded retry; status=${HOOK_STATE_ROOT}/${RELEASE_ATTEMPT_ID}/${hook_name}.json)"
+}
+
 soll_export_args=$(printf '{"project_code":"%s"}' "$PROJECT_CODE")
-if ! "$ROOT_DIR/scripts/axon" --instance live mcp-call call soll_export --args "$soll_export_args" --format text >> "$PROMOTE_LOG" 2>&1; then
-  promote_log "   ⚠️ soll_export failed (non-blocking — manifest is authoritative)"
-fi
+dispatch_durable_hook soll-export 120 \
+  "$ROOT_DIR/scripts/axon" --instance live mcp-call call soll_export \
+  --args "$soll_export_args" --format text
 
 # REQ-AXO-902105 — step 7 is COSMETIC (SOLL export + status display). The
 # promotion is ALREADY correct at this point: gated by step 5 (atomic swap +
@@ -1115,15 +1146,13 @@ promote_log "   ✅ step 7 (finalize) done"
 # wrapper is graceful (clean skip + marker, exit 0, when Docker/tools are
 # unavailable — the current WSL state), and it is backgrounded so the promote
 # never waits on the ~200 MB export/load. PIL-AXO-005 fail-closed is untouched.
-( nohup bash "$ROOT_DIR/scripts/publish-memgraph.sh" >>"$PROMOTE_LOG" 2>&1 & ) || true
-promote_log "   ▶ Memgraph publication refresh dispatched (background, best-effort)"
+dispatch_durable_hook memgraph-publication 900 bash "$ROOT_DIR/scripts/publish-memgraph.sh"
 
 # REQ-AXO-311 tier 3 — anchor a permanent (never-expiring) SOLL snapshot to this
 # qualified release. Same fire-and-forget contract as the Memgraph hook above:
 # runs outside run_step, backgrounded, can never fail the promote. PIL-AXO-005
 # fail-closed is untouched.
-( nohup bash "$ROOT_DIR/scripts/backup_soll_daily.sh" --keeper >>"$PROMOTE_LOG" 2>&1 & ) || true
-promote_log "   ▶ SOLL keeper backup dispatched (background, best-effort)"
+dispatch_durable_hook soll-keeper-backup 900 bash "$ROOT_DIR/scripts/backup_soll_daily.sh" --keeper
 
 # --- Final summary ---
 final_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "unknown")"
@@ -1147,6 +1176,9 @@ promote_log "   sha=${start_head:0:12}"
 promote_log "   bin/axon-brain md5=${final_md5}"
 promote_log "   manifest=${manifest_path}"
 promote_log "   log=${PROMOTE_LOG}"
+promote_log "   release_attempt_id=${RELEASE_ATTEMPT_ID}"
+promote_log "   chronology=${AXON_PROMOTE_JOURNAL_PATH}"
+promote_log "   hooks=${HOOK_STATE_ROOT}/${RELEASE_ATTEMPT_ID} (running/retrying/completed/failed/deferred; hook failure does not rewrite cutover verdict)"
 
 # Disable the ERR trap — we succeeded
 trap - ERR

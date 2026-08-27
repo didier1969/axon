@@ -165,6 +165,24 @@ else
   fail "recovery journal does not prove stale-owner reconciliation"
 fi
 
+projection="$STATE_DIR/attempt-current.json"
+if python3 - "$projection" "$RECOVERY_ID" "$SHA" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["release_attempt_id"] == sys.argv[2]
+assert d["sha"] == sys.argv[3]
+assert d["phase"] == "final"
+assert d["status"] == "completed"
+assert d["last_event"] == "lease_released"
+assert d["deadline_unix_ms"] > d["started_unix_ms"]
+assert d["journal_path"].endswith(f"/{sys.argv[2]}.jsonl")
+PY
+then
+  pass "atomic current-attempt projection exposes trace, phase, deadline, SHA, and last event"
+else
+  fail "current-attempt projection is absent or incomplete"
+fi
+
 if [[ ! -e "$owner_file" ]]; then
   pass "clean release removes the owner record after journalling the terminal state"
 else
