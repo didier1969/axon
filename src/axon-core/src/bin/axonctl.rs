@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use axon_core::release_reconciler::{
     drive_cutover, evaluate_liveness_gates, evaluate_stop_gates, liveness_next_action,
-    liveness_phase, stop_next_action, stop_phase, CutoverIo, CutoverVerdict, LivenessFacts,
-    StopFacts,
+    liveness_phase, run_cutover_loop, stop_next_action, stop_phase, CutoverIo, CutoverOutcome,
+    CutoverVerdict, LivenessFacts, StopFacts,
 };
 use serde::Serialize;
 use std::collections::{BTreeSet, VecDeque};
@@ -408,8 +408,18 @@ fn cmd_liveness(config: InstanceConfig, json: bool) -> Result<()> {
         brain_serving,
         indexer_expected,
         indexer_ready,
-        indexer_lifecycle: if indexer_ready { "healthy" } else { "crashed_or_abandoned" }.to_string(),
-        indexer_source: if indexer_ready { "http_readyz" } else { "http_readyz_down" }.to_string(),
+        indexer_lifecycle: if indexer_ready {
+            "healthy"
+        } else {
+            "crashed_or_abandoned"
+        }
+        .to_string(),
+        indexer_source: if indexer_ready {
+            "http_readyz"
+        } else {
+            "http_readyz_down"
+        }
+        .to_string(),
     };
     let gates = evaluate_liveness_gates(&l);
     let all_pass = gates.iter().all(|g| g.pass);
@@ -427,7 +437,12 @@ fn cmd_liveness(config: InstanceConfig, json: bool) -> Result<()> {
         );
     } else {
         for g in &gates {
-            eprintln!("  [{}] {} — {}", if g.pass { "ok" } else { "FAIL" }, g.name, g.detail);
+            eprintln!(
+                "  [{}] {} — {}",
+                if g.pass { "ok" } else { "FAIL" },
+                g.name,
+                g.detail
+            );
         }
         eprintln!("liveness: {}", if all_pass { "healthy" } else { phase });
     }
@@ -474,20 +489,42 @@ fn write_json_file(path: &Path, v: &serde_json::Value) -> Result<()> {
     }
     let mut s = serde_json::to_string_pretty(v).context("serialize manifest")?;
     s.push('\n');
-    fs::write(path, &s).with_context(|| format!("write {}", path.display()))
+    let tmp = path.with_file_name(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("manifest"),
+        std::process::id()
+    ));
+    {
+        use std::io::Write;
+        let mut file =
+            fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        file.write_all(s.as_bytes())
+            .with_context(|| format!("write {}", tmp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
+    }
+    fs::rename(&tmp, path)
+        .with_context(|| format!("atomic rename {} -> {}", tmp.display(), path.display()))
 }
 
 /// The `(name, entry)` artifact list of a manifest, falling back to the single primary
 /// `artifact` when the `artifacts` map is absent/empty (older manifests) — same shape as
 /// the python `{"axon-core": manifest["artifact"]}` fallback in promote/rollback.
-fn manifest_artifact_entries(manifest: &serde_json::Value) -> Result<Vec<(String, serde_json::Value)>> {
-    if let Some(map) = manifest.get("artifacts").and_then(|a| a.as_object()).filter(|m| !m.is_empty()) {
+fn manifest_artifact_entries(
+    manifest: &serde_json::Value,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    if let Some(map) = manifest
+        .get("artifacts")
+        .and_then(|a| a.as_object())
+        .filter(|m| !m.is_empty())
+    {
         return Ok(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
     }
-    let primary = manifest
-        .get("artifact")
-        .cloned()
-        .ok_or_else(|| anyhow!("manifest has neither a non-empty artifacts{{}} nor an artifact{{}}"))?;
+    let primary = manifest.get("artifact").cloned().ok_or_else(|| {
+        anyhow!("manifest has neither a non-empty artifacts{{}} nor an artifact{{}}")
+    })?;
     let name = primary
         .get("name")
         .and_then(|n| n.as_str())
@@ -515,7 +552,10 @@ fn verify_manifest_artifacts_present(manifest: &serde_json::Value) -> Result<()>
 /// Copy each `manifest.artifacts[name].path` (a sha-keyed archived binary) into
 /// `bin_dir/name`, plus its build-info. The single bin-swap primitive shared by stage
 /// (candidate→bin) and rollback (current→bin), mirroring rollback_live.sh:171-190.
-fn copy_manifest_artifacts_to_bin(manifest: &serde_json::Value, bin_dir: &Path) -> Result<Vec<String>> {
+fn copy_manifest_artifacts_to_bin(
+    manifest: &serde_json::Value,
+    bin_dir: &Path,
+) -> Result<Vec<String>> {
     fs::create_dir_all(bin_dir).ok();
     let mut copied = Vec::new();
     for (name, entry) in manifest_artifact_entries(manifest)? {
@@ -581,7 +621,9 @@ fn cutover_snapshot(release_dir: &Path) -> Result<serde_json::Value> {
 fn write_active_identity(manifest: &serde_json::Value, release_dir: &Path) -> Result<()> {
     let rv = manifest.get("runtime_version").and_then(|v| v.as_object());
     let field = |k: &str| -> &str {
-        rv.and_then(|m| m.get(k)).and_then(|v| v.as_str()).unwrap_or("")
+        rv.and_then(|m| m.get(k))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
     };
     let content = format!(
         "AXON_BUILD_ID={}\nAXON_RELEASE_VERSION={}\nAXON_PACKAGE_VERSION={}\nAXON_INSTALL_GENERATION={}\n",
@@ -594,16 +636,22 @@ fn write_active_identity(manifest: &serde_json::Value, release_dir: &Path) -> Re
     let target = release_dir.join("active-identity.env");
     let tmp = release_dir.join(".active-identity.env.cutover-tmp");
     fs::write(&tmp, content).with_context(|| format!("write {}", tmp.display()))?;
-    fs::rename(&tmp, &target).with_context(|| format!("rename active-identity -> {}", target.display()))?;
+    fs::rename(&tmp, &target)
+        .with_context(|| format!("rename active-identity -> {}", target.display()))?;
     Ok(())
 }
 
 /// stage: write pending.json (state=staged) from the candidate manifest + swap the
 /// candidate binaries into `bin_dir` + write active-identity.env (promoted build_id).
 /// current.json is left untouched (the rollback source).
-fn cutover_stage_files(candidate_manifest_path: &Path, release_dir: &Path, bin_dir: &Path) -> Result<()> {
+fn cutover_stage_files(
+    candidate_manifest_path: &Path,
+    release_dir: &Path,
+    bin_dir: &Path,
+) -> Result<()> {
     let mut candidate = read_json_file(candidate_manifest_path)?;
-    verify_manifest_artifacts_present(&candidate).context("candidate manifest artifacts missing")?;
+    verify_manifest_artifacts_present(&candidate)
+        .context("candidate manifest artifacts missing")?;
     candidate["state"] = serde_json::json!("staged");
     write_json_file(&release_dir.join("pending.json"), &candidate)?;
     copy_manifest_artifacts_to_bin(&candidate, bin_dir)?;
@@ -643,11 +691,75 @@ fn cutover_finalize_files(release_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+const REQUIRED_PROMOTION_GATES: [&str; 4] =
+    ["liveness", "ddl", "core_qualification", "indexer_truth"];
+
+fn cutover_mark_prepared(release_dir: &Path) -> Result<()> {
+    let path = release_dir.join("pending.json");
+    let mut pending = read_json_file(&path).context("prepare needs pending.json")?;
+    pending["state"] = serde_json::json!("prepared");
+    write_json_file(&path, &pending)
+}
+
+fn cutover_record_gate(release_dir: &Path, gate: &str, status: &str, evidence: &str) -> Result<()> {
+    if !REQUIRED_PROMOTION_GATES.contains(&gate) {
+        return Err(anyhow!(
+            "unknown promotion gate {gate}; expected one of {REQUIRED_PROMOTION_GATES:?}"
+        ));
+    }
+    if !matches!(status, "passed" | "failed" | "skipped" | "error") {
+        return Err(anyhow!(
+            "invalid gate status {status}; expected passed|failed|skipped|error"
+        ));
+    }
+    let path = release_dir.join("pending.json");
+    let mut pending = read_json_file(&path).context("gate recording needs pending.json")?;
+    if pending.get("state").and_then(|v| v.as_str()) != Some("prepared") {
+        return Err(anyhow!("gate recording requires pending state=prepared"));
+    }
+    pending["promotion_gates"][gate] = serde_json::json!({
+        "status": status,
+        "evidence": evidence,
+        "recorded_unix_ms": axon_core::clock::now_unix_ms(),
+    });
+    write_json_file(&path, &pending)
+}
+
+fn cutover_finalize_prepared_files(release_dir: &Path) -> Result<()> {
+    let pending = read_json_file(&release_dir.join("pending.json"))
+        .context("two-phase finalize needs pending.json")?;
+    if pending.get("state").and_then(|v| v.as_str()) != Some("prepared") {
+        return Err(anyhow!(
+            "two-phase finalize requires pending state=prepared"
+        ));
+    }
+    let missing_or_red = REQUIRED_PROMOTION_GATES
+        .iter()
+        .filter(|gate| {
+            pending
+                .get("promotion_gates")
+                .and_then(|g| g.get(**gate))
+                .and_then(|g| g.get("status"))
+                .and_then(|s| s.as_str())
+                != Some("passed")
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing_or_red.is_empty() {
+        return Err(anyhow!(
+            "finalize refused: required gates not passed: {}",
+            missing_or_red.join(",")
+        ));
+    }
+    cutover_finalize_files(release_dir)
+}
+
 /// rollback: restore bin/* from current.json (the untouched old manifest) and drop the
 /// failed pending staging, leaving bin/* ↔ current.json coherent. Mirrors
 /// the retired promote_live.sh's `rollback_bin_to_current` + pending cleanup.
 fn cutover_rollback_files(release_dir: &Path, bin_dir: &Path) -> Result<()> {
-    let current = read_json_file(&release_dir.join("current.json")).context("rollback needs current.json")?;
+    let current =
+        read_json_file(&release_dir.join("current.json")).context("rollback needs current.json")?;
     copy_manifest_artifacts_to_bin(&current, bin_dir)?;
     // Restore the PREVIOUS build's authoritative identity too, so the restarted old
     // runtime reports the rolled-back build_id (symmetry with stage).
@@ -732,7 +844,11 @@ struct RealCutoverIo {
 
 impl RealCutoverIo {
     fn role_config(&self, role: RuntimeRole) -> InstanceConfig {
-        InstanceConfig::new(self.config.project_root.clone(), self.config.instance_kind, role)
+        InstanceConfig::new(
+            self.config.project_root.clone(),
+            self.config.instance_kind,
+            role,
+        )
     }
 
     /// Stop the instance via the CANONICAL `scripts/axon … stop --hard`, then verify no
@@ -747,7 +863,10 @@ impl RealCutoverIo {
     fn stop_instance(&self) -> Result<()> {
         let axon_entry = self.config.project_root.join("scripts").join("axon");
         if !axon_entry.exists() {
-            return Err(anyhow!("scripts/axon not found at {}", axon_entry.display()));
+            return Err(anyhow!(
+                "scripts/axon not found at {}",
+                axon_entry.display()
+            ));
         }
         // REQ-AXO-902233 — WHICH role costs the 63 s this stop takes?
         //
@@ -853,9 +972,12 @@ impl RealCutoverIo {
         // at all: `stop.sh` now emits `[stop-phase]` markers and they would have been
         // thrown away. Same file-redirect shape as `spawn_start`'s cutover-start.log.
         let mut stop_cmd = Command::new("bash");
-        stop_cmd
-            .arg(&axon_entry)
-            .args(["--instance", self.config.instance_kind.label(), "stop", "--hard"]);
+        stop_cmd.arg(&axon_entry).args([
+            "--instance",
+            self.config.instance_kind.label(),
+            "stop",
+            "--hard",
+        ]);
         match fs::File::create(self.release_dir.join("cutover-stop.log")) {
             Ok(log) => match log.try_clone() {
                 Ok(errlog) => {
@@ -895,7 +1017,9 @@ impl RealCutoverIo {
         if remaining.is_empty() {
             Ok(())
         } else {
-            Err(anyhow!("instance not fully stopped (writer guard still held): {remaining:?}"))
+            Err(anyhow!(
+                "instance not fully stopped (writer guard still held): {remaining:?}"
+            ))
         }
     }
 
@@ -913,7 +1037,10 @@ impl RealCutoverIo {
     fn spawn_start(&self, install_from: &Path) -> Result<()> {
         let axon_entry = self.config.project_root.join("scripts").join("axon");
         if !axon_entry.exists() {
-            return Err(anyhow!("scripts/axon not found at {}", axon_entry.display()));
+            return Err(anyhow!(
+                "scripts/axon not found at {}",
+                axon_entry.display()
+            ));
         }
         if !install_from.exists() {
             return Err(anyhow!(
@@ -923,7 +1050,12 @@ impl RealCutoverIo {
         }
         let mut cmd = Command::new("bash");
         cmd.arg(&axon_entry)
-            .args(["--instance", self.config.instance_kind.label(), "start", "full"])
+            .args([
+                "--instance",
+                self.config.instance_kind.label(),
+                "start",
+                "full",
+            ])
             .env("AXON_LIVE_RELEASE_MANIFEST", install_from);
         if let Ok(log) = fs::File::create(self.release_dir.join("cutover-start.log")) {
             if let Ok(errlog) = log.try_clone() {
@@ -931,7 +1063,9 @@ impl RealCutoverIo {
                 cmd.stderr(std::process::Stdio::from(errlog));
             }
         }
-        cmd.spawn().map(|_| ()).context("spawn scripts/axon start full")
+        cmd.spawn()
+            .map(|_| ())
+            .context("spawn scripts/axon start full")
     }
 }
 
@@ -960,7 +1094,9 @@ fn cutover_phase(phase: &str, started_ms: u128) {
 impl CutoverIo for RealCutoverIo {
     fn snapshot_current(&mut self) -> Result<(), String> {
         let t0 = axon_core::clock::now_unix_ms() as u128;
-        let r = cutover_snapshot(&self.release_dir).map(|_| ()).map_err(|e| format!("{e:#}"));
+        let r = cutover_snapshot(&self.release_dir)
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"));
         cutover_phase("snapshot_current", t0);
         r
     }
@@ -1022,11 +1158,24 @@ impl CutoverIo for RealCutoverIo {
 }
 
 /// Local flags for `cutover`, pulled from the passthrough `remaining` args.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CutoverCommandPhase {
+    Full,
+    Prepare,
+    RecordGate,
+    Finalize,
+    Rollback,
+}
+
 struct CutoverArgs {
-    manifest: PathBuf,
+    manifest: Option<PathBuf>,
     max_polls: usize,
     poll_interval_ms: u64,
     bin_dir: Option<PathBuf>,
+    phase: CutoverCommandPhase,
+    gate: Option<String>,
+    gate_status: Option<String>,
+    evidence: Option<String>,
 }
 
 fn parse_cutover_args(remaining: &[String], project_root: &Path) -> Result<CutoverArgs> {
@@ -1034,6 +1183,10 @@ fn parse_cutover_args(remaining: &[String], project_root: &Path) -> Result<Cutov
     let mut max_polls = 30usize;
     let mut poll_interval_ms = 2_000u64;
     let mut bin_dir: Option<PathBuf> = None;
+    let mut phase = CutoverCommandPhase::Full;
+    let mut gate = None;
+    let mut gate_status = None;
+    let mut evidence = None;
     let mut it = remaining.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1053,24 +1206,53 @@ fn parse_cutover_args(remaining: &[String], project_root: &Path) -> Result<Cutov
                     .context("--poll-interval-ms must be a positive integer")?;
             }
             "--bin-dir" => bin_dir = it.next().map(PathBuf::from),
+            "--phase" => {
+                phase = match it.next().map(String::as_str) {
+                    Some("full") => CutoverCommandPhase::Full,
+                    Some("prepare") => CutoverCommandPhase::Prepare,
+                    Some("record-gate") => CutoverCommandPhase::RecordGate,
+                    Some("finalize") => CutoverCommandPhase::Finalize,
+                    Some("rollback") => CutoverCommandPhase::Rollback,
+                    Some(other) => return Err(anyhow!("unknown cutover phase: {other}")),
+                    None => return Err(anyhow!("--phase requires a value")),
+                };
+            }
+            "--gate" => gate = it.next().cloned(),
+            "--gate-status" => gate_status = it.next().cloned(),
+            "--evidence" => evidence = it.next().cloned(),
             other => return Err(anyhow!("unknown cutover flag: {other}")),
         }
     }
-    let manifest = manifest.ok_or_else(|| {
-        anyhow!("cutover requires --manifest <candidate.json> (the release to cut over to)")
-    })?;
+    if matches!(
+        phase,
+        CutoverCommandPhase::Full | CutoverCommandPhase::Prepare
+    ) && manifest.is_none()
+    {
+        return Err(anyhow!(
+            "cutover phase {:?} requires --manifest <candidate.json>",
+            phase
+        ));
+    }
     let _ = project_root;
     Ok(CutoverArgs {
         manifest,
         max_polls,
         poll_interval_ms,
         bin_dir,
+        phase,
+        gate,
+        gate_status,
+        evidence,
     })
 }
 
 fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Result<()> {
     let cargs = parse_cutover_args(remaining, &config.project_root)?;
     let release_dir = cutover_release_dir(&config);
+    let candidate_manifest = cargs
+        .manifest
+        .clone()
+        .unwrap_or_else(|| release_dir.join("pending.json"));
     let bin_dir = cargs
         .bin_dir
         .unwrap_or_else(|| config.project_root.join("bin"));
@@ -1081,7 +1263,10 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
         "http://127.0.0.1:{}/readyz",
         indexer_health_port(config.instance_kind)
     );
-    let indexer_expected = manifest_indexer_expected(&config);
+    let indexer_expected = fs::read_to_string(&candidate_manifest)
+        .ok()
+        .map(|raw| runtime_contract_has_indexer(&raw))
+        .unwrap_or_else(|| manifest_indexer_expected(&config));
     // REQ-AXO-902233 — time the liveness gate, and time the two ROLES SEPARATELY.
     //
     // The gate waits for brain AND indexer. If the brain is green early and the gate keeps
@@ -1113,13 +1298,118 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
     let wait = || thread::sleep(Duration::from_millis(cargs.poll_interval_ms));
 
     let mut io = RealCutoverIo {
-        candidate_manifest: cargs.manifest.clone(),
+        candidate_manifest: candidate_manifest.clone(),
         release_dir: release_dir.clone(),
         bin_dir,
         config,
     };
 
-    let verdict = drive_cutover(&mut io, probe, cargs.max_polls, wait);
+    let rollback_result = |io: &mut RealCutoverIo, failed_step: &str, cause: String| {
+        let rollback = io.rollback();
+        (
+            false,
+            if rollback.is_ok() {
+                "rolled_back"
+            } else {
+                "rollback_failed"
+            },
+            Some(format!(
+                "failed at {failed_step}: {cause}{}",
+                rollback
+                    .err()
+                    .map(|e| format!("; rollback also failed: {e}"))
+                    .unwrap_or_default()
+            )),
+        )
+    };
+
+    let (ok, phase, detail): (bool, &str, Option<String>) = match cargs.phase {
+        CutoverCommandPhase::Full => match drive_cutover(&mut io, probe, cargs.max_polls, wait) {
+            CutoverVerdict::Promoted => (true, "promoted", None),
+            CutoverVerdict::RolledBack {
+                failed_step,
+                rollback_ok,
+                detail,
+            } => (
+                false,
+                if rollback_ok {
+                    "rolled_back"
+                } else {
+                    "rollback_failed"
+                },
+                Some(format!(
+                    "failed at {failed_step}{}{}",
+                    detail
+                        .as_deref()
+                        .map(|d| format!(": {d}"))
+                        .unwrap_or_default(),
+                    if rollback_ok {
+                        " — old release restored & restarting"
+                    } else {
+                        " — ROLLBACK ALSO FAILED, operator action required"
+                    }
+                )),
+            ),
+        },
+        CutoverCommandPhase::Prepare => {
+            if let Err(e) = io.snapshot_current() {
+                (
+                    false,
+                    "aborted_intact",
+                    Some(format!("snapshot_current: {e}")),
+                )
+            } else if let Err(e) = io.stage_candidate() {
+                rollback_result(&mut io, "stage_candidate", e)
+            } else if let Err(e) = io.restart_runtime() {
+                rollback_result(&mut io, "restart_runtime", e)
+            } else if run_cutover_loop(probe, cargs.max_polls, wait) != CutoverOutcome::Promoted {
+                rollback_result(
+                    &mut io,
+                    "liveness",
+                    "candidate did not become ready before deadline".to_string(),
+                )
+            } else if let Err(e) = cutover_mark_prepared(&release_dir).and_then(|_| {
+                cutover_record_gate(&release_dir, "liveness", "passed", "brain+indexer ready")
+            }) {
+                rollback_result(&mut io, "mark_prepared", format!("{e:#}"))
+            } else {
+                (true, "prepared", None)
+            }
+        }
+        CutoverCommandPhase::RecordGate => {
+            let gate = cargs
+                .gate
+                .as_deref()
+                .ok_or_else(|| anyhow!("record-gate requires --gate"))?;
+            let status = cargs
+                .gate_status
+                .as_deref()
+                .ok_or_else(|| anyhow!("record-gate requires --gate-status"))?;
+            let evidence = cargs.evidence.as_deref().unwrap_or("");
+            cutover_record_gate(&release_dir, gate, status, evidence)?;
+            (
+                status == "passed",
+                "gate_recorded",
+                Some(format!("{gate}={status}")),
+            )
+        }
+        CutoverCommandPhase::Finalize => {
+            verify_bin_matches_manifest(&release_dir.join("pending.json"), &io.bin_dir)?;
+            cutover_finalize_prepared_files(&release_dir)?;
+            (true, "promoted", None)
+        }
+        CutoverCommandPhase::Rollback => match io.rollback() {
+            Err(e) => (false, "rollback_failed", Some(format!("{e:#}"))),
+            Ok(()) => match run_cutover_loop(probe, cargs.max_polls, wait) {
+                CutoverOutcome::Promoted => (true, "rolled_back", None),
+                CutoverOutcome::RolledBack => (
+                    false,
+                    "rollback_failed",
+                    Some("old release did not become ready before deadline".to_string()),
+                ),
+            },
+        },
+    };
 
     // REQ-AXO-902233 — publish the gate breakdown. `indexer_green - brain_green` is the
     // number that decides the next step: positive and large means the promote waits on the
@@ -1136,34 +1426,14 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
         );
     }
 
-    let (ok, phase, detail): (bool, &str, Option<String>) = match &verdict {
-        CutoverVerdict::Promoted => (true, "promoted", None),
-        CutoverVerdict::RolledBack {
-            failed_step,
-            rollback_ok,
-            detail,
-        } => (
-            false,
-            if *rollback_ok { "rolled_back" } else { "rollback_failed" },
-            Some(format!(
-                "failed at {failed_step}{}{}",
-                detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default(),
-                if *rollback_ok {
-                    " — old release restored & restarting"
-                } else {
-                    " — ROLLBACK ALSO FAILED, operator action required"
-                }
-            )),
-        ),
-    };
-
     if json {
         println!(
             "{}",
             serde_json::json!({
                 "action": "cutover",
                 "instance": io.config.instance_kind.label(),
-                "candidate_manifest": cargs.manifest.display().to_string(),
+                "candidate_manifest": cargs.manifest.as_ref().map(|p| p.display().to_string()),
+                "command_phase": format!("{:?}", cargs.phase).to_lowercase(),
                 "promoted": ok,
                 "phase": phase,
                 "detail": detail,
@@ -1174,7 +1444,7 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
         println!(
             "axonctl cutover: {} promoted to {} ✓",
             io.config.instance_kind.label(),
-            cargs.manifest.display()
+            candidate_manifest.display()
         );
     } else {
         eprintln!(
@@ -1261,14 +1531,15 @@ fn main() -> Result<()> {
         // it reads the machine, not a runtime. Exits 0 when quiet, 1 when busy, so a
         // shell gate can branch on the status code alone.
         "host-readiness" => {
-            let verdict = axon_core::host_readiness::assess(axon_core::host_readiness::HostSample {
-                load_1m: axon_core::host_readiness::read_load_1m(),
-                cores: std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(1),
-                swap_used_pct: axon_core::host_readiness::read_swap_used_pct(),
-                foreign_rustc: count_foreign_rustc(),
-            });
+            let verdict =
+                axon_core::host_readiness::assess(axon_core::host_readiness::HostSample {
+                    load_1m: axon_core::host_readiness::read_load_1m(),
+                    cores: std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1),
+                    swap_used_pct: axon_core::host_readiness::read_swap_used_pct(),
+                    foreign_rustc: count_foreign_rustc(),
+                });
             println!("{}", verdict.render());
             if verdict.is_quiet() {
                 Ok(())
@@ -1753,14 +2024,11 @@ fn find_port_listener_pids(config: &InstanceConfig) -> Vec<i32> {
 /// which is the conservative default for the stop verdict.
 fn probe_supervisor_healthy(config: &InstanceConfig) -> bool {
     let root = config.project_root.to_string_lossy().to_string();
-    proc_entries()
-        .unwrap_or_default()
-        .into_iter()
-        .any(|e| {
-            e.command.contains("process-compose")
-                && e.command.contains(&root)
-                && !cmdline_belongs_to_opposite_instance(&e.command, config)
-        })
+    proc_entries().unwrap_or_default().into_iter().any(|e| {
+        e.command.contains("process-compose")
+            && e.command.contains(&root)
+            && !cmdline_belongs_to_opposite_instance(&e.command, config)
+    })
 }
 
 fn kill_tmux_session(session: &str) -> bool {
@@ -2577,7 +2845,11 @@ mod tests {
         // REQ-AXO-901847 — the shim must delegate to scripts/axon with the
         // instance + verb + passthrough mode flags, never re-implement start.sh.
         let entry = Path::new("/home/user/projects/axon/scripts/axon");
-        let argv = start_argv(entry, "dev", &["--indexer-full".to_string(), "full".to_string()]);
+        let argv = start_argv(
+            entry,
+            "dev",
+            &["--indexer-full".to_string(), "full".to_string()],
+        );
         assert_eq!(
             argv,
             vec![
@@ -2596,7 +2868,10 @@ mod tests {
     fn start_argv_live_no_extra() {
         let entry = Path::new("/x/scripts/axon");
         let argv = start_argv(entry, "live", &[]);
-        assert_eq!(argv, vec!["bash", "/x/scripts/axon", "--instance", "live", "start"]);
+        assert_eq!(
+            argv,
+            vec!["bash", "/x/scripts/axon", "--instance", "live", "start"]
+        );
     }
 
     #[test]
@@ -2795,14 +3070,18 @@ mod tests {
             indexer_health_port_from(Some("not-a-port".into()), InstanceKind::Dev),
             44149
         );
-        assert_eq!(indexer_health_port_from(Some(String::new()), InstanceKind::Live), 44130);
+        assert_eq!(
+            indexer_health_port_from(Some(String::new()), InstanceKind::Live),
+            44130
+        );
     }
 
     // --- REQ-AXO-902165 cutover file-I/O (real manifest/bin steps, tempdir) --------
 
     /// Fresh, isolated (release_dir, bin_dir, archive_dir) under the temp dir.
     fn cutover_tmp(tag: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!("axonctl-cutover-{tag}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("axonctl-cutover-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let release = root.join("live-release");
         let bin = root.join("bin");
@@ -2837,7 +3116,10 @@ mod tests {
         // restarted runtime reports it (else promote_status drifts on a byte-identical
         // binary carrying an older embedded build_id).
         let ident = fs::read_to_string(release.join("active-identity.env")).unwrap();
-        assert!(ident.contains("AXON_BUILD_ID=v-new"), "active-identity.env must carry the candidate build_id; got:\n{ident}");
+        assert!(
+            ident.contains("AXON_BUILD_ID=v-new"),
+            "active-identity.env must carry the candidate build_id; got:\n{ident}"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2859,9 +3141,18 @@ mod tests {
 
         let cur = read_json_file(&release.join("current.json")).unwrap();
         assert_eq!(cur["state"], serde_json::json!("promoted"));
-        assert_eq!(cur["runtime_version"]["install_generation"], serde_json::json!("new-gen"));
-        assert!(release.join("history/old-gen.json").exists(), "prev generation archived");
-        assert!(release.join("history/new-gen.json").exists(), "new generation archived");
+        assert_eq!(
+            cur["runtime_version"]["install_generation"],
+            serde_json::json!("new-gen")
+        );
+        assert!(
+            release.join("history/old-gen.json").exists(),
+            "prev generation archived"
+        );
+        assert!(
+            release.join("history/new-gen.json").exists(),
+            "new generation archived"
+        );
         assert!(!release.join("pending.json").exists(), "pending consumed");
         let _ = fs::remove_dir_all(&root);
     }
@@ -2883,6 +3174,56 @@ mod tests {
             "finalize without a staged pending must error"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_phase_finalize_refuses_until_every_required_gate_passes() {
+        let (root, release, _bin, _archive) = cutover_tmp("two-phase-gates");
+        write_json_file(
+            &release.join("pending.json"),
+            &serde_json::json!({"state":"prepared","runtime_version":{"install_generation":"new"}}),
+        )
+        .unwrap();
+        for gate in ["liveness", "ddl", "core_qualification"] {
+            cutover_record_gate(&release, gate, "passed", "test evidence").unwrap();
+        }
+        let err = cutover_finalize_prepared_files(&release)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("indexer_truth"), "missing gate named: {err}");
+        cutover_record_gate(&release, "indexer_truth", "passed", "truth probe ok").unwrap();
+        cutover_finalize_prepared_files(&release).unwrap();
+        assert!(!release.join("pending.json").exists());
+        let current = read_json_file(&release.join("current.json")).unwrap();
+        assert_eq!(current["state"], "promoted");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn failed_gate_is_durable_and_blocks_finalize() {
+        let (root, release, _bin, _archive) = cutover_tmp("two-phase-failed-gate");
+        write_json_file(
+            &release.join("pending.json"),
+            &serde_json::json!({"state":"prepared","runtime_version":{"install_generation":"new"}}),
+        )
+        .unwrap();
+        cutover_record_gate(&release, "liveness", "passed", "ready").unwrap();
+        cutover_record_gate(&release, "ddl", "failed", "psql rc=2").unwrap();
+        let pending = read_json_file(&release.join("pending.json")).unwrap();
+        assert_eq!(pending["promotion_gates"]["ddl"]["status"], "failed");
+        assert!(cutover_finalize_prepared_files(&release).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cutover_phase_parser_keeps_full_backward_compatible() {
+        let root = Path::new("/srv/axon");
+        let full =
+            parse_cutover_args(&["--manifest".into(), "candidate.json".into()], root).unwrap();
+        assert_eq!(full.phase, CutoverCommandPhase::Full);
+        let finalize = parse_cutover_args(&["--phase".into(), "finalize".into()], root).unwrap();
+        assert_eq!(finalize.phase, CutoverCommandPhase::Finalize);
+        assert!(finalize.manifest.is_none());
     }
 
     // --- REQ-AXO-902258 byte-level verification -----------------------------------
@@ -2920,7 +3261,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("WRONG BINARY INSTALLED"), "got: {err}");
-        assert!(err.contains("different content"), "same-size swap must be named: {err}");
+        assert!(
+            err.contains("different content"),
+            "same-size swap must be named: {err}"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2963,19 +3307,33 @@ mod tests {
         .unwrap();
         // Simulate the failed staged swap: bin holds the NEW binary + a pending manifest.
         fs::write(bin.join("axon-brain"), b"NEW-BRAIN").unwrap();
-        write_json_file(&release.join("pending.json"), &serde_json::json!({"state": "staged"})).unwrap();
+        write_json_file(
+            &release.join("pending.json"),
+            &serde_json::json!({"state": "staged"}),
+        )
+        .unwrap();
 
         cutover_rollback_files(&release, &bin).unwrap();
 
-        assert_eq!(fs::read(bin.join("axon-brain")).unwrap(), b"OLD-BRAIN", "bin restored to old release");
-        assert!(!release.join("pending.json").exists(), "failed pending dropped");
+        assert_eq!(
+            fs::read(bin.join("axon-brain")).unwrap(),
+            b"OLD-BRAIN",
+            "bin restored to old release"
+        );
+        assert!(
+            !release.join("pending.json").exists(),
+            "failed pending dropped"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn cutover_snapshot_errs_without_current_manifest() {
         let (root, release, _bin, _archive) = cutover_tmp("snap-none");
-        assert!(cutover_snapshot(&release).is_err(), "no current.json → no rollback target");
+        assert!(
+            cutover_snapshot(&release).is_err(),
+            "no current.json → no rollback target"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -3043,7 +3401,10 @@ mod tests {
 
         assert_eq!(fs::read(bin.join("axon-brain")).unwrap(), b"NEW");
         let cur = read_json_file(&release.join("current.json")).unwrap();
-        assert_eq!(cur["runtime_version"]["build_id"], serde_json::json!("v-new"));
+        assert_eq!(
+            cur["runtime_version"]["build_id"],
+            serde_json::json!("v-new")
+        );
         assert_eq!(cur["state"], serde_json::json!("promoted"));
         assert!(release.join("history/old-gen.json").exists());
         assert!(!release.join("pending.json").exists());
@@ -3088,7 +3449,9 @@ mod tests {
 
     impl CutoverIo for TestProcCutoverIo {
         fn snapshot_current(&mut self) -> Result<(), String> {
-            cutover_snapshot(&self.release_dir).map(|_| ()).map_err(|e| e.to_string())
+            cutover_snapshot(&self.release_dir)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         }
         fn stage_candidate(&mut self) -> Result<(), String> {
             cutover_stage_files(&self.candidate, &self.release_dir, &self.bin_dir)
@@ -3167,7 +3530,11 @@ mod tests {
         assert!(
             matches!(
                 verdict,
-                CutoverVerdict::RolledBack { failed_step: "health_gate", rollback_ok: true, .. }
+                CutoverVerdict::RolledBack {
+                    failed_step: "health_gate",
+                    rollback_ok: true,
+                    ..
+                }
             ),
             "expected auto-rollback on a broken candidate, got {verdict:?}"
         );
@@ -3188,17 +3555,29 @@ mod tests {
         }
         io.kill_child();
         let _ = fs::remove_dir_all(&root);
-        assert!(served, "old GOOD runtime must serve /readyz again after auto-rollback");
+        assert!(
+            served,
+            "old GOOD runtime must serve /readyz again after auto-rollback"
+        );
     }
 
     #[test]
     fn process_exists_true_for_live_then_gone_after_reap_902170() {
-        let mut child = Command::new("sleep").arg("30").spawn().expect("spawn sleep");
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
         let pid = child.id() as i32;
-        assert!(process_exists(pid), "a running process must be reported alive");
+        assert!(
+            process_exists(pid),
+            "a running process must be reported alive"
+        );
         let _ = child.kill();
         let _ = child.wait(); // reap → /proc entry gone
-        assert!(!process_exists(pid), "a reaped, killed process must be reported gone");
+        assert!(
+            !process_exists(pid),
+            "a reaped, killed process must be reported gone"
+        );
     }
 
     #[test]
