@@ -551,6 +551,45 @@ fn orientations<'e>(
     lectures.into_iter().flatten()
 }
 
+/// REQ-AXO-902472 — the canonical create path writes
+/// `Milestone --TARGETS--> Requirement`.  For reachability rules only, a
+/// current/planned milestone is an intentional container: the requirement may
+/// inherit a path that starts from that milestone and continues through one of
+/// its other targeted branches.
+///
+/// This deliberately does NOT change `SollSnapshot::reaches_via_relations`:
+/// cycle checks and its other callers need strictly directed graph semantics.
+/// We cross exactly one incoming TARGETS edge, then reuse the canonical
+/// petgraph reachability for the forward path.  A terminal milestone or a
+/// milestone with no real path to a target therefore cannot hide an orphan.
+fn reaches_target_via_active_milestone(
+    snapshot: &SollSnapshot,
+    subject_id: &str,
+    targets: &[&str],
+    relations: &std::collections::HashSet<String>,
+    facts: &NodeFacts<'_>,
+) -> bool {
+    if !relations.contains("TARGETS") {
+        return false;
+    }
+
+    snapshot
+        .incoming_edges(subject_id)
+        .filter(|(_, relation)| relation.eq_ignore_ascii_case("TARGETS"))
+        .filter(|(milestone_id, _)| {
+            facts.get(milestone_id).is_some_and(|(kind, status)| {
+                kind.eq_ignore_ascii_case("Milestone")
+                    && (status.eq_ignore_ascii_case("current")
+                        || status.eq_ignore_ascii_case("planned"))
+            })
+        })
+        .any(|(milestone_id, _)| {
+            targets
+                .iter()
+                .any(|target| snapshot.reaches_via_relations(milestone_id, target, relations))
+        })
+}
+
 fn evaluate_rule_with_facts(
     snapshot: &SollSnapshot,
     rule: &SollRule,
@@ -870,7 +909,10 @@ fn evaluate_rule_with_facts(
             for id in subjects(snapshot, rule, facts) {
                 let reached = targets
                     .iter()
-                    .any(|target| snapshot.reaches_via_relations(id, target, &rel_set));
+                    .any(|target| snapshot.reaches_via_relations(id, target, &rel_set))
+                    || reaches_target_via_active_milestone(
+                        snapshot, id, &targets, &rel_set, facts,
+                    );
                 if !reached {
                     out.push(violation(rule, id));
                 }
@@ -1484,6 +1526,107 @@ mod tests {
         );
         // Contrôle positif : celui qui atteint la Vision en deux sauts passe.
         assert!(!flagged.contains(&"REQ-TST-001"));
+    }
+
+    /// REQ-AXO-902472 — the canonical writer attaches a new Requirement as
+    /// `MIL --TARGETS--> REQ`.  A current/planned milestone is an intentional
+    /// container: when another requirement under it already reaches a Vision,
+    /// the new requirement inherits that same filiation instead of becoming
+    /// invalid immediately after the nominal create operation.
+    #[test]
+    fn a_requirement_inherits_vision_reachability_from_an_active_milestone() {
+        let rule = parse_soll_rule(
+            "GUI-TST-122",
+            "Toute exigence remonte à une Vision",
+            &json!({
+                "subject_kind": "Requirement",
+                "subject_status_in": ["current", "planned"],
+                "reaches": true,
+                "other_kind": "Vision",
+                "relations": ["BELONGS_TO", "TARGETS", "EPITOMIZES"]
+            }),
+        )
+        .unwrap();
+
+        for milestone_status in ["current", "planned"] {
+            let snap = snapshot(
+                vec![
+                    node("VIS-TST-001", "Vision", "current"),
+                    node("PIL-TST-001", "Pillar", "current"),
+                    node("MIL-TST-001", "Milestone", milestone_status),
+                    node("REQ-TST-ANCHOR", "Requirement", "current"),
+                    node("REQ-TST-NEW", "Requirement", "planned"),
+                ],
+                vec![
+                    edge("PIL-TST-001", "VIS-TST-001", "EPITOMIZES"),
+                    edge("REQ-TST-ANCHOR", "PIL-TST-001", "BELONGS_TO"),
+                    edge("MIL-TST-001", "REQ-TST-ANCHOR", "TARGETS"),
+                    edge("MIL-TST-001", "REQ-TST-NEW", "TARGETS"),
+                ],
+            );
+            let found = evaluate_rule(&snap, &rule);
+            assert!(
+                found.is_empty(),
+                "{milestone_status} milestone must carry its anchored filiation: {found:?}"
+            );
+        }
+    }
+
+    /// A retired/blocked milestone is not a living statement of intent, and an
+    /// active milestone with no anchored branch cannot manufacture a Vision.
+    /// Both controls prevent the containment exception from hiding real
+    /// orphans.
+    #[test]
+    fn terminal_or_unanchored_milestones_do_not_supply_reachability() {
+        let rule = parse_soll_rule(
+            "GUI-TST-122",
+            "Toute exigence remonte à une Vision",
+            &json!({
+                "subject_kind": "Requirement",
+                "subject_status_in": ["current", "planned"],
+                "reaches": true,
+                "other_kind": "Vision",
+                "relations": ["BELONGS_TO", "TARGETS", "EPITOMIZES"]
+            }),
+        )
+        .unwrap();
+
+        for milestone_status in ["delivered", "rejected", "superseded", "blocked", "deferred"] {
+            let snap = snapshot(
+                vec![
+                    node("VIS-TST-001", "Vision", "current"),
+                    node("PIL-TST-001", "Pillar", "current"),
+                    node("MIL-TST-001", "Milestone", milestone_status),
+                    node("REQ-TST-ANCHOR", "Requirement", "current"),
+                    node("REQ-TST-ORPHAN", "Requirement", "current"),
+                ],
+                vec![
+                    edge("PIL-TST-001", "VIS-TST-001", "EPITOMIZES"),
+                    edge("REQ-TST-ANCHOR", "PIL-TST-001", "BELONGS_TO"),
+                    edge("MIL-TST-001", "REQ-TST-ANCHOR", "TARGETS"),
+                    edge("MIL-TST-001", "REQ-TST-ORPHAN", "TARGETS"),
+                ],
+            );
+            let found = evaluate_rule(&snap, &rule);
+            assert!(
+                found.iter().any(|v| v.source_id == "REQ-TST-ORPHAN"),
+                "{milestone_status} milestone must not qualify an orphan: {found:?}"
+            );
+        }
+
+        let unanchored = snapshot(
+            vec![
+                node("VIS-TST-001", "Vision", "current"),
+                node("MIL-TST-001", "Milestone", "current"),
+                node("REQ-TST-ORPHAN", "Requirement", "current"),
+            ],
+            vec![edge("MIL-TST-001", "REQ-TST-ORPHAN", "TARGETS")],
+        );
+        let found = evaluate_rule(&unanchored, &rule);
+        assert!(
+            found.iter().any(|v| v.source_id == "REQ-TST-ORPHAN"),
+            "an active but unanchored milestone must not invent a Vision: {found:?}"
+        );
     }
 
     /// Une règle qui combine DEUX prédicats n'a pas de sens de violation
