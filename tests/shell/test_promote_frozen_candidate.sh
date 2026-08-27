@@ -92,5 +92,12 @@ else
   fail "test-target compilation can still fan out under memory pressure"
 fi
 
+if grep -q '_cleanup_frozen_worktree "$rc"' "$PROMOTE" && \
+   grep -q 'checkpoint figé conservé pour retry' "$PROMOTE"; then
+  pass "a controlled pre-cutover failure preserves the immutable checkpoint for retry"
+else
+  fail "controlled gate failures still destroy the expensive immutable checkpoint"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

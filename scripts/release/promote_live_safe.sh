@@ -298,7 +298,21 @@ CANDIDATE_BIN_DIR=""
 CUTOVER_PREPARED=0
 
 _cleanup_frozen_worktree() {
+  local promote_rc="${1:-0}"
   [[ -n "$PROMOTE_FROZEN_WORKTREE" ]] || return 0
+  # Un gate pré-cutover peut échouer pour un état runtime transitoire (indexer en
+  # récupération, pression hôte) après un build de plusieurs minutes. Conserver ce
+  # checkpoint ne qualifie rien : le retry rejoue tous les gates et le preflight de
+  # contenu. Il évite seulement de transformer une protection fail-closed en nouvelle
+  # tempête mémoire. Un succès nettoie toujours le worktree.
+  if [[ "$promote_rc" -ne 0 ]] && \
+     [[ "$(git -C "$PROMOTE_FROZEN_WORKTREE" rev-parse HEAD 2>/dev/null || true)" == "$PROMOTE_SHA" ]] && \
+     git -C "$PROMOTE_FROZEN_WORKTREE" diff --quiet HEAD -- && \
+     git -C "$PROMOTE_FROZEN_WORKTREE" diff --cached --quiet HEAD --; then
+    promote_log "   ↻ checkpoint figé conservé pour retry: $PROMOTE_FROZEN_WORKTREE"
+    PROMOTE_FROZEN_WORKTREE=""
+    return 0
+  fi
   git -C "$ROOT_DIR" worktree remove --force "$PROMOTE_FROZEN_WORKTREE" >/dev/null 2>&1 || true
   PROMOTE_FROZEN_WORKTREE=""
 }
@@ -416,7 +430,7 @@ on_promote_exit() {
     timeout 20 "$ROOT_DIR/scripts/axon" --instance live mcp-call call mailbox_sweep \
       --args '{}' --format text >> "$PROMOTE_LOG" 2>&1 || true
   fi
-  _cleanup_frozen_worktree
+  _cleanup_frozen_worktree "$rc"
   if [[ "$rc" -eq 0 ]]; then
     axon_promote_lease_release completed "promotion process exited with rc=0"
   else
