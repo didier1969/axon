@@ -10014,6 +10014,18 @@ fn test_axon_init_project_returns_kickoff_bundle_for_first_init() {
         content.contains("Kickoff bundle"),
         "content must point to the bundle: {content}"
     );
+    // REQ-AXO-902516 — this response is consumed from the CLIENT repository.
+    // A relative Axon runtime script is therefore not executable there.  Route
+    // through the public MCP status contract, with copyable JSON arguments;
+    // status owns the environment-specific operator recovery hint.
+    assert!(
+        !content.contains("./scripts/axon-live"),
+        "client onboarding must not prescribe an Axon-repo-relative script: {content}"
+    );
+    assert!(
+        content.contains(r#"status({"mode":"brief"})"#),
+        "the conditional indexing check needs a schema-valid MCP call: {content}"
+    );
 }
 
 #[test]

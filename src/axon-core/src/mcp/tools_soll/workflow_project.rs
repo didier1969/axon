@@ -2577,8 +2577,10 @@ impl McpServer {
         response_text.push_str(
             "📡 **Live indexing** : an enrolment signal (`axon_registry_changed`) was emitted. \
              If an indexer is running, this project is being indexed live now. \
-             If the runtime is `brain_only` (no indexer — check `status`), start one with \
-             `./scripts/axon-live start --indexer-full`; the project enrols via the registry signal (REQ-AXO-901985).\n\n",
+             If the runtime is `brain_only` (no indexer), call the public MCP \
+             `status({\"mode\":\"brief\"})` and follow its `next_action`; starting a runtime is an \
+             operator action on the Axon host, never a command to run from this client repository. \
+             The project enrols via the registry signal (REQ-AXO-901985).\n\n",
         );
 
         // REQ-AXO-901606 — Vision auto-seed messaging. The legacy text
