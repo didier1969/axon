@@ -235,6 +235,14 @@ broadcast_promote() {
 # across steps 5→6c, then report the measured worst contiguous gap.
 MCP_SAMPLE_FILE="$LOG_DIR/mcp-availability-${PROMOTE_TIMESTAMP}.csv"
 MCP_SAMPLER_PID=""
+PROMOTE_FROZEN_WORKTREE=""
+
+_cleanup_frozen_worktree() {
+  [[ -n "$PROMOTE_FROZEN_WORKTREE" ]] || return 0
+  git -C "$ROOT_DIR" worktree remove --force "$PROMOTE_FROZEN_WORKTREE" >/dev/null 2>&1 || true
+  PROMOTE_FROZEN_WORKTREE=""
+}
+
 _start_mcp_sampler() {
   : > "$MCP_SAMPLE_FILE"
   (
@@ -328,6 +336,7 @@ on_promote_exit() {
     timeout 20 "$ROOT_DIR/scripts/axon" --instance live mcp-call call mailbox_sweep \
       --args '{}' --format text >> "$PROMOTE_LOG" 2>&1 || true
   fi
+  _cleanup_frozen_worktree
   if [[ "$rc" -eq 0 ]]; then
     axon_promote_lease_release completed "promotion process exited with rc=0"
   else
@@ -478,13 +487,9 @@ except Exception:
 ' 2>/dev/null || true)
 
   if [[ -z "$dev_build_id" ]]; then
-    # Brain `status` may not surface `runtime_version.build_id` (older
-    # binary contracts pre-REQ-AXO-150). Fall back to soft warning to
-    # avoid blocking environments where introspection isn't wired ;
-    # operator can still override via --skip-dev-validation if they
-    # accept the risk.
-    echo "  ⚠️ could not extract .result.data.runtime_version.build_id from dev status ; binary-match check skipped"
-    return 0
+    echo "❌ could not extract .result.data.runtime_version.build_id from dev status" >&2
+    echo "   Candidate identity is unproven; refusing before any live mutation." >&2
+    return 1
   fi
 
   # Match : dev build_id must contain the short HEAD sha. Format ex :
@@ -599,14 +604,13 @@ BROADCAST_PREFLIGHT_SENT=1
 # en lisant le CONTENU, seul contrôle qui ne soit pas auto-référentiel.
 build_from_frozen_worktree() {
   local sha="$1"
-  local worktree="${TMPDIR:-/tmp}/axon-promote-${sha:0:12}"
+  PROMOTE_FROZEN_WORKTREE="${TMPDIR:-/tmp}/axon-promote-${sha:0:12}"
+  local worktree="$PROMOTE_FROZEN_WORKTREE"
 
   git -C "$ROOT_DIR" worktree remove --force "$worktree" >/dev/null 2>&1 || true
-  rm -rf "$worktree"
   git -C "$ROOT_DIR" worktree add --detach "$worktree" "$sha" >/dev/null
-  # Le worktree survit à un échec de build juste le temps du trap : sans retrait,
-  # `git worktree list` se remplit de squelettes et le prochain `add` échoue.
-  trap 'git -C "$ROOT_DIR" worktree remove --force "'"$worktree"'" >/dev/null 2>&1 || true' RETURN
+  # Retained through DEV validation and test-target compilation; the process EXIT trap
+  # removes it on success and every trappable failure.
 
   # `AXON_BUILD_ID` = l'identité du SHA promu, lue DANS le worktree détaché : c'est
   # elle que `build.rs` grave dans chaque binaire, et que `preflight.sh` va chercher
@@ -665,26 +669,6 @@ ensure_head_stable
 run_step 1b preflight "$ROOT_DIR/scripts/axon" release-preflight
 ensure_head_stable
 
-# --- Step 4 (manifest): SYNCHRONOUS at step 4 by default (REQ-AXO-902359) ---
-# The optimisation of REQ-AXO-902188 launched the manifest EARLY, concurrently with
-# the dev_gate, to shave ~2s off the critical path. Its comment reasoned only about
-# WRITE races ("both sides read-only on bin/* → no write race") and missed the SIGNAL
-# dimension: the manifest's release preflight sha256's the release binaries, and a
-# subprocess of it is SIGTERM'd (exit 143) by step 2's dev restart/stop lifecycle —
-# DETERMINISTICALLY (3/3 promotes aborted here, before cutover; standalone the manifest
-# passes in ~2s). ~2s of overlap is not worth a promote that never reaches step 5, so
-# the manifest now runs SYNCHRONOUSLY at step 4 (the existing fallback path there), when
-# no dev lifecycle op runs concurrently. Set PROMOTE_MANIFEST_BG=1 to restore the overlap
-# once the exact signal source is separately root-caused. `manifest_bg_pid` left empty
-# routes step 4 through its synchronous branch.
-manifest_bg_out="$(mktemp)"
-manifest_bg_pid=""
-if [[ "${PROMOTE_MANIFEST_BG:-0}" == "1" ]]; then
-  ( "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified ) > "$manifest_bg_out" 2>&1 &
-  manifest_bg_pid=$!
-  promote_log "== step 4: manifest launched in background (∥ step 2 dev_gate — REQ-AXO-902188, opt-in) pid=${manifest_bg_pid} =="
-fi
-
 # --- Step 2: dev gate ---
 # After building, restart dev with the new binary so validate_dev_healthy
 # can verify the correct build_id. The restart is cheap (~5s) and ensures
@@ -706,7 +690,12 @@ else
     fi
     echo "  dev brain build_id ($dev_build_id_pre) != HEAD ($short_head), restarting dev..."
     bash "$ROOT_DIR/scripts/axon-dev" stop 2>&1 || true
-    bash "$ROOT_DIR/scripts/axon-dev" start brain --fast 2>&1
+    if [[ -n "$PROMOTE_FROZEN_WORKTREE" ]]; then
+      bash "$ROOT_DIR/scripts/axon-dev" start brain --fast \
+        --candidate-bin-dir "$PROMOTE_FROZEN_WORKTREE/bin" 2>&1
+    else
+      bash "$ROOT_DIR/scripts/axon-dev" start brain --fast 2>&1
+    fi
   }
   run_step 2 dev_restart restart_dev_with_candidate
   run_step 2b dev_gate validate_dev_healthy
@@ -765,45 +754,36 @@ fi
 # Compiling catches 100% of the class actually observed — structural drift — for ~1 min on a
 # warm cache.
 test_targets_compile_step() {
-  devenv shell --no-reload --no-tui -- bash -lc \
-    "cd '$ROOT_DIR/src/axon-core' && cargo build --tests 2>&1 | tail -20"
+  local source_root="$ROOT_DIR"
+  [[ -n "$PROMOTE_FROZEN_WORKTREE" ]] && source_root="$PROMOTE_FROZEN_WORKTREE"
+  (
+    cd "$source_root"
+    devenv shell --no-reload --no-tui -- bash -lc \
+      "cd '$source_root/src/axon-core' && cargo build --tests 2>&1 | tail -20"
+  )
 }
 run_step 2e test_targets_compile test_targets_compile_step
 
-# --- Step 3: preflight — DÉPLACÉ juste après le build (REQ-AXO-902454) ---
-# Il tournait ICI, après `dev_restart`. Or `axon-dev start brain --fast` recompile
-# en profil RELEASE dans le `.axon/cargo-target` du WORKSPACE, donc au moment où la
-# garde s'exécutait, le binaire qu'elle prenait pour « la cible canonique » n'était
-# plus celui dont l'étape 1 avait enregistré l'empreinte dans `bin/*.build-info`.
-# Le promote invalidait sa propre porte : « Workspace artifact drift » à chaque fois,
-# 100 % du temps, sur un arbre parfaitement propre.
-#
-# REQ-AXO-902464 : la garde ne recalcule plus de « cible canonique ». Elle compare
-# l'artefact à la source que le build a ENREGISTRÉE (`AXON_ARTIFACT_SOURCE`, le
-# target du worktree figé), qu'aucune étape ultérieure ne touche. Le déplacement en
-# 1b reste juste ; ce qui rendait la garde fragile — supposer que tout se compile
-# dans un unique target partagé — a disparu (voir aussi REQ-AXO-902460).
+# --- Step 3: post-DEV candidate recheck ---------------------------------------------
 ensure_head_stable
 
-# --- Step 4: manifest (JOIN the background job launched before step 2, REQ-AXO-902188) ---
-CURRENT_STEP=4; CURRENT_STEP_NAME="manifest"
-promote_log ""
-promote_log "== step 4: manifest (join background pid=${manifest_bg_pid:-none}) =="
-if [[ -n "$manifest_bg_pid" ]]; then
-  if ! wait "$manifest_bg_pid"; then
-    cat "$manifest_bg_out" | tee -a "$PROMOTE_LOG"
-    rm -f "$manifest_bg_out"
-    promote_log "❌ background manifest job (pid=${manifest_bg_pid}) failed"
-    exit 1
-  fi
-else
-  # Fallback: background launch was skipped — build the manifest synchronously now.
-  "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified > "$manifest_bg_out" 2>&1 \
-    || { cat "$manifest_bg_out" | tee -a "$PROMOTE_LOG"; rm -f "$manifest_bg_out"; exit 1; }
-fi
-cat "$manifest_bg_out" | tee -a "$PROMOTE_LOG"
-manifest_path="$(tail -n 1 "$manifest_bg_out")"
-rm -f "$manifest_bg_out"
+# REQ-AXO-902529 — re-certify digests + embedded build identity after every DEV
+# lifecycle action and frozen test compilation, immediately before the manifest.
+run_step 3 candidate_recheck "$ROOT_DIR/scripts/axon" release-preflight
+ensure_head_stable
+
+# --- Step 4: manifest — synchronous, after all candidate gates -----------------------
+manifest_out="$(mktemp)"
+create_manifest_step() {
+  "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified > "$manifest_out" 2>&1 || {
+    cat "$manifest_out"
+    return 1
+  }
+  cat "$manifest_out"
+}
+run_step 4 manifest create_manifest_step
+manifest_path="$(tail -n 1 "$manifest_out")"
+rm -f "$manifest_out"
 if [[ -z "$manifest_path" || ! -f "$manifest_path" ]]; then
   promote_log "Failed to capture manifest path from create-release-manifest output"
   exit 1

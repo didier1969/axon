@@ -59,6 +59,7 @@ axon_resolve_version "$PROJECT_ROOT"
 RUNTIME_MODE="brain_only"
 START_DASHBOARD=1
 RUN_MCP_TESTS=1
+CANDIDATE_BIN_DIR=""
 
 FORCE_RELEASE=0
 # REQ-AXO-234 — dev GPU sessions auto-pause the live indexer (single-GPU
@@ -77,6 +78,11 @@ while [[ $# -gt 0 ]]; do
         --indexer-vector)  RUNTIME_MODE="indexer_vector" ;;
         --indexer-full)    RUNTIME_MODE="indexer_full" ;;
         --release)         FORCE_RELEASE=1 ;;
+        # REQ-AXO-902529 — promotion-only DEV validation of the exact immutable
+        # candidate bundle. Selecting it also disables every source-driven rebuild.
+        --candidate-bin-dir)
+                            [[ $# -ge 2 ]] || { echo "❌ --candidate-bin-dir requires a directory" >&2; exit 1; }
+                            CANDIDATE_BIN_DIR="$2"; shift ;;
         --no-auto-pause)   AUTO_PAUSE_LIVE=0 ;;
         --no-dashboard)    START_DASHBOARD=0 ;;
         --skip-mcp-tests)  RUN_MCP_TESTS=0 ;;
@@ -94,6 +100,9 @@ Modes (positional aliases or long flags):
 
 Options:
   --release        Use release binaries (10× less RAM, 10× faster)
+  --candidate-bin-dir DIR
+                   DEV only: run DIR/axon-brain + DIR/axon-indexer exactly,
+                   without rebuilding from the mutable working tree
   --no-auto-pause  Don't auto-pause the live indexer for a dev GPU session
                    (single-GPU exclusion DEC-AXO-067; on by default)
   --no-dashboard   Disable dashboard
@@ -106,6 +115,11 @@ EOF
 done
 
 export AXON_RUNTIME_MODE="$RUNTIME_MODE"
+
+if [[ "$AXON_INSTANCE_KIND" == "live" && -n "$CANDIDATE_BIN_DIR" ]]; then
+    echo "❌ --candidate-bin-dir is DEV-only; live must start from its release manifest" >&2
+    exit 1
+fi
 
 # --- GPU detection (auto TensorRT when GPU present + mode uses vectors) ---
 # REQ-AXO-902163 — detect_gpu() now lives in scripts/lib/axon-gpu-detect.sh (sourced
@@ -255,7 +269,14 @@ if ig: print(f'export AXON_INSTALL_GENERATION={ig}')
         fi
     fi
 else
-    if [[ "$FORCE_RELEASE" == "1" ]] || [[ -x "$CARGO_TARGET/release/axon-brain" && -x "$CARGO_TARGET/release/axon-indexer" ]]; then
+    if [[ -n "$CANDIDATE_BIN_DIR" ]]; then
+        [[ "$CANDIDATE_BIN_DIR" == /* ]] || { echo "❌ --candidate-bin-dir must be absolute" >&2; exit 1; }
+        [[ -d "$CANDIDATE_BIN_DIR" ]] || { echo "❌ Candidate bin directory missing: $CANDIDATE_BIN_DIR" >&2; exit 1; }
+        CANDIDATE_BIN_DIR="$(cd "$CANDIDATE_BIN_DIR" && pwd -P)"
+        BRAIN_BIN="$CANDIDATE_BIN_DIR/axon-brain"
+        INDEXER_BIN="$CANDIDATE_BIN_DIR/axon-indexer"
+        BUILD_PROFILE="candidate"
+    elif [[ "$FORCE_RELEASE" == "1" ]] || [[ -x "$CARGO_TARGET/release/axon-brain" && -x "$CARGO_TARGET/release/axon-indexer" ]]; then
         BRAIN_BIN="$CARGO_TARGET/release/axon-brain"
         INDEXER_BIN="$CARGO_TARGET/release/axon-indexer"
         BUILD_PROFILE="--release"
@@ -268,7 +289,7 @@ fi
 
 _axon_stage="build"
 # 6. Auto-rebuild (dev only)
-if [[ "$AXON_INSTANCE_KIND" != "live" ]]; then
+if [[ "$AXON_INSTANCE_KIND" != "live" && -z "$CANDIDATE_BIN_DIR" ]]; then
     if [[ ! -x "$BRAIN_BIN" || ! -x "$INDEXER_BIN" ]]; then
         echo "🔨 Binary missing, building ${BUILD_PROFILE:-debug}..."
         run_devenv "cargo build --manifest-path src/axon-core/Cargo.toml ${BUILD_PROFILE:-} --bin axon-brain --bin axon-indexer"

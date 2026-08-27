@@ -101,7 +101,7 @@ fi
 pass "Case 2 — only runtime_version : extracted correctly"
 
 # Case 3 : missing runtime_version (older brain contract pre-REQ-AXO-150).
-# Parser must return empty so the gate falls back to soft-warning.
+# Parser returns empty; promote_live_safe now treats that as a fail-closed identity gate.
 read -r -d '' FIXTURE_MISSING <<'EOF' || true
 {
   "result": {
@@ -122,7 +122,7 @@ extracted=$(echo "$FIXTURE_MISSING" | extract_runtime_version_build_id)
 if [[ -n "$extracted" ]]; then
     fail "Case 3 — runtime_version absent : parser returned '$extracted' (expected empty so gate soft-warns)."
 fi
-pass "Case 3 — runtime_version absent : empty extraction (gate falls back to warning)"
+pass "Case 3 — runtime_version absent : empty extraction (promote gate refuses it)"
 
 # Case 4 : malformed JSON. Must not crash, must return empty.
 extracted=$(echo "not a json" | extract_runtime_version_build_id)
