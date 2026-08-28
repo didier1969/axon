@@ -10,6 +10,7 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -842,6 +843,42 @@ struct RealCutoverIo {
     bin_dir: PathBuf,
 }
 
+static CUTOVER_SCOPE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// Build the restart command without executing it, so ownership is testable.
+///
+/// A live cutover commonly runs inside a transient Nexus systemd unit. A plain
+/// child inherits that unit and is reclaimed when the promote exits, after the
+/// in-job liveness gate has already reported green. A user scope moves the live
+/// bootstrap (and its process-compose descendants) under the durable core slice;
+/// the scope remains alive for as long as those descendants do. Dev stays local.
+fn cutover_start_command(
+    config: &InstanceConfig,
+    axon_entry: &Path,
+    install_from: &Path,
+) -> Command {
+    let mut cmd = if config.instance_kind == InstanceKind::Live {
+        let sequence = CUTOVER_SCOPE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let unit = format!("axon-live-cutover-{}-{sequence}", std::process::id());
+        let mut command = Command::new("systemd-run");
+        command.args([
+            "--user",
+            "--scope",
+            "--quiet",
+            "--collect",
+            "--slice=nexus-core.slice",
+        ]);
+        command.arg(format!("--unit={unit}")).arg("bash");
+        command
+    } else {
+        Command::new("bash")
+    };
+    cmd.arg(axon_entry)
+        .args(["--instance", config.instance_kind.label(), "start", "full"])
+        .env("AXON_LIVE_RELEASE_MANIFEST", install_from);
+    cmd
+}
+
 impl RealCutoverIo {
     fn role_config(&self, role: RuntimeRole) -> InstanceConfig {
         InstanceConfig::new(
@@ -1048,15 +1085,7 @@ impl RealCutoverIo {
                 install_from.display()
             ));
         }
-        let mut cmd = Command::new("bash");
-        cmd.arg(&axon_entry)
-            .args([
-                "--instance",
-                self.config.instance_kind.label(),
-                "start",
-                "full",
-            ])
-            .env("AXON_LIVE_RELEASE_MANIFEST", install_from);
+        let mut cmd = cutover_start_command(&self.config, &axon_entry, install_from);
         if let Ok(log) = fs::File::create(self.release_dir.join("cutover-start.log")) {
             if let Ok(errlog) = log.try_clone() {
                 cmd.stdout(std::process::Stdio::from(log));
@@ -3090,6 +3119,55 @@ mod tests {
             fs::create_dir_all(d).unwrap();
         }
         (root, release, bin, archive)
+    }
+
+    // REQ-AXO-902540 — the live runtime must not inherit the transient promote
+    // cgroup. systemd reclaims that cgroup when the Nexus job exits, after all
+    // in-job health gates have already passed.
+    #[test]
+    fn live_cutover_start_escapes_into_a_durable_systemd_scope() {
+        let config = InstanceConfig::new(
+            PathBuf::from("/srv/axon"),
+            InstanceKind::Live,
+            RuntimeRole::All,
+        );
+        let command = cutover_start_command(
+            &config,
+            Path::new("/srv/axon/scripts/axon"),
+            Path::new("/srv/axon/.axon/releases/pending.json"),
+        );
+        let program = command.get_program().to_string_lossy();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(program, "systemd-run");
+        assert!(args.iter().any(|arg| arg == "--user"));
+        assert!(args.iter().any(|arg| arg == "--scope"));
+        assert!(args.iter().any(|arg| arg == "--slice=nexus-core.slice"));
+        assert!(args
+            .windows(4)
+            .any(|window| window == ["--instance", "live", "start", "full"]));
+    }
+
+    #[test]
+    fn dev_cutover_start_stays_a_direct_local_command() {
+        let config = InstanceConfig::new(
+            PathBuf::from("/srv/axon"),
+            InstanceKind::Dev,
+            RuntimeRole::All,
+        );
+        let command = cutover_start_command(
+            &config,
+            Path::new("/srv/axon/scripts/axon"),
+            Path::new("/srv/axon/.axon/releases/pending.json"),
+        );
+
+        assert_eq!(command.get_program(), "bash");
+        assert!(!command
+            .get_args()
+            .any(|arg| arg.to_string_lossy() == "--scope"));
     }
 
     #[test]
