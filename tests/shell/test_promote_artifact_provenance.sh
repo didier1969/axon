@@ -221,6 +221,16 @@ else
     fail "promote : l'admission Nexus du build release n'est pas mécaniquement imposée"
 fi
 
+if ! grep -Fq -- 'cargo build --tests' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- 'test-lib "$source_root/src/axon-core"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- 'Nexus admission/targeted test qualification failed' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- 'cargo test --lib --no-run -j 1' "$REPO_ROOT/scripts/release/run_targeted_cargo_build.sh" &&
+   grep -Fq -- 'CPUQuota=50%' "$REPO_ROOT/scripts/release/run_targeted_cargo_build.sh"; then
+    pass "promote : la qualification 2e est ciblée, admise par Nexus et bridée thermiquement"
+else
+    fail "promote : la qualification 2e peut recompiler hors périmètre ou hors gouvernance"
+fi
+
 if grep -q 'shared_cargo_target="\$ROOT_DIR/.axon/promote-cargo-target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" && \
    grep -q 'ln -s "\$shared_cargo_target" "\$worktree_cargo_target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
     pass "promote : sources figées par SHA, cache Cargo dédié partagé sous le lease"

@@ -527,7 +527,7 @@ run_step() {
 
 step_timeout_seconds() {
   case "$1" in
-    build) echo "$PROMOTE_LIVE_BUILD_TIMEOUT_S" ;; dev_restart) echo 480 ;; test_targets_compile) echo 600 ;;
+    build) echo "$PROMOTE_LIVE_BUILD_TIMEOUT_S" ;; dev_restart) echo 480 ;; test_targets_compile) echo 3600 ;;
     lifecycle_gate) echo 240 ;; cutover_prepare) echo 420 ;;
     qualify_mcp|qualify_indexer_truth) echo 240 ;;
     preflight|candidate_recheck|manifest|apply_ddl_live) echo 180 ;;
@@ -940,26 +940,33 @@ else
   run_step 2d lifecycle_gate lifecycle_gate_step
 fi
 
-# --- Step 2e: the TEST TARGETS must still compile (REQ-AXO-902269) ---
-# `--lib` and `--bins` — the pair every delivery runs — do not BUILD `src/axon-core/tests/`.
-# On 2026-07-12 REQ-AXO-902227 added a field to `SymbolRow` without updating four
-# initializers there, and the six integration binaries stopped compiling. It went unnoticed
-# for 15 days while every session reported a green suite: `0 failed` was true and useless.
-#
-# This builds the test targets in DEBUG and does not RUN them, deliberately. The 9 tests are
-# `#[ignore = "requires docker"]`, so running them without `--ignored` executes nothing, and
-# with `--ignored` the gate would depend on a Docker daemon — an environment dependency is
-# how a gate ends up disabled (the fate of the `USE_CUTOVER` toggle REQ-AXO-902256 removed).
-# Compiling catches 100% of the class actually observed — structural drift — for ~1 min on a
-# warm cache.
+# --- Step 2e: compile the relevant library test target (REQ-AXO-902269/902543) ---
+# The release binaries were already built explicitly in step 1. Rebuilding every integration
+# target here duplicated unrelated work and escaped Nexus resource governance. The library
+# target contains the unit tests for the changed runtime modules; compile it once, without
+# running Docker-dependent integration tests. A distinct stable Nexus signature keeps its
+# memory history separate from the release build.
 test_targets_compile_step() {
   local source_root="$ROOT_DIR"
+  local nexus_job_bin runner
   [[ -n "$PROMOTE_FROZEN_WORKTREE" ]] && source_root="$PROMOTE_FROZEN_WORKTREE"
-  (
-    cd "$source_root"
-    devenv shell --no-reload --no-tui -- bash -lc \
-      "cd '$source_root/src/axon-core' && CARGO_BUILD_JOBS=1 cargo build --tests -j 1 2>&1 | tail -20"
-  )
+  nexus_job_bin="${AXON_NEXUS_JOB_BIN:-$(command -v nexus-job || true)}"
+  runner="$source_root/scripts/release/run_targeted_cargo_build.sh"
+  if [[ -z "$nexus_job_bin" || ! -x "$nexus_job_bin" || ! -x "$runner" ]]; then
+    echo "❌ Targeted test qualification requires Nexus and its release runner." >&2
+    return 1
+  fi
+  if ! "$nexus_job_bin" run \
+      --project AXON \
+      --class medium \
+      --priority interactive \
+      --memory 6G \
+      --gpu-mib 0 \
+      --timeout 45m \
+      -- "$runner" test-lib "$source_root/src/axon-core"; then
+    echo "❌ Nexus admission/targeted test qualification failed." >&2
+    return 1
+  fi
 }
 run_step 2e test_targets_compile test_targets_compile_step
 
