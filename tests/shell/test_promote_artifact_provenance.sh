@@ -189,6 +189,13 @@ else
     pass "promote : plus de cible de compilation détournée vers le workspace"
 fi
 
+if grep -q 'shared_cargo_target="\$ROOT_DIR/.axon/promote-cargo-target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" && \
+   grep -q 'ln -s "\$shared_cargo_target" "\$worktree_cargo_target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
+    pass "promote : sources figées par SHA, cache Cargo dédié partagé sous le lease"
+else
+    fail "promote : chaque SHA reconstruit encore toutes les dépendances dans un target froid"
+fi
+
 # `install_release_bin` doit installer depuis la cible que le build a RÉELLEMENT
 # utilisée, telle que ce build la rapporte — pas depuis une variable que quelqu'un
 # d'autre a pu réécrire entre-temps.

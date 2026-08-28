@@ -773,6 +773,33 @@ build_from_frozen_worktree() {
   # Retained through DEV validation and test-target compilation; the process EXIT trap
   # removes it on success and every trappable failure.
 
+  # REQ-AXO-902543 — sources are isolated per SHA, compiler cache is not. A
+  # per-worktree target forced every promote to rebuild ~20 GiB of unchanged
+  # dependencies and made the optimized monolithic axon-core exceed even a
+  # one-hour deadline. The promotion lease serializes writers to this dedicated
+  # cache; Cargo fingerprints still invalidate changed sources, Cargo.lock,
+  # toolchain flags, build.rs inputs, and AXON_BUILD_ID. setup.sh continues to
+  # install through the exact target path reported by this build, and release
+  # preflight still verifies the identity embedded in every candidate binary.
+  local shared_cargo_target="$ROOT_DIR/.axon/promote-cargo-target"
+  local worktree_cargo_target="$worktree/.axon/cargo-target"
+  mkdir -p "$worktree/.axon"
+  if [[ -d "$worktree_cargo_target" && ! -L "$worktree_cargo_target" ]]; then
+    if [[ ! -e "$shared_cargo_target" ]]; then
+      # One-time migration of a checkpoint created before REQ-AXO-902543. A
+      # rename on the same disk preserves the expensive partial cache without
+      # copying it or accepting any prebuilt binary as qualified.
+      mv "$worktree_cargo_target" "$shared_cargo_target"
+    else
+      echo "❌ both local and shared promotion Cargo targets exist; refusing ambiguous cache selection" >&2
+      return 1
+    fi
+  fi
+  mkdir -p "$shared_cargo_target"
+  if [[ ! -L "$worktree_cargo_target" ]]; then
+    ln -s "$shared_cargo_target" "$worktree_cargo_target"
+  fi
+
   # `AXON_BUILD_ID` = l'identité du SHA promu, lue DANS le worktree détaché : c'est
   # elle que `build.rs` grave dans chaque binaire, et que `preflight.sh` va chercher
   # dans le contenu publié. Sans elle, le binaire ne pourrait pas dire d'où il sort.
