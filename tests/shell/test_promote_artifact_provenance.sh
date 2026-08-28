@@ -208,6 +208,14 @@ else
     pass "promote : plus de cible de compilation détournée vers le workspace"
 fi
 
+if grep -Fq -- 'AXON_REQUIRE_NEXUS_ADMISSION=1' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- 'nexus-job is unavailable' "$REPO_ROOT/scripts/setup.sh" &&
+   grep -Fq -- 'axon_inside_nexus_batch' "$REPO_ROOT/scripts/setup.sh"; then
+    pass "promote : le build release exige Nexus sans admission imbriquée"
+else
+    fail "promote : l'admission Nexus du build release n'est pas mécaniquement imposée"
+fi
+
 if grep -q 'shared_cargo_target="\$ROOT_DIR/.axon/promote-cargo-target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" && \
    grep -q 'ln -s "\$shared_cargo_target" "\$worktree_cargo_target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
     pass "promote : sources figées par SHA, cache Cargo dédié partagé sous le lease"

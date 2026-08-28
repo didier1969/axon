@@ -95,7 +95,7 @@ TENSORRT_ARGS      = ${TENSORRT_ARGS[*]:-<none>}
 Planned steps:
   1. devenv presence check (command -v devenv)
   2. devenv shell -- bash -lc './scripts/validate-devenv.sh'
-  3. devenv shell -- cargo build --release --bin <delivered artifact>...
+  3. Nexus admission (required by promote) then devenv shell -- cargo build --release --bin <delivered artifact>...
        cwd=$PROJECT_ROOT/src/axon-core
   4. install_release_bin axon-core / axon-brain / axon-indexer / axonctl / axon-query-embed-worker
        target=$PROJECT_ROOT/bin/<name>
@@ -182,7 +182,34 @@ AXON_EFFECTIVE_CARGO_TARGET=""
 # `AXON_BUILD_JOBS` overrides it outright.
 CARGO_JOBS="$(axon_resolve_cargo_jobs)"
 echo "🔨 Building Rust core (-j ${CARGO_JOBS}: $(axon_available_ram_gb) GB free, swap $(axon_swap_used_pct)%, $(axon_detect_host_cpu_cores) cores)..."
-devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release -j ${CARGO_JOBS} --bin axon-core --bin axon-brain --bin axon-indexer --bin axonctl --bin axon-query-embed-worker && printf '%s\n' \"\${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}\" > '$AXON_EFFECTIVE_CARGO_TARGET_FILE'"
+AXON_RELEASE_BUILD_COMMAND="cd '$RUST_CORE_DIR' && cargo build --release -j ${CARGO_JOBS} --bin axon-core --bin axon-brain --bin axon-indexer --bin axonctl --bin axon-query-embed-worker && printf '%s\\n' \"\${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}\" > '$AXON_EFFECTIVE_CARGO_TARGET_FILE'"
+
+# REQ-AXO-902543 — a promotion build is a host-wide resource event. The
+# canonical promote sets AXON_REQUIRE_NEXUS_ADMISSION=1; setup then waits for
+# Nexus' thermal, PSI and memory-reserve gates before starting rustc. A setup
+# already running inside a Nexus batch unit must not nest a second admission.
+axon_inside_nexus_batch() {
+    grep -q '/nexus\.slice/nexus-batch\.slice/' /proc/self/cgroup 2>/dev/null
+}
+
+if [[ "${AXON_REQUIRE_NEXUS_ADMISSION:-0}" == "1" ]] && ! axon_inside_nexus_batch; then
+    NEXUS_JOB_BIN="${AXON_NEXUS_JOB_BIN:-$(command -v nexus-job || true)}"
+    if [[ -z "$NEXUS_JOB_BIN" || ! -x "$NEXUS_JOB_BIN" ]]; then
+        echo "❌ Promotion build requires Nexus admission, but nexus-job is unavailable." >&2
+        exit 1
+    fi
+    echo "🛡️  Waiting for Nexus admission (huge, 12G, thermal + memory gates)..."
+    "$NEXUS_JOB_BIN" run \
+        --project AXON \
+        --class huge \
+        --priority interactive \
+        --memory 12G \
+        --gpu-mib 0 \
+        --timeout 90m \
+        -- devenv shell -- bash -lc "$AXON_RELEASE_BUILD_COMMAND"
+else
+    devenv shell -- bash -lc "$AXON_RELEASE_BUILD_COMMAND"
+fi
 
 AXON_EFFECTIVE_CARGO_TARGET="$(tr -d '\n' < "$AXON_EFFECTIVE_CARGO_TARGET_FILE" 2>/dev/null || true)"
 if [[ -z "$AXON_EFFECTIVE_CARGO_TARGET" || ! -d "$AXON_EFFECTIVE_CARGO_TARGET" ]]; then

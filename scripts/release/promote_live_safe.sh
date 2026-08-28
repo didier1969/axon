@@ -801,11 +801,12 @@ build_from_frozen_worktree() {
   fi
 
   # `AXON_BUILD_ID` = l'identité du SHA promu, lue DANS le worktree détaché : c'est
-  # elle que `build.rs` grave dans chaque binaire, et que `preflight.sh` va chercher
-  # dans le contenu publié. Sans elle, le binaire ne pourrait pas dire d'où il sort.
+  # elle que setup estampille dans chaque binaire après le link, et que
+  # `preflight.sh` va chercher dans le contenu publié. Sans elle, le binaire ne
+  # pourrait pas dire d'où il sort.
   local frozen_build_id
   frozen_build_id="$(git -C "$worktree" describe --tags --always --dirty)"
-  AXON_BUILD_ID="$frozen_build_id" \
+  AXON_REQUIRE_NEXUS_ADMISSION=1 AXON_BUILD_ID="$frozen_build_id" \
     "$worktree/scripts/axon" setup --artifact-only
 
   # Les artefacts candidats restent dans le worktree jusqu'à l'activation. `bin/axonctl`
@@ -827,7 +828,7 @@ build_from_frozen_worktree() {
 if [[ "$SKIP_BUILD" -ne 1 ]]; then
   if [[ "$BUILD_FROM_TREE" -eq 1 ]]; then
     promote_log "⚠️  --dirty : build depuis l'ARBRE DE TRAVAIL. Le binaire n'est PAS une fonction du SHA seul (REQ-AXO-902391) — réservé au dev."
-    run_step 1 build "$ROOT_DIR/scripts/axon" setup --artifact-only
+    run_step 1 build env AXON_REQUIRE_NEXUS_ADMISSION=1 "$ROOT_DIR/scripts/axon" setup --artifact-only
   else
     PROMOTE_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD)"
     # `run_step` streams through tee, so its command executes in a pipeline subshell.
