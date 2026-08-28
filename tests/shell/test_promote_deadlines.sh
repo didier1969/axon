@@ -20,6 +20,14 @@ else
   fail "step journal lacks monotonic deadlines"
 fi
 
+if grep -q 'PROMOTE_LIVE_BUILD_TIMEOUT_S="${PROMOTE_LIVE_BUILD_TIMEOUT_S:-3600}"' "$PROMOTE" && \
+   grep -q 'PROMOTE_LIVE_BUILD_TIMEOUT_S < 60' "$PROMOTE" && \
+   grep -q 'build) echo "$PROMOTE_LIVE_BUILD_TIMEOUT_S"' "$PROMOTE"; then
+  pass "cold release builds have a validated configurable deadline"
+else
+  fail "build deadline remains hard-coded or accepts invalid values"
+fi
+
 for state in connection_refused timeout http_5xx invalid_json mcp_nonready functional_failure; do
   if ! grep -q "$state" "$PROMOTE"; then fail "readiness sampler lacks state=$state"; fi
 done

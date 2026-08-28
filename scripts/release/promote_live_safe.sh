@@ -31,6 +31,11 @@ SKIP_DEV_VALIDATION=0
 BUILD_FROM_TREE=0
 BREAK_GLASS_REASON=""
 BREAK_GLASS_ACTOR=""
+# REQ-AXO-902543 — a cold, optimized build of the monolithic Rust crate can
+# legitimately exceed the former hard-coded 20-minute budget. Keep a bounded
+# deadline, but make it operator-configurable and long enough to converge on a
+# cold worktree. The effective value is recorded by run_step's journal event.
+PROMOTE_LIVE_BUILD_TIMEOUT_S="${PROMOTE_LIVE_BUILD_TIMEOUT_S:-3600}"
 # REQ-AXO-902165 / DEC-AXO-901666 / REQ-AXO-902256 — step 5 runs via `axonctl cutover`
 # (the Rust health-gated cutover with NATIVE auto-rollback). There is no longer a second
 # step-5 implementation to choose between: the `USE_CUTOVER` toggle and the
@@ -80,6 +85,11 @@ Flags:
                          REQ-AXO-902256. Kept only so existing muscle memory and
                          docs do not fail on an unknown option.
 
+Environment:
+  PROMOTE_LIVE_BUILD_TIMEOUT_S
+                         Build-step deadline in seconds (default: 3600, minimum: 60).
+                         This changes only the deadline; it never skips the build.
+
 Emergency paths (deliberately NOT flags of this script):
   Stranded pending.json  bash scripts/release/promote_live_safe.sh   (auto-resumes)
   Direct executor        bin/axonctl cutover --project-root . --instance-kind live \
@@ -109,6 +119,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$PROJECT_CODE" ]] || { echo "--project is required" >&2; exit 1; }
+if [[ ! "$PROMOTE_LIVE_BUILD_TIMEOUT_S" =~ ^[0-9]+$ ]] || \
+   (( PROMOTE_LIVE_BUILD_TIMEOUT_S < 60 )); then
+  echo "❌ PROMOTE_LIVE_BUILD_TIMEOUT_S must be an integer >= 60 seconds (got: ${PROMOTE_LIVE_BUILD_TIMEOUT_S@Q})" >&2
+  exit 2
+fi
 
 # --- REQ-AXO-902526: exclusive lease BEFORE build/install/stage -----------------------
 #
@@ -512,7 +527,7 @@ run_step() {
 
 step_timeout_seconds() {
   case "$1" in
-    build) echo 1200 ;; dev_restart) echo 480 ;; test_targets_compile) echo 600 ;;
+    build) echo "$PROMOTE_LIVE_BUILD_TIMEOUT_S" ;; dev_restart) echo 480 ;; test_targets_compile) echo 600 ;;
     lifecycle_gate) echo 240 ;; cutover_prepare) echo 420 ;;
     qualify_mcp|qualify_indexer_truth) echo 240 ;;
     preflight|candidate_recheck|manifest|apply_ddl_live) echo 180 ;;
