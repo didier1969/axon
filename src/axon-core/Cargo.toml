@@ -17,6 +17,10 @@ name = "axon-indexer"
 path = "src/bin/axon-indexer.rs"
 
 [[bin]]
+name = "axon-query-embed-worker"
+path = "src/bin/axon-query-embed-worker.rs"
+
+[[bin]]
 name = "axonctl"
 path = "src/bin/axonctl.rs"
 

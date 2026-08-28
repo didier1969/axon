@@ -74,7 +74,7 @@ def runtime_artifact_names() -> tuple[str, ...]:
     # Including it in the manifest is what makes the release executor's generic
     # artifact-copy loop deploy a fresh axonctl alongside the runtime
     # binaries; otherwise axonctl-side fixes never reach production.
-    return ("axon-brain", "axon-indexer", "axonctl")
+    return ("axon-brain", "axon-indexer", "axonctl", "axon-query-embed-worker")
 
 
 def resolve_release_attempt_id(explicit: str | None) -> str | None:

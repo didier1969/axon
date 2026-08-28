@@ -56,8 +56,8 @@ axon_file_sha256() {
 # fichier : le sha du build-info au sha réel, l'étiquette `AXON_BUILD_ID` à
 # `git describe`, l'artefact à la cible dont il dit sortir. Le 2026-08-23 elles
 # étaient TOUTES vraies sur un binaire vieux d'un jour, parce qu'aucune ne lisait
-# le binaire. Celle-ci le lit : `build.rs` grave l'identité de build dans le
-# binaire (`AXON_COMPILED_BUILD_ID`), et on vérifie qu'elle y est.
+# le binaire. Celle-ci le lit : le linker réserve `.axon_build_id`, puis le
+# packaging y estampille l'identité sans recompiler, et on vérifie qu'elle y est.
 #
 # Renvoie 0 si l'artefact PORTE cette identité, non-zéro sinon — y compris quand
 # l'artefact est absent ou l'identité vide (`grep -F ''` matcherait tout : un
@@ -87,6 +87,46 @@ axon_artifact_carries_build_id() {
     local hits
     hits="$(strings -a "$artifact" 2>/dev/null | grep -cF -- "$build_id" || true)"
     [[ "${hits:-0}" -gt 0 ]]
+}
+
+# REQ-AXO-902543 — stamp the fixed ELF identity slot after linking. The slot is
+# deliberately constant while rustc runs, so a new release label cannot
+# invalidate every axon-core codegen unit. Provenance remains inside the binary
+# and is verified by axon_artifact_carries_build_id exactly as before.
+axon_stamp_artifact_build_id() {
+    local artifact="${1:?artifact required}"
+    local build_id="${2:?build id required}"
+    local section_file=""
+    local objcopy_bin=""
+    local readelf_bin=""
+    local section_table=""
+
+    [[ -f "$artifact" ]] || return 1
+    [[ "$build_id" != *$'\n'* && "$build_id" != *$'\r'* ]] || return 1
+    (( ${#build_id} < 128 )) || return 1
+    objcopy_bin="$(command -v objcopy || command -v llvm-objcopy || true)"
+    [[ -n "$objcopy_bin" ]] || return 1
+    readelf_bin="$(command -v readelf || command -v llvm-readelf || true)"
+    [[ -n "$readelf_bin" ]] || return 1
+
+    section_file="$(mktemp -t axon-build-id-section.XXXXXX)"
+    printf '%s' "$build_id" > "$section_file"
+    truncate -s 128 "$section_file"
+    section_table="$("$readelf_bin" -S -W "$artifact" 2>/dev/null || true)"
+    if [[ "$section_table" == *".axon_build_id"* ]]; then
+        "$objcopy_bin" --update-section ".axon_build_id=$section_file" "$artifact"
+    else
+        # Small utility binaries may not retain the library's reserved slot.
+        # They still carry a file-backed section that the runtime/provenance
+        # probes read from ELF; it does not need to enter a load segment.
+        "$objcopy_bin" \
+            --add-section ".axon_build_id=$section_file" \
+            --set-section-flags .axon_build_id=readonly,data \
+            "$artifact"
+    fi
+    local status=$?
+    rm -f "$section_file"
+    return "$status"
 }
 
 axon_write_export_file() {

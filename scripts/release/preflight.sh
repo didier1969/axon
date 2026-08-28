@@ -122,7 +122,7 @@ preflight_main() {
   declare -A split_release_versions=()
   declare -A split_package_versions=()
   local bin_name build_info_path artifact_path
-  for bin_name in axon-brain axon-indexer; do
+  for bin_name in axon-brain axon-indexer axonctl axon-query-embed-worker; do
     build_info_path="$BIN_DIR/${bin_name}.build-info"
     artifact_path="$BIN_DIR/$bin_name"
     verify_one_artifact "$artifact_path" "$build_info_path" "$bin_name" || exit 1

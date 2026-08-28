@@ -95,9 +95,9 @@ TENSORRT_ARGS      = ${TENSORRT_ARGS[*]:-<none>}
 Planned steps:
   1. devenv presence check (command -v devenv)
   2. devenv shell -- bash -lc './scripts/validate-devenv.sh'
-  3. devenv shell -- cargo build --release --bins
+  3. devenv shell -- cargo build --release --bin <delivered artifact>...
        cwd=$PROJECT_ROOT/src/axon-core
-  4. install_release_bin axon-core / axon-brain / axon-indexer / axonctl
+  4. install_release_bin axon-core / axon-brain / axon-indexer / axonctl / axon-query-embed-worker
        target=$PROJECT_ROOT/bin/<name>
 EOF
     if [[ "$ARTIFACT_ONLY" -eq 1 ]]; then
@@ -182,7 +182,7 @@ AXON_EFFECTIVE_CARGO_TARGET=""
 # `AXON_BUILD_JOBS` overrides it outright.
 CARGO_JOBS="$(axon_resolve_cargo_jobs)"
 echo "🔨 Building Rust core (-j ${CARGO_JOBS}: $(axon_available_ram_gb) GB free, swap $(axon_swap_used_pct)%, $(axon_detect_host_cpu_cores) cores)..."
-devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release --bins -j ${CARGO_JOBS} && printf '%s\n' \"\${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}\" > '$AXON_EFFECTIVE_CARGO_TARGET_FILE'"
+devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release -j ${CARGO_JOBS} --bin axon-core --bin axon-brain --bin axon-indexer --bin axonctl --bin axon-query-embed-worker && printf '%s\n' \"\${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}\" > '$AXON_EFFECTIVE_CARGO_TARGET_FILE'"
 
 AXON_EFFECTIVE_CARGO_TARGET="$(tr -d '\n' < "$AXON_EFFECTIVE_CARGO_TARGET_FILE" 2>/dev/null || true)"
 if [[ -z "$AXON_EFFECTIVE_CARGO_TARGET" || ! -d "$AXON_EFFECTIVE_CARGO_TARGET" ]]; then
@@ -205,6 +205,14 @@ install_release_bin() {
         echo "❌ Canonical release binary missing after build: $release_bin"
         exit 1
     fi
+    if ! axon_stamp_artifact_build_id "$release_bin" "$AXON_BUILD_ID"; then
+        echo "❌ Unable to stamp build identity into $release_bin"
+        exit 1
+    fi
+    if ! axon_artifact_carries_build_id "$release_bin" "$AXON_BUILD_ID"; then
+        echo "❌ Stamped artifact does not carry build identity: $release_bin"
+        exit 1
+    fi
     install -m 755 "$release_bin" "$target_bin"
     AXON_ARTIFACT_SHA256="$(axon_file_sha256 "$target_bin")"
     axon_write_export_file "$build_info_path" \
@@ -222,6 +230,7 @@ AXON_PACKAGE_VERSION="$(axon_package_version "$PROJECT_ROOT")"
 install_release_bin "axon-core"
 install_release_bin "axon-brain"
 install_release_bin "axon-indexer"
+install_release_bin "axon-query-embed-worker"
 # REQ-AXO-153 — axonctl supervises the runtime processes and exposes the
 # status JSON consumed by `axon status` / qualify-mcp. Including it in the
 # release artifact set ensures every promotion ships the supervisor that

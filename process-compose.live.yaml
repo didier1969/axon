@@ -58,6 +58,12 @@ processes:
       # entrent en collision sur le même socket exporté par start.sh.
       - "AXON_TELEMETRY_SOCK=/tmp/axon-live-brain-telemetry.sock"
       - "AXON_MCP_SOCK=/tmp/axon-live-brain-mcp.sock"
+      # REQ-AXO-902547 — query ORT lives in a bounded child. Process exit is the
+      # deterministic reclamation boundary for host and CUDA arenas.
+      - "AXON_QUERY_EMBED_IDLE_SECS=${AXON_QUERY_EMBED_IDLE_SECS:-300}"
+      - "AXON_QUERY_EMBED_MAX_RSS_MB=${AXON_QUERY_EMBED_MAX_RSS_MB:-2200}"
+      - "AXON_QUERY_GPU_MEMORY_LIMIT_MB=${AXON_QUERY_GPU_MEMORY_LIMIT_MB:-2200}"
+      - "AXON_QUERY_ORT_INTRA_THREADS=${AXON_QUERY_ORT_INTRA_THREADS:-1}"
     depends_on:
       postgres-check:
         condition: "process_completed_successfully"

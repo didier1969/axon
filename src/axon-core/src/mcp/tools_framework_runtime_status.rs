@@ -471,7 +471,7 @@ impl McpServer {
         // une journée entière à annoncer une version que le binaire ne portait pas.
         // `compiled_build_id` est gravé DANS ce binaire à la compilation : les deux
         // ensemble rendent la dérive lisible au lieu d'être un mystère opérationnel.
-        let compiled_build_id = crate::build_identity::COMPILED_BUILD_ID;
+        let compiled_build_id = crate::build_identity::compiled_build_id();
         let build_identity_state = crate::build_identity::identity_match(&build_id);
         let install_generation =
             std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string());

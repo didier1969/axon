@@ -54,6 +54,10 @@ processes:
       # by the brain composer — hence "no values".
       - "AXON_TELEMETRY_SOCK=/tmp/axon-dev-brain-telemetry.sock"
       - "AXON_MCP_SOCK=/tmp/axon-dev-brain-mcp.sock"
+      - "AXON_QUERY_EMBED_IDLE_SECS=${AXON_QUERY_EMBED_IDLE_SECS:-300}"
+      - "AXON_QUERY_EMBED_MAX_RSS_MB=${AXON_QUERY_EMBED_MAX_RSS_MB:-2200}"
+      - "AXON_QUERY_GPU_MEMORY_LIMIT_MB=${AXON_QUERY_GPU_MEMORY_LIMIT_MB:-2200}"
+      - "AXON_QUERY_ORT_INTRA_THREADS=${AXON_QUERY_ORT_INTRA_THREADS:-1}"
       - "AXON_DEV_DATABASE_URL=${AXON_DEV_DATABASE_URL:-postgres://axon@127.0.0.1:44144/axon_dev}"
     depends_on:
       postgres-check:

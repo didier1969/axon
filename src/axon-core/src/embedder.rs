@@ -32,6 +32,8 @@ use tracing::{error, info};
 
 #[path = "embedder/cpu_query_service.rs"]
 mod cpu_query_service;
+#[path = "embedder/query_embed_service.rs"]
+mod query_embed_service;
 #[path = "embedder/gpu_backend.rs"]
 pub(crate) mod gpu_backend; // REQ-AXO-902103 — expose CUDA EP dispatch for the NLI session
 #[path = "embedder/gpu_preflight.rs"]
@@ -138,6 +140,12 @@ pub(crate) fn set_query_worker_compute_gpu(is_gpu: bool) {
         if is_gpu { 2 } else { 1 },
         std::sync::atomic::Ordering::Relaxed,
     );
+}
+
+/// Entry point for the isolated query-embedding worker binary.
+/// Kept in the library so parent and worker use the same pinned model contract.
+pub fn run_query_embed_worker(socket_path: &std::path::Path) -> anyhow::Result<()> {
+    query_embed_service::run_worker(socket_path)
 }
 
 /// `Some("GPU")` / `Some("CPU")` once this process's query worker has built its

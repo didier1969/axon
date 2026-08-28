@@ -128,6 +128,25 @@ else
     pass "sonde de contenu : refuse une identité de build vide"
 fi
 
+# REQ-AXO-902543 — l'identité variable est maintenant estampillée dans une
+# section ELF fixe après le link. Une nouvelle identité doit remplacer
+# l'ancienne sans reconstruire le code.
+STAMP_BIN="$WORK_DIR/stamped-elf"
+cp /bin/true "$STAMP_BIN"
+if axon_stamp_artifact_build_id "$STAMP_BIN" "$PROMOTED_ID" &&
+   axon_artifact_carries_build_id "$STAMP_BIN" "$PROMOTED_ID"; then
+    pass "estampillage ELF : la première identité est portée par l'artefact"
+else
+    fail "estampillage ELF : impossible d'inscrire/lire l'identité promue"
+fi
+if axon_stamp_artifact_build_id "$STAMP_BIN" "$STALE_ID" &&
+   axon_artifact_carries_build_id "$STAMP_BIN" "$STALE_ID" &&
+   ! axon_artifact_carries_build_id "$STAMP_BIN" "$PROMOTED_ID"; then
+    pass "estampillage ELF : le restamp remplace l'identité sans reliquat"
+else
+    fail "estampillage ELF : le restamp conserve une identité périmée"
+fi
+
 # ---------------------------------------------------------------------------
 # 2. `preflight.sh` utilise réellement la sonde — vérifié en l'appelant, pas en
 #    lisant le script.
