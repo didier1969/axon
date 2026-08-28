@@ -806,21 +806,23 @@ build_from_frozen_worktree() {
   # pourrait pas dire d'où il sort.
   local frozen_build_id
   frozen_build_id="$(git -C "$worktree" describe --tags --always --dirty)"
-  AXON_REQUIRE_NEXUS_ADMISSION=1 AXON_BUILD_ID="$frozen_build_id" \
-    "$worktree/scripts/axon" setup --artifact-only
+  if ! AXON_REQUIRE_NEXUS_ADMISSION=1 AXON_BUILD_ID="$frozen_build_id" \
+      "$worktree/scripts/axon" setup --artifact-only; then
+    echo "❌ frozen-worktree setup failed; refusing to inspect or publish partial artifacts" >&2
+    return 1
+  fi
 
   # Les artefacts candidats restent dans le worktree jusqu'à l'activation. `bin/axonctl`
   # demeure ainsi le contrôleur LKG et aucun gate ne peut exécuter le candidat par accident.
-  local installed=0
-  shopt -s nullglob
-  for artifact in "$worktree"/bin/*; do
+  local installed=0 artifact
+  local -a expected_artifacts=(axon-core axon-brain axon-indexer axonctl axon-query-embed-worker)
+  for artifact in "${expected_artifacts[@]}"; do
+    if [[ ! -x "$worktree/bin/$artifact" ]]; then
+      echo "❌ build depuis le worktree figé : exécutable attendu absent: $worktree/bin/$artifact" >&2
+      return 1
+    fi
     installed=$((installed + 1))
   done
-  shopt -u nullglob
-  if [[ "$installed" -eq 0 ]]; then
-    echo "❌ build depuis le worktree figé : aucun artefact produit dans $worktree/bin" >&2
-    return 1
-  fi
   CANDIDATE_BIN_DIR="$worktree/bin"
   echo "  ✅ $installed artefact(s) construits depuis le SHA figé $sha (worktree détaché, arbre de travail non lu)"
 }

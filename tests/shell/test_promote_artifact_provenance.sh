@@ -210,7 +210,10 @@ fi
 
 if grep -Fq -- 'AXON_REQUIRE_NEXUS_ADMISSION=1' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
    grep -Fq -- 'nexus-job is unavailable' "$REPO_ROOT/scripts/setup.sh" &&
-   grep -Fq -- 'axon_inside_nexus_batch' "$REPO_ROOT/scripts/setup.sh"; then
+   grep -Fq -- 'axon_inside_nexus_batch' "$REPO_ROOT/scripts/setup.sh" &&
+   grep -Fq -- 'Nexus admission/build failed' "$REPO_ROOT/scripts/setup.sh" &&
+   grep -Fq -- 'frozen-worktree setup failed' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- 'expected_artifacts=(axon-core axon-brain axon-indexer axonctl axon-query-embed-worker)' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
     pass "promote : le build release exige Nexus sans admission imbriquée"
 else
     fail "promote : l'admission Nexus du build release n'est pas mécaniquement imposée"

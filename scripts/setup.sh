@@ -199,16 +199,22 @@ if [[ "${AXON_REQUIRE_NEXUS_ADMISSION:-0}" == "1" ]] && ! axon_inside_nexus_batc
         exit 1
     fi
     echo "🛡️  Waiting for Nexus admission (huge, 12G, thermal + memory gates)..."
-    "$NEXUS_JOB_BIN" run \
-        --project AXON \
-        --class huge \
-        --priority interactive \
-        --memory 12G \
-        --gpu-mib 0 \
-        --timeout 90m \
-        -- devenv shell -- bash -lc "$AXON_RELEASE_BUILD_COMMAND"
+    if ! "$NEXUS_JOB_BIN" run \
+            --project AXON \
+            --class huge \
+            --priority interactive \
+            --memory 12G \
+            --gpu-mib 0 \
+            --timeout 90m \
+            -- devenv shell -- bash -lc "$AXON_RELEASE_BUILD_COMMAND"; then
+        echo "❌ Nexus admission/build failed; no release artifact may be installed." >&2
+        exit 1
+    fi
 else
-    devenv shell -- bash -lc "$AXON_RELEASE_BUILD_COMMAND"
+    if ! devenv shell -- bash -lc "$AXON_RELEASE_BUILD_COMMAND"; then
+        echo "❌ Rust release build failed; no release artifact may be installed." >&2
+        exit 1
+    fi
 fi
 
 AXON_EFFECTIVE_CARGO_TARGET="$(tr -d '\n' < "$AXON_EFFECTIVE_CARGO_TARGET_FILE" 2>/dev/null || true)"
