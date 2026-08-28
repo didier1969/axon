@@ -286,7 +286,10 @@ CREATE TABLE IF NOT EXISTS axon.indexer_runtime_truth (
     -- REQ-AXO-901854 queue depths (pipeline_v2 owner gauges; ready_queue_chunks
     -- is the dashboard funnel's canonical backlog signal)
     ready_queue_chunks          BIGINT NOT NULL DEFAULT 0, -- chunks queued A→B (ready queue)
-    persist_queue_depth         BIGINT NOT NULL DEFAULT 0  -- queued VectorPersistOutbox rows
+    persist_queue_depth         BIGINT NOT NULL DEFAULT 0, -- queued VectorPersistOutbox rows
+    a3_consecutive_failures     BIGINT NOT NULL DEFAULT 0,
+    a3_last_error               TEXT,
+    pg_pool_evictions_total     BIGINT NOT NULL DEFAULT 0
 );
 -- Additive column evolution for rows migrated from the foundation slice.
 ALTER TABLE axon.indexer_runtime_truth
@@ -301,6 +304,12 @@ ALTER TABLE axon.indexer_runtime_truth
     ADD COLUMN IF NOT EXISTS ready_queue_chunks      BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE axon.indexer_runtime_truth
     ADD COLUMN IF NOT EXISTS persist_queue_depth     BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS a3_consecutive_failures BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS a3_last_error           TEXT;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS pg_pool_evictions_total BIGINT NOT NULL DEFAULT 0;
 
 -- REQ-AXO-901893: Watchman reconciliation cursor, one row per watched root.
 -- The indexer threads `clock_json` back into the next `since` subscription so

@@ -26,7 +26,6 @@ use crate::embedder::lifecycle::process_state as embedder_state;
 use crate::graph::GraphStore;
 
 use super::metrics::StageMetrics;
-use super::project_resolver::ProjectCodeResolver;
 use super::types::ParsedFile;
 
 /// Receipt emitted by A3 once persistence committed.
@@ -64,38 +63,22 @@ pub struct EnrolledFile {
 pub async fn a3_enroll(
     parsed: ParsedFile,
     store: Arc<GraphStore>,
-    resolver: ProjectCodeResolver,
+    _resolver: super::project_resolver::ProjectCodeResolver,
 ) -> anyhow::Result<EnrolledFile> {
     let path_str = parsed.path.to_string_lossy().into_owned();
     let now_ms = Utc::now().timestamp_millis();
-    let project_code_str = resolver(&parsed.path);
+    let project_code_str = parsed.project_code.as_str().to_string();
 
     let store_clone = store.clone();
-    let path_for_block = path_str.clone();
-    let hash_for_block = parsed.content_hash.clone();
-    let content_for_block = parsed.content.clone();
-    let symbols_for_block = parsed.symbols.clone();
-    let relations_for_block = parsed.relations.clone();
-    let findings_for_block = parsed.security_findings.clone();
+    let parsed_for_block = parsed.clone();
     let chunk_ids = tokio::task::spawn_blocking(move || {
-        let chunk_ids = store_clone.upsert_graph(
-            &path_for_block,
-            &project_code_str,
-            &content_for_block,
-            &hash_for_block,
-            now_ms,
-            &symbols_for_block,
-            &relations_for_block,
-        )?;
-        store_clone.replace_security_findings(
-            &path_for_block,
-            &project_code_str,
-            &findings_for_block,
-            now_ms,
-        )?;
-        Ok::<_, anyhow::Error>(chunk_ids)
+        let mut rows = store_clone.upsert_graph_batch(&[parsed_for_block], &project_code_str)?;
+        Ok::<_, anyhow::Error>(rows.pop().unwrap_or_default())
     })
-    .await??;
+    .await??
+    .into_iter()
+    .map(|(id, _, _)| id)
+    .collect();
 
     Ok(EnrolledFile {
         path: path_str,
@@ -134,7 +117,6 @@ pub fn spawn_a3_batched_worker(
     mut rx: Receiver<ParsedFile>,
     tx: Sender<EnrolledFile>,
     store: Arc<GraphStore>,
-    resolver: ProjectCodeResolver,
     metrics: Arc<StageMetrics>,
     batch_size: usize,
     batch_timeout: Duration,
@@ -208,7 +190,7 @@ pub fn spawn_a3_batched_worker(
             let mut groups: std::collections::BTreeMap<String, Vec<ParsedFile>> =
                 std::collections::BTreeMap::new();
             for parsed in batch {
-                let code = resolver(&parsed.path);
+                let code = parsed.project_code.as_str().to_string();
                 groups.entry(code).or_default().push(parsed);
             }
 
@@ -262,21 +244,12 @@ pub fn spawn_a3_batched_worker(
                 // a shared `started` made per_item_us for the 2nd+ project group
                 // include the prior groups' write time.
                 let group_started = Instant::now();
-                let join_result = tokio::task::spawn_blocking(move || {
-                    let chunk_metas =
-                        store_clone.upsert_graph_batch(&group_batch, &pc_for_block)?;
-                    let detected_ms = Utc::now().timestamp_millis();
-                    store_clone.replace_security_findings_batch(
-                        &group_batch,
-                        &pc_for_block,
-                        detected_ms,
-                    )?;
-                    Ok::<_, anyhow::Error>(chunk_metas)
-                })
-                .await;
+                let join_result =
+                    persist_group_with_retry(store_clone, group_batch, pc_for_block).await;
 
                 match join_result {
                     Ok(Ok(chunk_metas_per_file)) if chunk_metas_per_file.len() == group_len => {
+                        super::stage_health::a3_health().record_success();
                         let chunks_total: usize =
                             chunk_metas_per_file.iter().map(|v| v.len()).sum();
                         info!(
@@ -286,8 +259,11 @@ pub fn spawn_a3_batched_worker(
                             group_len,
                             chunks_total
                         );
-                        let elapsed_us =
-                            group_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                        let elapsed_us = group_started
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX))
+                            as u64;
                         let per_item_us = elapsed_us / (group_len as u64).max(1);
                         let now_ms = Utc::now().timestamp_millis();
                         for (
@@ -340,12 +316,18 @@ pub fn spawn_a3_batched_worker(
                         for _ in 0..group_len {
                             metrics.record_error();
                         }
+                        super::stage_health::a3_health().record_failure(
+                            "A3 returned a mismatched per-file receipt count",
+                            Utc::now().timestamp_millis(),
+                        );
                     }
                     Ok(Err(err)) => {
                         warn!(stage = "A3", error = ?err, "upsert_graph_batch failed");
                         for _ in 0..group_len {
                             metrics.record_error();
                         }
+                        super::stage_health::a3_health()
+                            .record_failure(format!("{err:#}"), Utc::now().timestamp_millis());
                     }
                     Err(join_err) => {
                         warn!(
@@ -356,6 +338,10 @@ pub fn spawn_a3_batched_worker(
                         for _ in 0..group_len {
                             metrics.record_error();
                         }
+                        super::stage_health::a3_health().record_failure(
+                            format!("A3 blocking task failed: {join_err}"),
+                            Utc::now().timestamp_millis(),
+                        );
                     }
                 }
             }
@@ -365,6 +351,36 @@ pub fn spawn_a3_batched_worker(
             }
         }
     });
+}
+
+/// Three bounded in-memory attempts. The file is not acknowledged and never
+/// enters the dedup cache until one complete transaction commits.
+async fn persist_group_with_retry(
+    store: Arc<GraphStore>,
+    files: Vec<ParsedFile>,
+    project_code: String,
+) -> Result<Result<Vec<Vec<(String, String, String)>>, anyhow::Error>, tokio::task::JoinError> {
+    const BACKOFF_MS: [u64; 2] = [100, 500];
+    for attempt in 0..=BACKOFF_MS.len() {
+        let store = store.clone();
+        let files = files.clone();
+        let project_code = project_code.clone();
+        let result =
+            tokio::task::spawn_blocking(move || store.upsert_graph_batch(&files, &project_code))
+                .await?;
+        match result {
+            Ok(rows) => return Ok(Ok(rows)),
+            Err(err)
+                if attempt < BACKOFF_MS.len()
+                    && crate::postgres::bulk_writer::is_transient_pg_error(&err) =>
+            {
+                warn!(attempt = attempt + 1, error = %err, "A3 transient failure; retrying complete transaction");
+                tokio::time::sleep(Duration::from_millis(BACKOFF_MS[attempt])).await;
+            }
+            Err(err) => return Ok(Err(err)),
+        }
+    }
+    unreachable!("bounded A3 retry loop always returns")
 }
 
 #[cfg(test)]
@@ -393,10 +409,12 @@ mod tests {
     fn parsed_with(path: &str, content: &str, hash: &str, symbols: Vec<&str>) -> ParsedFile {
         ParsedFile {
             path: PathBuf::from(path),
+            project_code: super::super::ProjectCode::parse("AXO").unwrap(),
             content: content.to_string(),
             content_hash: hash.to_string(),
             mtime_ms: 1_700_000_000_000,
             size_bytes: content.len() as u64,
+            skip_reason: None,
             symbols: symbols.into_iter().map(sym).collect(),
             relations: vec![],
             security_findings: Vec::new(),
@@ -446,13 +464,9 @@ mod tests {
             redacted_excerpt: "let key = <redacted>".to_string(),
         }];
 
-        a3_enroll(
-            parsed,
-            store.clone(),
-            super::super::const_resolver("AXO"),
-        )
-        .await
-        .unwrap();
+        a3_enroll(parsed, store.clone(), super::super::const_resolver("AXO"))
+            .await
+            .unwrap();
         assert_eq!(
             store
                 .query_count("SELECT count(*) FROM SecurityFinding WHERE file_path = '/tmp/security-finding.rs' AND rule_id = 'SECRET_AWS_KEY' AND line = 4")
@@ -467,13 +481,9 @@ mod tests {
         );
 
         let clean = parsed_with(path, "fn demo() {}", "hash-security-2", vec!["demo"]);
-        a3_enroll(
-            clean,
-            store.clone(),
-            super::super::const_resolver("AXO"),
-        )
-        .await
-        .unwrap();
+        a3_enroll(clean, store.clone(), super::super::const_resolver("AXO"))
+            .await
+            .unwrap();
         assert_eq!(
             store
                 .query_count("SELECT count(*) FROM SecurityFinding WHERE file_path = '/tmp/security-finding.rs'")
@@ -506,9 +516,6 @@ mod tests {
         );
         let batch = vec![risky, clean];
         store.upsert_graph_batch(&batch, "AXO").unwrap();
-        store
-            .replace_security_findings_batch(&batch, "AXO", 123)
-            .unwrap();
 
         assert_eq!(
             store
@@ -537,10 +544,10 @@ mod tests {
         store
             .execute(
                 "INSERT INTO ist.IndexedFile \
-                    (path, project_code, content_hash, last_seen_ms) VALUES \
-                    ('/tmp/hyd/done_a.rs','AXO','hA',1), \
-                    ('/tmp/hyd/done_b.rs','AXO','hB',1), \
-                    ('/tmp/hyd/pending.rs','AXO','',1);",
+                    (path, project_code, content_hash, last_seen_ms, status) VALUES \
+                    ('/tmp/hyd/done_a.rs','AXO','hA',1,'indexed'), \
+                    ('/tmp/hyd/done_b.rs','AXO','hB',1,'skipped'), \
+                    ('/tmp/hyd/pending.rs','AXO','hPending',1,'discovered');",
             )
             .unwrap();
 
@@ -615,10 +622,12 @@ mod tests {
         let plain = sym("plain_helper_ep");
         let parsed = ParsedFile {
             path: PathBuf::from("/tmp/entry_rt.ex"),
+            project_code: super::super::ProjectCode::parse("AXO").unwrap(),
             content: "def handle_call_ep, do: :ok\ndef plain_helper_ep, do: :ok".to_string(),
             content_hash: "hash-entry-rt".to_string(),
             mtime_ms: 1_700_000_000_000,
             size_bytes: 48,
+            skip_reason: None,
             symbols: vec![entry, plain],
             relations: vec![],
             security_findings: Vec::new(),

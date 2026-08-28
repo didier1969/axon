@@ -275,7 +275,11 @@ impl Scanner {
         // directories at descent (REQ-AXO-902045 MUR 0), so this walk only
         // enumerates the source neighbourhood — never the millions of build
         // artefacts. Per-file eligibility decides the rest.
-        for entry in self.build_walker_from(&self.root).build().filter_map(|e| e.ok()) {
+        for entry in self
+            .build_walker_from(&self.root)
+            .build()
+            .filter_map(|e| e.ok())
+        {
             if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
                 continue;
             }
@@ -284,7 +288,9 @@ impl Scanner {
             if self.should_process_path(path) {
                 eligible += 1;
             } else {
-                *reasons.entry(self.explain_ignore_decision(path, false)).or_insert(0) += 1;
+                *reasons
+                    .entry(self.explain_ignore_decision(path, false))
+                    .or_insert(0) += 1;
             }
         }
 
@@ -301,12 +307,19 @@ impl Scanner {
     fn extract_project_code(&self, graph: &GraphStore, path: &Path) -> Result<String> {
         let explicit = self.project_code.trim();
         if !explicit.is_empty() {
-            return Ok(explicit.to_string());
+            return crate::pipeline::project_resolver::ProjectCode::parse(explicit)
+                .map(|code| code.as_str().to_string())
+                .map_err(anyhow::Error::from);
         }
 
         let candidate = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        crate::project_meta::resolve_project_identity_for_path(graph, &candidate)
-            .map(|identity| identity.code)
+        crate::project_meta::resolve_project_identity_for_path(graph, &candidate).and_then(
+            |identity| {
+                crate::pipeline::project_resolver::ProjectCode::parse(&identity.code)
+                    .map(|code| code.as_str().to_string())
+                    .map_err(anyhow::Error::from)
+            },
+        )
     }
 
     fn build_walker_from(&self, start: &Path) -> WalkBuilder {
@@ -418,7 +431,8 @@ impl Scanner {
                 (&self.axonignore_cache, ".axonignore"),
                 (&self.axonignore_local_cache, ".axonignore.local"),
             ] {
-                if let Some(matcher) = self.cached_matcher_for(cache, &dir, &dir.join(ignore_name)) {
+                if let Some(matcher) = self.cached_matcher_for(cache, &dir, &dir.join(ignore_name))
+                {
                     let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
                     if matched.is_ignore() {
                         decision = Some(true);
@@ -643,66 +657,19 @@ fn persist_discovery_batch(
         return Ok(());
     }
     let now_ms = chrono::Utc::now().timestamp_millis();
-    // REQ-AXO-901860: IndexedFile.project_code is a NOT NULL FK to
-    // axon.Project, so every project this batch references must exist BEFORE
-    // the file rows. Enrol the distinct projects first (idempotent).
-    let mut projects: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     let mut values = Vec::with_capacity(batch.len());
     for (path, project, size, mtime) in batch {
-        // REQ-AXO-901860 — NEVER enrol the "UNK" sentinel (unresolved project).
-        // project_code is a NOT NULL FK to axon.Project; enrolling UNK both
-        // resurrects the garbage bucket the canonical project/path resolution
-        // retired AND creates an "UNK" axon.Project row (the `INSERT INTO Project
-        // … ON CONFLICT DO NOTHING` below would mint it). Files that don't
-        // resolve to a registered project are dropped here, mirroring
-        // graph_ingestion's UNK skip — no UNK Project, no UNK IndexedFile, ever.
-        if project == "UNK" {
-            continue;
-        }
         let safe_path = path.replace('\'', "''");
         let safe_project = project.replace('\'', "''");
-        projects.insert(project.as_str());
         // mtime from scanner is seconds, convert to ms for consistency
         let mtime_ms = *mtime * 1000;
         values.push(format!(
             "('{safe_path}', '{safe_project}', '', {now_ms}, 'discovered', {now_ms}, {mtime_ms}, {size}, 0, NULL)"
         ));
     }
-    if values.is_empty() {
-        // Entire batch resolved to UNK / unresolved — nothing canonical to enrol.
-        return Ok(());
-    }
-    let proj_values: Vec<String> = projects
-        .iter()
-        .map(|p| format!("('{}', {now_ms})", p.replace('\'', "''")))
-        .collect();
-    graph.execute(&format!(
-        "INSERT INTO axon.Project (code, enrolled_at_ms) VALUES {} ON CONFLICT (code) DO NOTHING",
-        proj_values.join(", ")
-    ))?;
-    // REQ-AXO-901867 — enrich axon.Project.name / root_path from the canonical
-    // registry (soll.ProjectCodeRegistry). The discovery INSERT above only
-    // carries (code, enrolled_at_ms), leaving name/root_path blank, so the
-    // project_telemetry view (and the dashboard reading it) showed empty
-    // identity columns. Fill ONLY when empty → idempotent, never clobbers an
-    // operator-set value, and a no-op once populated. Name falls back to the
-    // project_path basename when the registry name is blank (parity with
-    // project_meta::registered_project_identities).
-    let code_list: Vec<String> = projects
-        .iter()
-        .map(|p| format!("'{}'", p.replace('\'', "''")))
-        .collect();
-    graph.execute(&format!(
-        "UPDATE axon.Project p \
-         SET name = COALESCE(NULLIF(r.project_name, ''), \
-                             NULLIF(regexp_replace(r.project_path, '^.*/', ''), ''), p.name), \
-             root_path = COALESCE(NULLIF(r.project_path, ''), p.root_path) \
-         FROM soll.ProjectCodeRegistry r \
-         WHERE upper(r.project_code) = p.code \
-           AND (p.name = '' OR p.root_path = '') \
-           AND p.code IN ({})",
-        code_list.join(", ")
-    ))?;
+    // Tenant creation belongs exclusively to the canonical registry. The FK on
+    // IndexedFile.project_code is the final fail-closed guard if registry and
+    // runtime admission ever diverge.
     // C1: mtime_ms + size_bytes enable change detection without reading content.
     // C2: WHERE clause skips UPDATE entirely when file is unchanged (zero WAL).
     // Changed file (mtime or size differ) → force status='discovered' for re-indexing.
@@ -915,14 +882,21 @@ mod tests {
         std::fs::write(prj.join(".gitignore"), "secret.py\n").unwrap();
         std::fs::write(prj.join("secret.py"), "TOKEN = 1\n").unwrap();
         // Dependency tree — must be pruned at descent, not walked file-by-file.
-        std::fs::write(prj.join("node_modules").join("react").join("index.js"), "//\n").unwrap();
+        std::fs::write(
+            prj.join("node_modules").join("react").join("index.js"),
+            "//\n",
+        )
+        .unwrap();
 
         let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
         let bd = scanner.scope_breakdown();
 
         // main.rs + lib.py are eligible; secret.py is gitignored (not eligible),
         // csv/parquet are out-of-ecosystem.
-        assert_eq!(bd.eligible, 2, "two source files should be eligible: {bd:?}");
+        assert_eq!(
+            bd.eligible, 2,
+            "two source files should be eligible: {bd:?}"
+        );
 
         let reason = |key: &str| -> u64 {
             bd.excluded_by_reason
@@ -995,7 +969,10 @@ mod tests {
         std::fs::create_dir_all(prj.join("src")).unwrap();
         std::fs::write(prj.join("src").join("main.rs"), "fn main(){}\n").unwrap();
         std::fs::write(
-            prj.join("node_modules").join("react").join("deep").join("index.js"),
+            prj.join("node_modules")
+                .join("react")
+                .join("deep")
+                .join("index.js"),
             "//\n",
         )
         .unwrap();

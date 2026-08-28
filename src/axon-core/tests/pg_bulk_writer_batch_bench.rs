@@ -113,6 +113,9 @@ fn build_batch() -> PgBulkBatch {
         calls_nif,
         other_edges: Vec::new(),
         indexed_files: Vec::new(),
+        skipped_files: Vec::new(),
+        security_files: Vec::new(),
+        security_findings: Vec::new(),
         project_code: "AXO".to_string(),
     }
 }

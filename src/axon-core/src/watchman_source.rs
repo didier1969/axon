@@ -34,8 +34,8 @@ use std::time::Duration;
 use anyhow::Result;
 // The `query_result_type!` macro expands to `#[derive(Deserialize)]` +
 // `#[serde(flatten)]`, so both must be in scope at the expansion site.
-use serde::Deserialize;
 use futures_util::stream::StreamExt;
+use serde::Deserialize;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_postgres::{AsyncMessage, NoTls};
 use tracing::{info, warn};
@@ -44,6 +44,8 @@ use watchman_client::{Error as WatchmanError, SubscriptionData};
 
 use crate::graph::GraphStore;
 use crate::indexing_policy::{is_watch_pruned_segment, watchman_ignore_dirs};
+use crate::pipeline::project_resolver::{ProjectCodeResolver, ProjectRegistrySnapshot};
+use crate::pipeline::types::AdmittedPath;
 use crate::scanner::Scanner;
 
 /// Reconnect backoff floor (productive cadence). Mirrors `demand_pull`.
@@ -114,13 +116,14 @@ fn parse_registry_payload(raw: &str) -> Option<RegistryNotify> {
 /// one-shot fallback walk when Watchman is unreachable.
 pub fn spawn_watchman_source(
     store: Arc<GraphStore>,
-    input_tx: Sender<PathBuf>,
+    input_tx: Sender<AdmittedPath>,
     scanner: Arc<Scanner>,
     watch_root: String,
     database_url: String,
+    resolver: ProjectCodeResolver,
 ) -> Result<()> {
     tokio::spawn(async move {
-        run_supervisor(store, input_tx, scanner, watch_root, database_url).await;
+        run_supervisor(store, input_tx, scanner, watch_root, database_url, resolver).await;
     });
     Ok(())
 }
@@ -130,10 +133,11 @@ pub fn spawn_watchman_source(
 /// one-shot scanner walk (full index, no live deltas) and surface a Blocker.
 async fn run_supervisor(
     store: Arc<GraphStore>,
-    input_tx: Sender<PathBuf>,
+    input_tx: Sender<AdmittedPath>,
     scanner: Arc<Scanner>,
     watch_root: String,
     database_url: String,
+    resolver: ProjectCodeResolver,
 ) {
     let client = match connect_watchman().await {
         Ok(c) => Arc::new(c),
@@ -144,18 +148,18 @@ async fn run_supervisor(
                  walk (full index, NO live deltas). Check the `watchman` binary / \
                  AXON_WATCHMAN_BIN. REQ-AXO-901893"
             );
-            fallback_scanner_bootstrap(&scanner, &input_tx).await;
+            fallback_scanner_bootstrap(&scanner, &input_tx, &resolver).await;
             return;
         }
     };
 
-    let roots = resolve_roots(&client, &watch_root).await;
+    let roots = resolve_roots(&client, &resolver.project_paths()).await;
     if roots.is_empty() {
         warn!(
             watch_root = %watch_root,
             "Watchman resolved no project roots — degrading to a one-shot scanner walk"
         );
-        fallback_scanner_bootstrap(&scanner, &input_tx).await;
+        fallback_scanner_bootstrap(&scanner, &input_tx, &resolver).await;
         return;
     }
     info!(
@@ -193,6 +197,7 @@ async fn run_supervisor(
             store.clone(),
             scanner.clone(),
             clock_tx.clone(),
+            resolver.clone(),
         );
     }
 
@@ -209,6 +214,7 @@ async fn run_supervisor(
         scanner,
         clock_tx,
         watched,
+        resolver,
     );
 }
 
@@ -220,17 +226,18 @@ fn spawn_root_subscription(
     client: Arc<Client>,
     root: ResolvedRoot,
     mut clock: Option<Clock>,
-    input_tx: Sender<PathBuf>,
+    input_tx: Sender<AdmittedPath>,
     store: Arc<GraphStore>,
     scanner: Arc<Scanner>,
     clock_tx: Sender<ClockUpdate>,
+    resolver: ProjectCodeResolver,
 ) {
     tokio::spawn(async move {
         let mut backoff = BACKOFF_INITIAL_MS;
         loop {
             ensure_watchmanconfig(&root.path());
             match run_root_subscription(
-                &client, &root, &mut clock, &input_tx, &store, &scanner, &clock_tx,
+                &client, &root, &mut clock, &input_tx, &store, &scanner, &clock_tx, &resolver,
             )
             .await
             {
@@ -263,11 +270,12 @@ fn spawn_root_subscription(
 fn spawn_registry_discovery(
     database_url: String,
     client: Arc<Client>,
-    input_tx: Sender<PathBuf>,
+    input_tx: Sender<AdmittedPath>,
     store: Arc<GraphStore>,
     scanner: Arc<Scanner>,
     clock_tx: Sender<ClockUpdate>,
     watched: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    resolver: ProjectCodeResolver,
 ) {
     tokio::spawn(async move {
         let mut backoff = BACKOFF_INITIAL_MS;
@@ -280,6 +288,7 @@ fn spawn_registry_discovery(
                 &scanner,
                 &clock_tx,
                 &watched,
+                &resolver,
             )
             .await
             {
@@ -312,11 +321,12 @@ fn spawn_registry_discovery(
 async fn registry_discovery_once(
     database_url: &str,
     client: &Arc<Client>,
-    input_tx: &Sender<PathBuf>,
+    input_tx: &Sender<AdmittedPath>,
     store: &Arc<GraphStore>,
     scanner: &Arc<Scanner>,
     clock_tx: &Sender<ClockUpdate>,
     watched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+    resolver: &ProjectCodeResolver,
 ) -> Result<()> {
     let (conn_client, mut connection) = tokio_postgres::connect(database_url, NoTls)
         .await
@@ -357,8 +367,50 @@ async fn registry_discovery_once(
         let Some(payload) = parse_registry_payload(&n.payload()) else {
             continue;
         };
+        // Reload the complete canonical registry and publish it before the new
+        // Watchman subscription can emit its fresh-instance batch.
+        let store_for_registry = store.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::project_meta::registered_project_identities(&store_for_registry)
+        })
+        .await
+        {
+            Ok(Ok(ids)) if !ids.is_empty() => {
+                let snapshot = match ProjectRegistrySnapshot::from_rows(
+                    ids.into_iter()
+                        .map(|id| (id.code, id.project_path.to_string_lossy().into_owned())),
+                ) {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        warn!(error = %err, "registry discovery: invalid snapshot ignored");
+                        continue;
+                    }
+                };
+                resolver.replace(snapshot);
+            }
+            Ok(Ok(_)) => {
+                warn!("registry discovery: canonical registry unexpectedly empty; notification ignored");
+                continue;
+            }
+            Ok(Err(err)) => {
+                warn!(error = %err, "registry discovery: refresh failed; notification ignored");
+                continue;
+            }
+            Err(err) => {
+                warn!(error = %err, "registry discovery: refresh task failed; notification ignored");
+                continue;
+            }
+        }
         maybe_watch_new_root(
-            &payload, database_url, client, input_tx, store, scanner, clock_tx, watched,
+            &payload,
+            database_url,
+            client,
+            input_tx,
+            store,
+            scanner,
+            clock_tx,
+            watched,
+            resolver,
         )
         .await;
     }
@@ -379,11 +431,12 @@ async fn maybe_watch_new_root(
     payload: &RegistryNotify,
     database_url: &str,
     client: &Arc<Client>,
-    input_tx: &Sender<PathBuf>,
+    input_tx: &Sender<AdmittedPath>,
     store: &Arc<GraphStore>,
     scanner: &Arc<Scanner>,
     clock_tx: &Sender<ClockUpdate>,
     watched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+    resolver: &ProjectCodeResolver,
 ) {
     let dir = PathBuf::from(&payload.project_path);
     if !dir.is_dir() {
@@ -433,6 +486,7 @@ async fn maybe_watch_new_root(
         store.clone(),
         scanner.clone(),
         clock_tx.clone(),
+        resolver.clone(),
     );
 }
 
@@ -453,27 +507,13 @@ async fn connect_watchman() -> std::result::Result<Client, WatchmanError> {
 /// takes effect on first watch), then `resolve_root` (= watch-project) each.
 /// Watchman collapses a path to its enclosing repo root, so we dedup by the
 /// resolved root path.
-async fn resolve_roots(client: &Client, watch_root: &str) -> Vec<ResolvedRoot> {
+async fn resolve_roots(client: &Client, project_paths: &[PathBuf]) -> Vec<ResolvedRoot> {
     let mut roots = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    let entries = match std::fs::read_dir(watch_root) {
-        Ok(e) => e,
-        Err(err) => {
-            warn!(error = %err, watch_root = %watch_root, "Watchman: cannot read watch_root");
-            return roots;
-        }
-    };
-
-    for entry in entries.flatten() {
-        let dir = entry.path();
+    for dir in project_paths.iter().cloned() {
         if !dir.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        // Skip build dirs / dotdirs / VCS metadata at the top level outright.
-        if is_watch_pruned_segment(&name) {
+            warn!(dir = %dir.display(), "Watchman: registered project path is not a directory");
             continue;
         }
         // Pre-seed the config so the watch created by resolve_root reads it.
@@ -510,10 +550,11 @@ async fn run_root_subscription(
     client: &Client,
     root: &ResolvedRoot,
     clock: &mut Option<Clock>,
-    input_tx: &Sender<PathBuf>,
+    input_tx: &Sender<AdmittedPath>,
     store: &Arc<GraphStore>,
     scanner: &Arc<Scanner>,
     clock_tx: &Sender<ClockUpdate>,
+    resolver: &ProjectCodeResolver,
 ) -> std::result::Result<(), WatchmanError> {
     let root_path = root.path();
     let root_key = root_path.to_string_lossy().to_string();
@@ -563,6 +604,7 @@ async fn run_root_subscription(
     let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<FeedAction>();
     let feeder_input_tx = input_tx.clone();
     let feeder_store = store.clone();
+    let feeder_resolver = resolver.clone();
     // REQ-AXO-902049 — per-file churn guard (trailing-edge debounce). Coalesces
     // a file changing faster than we can index it (data lakes, logs, generated
     // outputs) to ≤ 1 feed per cooldown, while still feeding the latest content
@@ -581,7 +623,14 @@ async fn run_root_subscription(
                         FeedAction::Upsert(path) => {
                             let now = crate::clock::now_unix_ms();
                             if guard.admit(&path, now) {
-                                if feeder_input_tx.send(path).await.is_err() {
+                                let project_code = match feeder_resolver.resolve(&path) {
+                                    Ok(code) => code,
+                                    Err(err) => {
+                                        record_unregistered_skip(&feeder_store, &path, &err.to_string()).await;
+                                        continue;
+                                    }
+                                };
+                                if feeder_input_tx.send(AdmittedPath { path, project_code }).await.is_err() {
                                     return; // pipeline A closed
                                 }
                             } else {
@@ -605,7 +654,14 @@ async fn run_root_subscription(
                     // cooldown has now elapsed.
                     let now = crate::clock::now_unix_ms();
                     for path in guard.drain_due(now) {
-                        if feeder_input_tx.send(path).await.is_err() {
+                        let project_code = match feeder_resolver.resolve(&path) {
+                            Ok(code) => code,
+                            Err(err) => {
+                                record_unregistered_skip(&feeder_store, &path, &err.to_string()).await;
+                                continue;
+                            }
+                        };
+                        if feeder_input_tx.send(AdmittedPath { path, project_code }).await.is_err() {
                             return; // pipeline A closed
                         }
                     }
@@ -693,6 +749,24 @@ async fn run_root_subscription(
     drop(feed_tx);
     let _ = feeder.await;
     outcome
+}
+
+/// Fail-loud ledger for paths rejected before A1. FileLifecycleEvent deliberately
+/// permits an empty project_code because there is no canonical tenant to attach.
+async fn record_unregistered_skip(store: &Arc<GraphStore>, path: &Path, reason: &str) {
+    let store = store.clone();
+    let event = crate::graph_ingestion::FileLifecycleEvent {
+        file_path: path.to_string_lossy().into_owned(),
+        project_code: String::new(),
+        stage: "admission".to_string(),
+        status: "skipped".to_string(),
+        reason: Some(format!("unregistered_project_path: {reason}")),
+        at_ms: chrono::Utc::now().timestamp_millis(),
+        worker_id: None,
+        trace_id: None,
+        run_id: None,
+    };
+    let _ = tokio::task::spawn_blocking(move || store.append_file_lifecycle_events(&[event])).await;
 }
 
 /// Pure feed planner — maps Watchman's reported `(relative_name, exists)`
@@ -979,7 +1053,11 @@ async fn clock_writer_loop(mut rx: Receiver<ClockUpdate>, database_url: String) 
 /// Degraded path when Watchman is unreachable: enumerate the whole watch root
 /// once and feed it with backpressure. No live deltas — equivalent to the old
 /// bootstrap scan, but explicitly a fallback, not the steady state.
-async fn fallback_scanner_bootstrap(scanner: &Arc<Scanner>, input_tx: &Sender<PathBuf>) {
+async fn fallback_scanner_bootstrap(
+    scanner: &Arc<Scanner>,
+    input_tx: &Sender<AdmittedPath>,
+    resolver: &ProjectCodeResolver,
+) {
     let scanner = scanner.clone();
     let files = tokio::task::spawn_blocking(move || scanner.enumerate_files())
         .await
@@ -990,7 +1068,18 @@ async fn fallback_scanner_bootstrap(scanner: &Arc<Scanner>, input_tx: &Sender<Pa
         files.len()
     );
     for path in files {
-        if input_tx.send(path).await.is_err() {
+        let project_code = match resolver.resolve(&path) {
+            Ok(code) => code,
+            Err(err) => {
+                warn!(path = %path.display(), error = %err, "Watchman fallback: unregistered path skipped before A1");
+                continue;
+            }
+        };
+        if input_tx
+            .send(AdmittedPath { path, project_code })
+            .await
+            .is_err()
+        {
             return;
         }
     }
@@ -1052,7 +1141,11 @@ mod tests {
         g.mark_pending(p, 3_000);
         // At t=5_000 the cooldown since the last feed (t=0) has elapsed → fed.
         let due = g.drain_due(5_000);
-        assert_eq!(due, vec![p.to_path_buf()], "deferred change is fed, not lost");
+        assert_eq!(
+            due,
+            vec![p.to_path_buf()],
+            "deferred change is fed, not lost"
+        );
         // Once fed, it is no longer pending.
         assert!(g.drain_due(6_000).is_empty());
     }

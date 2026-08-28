@@ -797,15 +797,14 @@ impl GraphStore {
     /// level-1 (no-read) I/O pre-filter; content_hash the level-2 parse skip.
     pub fn load_all_indexed_files(&self) -> Result<Vec<(String, String, i64, i64, u64)>> {
         // PIL-AXO-007 (REQ-AXO-901916) — the dedup cache hydrates from rows that
-        // carry a real content_hash, i.e. A3 actually indexed them. In the
-        // status-free model an IndexedFile row exists ONLY after a successful A3
-        // UPSERT (no pre-created 'discovered' placeholder), so `content_hash <> ''`
-        // is the exact "A-DONE" predicate that replaces the old status filter.
+        // carry a real content_hash AND a terminal A3 status. Scanner-created
+        // `discovered` rows must never suppress replay merely because they carry
+        // metadata; that was the APS completeness gap.
         // A not-yet-indexed file is simply absent → should_read/should_index
         // return true → it gets read + parsed.
         let raw = self.query_json_writer(
             "SELECT path, content_hash, last_seen_ms, mtime_ms, size_bytes FROM IndexedFile \
-             WHERE content_hash <> ''",
+             WHERE content_hash <> '' AND status IN ('indexed','skipped')",
         )?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         Ok(rows
@@ -850,8 +849,7 @@ impl GraphStore {
     /// walk and unchanged files never get re-stamped), draining ~9479 enrolled
     /// files down to a single project's worth on the first 60 s reconciliation
     /// pass. Scoping by canonical path prefix is correct for the full-root
-    /// indexer scan, per-project reconciliation, and UNK/empty project_code
-    /// candidates alike (path is independent of code).
+    /// indexer scan and per-project reconciliation (path is independent of code).
     pub fn delete_stale_indexed_files(
         &self,
         scan_start_ms: i64,
@@ -948,13 +946,6 @@ impl GraphStore {
     ) -> Result<Vec<String>> {
         use crate::graph_ingestion::rows::{ChunkRow, RelationRow, SymbolRow};
         use std::collections::HashSet;
-
-        // REQ-AXO-901860 — skip the "UNK" sentinel (unregistered file) so a
-        // single-file enrol can't pollute an UNK bucket or poison the writer
-        // tx on the NOT NULL project_code FK. Mirrors upsert_graph_batch.
-        if project_code == "UNK" {
-            return Ok(Vec::new());
-        }
 
         // REQ-AXO-271 slice 2k : PG canonical only. The legacy SQL
         // relation render block (render_contains_pg / render_calls_pg /
@@ -1108,6 +1099,9 @@ impl GraphStore {
                 last_seen_ms,
                 content.len() as i64,
             )],
+            skipped_files: Vec::new(),
+            security_files: Vec::new(),
+            security_findings: Vec::new(),
             project_code: project_code.to_string(),
         };
         // REQ-AXO-901959 — route the live graph write through THIS store's
@@ -1116,90 +1110,6 @@ impl GraphStore {
         // stage_a3/orchestrator tests (REQ-AXO-901877 linchpin).
         self.pool.native.flush_batch_copy(&batch)?;
         Ok(chunk_ids_emitted)
-    }
-
-    /// Replace the complete detector snapshot for one file. Findings contain
-    /// only redacted evidence and are deliberately stored outside `Symbol`.
-    pub fn replace_security_findings(
-        &self,
-        path: &str,
-        project_code: &str,
-        findings: &[crate::parser::SecurityFinding],
-        detected_ms: i64,
-    ) -> Result<()> {
-        let safe_path = path.replace('\'', "''");
-        let safe_project = project_code.replace('\'', "''");
-        let mut sql = format!(
-            "BEGIN; DELETE FROM SecurityFinding WHERE project_code = '{safe_project}' AND file_path = '{safe_path}';"
-        );
-        if !findings.is_empty() {
-            let values = findings
-                .iter()
-                .map(|finding| {
-                    let rule = finding.rule_id.replace('\'', "''");
-                    let severity = finding.severity.replace('\'', "''");
-                    let excerpt = finding.redacted_excerpt.replace('\'', "''");
-                    format!(
-                        "('{safe_project}', '{safe_path}', '{rule}', {}, '{severity}', '{excerpt}', {detected_ms})",
-                        finding.line
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            sql.push_str(&format!(
-                " INSERT INTO SecurityFinding (project_code, file_path, rule_id, line, severity, redacted_excerpt, detected_ms) VALUES {values} ON CONFLICT (project_code, file_path, rule_id, line) DO UPDATE SET severity = EXCLUDED.severity, redacted_excerpt = EXCLUDED.redacted_excerpt, detected_ms = EXCLUDED.detected_ms;"
-            ));
-        }
-        sql.push_str(" COMMIT;");
-        self.execute(&sql)
-    }
-
-    /// Batched counterpart used by A3: one replacement transaction per
-    /// project batch, never one PostgreSQL round-trip per indexed file.
-    pub fn replace_security_findings_batch(
-        &self,
-        files: &[crate::pipeline::types::ParsedFile],
-        project_code: &str,
-        detected_ms: i64,
-    ) -> Result<()> {
-        if files.is_empty() {
-            return Ok(());
-        }
-        let safe_project = project_code.replace('\'', "''");
-        let paths = files
-            .iter()
-            .map(|parsed| {
-                format!("'{}'", parsed.path.to_string_lossy().replace('\'', "''"))
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut sql = format!(
-            "BEGIN; DELETE FROM SecurityFinding WHERE project_code = '{safe_project}' AND file_path IN ({paths});"
-        );
-        let values = files
-            .iter()
-            .flat_map(|parsed| {
-                let safe_path = parsed.path.to_string_lossy().replace('\'', "''");
-                let safe_project_for_row = safe_project.clone();
-                parsed.security_findings.iter().map(move |finding| {
-                    let rule = finding.rule_id.replace('\'', "''");
-                    let severity = finding.severity.replace('\'', "''");
-                    let excerpt = finding.redacted_excerpt.replace('\'', "''");
-                    format!(
-                        "('{safe_project_for_row}', '{safe_path}', '{rule}', {}, '{severity}', '{excerpt}', {detected_ms})",
-                        finding.line
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        if !values.is_empty() {
-            sql.push_str(&format!(
-                " INSERT INTO SecurityFinding (project_code, file_path, rule_id, line, severity, redacted_excerpt, detected_ms) VALUES {} ON CONFLICT (project_code, file_path, rule_id, line) DO UPDATE SET severity = EXCLUDED.severity, redacted_excerpt = EXCLUDED.redacted_excerpt, detected_ms = EXCLUDED.detected_ms;",
-                values.join(",")
-            ));
-        }
-        sql.push_str(" COMMIT;");
-        self.execute(&sql)
     }
 
     /// REQ-AXO-295 — Batched variant of [`Self::upsert_graph`].
@@ -1229,16 +1139,6 @@ impl GraphStore {
 
         if files.is_empty() {
             return Ok(Vec::new());
-        }
-
-        // REQ-AXO-901860 — unregistered files resolve to the "UNK" sentinel
-        // (pipeline_runtime resolver fallback). project_code is now a NOT
-        // NULL FK to axon.Project, so writing UNK rows would either resurrect
-        // the "UNK" bucket the refonte deleted or fail the FK and poison the
-        // pooled writer connection (25P02 cascade). Skip cleanly — the
-        // resolver already logged the resolution failure (fail-loud, graceful).
-        if project_code == "UNK" {
-            return Ok(files.iter().map(|_| Vec::new()).collect());
         }
 
         // REQ-AXO-271 slice 2k : PG canonical only (see upsert_graph).
@@ -1503,6 +1403,39 @@ impl GraphStore {
         contains_rows.sort_unstable();
         contains_rows.dedup();
 
+        // REQ-AXO-902541 — detector evidence belongs to this exact file
+        // snapshot and therefore travels in the same transaction as the graph.
+        let detected_ms = chrono::Utc::now().timestamp_millis();
+        let security_files = files
+            .iter()
+            .map(|parsed| parsed.path.to_string_lossy().into_owned())
+            .collect();
+        let security_findings = files
+            .iter()
+            .flat_map(|parsed| {
+                let file_path = parsed.path.to_string_lossy().into_owned();
+                parsed.security_findings.iter().map(move |finding| {
+                    crate::graph_ingestion::rows::SecurityFindingRow {
+                        file_path: file_path.clone(),
+                        rule_id: finding.rule_id.clone(),
+                        line: finding.line as i64,
+                        severity: finding.severity.clone(),
+                        redacted_excerpt: finding.redacted_excerpt.clone(),
+                        detected_ms,
+                    }
+                })
+            })
+            .collect();
+        let skipped_files = files
+            .iter()
+            .filter_map(|parsed| {
+                parsed
+                    .skip_reason
+                    .as_ref()
+                    .map(|reason| (parsed.path.to_string_lossy().into_owned(), reason.clone()))
+            })
+            .collect();
+
         // REQ-AXO-901747 — COPY BINARY path via bulk_writer.
         let batch = crate::postgres::bulk_writer::PgBulkBatch {
             symbols: symbol_rows,
@@ -1515,6 +1448,9 @@ impl GraphStore {
                 .map(|(t, r)| (t.to_string(), r))
                 .collect(),
             indexed_files: indexed_file_rows,
+            skipped_files,
+            security_files,
+            security_findings,
             project_code: project_code.to_string(),
         };
         // REQ-AXO-901959 — route the live graph write through THIS store's
@@ -2016,7 +1952,9 @@ mod req_axo_140_call_resolution {
     fn index(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
         let mut m: HashMap<String, Vec<String>> = HashMap::new();
         for (name, id) in pairs {
-            m.entry((*name).to_string()).or_default().push((*id).to_string());
+            m.entry((*name).to_string())
+                .or_default()
+                .push((*id).to_string());
         }
         m
     }
@@ -2033,10 +1971,7 @@ mod req_axo_140_call_resolution {
         // Le dépôt indexe UNE fonction libre `truncate` et UNE fonction `spawn`.
         let indexed_truncate = GraphStore::symbol_id("PRJ", "prj/util.rs", "truncate");
         let indexed_spawn = GraphStore::symbol_id("PRJ", "prj/listener.rs", "spawn");
-        let idx = index(&[
-            ("truncate", &indexed_truncate),
-            ("spawn", &indexed_spawn),
-        ]);
+        let idx = index(&[("truncate", &indexed_truncate), ("spawn", &indexed_spawn)]);
 
         // `pairs.truncate(top)` — receveur = une variable locale, donc un type
         // dont on ne sait rien. Résoudre serait deviner.
@@ -2094,7 +2029,10 @@ mod req_axo_140_call_resolution {
         let free = GraphStore::resolve_call_target_id_with_receiver(
             "PRJ", "prj/a.rs", "helper", None, &idx,
         );
-        assert_eq!(free, helper_id, "un appel de fonction libre résout comme avant");
+        assert_eq!(
+            free, helper_id,
+            "un appel de fonction libre résout comme avant"
+        );
     }
 
     #[test]
@@ -2102,9 +2040,13 @@ mod req_axo_140_call_resolution {
         let callee_id = GraphStore::symbol_id("PRJ", "prj/b.rs", "callee");
         let idx = index(&[("callee", &callee_id)]);
         // Caller lives in a.rs; the synthetic id would have been prj/a.rs::callee.
-        let resolved =
-            GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "callee", None, &idx);
-        assert_eq!(resolved, callee_id, "cross-file unique callee must be canonical");
+        let resolved = GraphStore::resolve_call_target_id_with_receiver(
+            "PRJ", "prj/a.rs", "callee", None, &idx,
+        );
+        assert_eq!(
+            resolved, callee_id,
+            "cross-file unique callee must be canonical"
+        );
         assert_ne!(
             resolved,
             GraphStore::symbol_id("PRJ", "prj/a.rs", "callee"),
@@ -2115,9 +2057,13 @@ mod req_axo_140_call_resolution {
     #[test]
     fn absent_callee_falls_back_to_synthetic() {
         let idx = index(&[("other", &GraphStore::symbol_id("PRJ", "prj/b.rs", "other"))]);
-        let resolved =
-            GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "unknown", None, &idx);
-        assert_eq!(resolved, GraphStore::symbol_id("PRJ", "prj/a.rs", "unknown"));
+        let resolved = GraphStore::resolve_call_target_id_with_receiver(
+            "PRJ", "prj/a.rs", "unknown", None, &idx,
+        );
+        assert_eq!(
+            resolved,
+            GraphStore::symbol_id("PRJ", "prj/a.rs", "unknown")
+        );
     }
 
     #[test]
@@ -2126,7 +2072,8 @@ mod req_axo_140_call_resolution {
             ("dup", &GraphStore::symbol_id("PRJ", "prj/b.rs", "dup")),
             ("dup", &GraphStore::symbol_id("PRJ", "prj/c.rs", "dup")),
         ]);
-        let resolved = GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "dup", None, &idx);
+        let resolved =
+            GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "dup", None, &idx);
         assert_eq!(
             resolved,
             GraphStore::symbol_id("PRJ", "prj/a.rs", "dup"),
@@ -2162,16 +2109,27 @@ mod req_axo_140_call_resolution {
     fn call_source_leaves_free_function_caller_unchanged() {
         // A free-function caller is already short → the file-local id is unchanged.
         let resolved = GraphStore::resolve_call_source_id("PRJ", "prj/a.rs", "free_fn");
-        assert_eq!(resolved, GraphStore::symbol_id("PRJ", "prj/a.rs", "free_fn"));
+        assert_eq!(
+            resolved,
+            GraphStore::symbol_id("PRJ", "prj/a.rs", "free_fn")
+        );
     }
 
     #[test]
     fn globally_qualified_callee_keeps_direct_mapping() {
         // A `::`-qualified name bypasses the name index entirely.
         let idx = index(&[("foo", &GraphStore::symbol_id("PRJ", "prj/b.rs", "foo"))]);
-        let resolved =
-            GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "modx::foo", None, &idx);
-        assert_eq!(resolved, GraphStore::symbol_id("PRJ", "prj/a.rs", "modx::foo"));
+        let resolved = GraphStore::resolve_call_target_id_with_receiver(
+            "PRJ",
+            "prj/a.rs",
+            "modx::foo",
+            None,
+            &idx,
+        );
+        assert_eq!(
+            resolved,
+            GraphStore::symbol_id("PRJ", "prj/a.rs", "modx::foo")
+        );
     }
 
     #[test]
@@ -2180,7 +2138,9 @@ mod req_axo_140_call_resolution {
         // synthetic — no behavioural change for intra-file calls.
         let id = GraphStore::symbol_id("PRJ", "prj/a.rs", "local");
         let idx = index(&[("local", &id)]);
-        let resolved = GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.rs", "local", None, &idx);
+        let resolved = GraphStore::resolve_call_target_id_with_receiver(
+            "PRJ", "prj/a.rs", "local", None, &idx,
+        );
         assert_eq!(resolved, id);
     }
 
@@ -2204,7 +2164,11 @@ mod req_axo_140_call_resolution {
     #[test]
     fn a_definition_id_always_carries_its_defining_file() {
         // Elixir : le nom EST pointé par convention de langage.
-        let ex = GraphStore::symbol_id("FSF", "prj/lib/privacy.ex", "FiscalyAi.Privacy.amount_bucket");
+        let ex = GraphStore::symbol_id(
+            "FSF",
+            "prj/lib/privacy.ex",
+            "FiscalyAi.Privacy.amount_bucket",
+        );
         assert!(
             ex.split("::").count() >= 3,
             "un id de definition doit porter son fichier, got {ex}"
@@ -2238,7 +2202,11 @@ mod req_axo_140_call_resolution {
     /// résout que sur une définition UNIQUE, jamais sur une devinette.
     #[test]
     fn a_qualified_call_resolves_to_its_unique_definition() {
-        let def = GraphStore::symbol_id("FSF", "prj/lib/privacy.ex", "FiscalyAi.Privacy.amount_bucket");
+        let def = GraphStore::symbol_id(
+            "FSF",
+            "prj/lib/privacy.ex",
+            "FiscalyAi.Privacy.amount_bucket",
+        );
         let idx = index(&[("FiscalyAi.Privacy.amount_bucket", &def)]);
         let resolved = GraphStore::resolve_call_target_id_with_receiver(
             "FSF",
@@ -2264,11 +2232,7 @@ mod req_axo_140_call_resolution {
     fn an_unknown_qualified_call_stays_local_and_still_carries_a_path() {
         let idx = index(&[("autre", &GraphStore::symbol_id("PRJ", "prj/b.rs", "autre"))]);
         let resolved = GraphStore::resolve_call_target_id_with_receiver(
-            "PRJ",
-            "prj/a.rs",
-            "Enum.map",
-            None,
-            &idx,
+            "PRJ", "prj/a.rs", "Enum.map", None, &idx,
         );
         assert_eq!(
             resolved,
@@ -2287,11 +2251,18 @@ mod req_axo_140_call_resolution {
     #[test]
     fn an_ambiguous_qualified_call_refuses_to_choose() {
         let idx = index(&[
-            ("A.B.fun", &GraphStore::symbol_id("PRJ", "prj/b.ex", "A.B.fun")),
-            ("A.B.fun", &GraphStore::symbol_id("PRJ", "prj/c.ex", "A.B.fun")),
+            (
+                "A.B.fun",
+                &GraphStore::symbol_id("PRJ", "prj/b.ex", "A.B.fun"),
+            ),
+            (
+                "A.B.fun",
+                &GraphStore::symbol_id("PRJ", "prj/c.ex", "A.B.fun"),
+            ),
         ]);
-        let resolved =
-            GraphStore::resolve_call_target_id_with_receiver("PRJ", "prj/a.ex", "A.B.fun", None, &idx);
+        let resolved = GraphStore::resolve_call_target_id_with_receiver(
+            "PRJ", "prj/a.ex", "A.B.fun", None, &idx,
+        );
         assert_eq!(
             resolved,
             GraphStore::symbol_id("PRJ", "prj/a.ex", "A.B.fun"),

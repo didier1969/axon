@@ -1,80 +1,99 @@
-//! Per-file `project_code` resolution for pipeline (DEC-AXO-081).
+//! Per-file project identity for the multi-project pipeline (DEC-AXO-081).
 //!
-//! The session-17 spawn_pipeline_a contract fixed `project_code: Arc<str>`
-//! at construction time — one indexer = one project, file paths got
-//! stamped with that one code. Live indexers watch `~/projects/*` with
-//! multiple project codes, so DEC-AXO-081 ratifies a resolver-based
-//! signature: each file's project_code is computed at stage-A3 entry
-//! (and at B3 by parsing the chunk_id prefix, which already carries the
-//! project_code).
+//! REQ-AXO-902541 makes resolution fail-closed: an unresolved path is a typed
+//! error at the admission boundary, never a fabricated `UNK` project code.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-/// Callable that maps an arbitrary watch-root-relative or absolute file
-/// path to its 3-letter project code (e.g. `AXO`, `RMC`, `DOC`).
-///
-/// Implementations are expected to be cheap (Scanner does an in-memory
-/// project-meta lookup; the const variant is a fixed string clone).
-pub type ProjectCodeResolver = Arc<dyn Fn(&Path) -> String + Send + Sync>;
+/// Canonical three-letter tenant identity carried through pipeline A.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProjectCode(String);
 
-/// Build a resolver that always returns the same project code. Used by
-/// the bench harness + tests where the file set is single-project by
-/// construction.
-pub fn const_resolver(project_code: impl Into<String>) -> ProjectCodeResolver {
-    let code = project_code.into();
-    Arc::new(move |_path: &Path| code.clone())
+impl ProjectCode {
+    pub fn parse(value: impl Into<String>) -> Result<Self, ProjectResolutionError> {
+        let value = value.into();
+        if value.len() == 3
+            && value.bytes().all(|b| b.is_ascii_uppercase())
+            && value != "PRO"
+            && value != "UNK"
+        {
+            Ok(Self(value))
+        } else {
+            Err(ProjectResolutionError::InvalidCode(value))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-/// Extract the project_code from a v2 chunk_id (canonical format
-/// `"{project_code}::{path_namespace}::{name}::chunk[::part-NN]"`).
-///
-/// Returns `None` when the chunk_id is malformed (no `::` delimiter).
-/// B3 uses this so it can stamp `ist.ChunkEmbedding.project_code`
-/// without having to thread the code through B1/B2.
-pub fn project_code_from_chunk_id(chunk_id: &str) -> Option<&str> {
-    chunk_id.split("::").next().filter(|s| !s.is_empty())
+impl fmt::Display for ProjectCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
-/// Boot-time snapshot of the canonical project registry — resolves a file path
-/// → project_code by LONGEST-PREFIX match, fully in RAM (PIL-AXO-007 CP2c).
-///
-/// Replaces the per-file filesystem rescan of every `.axon/meta.json` the old
-/// resolver did on each A3 call (O(projects) disk I/O per file). Hydrated ONCE
-/// at boot from PG (`soll.ProjectCodeRegistry`) — PIL-AXO-001: the PG registry
-/// is the canonical source of truth, not the filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectResolutionError {
+    UnregisteredPath(PathBuf),
+    InvalidCode(String),
+    InvalidRegistryPath { code: String, path: String },
+    RegistryUnavailable,
+}
+
+impl fmt::Display for ProjectResolutionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnregisteredPath(path) => {
+                write!(f, "path is outside ProjectCodeRegistry: {}", path.display())
+            }
+            Self::InvalidCode(code) => write!(f, "invalid canonical project code: {code:?}"),
+            Self::InvalidRegistryPath { code, path } => {
+                write!(f, "invalid ProjectCodeRegistry path for {code}: {path:?}")
+            }
+            Self::RegistryUnavailable => f.write_str("ProjectCodeRegistry is unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for ProjectResolutionError {}
+
+/// Immutable longest-prefix snapshot of the canonical PG registry.
+#[derive(Debug, Clone, Default)]
 pub struct ProjectRegistrySnapshot {
-    /// (canonical project_path, project_code), sorted by path length DESC so the
-    /// first prefix match is the deepest (most specific) project.
-    entries: Vec<(PathBuf, String)>,
+    entries: Vec<(PathBuf, ProjectCode)>,
 }
 
 impl ProjectRegistrySnapshot {
-    /// Build from `(project_code, project_path)` rows. Empty codes/paths and the
-    /// reserved cross-tenant `PRO` methodology code are dropped (they map to no
-    /// IST project). Sorted by path length DESC for longest-prefix resolution.
-    pub fn from_rows<I>(rows: I) -> Self
+    pub fn from_rows<I>(rows: I) -> Result<Self, ProjectResolutionError>
     where
         I: IntoIterator<Item = (String, String)>,
     {
-        let mut entries: Vec<(PathBuf, String)> = rows
-            .into_iter()
-            .filter(|(code, path)| !code.is_empty() && code != "PRO" && !path.is_empty())
-            .map(|(code, path)| (PathBuf::from(path), code))
-            .collect();
+        let mut entries = Vec::new();
+        for (code, path) in rows {
+            let project_code = ProjectCode::parse(code.clone())?;
+            let project_path = PathBuf::from(&path);
+            if path.is_empty() || !project_path.is_absolute() {
+                return Err(ProjectResolutionError::InvalidRegistryPath { code, path });
+            }
+            entries.push((project_path, project_code));
+        }
         entries.sort_by(|a, b| b.0.as_os_str().len().cmp(&a.0.as_os_str().len()));
-        Self { entries }
+        Ok(Self { entries })
     }
 
-    /// Longest-prefix resolve: the code of the deepest registered project whose
-    /// path is a path-component prefix of `path`, or `None` when `path` is
-    /// outside every registered project. `Path::starts_with` is component-wise,
-    /// so `/p/ab` never matches project `/p/a`.
-    pub fn resolve(&self, path: &Path) -> Option<&str> {
+    pub fn resolve(&self, path: &Path) -> Option<&ProjectCode> {
         self.entries
             .iter()
-            .find(|(proj_path, _)| path.starts_with(proj_path))
-            .map(|(_, code)| code.as_str())
+            .find(|(project_path, _)| path.starts_with(project_path))
+            .map(|(_, code)| code)
+    }
+
+    pub fn project_paths(&self) -> Vec<PathBuf> {
+        self.entries.iter().map(|(path, _)| path.clone()).collect()
     }
 
     pub fn len(&self) -> usize {
@@ -84,18 +103,64 @@ impl ProjectRegistrySnapshot {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
 
-    /// Wrap into a [`ProjectCodeResolver`] closure. Unresolved paths return the
-    /// `"UNK"` sentinel — a DROP marker (A3 / graph_ingestion skip `"UNK"`,
-    /// REQ-AXO-901860), matching the prior resolver's contract exactly.
-    pub fn into_resolver(self) -> ProjectCodeResolver {
-        let snap = Arc::new(self);
-        Arc::new(move |path: &Path| {
-            snap.resolve(path)
-                .map(str::to_string)
-                .unwrap_or_else(|| "UNK".to_string())
-        })
+/// Hot-swappable registry resolver shared by admission and dynamic discovery.
+#[derive(Clone)]
+pub struct ProjectCodeResolver {
+    snapshot: Arc<RwLock<ProjectRegistrySnapshot>>,
+    constant: Option<ProjectCode>,
+}
+
+impl ProjectCodeResolver {
+    pub fn from_snapshot(snapshot: ProjectRegistrySnapshot) -> Self {
+        Self {
+            snapshot: Arc::new(RwLock::new(snapshot)),
+            constant: None,
+        }
     }
+
+    pub fn resolve(&self, path: &Path) -> Result<ProjectCode, ProjectResolutionError> {
+        if let Some(code) = &self.constant {
+            return Ok(code.clone());
+        }
+        let guard = self
+            .snapshot
+            .read()
+            .map_err(|_| ProjectResolutionError::RegistryUnavailable)?;
+        guard
+            .resolve(path)
+            .cloned()
+            .ok_or_else(|| ProjectResolutionError::UnregisteredPath(path.to_path_buf()))
+    }
+
+    /// Replace the whole snapshot atomically for readers.
+    pub fn replace(&self, snapshot: ProjectRegistrySnapshot) {
+        if let Ok(mut guard) = self.snapshot.write() {
+            *guard = snapshot;
+        }
+    }
+
+    pub fn project_paths(&self) -> Vec<PathBuf> {
+        self.snapshot
+            .read()
+            .map(|snapshot| snapshot.project_paths())
+            .unwrap_or_default()
+    }
+}
+
+pub fn const_resolver(project_code: impl Into<String>) -> ProjectCodeResolver {
+    let code = ProjectCode::parse(project_code.into())
+        .expect("test/bench project_code must be canonical (three uppercase letters)");
+    ProjectCodeResolver {
+        snapshot: Arc::new(RwLock::new(ProjectRegistrySnapshot::default())),
+        constant: Some(code),
+    }
+}
+
+/// Extract the project_code from a v2 chunk id.
+pub fn project_code_from_chunk_id(chunk_id: &str) -> Option<&str> {
+    chunk_id.split("::").next().filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -103,84 +168,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn const_resolver_returns_supplied_code_for_any_path() {
-        let r = const_resolver("AXO");
-        assert_eq!(r(Path::new("/anywhere/foo.rs")), "AXO");
-        assert_eq!(r(Path::new("/elsewhere/bar.ex")), "AXO");
+    fn project_code_rejects_non_canonical_values() {
+        assert!(ProjectCode::parse("AXO").is_ok());
+        assert!(ProjectCode::parse("PRO").is_err());
+        assert!(ProjectCode::parse("UNK").is_err());
+        assert!(ProjectCode::parse("axo").is_err());
+        assert!(ProjectCode::parse("ABCD").is_err());
     }
 
     #[test]
-    fn project_code_from_chunk_id_parses_canonical_format() {
-        assert_eq!(
-            project_code_from_chunk_id("AXO::src__main_rs::main::chunk"),
-            Some("AXO")
+    fn snapshot_resolves_longest_prefix() {
+        let resolver = ProjectCodeResolver::from_snapshot(
+            ProjectRegistrySnapshot::from_rows([
+                ("AAA".into(), "/home/u/projects/a".into()),
+                ("BBB".into(), "/home/u/projects/a/b".into()),
+            ])
+            .unwrap(),
         );
         assert_eq!(
-            project_code_from_chunk_id("RMC::lib__util_rs::helper::chunk::part-03"),
-            Some("RMC")
-        );
-    }
-
-    #[test]
-    fn project_code_from_chunk_id_returns_none_on_malformed_input() {
-        assert_eq!(project_code_from_chunk_id(""), None);
-        assert_eq!(
-            project_code_from_chunk_id("no_delimiter_at_all"),
-            Some("no_delimiter_at_all")
-        );
-        // Empty leading segment is rejected — a stray `::name` is not a
-        // valid project_code prefix.
-        assert_eq!(project_code_from_chunk_id("::bad::chunk"), None);
-    }
-
-    // --- ProjectRegistrySnapshot (CP2c — RAM longest-prefix resolver) ---
-
-    #[test]
-    fn snapshot_resolves_longest_prefix_to_deepest_project() {
-        let snap = ProjectRegistrySnapshot::from_rows([
-            ("AAA".into(), "/home/u/projects/a".into()),
-            ("BBB".into(), "/home/u/projects/a/b".into()),
-        ]);
-        // The deepest (most specific) registered project wins.
-        assert_eq!(
-            snap.resolve(Path::new("/home/u/projects/a/b/src/f.rs")),
-            Some("BBB")
+            resolver
+                .resolve(Path::new("/home/u/projects/a/b/src/f.rs"))
+                .unwrap()
+                .as_str(),
+            "BBB"
         );
         assert_eq!(
-            snap.resolve(Path::new("/home/u/projects/a/x.rs")),
-            Some("AAA")
+            resolver
+                .resolve(Path::new("/home/u/projects/a/x.rs"))
+                .unwrap()
+                .as_str(),
+            "AAA"
         );
     }
 
     #[test]
-    fn snapshot_returns_none_outside_all_projects() {
-        let snap =
-            ProjectRegistrySnapshot::from_rows([("AAA".into(), "/home/u/projects/a".into())]);
-        assert_eq!(snap.resolve(Path::new("/tmp/elsewhere.rs")), None);
-        // Component-wise: a sibling sharing a string prefix must NOT match.
-        assert_eq!(snap.resolve(Path::new("/home/u/projects/ab/f.rs")), None);
-    }
-
-    #[test]
-    fn snapshot_drops_empty_and_reserved_pro_codes() {
-        let snap = ProjectRegistrySnapshot::from_rows([
-            ("".into(), "/x".into()),
-            ("PRO".into(), "/y".into()),
-            ("AXO".into(), "/home/u/projects/axon".into()),
-        ]);
-        assert_eq!(snap.len(), 1);
-        assert_eq!(
-            snap.resolve(Path::new("/home/u/projects/axon/src/f.rs")),
-            Some("AXO")
-        );
-    }
-
-    #[test]
-    fn snapshot_into_resolver_returns_unk_sentinel_for_unmatched() {
-        let r =
+    fn unresolved_path_is_an_error_never_a_sentinel() {
+        let resolver = ProjectCodeResolver::from_snapshot(
             ProjectRegistrySnapshot::from_rows([("AXO".into(), "/home/u/projects/axon".into())])
-                .into_resolver();
-        assert_eq!(r(Path::new("/home/u/projects/axon/x.rs")), "AXO");
-        assert_eq!(r(Path::new("/tmp/foo.rs")), "UNK");
+                .unwrap(),
+        );
+        assert!(matches!(
+            resolver.resolve(Path::new("/tmp/foo.rs")),
+            Err(ProjectResolutionError::UnregisteredPath(_))
+        ));
+    }
+
+    #[test]
+    fn replacement_is_immediately_visible() {
+        let resolver = ProjectCodeResolver::from_snapshot(ProjectRegistrySnapshot::default());
+        assert!(resolver.resolve(Path::new("/p/x.rs")).is_err());
+        resolver
+            .replace(ProjectRegistrySnapshot::from_rows([("NEW".into(), "/p".into())]).unwrap());
+        assert_eq!(
+            resolver.resolve(Path::new("/p/x.rs")).unwrap().as_str(),
+            "NEW"
+        );
+    }
+
+    #[test]
+    fn invalid_registry_row_fails_the_whole_snapshot() {
+        assert!(ProjectRegistrySnapshot::from_rows([(
+            "lower".into(),
+            "/valid/absolute/path".into(),
+        )])
+        .is_err());
+        assert!(
+            ProjectRegistrySnapshot::from_rows([("AXO".into(), "relative/path".into())]).is_err()
+        );
+    }
+
+    #[test]
+    fn chunk_project_code_parser_preserves_existing_contract() {
+        assert_eq!(
+            project_code_from_chunk_id("AXO::path::name::chunk"),
+            Some("AXO")
+        );
+        assert_eq!(project_code_from_chunk_id("::bad"), None);
+        assert_eq!(project_code_from_chunk_id(""), None);
     }
 }

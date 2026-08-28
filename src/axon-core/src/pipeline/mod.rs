@@ -83,7 +83,8 @@ pub use orchestrator::{
     PipelineBWorkerCounts,
 };
 pub use project_resolver::{
-    const_resolver, project_code_from_chunk_id, ProjectCodeResolver, ProjectRegistrySnapshot,
+    const_resolver, project_code_from_chunk_id, ProjectCode, ProjectCodeResolver,
+    ProjectRegistrySnapshot,
 };
 pub use stage_a1::a1_prepare;
 pub use stage_a2::a2_transform;

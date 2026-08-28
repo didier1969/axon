@@ -28,9 +28,9 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use axon_core::graph::GraphStore;
 use axon_core::pipeline::{
-    const_resolver, spawn_pipeline_a, spawn_pipeline_b_full_multi,
-    B2Embedder, ChunkForEmbedding, GpuB2Embedder, NoOpEmbedder, PipelineAWorkerCounts,
-    PipelineBWorkerCounts, PipelineChannelCaps, StageSnapshot,
+    const_resolver, spawn_pipeline_a, spawn_pipeline_b_full_multi, B2Embedder, ChunkForEmbedding,
+    GpuB2Embedder, NoOpEmbedder, PipelineAWorkerCounts, PipelineBWorkerCounts, PipelineChannelCaps,
+    StageSnapshot,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -273,6 +273,9 @@ async fn run() -> Result<()> {
     );
 
     let resolver = const_resolver(args.project.clone());
+    let admitted_project = resolver
+        .resolve(std::path::Path::new("/"))
+        .expect("constant bench resolver must resolve every path");
     let mut handles_a = spawn_pipeline_a(counts_a, caps, store.clone(), resolver);
 
     // Slice 5 SOTA — the bench creates its own b_chunks channel and
@@ -280,13 +283,8 @@ async fn run() -> Result<()> {
     // SELECT-with-content from PG (a chunk B2 just persisted via A3).
     let (b_chunks_tx, b_chunks_rx) = tokio::sync::mpsc::channel::<ChunkForEmbedding>(caps.internal);
 
-    let mut handles_b = spawn_pipeline_b_full_multi(
-        counts_b,
-        caps,
-        store.clone(),
-        vec![embedder],
-        b_chunks_rx,
-    );
+    let mut handles_b =
+        spawn_pipeline_b_full_multi(counts_b, caps, store.clone(), vec![embedder], b_chunks_rx);
 
     // Bench-local demand_pull feeder : poll PG for chunks needing
     // embedding and push them via b_chunks_tx. Mirrors the production
@@ -341,6 +339,7 @@ async fn run() -> Result<()> {
     // would leave A1 workers waiting on recv() forever.
     let input_tx = handles_a.input_tx;
     let feeder_files = files.clone();
+    let feeder_project = admitted_project;
     let feeder = tokio::spawn(async move {
         if cycle {
             // Sustained mode : recycle the file list until --duration-secs
@@ -353,7 +352,14 @@ async fn run() -> Result<()> {
                             return;
                         }
                     }
-                    if input_tx.send(path.clone()).await.is_err() {
+                    if input_tx
+                        .send(axon_core::pipeline::types::AdmittedPath {
+                            path: path.clone(),
+                            project_code: feeder_project.clone(),
+                        })
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -363,7 +369,14 @@ async fn run() -> Result<()> {
             }
         } else {
             for path in feeder_files {
-                if input_tx.send(path).await.is_err() {
+                if input_tx
+                    .send(axon_core::pipeline::types::AdmittedPath {
+                        path,
+                        project_code: feeder_project.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }

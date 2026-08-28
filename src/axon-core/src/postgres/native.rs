@@ -162,12 +162,17 @@ impl NativePgCtx {
                 Err(e) => return error_envelope("acquire", &sql, &e.to_string()),
             };
             if let Err(e) = apply_session_setup(&conn, &schema).await {
+                rollback_or_evict(conn, "query_json_session_setup").await;
                 return db_error_envelope("set_search_path", &sql, &e);
             }
             if !returns_rows {
                 return match conn.batch_execute(&sql).await {
                     Ok(_) => "[]".to_string(),
-                    Err(e) => db_error_envelope("execute", &sql, &e),
+                    Err(e) => {
+                        let envelope = db_error_envelope("execute", &sql, &e);
+                        rollback_or_evict(conn, "query_json_execute").await;
+                        envelope
+                    }
                 };
             }
             match conn.query(&sql, &[]).await {
@@ -416,6 +421,7 @@ impl NativePgCtx {
             };
             if let Err(e) = apply_session_setup(&conn, &schema).await {
                 tracing::warn!("native pg execute: set search_path failed: {e}");
+                rollback_or_evict(conn, "session_setup").await;
                 return Err(format!("set search_path failed: {e}"));
             }
             match conn.batch_execute(&sql).await {
@@ -435,6 +441,7 @@ impl NativePgCtx {
                         })
                         .unwrap_or_else(|| e.to_string());
                     tracing::warn!("native pg execute: {detail} | {sql}");
+                    rollback_or_evict(conn, "batch_execute").await;
                     Err(detail)
                 }
             }
@@ -464,9 +471,11 @@ impl NativePgCtx {
             .get()
             .await
             .map_err(|e| PgError::acquire(stage, sql, e.to_string()))?;
-        apply_session_setup(&conn, &self.schema_search_path)
-            .await
-            .map_err(|e| PgError::from_tokio("set_search_path", sql, &e))?;
+        if let Err(err) = apply_session_setup(&conn, &self.schema_search_path).await {
+            let pg_err = PgError::from_tokio("set_search_path", sql, &err);
+            rollback_or_evict(conn, stage).await;
+            return Err(pg_err);
+        }
         Ok(conn)
     }
 
@@ -482,9 +491,14 @@ impl NativePgCtx {
     /// Async multi-statement execute (BEGIN/…/COMMIT batches, DDL, writes).
     pub async fn execute_batch_async(&self, sql: &str) -> Result<(), PgError> {
         let conn = self.acquire_and_setup("execute", sql).await?;
-        conn.batch_execute(sql)
-            .await
-            .map_err(|e| PgError::from_tokio("execute", sql, &e))
+        match conn.batch_execute(sql).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let pg_err = PgError::from_tokio("execute", sql, &err);
+                rollback_or_evict(conn, "execute").await;
+                Err(pg_err)
+            }
+        }
     }
 
     /// Async ANN (HNSW) read — mirrors `run_ann_query_json` (SET LOCAL
@@ -521,6 +535,23 @@ impl NativePgCtx {
             .await
             .map_err(|e| PgError::from_tokio("ann_commit", sql, &e))?;
         Ok(rows)
+    }
+}
+
+static POOL_CONNECTION_EVICTIONS_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn pool_connection_evictions_total() -> u64 {
+    POOL_CONNECTION_EVICTIONS_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A multi-statement batch can leave PostgreSQL in `25P02` until ROLLBACK.
+/// Never return such a session to deadpool: reset it, or detach and close it.
+async fn rollback_or_evict(conn: deadpool_postgres::Client, stage: &str) {
+    if let Err(err) = conn.batch_execute("ROLLBACK").await {
+        tracing::error!(stage, error = %err, "native pg execute: rollback failed; evicting pooled connection");
+        POOL_CONNECTION_EVICTIONS_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        drop(deadpool_postgres::Client::take(conn));
     }
 }
 
@@ -926,6 +957,10 @@ mod tests {
         if std::env::var("AXON_PG_LOCK_TIMEOUT_MS").is_ok() {
             return; // operator override in effect; the default is not under test
         }
-        assert_eq!(lock_timeout_ms(), 10_000, "designed default lock_timeout is 10s");
+        assert_eq!(
+            lock_timeout_ms(),
+            10_000,
+            "designed default lock_timeout is 10s"
+        );
     }
 }

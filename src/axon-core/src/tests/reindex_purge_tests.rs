@@ -32,10 +32,12 @@ mod tests {
     fn parsed_file(path: &str, content: &str, symbols: Vec<Symbol>) -> ParsedFile {
         ParsedFile {
             path: PathBuf::from(path),
+            project_code: crate::pipeline::ProjectCode::parse("AXO").unwrap(),
             content: content.to_string(),
             content_hash: format!("hash-{}", content.len()),
             mtime_ms: 0,
             size_bytes: content.len() as u64,
+            skip_reason: None,
             symbols,
             relations: Vec::new(),
             security_findings: Vec::new(),
@@ -51,7 +53,11 @@ mod tests {
 
         store
             .upsert_graph_batch(
-                &[parsed_file(path, "fn func_alpha() {}", vec![sym("func_alpha")])],
+                &[parsed_file(
+                    path,
+                    "fn func_alpha() {}",
+                    vec![sym("func_alpha")],
+                )],
                 "AXO",
             )
             .unwrap();
@@ -66,7 +72,11 @@ mod tests {
         // Re-index the SAME file with the symbol renamed.
         store
             .upsert_graph_batch(
-                &[parsed_file(path, "fn func_beta() {}", vec![sym("func_beta")])],
+                &[parsed_file(
+                    path,
+                    "fn func_beta() {}",
+                    vec![sym("func_beta")],
+                )],
                 "AXO",
             )
             .unwrap();
@@ -110,7 +120,11 @@ mod tests {
 
         store
             .upsert_graph_batch(
-                &[parsed_file(path, "fn callee_fn() {}", vec![sym("callee_fn")])],
+                &[parsed_file(
+                    path,
+                    "fn callee_fn() {}",
+                    vec![sym("callee_fn")],
+                )],
                 "AXO",
             )
             .unwrap();

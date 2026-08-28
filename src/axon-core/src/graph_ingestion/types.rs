@@ -199,6 +199,9 @@ pub struct IndexerRuntimeTruthRecord {
     /// `persist_queue_depth` the queued VectorPersistOutbox rows.
     pub ready_queue_chunks: i64,
     pub persist_queue_depth: i64,
+    pub a3_consecutive_failures: i64,
+    pub a3_last_error: Option<String>,
+    pub pg_pool_evictions_total: i64,
 }
 
 /// DEC-AXO-901626 — PG-canonical half of the observable embedder state,

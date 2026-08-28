@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
-use super::types::PreparedFile;
+use super::types::{AdmittedPath, PreparedFile};
 
 /// Extract `(mtime_ms, size_bytes)` from filesystem metadata — the level-1
 /// change-detection key shared by A1 and the orchestrator's pre-read filter
@@ -48,7 +48,9 @@ fn a1_memory_backoff_cap_ms() -> u64 {
 /// This is the closure handed to [`super::spawn_stage_workers`] for stage A1.
 /// Errors are surfaced verbatim so the worker pool can record them in
 /// `StageMetrics::errors_total` without crashing the pipeline.
-pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
+pub async fn a1_prepare(admitted: AdmittedPath) -> Result<PreparedFile> {
+    let path = admitted.path;
+    let project_code = admitted.project_code;
     // REQ-AXO-902152 — host-safety co-tenant backoff. Under CRITICAL aggregate VM
     // pressure (published by the memory watchdog from host MemAvailable), slow NEW
     // A1 intake so in-flight content drains and the reclaimer can trim, instead of
@@ -96,7 +98,13 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
             path.display(),
             size_bytes
         );
-        return Ok(skipped_prepared(path, size_bytes, mtime_ms, "oversized"));
+        return Ok(skipped_prepared(
+            path,
+            project_code,
+            size_bytes,
+            mtime_ms,
+            "oversized",
+        ));
     }
 
     // Read as UTF-8 text. Binary content surfaces as `InvalidData` — skip it
@@ -111,7 +119,13 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
                 path.display(),
                 size_bytes
             );
-            return Ok(skipped_prepared(path, size_bytes, mtime_ms, "binary"));
+            return Ok(skipped_prepared(
+                path,
+                project_code,
+                size_bytes,
+                mtime_ms,
+                "binary",
+            ));
         }
         Err(err) => {
             return Err(err).with_context(|| format!("A1 read failed for {}", path.display()));
@@ -133,10 +147,12 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
         );
         return Ok(PreparedFile {
             path,
+            project_code,
             content: String::new(),
             content_hash,
             mtime_ms,
             size_bytes,
+            skip_reason: Some("minified".to_string()),
         });
     }
 
@@ -156,10 +172,12 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
         );
         return Ok(PreparedFile {
             path,
+            project_code,
             content: String::new(),
             content_hash,
             mtime_ms,
             size_bytes,
+            skip_reason: Some("generated".to_string()),
         });
     }
 
@@ -172,12 +190,15 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
     );
     // REQ-AXO-901906 — memory is bounded by the (small) A-content channel caps +
     // send().await backpressure (mirrors pipeline B); no per-file budget guard.
+    let skip_reason = content.is_empty().then(|| "empty".to_string());
     Ok(PreparedFile {
         path,
+        project_code,
         content,
         content_hash,
         mtime_ms,
         size_bytes,
+        skip_reason,
     })
 }
 
@@ -185,14 +206,22 @@ pub async fn a1_prepare(path: PathBuf) -> Result<PreparedFile> {
 /// read. Emits empty content (→ A2 zero-symbol fast-path → A3 'parsed' marker)
 /// with a hash keyed on size+mtime so a later edit changing either re-evaluates
 /// the file instead of being deduped as "already seen".
-fn skipped_prepared(path: PathBuf, size_bytes: u64, mtime_ms: i64, reason: &str) -> PreparedFile {
+fn skipped_prepared(
+    path: PathBuf,
+    project_code: super::project_resolver::ProjectCode,
+    size_bytes: u64,
+    mtime_ms: i64,
+    reason: &str,
+) -> PreparedFile {
     let content_hash = sha256_hex(&format!("__axon_skip_{reason}__:{size_bytes}:{mtime_ms}"));
     PreparedFile {
         path,
+        project_code,
         content: String::new(),
         content_hash,
         mtime_ms,
         size_bytes,
+        skip_reason: Some(reason.to_string()),
     }
 }
 
@@ -217,13 +246,20 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn admitted(path: PathBuf) -> AdmittedPath {
+        AdmittedPath {
+            path,
+            project_code: super::super::project_resolver::ProjectCode::parse("AXO").unwrap(),
+        }
+    }
+
     #[tokio::test]
     async fn a1_prepare_returns_content_plus_stable_hash() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         write!(file, "fn main() {{ println!(\"hi\"); }}").unwrap();
         let path = file.path().to_path_buf();
 
-        let prep = a1_prepare(path.clone()).await.unwrap();
+        let prep = a1_prepare(admitted(path.clone())).await.unwrap();
 
         assert_eq!(prep.path, path);
         assert_eq!(prep.content, "fn main() { println!(\"hi\"); }");
@@ -241,8 +277,8 @@ mod tests {
         let mut b = tempfile::NamedTempFile::new().unwrap();
         write!(a, "identical source").unwrap();
         write!(b, "identical source").unwrap();
-        let ha = a1_prepare(a.path().to_path_buf()).await.unwrap();
-        let hb = a1_prepare(b.path().to_path_buf()).await.unwrap();
+        let ha = a1_prepare(admitted(a.path().to_path_buf())).await.unwrap();
+        let hb = a1_prepare(admitted(b.path().to_path_buf())).await.unwrap();
         assert_eq!(ha.content_hash, hb.content_hash);
     }
 
@@ -252,14 +288,14 @@ mod tests {
         let mut b = tempfile::NamedTempFile::new().unwrap();
         write!(a, "version one").unwrap();
         write!(b, "version two").unwrap();
-        let ha = a1_prepare(a.path().to_path_buf()).await.unwrap();
-        let hb = a1_prepare(b.path().to_path_buf()).await.unwrap();
+        let ha = a1_prepare(admitted(a.path().to_path_buf())).await.unwrap();
+        let hb = a1_prepare(admitted(b.path().to_path_buf())).await.unwrap();
         assert_ne!(ha.content_hash, hb.content_hash);
     }
 
     #[tokio::test]
     async fn a1_prepare_fails_cleanly_when_path_does_not_exist() {
-        let res = a1_prepare(PathBuf::from("/tmp/does/not/exist/axon-test")).await;
+        let res = a1_prepare(admitted(PathBuf::from("/tmp/does/not/exist/axon-test"))).await;
         assert!(
             res.is_err(),
             "missing path must surface an error to the worker pool"
@@ -276,7 +312,9 @@ mod tests {
         // size guard fires before the read either way.
         file.write_all("x\n".repeat(2_800_000).as_bytes()).unwrap();
         file.flush().unwrap();
-        let prep = a1_prepare(file.path().to_path_buf()).await.unwrap();
+        let prep = a1_prepare(admitted(file.path().to_path_buf()))
+            .await
+            .unwrap();
         assert!(
             prep.content.is_empty(),
             "oversized file must yield empty content"
@@ -293,7 +331,9 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all("x".repeat(9000).as_bytes()).unwrap(); // one 9 KB line > 8 KB
         file.flush().unwrap();
-        let prep = a1_prepare(file.path().to_path_buf()).await.unwrap();
+        let prep = a1_prepare(admitted(file.path().to_path_buf()))
+            .await
+            .unwrap();
         assert!(
             prep.content.is_empty(),
             "minified file must yield empty content"
@@ -311,7 +351,9 @@ mod tests {
         file.write_all(&[0xFFu8, 0xFE, 0x00, 0x9F, 0x01, 0x02])
             .unwrap(); // invalid UTF-8
         file.flush().unwrap();
-        let prep = a1_prepare(file.path().to_path_buf()).await.unwrap();
+        let prep = a1_prepare(admitted(file.path().to_path_buf()))
+            .await
+            .unwrap();
         assert!(
             prep.content.is_empty(),
             "binary file must yield empty content"

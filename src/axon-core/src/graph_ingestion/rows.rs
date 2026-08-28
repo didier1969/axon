@@ -62,6 +62,18 @@ pub struct RelationRow {
     pub project_code: String,
 }
 
+/// Redacted detector evidence persisted in the same A3 transaction as its
+/// IndexedFile/graph owner (REQ-AXO-902541).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurityFindingRow {
+    pub file_path: String,
+    pub rule_id: String,
+    pub line: i64,
+    pub severity: String,
+    pub redacted_excerpt: String,
+    pub detected_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkEmbeddingPersistRow {
     pub chunk_id: String,

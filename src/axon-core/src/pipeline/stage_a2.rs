@@ -58,10 +58,12 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
         );
         return Ok(ParsedFile {
             path: prep.path,
+            project_code: prep.project_code,
             content: prep.content,
             content_hash: prep.content_hash,
             mtime_ms: prep.mtime_ms,
             size_bytes: prep.size_bytes,
+            skip_reason: prep.skip_reason,
             symbols: Vec::new(),
             relations: Vec::new(),
             security_findings: Vec::new(),
@@ -71,6 +73,7 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
     let hash_for_skip = prep.content_hash.clone();
     let mtime_for_skip = prep.mtime_ms;
     let size_for_skip = prep.size_bytes;
+    let project_for_skip = prep.project_code.clone();
     // The bounded regex engine is independent from language parsing. Run it
     // before the parser timeout so a slow grammar cannot erase security truth.
     let security_findings = crate::parser::scan_secrets(&prep.content);
@@ -121,10 +124,12 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
         // it on the next walk.
         Ok(ParsedFile {
             path: prep.path,
+            project_code: prep.project_code,
             content: prep.content,
             content_hash: prep.content_hash,
             mtime_ms: prep.mtime_ms,
             size_bytes: prep.size_bytes,
+            skip_reason: prep.skip_reason,
             symbols,
             relations,
             security_findings,
@@ -162,10 +167,12 @@ pub async fn a2_transform(prep: PreparedFile) -> Result<ParsedFile> {
             );
             return Ok(ParsedFile {
                 path: path_for_skip,
+                project_code: project_for_skip,
                 content: String::new(),
                 content_hash: hash_for_skip,
                 mtime_ms: mtime_for_skip,
                 size_bytes: size_for_skip,
+                skip_reason: Some("parse_timeout".to_string()),
                 symbols: Vec::new(),
                 relations: Vec::new(),
                 security_findings: security_findings_for_timeout,
@@ -234,10 +241,12 @@ mod tests {
     fn prep_with(path: &str, content: &str) -> PreparedFile {
         PreparedFile {
             path: PathBuf::from(path),
+            project_code: super::super::ProjectCode::parse("AXO").unwrap(),
             content: content.to_string(),
             content_hash: "deadbeef".to_string(),
             mtime_ms: 1_700_000_000_000,
             size_bytes: content.len() as u64,
+            skip_reason: None,
         }
     }
 
@@ -298,7 +307,10 @@ mod tests {
         // The contract of the timeout branch: a CLEAN zero-symbol skip (never an Err —
         // an Err would leave the file unmarked and re-queued forever, REQ-AXO-901885).
         if super::parse_timeouts() > before {
-            assert!(parsed.symbols.is_empty(), "a timed-out parse must yield no symbols");
+            assert!(
+                parsed.symbols.is_empty(),
+                "a timed-out parse must yield no symbols"
+            );
             assert!(parsed.relations.is_empty());
             assert_eq!(parsed.path, PathBuf::from("/tmp/slow.rs"));
         }
@@ -327,7 +339,10 @@ mod tests {
             parsed.security_findings
         );
         assert!(
-            parsed.symbols.iter().all(|symbol| !symbol.kind.starts_with("SECRET_")),
+            parsed
+                .symbols
+                .iter()
+                .all(|symbol| !symbol.kind.starts_with("SECRET_")),
             "security findings must never masquerade as graph symbols"
         );
         // The language parser must ALSO still run (scan_secrets is additive,

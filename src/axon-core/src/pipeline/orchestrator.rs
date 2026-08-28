@@ -12,7 +12,6 @@
 //! collapsed into `demand_pull_b`, which SELECTs pending chunks WITH content
 //! and feeds B2 → B3 on the `b_chunks` channel topology.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -27,7 +26,7 @@ use super::stage_a3::EnrolledFile;
 use super::stage_b1::ChunkForEmbedding;
 use super::stage_b2::{B2Embedder, EmbeddedChunk};
 use super::stage_b3::PersistedEmbedding;
-use super::types::ParsedFile;
+use super::types::{AdmittedPath, ParsedFile};
 use super::worker_pool::spawn_stage_workers;
 
 /// Tunable per-stage worker counts. Operator-overridable through env vars
@@ -139,7 +138,7 @@ impl PipelineAWorkerCounts {
 /// with content directly and emits `ChunkForEmbedding` to the b_chunks
 /// channel owned by `pipeline_runtime`.
 pub struct PipelineAHandles {
-    pub input_tx: Sender<PathBuf>,
+    pub input_tx: Sender<AdmittedPath>,
     pub output_rx: Receiver<EnrolledFile>,
     pub metrics_a1: Arc<StageMetrics>,
     pub metrics_a2: Arc<StageMetrics>,
@@ -178,14 +177,14 @@ pub fn spawn_pipeline_a_with_cache(
     counts: PipelineAWorkerCounts,
     caps: PipelineChannelCaps,
     store: Arc<GraphStore>,
-    resolver: super::project_resolver::ProjectCodeResolver,
+    _resolver: super::project_resolver::ProjectCodeResolver,
     dedup_cache: Option<Arc<super::IndexedFileCache>>,
 ) -> PipelineAHandles {
     // REQ-AXO-901906 — input/output carry tiny payloads (PathBuf / chunk_ids)
     // so they keep the large `internal` cap; the A1→A2 / A2→A3 channels carry
     // file CONTENT (≤5 MB/slot) and use the small `a_content` cap — that pairing
     // (small content channel + send().await) IS the pipeline-A memory bound.
-    let (input_tx, input_rx) = mpsc::channel::<PathBuf>(caps.internal);
+    let (input_tx, input_rx) = mpsc::channel::<AdmittedPath>(caps.internal);
     let (a1_to_a2_tx, a1_to_a2_rx) = mpsc::channel(caps.a_content);
     let (a2_to_a3_tx, a2_to_a3_rx) = mpsc::channel(caps.a_content);
     let (output_tx, output_rx) = mpsc::channel::<EnrolledFile>(caps.internal);
@@ -219,21 +218,21 @@ pub fn spawn_pipeline_a_with_cache(
     // (persist_discovery_batch) before the PIL-AXO-007 direct flow removed it,
     // so a re-walk / restart re-reads only the delta, not the whole fleet.
     let a1_input_rx = if let Some(cache_l1) = dedup_cache.clone() {
-        let (pf_tx, pf_rx) = mpsc::channel::<PathBuf>(caps.internal);
+        let (pf_tx, pf_rx) = mpsc::channel::<AdmittedPath>(caps.internal);
         tokio::spawn(async move {
             let mut in_rx = input_rx;
             let (mut skipped, mut forwarded): (u64, u64) = (0, 0);
-            while let Some(path) = in_rx.recv().await {
-                let needs_read = match tokio::fs::metadata(&path).await {
+            while let Some(admitted) = in_rx.recv().await {
+                let needs_read = match tokio::fs::metadata(&admitted.path).await {
                     Ok(md) => {
                         let (mtime_ms, size_bytes) = super::stage_a1::mtime_size_ms(&md);
-                        cache_l1.should_read(&path.to_string_lossy(), mtime_ms, size_bytes)
+                        cache_l1.should_read(&admitted.path.to_string_lossy(), mtime_ms, size_bytes)
                     }
                     // stat failed (deleted / perm) → let A1 surface it cleanly.
                     Err(_) => true,
                 };
                 if needs_read {
-                    if pf_tx.send(path).await.is_err() {
+                    if pf_tx.send(admitted).await.is_err() {
                         break;
                     }
                     forwarded += 1;
@@ -265,7 +264,7 @@ pub fn spawn_pipeline_a_with_cache(
         counts.a1,
         a1_input_rx,
         a1_to_a2_tx,
-        |path: PathBuf| async move { a1_prepare(path).await },
+        |path: AdmittedPath| async move { a1_prepare(path).await },
         metrics_a1.clone(),
     );
 
@@ -356,7 +355,6 @@ pub fn spawn_pipeline_a_with_cache(
                 a2_to_a3_rx,
                 output_tx,
                 store.clone(),
-                resolver.clone(),
                 metrics_a3.clone(),
                 bs,
                 bto,
@@ -370,7 +368,6 @@ pub fn spawn_pipeline_a_with_cache(
                     wrx,
                     output_tx.clone(),
                     store.clone(),
-                    resolver.clone(),
                     metrics_a3.clone(),
                     bs,
                     bto,
@@ -575,6 +572,13 @@ mod tests {
     /// chunker bounds this REQ replaced with deterministic encode counts.
     const LIVENESS_TIMEOUT_SECS: u64 = 60;
 
+    fn admitted(path: std::path::PathBuf) -> AdmittedPath {
+        AdmittedPath {
+            path,
+            project_code: super::super::ProjectCode::parse("AXO").unwrap(),
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pipeline_a_end_to_end_persists_graph_chunks_and_indexed_file_for_a_rust_fixture() {
         // Session-19 contract: A persists graph + chunks in ONE transaction
@@ -599,12 +603,15 @@ mod tests {
             super::super::const_resolver("AXO"),
         );
 
-        handles.input_tx.send(path.clone()).await.unwrap();
+        handles.input_tx.send(admitted(path.clone())).await.unwrap();
 
-        let receipt = tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), handles.output_rx.recv())
-            .await
-            .expect("pipeline A must produce a receipt within 5 s")
-            .expect("output channel must yield Some(EnrolledFile)");
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(LIVENESS_TIMEOUT_SECS),
+            handles.output_rx.recv(),
+        )
+        .await
+        .expect("pipeline A must produce a receipt within 5 s")
+        .expect("output channel must yield Some(EnrolledFile)");
 
         assert_eq!(receipt.path, path.to_string_lossy());
         assert_eq!(receipt.content_hash.len(), 64, "sha256 hex digest");
@@ -686,7 +693,7 @@ mod tests {
             super::super::const_resolver("AXO"),
         );
 
-        handles.input_tx.send(path.clone()).await.unwrap();
+        handles.input_tx.send(admitted(path.clone())).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -764,12 +771,19 @@ mod tests {
         // left by sibling A-only tests, so B embedded a foreign chunk and the
         // `enrolled.chunk_ids.contains(&receipt.chunk_id)` assertion failed.
         // REQ-AXO-901903 — feed B by id (deterministic, residue-independent).
-        handles_a.input_tx.send(path.clone()).await.unwrap();
-
-        let enrolled = tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), handles_a.output_rx.recv())
+        handles_a
+            .input_tx
+            .send(admitted(path.clone()))
             .await
-            .expect("A must produce a receipt within 5 s")
-            .expect("A output channel must yield Some(EnrolledFile)");
+            .unwrap();
+
+        let enrolled = tokio::time::timeout(
+            Duration::from_secs(LIVENESS_TIMEOUT_SECS),
+            handles_a.output_rx.recv(),
+        )
+        .await
+        .expect("A must produce a receipt within 5 s")
+        .expect("A output channel must yield Some(EnrolledFile)");
 
         // Feed B ONLY this file's chunks (by id), mirroring demand_pull_b's
         // SELECT-with-content but scoped so the test is independent of any other
@@ -805,10 +819,13 @@ mod tests {
 
         let mut persisted = 0usize;
         for _ in 0..expected_chunks {
-            let receipt = tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), handles_b.output_rx.recv())
-                .await
-                .expect("B3 must produce a persist receipt within 5 s")
-                .expect("B3 output channel must yield Some(PersistedEmbedding)");
+            let receipt = tokio::time::timeout(
+                Duration::from_secs(LIVENESS_TIMEOUT_SECS),
+                handles_b.output_rx.recv(),
+            )
+            .await
+            .expect("B3 must produce a persist receipt within 5 s")
+            .expect("B3 output channel must yield Some(PersistedEmbedding)");
             assert!(enrolled.chunk_ids.contains(&receipt.chunk_id));
             persisted += 1;
         }

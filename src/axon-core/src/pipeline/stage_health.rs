@@ -146,8 +146,14 @@ impl StageHealthSnapshot {
 /// enough to rule out a single transient flush, short enough to stop the CPU
 /// hemorrhage quickly.
 pub const B3_SYSTEMIC_FAILURE_THRESHOLD: u64 = 8;
+pub const A3_SYSTEMIC_FAILURE_THRESHOLD: u64 = 3;
 
+static A3_HEALTH: OnceLock<StageHealth> = OnceLock::new();
 static B3_HEALTH: OnceLock<StageHealth> = OnceLock::new();
+
+pub fn a3_health() -> &'static StageHealth {
+    A3_HEALTH.get_or_init(StageHealth::default)
+}
 
 /// Process-global B3 (embedding persist) health signal.
 pub fn b3_health() -> &'static StageHealth {

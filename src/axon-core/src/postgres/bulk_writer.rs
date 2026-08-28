@@ -264,7 +264,16 @@ pub(crate) async fn flush_chunk_embeddings_async(
     // cost). On a DATA poison, bisect so one bad embedding row can't freeze the
     // whole batch (this was the most exposed of the 5 original COPY sites: it had
     // neither a NUL pre-filter nor bisection before this residual slice).
-    match copy_chunk_embeddings_tx(client, project_code, model_id, rows, embedded_at_ms, vec_type.clone()).await {
+    match copy_chunk_embeddings_tx(
+        client,
+        project_code,
+        model_id,
+        rows,
+        embedded_at_ms,
+        vec_type.clone(),
+    )
+    .await
+    {
         Ok(()) => return Ok(()),
         Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
             Some(CopyErrorClass::Other) | None => return Err(e),
@@ -551,6 +560,19 @@ fn pg_sqlstate(err: &anyhow::Error) -> Option<String> {
         .map(|c| c.code().to_string())
 }
 
+pub(crate) fn is_transient_pg_error(err: &anyhow::Error) -> bool {
+    matches!(
+        pg_sqlstate(err).as_deref().map(classify_copy_error),
+        Some(CopyErrorClass::Transient)
+    ) || {
+        let message = format!("{err:#}").to_ascii_lowercase();
+        message.contains("pool acquire")
+            || message.contains("connection closed")
+            || message.contains("connection reset")
+            || message.contains("broken pipe")
+    }
+}
+
 /// Pure bisection planner: a work-stack of row ranges to probe + the isolated poison
 /// indices. The async driver pops a range (`next`), probes that slice's COPY in its own
 /// tx, and reports a DATA failure (`on_data`, which splits or records a singleton poison)
@@ -565,7 +587,11 @@ struct BisectPlanner {
 impl BisectPlanner {
     fn new(total: usize) -> Self {
         BisectPlanner {
-            stack: if total == 0 { Vec::new() } else { vec![0..total] },
+            stack: if total == 0 {
+                Vec::new()
+            } else {
+                vec![0..total]
+            },
             poison: Vec::new(),
         }
     }
@@ -705,6 +731,11 @@ pub struct PgBulkBatch {
     /// merge (`copy_edges_in_tx`) is already relation-type-generic.
     pub other_edges: Vec<(String, RelationRow)>,
     pub indexed_files: Vec<(String, String, i64, i64, i64)>,
+    pub skipped_files: Vec<(String, String)>,
+    /// Complete per-file detector snapshots. Every path is deleted first, then
+    /// these rows are inserted, inside the graph transaction.
+    pub security_files: Vec<String>,
+    pub security_findings: Vec<crate::graph_ingestion::rows::SecurityFindingRow>,
     /// REQ-AXO-901860 — the single project_code this batch belongs to
     /// (A3 groups by resolved project_code, one group per flush). The
     /// writer uses it to UPSERT the `axon.Project` FK parent first and to
@@ -725,6 +756,9 @@ impl PgBulkBatch {
             && self.calls_nif.is_empty()
             && self.other_edges.is_empty()
             && self.indexed_files.is_empty()
+            && self.skipped_files.is_empty()
+            && self.security_files.is_empty()
+            && self.security_findings.is_empty()
     }
 
     pub fn row_count(&self) -> usize {
@@ -735,6 +769,9 @@ impl PgBulkBatch {
             + self.calls_nif.len()
             + self.other_edges.len()
             + self.indexed_files.len()
+            + self.skipped_files.len()
+            + self.security_files.len()
+            + self.security_findings.len()
     }
 }
 
@@ -774,7 +811,7 @@ pub(crate) async fn flush_batch_async(
     match flush_batch_tx(client, batch).await {
         Ok(()) => Ok(()),
         Err(e) => match pg_sqlstate(&e).as_deref().map(classify_copy_error) {
-            Some(CopyErrorClass::Data) => {
+            Some(CopyErrorClass::Data) if batch.security_files.is_empty() => {
                 log::warn!(
                     "bulk_writer batch atomic flush hit a DATA poison ({e:#}); retrying table-by-table with bisection so one bad row can't freeze the drain (REQ-AXO-902198)"
                 );
@@ -787,19 +824,13 @@ pub(crate) async fn flush_batch_async(
                 // (Chunk's FK parent) → Symbol → Chunk → Edge (last, since edges reference
                 // symbol/file ids). Every clean row across every table lands; only the
                 // provably-poisoned ones are dropped (and counted, see poison_rows_dropped).
-                if !batch.project_code.is_empty() {
-                    let now_ms = chrono::Utc::now().timestamp_millis();
-                    client
-                        .execute(
-                            "INSERT INTO axon.Project (code, enrolled_at_ms) VALUES ($1, $2) \
-                             ON CONFLICT (code) DO NOTHING",
-                            &[&batch.project_code, &now_ms],
-                        )
-                        .await
-                        .context("bulk_writer resilient ensure axon.Project FK parent")?;
-                }
                 if !batch.indexed_files.is_empty() {
-                    flush_indexed_files_resilient_async(client, &batch.indexed_files, &batch.project_code).await?;
+                    flush_indexed_files_resilient_async(
+                        client,
+                        &batch.indexed_files,
+                        &batch.project_code,
+                    )
+                    .await?;
                 }
                 if !batch.symbols.is_empty() {
                     let vec_type = vector_type(client).await?;
@@ -839,10 +870,7 @@ pub(crate) async fn flush_batch_async(
 /// The batch flush transaction — the happy path, everything in one atomic tx. On a
 /// DATA-poison failure, `flush_batch_async` falls back to the table-by-table resilient
 /// flushes below instead of retrying this function (REQ-AXO-902198 residual).
-async fn flush_batch_tx(
-    client: &mut deadpool_postgres::Client,
-    batch: &PgBulkBatch,
-) -> Result<()> {
+async fn flush_batch_tx(client: &mut deadpool_postgres::Client, batch: &PgBulkBatch) -> Result<()> {
     // Pre-tx: ensure pgvector extension + cache the runtime-assigned
     // OID once. Both are idempotent and stay outside the bulk tx so a
     // failed extension load doesn't poison the whole batch.
@@ -863,25 +891,8 @@ async fn flush_batch_tx(
         .await
         .context("bulk_writer batch begin tx")?;
 
-    // REQ-AXO-901860 — guarantee the FK parents exist before any child row.
-    // Symbol / Chunk / IndexedFile all carry a NOT NULL project_code FK to
-    // axon.Project; Chunk additionally FKs ist.IndexedFile(path). A file that
-    // reaches A3 before the scanner enrolled it (the bootstrap walk feeds A1
-    // directly) used to fail the Symbol/Chunk insert with a FK violation,
-    // aborting the tx and poisoning the pooled connection — a 25P02 cascade
-    // that blocked embeddings, the heartbeat UPSERT, and dashboard_state for
-    // every project sharing the connection. The writer now owns its FK
-    // parents: ensure axon.Project, then ist.IndexedFile, before the children.
-    if !batch.project_code.is_empty() {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        tx.execute(
-            "INSERT INTO axon.Project (code, enrolled_at_ms) VALUES ($1, $2) \
-             ON CONFLICT (code) DO NOTHING",
-            &[&batch.project_code, &now_ms],
-        )
-        .await
-        .context("bulk_writer batch ensure axon.Project FK parent")?;
-    }
+    // REQ-AXO-902541 — ProjectCodeRegistry owns tenant creation. A3 may create
+    // IndexedFile (the graph FK parent), but never manufactures axon.Project.
     if !batch.indexed_files.is_empty() {
         // REQ-AXO-902011 — re-index-safe purge BEFORE the COPY merge, same tx:
         // an edited-in-place file (renamed/removed symbol, fewer chunk parts)
@@ -889,6 +900,21 @@ async fn flush_batch_tx(
         purge_reindexed_files_in_tx(&tx, &batch.indexed_files).await?;
         copy_indexed_files_in_tx(&tx, &batch.indexed_files, &batch.project_code).await?;
     }
+    for (path, reason) in &batch.skipped_files {
+        tx.execute(
+            "UPDATE ist.IndexedFile SET status='skipped', skip_reason=$2 WHERE path=$1",
+            &[path, reason],
+        )
+        .await
+        .context("A3 mark explicitly skipped file")?;
+    }
+    replace_security_findings_in_tx(
+        &tx,
+        &batch.project_code,
+        &batch.security_files,
+        &batch.security_findings,
+    )
+    .await?;
     if !batch.symbols.is_empty() {
         let vec_type = vec_type_opt
             .as_ref()
@@ -926,6 +952,44 @@ async fn flush_batch_tx(
     Ok(())
 }
 
+async fn replace_security_findings_in_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    project_code: &str,
+    files: &[String],
+    findings: &[crate::graph_ingestion::rows::SecurityFindingRow],
+) -> Result<()> {
+    for path in files {
+        tx.execute(
+            "DELETE FROM ist.SecurityFinding WHERE project_code = $1 AND file_path = $2",
+            &[&project_code, path],
+        )
+        .await
+        .context("A3 replace SecurityFinding delete snapshot")?;
+    }
+    for finding in findings {
+        tx.execute(
+            "INSERT INTO ist.SecurityFinding \
+             (project_code, file_path, rule_id, line, severity, redacted_excerpt, detected_ms) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7) \
+             ON CONFLICT (project_code, file_path, rule_id, line) DO UPDATE SET \
+               severity=EXCLUDED.severity, redacted_excerpt=EXCLUDED.redacted_excerpt, \
+               detected_ms=EXCLUDED.detected_ms",
+            &[
+                &project_code,
+                &finding.file_path,
+                &finding.rule_id,
+                &finding.line,
+                &finding.severity,
+                &finding.redacted_excerpt,
+                &finding.detected_ms,
+            ],
+        )
+        .await
+        .context("A3 replace SecurityFinding insert snapshot")?;
+    }
+    Ok(())
+}
+
 /// REQ-AXO-902011 — purge a re-indexed file's OWNED graph rows inside the bulk
 /// tx so editing a file in place (renamed/removed symbol, fewer chunk parts)
 /// leaves no orphan rows. Owned = its Chunks (by `file_path`), their
@@ -960,12 +1024,9 @@ async fn purge_reindexed_files_in_tx(
         )
         .await
         .context("purge_reindexed: ChunkEmbedding")?;
-        tx.execute(
-            "DELETE FROM ist.Chunk WHERE file_path = $1",
-            &path_only,
-        )
-        .await
-        .context("purge_reindexed: Chunk")?;
+        tx.execute("DELETE FROM ist.Chunk WHERE file_path = $1", &path_only)
+            .await
+            .context("purge_reindexed: Chunk")?;
         let path_params: [&(dyn tokio_postgres::types::ToSql + Sync); 1] = [path];
         tx.execute(
             "DELETE FROM ist.Symbol WHERE id IN \
@@ -989,12 +1050,9 @@ async fn purge_reindexed_files_in_tx(
         )
         .await
         .context("purge_reindexed: outbound edges of file's symbols (REQ-AXO-902204)")?;
-        tx.execute(
-            "DELETE FROM ist.Edge WHERE source_id = $1",
-            &path_params,
-        )
-        .await
-        .context("purge_reindexed: Edge")?;
+        tx.execute("DELETE FROM ist.Edge WHERE source_id = $1", &path_params)
+            .await
+            .context("purge_reindexed: Edge")?;
     }
     Ok(())
 }
@@ -1135,7 +1193,9 @@ async fn copy_symbols_tx(
         .await
         .context("bulk_writer Symbol begin tx (resilient)")?;
     copy_symbols_in_tx(&tx, rows, vec_type).await?;
-    tx.commit().await.context("bulk_writer Symbol commit (resilient)")?;
+    tx.commit()
+        .await
+        .context("bulk_writer Symbol commit (resilient)")?;
     Ok(())
 }
 
@@ -1394,7 +1454,9 @@ async fn copy_edges_tx(
         .await
         .context("bulk_writer edge begin tx (resilient)")?;
     copy_edges_in_tx(&tx, rows).await?;
-    tx.commit().await.context("bulk_writer edge commit (resilient)")?;
+    tx.commit()
+        .await
+        .context("bulk_writer edge commit (resilient)")?;
     Ok(())
 }
 
@@ -1460,7 +1522,7 @@ async fn flush_edges_resilient_async(
 pub(crate) const INDEXEDFILE_MERGE_SQL: &str = "INSERT INTO indexedfile \
              (path, project_code, content_hash, last_seen_ms, status, mtime_ms, size_bytes, lease_until_ms) \
          SELECT DISTINCT ON (s.path) \
-                s.path, $1, s.content_hash, s.last_seen_ms, 'parsed', s.mtime_ms, s.size_bytes, 0 \
+                s.path, $1, s.content_hash, s.last_seen_ms, 'indexed', s.mtime_ms, s.size_bytes, 0 \
              FROM _bulk_indexedfile_stage s \
          ORDER BY s.path, s.last_seen_ms DESC \
          ON CONFLICT (path) DO UPDATE SET \
@@ -1469,7 +1531,8 @@ pub(crate) const INDEXEDFILE_MERGE_SQL: &str = "INSERT INTO indexedfile \
              last_seen_ms    = EXCLUDED.last_seen_ms, \
              mtime_ms        = EXCLUDED.mtime_ms, \
              size_bytes      = EXCLUDED.size_bytes, \
-             status          = 'parsed', \
+             status          = 'indexed', \
+             skip_reason     = NULL, \
              retry_count     = 0, \
              last_attempt_ms = NULL, \
              lease_until_ms  = 0";
@@ -1582,7 +1645,9 @@ async fn copy_indexed_files_tx(
         .context("bulk_writer indexedfile begin tx (resilient)")?;
     purge_reindexed_files_in_tx(&tx, rows).await?;
     copy_indexed_files_in_tx(&tx, rows, project_code).await?;
-    tx.commit().await.context("bulk_writer indexedfile commit (resilient)")?;
+    tx.commit()
+        .await
+        .context("bulk_writer indexedfile commit (resilient)")?;
     Ok(())
 }
 
@@ -1639,7 +1704,6 @@ async fn flush_indexed_files_resilient_async(
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     /// REQ-AXO-902506 — LA garde : une attribution erronée doit se CORRIGER, pas survivre.
     ///
@@ -1800,7 +1864,10 @@ mod tests {
     fn strip_nul_removes_nul_bytes_and_borrows_when_clean() {
         // REQ-AXO-902197 — clean text is borrowed (no alloc); NULs are stripped so
         // the COPY batch never aborts on 0x00 (the frozen-drain incident).
-        assert!(matches!(strip_nul("clean body"), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(
+            strip_nul("clean body"),
+            std::borrow::Cow::Borrowed(_)
+        ));
         assert_eq!(strip_nul("clean body"), "clean body");
         assert!(matches!(strip_nul("a\0b\0c"), std::borrow::Cow::Owned(_)));
         assert_eq!(strip_nul("a\0b\0c"), "abc");
@@ -1815,14 +1882,14 @@ mod tests {
         assert_eq!(classify_copy_error("55P03"), CopyErrorClass::Transient); // lock_not_available
         assert_eq!(classify_copy_error("57014"), CopyErrorClass::Transient); // statement_timeout
         assert_eq!(classify_copy_error("08006"), CopyErrorClass::Transient); // connection_failure
-        // Data: the row is poison → bisect to isolate it.
+                                                                             // Data: the row is poison → bisect to isolate it.
         assert_eq!(classify_copy_error("22021"), CopyErrorClass::Data); // invalid byte (the 0x00 class)
         assert_eq!(classify_copy_error("22P02"), CopyErrorClass::Data); // invalid text representation
         assert_eq!(classify_copy_error("23505"), CopyErrorClass::Data); // unique_violation
         assert_eq!(classify_copy_error("23503"), CopyErrorClass::Data); // foreign_key_violation
         assert_eq!(classify_copy_error("23502"), CopyErrorClass::Data); // not_null_violation
         assert_eq!(classify_copy_error("23514"), CopyErrorClass::Data); // check_violation
-        // Other: not a poison row → propagate unchanged.
+                                                                        // Other: not a poison row → propagate unchanged.
         assert_eq!(classify_copy_error("42601"), CopyErrorClass::Other); // syntax_error
         assert_eq!(classify_copy_error("42501"), CopyErrorClass::Other); // insufficient_privilege
     }
@@ -1918,6 +1985,9 @@ mod tests {
                 },
             )],
             indexed_files: vec![],
+            skipped_files: vec![],
+            security_files: vec![],
+            security_findings: vec![],
             project_code: "AXO".to_string(),
         };
         assert!(!b.is_empty());

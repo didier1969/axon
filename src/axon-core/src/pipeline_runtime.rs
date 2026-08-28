@@ -99,9 +99,9 @@ fn spawn_vector_sorted_drain(
             // let one probe batch through after each sleep so recovery (e.g.
             // once the operator repairs the DB) is detected automatically —
             // a successful persist resets the latch in stage_b3.
-            if crate::pipeline::stage_health::b3_health()
-                .is_systemically_failing(crate::pipeline::stage_health::B3_SYSTEMIC_FAILURE_THRESHOLD)
-            {
+            if crate::pipeline::stage_health::b3_health().is_systemically_failing(
+                crate::pipeline::stage_health::B3_SYSTEMIC_FAILURE_THRESHOLD,
+            ) {
                 tokio::time::sleep(std::time::Duration::from_millis(systemic_backoff_ms)).await;
                 systemic_backoff_ms = systemic_backoff_ms
                     .saturating_mul(2)
@@ -128,7 +128,9 @@ fn spawn_vector_sorted_drain(
             };
             if rows.is_empty() {
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                backoff_ms = backoff_ms.saturating_mul(2).min(VECTOR_DRAIN_BACKOFF_MAX_MS);
+                backoff_ms = backoff_ms
+                    .saturating_mul(2)
+                    .min(VECTOR_DRAIN_BACKOFF_MAX_MS);
                 continue;
             }
             backoff_ms = VECTOR_DRAIN_BACKOFF_INITIAL_MS;
@@ -207,6 +209,7 @@ fn spawn_indexer_liveness_heartbeat(
             let in_flight = crate::pipeline::in_flight::InFlightRegistry::global();
             let in_flight_oldest = in_flight.snapshot();
             let vector_metrics = crate::service_guard::vector_runtime_metrics();
+            let a3_health = crate::pipeline::stage_health::a3_health().snapshot();
             let truth = crate::graph_ingestion::IndexerRuntimeTruthRecord {
                 process_role: "indexer".to_string(),
                 heartbeat_ms: snapshot.heartbeat_ms,
@@ -215,15 +218,17 @@ fn spawn_indexer_liveness_heartbeat(
                     crate::service_guard::vector_chunk_embeddings_per_second(),
                 in_flight_count: in_flight.len() as i64,
                 oldest_in_flight_path: in_flight_oldest.as_ref().map(|s| s.path.clone()),
-                oldest_in_flight_stage: in_flight_oldest
-                    .as_ref()
-                    .map(|s| s.stage.to_string()),
+                oldest_in_flight_stage: in_flight_oldest.as_ref().map(|s| s.stage.to_string()),
                 oldest_in_flight_age_ms: in_flight_oldest
                     .as_ref()
                     .map(|s| s.age_ms as i64)
                     .unwrap_or(0),
                 ready_queue_chunks: vector_metrics.ready_queue_chunks_current as i64,
                 persist_queue_depth: vector_metrics.persist_queue_depth_current as i64,
+                a3_consecutive_failures: a3_health.consecutive_failures as i64,
+                a3_last_error: a3_health.last_error.map(|error| error.message),
+                pg_pool_evictions_total: crate::postgres::native::pool_connection_evictions_total()
+                    as i64,
             };
             if let Err(err) = store.record_indexer_runtime_truth(&truth) {
                 warn!(
@@ -257,46 +262,27 @@ pub fn spawn_pipeline_indexer(
     // with empty explicit code so it delegates to
     // project_meta::resolve_project_identity_for_path on every call.
     let scanner = Arc::new(Scanner::new(&watch_root, ""));
-    // REQ-AXO-901916 CP2c — resolver from a RAM snapshot of the canonical PG
-    // project registry (PIL-AXO-001), hydrated ONCE at boot. Longest-prefix
-    // match in RAM = zero filesystem I/O per file, replacing the old per-A3-call
-    // rescan of every `.axon/meta.json`. Falls back to per-file scanner
-    // resolution ONLY if the registry SELECT fails / is empty (explicit degraded
-    // path). "UNK" stays the DROP sentinel (REQ-AXO-901860): graph_ingestion
-    // skips it, so an unresolved file is enrolled nowhere.
-    let resolver: ProjectCodeResolver = match crate::project_meta::registered_project_identities(
-        &store,
-    ) {
-        Ok(ids) if !ids.is_empty() => {
-            let n = ids.len();
-            let rows = ids
-                .into_iter()
-                .map(|id| (id.code, id.project_path.to_string_lossy().into_owned()));
-            info!("pipeline: project resolver hydrated from PG registry ({n} projects, longest-prefix RAM)");
-            ProjectRegistrySnapshot::from_rows(rows).into_resolver()
-        }
-        other => {
-            match &other {
-                Err(e) => {
-                    warn!(error = %e, "pipeline: registry snapshot hydration failed — per-file scanner fallback")
-                }
-                Ok(_) => {
-                    warn!("pipeline: PG project registry empty — per-file scanner fallback")
-                }
-            }
-            let store_for_resolver = store.clone();
-            let scanner_for_resolver = scanner.clone();
-            Arc::new(move |path: &std::path::Path| -> String {
-                match scanner_for_resolver.project_code_for_path(&store_for_resolver, path) {
-                    Ok(code) => code,
-                    Err(err) => {
-                        warn!(?path, error = %err, "pipeline: project_code unresolved → file dropped (UNK sentinel)");
-                        "UNK".to_string()
-                    }
-                }
-            }) as ProjectCodeResolver
-        }
-    };
+    // REQ-AXO-902541 — fail closed when the canonical registry cannot be
+    // loaded. Falling back to filesystem guesses is exactly what admitted
+    // host siblings and fabricated the UNK tenant during the incident.
+    let identities = crate::project_meta::registered_project_identities(&store)
+        .map_err(|err| anyhow!("pipeline: ProjectCodeRegistry hydration failed: {err}"))?;
+    if identities.is_empty() {
+        return Err(anyhow!(
+            "pipeline: ProjectCodeRegistry is empty; refusing unscoped ingestion"
+        ));
+    }
+    let registered_count = identities.len();
+    let snapshot = ProjectRegistrySnapshot::from_rows(
+        identities
+            .into_iter()
+            .map(|id| (id.code, id.project_path.to_string_lossy().into_owned())),
+    )
+    .map_err(|err| anyhow!("pipeline: invalid ProjectCodeRegistry snapshot: {err}"))?;
+    let resolver = ProjectCodeResolver::from_snapshot(snapshot);
+    info!(
+        "pipeline: strict project resolver hydrated from PG registry ({registered_count} projects)"
+    );
 
     // REQ-AXO-901746 — hydrate the content-hash dedup cache from PG at boot.
     // Files whose (path, content_hash) match are skipped between A1 and A2,
@@ -338,8 +324,13 @@ pub fn spawn_pipeline_indexer(
         counts_a.a3,
         runtime_mode.as_str()
     );
-    let handles_a =
-        spawn_pipeline_a_with_cache(counts_a, caps, store.clone(), resolver, dedup_cache.clone());
+    let handles_a = spawn_pipeline_a_with_cache(
+        counts_a,
+        caps,
+        store.clone(),
+        resolver.clone(),
+        dedup_cache.clone(),
+    );
 
     // REQ-AXO-901874 — indexer liveness heartbeat, decoupled from the GPU
     // embedder. This function is reached for every ingestion-enabled mode
@@ -390,55 +381,55 @@ pub fn spawn_pipeline_indexer(
         // handles alongside the `dyn` pipeline view so the opt-in idle watchdog
         // (armed below) can drop their VRAM at rest.
         let mut gpu_sessions: Vec<Arc<GpuB2Embedder>> = Vec::new();
-        let embedders: Vec<Arc<dyn crate::pipeline::B2Embedder>> =
-            match GpuB2Embedder::try_new_cuda("indexer-pipeline-v2", 0) {
-                // DEC-AXO-901631 — by default the GPU session stays resident for
-                // the worker's lifetime (max drain throughput; no sleep/wake).
-                // REQ-AXO-902220 adds an OPT-IN idle-drop watchdog that leaves
-                // this drain regime untouched.
-                Ok(e) => {
-                    let first = Arc::new(e);
-                    gpu_sessions.push(first.clone());
-                    let mut v: Vec<Arc<dyn crate::pipeline::B2Embedder>> =
-                        vec![first as Arc<dyn crate::pipeline::B2Embedder>];
-                    if counts_b.b2 > 1 {
-                        for i in 1..counts_b.b2 {
-                            match GpuB2Embedder::try_new_cuda(
-                                &format!("indexer-pipeline-v2-b2w{i}"),
-                                i,
-                            ) {
-                                Ok(e) => {
-                                    let extra = Arc::new(e);
-                                    gpu_sessions.push(extra.clone());
-                                    v.push(extra as Arc<dyn crate::pipeline::B2Embedder>);
-                                }
-                                Err(err) => {
-                                    warn!(worker = i, error = %err, "pipeline: extra B2 worker init failed, continuing with fewer");
-                                    break;
-                                }
+        let embedders: Vec<Arc<dyn crate::pipeline::B2Embedder>> = match GpuB2Embedder::try_new_cuda(
+            "indexer-pipeline-v2",
+            0,
+        ) {
+            // DEC-AXO-901631 — by default the GPU session stays resident for
+            // the worker's lifetime (max drain throughput; no sleep/wake).
+            // REQ-AXO-902220 adds an OPT-IN idle-drop watchdog that leaves
+            // this drain regime untouched.
+            Ok(e) => {
+                let first = Arc::new(e);
+                gpu_sessions.push(first.clone());
+                let mut v: Vec<Arc<dyn crate::pipeline::B2Embedder>> =
+                    vec![first as Arc<dyn crate::pipeline::B2Embedder>];
+                if counts_b.b2 > 1 {
+                    for i in 1..counts_b.b2 {
+                        match GpuB2Embedder::try_new_cuda(&format!("indexer-pipeline-v2-b2w{i}"), i)
+                        {
+                            Ok(e) => {
+                                let extra = Arc::new(e);
+                                gpu_sessions.push(extra.clone());
+                                v.push(extra as Arc<dyn crate::pipeline::B2Embedder>);
+                            }
+                            Err(err) => {
+                                warn!(worker = i, error = %err, "pipeline: extra B2 worker init failed, continuing with fewer");
+                                break;
                             }
                         }
-                        info!("pipeline: {} B2 GPU workers initialized", v.len());
                     }
-                    v
+                    info!("pipeline: {} B2 GPU workers initialized", v.len());
                 }
-                Err(err) => {
-                    // REQ-AXO-901630 — fail-fast when the operator has explicitly
-                    // requested a GPU provider. Silent NoOp fallback produced junk
-                    // embeddings ((1,0,…,0) vectors) in session 49, breaking
-                    // semantic retrieval downstream while the indexer kept
-                    // reporting healthy. Only the `cpu`/unset branch may NoOp.
-                    if gpu_provider_explicitly_requested() {
-                        return Err(anyhow!(
-                            "pipeline: GPU embedder init failed but AXON_EMBEDDING_PROVIDER \
+                v
+            }
+            Err(err) => {
+                // REQ-AXO-901630 — fail-fast when the operator has explicitly
+                // requested a GPU provider. Silent NoOp fallback produced junk
+                // embeddings ((1,0,…,0) vectors) in session 49, breaking
+                // semantic retrieval downstream while the indexer kept
+                // reporting healthy. Only the `cpu`/unset branch may NoOp.
+                if gpu_provider_explicitly_requested() {
+                    return Err(anyhow!(
+                        "pipeline: GPU embedder init failed but AXON_EMBEDDING_PROVIDER \
                              requests a GPU provider (NoOpEmbedder fallback would silently \
                              produce junk vectors): {err}"
-                        ));
-                    }
-                    warn!(error = %err, "pipeline: GPU embedder init failed, falling back to NoOpEmbedder");
-                    vec![Arc::new(NoOpEmbedder) as Arc<dyn crate::pipeline::B2Embedder>]
+                    ));
                 }
-            };
+                warn!(error = %err, "pipeline: GPU embedder init failed, falling back to NoOpEmbedder");
+                vec![Arc::new(NoOpEmbedder) as Arc<dyn crate::pipeline::B2Embedder>]
+            }
+        };
 
         // REQ-AXO-902220 / REQ-AXO-902234 — arm the idle VRAM watchdog whenever
         // there are REAL GPU sessions. The NoOp fallback leaves `gpu_sessions`
@@ -525,6 +516,7 @@ pub fn spawn_pipeline_indexer(
         scanner.clone(),
         watch_root.clone(),
         resolve_database_url_for_listener(),
+        resolver.clone(),
     )?;
 
     // REQ-AXO-901916 (PIL-AXO-007) — DIRECT-STREAMING bootstrap + periodic
@@ -569,8 +561,19 @@ pub fn spawn_pipeline_indexer(
                 let total = files.len();
                 let mut pushed = 0usize;
                 for path in files {
+                    let project_code = match resolver.resolve(&path) {
+                        Ok(code) => code,
+                        Err(err) => {
+                            warn!(path = %path.display(), error = %err, "reconciliation: unregistered path skipped before A1");
+                            continue;
+                        }
+                    };
                     // Backpressure: send().await paces the walk to A1's drain rate.
-                    if walk_input_tx.send(path).await.is_err() {
+                    if walk_input_tx
+                        .send(crate::pipeline::types::AdmittedPath { path, project_code })
+                        .await
+                        .is_err()
+                    {
                         return; // pipeline shut down
                     }
                     pushed += 1;
@@ -639,9 +642,11 @@ pub fn spawn_pipeline_indexer(
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(dup_sweep_secs)).await;
                 let store_for_check = store_for_dup.clone();
-                let pending = tokio::task::spawn_blocking(move || store_for_check.pending_embed_chunk_count())
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
+                let pending = tokio::task::spawn_blocking(move || {
+                    store_for_check.pending_embed_chunk_count()
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
                 let pending = match pending {
                     Ok(n) => n,
                     Err(e) => {
@@ -650,7 +655,10 @@ pub fn spawn_pipeline_indexer(
                     }
                 };
                 if !crate::duplication_scan::duplication_scan_due(pending) {
-                    info!(pending, "duplication sweep: pipeline busy, skipping this tick");
+                    info!(
+                        pending,
+                        "duplication sweep: pipeline busy, skipping this tick"
+                    );
                     continue;
                 }
                 let store_for_registry = store_for_dup.clone();
@@ -683,8 +691,12 @@ pub fn spawn_pipeline_indexer(
                             pairs_found = report.pairs_found,
                             "duplication sweep: reconciled"
                         ),
-                        Ok(Err(e)) => warn!(project_code = %id.code, error = %e, "duplication sweep: reconcile failed (non-fatal, next tick retries)"),
-                        Err(e) => warn!(project_code = %id.code, error = %e, "duplication sweep: reconcile task panicked"),
+                        Ok(Err(e)) => {
+                            warn!(project_code = %id.code, error = %e, "duplication sweep: reconcile failed (non-fatal, next tick retries)")
+                        }
+                        Err(e) => {
+                            warn!(project_code = %id.code, error = %e, "duplication sweep: reconcile task panicked")
+                        }
                     }
                 }
             }

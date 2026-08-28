@@ -14,7 +14,16 @@
 
 use std::path::PathBuf;
 
+use super::project_resolver::ProjectCode;
 use crate::parser::{Relation, SecurityFinding, Symbol};
+
+/// A path admitted by the canonical project registry. This is the only input
+/// accepted by A1; raw filesystem paths must be resolved first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedPath {
+    pub path: PathBuf,
+    pub project_code: ProjectCode,
+}
 
 /// Output of stage A1 — Preparation.
 ///
@@ -26,6 +35,7 @@ use crate::parser::{Relation, SecurityFinding, Symbol};
 pub struct PreparedFile {
     /// Absolute filesystem path of the file that was read.
     pub path: PathBuf,
+    pub project_code: ProjectCode,
     /// Full source text.
     pub content: String,
     /// SHA-256 hex digest of `content` — stable cross-restart so the
@@ -36,6 +46,7 @@ pub struct PreparedFile {
     pub mtime_ms: i64,
     /// Size in bytes of the file as read.
     pub size_bytes: u64,
+    pub skip_reason: Option<String>,
 }
 
 /// Output of stage A2 — Transformation (tree-sitter parse).
@@ -48,11 +59,13 @@ pub struct PreparedFile {
 #[derive(Debug, Clone)]
 pub struct ParsedFile {
     pub path: PathBuf,
+    pub project_code: ProjectCode,
     /// Original source text preserved for chunk-extraction inside A3.
     pub content: String,
     pub content_hash: String,
     pub mtime_ms: i64,
     pub size_bytes: u64,
+    pub skip_reason: Option<String>,
     /// Symbols extracted by the tree-sitter parser dispatch for this file's
     /// extension.
     pub symbols: Vec<Symbol>,

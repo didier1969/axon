@@ -275,7 +275,8 @@ impl GraphStore {
         let raw = self.query_json_writer(&format!(
             "SELECT process_role, heartbeat_ms, graph_workers_active, chunk_embeddings_per_second, \
                     in_flight_count, oldest_in_flight_path, oldest_in_flight_stage, \
-                    oldest_in_flight_age_ms, ready_queue_chunks, persist_queue_depth \
+                    oldest_in_flight_age_ms, ready_queue_chunks, persist_queue_depth, \
+                    a3_consecutive_failures, a3_last_error, pg_pool_evictions_total \
              FROM {table_ref} \
              WHERE process_role = '{}' \
              LIMIT 1",
@@ -303,7 +304,11 @@ impl GraphStore {
             graph_workers_active: row.get(2).and_then(parse_i64_field).unwrap_or_default(),
             chunk_embeddings_per_second: row
                 .get(3)
-                .and_then(|value| value.as_f64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
+                .and_then(|value| {
+                    value
+                        .as_f64()
+                        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+                })
                 .unwrap_or_default(),
             in_flight_count: row.get(4).and_then(parse_i64_field).unwrap_or_default(),
             oldest_in_flight_path: opt_str(row.get(5)),
@@ -311,6 +316,9 @@ impl GraphStore {
             oldest_in_flight_age_ms: row.get(7).and_then(parse_i64_field).unwrap_or_default(),
             ready_queue_chunks: row.get(8).and_then(parse_i64_field).unwrap_or_default(),
             persist_queue_depth: row.get(9).and_then(parse_i64_field).unwrap_or_default(),
+            a3_consecutive_failures: row.get(10).and_then(parse_i64_field).unwrap_or_default(),
+            a3_last_error: opt_str(row.get(11)),
+            pg_pool_evictions_total: row.get(12).and_then(parse_i64_field).unwrap_or_default(),
         }))
     }
 
@@ -425,8 +433,9 @@ fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> St
         "INSERT INTO axon.indexer_runtime_truth \
          (process_role, heartbeat_ms, graph_workers_active, chunk_embeddings_per_second, \
           in_flight_count, oldest_in_flight_path, oldest_in_flight_stage, \
-          oldest_in_flight_age_ms, ready_queue_chunks, persist_queue_depth) \
-         VALUES ('{}', {}, {}, {:.6}, {}, {}, {}, {}, {}, {}) \
+          oldest_in_flight_age_ms, ready_queue_chunks, persist_queue_depth, \
+          a3_consecutive_failures, a3_last_error, pg_pool_evictions_total) \
+         VALUES ('{}', {}, {}, {:.6}, {}, {}, {}, {}, {}, {}, {}, {}, {}) \
          ON CONFLICT (process_role) DO UPDATE SET \
             heartbeat_ms = EXCLUDED.heartbeat_ms, \
             graph_workers_active = EXCLUDED.graph_workers_active, \
@@ -436,7 +445,10 @@ fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> St
             oldest_in_flight_stage = EXCLUDED.oldest_in_flight_stage, \
             oldest_in_flight_age_ms = EXCLUDED.oldest_in_flight_age_ms, \
             ready_queue_chunks = EXCLUDED.ready_queue_chunks, \
-            persist_queue_depth = EXCLUDED.persist_queue_depth",
+            persist_queue_depth = EXCLUDED.persist_queue_depth, \
+            a3_consecutive_failures = EXCLUDED.a3_consecutive_failures, \
+            a3_last_error = EXCLUDED.a3_last_error, \
+            pg_pool_evictions_total = EXCLUDED.pg_pool_evictions_total",
         GraphStore::escape_sql(&row.process_role),
         row.heartbeat_ms,
         row.graph_workers_active,
@@ -447,6 +459,9 @@ fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> St
         row.oldest_in_flight_age_ms,
         row.ready_queue_chunks,
         row.persist_queue_depth,
+        row.a3_consecutive_failures,
+        opt_text_sql(&row.a3_last_error),
+        row.pg_pool_evictions_total,
     )
 }
 
@@ -685,6 +700,9 @@ mod tests {
             oldest_in_flight_age_ms: 4200,
             ready_queue_chunks: 512,
             persist_queue_depth: 9,
+            a3_consecutive_failures: 3,
+            a3_last_error: Some("23503 foreign key violation".to_string()),
+            pg_pool_evictions_total: 2,
         };
         let sql = super::build_indexer_runtime_truth_upsert_sql(&row);
         assert!(sql.contains("INSERT INTO axon.indexer_runtime_truth"));
@@ -699,6 +717,9 @@ mod tests {
             "oldest_in_flight_age_ms",
             "ready_queue_chunks",
             "persist_queue_depth",
+            "a3_consecutive_failures",
+            "a3_last_error",
+            "pg_pool_evictions_total",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),

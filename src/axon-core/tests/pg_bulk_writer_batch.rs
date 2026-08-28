@@ -163,6 +163,9 @@ fn flush_batch_cross_table_round_trip() {
         calls_nif: calls_nif.clone(),
         other_edges: Vec::new(),
         indexed_files: Vec::new(),
+        skipped_files: Vec::new(),
+        security_files: Vec::new(),
+        security_findings: Vec::new(),
         project_code: "AXO".to_string(),
     };
 
@@ -263,6 +266,9 @@ fn flush_batch_cross_table_round_trip() {
         calls_nif: vec![],
         other_edges: Vec::new(),
         indexed_files: Vec::new(),
+        skipped_files: Vec::new(),
+        security_files: Vec::new(),
+        security_findings: Vec::new(),
         project_code: "AXO".to_string(),
     };
     bulk_writer::flush_batch(&partial_batch).expect("partial-bucket batch should succeed");
