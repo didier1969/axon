@@ -9,10 +9,48 @@ pass(){ printf '  PASS  %s\n' "$1"; PASS=$((PASS+1)); }
 fail(){ printf '  FAIL  %s\n' "$1" >&2; FAIL=$((FAIL+1)); }
 
 life="$(sed -n '/lifecycle_gate_step()/,/^  }/p' "$PROMOTE")"
-if grep -q 'return 77' <<<"$life" && ! grep -q 'return 0' <<<"$life"; then
-  pass "lifecycle exit 77 stays a distinct non-passing gate"
+
+# REQ-AXO-902539 — admission may deliberately pause the indexer. The live test then
+# exits 77 after its cleanup has restored the role. The promote must consume that
+# recovery exactly once: retry immediately, while still failing closed when the second
+# measurement skips or when either measurement reports a real failure.
+run_lifecycle_case() {
+  local exits="$1" expected_rc="$2" expected_calls="$3"
+  local harness journal rc=0 calls
+  harness="$(mktemp)"
+  journal="$(mktemp)"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -uo pipefail'
+    echo "EXITS=($exits)"
+    echo "JOURNAL=$journal"
+    echo 'bash() { local i; i="$(wc -l < "$JOURNAL")"; printf "call\n" >> "$JOURNAL"; return "${EXITS[$i]:-${EXITS[${#EXITS[@]}-1]}}"; }'
+    echo 'ROOT_DIR=/tmp/axon-test'
+    echo "$life"
+    echo 'lifecycle_gate_step'
+  } > "$harness"
+  bash "$harness" >/dev/null 2>&1 || rc=$?
+  calls="$(wc -l < "$journal")"
+  rm -f "$harness" "$journal"
+  [[ "$rc" -eq "$expected_rc" && "$calls" -eq "$expected_calls" ]]
+}
+
+if run_lifecycle_case '77 0' 0 2; then
+  pass "lifecycle retries once after a recovered skip and accepts a real measurement"
 else
-  fail "lifecycle exit 77 is still normalized to PASS"
+  fail "lifecycle does not turn one recovered skip into exactly one measured retry"
+fi
+
+if run_lifecycle_case '1 0' 1 1; then
+  pass "lifecycle real failure is returned immediately without retry"
+else
+  fail "lifecycle retries or masks a real first-run failure"
+fi
+
+if run_lifecycle_case '77 77 0' 77 2; then
+  pass "lifecycle second skip remains non-passing after the single retry"
+else
+  fail "lifecycle retries repeatedly or normalizes a second skip to PASS"
 fi
 
 if grep -q -- '--break-glass-reason' "$PROMOTE" && grep -q 'break_glass_refused' "$PROMOTE"; then

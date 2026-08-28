@@ -874,17 +874,21 @@ else
   # Cost, stated rather than hidden: the live INDEXER is dropped once more than before,
   # here, upstream of the cutover. The operator explicitly authorised seconds to 2-3 min of
   # indexer downtime; the BRAIN is the sensitive one and the test asserts it never stops
-  # serving. The script SKIPs (exit 0) when the runtime is not in a testable state, so this
-  # never fails a promote for an unrelated reason.
+  # serving.
   # Exit 77 = the script SKIPPED (nothing measured, e.g. the role is not Running+Ready).
-  # A skip must not fail a release — but it must not pass silently either, or the gate
-  # becomes the vacuous green it exists to prevent. Surface it loudly and continue.
+  # Admission can deliberately pause the indexer immediately before this gate. In that
+  # case the test's safety cleanup restores it, so retry ONCE while that recovery is hot.
+  # A second skip remains non-passing: no release is qualified without a measurement.
   lifecycle_gate_step() {
     local rc=0
     bash "$ROOT_DIR/tests/shell/test_role_restart_live.sh" || rc=$?
+    [[ "$rc" -ne 77 ]] && return "$rc"
+
+    echo "⚠️ lifecycle gate SKIPPED once — cleanup may have restored the admission-paused indexer; measuring once more"
+    rc=0
+    bash "$ROOT_DIR/tests/shell/test_role_restart_live.sh" || rc=$?
     if [[ "$rc" -eq 77 ]]; then
-      echo "⚠️ lifecycle gate SKIPPED (nothing measured) — the per-role restart was NOT verified for this release"
-      return 77
+      echo "❌ lifecycle gate SKIPPED twice (nothing measured) — the per-role restart was NOT verified for this release"
     fi
     return "$rc"
   }
