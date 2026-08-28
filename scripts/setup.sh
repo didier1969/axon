@@ -182,7 +182,8 @@ AXON_EFFECTIVE_CARGO_TARGET=""
 # `AXON_BUILD_JOBS` overrides it outright.
 CARGO_JOBS="$(axon_resolve_cargo_jobs)"
 echo "🔨 Building Rust core (-j ${CARGO_JOBS}: $(axon_available_ram_gb) GB free, swap $(axon_swap_used_pct)%, $(axon_detect_host_cpu_cores) cores)..."
-AXON_RELEASE_BUILD_COMMAND="cd '$RUST_CORE_DIR' && cargo build --release -j ${CARGO_JOBS} --bin axon-core --bin axon-brain --bin axon-indexer --bin axonctl --bin axon-query-embed-worker && printf '%s\\n' \"\${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}\" > '$AXON_EFFECTIVE_CARGO_TARGET_FILE'"
+AXON_RELEASE_BUILD_RUNNER="$PROJECT_ROOT/scripts/release/run_targeted_cargo_build.sh"
+AXON_DEFAULT_CARGO_TARGET="$PROJECT_ROOT/.axon/cargo-target"
 
 # REQ-AXO-902543 — a promotion build is a host-wide resource event. The
 # canonical promote sets AXON_REQUIRE_NEXUS_ADMISSION=1; setup then waits for
@@ -198,20 +199,22 @@ if [[ "${AXON_REQUIRE_NEXUS_ADMISSION:-0}" == "1" ]] && ! axon_inside_nexus_batc
         echo "❌ Promotion build requires Nexus admission, but nexus-job is unavailable." >&2
         exit 1
     fi
-    echo "🛡️  Waiting for Nexus admission (huge, 12G, thermal + memory gates)..."
+    echo "🛡️  Waiting for Nexus admission (medium, 6G estimate / 8G ceiling, thermal + memory gates)..."
     if ! "$NEXUS_JOB_BIN" run \
             --project AXON \
-            --class huge \
+            --class medium \
             --priority interactive \
-            --memory 12G \
+            --memory 6G \
             --gpu-mib 0 \
             --timeout 90m \
-            -- devenv shell -- bash -lc "$AXON_RELEASE_BUILD_COMMAND"; then
+            -- "$AXON_RELEASE_BUILD_RUNNER" build "$RUST_CORE_DIR" \
+            "$AXON_EFFECTIVE_CARGO_TARGET_FILE" "$CARGO_JOBS" "$AXON_DEFAULT_CARGO_TARGET"; then
         echo "❌ Nexus admission/build failed; no release artifact may be installed." >&2
         exit 1
     fi
 else
-    if ! devenv shell -- bash -lc "$AXON_RELEASE_BUILD_COMMAND"; then
+    if ! "$AXON_RELEASE_BUILD_RUNNER" build "$RUST_CORE_DIR" \
+            "$AXON_EFFECTIVE_CARGO_TARGET_FILE" "$CARGO_JOBS" "$AXON_DEFAULT_CARGO_TARGET"; then
         echo "❌ Rust release build failed; no release artifact may be installed." >&2
         exit 1
     fi
