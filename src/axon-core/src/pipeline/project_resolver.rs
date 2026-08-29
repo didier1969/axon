@@ -7,7 +7,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-/// Canonical three-letter tenant identity carried through pipeline A.
+/// Canonical three-character uppercase alphanumeric tenant identity carried
+/// through pipeline A.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectCode(String);
 
@@ -15,7 +16,9 @@ impl ProjectCode {
     pub fn parse(value: impl Into<String>) -> Result<Self, ProjectResolutionError> {
         let value = value.into();
         if value.len() == 3
-            && value.bytes().all(|b| b.is_ascii_uppercase())
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
             && value != "PRO"
             && value != "UNK"
         {
@@ -151,7 +154,7 @@ impl ProjectCodeResolver {
 
 pub fn const_resolver(project_code: impl Into<String>) -> ProjectCodeResolver {
     let code = ProjectCode::parse(project_code.into())
-        .expect("test/bench project_code must be canonical (three uppercase letters)");
+        .expect("test/bench project_code must be canonical (three uppercase alphanumerics)");
     ProjectCodeResolver {
         snapshot: Arc::new(RwLock::new(ProjectRegistrySnapshot::default())),
         constant: Some(code),
@@ -170,6 +173,7 @@ mod tests {
     #[test]
     fn project_code_rejects_non_canonical_values() {
         assert!(ProjectCode::parse("AXO").is_ok());
+        assert!(ProjectCode::parse("GM6").is_ok());
         assert!(ProjectCode::parse("PRO").is_err());
         assert!(ProjectCode::parse("UNK").is_err());
         assert!(ProjectCode::parse("axo").is_err());

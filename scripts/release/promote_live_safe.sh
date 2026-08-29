@@ -1410,7 +1410,7 @@ if [[ "$recon_phase" != "clean" && "$recon_phase" != "admission_paused" ]]; then
     if axon_restart_role_verified live axon-indexer 180 >> "$PROMOTE_LOG" 2>&1; then
       promote_log "   ↻ TIER-1: indexer restart VERIFIED (new pid, Running+Ready)"
     else
-      promote_log "   ⚠️ TIER-1 could not verify the indexer restart — escalating to TIER-2"
+      promote_log "   ⚠️ TIER-1 could not verify the indexer restart — failing closed while the Brain keeps serving"
     fi
     set -e
     _poll_promote_clean 180 || true
@@ -1419,8 +1419,10 @@ if [[ "$recon_phase" != "clean" && "$recon_phase" != "admission_paused" ]]; then
     promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) — not indexer-only, skipping tier 1."
   fi
 
-  # Tier 2 — unchanged full restart, only if tier 1 did not converge.
-  if [[ "$recon_phase" != "clean" ]]; then
+  # Tier 2 is reserved for failures that are not indexer-only. An unhealthy
+  # indexer fails the promotion closed without turning a partial degradation
+  # into a customer-visible Brain outage.
+  if [[ "$recon_phase" != "clean" && "$recon_failed" != "indexer_alive" ]]; then
     promote_log "   ⚠️ step 6c: still phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) — TIER-2 AUTO-RECOVERY: full restart (stop --hard + start full). THIS INTERRUPTS THE BRAIN — expect third-party MCP clients to see an outage."
     set +e
     bash "$ROOT_DIR/scripts/axon-live" stop --hard >> "$PROMOTE_LOG" 2>&1

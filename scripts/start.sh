@@ -280,7 +280,7 @@ else
         BRAIN_BIN="$CANDIDATE_BIN_DIR/axon-brain"
         INDEXER_BIN="$CANDIDATE_BIN_DIR/axon-indexer"
         BUILD_PROFILE="candidate"
-    elif [[ "$FORCE_RELEASE" == "1" ]] || [[ -x "$CARGO_TARGET/release/axon-brain" && -x "$CARGO_TARGET/release/axon-indexer" ]]; then
+    elif [[ "$FORCE_RELEASE" == "1" ]]; then
         BRAIN_BIN="$CARGO_TARGET/release/axon-brain"
         INDEXER_BIN="$CARGO_TARGET/release/axon-indexer"
         BUILD_PROFILE="--release"
@@ -291,21 +291,48 @@ else
     fi
 fi
 
+mapfile -t RUNTIME_PROCESSES < <(axon_start_processes "$AXON_INSTANCE_KIND" "$RUNTIME_MODE")
+REQUIRED_BINARY_NAMES=()
+for process_name in "${RUNTIME_PROCESSES[@]}"; do
+    REQUIRED_BINARY_NAMES+=("$process_name")
+done
+
 _axon_stage="build"
 # 6. Auto-rebuild (dev only)
 if [[ "$AXON_INSTANCE_KIND" != "live" && -z "$CANDIDATE_BIN_DIR" ]]; then
-    if [[ ! -x "$BRAIN_BIN" || ! -x "$INDEXER_BIN" ]]; then
+    selected_binary_missing=0
+    selected_binary_stale=0
+    build_bin_args=""
+    for binary_name in "${REQUIRED_BINARY_NAMES[@]}"; do
+        case "$binary_name" in
+            axon-brain) selected_binary="$BRAIN_BIN" ;;
+            axon-indexer) selected_binary="$INDEXER_BIN" ;;
+            *) echo "❌ Unsupported runtime binary: $binary_name" >&2; exit 1 ;;
+        esac
+        [[ -x "$selected_binary" ]] || selected_binary_missing=1
+        if [[ -x "$selected_binary" ]] \
+          && find "$PROJECT_ROOT/src/axon-core/src" -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "$selected_binary" -print -quit | grep -q .; then
+            selected_binary_stale=1
+        fi
+        build_bin_args+=" --bin $binary_name"
+    done
+
+    if [[ "$selected_binary_missing" == "1" ]]; then
         echo "🔨 Binary missing, building ${BUILD_PROFILE:-debug}..."
-        run_devenv "cargo build --manifest-path src/axon-core/Cargo.toml ${BUILD_PROFILE:-} --bin axon-brain --bin axon-indexer"
-    elif find "$PROJECT_ROOT/src/axon-core/src" -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "$BRAIN_BIN" -print -quit | grep -q .; then
+        run_devenv "cargo build --manifest-path src/axon-core/Cargo.toml ${BUILD_PROFILE:-}${build_bin_args}"
+    elif [[ "$selected_binary_stale" == "1" ]]; then
         echo "🔨 Sources newer than binary, rebuilding ${BUILD_PROFILE:-debug}..."
-        run_devenv "cargo build --manifest-path src/axon-core/Cargo.toml ${BUILD_PROFILE:-} --bin axon-brain --bin axon-indexer"
+        run_devenv "cargo build --manifest-path src/axon-core/Cargo.toml ${BUILD_PROFILE:-}${build_bin_args}"
     fi
 fi
 
 # Check binaries exist
-for bin in "$BRAIN_BIN" "$INDEXER_BIN"; do
-    [[ -x "$bin" ]] || { echo "❌ Missing: $bin"; exit 1; }
+for binary_name in "${REQUIRED_BINARY_NAMES[@]}"; do
+    case "$binary_name" in
+        axon-brain) selected_binary="$BRAIN_BIN" ;;
+        axon-indexer) selected_binary="$INDEXER_BIN" ;;
+    esac
+    [[ -x "$selected_binary" ]] || { echo "❌ Missing: $selected_binary"; exit 1; }
 done
 
 # --- Env exports ---
@@ -349,9 +376,14 @@ fi
 export AXON_BULK_WRITER_ENABLED="${AXON_BULK_WRITER_ENABLED:-1}"
 # Absolute path to this Axon repo root.
 export AXON_PROJECT_ROOT="$PROJECT_ROOT"
-# HTTP health port for the indexer process (default: brain port + 1).
-# Explicit per-instance: live=44130, dev=44140. Yaml overrides via AXON_INDEXER_HEALTH_PORT env.
-export AXON_INDEXER_HEALTH_PORT="${AXON_INDEXER_HEALTH_PORT:-$((AXON_BRAIN_PORT + 1))}"
+# HTTP health port for the indexer process. Keep the launcher and the child YAML
+# on the same instance-specific contract; otherwise a healthy dev indexer on
+# 44149 is waited for on the nonexistent 44140 endpoint.
+if [[ "$AXON_INSTANCE_KIND" == "dev" ]]; then
+    export AXON_INDEXER_HEALTH_PORT="${AXON_INDEXER_HEALTH_PORT:-44149}"
+else
+    export AXON_INDEXER_HEALTH_PORT="${AXON_INDEXER_HEALTH_PORT:-44130}"
+fi
 # Absolute paths to the brain and indexer binaries for process-compose.
 export AXON_BRAIN_BIN="$BRAIN_BIN"
 export AXON_INDEXER_BIN="$INDEXER_BIN"
@@ -377,11 +409,14 @@ mkdir -p "$AXON_DB_ROOT" "${AXON_RUN_ROOT:-/tmp}"
 rm -f "${AXON_TELEMETRY_SOCK:-}" "${AXON_MCP_SOCK:-}" "${AXON_PID_FILE:-}"
 
 # --- Process selection ---
-PC_PROCESSES=(axon-brain)
-READYZ_PORT="$AXON_BRAIN_PORT"
-
-if [[ "$RUNTIME_MODE" == indexer_* ]]; then
-    PC_PROCESSES+=(axon-indexer)
+PC_PROCESSES=("${RUNTIME_PROCESSES[@]}")
+if [[ " ${RUNTIME_PROCESSES[*]} " == *" axon-brain "* ]]; then
+    READY_PROCESS="axon-brain"
+    READY_ROLE="brain"
+    READYZ_PORT="$AXON_BRAIN_PORT"
+else
+    READY_PROCESS="axon-indexer"
+    READY_ROLE="indexer"
     READYZ_PORT="$AXON_INDEXER_HEALTH_PORT"
 fi
 [[ "$START_DASHBOARD" == "1" ]] && PC_PROCESSES+=(dashboard)
@@ -405,8 +440,10 @@ export AXON_PGREADY_BIN="$(run_devenv 'which pg_isready' 2>/dev/null | tail -1)"
 # cost; this quantifies it before any optimization). Pure echo, zero risk.
 AXON_LAUNCH_T0_MS="$(axon_monotonic_ms)"
 echo "🚀 Starting Axon (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
-echo "   Brain: $BRAIN_BIN | Indexer: $INDEXER_BIN"
-echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
+echo "   Runtime processes: ${RUNTIME_PROCESSES[*]}"
+[[ " ${RUNTIME_PROCESSES[*]} " == *" axon-brain "* ]] && echo "   Brain: $BRAIN_BIN"
+[[ " ${RUNTIME_PROCESSES[*]} " == *" axon-indexer "* ]] && echo "   Indexer: $INDEXER_BIN"
+[[ " ${RUNTIME_PROCESSES[*]} " == *" axon-brain "* ]] && echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
 echo "   Embedding: ${AXON_EMBEDDING_PROVIDER:-cpu}"
 
 # REQ-AXO-901762 — Ensure the process-compose management API port is free
@@ -489,9 +526,9 @@ if ! curl -sf --connect-timeout 3 "http://127.0.0.1:${PC_PORT}/live" >/dev/null 
 fi
 
 # --- Wait for readiness ---
-# Brain readiness is the gate — MCP is usable as soon as the brain is up.
-# Indexer init (GPU model load) continues in background; process-compose
-# monitors it independently via its own readiness_probe.
+# The selected public role is the gate. A topology containing a Brain waits
+# for MCP readiness; a dev indexer-only launch waits for the indexer's own
+# durable-heartbeat readiness and never probes a non-existent dev Brain.
 # REQ-AXO-901929 — boot can legitimately exceed 2 min: the CPU embedder
 # (BGE-Large / ORT init) plus the boot-warm of every project's IST snapshot
 # (REQ-AXO-901869) push first-readyz past the old 120s gate under load, which
@@ -499,17 +536,14 @@ fi
 # Allow override via AXON_BRAIN_READYZ_TIMEOUT_S.
 BRAIN_TIMEOUT_S="${AXON_BRAIN_READYZ_TIMEOUT_S:-300}"
 _axon_stage="wait_readyz"
-echo "⏳ Waiting for brain :${AXON_BRAIN_PORT}/readyz (timeout ${BRAIN_TIMEOUT_S}s)..."
+echo "⏳ Waiting for ${READY_ROLE} :${READYZ_PORT}/readyz (timeout ${BRAIN_TIMEOUT_S}s)..."
 for ((i=1; i<=BRAIN_TIMEOUT_S; i++)); do
-    curl -sf --connect-timeout 3 "http://127.0.0.1:${AXON_BRAIN_PORT}/readyz" >/dev/null 2>&1 && {
+    curl -sf --connect-timeout 3 "http://127.0.0.1:${READYZ_PORT}/readyz" >/dev/null 2>&1 && {
         echo "✅ Axon ready (instance=$AXON_INSTANCE_KIND, mode=$RUNTIME_MODE)"
         # REQ-AXO-902064 slice 1 — brain launch→readyz wall-time (the boot
         # contribution to MCP downtime during a promote/restart).
-        echo "   [timing] brain launch→readyz: $(( $(axon_monotonic_ms) - AXON_LAUNCH_T0_MS ))ms"
-        echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
-        if [[ "$RUNTIME_MODE" == indexer_* ]]; then
-            echo "   Indexer: initializing in background (GPU model load)"
-        fi
+        echo "   [timing] ${READY_ROLE} launch→readyz: $(( $(axon_monotonic_ms) - AXON_LAUNCH_T0_MS ))ms"
+        [[ "$READY_ROLE" == "brain" ]] && echo "   MCP: http://127.0.0.1:$AXON_BRAIN_PORT/mcp"
         echo "   Stop: ./scripts/axon --instance $AXON_INSTANCE_KIND stop"
         exit 0
     }
@@ -518,5 +552,5 @@ for ((i=1; i<=BRAIN_TIMEOUT_S; i++)); do
 done
 
 echo "❌ Timeout on :${READYZ_PORT}/readyz"
-echo "   Logs: process-compose -p $PC_PORT process logs axon-brain"
+echo "   Logs: process-compose -p $PC_PORT process logs $READY_PROCESS"
 exit 1

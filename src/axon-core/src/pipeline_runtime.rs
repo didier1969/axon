@@ -182,11 +182,13 @@ fn resolve_database_url_for_listener() -> String {
 fn spawn_indexer_liveness_heartbeat(
     store: Arc<GraphStore>,
     a_stage_metrics: [Arc<crate::pipeline::StageMetrics>; 3],
+    health_state: crate::indexer_health_http::IndexerHealthState,
 ) {
     crate::embedder::lifecycle_machine::spawn_lifecycle_heartbeat_publisher(
         std::time::Duration::from_secs(5),
         move |snapshot| {
-            if let Err(err) = store.record_lifecycle_heartbeat("indexer", &snapshot) {
+            let lifecycle_result = store.record_lifecycle_heartbeat("indexer", &snapshot);
+            if let Err(err) = &lifecycle_result {
                 warn!(
                     error = %err,
                     "REQ-AXO-901874: failed to UPSERT EmbedderLifecycleHeartbeat row"
@@ -230,11 +232,23 @@ fn spawn_indexer_liveness_heartbeat(
                 pg_pool_evictions_total: crate::postgres::native::pool_connection_evictions_total()
                     as i64,
             };
-            if let Err(err) = store.record_indexer_runtime_truth(&truth) {
+            let runtime_truth_result = store.record_indexer_runtime_truth(&truth);
+            if let Err(err) = &runtime_truth_result {
                 warn!(
                     error = %err,
                     "REQ-AXO-901854: failed to UPSERT indexer_runtime_truth row"
                 );
+            }
+            match lifecycle_result {
+                Ok(()) => {
+                    health_state.record_heartbeat_success(snapshot.heartbeat_ms);
+                }
+                Err(_) => {
+                    // The detailed PG error is logged above. Keep the probe
+                    // payload credential-safe and stable for supervisors.
+                    health_state
+                        .record_heartbeat_failure("canonical_lifecycle_heartbeat_persist_failed");
+                }
             }
         },
     );
@@ -244,6 +258,7 @@ pub fn spawn_pipeline_indexer(
     runtime_mode: AxonRuntimeMode,
     store: Arc<GraphStore>,
     watch_root: String,
+    health_state: crate::indexer_health_http::IndexerHealthState,
 ) -> Result<()> {
     // REQ-AXO-901901 — discovery has TWO complementary feeds, both landing directly in
     // pipeline A's input channel (no in-memory buffer, and — REQ-AXO-902260 — no DB work
@@ -348,6 +363,7 @@ pub fn spawn_pipeline_indexer(
             handles_a.metrics_a2.clone(),
             handles_a.metrics_a3.clone(),
         ],
+        health_state,
     );
 
     // Create the b_chunks channel here. The sorted-drain feeder owns the tx ;

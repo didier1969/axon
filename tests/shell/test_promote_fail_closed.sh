@@ -71,5 +71,12 @@ else
   fail "final verdict cannot distinguish/reconstruct gate outcomes"
 fi
 
+if grep -q 'TIER-1 AUTO-RECOVERY: restart the indexer ONLY' "$PROMOTE" \
+  && grep -Fq 'if [[ "$recon_phase" != "clean" && "$recon_failed" != "indexer_alive" ]]; then' "$PROMOTE"; then
+  pass "indexer-only liveness failure cannot escalate to a full Brain restart"
+else
+  fail "indexer-only liveness failure can still interrupt the Brain"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -7,11 +7,11 @@ use crate::main_background;
 use crate::main_services;
 use crate::main_telemetry;
 use crate::queue::QueueStore;
-use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
-use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_capacity_profile::{
     recommend_embedding_lane_sizing, EmbeddingLaneSizing, RuntimeProfile,
 };
+use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
+use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_writer_guard::WriterGuard;
 // REQ-AXO-901653 slice-5c — v1 `worker::{DbWriteTask, WorkerPool}` retired.
 // Pipeline_v2 (REQ-AXO-289 / CPT-AXO-054) owns the ingestion path.
@@ -1083,7 +1083,7 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
 
     // REQ-AXO-901653 slice-5c — `db_sender` removed (v1 writer-actor retired).
     // Pipeline_v2 (REQ-AXO-289) writes via GraphStore directly.
-    if profile.start_mcp_http {
+    let indexer_health = if profile.start_mcp_http {
         let options = match runtime_mode {
             AxonRuntimeMode::BrainOnly => main_services::RuntimeServiceOptions::brain_only(),
             AxonRuntimeMode::IndexerGraph => main_services::RuntimeServiceOptions::indexer_graph(),
@@ -1099,15 +1099,16 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
             num_workers,
             options,
         );
+        None
     } else {
-        start_indexer_only_services(
+        Some(start_indexer_only_services(
             graph_store.clone(),
             queue_store.clone(),
             results_tx.clone(),
             num_workers,
             runtime_mode,
-        );
-    }
+        ))
+    };
 
     // REQ-AXO-901869 A1 — when this process serves MCP reads (brain), warm
     // the in-RAM IstGraphView CSR snapshot for every IST-bearing project at
@@ -1133,15 +1134,24 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         // per file.
         // The legacy notify watcher + federation/scope orchestrators that pushed
         // into the in-memory ingress_buffer were RIPPED in the LEGACY FEED PURGE.
+        let health_state = indexer_health.clone().ok_or_else(|| {
+            anyhow::anyhow!("ingestion-enabled runtime has no indexer health state")
+        })?;
         if let Err(err) = crate::pipeline_runtime::spawn_pipeline_indexer(
             runtime_mode,
             graph_store.clone(),
             watch_root_str.clone(),
+            health_state.clone(),
         ) {
-            warn!(error = %err, "pipeline_runtime: failed to spawn streaming indexer");
+            health_state.record_heartbeat_failure("pipeline_spawn_failed");
+            return Err(err.context("pipeline_runtime: failed to spawn streaming indexer"));
         }
+        health_state.mark_pipeline_started();
         main_background::spawn_memory_reclaimer(queue_store.clone());
     } else {
+        if let Some(health_state) = &indexer_health {
+            health_state.mark_pipeline_started();
+        }
         info!("Scan and autonomous ingestion disabled by runtime mode.");
     }
 
@@ -2226,7 +2236,7 @@ fn start_indexer_only_services(
     _results_tx: tokio::sync::broadcast::Sender<String>,
     _num_workers: usize,
     runtime_mode: AxonRuntimeMode,
-) {
+) -> crate::indexer_health_http::IndexerHealthState {
     if runtime_mode.ingestion_enabled() {
         info!("Runtime services: indexing handled by pipeline (REQ-AXO-289).");
     } else {
@@ -2257,13 +2267,12 @@ fn start_indexer_only_services(
     // celui du brain pour cohabitation live brain :44129 + indexer :44139.
     // Best-effort : si bind échoue, l'indexer tourne sans HTTP (process-
     // compose perdra ses probes mais ne crash pas).
-    let health_state = crate::indexer_health_http::IndexerHealthState::new();
+    let health_state =
+        crate::indexer_health_http::IndexerHealthState::new(runtime_mode.ingestion_enabled());
     let health_port = crate::indexer_health_http::resolve_health_port();
     let health_state_for_spawn = health_state.clone();
     tokio::spawn(async move {
         crate::indexer_health_http::serve_health_probes(health_port, health_state_for_spawn).await;
     });
-    // Init terminé (workers spawnés ci-dessus) → /startupz peut retourner
-    // 200. Avant ce point, /startupz retourne 503 + {state:starting}.
-    health_state.mark_startup_done();
+    health_state
 }

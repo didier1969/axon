@@ -601,7 +601,12 @@ async fn run_root_subscription(
     // Fix: next() pushes feed actions to an UNBOUNDED queue (never blocks); a
     // separate feeder task drains it into `input_tx` WITH backpressure. The
     // subscription loop therefore always returns to next() immediately.
-    let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<FeedAction>();
+    // Keep the fresh-instance crawl and live deltas on distinct queues. A
+    // single FIFO made an interactive save wait behind 10k+ bootstrap files
+    // from the same repository. The feeder always drains the live queue first,
+    // while retaining every bulk action for eventual completeness.
+    let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel::<FeedAction>();
+    let (bulk_tx, mut bulk_rx) = tokio::sync::mpsc::unbounded_channel::<FeedAction>();
     let feeder_input_tx = input_tx.clone();
     let feeder_store = store.clone();
     let feeder_resolver = resolver.clone();
@@ -615,38 +620,32 @@ async fn run_root_subscription(
         let mut guard = ChurnGuard::new(cooldown_ms);
         let mut flush = tokio::time::interval(Duration::from_millis(CHURN_FLUSH_INTERVAL_MS));
         flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut live_open = true;
+        let mut bulk_open = true;
         loop {
+            if !live_open && !bulk_open {
+                break;
+            }
             tokio::select! {
-                maybe = feed_rx.recv() => {
-                    let Some(action) = maybe else { break }; // sender dropped → drain done
-                    match action {
-                        FeedAction::Upsert(path) => {
-                            let now = crate::clock::now_unix_ms();
-                            if guard.admit(&path, now) {
-                                let project_code = match feeder_resolver.resolve(&path) {
-                                    Ok(code) => code,
-                                    Err(err) => {
-                                        record_unregistered_skip(&feeder_store, &path, &err.to_string()).await;
-                                        continue;
-                                    }
-                                };
-                                if feeder_input_tx.send(AdmittedPath { path, project_code }).await.is_err() {
-                                    return; // pipeline A closed
-                                }
-                            } else {
-                                // Inside cooldown — defer to the trailing edge.
-                                guard.mark_pending(&path, now);
+                biased;
+                maybe = live_rx.recv(), if live_open => {
+                    match maybe {
+                        Some(action) => {
+                            if !feed_action(&feeder_input_tx, &feeder_store, &feeder_resolver, &mut guard, action).await {
+                                return;
                             }
                         }
-                        FeedAction::Delete(path) => {
-                            guard.forget(&path); // a delete supersedes a pending upsert
-                            let store = feeder_store.clone();
-                            let p = path.to_string_lossy().to_string();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                store.delete_file_cascade(&p)
-                            })
-                            .await;
+                        None => live_open = false,
+                    }
+                }
+                maybe = bulk_rx.recv(), if bulk_open => {
+                    match maybe {
+                        Some(action) => {
+                            if !feed_action(&feeder_input_tx, &feeder_store, &feeder_resolver, &mut guard, action).await {
+                                return;
+                            }
                         }
+                        None => bulk_open = false,
                     }
                 }
                 _ = flush.tick() => {
@@ -666,6 +665,7 @@ async fn run_root_subscription(
                         }
                     }
                 }
+                else => break,
             }
         }
     });
@@ -714,8 +714,9 @@ async fn run_root_subscription(
 
                 // Hand off to the feeder (UNBOUNDED — never blocks next()).
                 let mut feeder_closed = false;
+                let selected_tx = if is_fresh { &bulk_tx } else { &live_tx };
                 for action in actions {
-                    if feed_tx.send(action).is_err() {
+                    if selected_tx.send(action).is_err() {
                         feeder_closed = true;
                         break;
                     }
@@ -746,9 +747,47 @@ async fn run_root_subscription(
     };
 
     // Drop the sender so the feeder drains its queue and exits cleanly.
-    drop(feed_tx);
+    drop(live_tx);
+    drop(bulk_tx);
     let _ = feeder.await;
     outcome
+}
+
+async fn feed_action(
+    input_tx: &Sender<AdmittedPath>,
+    store: &Arc<GraphStore>,
+    resolver: &ProjectCodeResolver,
+    guard: &mut ChurnGuard,
+    action: FeedAction,
+) -> bool {
+    match action {
+        FeedAction::Upsert(path) => {
+            let now = crate::clock::now_unix_ms();
+            if guard.admit(&path, now) {
+                let project_code = match resolver.resolve(&path) {
+                    Ok(code) => code,
+                    Err(err) => {
+                        record_unregistered_skip(store, &path, &err.to_string()).await;
+                        return true;
+                    }
+                };
+                input_tx
+                    .send(AdmittedPath { path, project_code })
+                    .await
+                    .is_ok()
+            } else {
+                guard.mark_pending(&path, now);
+                true
+            }
+        }
+        FeedAction::Delete(path) => {
+            guard.forget(&path);
+            let store = store.clone();
+            let path = path.to_string_lossy().to_string();
+            let _ = tokio::task::spawn_blocking(move || store.delete_file_cascade(&path)).await;
+            true
+        }
+    }
 }
 
 /// Fail-loud ledger for paths rejected before A1. FileLifecycleEvent deliberately

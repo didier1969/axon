@@ -10,35 +10,102 @@
 // (`AXON_INDEXER_HEALTH_PORT`, défaut 44130 live / 44149 dev) avec
 // uniquement les 3 endpoints de probe — pas de surface MCP / SQL.
 //
-// V1 : les 3 endpoints retournent 200 OK. Le simple fait que axum réponde
-// prouve liveness + readiness côté indexer (le process est en train de
-// tourner la pipeline). V2 raffinera /readyz (PG ping via tokio-postgres,
-// freshness IST snapshot) et /startupz (flag AtomicBool set par init).
+// `/livez` prouve uniquement que le processus HTTP répond. `/readyz` et
+// `/startupz` restent à 503 tant que le pipeline n'est pas démarré et, pour
+// un mode d'ingestion, tant qu'un heartbeat durable PG récent n'a pas été
+// publié. Une simple présence de PID ne peut donc plus masquer un indexeur
+// qui ne produit rien.
 
 use axum::{http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
-/// État partagé minimal — flag StartupDone set par init runtime quand les
-/// workers sémantiques + pipeline sont spawnés.
-#[derive(Clone, Default)]
+const HEARTBEAT_FRESHNESS_MS: i64 = 30_000;
+
+/// État partagé entre le boot, le publisher PG et les handlers de probes.
+#[derive(Clone)]
 pub struct IndexerHealthState {
-    pub startup_done: Arc<AtomicBool>,
+    pipeline_started: Arc<AtomicBool>,
+    heartbeat_required: bool,
+    last_heartbeat_ms: Arc<AtomicI64>,
+    last_error: Arc<RwLock<Option<String>>>,
 }
 
 impl IndexerHealthState {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(heartbeat_required: bool) -> Self {
+        Self {
+            pipeline_started: Arc::new(AtomicBool::new(false)),
+            heartbeat_required,
+            last_heartbeat_ms: Arc::new(AtomicI64::new(0)),
+            last_error: Arc::new(RwLock::new(None)),
+        }
     }
 
-    pub fn mark_startup_done(&self) {
-        self.startup_done.store(true, Ordering::Release);
+    pub fn mark_pipeline_started(&self) {
+        self.pipeline_started.store(true, Ordering::Release);
     }
 
     pub fn is_started(&self) -> bool {
-        self.startup_done.load(Ordering::Acquire)
+        self.pipeline_started.load(Ordering::Acquire)
+    }
+
+    pub fn record_heartbeat_success(&self, heartbeat_ms: i64) {
+        self.last_heartbeat_ms
+            .store(heartbeat_ms.max(0), Ordering::Release);
+        if let Ok(mut error) = self.last_error.write() {
+            *error = None;
+        }
+    }
+
+    pub fn record_heartbeat_failure(&self, error: impl Into<String>) {
+        if let Ok(mut current) = self.last_error.write() {
+            *current = Some(error.into());
+        }
+    }
+
+    pub fn is_ready_at(&self, now_ms: i64) -> bool {
+        if !self.is_started() {
+            return false;
+        }
+        if !self.heartbeat_required {
+            return true;
+        }
+        let heartbeat_ms = self.last_heartbeat_ms.load(Ordering::Acquire);
+        heartbeat_ms > 0 && now_ms.saturating_sub(heartbeat_ms) <= HEARTBEAT_FRESHNESS_MS
+    }
+
+    fn reasons_at(&self, now_ms: i64) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if !self.is_started() {
+            reasons.push("pipeline_not_started".to_string());
+        }
+        if self.heartbeat_required {
+            let heartbeat_ms = self.last_heartbeat_ms.load(Ordering::Acquire);
+            if heartbeat_ms <= 0 {
+                reasons.push("heartbeat_not_published".to_string());
+            } else if now_ms.saturating_sub(heartbeat_ms) > HEARTBEAT_FRESHNESS_MS {
+                reasons.push("heartbeat_stale".to_string());
+            }
+        }
+        reasons
+    }
+
+    fn status_json(&self, now_ms: i64, ready: bool) -> serde_json::Value {
+        let heartbeat_ms = self.last_heartbeat_ms.load(Ordering::Acquire);
+        let last_error = self.last_error.read().ok().and_then(|value| value.clone());
+        serde_json::json!({
+            "state": if ready { "ready" } else { "not_ready" },
+            "pipeline_started": self.is_started(),
+            "heartbeat_required": self.heartbeat_required,
+            "heartbeat_ms": if heartbeat_ms > 0 { Some(heartbeat_ms) } else { None },
+            "heartbeat_age_ms": if heartbeat_ms > 0 { Some(now_ms.saturating_sub(heartbeat_ms)) } else { None },
+            "reasons": self.reasons_at(now_ms),
+            "last_error": last_error,
+            "pid": std::process::id(),
+            "build_id": std::env::var("AXON_BUILD_ID").ok().filter(|v| !v.trim().is_empty()),
+        })
     }
 }
 
@@ -57,13 +124,19 @@ pub fn health_router(state: IndexerHealthState) -> Router {
         .route(
             "/readyz",
             get({
-                let _s = state.clone();
-                move || async {
-                    // V1 : si axum répond, l'indexer est ready.
-                    // V2 (TODO) : ping PG via tokio-postgres + check
-                    // freshness IST snapshot pour distinguer ready vs
-                    // degraded (cf. doctrine Sridharan graceful degradation).
-                    (StatusCode::OK, Json(serde_json::json!({"state": "ready"}))).into_response()
+                let s = state.clone();
+                move || {
+                    let s = s.clone();
+                    async move {
+                        let now_ms = crate::clock::now_unix_ms();
+                        let ready = s.is_ready_at(now_ms);
+                        let status = if ready {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        };
+                        (status, Json(s.status_json(now_ms, ready))).into_response()
+                    }
                 }
             }),
         )
@@ -72,19 +145,14 @@ pub fn health_router(state: IndexerHealthState) -> Router {
             get(move || {
                 let state = state.clone();
                 async move {
-                    if state.is_started() {
-                        (
-                            StatusCode::OK,
-                            Json(serde_json::json!({"state": "started"})),
-                        )
-                            .into_response()
+                    let now_ms = crate::clock::now_unix_ms();
+                    let ready = state.is_ready_at(now_ms);
+                    if ready {
+                        (StatusCode::OK, Json(state.status_json(now_ms, true))).into_response()
                     } else {
                         (
                             StatusCode::SERVICE_UNAVAILABLE,
-                            Json(serde_json::json!({
-                                "state": "starting",
-                                "reasons": ["indexer_init_not_complete"]
-                            })),
+                            Json(state.status_json(now_ms, false)),
                         )
                             .into_response()
                     }
@@ -161,6 +229,8 @@ pub fn resolve_health_port_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
 
     // REQ-AXO-902261 — no lock and no env mutation: the values are arguments now.
 
@@ -202,9 +272,82 @@ mod tests {
 
     #[test]
     fn startup_state_transitions() {
-        let s = IndexerHealthState::new();
+        let s = IndexerHealthState::new(true);
         assert!(!s.is_started());
-        s.mark_startup_done();
+        assert!(!s.is_ready_at(1_000));
+
+        s.mark_pipeline_started();
         assert!(s.is_started());
+        assert!(
+            !s.is_ready_at(1_000),
+            "a spawned pipeline is not ready until its first heartbeat is durable"
+        );
+
+        s.record_heartbeat_success(1_000);
+        assert!(s.is_ready_at(1_001));
+        assert!(
+            !s.is_ready_at(31_001),
+            "readiness must expire with the canonical 30s heartbeat window"
+        );
+    }
+
+    #[test]
+    fn non_ingestion_indexer_does_not_require_pipeline_heartbeat() {
+        let s = IndexerHealthState::new(false);
+        assert!(!s.is_ready_at(1_000));
+        s.mark_pipeline_started();
+        assert!(s.is_started());
+        assert!(s.is_ready_at(1_000));
+    }
+
+    #[test]
+    fn transient_heartbeat_failure_is_tolerated_until_freshness_expires() {
+        let s = IndexerHealthState::new(true);
+        s.mark_pipeline_started();
+        s.record_heartbeat_success(1_000);
+        assert!(s.is_ready_at(1_001));
+        s.record_heartbeat_failure("postgres unavailable");
+        assert!(s.is_ready_at(1_002));
+        assert!(!s.is_ready_at(31_001));
+    }
+
+    #[tokio::test]
+    async fn http_probes_distinguish_process_liveness_from_durable_readiness() {
+        let state = IndexerHealthState::new(true);
+
+        let live = health_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/livez")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(live.status(), StatusCode::OK);
+
+        let not_ready = health_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(not_ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        state.mark_pipeline_started();
+        state.record_heartbeat_success(crate::clock::now_unix_ms());
+        let ready = health_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
     }
 }

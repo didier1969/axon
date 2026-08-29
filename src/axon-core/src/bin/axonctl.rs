@@ -151,10 +151,18 @@ impl InstanceConfig {
         let pid_file = run_root.join(format!("{binary_name}.pid"));
         let runtime_state_file = run_root.join("runtime.env");
 
-        let writer_lock_paths = vec![
-            ("IST".to_string(), db_root.join(".axon-ist.writer.lock")),
-            ("SOLL".to_string(), db_root.join(".axon-soll.writer.lock")),
-        ];
+        let writer_lock_paths = match role {
+            RuntimeRole::Brain => {
+                vec![("SOLL".to_string(), db_root.join(".axon-soll.writer.lock"))]
+            }
+            RuntimeRole::Indexer => {
+                vec![("IST".to_string(), db_root.join(".axon-ist.writer.lock"))]
+            }
+            RuntimeRole::All => vec![
+                ("IST".to_string(), db_root.join(".axon-ist.writer.lock")),
+                ("SOLL".to_string(), db_root.join(".axon-soll.writer.lock")),
+            ],
+        };
 
         Self {
             project_root,
@@ -184,14 +192,33 @@ impl InstanceConfig {
     }
 
     fn all_ports(&self) -> Vec<u16> {
-        vec![
-            self.phx_port,
-            self.hydra_tcp_port,
-            self.hydra_http_port,
-            self.hydra_odata_port,
-            self.hydra_http2_port,
-            self.hydra_mcp_port,
-        ]
+        let indexer_health_port = indexer_health_port(self.instance_kind);
+        let mut ports = match self.role {
+            RuntimeRole::Brain => vec![
+                self.phx_port,
+                self.hydra_tcp_port,
+                self.hydra_http_port,
+                self.hydra_odata_port,
+                self.hydra_http2_port,
+                self.hydra_mcp_port,
+            ],
+            RuntimeRole::Indexer => vec![indexer_health_port],
+            RuntimeRole::All => vec![
+                self.phx_port,
+                self.hydra_tcp_port,
+                self.hydra_http_port,
+                self.hydra_odata_port,
+                self.hydra_http2_port,
+                self.hydra_mcp_port,
+                indexer_health_port,
+            ],
+        };
+        if matches!(self.role, RuntimeRole::Brain) {
+            ports.retain(|port| *port != indexer_health_port);
+        }
+        ports.sort_unstable();
+        ports.dedup();
+        ports
     }
 }
 
@@ -1693,6 +1720,9 @@ fn cmd_stop(config: InstanceConfig, hard: bool, timeout_ms: u64, json: bool) -> 
 
         // Step 2: Kill BEAM processes by Erlang node name
         let t_beam = s.spawn(|| -> (Vec<i32>, Option<StopPhase>) {
+            if matches!(config.role, RuntimeRole::Indexer) {
+                return (vec![], None);
+            }
             let beam_pids = find_beam_pids_by_node_name(&config.elixir_node_name);
             if !beam_pids.is_empty() {
                 terminate_pids(&beam_pids, libc::SIGTERM);
@@ -1970,11 +2000,15 @@ fn process_matches_instance(entry: &ProcEntry, config: &InstanceConfig) -> bool 
         return true;
     }
     // Match BEAM by Erlang node name (orphaned BEAMs may lack project_root in cmdline)
-    if entry.command.contains("beam.smp") && entry.command.contains(&config.elixir_node_name) {
+    if !matches!(config.role, RuntimeRole::Indexer)
+        && entry.command.contains("beam.smp")
+        && entry.command.contains(&config.elixir_node_name)
+    {
         return true;
     }
     // Match dashboard build tools under project root
-    if entry.command.contains(root.as_ref())
+    if !matches!(config.role, RuntimeRole::Indexer)
+        && entry.command.contains(root.as_ref())
         && (entry.command.contains("_build/esbuild") || entry.command.contains("_build/tailwind"))
     {
         return true;
@@ -2941,6 +2975,14 @@ mod tests {
             PathBuf::from("/home/user/projects/axon/.axon/run-indexer/axon-indexer.pid")
         );
         assert_eq!(c.runtime_binary_name, "axon-indexer");
+        assert_eq!(
+            c.writer_lock_paths,
+            vec![(
+                "IST".to_string(),
+                PathBuf::from("/home/user/projects/axon/.axon/graph_v2/.axon-ist.writer.lock")
+            )]
+        );
+        assert_eq!(c.all_ports(), vec![44130]);
     }
 
     #[test]
@@ -3024,6 +3066,57 @@ mod tests {
                 .into(),
         };
         assert!(process_matches_instance(&entry, &config));
+    }
+
+    #[test]
+    fn process_matches_instance_indexer_rejects_dashboard_beam() {
+        let config = InstanceConfig::new(
+            PathBuf::from("/home/user/projects/axon"),
+            InstanceKind::Live,
+            RuntimeRole::Indexer,
+        );
+        let entry = ProcEntry {
+            pid: 100,
+            ppid: 1,
+            command: "/nix/store/xxx/beam.smp -name axon_nexus@127.0.0.1 -setcookie secret".into(),
+        };
+        assert!(
+            !process_matches_instance(&entry, &config),
+            "an indexer-scoped stop must never select the dashboard BEAM"
+        );
+    }
+
+    #[test]
+    fn process_matches_instance_indexer_rejects_dashboard_build_tools() {
+        let config = InstanceConfig::new(
+            PathBuf::from("/home/user/projects/axon"),
+            InstanceKind::Live,
+            RuntimeRole::Indexer,
+        );
+        let entry = ProcEntry {
+            pid: 101,
+            ppid: 1,
+            command: "/home/user/projects/axon/src/dashboard/_build/esbuild --serve".into(),
+        };
+        assert!(!process_matches_instance(&entry, &config));
+    }
+
+    #[test]
+    fn instance_config_brain_owns_soll_and_not_indexer_health_port() {
+        let config = InstanceConfig::new(
+            PathBuf::from("/home/user/projects/axon"),
+            InstanceKind::Live,
+            RuntimeRole::Brain,
+        );
+        assert_eq!(
+            config.writer_lock_paths,
+            vec![(
+                "SOLL".to_string(),
+                PathBuf::from("/home/user/projects/axon/.axon/graph_v2/.axon-soll.writer.lock")
+            )]
+        );
+        assert!(!config.all_ports().contains(&44130));
+        assert!(config.all_ports().contains(&44129));
     }
 
     #[test]

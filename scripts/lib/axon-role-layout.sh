@@ -76,6 +76,29 @@ axon_runtime_binary_name() {
     esac
 }
 
+# Return the runtime processes owned by one start request. Live `indexer_full`
+# remains the canonical full topology (Brain + Indexer). In dev, indexer modes
+# are intentionally role-isolated: they must not create a second MCP Brain.
+axon_start_processes() {
+    local instance_kind="${1:?instance kind required}"
+    local runtime_mode="${2:?runtime mode required}"
+
+    case "$runtime_mode" in
+        brain_only)
+            printf 'axon-brain\n'
+            ;;
+        indexer_graph|indexer_vector|indexer_full)
+            if [[ "$instance_kind" == "live" ]]; then
+                printf 'axon-brain\n'
+            fi
+            printf 'axon-indexer\n'
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+}
+
 axon_role_is_brain() {
     local role="${1:-$(axon_runtime_shadow_role)}"
     [[ "$role" == "brain" ]]
