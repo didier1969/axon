@@ -264,10 +264,12 @@ else
 fi
 
 if grep -q 'shared_cargo_target="\$ROOT_DIR/.axon/promote-cargo-target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" && \
-   grep -q 'ln -s "\$shared_cargo_target" "\$worktree_cargo_target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
-    pass "promote : sources figées par SHA, cache Cargo dédié partagé sous le lease"
+   grep -q 'ln -s "\$shared_cargo_target" "\$worktree_cargo_target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" && \
+   grep -q 'promote-worktrees/stable' "$REPO_ROOT/scripts/release/promote_live_safe.sh" && \
+   grep -q 'switch --detach "\$sha"' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
+    pass "promote : sources figées, chemin et cache Cargo stables sous le lease"
 else
-    fail "promote : chaque SHA reconstruit encore toutes les dépendances dans un target froid"
+    fail "promote : un nouveau SHA peut encore invalider le cache par changement de chemin source"
 fi
 
 # `install_release_bin` doit installer depuis la cible que le build a RÉELLEMENT

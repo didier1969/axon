@@ -35,7 +35,8 @@ fi
 if grep -q 'PROMOTE_FROZEN_WORKTREE=' "$PROMOTE" && \
    grep -q '_cleanup_frozen_worktree' "$PROMOTE" && \
    grep -q 'source_root="$PROMOTE_FROZEN_WORKTREE"' "$PROMOTE" && \
-   grep -q "cd '\$source_root/src/axon-core'" "$PROMOTE"; then
+   grep -q 'run_targeted_cargo_build.sh' "$PROMOTE" && \
+   grep -q 'test-lib "$source_root/src/axon-core"' "$PROMOTE"; then
   pass "frozen worktree survives through test-target compilation and has EXIT cleanup"
 else
   fail "test targets are not compiled from the retained frozen worktree"
@@ -63,7 +64,7 @@ else
   fail "no post-DEV candidate recheck precedes manifest creation"
 fi
 
-parent_path_line="$(grep -n 'PROMOTE_FROZEN_WORKTREE=.*promote-worktrees.*PROMOTE_SHA' "$PROMOTE" | tail -1 | cut -d: -f1 || true)"
+parent_path_line="$(grep -n 'PROMOTE_FROZEN_WORKTREE=.*promote-worktrees/stable' "$PROMOTE" | tail -1 | cut -d: -f1 || true)"
 build_step_line="$(grep -n 'run_step 1 build build_from_frozen_worktree' "$PROMOTE" | head -1 | cut -d: -f1 || true)"
 if [[ -n "$parent_path_line" && -n "$build_step_line" && "$parent_path_line" -lt "$build_step_line" ]]; then
   pass "candidate path is published in the parent before run_step's pipeline subshell"
@@ -78,15 +79,18 @@ else
 fi
 
 if grep -q 'reuse_checkpoint=1' "$PROMOTE" && \
+   grep -q 'advance_checkpoint=1' "$PROMOTE" && \
+   grep -q 'switch --detach "$sha"' "$PROMOTE" && \
    grep -q 'rev-parse HEAD' "$PROMOTE" && \
    grep -q 'diff --quiet HEAD' "$PROMOTE" && \
    grep -q 'status --porcelain --untracked-files=normal' "$PROMOTE"; then
-  pass "an OOM-surviving worktree is reused only at the exact clean candidate SHA"
+  pass "a clean stable worktree is reused or advanced without rewriting unchanged sources"
 else
-  fail "frozen candidate checkpoints are not safely reusable after OOM"
+  fail "frozen candidate checkpoints cannot preserve Cargo source identity across SHAs"
 fi
 
-if grep -q 'CARGO_BUILD_JOBS=1 cargo build --tests -j 1' "$PROMOTE"; then
+if grep -q 'test-lib "$source_root/src/axon-core"' "$PROMOTE" && \
+   grep -q 'cargo test --lib --no-run -j 1' "$ROOT_DIR/scripts/release/run_targeted_cargo_build.sh"; then
   pass "test-target compilation has an explicit one-job memory backpressure guard"
 else
   fail "test-target compilation can still fan out under memory pressure"

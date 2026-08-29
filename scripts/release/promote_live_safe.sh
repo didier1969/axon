@@ -785,7 +785,14 @@ build_from_frozen_worktree() {
   # /tmp est un tmpfs de 31 Gio : y placer le worktree transforme les artefacts de
   # compilation en mémoire engagée et finit en ENOSPC/OOM pendant `cargo build
   # --tests`. Les checkpoints de promotion sont donc disk-backed sous .axon.
-  PROMOTE_FROZEN_WORKTREE="$ROOT_DIR/.axon/promote-worktrees/${sha:0:12}"
+  # REQ-AXO-902543 — the ABSOLUTE source path is part of Cargo's dep-info.
+  # A directory named after each SHA made every source path new and therefore
+  # rebuilt the monolithic axon-core even for shell-only commits. The promotion
+  # lease already serializes this workspace, so keep one stable path and move a
+  # clean detached checkout forward. Git rewrites only changed files: unchanged
+  # Rust sources retain both path and mtime, making the shared target genuinely
+  # incremental instead of merely shared storage.
+  PROMOTE_FROZEN_WORKTREE="$ROOT_DIR/.axon/promote-worktrees/stable"
   local worktree="$PROMOTE_FROZEN_WORKTREE"
 
   # Un SIGKILL/OOM ne peut exécuter aucun trap. S'il survient après le build, le
@@ -793,17 +800,27 @@ build_from_frozen_worktree() {
   # réutiliser. On ne le reprend que si Git prouve l'identité exacte du SHA ET
   # l'absence de toute modification de source; le preflight de contenu recertifie
   # ensuite chaque binaire. Toute ambiguïté retombe sur une création neuve.
-  local reuse_checkpoint=0
+  local reuse_checkpoint=0 advance_checkpoint=0
   if [[ -d "$worktree/.git" || -f "$worktree/.git" ]]; then
-    if [[ "$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)" == "$sha" ]] && \
-       git -C "$worktree" diff --quiet HEAD -- && \
+    if git -C "$worktree" diff --quiet HEAD -- && \
        git -C "$worktree" diff --cached --quiet HEAD -- && \
        [[ -z "$(git -C "$worktree" status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
-      reuse_checkpoint=1
+      if [[ "$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)" == "$sha" ]]; then
+        reuse_checkpoint=1
+      else
+        advance_checkpoint=1
+      fi
     fi
   fi
   if [[ "$reuse_checkpoint" -eq 1 ]]; then
     echo "  ↻ reprise du checkpoint figé $worktree (SHA exact, sources propres)"
+  elif [[ "$advance_checkpoint" -eq 1 ]]; then
+    git -C "$worktree" switch --detach "$sha" >/dev/null
+    [[ "$(git -C "$worktree" rev-parse HEAD)" == "$sha" ]] || {
+      echo "❌ stable promotion worktree did not reach requested SHA $sha" >&2
+      return 1
+    }
+    echo "  ↻ checkpoint stable avancé vers $sha (seuls les fichiers modifiés sont réécrits)"
   else
     git -C "$ROOT_DIR" worktree remove --force "$worktree" >/dev/null 2>&1 || true
     git -C "$ROOT_DIR" worktree add --detach "$worktree" "$sha" >/dev/null
@@ -874,7 +891,7 @@ if [[ "$SKIP_BUILD" -ne 1 ]]; then
     # `run_step` streams through tee, so its command executes in a pipeline subshell.
     # Publish these paths in the parent first; otherwise DEV silently falls back to a
     # mutable workspace rebuild after the child assignment disappears.
-    PROMOTE_FROZEN_WORKTREE="$ROOT_DIR/.axon/promote-worktrees/${PROMOTE_SHA:0:12}"
+    PROMOTE_FROZEN_WORKTREE="$ROOT_DIR/.axon/promote-worktrees/stable"
     CANDIDATE_BIN_DIR="$PROMOTE_FROZEN_WORKTREE/bin"
     # Un binaire live doit correspondre à un commit que quelqu'un d'autre peut
     # retrouver. Sans ça, « quelle version tourne en production » n'a pas de
