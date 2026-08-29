@@ -84,11 +84,28 @@ processes:
         scheme: "http"
         path: "/livez"
         port: 44129
-      initial_delay_seconds: 30
+      # REQ-AXO-902563 — la sonde tuait le brain PENDANT son propre démarrage.
+      # Au boot, le brain réchauffe le snapshot IST de CHAQUE projet du parc
+      # (REQ-AXO-901869 ; ~75 projets, TE2 21151 nœuds, TRD 12494) et ne sert
+      # pas /livez dans le budget. Mesuré en session 130 : trois terminaisons,
+      # `status: Terminating` + `exit_code: 0` + « liveness check fail —
+      # context deadline exceeded », donc AUCUN journal de crash — l'opérateur
+      # ne voyait qu'une sortie propre inexpliquée. L'ancien budget
+      # (30 + 3×15 = 75 s) reposait sur « exits cleanly on /readyz in ~0.8s »,
+      # vrai quand la mesure a été prise et devenu faux à mesure que le parc a
+      # grossi : un budget constant devant un travail qui croît avec les
+      # données finit toujours par être dépassé.
+      # 120 + 10×15 = 270 s. Le 120 est la valeur déjà retenue pour l'indexeur
+      # (bloc ci-dessous), qui a le même profil de démarrage long.
+      # CECI N'EST QU'UN DESSERRAGE. Le correctif de fond — servir /livez hors
+      # du chemin de réchauffage, comme 05fa97af l'a fait pour l'indexeur —
+      # reste porté par REQ-AXO-902563 : sans lui, un parc plus gros redéplacera
+      # le problème.
+      initial_delay_seconds: 120
       period_seconds: 15
       timeout_seconds: 5
       success_threshold: 1
-      failure_threshold: 3
+      failure_threshold: 10
     availability:
       restart: "on_failure"
       max_restarts: 3
