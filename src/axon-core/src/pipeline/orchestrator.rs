@@ -120,6 +120,20 @@ impl PipelineAWorkerCounts {
                 counts.a3 = v;
             }
         }
+        Self::bounded_for_instance(counts, std::env::var("AXON_INSTANCE_KIND").ok().as_deref())
+    }
+
+    /// REQ-AXO-902550 — live serves interactive customers while the indexer
+    /// drains an unbounded historical backlog. A stale deployment override must
+    /// not turn that background work into 12 parser + 16 PG writers and starve
+    /// Brain's readiness path. Lower operator values remain valid; dev and bench
+    /// instances remain unrestricted.
+    fn bounded_for_instance(mut counts: Self, instance_kind: Option<&str>) -> Self {
+        if instance_kind == Some("live") {
+            let safe = Self::default();
+            counts.a2 = counts.a2.min(safe.a2);
+            counts.a3 = counts.a3.min(safe.a3);
+        }
         counts
     }
 }
@@ -571,6 +585,35 @@ mod tests {
     /// still fails, a busy CPU no longer does. Same class as the wall-clock
     /// chunker bounds this REQ replaced with deterministic encode counts.
     const LIVENESS_TIMEOUT_SECS: u64 = 60;
+
+    #[test]
+    fn live_pipeline_a_clamps_backlog_drain_concurrency() {
+        let requested = PipelineAWorkerCounts {
+            a1: 4,
+            a2: 12,
+            a3: 16,
+        };
+
+        let effective = PipelineAWorkerCounts::bounded_for_instance(requested, Some("live"));
+
+        assert_eq!(effective.a1, 4);
+        assert_eq!(effective.a2, 8);
+        assert_eq!(effective.a3, 2);
+    }
+
+    #[test]
+    fn non_live_pipeline_a_keeps_explicit_benchmark_concurrency() {
+        let requested = PipelineAWorkerCounts {
+            a1: 6,
+            a2: 12,
+            a3: 16,
+        };
+
+        assert_eq!(
+            PipelineAWorkerCounts::bounded_for_instance(requested, Some("dev")).a3,
+            16
+        );
+    }
 
     fn admitted(path: std::path::PathBuf) -> AdmittedPath {
         AdmittedPath {

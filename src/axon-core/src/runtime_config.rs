@@ -18,6 +18,7 @@ use crate::pipeline::channels::{
     B3_BATCH_TIMEOUT_MS_DEFAULT, CHUNK_PENDING_NOTIFY_CHANNEL, INGRESS_DRAIN_BATCH_DEFAULT,
     INTERNAL_CHANNEL_CAP_DEFAULT,
 };
+use crate::pipeline::orchestrator::PipelineAWorkerCounts;
 use crate::pipeline_runtime::{VECTOR_DRAIN_BACKOFF_INITIAL_MS, VECTOR_DRAIN_BACKOFF_MAX_MS};
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -40,9 +41,12 @@ fn env_u64(key: &str, default: u64) -> u64 {
 /// `mcp/tools_system.rs` so an unset env still reports canonical
 /// values.
 pub fn compose_indexer_config() -> serde_json::Value {
-    let a1 = env_usize("AXON_A1_WORKERS", 4);
-    let a2 = env_usize("AXON_A2_WORKERS", 8);
-    let a3 = env_usize("AXON_A3_WORKERS", 2);
+    // REQ-AXO-902550 — report the effective live-safe values, not the raw env
+    // request which PipelineAWorkerCounts may clamp before spawning workers.
+    let pipeline_a = PipelineAWorkerCounts::from_env();
+    let a1 = pipeline_a.a1;
+    let a2 = pipeline_a.a2;
+    let a3 = pipeline_a.a3;
     let a3_batch = env_usize("AXON_A3_BATCH_SIZE", 32);
     let a3_timeout = env_u64("AXON_A3_BATCH_TIMEOUT_MS", 10);
 

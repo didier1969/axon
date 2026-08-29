@@ -126,18 +126,26 @@ processes:
       # REQ-AXO-901835 — explicit per-process sockets (cf. brain block).
       - "AXON_TELEMETRY_SOCK=/tmp/axon-live-indexer-telemetry.sock"
       - "AXON_MCP_SOCK=/tmp/axon-live-indexer-mcp.sock"
-      # REQ-AXO-901895 interim — parallelise the chunk stage (the tokenizer-per-
-      # symbol cost in A3 is the re-index bottleneck) until the cheap-estimate
-      # fix lands. Host has the cores; A3 chunking is CPU-bound + idempotent.
-      - "AXON_A3_WORKERS=16"
-      - "AXON_A2_WORKERS=12"
+      # REQ-AXO-902550 — customer traffic owns the host. The former hardcoded
+      # A2=12/A3=16 drain profile could saturate TypeDB while Brain rebuilt its
+      # RAM snapshot, making /readyz time out and the supervisor restart Brain.
+      # Keep the shipped live envelope aligned with PipelineAWorkerCounts. A
+      # deliberate operator experiment remains possible through indexer-scoped
+      # knobs, without inheriting a global AXON_A{2,3}_WORKERS value into both
+      # roles by accident.
+      - "AXON_A2_WORKERS=${AXON_INDEXER_A2_WORKERS:-8}"
+      - "AXON_A3_WORKERS=${AXON_INDEXER_A3_WORKERS:-2}"
       # REQ-AXO-902387 — budget VRAM et taille de lot B2, pilotables SANS rebuild.
       # Mesure 2026-08-20 : avec n=64, ORT demande une extension d'arene de 1,44 Gio
       # par lot, echoue, et TOUS les lots basculent sur CPU (debit /100, sans alerte).
       # Les petits lots du flux frais passent sur la MEME arene — d'ou le retaillage.
       # Valeurs de reglage, pas des constantes : 902387 les rend adaptatives.
       - "AXON_B2_BATCH_SIZE=${AXON_B2_BATCH_SIZE:-8}"
-      - "AXON_GPU_RESERVE_MB=${AXON_GPU_RESERVE_MB:-4096}"
+      # REQ-AXO-902550 — reserve half of the reference 8 GiB card for Brain's
+      # bounded query worker and interactive host consumers. runtime_boot then
+      # derives the actual CUDA arena cap from detected VRAM (about 3.97 GiB on
+      # the reference host); do not override that adaptive cap with 8 GiB.
+      - "AXON_GPU_RESERVE_MB=${AXON_INDEXER_GPU_RESERVE_MB:-4096}"
       # REQ-LLL-021/023 (mailbox [19]) — the .lll parser (parser/lll.rs) shells out to
       # `lll export-ist`; point it at the built llmlang release binary so extraction is
       # non-empty. Absent/unreachable → graceful-empty (indexing never fails, lll.rs:49).

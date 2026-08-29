@@ -43,3 +43,34 @@ if ! grep -Fq 'AXON_INDEXER_HEALTH_PORT:-44149' "$ROOT_DIR/scripts/start.sh"; th
     exit 1
 fi
 echo 'PASS  dev launcher and child agree on indexer health port 44149'
+
+# REQ-AXO-902550 — the shipped live drain profile must preserve Brain's CPU/PG
+# and GPU headroom. These are deployment contracts, so exercise the actual YAML
+# and sourceable template instead of duplicating their values in Rust.
+LIVE_YAML="$ROOT_DIR/process-compose.live.yaml"
+LIVE_ENV_TEMPLATE="$ROOT_DIR/config/axon-live.env.template"
+
+for expected in \
+    'AXON_A2_WORKERS=${AXON_INDEXER_A2_WORKERS:-8}' \
+    'AXON_A3_WORKERS=${AXON_INDEXER_A3_WORKERS:-2}' \
+    'AXON_GPU_RESERVE_MB=${AXON_INDEXER_GPU_RESERVE_MB:-4096}'
+do
+    if ! grep -Fq "$expected" "$LIVE_YAML"; then
+        printf 'FAIL  live indexer resource envelope missing: %s\n' "$expected" >&2
+        exit 1
+    fi
+done
+
+if grep -Eq '^[[:space:]]*AXON_CUDA_MEMORY_(SOFT_)?LIMIT_MB=' "$LIVE_ENV_TEMPLATE"; then
+    echo 'FAIL  live template disables the adaptive indexer CUDA budget' >&2
+    exit 1
+fi
+if ! grep -Fq 'AXON_INDEXER_GPU_RESERVE_MB=4096' "$LIVE_ENV_TEMPLATE"; then
+    echo 'FAIL  live template does not reserve GPU capacity for Brain' >&2
+    exit 1
+fi
+if grep -Eq 'AXON_A2_WORKERS=12|AXON_A3_WORKERS=16' "$LIVE_YAML"; then
+    echo 'FAIL  unsafe backlog-drain worker overrides returned' >&2
+    exit 1
+fi
+echo 'PASS  live indexer resource envelope preserves Brain headroom'

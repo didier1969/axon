@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use super::format::{format_standard_contract, format_table_from_json};
 use super::tools_system_debug;
 use super::McpServer;
+use crate::pipeline::orchestrator::PipelineAWorkerCounts;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
@@ -633,9 +634,13 @@ impl McpServer {
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .unwrap_or(default)
         };
-        let a1 = env_usize("AXON_A1_WORKERS", 4);
-        let a2 = env_usize("AXON_A2_WORKERS", 8);
-        let a3 = env_usize("AXON_A3_WORKERS", 2);
+        // REQ-AXO-902550 — expose effective live-safe concurrency. Reporting
+        // the stale raw override after the runtime clamps it sends operators in
+        // exactly the wrong direction during a customer-availability incident.
+        let pipeline_a = PipelineAWorkerCounts::from_env();
+        let a1 = pipeline_a.a1;
+        let a2 = pipeline_a.a2;
+        let a3 = pipeline_a.a3;
         let a3_batch = env_usize("AXON_A3_BATCH_SIZE", 32);
         let a3_timeout = env_u64("AXON_A3_BATCH_TIMEOUT_MS", 10);
         // B1 retired (REQ-AXO-901746) — no fetch-by-id worker pool ; demand_pull_b
