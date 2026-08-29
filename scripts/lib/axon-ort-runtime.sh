@@ -118,7 +118,13 @@ axon_resolve_ort_runtime() {
     local gpu_service_tensorrt_requested=0
 
     PRELAUNCH_LD_LIBRARY_PATH_EXPORT=""
-    ORT_BUILD_LOG="$(mktemp /tmp/axon-ort-build.XXXXXX.log)"
+    # REQ-AXO-902562 — ORT_BUILD_LOG n'est PLUS créé ici. Le `mktemp` était
+    # inconditionnel alors que ses cinq usages vivent tous dans le bloc de
+    # build ci-dessous, qui ne s'exécute que si la résolution par manifeste a
+    # échoué — c'est-à-dire presque jamais. Chaque appel laissait donc un
+    # fichier de 0 octet dans /tmp : une centaine en 9 jours, du bruit qui a
+    # coûté du temps d'exploration en session 130. Le fichier se crée
+    # désormais là où le `tee` l'écrit réellement.
     ORT_BUILD_TARGET="nixpkgs#onnxruntime"
     ORT_OUT_PATH=""
     ORT_DYLIB_PATH=""
@@ -234,6 +240,10 @@ axon_resolve_ort_runtime() {
     fi
 
     if [[ -z "${ORT_DYLIB_PATH:-}" ]]; then
+        # REQ-AXO-902562 — créé ICI, au seul endroit qui l'écrit : un build va
+        # réellement avoir lieu. Toutes les références (`tee`, le `rg` de
+        # diagnostic, le « Build log: » final) sont dans ce bloc.
+        ORT_BUILD_LOG="$(mktemp /tmp/axon-ort-build.XXXXXX.log)"
         if [[ "$ORT_BUILD_TARGET" == "nixpkgs#onnxruntime" ]]; then
             ORT_OUT_PATH="$(nix build --no-link --print-out-paths "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | tail -n 1)"
         else
