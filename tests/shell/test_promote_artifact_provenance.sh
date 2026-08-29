@@ -231,6 +231,16 @@ else
     fail "promote : la qualification 2e peut recompiler hors périmètre ou hors gouvernance"
 fi
 
+if grep -Fq -- 'run_step 4b latency_baseline' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- '--baseline "$PROMOTE_LATENCY_BASELINE"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- 'Contemporary LKG baseline artifact is incomplete or invalid' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- '"3" if args.warm_cache else "1"' "$REPO_ROOT/scripts/measure_mcp_suite.py" &&
+   grep -Fq -- 'statistics.median(latencies)' "$REPO_ROOT/scripts/measure_project_status_stack.py"; then
+    pass "promote : la latence candidate est comparée à une médiane LKG contemporaine"
+else
+    fail "promote : la gate de latence repose encore sur un échantillon ou une baseline historique"
+fi
+
 if grep -q 'shared_cargo_target="\$ROOT_DIR/.axon/promote-cargo-target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" && \
    grep -q 'ln -s "\$shared_cargo_target" "\$worktree_cargo_target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
     pass "promote : sources figées par SHA, cache Cargo dédié partagé sous le lease"

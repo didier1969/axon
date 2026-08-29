@@ -528,7 +528,7 @@ run_step() {
 step_timeout_seconds() {
   case "$1" in
     build) echo "$PROMOTE_LIVE_BUILD_TIMEOUT_S" ;; dev_restart) echo 480 ;; test_targets_compile) echo 3600 ;;
-    lifecycle_gate) echo 240 ;; cutover_prepare) echo 420 ;;
+    lifecycle_gate) echo 240 ;; latency_baseline) echo 240 ;; cutover_prepare) echo 420 ;;
     qualify_mcp|qualify_indexer_truth) echo 240 ;;
     preflight|candidate_recheck|manifest|apply_ddl_live) echo 180 ;;
     cutover_finalize) echo 60 ;; *) echo 300 ;;
@@ -999,6 +999,56 @@ fi
 manifest_path="$(realpath "$manifest_path")"
 promote_log "   ✅ step 4 (manifest) done — $manifest_path"
 
+# --- Step 4b: contemporaneous LKG latency baseline (REQ-AXO-902543) ---
+# A months-old baseline cannot distinguish a candidate regression from today's host
+# pressure. Measure the still-serving LKG immediately before cutover, with the same
+# steady-state suite used after activation. The status stack records three samples per
+# tool and compares their median; raw samples remain in the artifact.
+PROMOTE_BASELINE_ROOT="$LOG_DIR/baselines/$RELEASE_ATTEMPT_ID"
+capture_latency_baseline_step() {
+  mkdir -p "$PROMOTE_BASELINE_ROOT"
+  if ! timeout 180 python3 "$ROOT_DIR/scripts/measure_mcp_suite.py" \
+      --url "http://127.0.0.1:44129/mcp" \
+      --project "$PROJECT_CODE" \
+      --timeout 60 \
+      --warm-cache \
+      --label "lkg-pre-cutover" \
+      --output-root "$PROMOTE_BASELINE_ROOT"; then
+    echo "❌ Contemporary LKG latency baseline failed." >&2
+    return 1
+  fi
+}
+run_step 4b latency_baseline capture_latency_baseline_step
+mapfile -t promote_baseline_summaries < <(find "$PROMOTE_BASELINE_ROOT" -mindepth 2 -maxdepth 2 -name summary.json -type f)
+if [[ "${#promote_baseline_summaries[@]}" -ne 1 ]]; then
+  echo "❌ Expected exactly one contemporary LKG baseline, found ${#promote_baseline_summaries[@]}." >&2
+  exit 1
+fi
+PROMOTE_LATENCY_BASELINE="${promote_baseline_summaries[0]}"
+if ! python3 - "$PROMOTE_LATENCY_BASELINE" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+steps = payload.get("steps", {})
+stack = steps.get("project_status_stack", {}).get("summary", {})
+required = {"status", "soll_query_context", "conception_view", "project_status"}
+valid = (
+    payload.get("suite_mode") == "steady_state"
+    and steps.get("core_latency", {}).get("exit_code") == 0
+    and steps.get("project_status_stack", {}).get("exit_code") == 0
+    and steps.get("symbol_flow", {}).get("exit_code") == 0
+    and required == set(stack)
+    and all(isinstance(stack[name], (int, float)) for name in required)
+)
+raise SystemExit(0 if valid else 1)
+PY
+then
+  echo "❌ Contemporary LKG baseline artifact is incomplete or invalid." >&2
+  exit 1
+fi
+promote_log "   ✅ contemporaneous latency baseline — $PROMOTE_LATENCY_BASELINE"
+
 
 # --- Step 5: promote (copy + restart) ---
 # REQ-AXO-902285 — last GPU-wedge check, immediately before the destructive cutover and
@@ -1196,7 +1246,8 @@ else
     qualify_core_gate() {
       local output rc=0
       output="$(mktemp)"
-      timeout 180 "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency --project "$PROJECT_CODE" 2>&1 | tee "$output" || rc=${PIPESTATUS[0]}
+      timeout 180 "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency \
+        --project "$PROJECT_CODE" --baseline "$PROMOTE_LATENCY_BASELINE" 2>&1 | tee "$output" || rc=${PIPESTATUS[0]}
       if [[ "$rc" -eq 0 ]] && ! grep -q '^verdict=ok$' "$output"; then
         echo "qualify-mcp returned success without parseable verdict=ok" >&2
         rc=65

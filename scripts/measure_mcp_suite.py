@@ -192,6 +192,8 @@ def main() -> int:
             args.project,
             "--timeout",
             str(max(args.timeout, 30)),
+            "--samples",
+            "3" if args.warm_cache else "1",
             "--json-out",
             str(run_dir / "project-status-stack.json"),
         ],
