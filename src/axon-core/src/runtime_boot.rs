@@ -2271,8 +2271,6 @@ fn start_indexer_only_services(
         crate::indexer_health_http::IndexerHealthState::new(runtime_mode.ingestion_enabled());
     let health_port = crate::indexer_health_http::resolve_health_port();
     let health_state_for_spawn = health_state.clone();
-    tokio::spawn(async move {
-        crate::indexer_health_http::serve_health_probes(health_port, health_state_for_spawn).await;
-    });
+    crate::indexer_health_http::spawn_health_probe_server(health_port, health_state_for_spawn);
     health_state
 }

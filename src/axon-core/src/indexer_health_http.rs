@@ -193,6 +193,34 @@ pub async fn serve_health_probes(port: u16, state: IndexerHealthState) {
     }
 }
 
+/// REQ-AXO-902550 — run probes outside the indexer's application runtime.
+///
+/// CUDA/ORT session construction contains long synchronous sections. Running
+/// axum through `tokio::spawn` on that same runtime produced a deceptive state:
+/// the TCP listener existed, but its accept loop could not be polled and more
+/// than 50 liveness requests accumulated in the kernel backlog. A dedicated OS
+/// thread with a single-thread Tokio runtime makes the observer independent of
+/// the workload it observes.
+pub fn spawn_health_probe_server(port: u16, state: IndexerHealthState) {
+    let thread = std::thread::Builder::new().name("axon-indexer-health".to_string());
+    if let Err(error) = thread.spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                warn!(%error, "Indexer health probe runtime creation failed");
+                return;
+            }
+        };
+        runtime.block_on(serve_health_probes(port, state));
+    }) {
+        warn!(%error, "Indexer health probe thread creation failed");
+    }
+}
+
 /// Resolve le port health depuis l'env : `AXON_INDEXER_HEALTH_PORT` >
 /// `AXON_BRAIN_PORT + 1` > 44130. Ports explicites par instance dans
 /// process-compose yaml (live=44130, dev=44149). Le +1 est le fallback
@@ -230,6 +258,8 @@ pub fn resolve_health_port_from(
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
     use tower::ServiceExt;
 
     // REQ-AXO-902261 — no lock and no env mutation: the values are arguments now.
@@ -268,6 +298,37 @@ mod tests {
         // base + 1 on 65535 would wrap to 0 and bind a random port. `saturating_add`
         // keeps it in range; nothing pinned this before.
         assert_eq!(resolve_health_port_from(None, Some("65535".into())), 65535);
+    }
+
+    #[test]
+    fn dedicated_probe_runtime_answers_without_a_caller_runtime() {
+        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+
+        let state = IndexerHealthState::new(false);
+        state.mark_pipeline_started();
+        spawn_health_probe_server(port, state);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(error) if Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("dedicated health runtime did not bind: {error}"),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream
+            .write_all(b"GET /livez HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     }
 
     #[test]
