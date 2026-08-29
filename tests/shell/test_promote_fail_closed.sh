@@ -78,5 +78,21 @@ else
   fail "indexer-only liveness failure can still interrupt the Brain"
 fi
 
+if grep -Fq 'if [[ -f "$ADMISSION_PAUSE_FILE" ]]; then' "$PROMOTE" \
+  && ! grep -Fq 'if [[ "$recon_phase" != "clean" && -f "$ADMISSION_PAUSE_FILE" ]]; then' "$PROMOTE"; then
+  pass "admission desired-state overrides a fresh heartbeat instead of accepting stale clean"
+else
+  fail "fresh heartbeat can still mask an admission-paused indexer"
+fi
+
+guard_line="$(grep -n '^post_finalize_runtime_guard$' "$PROMOTE" | head -1 | cut -d: -f1)"
+complete_line="$(grep -n 'PROMOTE COMPLETE' "$PROMOTE" | tail -1 | cut -d: -f1)"
+if [[ -n "$guard_line" && -n "$complete_line" && "$guard_line" -lt "$complete_line" ]] \
+  && grep -q 'indexer /readyz returned' "$PROMOTE"; then
+  pass "final verdict rechecks actual indexer readiness after heartbeat reconciliation"
+else
+  fail "PROMOTE COMPLETE can still race a stopped indexer"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

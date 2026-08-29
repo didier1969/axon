@@ -1393,11 +1393,30 @@ _poll_promote_clean 120 || true
 # different from the one seen before) and sends the missing explicit `start` when the
 # supervisor gives up. Same lesson as the byte check of REQ-AXO-902258: never certify an
 # outcome from the return code of the thing you asked.
-if [[ "$recon_phase" != "clean" && -f "$ADMISSION_PAUSE_FILE" ]]; then
+# Admission desired-state outranks a recently successful heartbeat.  The indexer can
+# be stopped immediately after publishing one, leaving promote_status="clean" for the
+# heartbeat TTL even though Nexus has already withdrawn the role.  Observed during the
+# f51aba42 cutover: the marker and SIGTERM shared the same timestamp, yet the fresh
+# heartbeat let the promote print COMPLETE on a paused runtime.
+if [[ -f "$ADMISSION_PAUSE_FILE" ]]; then
   recon_phase="admission_paused"
   recon_failed="indexer_alive"
   promote_log "   ⏸ step 6c: Nexus admission paused the indexer during promotion — no role restart and no brain restart will fight desired state."
   promote_log "      marker=${ADMISSION_PAUSE_FILE} ($(tr '\n' ' ' < "$ADMISSION_PAUSE_FILE" 2>/dev/null || printf unreadable))"
+fi
+
+# A heartbeat is a bounded freshness signal, not proof that the producer still owns a
+# socket at this instant.  Certify the indexer's own readiness endpoint as well before
+# accepting clean; this closes the process-exit/heartbeat-TTL race without coupling the
+# indexer to Brain availability or trusting process-compose bookkeeping.
+if [[ "$recon_phase" == "clean" ]]; then
+  indexer_ready_code="$(curl -sS -o /dev/null -w '%{http_code}' -m 5 \
+    "http://127.0.0.1:44130/readyz" 2>/dev/null || true)"
+  if [[ "$indexer_ready_code" != "200" ]]; then
+    recon_phase="indexer_down"
+    recon_failed="indexer_alive"
+    promote_log "   ❌ step 6c: heartbeat was fresh but indexer /readyz returned ${indexer_ready_code:-unreachable}; refusing stale liveness."
+  fi
 fi
 
 if [[ "$recon_phase" != "clean" && "$recon_phase" != "admission_paused" ]]; then
@@ -1492,6 +1511,28 @@ fi
 # so its exit code must NOT fire the ERR trap and spuriously roll back a
 # successful promote. Display-only; `|| true` neutralises the pipefail exit.
 bash "$ROOT_DIR/scripts/axon-live" status 2>&1 | tee -a "$PROMOTE_LOG" || true
+
+# The release transaction is already finalized, so this guard never attempts a
+# rollback or a full-stack restart.  It only prevents the operator-facing verdict from
+# becoming a lie if admission or either runtime endpoint changes after step 6c.  Two
+# immediate sources are checked: desired state (the Nexus marker) and actual sockets.
+post_finalize_runtime_guard() {
+  local brain_code indexer_code
+  if [[ -f "$ADMISSION_PAUSE_FILE" ]]; then
+    promote_log "   ❌ post-finalize: cutover committed but indexer is admission-paused; refusing PROMOTE COMPLETE."
+    promote_log "      marker=${ADMISSION_PAUSE_FILE} ($(tr '\n' ' ' < "$ADMISSION_PAUSE_FILE" 2>/dev/null || printf unreadable))"
+    return 78
+  fi
+  brain_code="$(curl -sS -o /dev/null -w '%{http_code}' -m 5 \
+    "http://127.0.0.1:${AXON_BRAIN_PORT:-44129}/readyz" 2>/dev/null || true)"
+  indexer_code="$(curl -sS -o /dev/null -w '%{http_code}' -m 5 \
+    "http://127.0.0.1:44130/readyz" 2>/dev/null || true)"
+  if [[ "$brain_code" != "200" || "$indexer_code" != "200" ]]; then
+    promote_log "   ❌ post-finalize: cutover committed but runtime is not fully ready (brain=${brain_code:-unreachable}, indexer=${indexer_code:-unreachable}); refusing PROMOTE COMPLETE."
+    return 1
+  fi
+}
+post_finalize_runtime_guard
 promote_log "   ✅ step 7 (finalize) done"
 
 # REQ-AXO-902052 #6-B — fire-and-forget Memgraph publication refresh. Runs
