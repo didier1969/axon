@@ -82,4 +82,23 @@ Le succès se lira sur `soll_query_context`, `soll_attach_evidence` et `axon_pre
 - `REQ-AXO-902553` — 4 nœuds `SKI-PRO-*` plus minces que la copie archivée.
 - `REQ-AXO-902554` — 18 arêtes `INHERITS_FROM` vers un projet `CHC` inexistant, qui masquent les 8 vraies violations `PRO`.
 - `REQ-AXO-902555` — la télémétrie MCP ignore quel client appelle.
-- **Décision opérateur en attente** : `PRT-PRO-994`→`998` sont eux aussi des fixtures d'une ligne (`Slug: {{slug}}.`, `Run {{iterations}} times.`). Les rejeter porterait le nettoyage à 25 sur 26. Non fait — hors du périmètre validé.
+- ~~Décision opérateur en attente sur `PRT-PRO-994`→`998`~~ — **tranchée** : ces cinq étaient eux aussi des fixtures d'une ligne (`Slug: {{slug}}.`, `Run {{iterations}} times.`), rejetés sur instruction. Nettoyage final : **25 des 26 `PromptTemplate`**, seul `PRT-PRO-999` reste `current`.
+- `REQ-AXO-902556` — `practice_put` corrompt la mémoire gouvernée (voir section suivante).
+
+## Après-coup — vérifications, nettoyage parc, et un défaut trouvé au handoff
+
+**Le nouveau fonctionnement est vérifié, pas supposé.** Deux tests sur processus neuf :
+- CLAUDE.md projet = le nouveau · pas de section cache-TTL · pas de bandeau REMEMBER · pas de superpowers · 1 seul skill `axon-*` · 114 outils `mcp__axon__*` montés.
+- « axon init » route vers `GUI-PRO-102` **sans** l'ancien CLAUDE.md, et annonce les 3 bons premiers appels (`status mode=brief` → `axon_init_project` → `practice_recall`). La mitigation prévue au plan tient.
+
+Réserve : `/clear` seul ne suffit pas — le catalogue de skills et les plugins sont chargés au lancement du binaire. Il faut quitter et relancer.
+
+**27 répertoires `.remember` supprimés (~18 Mo).** Résidus du plugin `remember`, désactivé ce soir ; journal parallèle à Axon, sans garde anti-contradiction ni preuve pointée. Il avait d'ailleurs enregistré le « 6,6× » rétracté et désigné `settings.json` comme cause — il empile, il ne se relit pas.
+Le premier balayage (`-maxdepth 2`) en avait trouvé 24 ; le balayage complet en a révélé 27, dont le plus gros du parc (3,6 Mo à `Fiscaly/elixir/`) et un hors arborescence (`~/.remember`). Vérifié avant suppression : 0 versionné sur 27, tous gitignorés, aucun hook actif n'y écrivait.
+
+**`REQ-AXO-902556` — défaut trouvé pendant le handoff lui-même.** `practice_put` inline `dense` et `evidence` dans le corps du champ `practice` : le texte stocké porte littéralement `</practice><parameter name="dense">`, `encoding` retombe en `prose_fallback` alors que `dense` a été fourni, et l'`evidence` peut finir vide. Reproduit 3 fois de suite, y compris en tentant de contourner. Ce n'est pas une faute d'appelant : **3 pratiques antérieures du parc portent le même défaut** — `1222` (KKI), `1249` (APS3D), `1274` (OPV), écrites par des sessions et des tenants différents. La mémoire gouvernée étant primaire à l'init, la corruption est relue par chaque session de chaque projet.
+Doublons créés en tentant de corriger : `1701` et `1703` retirés par `practice_retire` (jamais supprimés), `1702` conservée.
+
+**Session pointer** : `CPT-AXO-052` pèse **77 739 o**. La pratique 1639 du parc documente le mode de ruine exact à 94 Ko — `soll_get` finit par refuser de rendre le corps, et ~25 000 jetons sont consommés à chaque réveil. Le titre a été corrigé (il annonçait encore « session 124 »), mais la réécriture du corps est une opération structurante qui n'a pas été engagée sans l'opérateur.
+
+**Portes finales** : `soll_validate(AXO)` 0 violation · couverture 1230 done / 65 partial / 2 missing (les 2 sont préexistants : `REQ-AXO-902072`/`902073`) · arbre propre · 0 commit non poussé.
