@@ -133,6 +133,7 @@ fi
 # A contender returns 75 before it creates a log/journal or touches release artifacts.
 PROMOTE_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_DIR="$ROOT_DIR/.axon/live-release"
+ADMISSION_PAUSE_FILE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/nexus-admission/axon-indexer.paused"
 start_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 RELEASE_ATTEMPT_ID="${PROMOTE_TIMESTAMP}-$$-${start_head:0:12}"
 export AXON_RELEASE_ATTEMPT_ID="$RELEASE_ATTEMPT_ID"
@@ -229,6 +230,43 @@ require_gpu_channel_free() {
   promote_log "   Most frequent cause: agent-deck's Footer GPU widget shelling \`nvidia-smi\` every 5s. Cure: remove \"gpu\" from [system_stats].show in ~/.agent-deck/config.toml (hot-reloads)."
   promote_log "   Recover: wait for \`ps -eo stat | grep '^D'\` to clear (frees itself ~15 min) or \`wsl --shutdown\` (operator), then re-run this promote."
   exit 3
+}
+
+# REQ-AXO-902543 — an admission pause is desired state, not an indexer crash.
+# Refuse before the destructive cutover: forcing the role up would fight Nexus,
+# while attempting a full-restart recovery would needlessly drop the brain and
+# still come back brain-only. The marker content and current pressure are emitted
+# as evidence so the refusal is actionable and cannot be mistaken for a product
+# regression.
+require_indexer_admission_green() {
+  [[ ! -f "$ADMISSION_PAUSE_FILE" ]] && return 0
+  promote_log "❌ PROMOTE REFUSED (pre-cutover): live indexer is intentionally paused by Nexus admission."
+  promote_log "   marker=${ADMISSION_PAUSE_FILE} ($(tr '\n' ' ' < "$ADMISSION_PAUSE_FILE" 2>/dev/null || printf unreadable))"
+  if command -v nexus-job >/dev/null 2>&1; then
+    promote_log "   pressure=$(nexus-job pressure 2>/dev/null | tr '\n' ' ' || printf unavailable)"
+  fi
+  promote_log "   No brain restart was attempted. Wait for Nexus to clear the marker, then retry."
+  return 78
+}
+
+# REQ-AXO-902543 — after a hard stop, persistent live ownership belongs to the
+# canonical systemd unit (nexus-core.slice, 14G/18G), never to the promoting
+# session's transient cgroup. Fail closed when that owner is unavailable; an
+# unsafe direct-start fallback recreates the 2G/4G reclaim incident.
+restart_live_through_systemd_owner() {
+  if ! command -v systemctl >/dev/null 2>&1 ||
+     ! systemctl --user cat axon-live.service >/dev/null 2>&1; then
+    echo "canonical axon-live.service unavailable; refusing session-owned live start" >&2
+    return 1
+  fi
+  systemctl --user restart axon-live.service || return 1
+  local owner
+  owner="$(systemctl --user show axon-live.service -p ControlGroup --value 2>/dev/null || true)"
+  if [[ "$owner" != *"/nexus.slice/nexus-core.slice/axon-live.service" ]]; then
+    echo "unexpected live owner cgroup: ${owner:-unavailable}" >&2
+    return 1
+  fi
+  curl -fsS --max-time 10 "http://127.0.0.1:${AXON_BRAIN_PORT:-44129}/readyz" >/dev/null
 }
 
 # --- REQ-AXO-902194: best-effort cross-project MCP-disruption broadcast ---
@@ -1056,6 +1094,7 @@ promote_log "   ✅ contemporaneous latency baseline — $PROMOTE_LATENCY_BASELI
 # (the pre-flight gate could not). On refusal the brain is still up → the EXIT trap's
 # "brain UP, pas un incident" all-clear reaches the peers who saw the pre-notice broadcast.
 require_gpu_channel_free "pre-cutover"
+require_indexer_admission_green
 _start_mcp_sampler
 ensure_head_stable
 old_md5="$(md5sum "$ROOT_DIR/bin/axon-brain" 2>/dev/null | cut -d' ' -f1 || echo "none")"
@@ -1336,7 +1375,14 @@ _poll_promote_clean 120 || true
 # different from the one seen before) and sends the missing explicit `start` when the
 # supervisor gives up. Same lesson as the byte check of REQ-AXO-902258: never certify an
 # outcome from the return code of the thing you asked.
-if [[ "$recon_phase" != "clean" ]]; then
+if [[ "$recon_phase" != "clean" && -f "$ADMISSION_PAUSE_FILE" ]]; then
+  recon_phase="admission_paused"
+  recon_failed="indexer_alive"
+  promote_log "   ⏸ step 6c: Nexus admission paused the indexer during promotion — no role restart and no brain restart will fight desired state."
+  promote_log "      marker=${ADMISSION_PAUSE_FILE} ($(tr '\n' ' ' < "$ADMISSION_PAUSE_FILE" 2>/dev/null || printf unreadable))"
+fi
+
+if [[ "$recon_phase" != "clean" && "$recon_phase" != "admission_paused" ]]; then
   # Tier 1 — the indexer is the ONLY failing gate: recover it without touching the brain.
   if [[ "$recon_failed" == "indexer_alive" ]]; then
     promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (failed_gates: indexer_alive) — TIER-1 AUTO-RECOVERY: restart the indexer ONLY (brain keeps serving)."
@@ -1360,7 +1406,7 @@ if [[ "$recon_phase" != "clean" ]]; then
     promote_log "   ⚠️ step 6c: still phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) — TIER-2 AUTO-RECOVERY: full restart (stop --hard + start full). THIS INTERRUPTS THE BRAIN — expect third-party MCP clients to see an outage."
     set +e
     bash "$ROOT_DIR/scripts/axon-live" stop --hard >> "$PROMOTE_LOG" 2>&1
-    bash "$ROOT_DIR/scripts/axon-live" start full  >> "$PROMOTE_LOG" 2>&1
+    restart_live_through_systemd_owner >> "$PROMOTE_LOG" 2>&1
     set -e
     _poll_promote_clean 180 || true
   fi
@@ -1373,7 +1419,7 @@ _report_mcp_outage
 if [[ "$recon_phase" == "clean" ]]; then
   promote_log "   ✅ step 6c: phase=clean (manifest↔runtime↔FULL-contract liveness all green)"
 else
-  promote_log "   ❌ step 6c: phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) persists after auto-recovery — FAILING the promote: the runtime_contract is degraded (indexer not alive). Do NOT trust a 'COMPLETE'; investigate the indexer."
+  promote_log "   ❌ step 6c: phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) — FAILING the promote: the runtime_contract is not fully available. Do NOT trust a 'COMPLETE'; follow the recorded admission/runtime evidence."
   exit 1
 fi
 

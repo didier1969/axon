@@ -241,6 +241,28 @@ else
     fail "promote : la gate de latence repose encore sur un échantillon ou une baseline historique"
 fi
 
+# REQ-AXO-902543 — une pause Nexus est un état désiré. Le promote doit la
+# détecter avant la coupure et ne jamais faire tomber le brain pour la combattre.
+if grep -Fq -- 'require_indexer_admission_green' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- 'recon_phase="admission_paused"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- 'recon_phase" != "admission_paused"' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
+    pass "promote : une pause admission refuse le cutover et interdit la récupération destructive"
+else
+    fail "promote : la récupération peut encore combattre une pause admission et couper le brain"
+fi
+
+# Après le hard-stop de TIER-2, le start doit être possédé par le service durable
+# doté du budget 14G/18G. Un `scripts/axon-live start full` direct hérite du cgroup
+# de la session de promote (incident 2G/4G du 2026-08-29).
+if grep -Fq -- 'restart_live_through_systemd_owner' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- 'systemctl --user restart axon-live.service' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   grep -Fq -- '/nexus.slice/nexus-core.slice/axon-live.service' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+   ! grep -Fq -- 'scripts/axon-live" start full' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
+    pass "promote : la récupération TIER-2 rattache le live au propriétaire systemd durable"
+else
+    fail "promote : la récupération TIER-2 peut encore lancer le live dans le cgroup de la session"
+fi
+
 if grep -q 'shared_cargo_target="\$ROOT_DIR/.axon/promote-cargo-target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" && \
    grep -q 'ln -s "\$shared_cargo_target" "\$worktree_cargo_target"' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
     pass "promote : sources figées par SHA, cache Cargo dédié partagé sous le lease"
