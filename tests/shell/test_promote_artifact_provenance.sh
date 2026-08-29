@@ -243,7 +243,7 @@ fi
 
 # REQ-AXO-902543 — une pause Nexus est un état désiré. Le promote doit la
 # détecter avant la coupure et ne jamais faire tomber le brain pour la combattre.
-if grep -Fq -- 'require_indexer_admission_green' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
+if [[ "$(grep -Fc -- 'require_indexer_admission_green' "$REPO_ROOT/scripts/release/promote_live_safe.sh")" -ge 3 ]] &&
    grep -Fq -- 'recon_phase="admission_paused"' "$REPO_ROOT/scripts/release/promote_live_safe.sh" &&
    grep -Fq -- 'recon_phase" != "admission_paused"' "$REPO_ROOT/scripts/release/promote_live_safe.sh"; then
     pass "promote : une pause admission refuse le cutover et interdit la récupération destructive"

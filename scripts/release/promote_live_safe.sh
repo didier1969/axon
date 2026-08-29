@@ -734,6 +734,7 @@ fi
 # "MCP will drop" message that would then need an all-clear). A wedge appearing LATER, during
 # the ~9-min build, is caught by the second gate just before step 5.
 require_gpu_channel_free "pre-flight (fresh promote)"
+require_indexer_admission_green
 
 # --- REQ-AXO-902194: pre-notice (brain still up) — warn peers the step-5 restart
 # will drop MCP briefly. Async, so mostly read on reconnect; harmless to send early. ---
