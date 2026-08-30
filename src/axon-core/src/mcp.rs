@@ -880,6 +880,61 @@ impl McpServer {
             }
         } // end attach_full (REQ-AXO-901947 terse-default gate)
 
+        // REQ-AXO-902560 — the SYMMETRIC half of REQ-AXO-902517 below, and the
+        // one that was missing. 902517 mirrors `data` into `structuredContent`
+        // for clients that read only the protocol field. But a tool whose whole
+        // payload lives in `content[0].text` and which puts NOTHING in `data`
+        // stays invisible to those very clients: they receive the generic
+        // guidance stub this function just built (`next_action` +
+        // `canonical_sources`) and conclude the tool returned nothing.
+        //
+        // Measured in session 130 on this exact client: `sql("SELECT 1 AS x")`,
+        // `fs_read` on a 217-byte file and `diagnose_indexing` all read as empty
+        // envelopes. None of them was broken — each wrote correctly into a
+        // channel the client does not render. The discriminator was `query`,
+        // the one tool that fills BOTH: only its `data` half arrived.
+        //
+        // The repo's own doctrine asserted the opposite ("rows only ever reached
+        // `data`, which the Claude Code client does not expose to the LLM").
+        // Rather than replace one client-specific belief with its inverse — which
+        // would break again on the next client — publish in BOTH channels, which
+        // is what `soll_get` already does and why it never suffered from this.
+        //
+        // Mirror only when `data` carries NO payload of its own, i.e. every key
+        // it holds belongs to the guidance stub. A tool with a rich `data` is
+        // already reaching the client, and duplicating its text would inflate
+        // every response for nothing.
+        const GUIDANCE_ONLY_KEYS: &[&str] = &[
+            "next_action",
+            "canonical_sources",
+            "next",
+            "next_call_hint",
+            "status",
+            "operator_guidance",
+            "follow_up_tools",
+            "derived_docs_refresh",
+            "parameter_repair",
+            "fallback_guidance",
+        ];
+        let rendered_text = object
+            .get("content")
+            .and_then(|content| content.as_array())
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("text"))
+            .and_then(|text| text.as_str())
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_string);
+        if let Some(text) = rendered_text {
+            if let Some(data_object) = object.get_mut("data").and_then(Value::as_object_mut) {
+                let payload_free = data_object
+                    .keys()
+                    .all(|key| GUIDANCE_ONLY_KEYS.contains(&key.as_str()));
+                if payload_free {
+                    data_object.insert("rendered_text".to_string(), json!(text));
+                }
+            }
+        }
+
         // REQ-AXO-902517 — `data` is Axon's canonical internal tool payload,
         // while MCP clients consume `structuredContent`. Producers historically
         // returned one, the other, or both; clients that expose only the protocol

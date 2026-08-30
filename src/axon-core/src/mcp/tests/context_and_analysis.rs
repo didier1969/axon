@@ -3475,12 +3475,26 @@ fn test_scope_banner_reports_the_real_denominator_not_itself() {
 #[test]
 fn test_axon_fs_read() {
     let server = create_test_server();
+
+    // REQ-AXO-902560 — ce test lisait `src/axon-core/src/main.rs` par un chemin
+    // RELATIF, alors que `cargo test` s'exécute depuis `src/axon-core/` : le
+    // fichier n'existait pas, `fs_read` rendait « Error », et l'assertion
+    // `contains("L2 Detail") || contains("Error")` restait verte. Le chemin
+    // nominal n'était donc JAMAIS exercé — mesuré le 2026-08-30, le test passe
+    // aussi bien avec le correctif que sans. On lit un fichier qu'on écrit,
+    // par chemin absolu : plus de dépendance au répertoire courant, et plus
+    // d'alternative qui absout l'échec.
+    let dir = tempdir().expect("tempdir");
+    let fichier = dir.path().join("lecture.txt");
+    std::fs::write(&fichier, "ligne1\nligne2\nligne3\n").expect("écrire le fichier à lire");
+    let uri = fichier.to_str().expect("chemin utf-8").to_string();
+
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "fs_read",
-            "arguments": { "uri": "src/axon-core/src/main.rs", "start_line": 1, "end_line": 5 }
+            "arguments": { "uri": uri, "start_line": 1, "end_line": 3 }
         })),
         id: Some(json!(4)),
     };
@@ -3492,7 +3506,37 @@ fn test_axon_fs_read() {
         .unwrap()
         .as_str()
         .unwrap();
-    assert!(content.contains("L2 Detail") || content.contains("Error"));
+    assert!(
+        content.contains("L2 Detail"),
+        "fs_read doit rendre son rapport sur un fichier qui existe : {content:?}"
+    );
+
+    // Le CORPS, pas seulement l'en-tête : `L2 Detail:` est écrit par le
+    // formateur quel que soit le contenu lu, si bien qu'un corps vidé le
+    // garderait et laisserait le test vert.
+    assert!(
+        content.contains("ligne2"),
+        "fs_read doit rendre le CORPS du fichier, pas seulement son en-tête : {content:?}"
+    );
+
+    // REQ-AXO-902560 — et ce corps doit atteindre le canal que le client
+    // consomme. Mesuré en session 130 : ce client rend `structuredContent`
+    // et jamais `content[0].text`, si bien qu'un `fs_read` parfaitement
+    // fonctionnel paraissait rendre une enveloppe vide. Le handler n'était
+    // pas en cause : il écrivait dans un canal que personne ne lisait.
+    let structured = result
+        .get("structuredContent")
+        .expect("structuredContent doit exister (REQ-AXO-902517)");
+    let mirrored = structured
+        .get("rendered_text")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| {
+            panic!("`fs_read` doit miroiter sa charge utile sous `rendered_text` : {structured}")
+        });
+    assert_eq!(
+        mirrored, content,
+        "le miroir doit porter le texte rendu tel quel, pas un résumé"
+    );
 }
 
 #[test]

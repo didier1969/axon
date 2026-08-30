@@ -286,6 +286,47 @@ fn test_sql_tool_is_read_only_rejects_mutations() {
         "SELECT must not be rejected: {}",
         ok["data"]
     );
+
+    // REQ-AXO-902560 — l'assertion ci-dessus ne prouve PAS que la requête a
+    // rendu quoi que ce soit : `rejected != true` reste vrai d'un `SELECT 1`
+    // qui renverrait `[]`. Le défaut mesuré en session 130 est exactement
+    // celui-là — un appelant recevait une enveloppe sans lignes et le test
+    // restait vert. Un `SELECT 1` ne PEUT pas rendre zéro ligne : on l'exige.
+    let sql_text = ok["content"][0]["text"]
+        .as_str()
+        .expect("sql doit rendre du texte");
+    assert!(
+        sql_text.contains('1') && sql_text.trim() != "[]",
+        "SELECT 1 doit rendre sa ligne, pas une enveloppe vide : {sql_text:?}"
+    );
+
+    // REQ-AXO-902560 — et cette charge utile doit atteindre le canal que le
+    // client consomme réellement. Mesuré en session 130 : ce client rend
+    // `structuredContent`/`data` et JAMAIS `content[0].text` ; un outil qui
+    // n'écrit que dans `content` est donc invisible au LLM, ce qui a fait
+    // conclure à tort que `sql` était cassé alors qu'il répondait juste.
+    // Asserter sur la CLÉ que le correctif insère, pas sur la présence du
+    // caractère `1` quelque part dans l'enveloppe : `canonical_sources`,
+    // `next` et `next_call_hint` en contiennent déjà (ids, compteurs), si
+    // bien qu'un `contains('1')` resterait vert sur une charge utile absente
+    // — le faux témoin même que ce test est censé supprimer.
+    let sql_structured = ok
+        .get("structuredContent")
+        .expect("structuredContent doit exister (REQ-AXO-902517)");
+    let sql_mirrored = sql_structured
+        .get("rendered_text")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| {
+            panic!("`sql` doit miroiter sa charge utile sous `rendered_text` : {sql_structured}")
+        });
+    assert_eq!(
+        sql_mirrored, sql_text,
+        "le miroir doit porter le texte rendu tel quel, pas un résumé"
+    );
+    assert!(
+        sql_mirrored.contains('1'),
+        "le miroir doit porter la ligne de `SELECT 1` : {sql_mirrored:?}"
+    );
 }
 
 /// REQ-AXO-902323 — two DIFFERENT causes must produce two DIFFERENT
