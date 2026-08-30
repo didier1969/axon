@@ -52,19 +52,8 @@ defmodule AxonDashboardWeb.Features.NavTest do
     assert current_path(session) == "/"
   end
 
-  defp wait_until_path(session, expected, attempts \\ 50) do
-    cond do
-      current_path(session) == expected ->
-        :ok
-
-      attempts <= 0 ->
-        :timeout
-
-      true ->
-        Process.sleep(100)
-        wait_until_path(session, expected, attempts - 1)
-    end
-  end
+  # REQ-AXO-902570 — `wait_until_path/3` vit désormais dans FeatureCase,
+  # d'où errors_test l'emploie aussi.
 
   feature "active nav link is highlighted on each route", %{session: session} do
     # When on /, the Pipeline link has amber-500/30 border (current?).

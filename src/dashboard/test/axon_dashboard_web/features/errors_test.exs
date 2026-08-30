@@ -29,12 +29,24 @@ defmodule AxonDashboardWeb.Features.ErrorsTest do
 
   feature "navigating Pipeline → Projects → MCP never raises a crash banner",
           %{session: session} do
-    session =
-      session
-      |> visit("/")
-      |> click(Query.link("Projects"))
-      |> click(Query.link("MCP"))
-      |> click(Query.link("Pipeline"))
+    # REQ-AXO-902570 — ni le test ni l'interface n'avaient tort : l'enchaînement
+    # de clics n'était pas stabilisé. Après chaque navigation la LiveView
+    # remonte, et la référence DOM du lien suivant meurt en cours de route
+    # (`Wallaby.StaleReferenceError`). Observé une fois — job 1788094637-662101f4
+    # — puis vert deux fois de suite : c'est un test INTERMITTENT, ce qui est
+    # pire qu'un test rouge, puisque son vert ne veut rien dire.
+    # `wait_for_live/1` est le helper déjà prévu pour ça (FeatureCase, employé
+    # par mcp_test.exs) : il attend le handshake du socket avant le clic suivant.
+    session = session |> visit("/") |> wait_for_live()
+
+    session = click(session, Query.link("Projects"))
+    wait_until_path(session, "/projects")
+
+    session = session |> wait_for_live() |> click(Query.link("MCP"))
+    wait_until_path(session, "/mcp")
+
+    session = session |> wait_for_live() |> click(Query.link("Pipeline"))
+    wait_until_path(session, "/")
 
     banners = Wallaby.Browser.all(session, Query.css(".phx-error"))
     assert banners == []

@@ -19,7 +19,9 @@ defmodule AxonDashboardWeb.FeatureCase do
 
       import Wallaby.Browser
       import Wallaby.Query, only: [css: 1, css: 2, link: 1, button: 1, text_field: 1, xpath: 1]
-      import AxonDashboardWeb.FeatureCase, only: [wait_for_live: 1, wait_for_live: 2]
+
+      import AxonDashboardWeb.FeatureCase,
+        only: [wait_for_live: 1, wait_for_live: 2, wait_until_path: 2, wait_until_path: 3]
 
       alias Wallaby.Browser
       alias Wallaby.Query
@@ -40,6 +42,33 @@ defmodule AxonDashboardWeb.FeatureCase do
   the LiveView server never sees the event (Wallaby has no built-in
   wait for LV connection).
   """
+  @doc """
+  REQ-AXO-902570 — attendre qu'un `live_redirect` ait effectivement atterri.
+
+  `.link navigate={…}` rend un `<a data-phx-link>` que LiveView intercepte :
+  la navigation part par le WebSocket et le `pushState` arrive APRÈS le clic.
+  Enchaîner deux clics sans attendre laisse Wallaby chercher le second lien
+  dans un DOM en cours de remplacement — d'où un `StaleReferenceError`
+  intermittent, que `wait_for_live/1` seul ne prévient pas : le socket est
+  connecté bien avant que la page cible ne soit rendue.
+
+  Extrait de `nav_test.exs`, où ce motif tient le vert, pour que les autres
+  suites de navigation cessent de le redécouvrir.
+  """
+  def wait_until_path(session, expected, attempts \\ 50) do
+    cond do
+      Wallaby.Browser.current_path(session) == expected ->
+        :ok
+
+      attempts <= 0 ->
+        :timeout
+
+      true ->
+        Process.sleep(100)
+        wait_until_path(session, expected, attempts - 1)
+    end
+  end
+
   def wait_for_live(session, timeout_ms \\ 5_000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_live(session, deadline)
