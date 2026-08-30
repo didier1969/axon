@@ -53,7 +53,9 @@ defmodule AxonDashboardWeb.Features.ProjectsTest do
   feature "footer cadence message is visible", %{session: session} do
     session
     |> visit("/projects")
-    |> assert_has(Query.css("body", text: "refresh 5s"))
+    # REQ-AXO-902570 — l'INTERFACE avait raison : la cadence du pied de page
+    # est passée à 2 s (projects_live.ex:135).
+    |> assert_has(Query.css("body", text: "refresh 2s"))
   end
 
   feature "fetch-error fallback or empty-state renders, no crash banner",
