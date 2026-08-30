@@ -28,7 +28,15 @@ if [[ $# -gt 0 ]]; then
   EXTRA_ARGS=("$@")
 fi
 
-# Sanity-check that ChromeDriver + Chromium are on PATH from devenv.nix.
+# First integer of the first dotted version found in a `--version` line.
+major_of() { grep -oE '[0-9]+(\.[0-9]+){2,3}' <<<"$1" | head -1 | cut -d. -f1; }
+
+# Sanity-check that ChromeDriver + Chromium are on PATH from devenv.nix AND
+# that they actually MATCH — REQ-AXO-902569. Presence alone proves nothing:
+# Wallaby resolves its own browser (`google-chrome` BEFORE `chromium`), so a
+# system-wide Chrome silently wins over the one devenv provisions, and every
+# WebDriver session then dies as "invalid session id" with no assertion ever
+# evaluated. A preflight that cannot contradict the run is worthless.
 preflight() {
   if ! command -v chromedriver >/dev/null 2>&1; then
     echo "FATAL: chromedriver not on PATH — add pkgs.chromedriver to devenv.nix" >&2
@@ -38,8 +46,29 @@ preflight() {
     echo "FATAL: chromium not on PATH — add pkgs.chromium to devenv.nix" >&2
     return 1
   fi
-  echo "[preflight] chromedriver=$(chromedriver --version | head -1)"
-  echo "[preflight] chromium=$(chromium --version 2>&1 | head -1)"
+
+  # Same resolution rule as config/test.exs, so check and run agree.
+  local browser="${WALLABY_CHROME_BINARY:-$(command -v chromium)}"
+  local driver_version browser_version driver_major browser_major
+  driver_version="$(chromedriver --version 2>&1 | head -1)"
+  browser_version="$("${browser}" --version 2>&1 | head -1)"
+  driver_major="$(major_of "${driver_version}")"
+  browser_major="$(major_of "${browser_version}")"
+
+  echo "[preflight] chromedriver=${driver_version}"
+  echo "[preflight] browser=${browser} -> ${browser_version}"
+
+  if [[ -z "${driver_major}" || -z "${browser_major}" ]]; then
+    echo "FATAL: no major version readable (driver='${driver_version}' browser='${browser_version}')" >&2
+    return 1
+  fi
+  if [[ "${driver_major}" != "${browser_major}" ]]; then
+    echo "FATAL: chromedriver major ${driver_major} != browser major ${browser_major}." >&2
+    echo "       Every Wallaby session would die as 'invalid session id' (REQ-AXO-902569)." >&2
+    echo "       Point WALLABY_CHROME_BINARY at a browser matching the driver." >&2
+    return 1
+  fi
+  echo "[preflight] driver and browser agree on major ${driver_major}"
 }
 
 run_suite() {

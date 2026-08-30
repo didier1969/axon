@@ -49,10 +49,20 @@ config :axon_dashboard, AxonDashboard.BridgeClient,
 # viewport so the suite runs identically on a developer workstation and on
 # a headless CI box. ChromeDriver binary is resolved from $PATH (devenv.nix
 # provisions it via pkgs.chromedriver + pkgs.chromium).
+#
+# REQ-AXO-902569 — pin the BROWSER too, not only the driver. Wallaby's
+# `find_chrome_executable/0` probes ["google-chrome", "chromium",
+# "chromium-browser"] in that order, so a system-wide Google Chrome wins over
+# the chromium devenv provisions. Driving Chrome 151 with chromedriver 146
+# kills every WebDriver session as "invalid session id" — 28 of 30 features
+# red without a single assertion being evaluated. Resolved through $PATH so
+# no /nix/store path is hardcoded (hermetic repo, 23bbe182); Wallaby's
+# `put_binary_config/2` skips a nil, so an absent chromium changes nothing.
 config :wallaby,
   driver: Wallaby.Chrome,
   chromedriver: [
-    headless: true
+    headless: true,
+    binary: System.get_env("WALLABY_CHROME_BINARY") || System.find_executable("chromium")
   ],
   base_url: "http://127.0.0.1:44126",
   screenshot_on_failure: true,
