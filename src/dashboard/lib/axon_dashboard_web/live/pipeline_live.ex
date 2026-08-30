@@ -179,7 +179,11 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
           <header class="flex items-center justify-between px-5 py-3 border-b border-slate-800 bg-slate-950/50">
             <div>
               <div class="text-[10px] uppercase tracking-[0.18em] text-amber-400/80">Pipeline V2 · CPT-AXO-054</div>
-              <h2 class="text-base font-semibold text-slate-100 mt-0.5">A1/A2/A3 → PG NOTIFY → demand_pull_b → B2/B3</h2>
+              <%!-- REQ-AXO-902575 — `demand_pull_b` et le reveil par NOTIFY sont
+                   RETIRES (REQ-AXO-901975 / DEC-AXO-901631). B est nourri par le
+                   drain trie : `embed_status='pending'` est la file durable, le
+                   SELECT trie par token_count, B2 decoupe des batchs homogenes. --%>
+              <h2 class="text-base font-semibold text-slate-100 mt-0.5">A1/A2/A3 → embed_status pending → drain trié → B2/B3</h2>
             </div>
             <div class="flex items-center gap-3 text-[11px] font-mono">
               <span class="flex items-center gap-1.5 text-slate-300">
@@ -200,8 +204,15 @@ defmodule AxonDashboardWeb.Live.PipelineLive do
           ></div>
           <div class="px-5 py-3 border-t border-slate-800 bg-slate-950/40 flex flex-wrap items-center gap-4 text-[10px] font-mono uppercase tracking-wider text-slate-500">
             <span>b_chunks cap: <strong class="text-slate-200">{pipeline_field(@dashboard_state, :b_chunks_cap, 0)}</strong> (internal mpsc, send().await backpressure)</span>
-            <span>NOTIFY: <strong class="text-slate-200">{rc_field(@dashboard_state, :notify_channel, "n/a")}</strong></span>
-            <span>demand_pull adaptive: <strong class="text-slate-200">{rc_field(@dashboard_state, :demand_pull_backoff_initial_ms, 0)}ms → {rc_field(@dashboard_state, :demand_pull_backoff_max_ms, 0)}ms</strong></span>
+            <%!-- REQ-AXO-902575 — le trigger `trg_chunk_notify_pending` emet encore
+                 sur ce canal, mais AUCUN `LISTEN` du depot ne le consomme depuis le
+                 passage au drain trie. Le dire, plutot que de le presenter comme le
+                 mecanisme d'alimentation. --%>
+            <span>NOTIFY <span class="text-slate-600">(émis, sans consommateur)</span>: <strong class="text-slate-400">{rc_field(@dashboard_state, :notify_channel, "n/a")}</strong></span>
+            <%!-- REQ-AXO-902575 — le backend publie `vector_drain_backoff_*` depuis
+                 DEC-AXO-901631 ; ce panneau lisait encore `demand_pull_backoff_*`,
+                 un nom qui n'existe plus cote Rust, et affichait donc 0ms → 0ms. --%>
+            <span>drain backoff: <strong class="text-slate-200">{rc_field(@dashboard_state, :vector_drain_backoff_initial_ms, 0)}ms → {rc_field(@dashboard_state, :vector_drain_backoff_max_ms, 0)}ms</strong></span>
             <span>idle: <strong class={if runtime_field(@dashboard_state, :runtime_idle, false), do: "text-emerald-300", else: "text-amber-300"}>{runtime_field(@dashboard_state, :runtime_idle, false) |> to_string()}</strong></span>
           </div>
         </section>

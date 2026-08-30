@@ -18,10 +18,14 @@ defmodule AxonDashboardWeb.Features.PipelineTest do
     session
     |> visit("/")
     |> assert_has(Query.css("header", text: "Axon Cockpit"))
-    # REQ-AXO-902572 — l'INTERFACE avait raison. L'étage B1 et le canal
-    # `try_send`/`b1_inbox` sont RETIRÉS (orchestrator.rs:6-13) ; le découplage
-    # A3 → B passe par `pg_notify('chunk_pending_embed')` → `demand_pull_b`.
-    |> assert_has(Query.css("h1, h2", text: "A1/A2/A3 → PG NOTIFY → demand_pull_b → B2/B3"))
+    # REQ-AXO-902572 puis REQ-AXO-902575 — deux corrections successives, et
+    # cette fois c'est le TEST qui avait raison de suivre la page, mais la PAGE
+    # qui décrivait un mécanisme mort. B1/`try_send` (session 19) puis
+    # `PG NOTIFY`/`demand_pull_b` (étape intermédiaire) sont TOUS retirés
+    # (REQ-AXO-901975 / DEC-AXO-901631). Le feeder réel est le drain trié.
+    |> assert_has(
+      Query.css("h1, h2", text: "A1/A2/A3 → embed_status pending → drain trié → B2/B3")
+    )
   end
 
   feature "all six KPI cards are present (indexed files / symbols / edges / chunks / embedded / pending)",
