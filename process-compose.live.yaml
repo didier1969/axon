@@ -126,7 +126,24 @@ processes:
     command: "${AXON_INDEXER_BIN:-bin/axon-indexer}"
     working_dir: "."
     environment:
-      - "AXON_RUNTIME_MODE=${AXON_INDEXER_MODE:-indexer_full}"
+      # REQ-AXO-902576 — defaut `indexer_graph`, PAS `indexer_full`, tant que le
+      # crash d'init CUDA n'est pas instrumente. C'est le MODE qui declenche
+      # l'init GPU (`runtime_mode.semantic_workers_enabled()`,
+      # pipeline_runtime.rs:375), pas le provider : demarrer en `indexer_full`
+      # avec provider=cpu passait quand meme par l'init CUDA et mourait.
+      # En `indexer_graph` la pipeline B ne demarre pas : le graphe est indexe
+      # (donc la fraicheur revient), seule la vectorisation attend le correctif.
+      # Deroge temporairement au standing live `indexer_full` de DEC-AXO-901672 ;
+      # y revenir des que 902576 est livre : AXON_INDEXER_MODE=indexer_full.
+      - "AXON_RUNTIME_MODE=${AXON_INDEXER_MODE:-indexer_graph}"
+      # REQ-AXO-902576 — l'init CUDA fait planter le process sans un mot : trois
+      # demarrages sur trois s'arretent sur « using CUDA EP » puis silence,
+      # exit=-1, aucune trace noyau, GPU LIBRE (l'explication VRAM est refutee).
+      # Tant que le crash n'est pas instrumente, le defaut est CPU : l'indexation
+      # du graphe fonctionne, seule la vectorisation attend. C'est la regle
+      # « jamais casser, seulement ralentir » appliquee au cas present.
+      # Repasser a cuda : AXON_INDEXER_EMBEDDING_PROVIDER=cuda.
+      - "AXON_EMBEDDING_PROVIDER=${AXON_INDEXER_EMBEDDING_PROVIDER:-cpu}"
       - "AXON_RUNTIME_SHADOW_ROLE=indexer"
       - "AXON_INSTANCE_KIND=live"
       - "AXON_INDEXER_HEALTH_PORT=44130"
@@ -195,8 +212,14 @@ processes:
       failure_threshold: 3
     availability:
       restart: "on_failure"
-      max_restarts: 3
-      backoff_seconds: 10
+      # REQ-AXO-902576 — PAS de plafond de redemarrage sur l'indexeur. Il meurt
+      # d'un manque de ressource (GPU pris, pression memoire) ; lui interdire de
+      # revenir quand la ressource revient est exactement l'inverse de ce qu'il
+      # faut. Le recul progressif suffit a proteger d'une boucle de crash, et
+      # `restart: on_failure` garde la reprise automatique.
+      # max_restarts retire (etait 3). Recul porte de 10 s a 30 s : un crash
+      # d'init GPU se rejoue a l'identique, inutile de le rejouer vite.
+      backoff_seconds: 30
     shutdown:
       signal: 15
       # REQ-AXO-902263 — 120 s, NOT 15 s. This process holds a TensorRT/CUDA session;

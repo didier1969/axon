@@ -56,10 +56,20 @@ CREATE TABLE IF NOT EXISTS axon.mailbox_message (
     ttl_at          TIMESTAMPTZ
 );
 
--- Idempotent dedup: a re-sent message (same sender + idempotency_key) is a no-op
+-- Idempotent dedup: a re-sent message (same sender + key + recipient) is a no-op
 -- (ON CONFLICT DO NOTHING at the writer). Anchors at-least-once delivery.
+--
+-- REQ-AXO-902576 — la cle porte le DESTINATAIRE. La version d'origine
+-- UNIQUE(from_project, idempotency_key) est IMPOSSIBLE depuis le fan-out (MBX-7) :
+-- un broadcast materialise une ligne par destinataire sous la meme cle, et la base
+-- en compte 75 par cle. `CREATE UNIQUE INDEX` echouait donc en 23505, ce qui fait
+-- echouer TOUT le bootstrap du schema — « Fatal Error initializing GraphStore » —
+-- et tuait l'indexeur au demarrage.
+-- 20_mailbox_pubsub.sql corrigeait deja la definition, mais TROP TARD : le fichier
+-- 15 s'applique avant et meurt. Les deux fichiers declarent desormais la MEME
+-- definition, donc l'ordre d'application cesse d'importer.
 CREATE UNIQUE INDEX IF NOT EXISTS mailbox_message_idem_idx
-    ON axon.mailbox_message (from_project, idempotency_key);
+    ON axon.mailbox_message (from_project, to_project, idempotency_key);
 
 -- inbox_read(to=project, unread|since): scan the recipient's messages by id.
 CREATE INDEX IF NOT EXISTS mailbox_message_inbox_idx
