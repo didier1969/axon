@@ -4,7 +4,9 @@
 //! pools. A3 persists the chunk_ids it produced to PG; the
 //! `trg_chunk_notify_pending` trigger fires `pg_notify` so pipeline B wakes.
 //! There is NO cross-pipeline push channel — `try_send`/`b1_inbox` are RETIRED
-//! (REQ-AXO-901746). graph + chunks + FTS keep their CPU-native cadence
+//! (REQ-AXO-901975 / DEC-AXO-901631 — NOT 901746, which is slice 2 and
+//! OPTIMISED the A3→B1 path it is often miscited for retiring; see
+//! REQ-AXO-902572). graph + chunks + FTS keep their CPU-native cadence
 //! (CPT-AXO-053) regardless of B's GPU pace, decoupled through PG rather than
 //! an in-process push.
 //!
@@ -51,8 +53,10 @@ impl Default for PipelineAWorkerCounts {
 /// Tunable per-stage worker counts for Pipeline B. Operator-overridable
 /// through env vars `AXON_B2_WORKERS`, `AXON_B3_WORKERS`.
 ///
-/// B1 is retired (REQ-AXO-901746) — demand_pull_b feeds B2 directly, there is
-/// no fetch-by-id worker pool. The dead `AXON_B1_WORKERS` knob is gone.
+/// B1 is retired (REQ-AXO-901975) — the sorted drain
+/// (`pipeline_runtime::spawn_vector_sorted_drain`, DEC-AXO-901631) feeds B2
+/// directly; there is no fetch-by-id worker pool, and `demand_pull_b` is gone
+/// too. The dead `AXON_B1_WORKERS` knob is gone.
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineBWorkerCounts {
     pub b2: usize,

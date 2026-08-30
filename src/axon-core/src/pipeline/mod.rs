@@ -27,7 +27,7 @@
 //! A1's output blocking-sends to A2; A2 to A3. A3 persists chunk_ids to PG
 //! and `embed_status='pending'` is the durable B queue. There is NO
 //! cross-pipeline push channel and NO B1 worker pool (slice 4/5 SOTA,
-//! REQ-AXO-901746) — `try_send` is RETIRED. Pipeline B is fed EXCLUSIVELY by
+//! REQ-AXO-901975) — `try_send` is RETIRED. Pipeline B is fed EXCLUSIVELY by
 //! the sorted-drain feeder ([`crate::pipeline_runtime::spawn_vector_sorted_drain`],
 //! DEC-AXO-901631), which SELECTs token-sorted pending chunks (content
 //! included) and feeds B2 in order via the internal `b_chunks` mpsc

@@ -643,8 +643,8 @@ impl McpServer {
         let a3 = pipeline_a.a3;
         let a3_batch = env_usize("AXON_A3_BATCH_SIZE", 32);
         let a3_timeout = env_u64("AXON_A3_BATCH_TIMEOUT_MS", 10);
-        // B1 retired (REQ-AXO-901746) — no fetch-by-id worker pool ; demand_pull_b
-        // feeds B2 directly. `AXON_B1_WORKERS` is a dead knob, not surfaced.
+        // B1 retired (REQ-AXO-901975) — no fetch-by-id worker pool ; the sorted
+        // drain feeds B2 directly. `AXON_B1_WORKERS` is a dead knob, not surfaced.
         let b2 = env_usize("AXON_B2_WORKERS", 1);
         let b3 = env_usize("AXON_B3_WORKERS", 2);
         let b2_batch = env_usize(

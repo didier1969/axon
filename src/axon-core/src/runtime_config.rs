@@ -67,9 +67,10 @@ pub fn compose_indexer_config() -> serde_json::Value {
             "a3_batch_timeout_ms": a3_timeout,
         },
         // Slice 4/5 SOTA — there is NO B1 worker pool. A3 writes chunks to
-        // PG ; demand_pull_b (PG NOTIFY listener) SELECTs them and feeds B2
+        // PG with embed_status='pending' (the durable queue) ; the sorted drain
+        // (spawn_vector_sorted_drain) SELECTs them token-sorted and feeds B2
         // directly via the internal b_chunks mpsc (cap below). `b1_workers`
-        // is retired (REQ-AXO-901746) — publishing it would resurrect a
+        // is retired (REQ-AXO-901975) — publishing it would resurrect a
         // fictional stage on the dashboard.
         "pipeline_b": {
             "b2_workers": b2,
