@@ -102,10 +102,16 @@ defmodule AxonDashboardWeb.Features.McpTest do
       # Now clear it
       |> clear(Query.css("input[phx-keyup=\"filter\"]"))
 
-    refute_has(session, Query.css("body", text: "No tools match filter"))
+    # REQ-AXO-902574 — SYNCHRONISER AVANT DE NIER. `refute_has` ne retente pas :
+    # il constate l'absence à l'instant où il est appelé. Placé juste après
+    # `clear/2`, il s'exécute pendant que la LiveView re-rend encore, et voit la
+    # bannière que le rendu suivant va retirer. `assert_has`, lui, retente
+    # jusqu'au timeout — il sert donc de point de synchronisation : une fois la
+    # liste revenue, la bannière est nécessairement partie.
     assert_has(session, Query.css("code", text: "soll_manager"))
     # REQ-AXO-901683 — `<code>query</code>` is one of multiple matches.
     assert_has(session, Query.css("code", text: "query", count: :any))
+    refute_has(session, Query.css("body", text: "No tools match filter"))
   end
 
   feature "fast typing then full backspace ends in clean state (REQ-AXO-901649 race-free)",
@@ -119,7 +125,9 @@ defmodule AxonDashboardWeb.Features.McpTest do
       |> fill_in(field, with: "abcdefghij")
       |> clear(field)
 
-    refute_has(session, Query.css("body", text: "No tools match filter"))
+    # REQ-AXO-902574 — même inversion : le test se disait « race-free » alors
+    # qu'il portait la course qu'il prétendait couvrir.
     assert_has(session, Query.css("code", text: "soll_manager"))
+    refute_has(session, Query.css("body", text: "No tools match filter"))
   end
 end
