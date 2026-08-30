@@ -17,3 +17,10 @@ fixture_path =
   |> Path.absname()
 
 System.put_env("AXON_MCP_FIXTURE_PATH", fixture_path)
+
+# REQ-AXO-902570 — et le poser AUSSI dans l'Application env. `config/test.exs`
+# lit `AXON_MCP_FIXTURE_PATH` à la COMPILATION, or on est ici au runtime : le
+# `config :axon_dashboard, :mcp_fixture_path` n'était donc jamais posé, et
+# `McpLive.initial_tools/0` — qui lit cette clé, pas la variable d'environnement
+# — rendait `{[], false, nil}`, soit « 0 public tools » sur toute la suite.
+Application.put_env(:axon_dashboard, :mcp_fixture_path, fixture_path)
