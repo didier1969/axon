@@ -117,3 +117,34 @@ de toute façon pas prendre le GPU.
 - La granularité de la tranche GPU en option B (durée d'un bail, cadence de renouvellement) —
   à calibrer sur une mesure, pas à choisir a priori.
 - Ce que VPC expose comme surface de révocation (signal, fichier, appel) — décision côté VPC.
+
+---
+
+## État à la fin de la session 132 — tranches 0 et 1 livrées, PAS terminées
+
+Commit `04543692`.
+
+**Cause 1 levée, prouvée.** L'init CUDA est sous `runtime_mode.semantic_workers_enabled()`
+(`pipeline_runtime.rs:375`) : c'est le **mode**, pas le provider. Démarrer en `indexer_full`
+avec `provider=cpu` passait quand même par l'init CUDA — journal identique, ligne pour ligne.
+Après bascule en `indexer_graph`, le journal ne montre plus le crash CUDA mais l'erreur DDL
+suivante. La preuve est ce **déplacement du point d'arrêt**.
+
+**Cause 2 corrigée, PAS encore active.** `15_mailbox.sql` et `20_mailbox_pubsub.sql` portent
+désormais la même définition d'index à trois colonnes. Mais le DDL ne s'applique qu'au
+**démarrage du parc**, et aucun redémarrage n'a eu lieu depuis le commit : l'indexeur est
+toujours mort, et son dernier journal montre encore la définition à deux colonnes.
+
+**Pourquoi je me suis arrêté là.** Cinq redémarrages entre 19h37 et 19h47 ont rendu le brain
+intermittent **pour les autres sessions du parc** — signalé par OPV (« 1 appel MCP sur 3 muet,
+sur tous les outils »). Engagement pris auprès d'elles de ne plus redémarrer. Le prochain
+redémarrage appartient à l'opérateur.
+
+**Dérogation à `DEC-AXO-901672`, à ne pas laisser se périmer.** Cette décision préserve
+explicitement « le standing live en `indexer_full` GPU ». Le défaut est désormais
+`indexer_graph`. Retour par une seule variable — `AXON_INDEXER_MODE=indexer_full` — dès que le
+crash CUDA est instrumenté.
+
+**Le contrôle qui seul clôt la tranche 0**, à faire au prochain redémarrage : l'indexeur tient
+**au moins 10 minutes** ET `truth_cockpit.staleness.last_publish_ts` **avance**. Un indexeur
+qui vit sans publier vaut un indexeur mort.
