@@ -11,13 +11,68 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokenizers::{Encoding, Tokenizer};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::{
     embedding_model_cache_dir, gpu_memory_soft_limit_mb, load_runtime_embedding_tokenizer,
     normalize_embedding, ort_pooling_cls, ort_pooling_mean, runtime_embedding_snapshot_dir,
     FASTEMBED_OUTPUT_PRECEDENCE,
 };
+
+/// REQ-AXO-902576 — l'initialisation GPU meurt en code NATIF (ORT / provider
+/// CUDA) : ni panic Rust, ni `Err`, `exit=-1` muet, aucune trace noyau. Trois
+/// démarrages sur trois se sont arrêtés au même point, à la milliseconde près,
+/// juste après « TensorRT EP unavailable, using CUDA EP » — et personne n'a
+/// jamais su LAQUELLE des étapes suivantes tuait le processus.
+///
+/// Un `tracing::info!` ne suffit pas : quand le process est abattu par un
+/// signal, le buffer du souscripteur peut n'être jamais vidé. On écrit donc
+/// l'étape atteinte dans un fichier, par `fs::write` SYNCHRONE, avant chaque
+/// étape susceptible de tuer. Le fichier survit au SIGSEGV ; le log, non.
+const GPU_INIT_STAGE_FILE: &str = "gpu-init-stage";
+
+/// Marqueur écrit quand l'init GPU s'est terminée normalement.
+pub(crate) const GPU_INIT_STAGE_COMPLETED: &str = "completed";
+
+/// Répertoire du témoin : `AXON_RUN_ROOT` quand il est défini (le rôle indexeur
+/// en pose un, cf. `process-compose.live.yaml`), sinon le répertoire temporaire.
+pub(crate) fn gpu_init_stage_dir() -> PathBuf {
+    std::env::var("AXON_RUN_ROOT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Dépose l'étape atteinte. Best-effort et TOTALEMENT silencieux en cas
+/// d'échec : un témoin de crash qui ferait échouer le démarrage qu'il observe
+/// serait pire que pas de témoin du tout.
+pub(crate) fn record_gpu_init_stage_in(dir: &Path, lane: &str, worker_idx: usize, stage: &str) {
+    let _ = fs::create_dir_all(dir);
+    let _ = fs::write(
+        dir.join(GPU_INIT_STAGE_FILE),
+        format!(
+            "{stage}\nlane={lane}\nworker={worker_idx}\npid={}\n",
+            std::process::id()
+        ),
+    );
+}
+
+/// Lit le témoin laissé par un démarrage précédent et le CONSOMME.
+///
+/// Rend `Some` uniquement si le démarrage précédent est mort avant d'atteindre
+/// `completed` — exactement le cas qu'on cherche à nommer.
+pub(crate) fn take_previous_gpu_init_crash_in(dir: &Path) -> Option<String> {
+    let path = dir.join(GPU_INIT_STAGE_FILE);
+    let contenu = fs::read_to_string(&path).ok()?;
+    let _ = fs::remove_file(&path);
+    let etape = contenu.lines().next().unwrap_or_default().trim().to_string();
+    if etape.is_empty() || etape == GPU_INIT_STAGE_COMPLETED {
+        None
+    } else {
+        Some(contenu.trim().to_string())
+    }
+}
 
 pub(crate) struct OrtGpuFirstTextEmbedding {
     pub(super) tokenizer: Arc<Tokenizer>,
@@ -67,6 +122,20 @@ pub(super) struct EmbeddingBatchStats {
 
 impl OrtGpuFirstTextEmbedding {
     pub(crate) fn try_new(lane: &str, worker_idx: usize, use_cuda: bool) -> AnyhowResult<Self> {
+        // REQ-AXO-902576 — jalonner l'init GPU. Le témoin est écrit AVANT chaque
+        // étape susceptible de tuer le processus en code natif, et relu au
+        // démarrage suivant : c'est la seule façon de nommer une mort qui ne
+        // laisse ni panic, ni `Err`, ni trace noyau.
+        let stage_dir = gpu_init_stage_dir();
+        if use_cuda {
+            if let Some(precedent) = take_previous_gpu_init_crash_in(&stage_dir) {
+                error!(
+                    "GPU init: le démarrage précédent est MORT à cette étape, sans panic ni Err \
+                     (crash natif ORT/CUDA) :\n{precedent}"
+                );
+            }
+            record_gpu_init_stage_in(&stage_dir, lane, worker_idx, "session_builder");
+        }
         let snapshot_dir = runtime_embedding_snapshot_dir()?;
         let model_path = snapshot_dir.join("onnx").join("model.onnx");
         let tokenizer = load_runtime_embedding_tokenizer()?;
@@ -128,10 +197,13 @@ impl OrtGpuFirstTextEmbedding {
                     provider_resolved = "cuda";
                 }
             }
+            record_gpu_init_stage_in(&stage_dir, lane, worker_idx, "cuda_provider_dispatch");
             providers.push(cuda_execution_provider_dispatch());
+            record_gpu_init_stage_in(&stage_dir, lane, worker_idx, "with_execution_providers");
             builder = builder.with_execution_providers(providers).map_err(|err| {
                 anyhow!("failed to configure GPU execution providers for ORT session: {err}")
             })?;
+            record_gpu_init_stage_in(&stage_dir, lane, worker_idx, "commit_from_file");
         }
 
         let session = builder
@@ -217,6 +289,13 @@ impl OrtGpuFirstTextEmbedding {
         // observed on read via `nvidia-smi` (crate::observed_gpu), never
         // self-reported into a shared cell. `provider_resolved` above is
         // the local truth for this session's load log only.
+
+        // REQ-AXO-902576 — l'init est allée au bout : le témoin passe à
+        // `completed` pour que le démarrage suivant ne rapporte pas un crash
+        // qui n'a pas eu lieu.
+        if use_cuda {
+            record_gpu_init_stage_in(&stage_dir, lane, worker_idx, GPU_INIT_STAGE_COMPLETED);
+        }
 
         Ok(Self {
             tokenizer,

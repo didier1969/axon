@@ -1799,3 +1799,60 @@ fn test_request_query_embedding_returns_worker_disconnect_error() {
         .to_string()
         .contains("MCP real-time embedding worker unavailable"));
 }
+
+/// REQ-AXO-902576 — critère d'acceptation : « un crash à l'init GPU produit une
+/// trace nommant la dernière étape atteinte, et un journal de crash exploitable
+/// — pas un `exit=-1` muet ».
+///
+/// Le test rejoue les DEUX issues sur le même chemin : un démarrage abattu en
+/// cours d'init doit être NOMMÉ au démarrage suivant, et un démarrage réussi ne
+/// doit rien signaler. Un garde incapable de rendre l'autre verdict ne prouve
+/// rien.
+#[test]
+fn test_gpu_init_breadcrumb_nomme_l_etape_ou_le_demarrage_precedent_est_mort() {
+    use super::gpu_backend::{
+        record_gpu_init_stage_in, take_previous_gpu_init_crash_in, GPU_INIT_STAGE_COMPLETED,
+    };
+
+    let tmp = std::env::temp_dir().join(format!("axon-gpu-init-probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    // (1) Aucun témoin : rien à signaler.
+    assert_eq!(
+        take_previous_gpu_init_crash_in(&tmp),
+        None,
+        "sans témoin, aucun crash ne doit être rapporté"
+    );
+
+    // (2) Un démarrage meurt pendant `with_execution_providers` — le cas réel :
+    //     code natif ORT/CUDA, aucun panic, aucun Err, exit=-1 muet.
+    record_gpu_init_stage_in(&tmp, "b2", 0, "with_execution_providers");
+    let rapporte = take_previous_gpu_init_crash_in(&tmp)
+        .expect("un démarrage mort en cours d'init DOIT être rapporté");
+    assert!(
+        rapporte.contains("with_execution_providers"),
+        "le rapport doit NOMMER l'étape atteinte, got: {rapporte}"
+    );
+    assert!(
+        rapporte.contains("lane=b2") && rapporte.contains("worker=0"),
+        "le rapport doit porter la voie et le worker pour être exploitable, got: {rapporte}"
+    );
+
+    // (3) Le témoin est CONSOMMÉ : on ne rapporte pas deux fois le même crash.
+    assert_eq!(
+        take_previous_gpu_init_crash_in(&tmp),
+        None,
+        "un crash déjà rapporté ne doit pas l'être une seconde fois"
+    );
+
+    // (4) Contre-exemple obligatoire : une init qui va au bout ne signale RIEN.
+    record_gpu_init_stage_in(&tmp, "b2", 0, "session_builder");
+    record_gpu_init_stage_in(&tmp, "b2", 0, GPU_INIT_STAGE_COMPLETED);
+    assert_eq!(
+        take_previous_gpu_init_crash_in(&tmp),
+        None,
+        "une init terminée normalement ne doit JAMAIS être rapportée comme un crash"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
