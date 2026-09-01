@@ -16771,3 +16771,71 @@ fn le_retrait_d_un_projet_refuse_par_defaut_et_dit_pourquoi() {
         assert_eq!(n, 0, "{table} doit être vide de GHO après retrait");
     }
 }
+
+/// REQ-AXO-902583 (2ᵉ demande) — « aucune ligne » et « la requête n'a pas tourné »
+/// doivent être indiscernables POUR PERSONNE.
+///
+/// Avant : un résultat vide rendait le texte `[]` et un `data` qui ne portait que
+/// `next` — ni statut, ni compte. Un client qui lit `data` (le cas de tout appelant
+/// programmatique) ne pouvait pas distinguer « la requête a tourné et n'a rien
+/// trouvé » de « il ne s'est rien passé ». Le rapporteur NEX a payé deux fois : le
+/// coût de l'appel, puis celui de la reformulation, parce que le silence de l'outil
+/// désigne l'appelant comme fautif.
+#[test]
+fn sql_dit_son_compte_de_lignes_au_lieu_de_rendre_une_enveloppe_muette() {
+    fn appel_sql(server: &McpServer, sql: &str) -> Value {
+        server
+            .execute_tool_direct("sql", &json!({ "sql": sql }))
+            .expect("sql returns a result")
+    }
+
+    let server = create_test_server();
+
+    let une_ligne = appel_sql(&server, "SELECT 1 AS un");
+    assert_eq!(
+        une_ligne["data"]["row_count"],
+        json!(1),
+        "un résultat non vide dit combien il porte : {une_ligne}"
+    );
+    assert_eq!(une_ligne["data"]["status"], json!("ok"));
+
+    // `pg_catalog.pg_namespace` est toujours présent : le zéro est celui du
+    // PRÉDICAT, jamais celui d'une table absente.
+    let zero_ligne = appel_sql(
+        &server,
+        "SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = 'nexiste_pas_xyz'",
+    );
+    assert_ne!(
+        zero_ligne["isError"].as_bool(),
+        Some(true),
+        "zéro ligne est un résultat, pas une erreur : {zero_ligne}"
+    );
+    assert_eq!(
+        zero_ligne["data"]["row_count"],
+        json!(0),
+        "le vide se COMPTE : {zero_ligne}"
+    );
+    assert_eq!(zero_ligne["data"]["status"], json!("ok_empty"));
+    let texte = zero_ligne["content"][0]["text"]
+        .as_str()
+        .expect("texte rendu");
+    assert!(
+        texte.contains("ok_empty") && texte.contains('0'),
+        "le vide doit se DIRE dans le texte aussi, pas seulement dans `data` : {texte:?}"
+    );
+
+    // Et la requête qui N'A PAS tourné reste distincte — c'est tout l'objet.
+    let erreur = appel_sql(&server, "SELECT colonne_absente FROM pg_catalog.pg_namespace");
+    assert_eq!(
+        erreur["isError"].as_bool(),
+        Some(true),
+        "une colonne inconnue est une erreur nommée : {erreur}"
+    );
+    assert_eq!(erreur["data"]["status"], json!("input_invalid"));
+    assert_eq!(
+        erreur["data"]["row_count"],
+        json!(null),
+        "une requête qui n'a pas tourné n'a pas de compte — ne pas fabriquer un 0 \
+         qui la rendrait identique au résultat vide : {erreur}"
+    );
+}

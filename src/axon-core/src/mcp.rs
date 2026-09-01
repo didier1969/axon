@@ -915,6 +915,14 @@ impl McpServer {
             "derived_docs_refresh",
             "parameter_repair",
             "fallback_guidance",
+            // REQ-AXO-902583 — un COMPTE est de la guidance, pas une charge utile :
+            // la charge utile, ce sont les lignes, et elles sont dans `content`.
+            // Sans cette entrée, un outil qui se met à compter ses résultats PERD
+            // son miroir et redevient invisible aux clients qui ne lisent que
+            // `structuredContent` — la régression exacte que REQ-AXO-902560 avait
+            // fermée, réintroduite par le correctif qui rendait `sql` plus bavard.
+            // Attrapée par `test_sql_tool_is_read_only_rejects_mutations`.
+            "row_count",
         ];
         let rendered_text = object
             .get("content")

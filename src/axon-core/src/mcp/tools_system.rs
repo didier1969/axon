@@ -1190,13 +1190,47 @@ impl McpServer {
                 // REQ-AXO-901949 inv.5 — auto-continue: surface the valid next
                 // moves from the single-source tool_routing record.
                 let next = super::tool_contracts::next_links("sql");
-                if result.trim() == "[]" && ql.contains("match") {
-                    let note =
-                        "[]\n\nStatus: warn_empty_result\nHint: Cypher-style query detected. `sql` is read-only SQL over canonical tables; multi-hop CALLS traversal is NOT done in SQL (REQ-AXO-901952 retired the `ist.path` PG functions — graph traversal is RAM-only now). Use the structural tools `path`, `impact`, `bidi_trace` or `query` instead.";
-                    Some(json!({ "content": [{ "type": "text", "text": note }], "data": { "next": next } }))
+                // REQ-AXO-902583 — COMPTER, au lieu de rendre une enveloppe qu'on
+                // peut lire comme « vide ». Avant, zéro ligne rendait le texte `[]`
+                // et un `data` qui ne portait que `next` : un appelant programmatique
+                // ne pouvait pas distinguer « la requête a tourné et n'a rien trouvé »
+                // de « il ne s'est rien passé », et le silence le désignait comme
+                // fautif — il reformulait, et payait deux fois (NEX, CSAT 2026-08-31).
+                //
+                // COÛT, dit franchement : un second passage sur la sortie déjà
+                // sérialisée. Il est borné par `RawValue`, qui DÉLIMITE les lignes
+                // sans désérialiser leur contenu — pas d'allocation par cellule. Le
+                // cas vide court-circuite même ce passage. `sql` est une surface
+                // « advanced read », jamais un chemin chaud RAM-first.
+                let row_count: Option<usize> = if result.trim() == "[]" {
+                    Some(0)
                 } else {
-                    Some(json!({ "content": [{ "type": "text", "text": result }], "data": { "next": next } }))
-                }
+                    serde_json::from_str::<Vec<&serde_json::value::RawValue>>(&result)
+                        .ok()
+                        .map(|rows| rows.len())
+                };
+                // Une sortie qu'on n'a pas su délimiter ne se compte PAS à zéro :
+                // fabriquer un 0 la rendrait identique au résultat vide.
+                let status = match row_count {
+                    Some(0) => "ok_empty",
+                    Some(_) => "ok",
+                    None => "ok_uncounted",
+                };
+                let texte = if result.trim() == "[]" && ql.contains("match") {
+                    "[]\n\nStatus: ok_empty — 0 ligne. La requête a bien tourné.\nHint: Cypher-style query detected. `sql` is read-only SQL over canonical tables; multi-hop CALLS traversal is NOT done in SQL (REQ-AXO-901952 retired the `ist.path` PG functions — graph traversal is RAM-only now). Use the structural tools `path`, `impact`, `bidi_trace` or `query` instead.".to_string()
+                } else if row_count == Some(0) {
+                    // Le vide se DIT dans le texte aussi : beaucoup de clients ne
+                    // rendent que `content[0].text` (REQ-AXO-901949 inv.2).
+                    "[]\n\nStatus: ok_empty — 0 ligne. La requête a bien tourné ; \
+                     c'est le prédicat qui ne ramène rien, pas l'outil qui s'est tu."
+                        .to_string()
+                } else {
+                    result
+                };
+                Some(json!({
+                    "content": [{ "type": "text", "text": texte }],
+                    "data": { "next": next, "row_count": row_count, "status": status }
+                }))
             }
             Err(e) => {
                 // REQ-AXO-901949 — repair-as-data for PG execution errors.

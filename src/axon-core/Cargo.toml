@@ -95,7 +95,10 @@ ignore = "0.4"
 watchman_client = "0.9"
 tree-sitter = { version = "0.23", features = ["wasm"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# REQ-AXO-902583 — `raw_value` sert à COMPTER les lignes d'une sortie SQL sans
+# désérialiser leur contenu (`Vec<&RawValue>` délimite, il n'alloue pas par cellule).
+# Feature additive : le résolveur de Cargo fait l'union, aucune API existante ne change.
+serde_json = { version = "1.0", features = ["raw_value"] }
 rmp-serde = "1.1"
 anyhow = "1.0"
 rayon = "1.8"
