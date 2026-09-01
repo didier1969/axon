@@ -183,26 +183,6 @@ impl McpServer {
         let homonym_note = resolved.ambiguity_note().unwrap_or_default();
         let target_id = resolved.id;
 
-        // REQ-AXO-902584 — un symbole qui n'existe QUE comme extremite d'arete
-        // n'est pas un symbole. La traversee d'`impact` est INVERSE, donc son
-        // index RAM porte tout noeud ayant une arete ENTRANTE — y compris une
-        // cible dont le fichier a ete supprime et dont la ligne `Symbol` est
-        // partie avec lui. Mesure chez LLL : `examples/tmph5laa9_f.lll`, fichier
-        // temporaire disparu, laissait `fulfill --CALLS--> stock_reserve` sans
-        // aucune ligne `Symbol`. `query` rendait vide, `inspect` refusait — et
-        // `impact` affirmait `confidence: high` avec `blocking_factors: []`.
-        //
-        // Un silence fait CHERCHER, une fausse certitude fait ECRIRE : un agent
-        // qui suit le contrat (un appel, lecture du `confidence`) inscrivait un
-        // rayon invente dans son graphe d'intention. On refuse, comme le font
-        // deja les deux autres surfaces.
-        let indexed_project = self.symbol_project_code(&target_id);
-        if indexed_project.is_none() {
-            return Some(Self::impact_symbol_absent_from_index_error(
-                symbol, project, depth, &target_id,
-            ));
-        }
-
         // REQ-AXO-91512 — RAM-first via IstGraphView (PIL-AXO-9002,
         // feedback_trimodal_use_ram_graph_not_pg). When the cache is
         // warm, the reverse-traversal runs entirely in RAM ; the PG
@@ -221,11 +201,9 @@ impl McpServer {
         // derive it from the resolved symbol's metadata so an unscoped
         // (workspace-wide) impact still serves from RAM. The graph traversal
         // stays in RAM ; only this metadata lookup touches PG.
-        // REQ-AXO-902584 — le lookup est deja fait par le garde ci-dessus ; on
-        // reutilise son resultat plutot que de repayer la requete.
         let effective_project: Option<String> = match project {
             Some(p) => Some(p.to_string()),
-            None => indexed_project,
+            None => self.symbol_project_code(&target_id),
         };
         let ram_attempted = effective_project
             .as_deref()
@@ -243,6 +221,36 @@ impl McpServer {
         let surfaces_used: Vec<&'static str> = vec!["graph_ram"];
         let surfaces_degraded: Vec<&'static str> = Vec::new();
         let proj_key = effective_project.as_deref().unwrap_or("");
+
+        // REQ-AXO-902584 — un symbole qui n'existe QUE comme extremite d'arete
+        // n'est pas un symbole. La traversee ci-dessous est INVERSE, donc l'index
+        // RAM porte tout noeud ayant une arete ENTRANTE — y compris une cible
+        // dont le fichier a ete supprime et dont la ligne `Symbol` est partie
+        // avec lui. Mesure chez LLL : `examples/tmph5laa9_f.lll`, fichier
+        // temporaire disparu, laissait `fulfill --CALLS--> stock_reserve` sans
+        // aucune ligne `Symbol`. `query` rendait vide, `inspect` refusait — et
+        // `impact` affirmait `confidence: high` avec `blocking_factors: []`.
+        //
+        // Un silence fait CHERCHER, une fausse certitude fait ECRIRE : un agent
+        // qui suit le contrat (un appel, lecture du `confidence`) inscrivait un
+        // rayon invente dans son graphe d'intention. On refuse, comme le font
+        // deja les deux autres surfaces.
+        //
+        // COUT, dit franchement : ce garde AJOUTE un aller-retour PG sur le
+        // chemin chaud d'un outil RAM-first (REQ-AXO-901952, PIL-AXO-9002), y
+        // compris pour un appel scope ou `symbol_project_code` n'etait pas
+        // appele auparavant. Le controle RAM a ete essaye d'abord et MESURE
+        // insuffisant : `view.node_kind_db()` rend `Some(kind)` pour un noeud qui
+        // n'est qu'une extremite d'arete — le snapshot lui fabrique un kind par
+        // defaut, donc il ne peut pas distinguer un symbole d'un residu. Le jour
+        // ou le snapshot portera cette distinction, ce garde redevient gratuit.
+        // L'`impact_cache` en tete amortit les appels repetes, pas le premier.
+        if self.symbol_project_code(&target_id).is_none() {
+            return Some(Self::impact_symbol_absent_from_index_error(
+                symbol, project, depth, &target_id,
+            ));
+        }
+
         let query_outcome: Result<String, anyhow::Error> =
             Ok(self.build_impact_rows_from_ram(&view, proj_key, &target_id, depth));
 
