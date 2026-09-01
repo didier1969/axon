@@ -68,3 +68,50 @@ La règle qui compte n'est pas le ménage, c'est sa **place** : le nettoyage se 
 - Un drop-in systemd s'applique à moitié : `MemoryHigh`/`CPUQuota` au `daemon-reload`, `Slice=` exige un redémarrage.
 - `/tmp` est un **tmpfs** : ce qu'on y laisse est de la RAM, invisible à `ps`, et ampute `MemAvailable`.
 - Journaliser `stderr[-500:]` garde la queue et jette le message d'erreur, qui vient en tête.
+
+
+---
+
+# Suite — la nuit du 31/08 au 01/09 : livrer quand la porte de compilation est fermée
+
+## Ce que la session a livré
+
+`80e71bd7` — l'init GPU nomme désormais l'étape où elle meurt. Cause 1 de `REQ-AXO-902576`.
+
+Le point de conception mérite d'être retenu : **un `tracing::info!` ne suffit pas** quand le processus est abattu par un signal, parce que le buffer du souscripteur peut n'être jamais vidé. Le log meurt avec le processus qu'il devait décrire. D'où un témoin écrit par `fs::write` **synchrone** avant chaque étape native — il survit au SIGSEGV.
+
+Prouvé dans les deux sens : job `1788215582` vert, job `1788211136` rouge après mutation, sur l'assertion exacte. Un garde incapable de rendre l'autre verdict ne prouve rien.
+
+## Le vrai adversaire de la nuit n'était pas le code
+
+Six jobs de compilation morts en file. La cause a mis quatre hypothèses à mourir avant d'être trouvée :
+
+| hypothèse | verdict |
+|---|---|
+| « le courtier refuse par contention » | faux — refus persistant sur machine à 0 rustc |
+| « le p95 est empoisonné par les forfaits du wrapper » | **faux** — il apprend des pics réels ; retiré |
+| « 12 G est un forfait arbitraire de VPC » | **faux** — c'est notre propre norme, `GUI-AXO-1034` ; retiré |
+| « le p95 est un max » | **VRAI**, et c'est une ligne |
+
+`peaks[min(len-1, int(len*0.95))]` avec une fenêtre `LIMIT 20` rend le dernier index pour tout n. Sur nos 19 mesures : médiane **3,74 G**, valeur retenue **12,00 G**. Une seule porte de build complète dans la fenêtre fait réserver 12 G aux vingt jobs suivants — `cargo --version` compris.
+
+**Deux griefs retirés pour un trouvé.** C'est le bon ratio quand on cherche vraiment.
+
+## Deux fautes de méthode, à ne pas refaire
+
+1. **`cargo … | tail -12` masque le code retour.** Le job a rapporté `succeeded exit=0` alors que `test --lib` était `FAILED`. C'est exactement la classe `REQ-AXO-902409` que cette session documente depuis des heures — introduite par moi, dans ma propre commande. Une surface qui ment n'a pas besoin d'être écrite par quelqu'un d'autre.
+2. **Division par 10⁹ au lieu de 2³⁰.** « Il faut 24 GiB » portait sur 23,27. Trois messages bâtis sur un chiffre faux avant de le vérifier.
+
+## Ce qui a été touché hors de notre territoire, et rendu
+
+Un override `NEXUS_ADMISSION_RESERVE=2G` sur le courtier du parc — service de VPC, pas le nôtre. Posé sur directive opérateur à 00h32, documenté dans le fichier lui-même (pourquoi, mesure justificative, effet de bord assumé, commande de retour), **retiré dès la livraison passée**. Aucun drop-in ne subsiste.
+
+La règle appliquée : on peut emprunter le levier d'un voisin si on le lui dit, si on écrit pourquoi, et si on le rend. Pas autrement.
+
+## Ce que les voisins ont apporté, et qui vaut plus que nos mesures
+
+**VPC** : la cause réelle des 20 h de préemption — `daggy-typedb` avec un `MemoryHigh` sous sa consommation, 82,2 % de la pression de la tranche, pendant que `axon-live` mesurait PSI 0,00. Et surtout ce piège de mesure, qui dépasse l'incident : *un plafond trop bas fait paraître son prisonnier plus gros qu'il n'est* — `opv-serve` lisait 8,0 Go sous un high de 8,0, desserré il en pèse 6,1. On entre dans cette boucle de bonne foi en regardant `top`.
+
+**NEX** : `GUI-PRO-120` disait littéralement l'inverse d'elle-même. Titre, énoncé et exemple d'un côté ; ligne RÉPARATION de l'autre — la dernière lue, la seule à l'impératif. Aucun outil ne l'avait vue ; il a fallu un lecteur qui compare la consigne à la règle avant d'exécuter douze écritures.
+
+**LLL** : 2,2 Gio de RAM rendus en dix minutes, et une remarque de forme qu'il faut garder honnêtement — notre message leur a été actionnable non par courtoisie, mais parce que nous avions la chaîne causale au moment de l'écrire. Quand on ne l'a pas, l'exigence remplit le vide et vise à côté. C'est ce qui était arrivé une heure plus tôt avec VPC.
