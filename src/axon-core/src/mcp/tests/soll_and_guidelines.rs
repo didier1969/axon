@@ -16839,3 +16839,59 @@ fn sql_dit_son_compte_de_lignes_au_lieu_de_rendre_une_enveloppe_muette() {
          qui la rendrait identique au résultat vide : {erreur}"
     );
 }
+
+/// REQ-AXO-902583 (1ʳᵉ demande) — un paramètre reçu que l'outil ne connaît pas doit
+/// être NOMMÉ, sinon l'appelant impute l'échec à sa propre syntaxe et paie deux fois.
+///
+/// Mesuré le 2026-09-01 sur le runtime : `soll_get(id=…, sectionz="Règle", limit=3)`
+/// a rendu le corps ENTIER en silence. `sectionz` est une faute de frappe pour
+/// `section` et `limit` n'existe pas — l'appelant paie le corps complet, ne reçoit
+/// aucun signal, et reformule. C'est le scénario exact du rapporteur NEX.
+///
+/// Le contrôle est au chokepoint de dispatch, pas dans chaque outil : « généraliser
+/// plutôt qu'instrumenter cas par cas » est la 3ᵉ demande du REQ.
+#[test]
+fn un_parametre_hors_schema_est_nomme_au_lieu_d_etre_avale() {
+    let server = create_test_server();
+    seed_pillar(&server, "TST", "PIL-TST-905", "Ancre 902583 ter");
+
+    let avec_intrus = server
+        .execute_tool_direct(
+            "soll_get",
+            &json!({ "id": "PIL-TST-905", "sectionz": "Règle", "limit": 3 }),
+        )
+        .expect("soll_get returns a result");
+
+    let nommes = avec_intrus["data"]["ignored_parameters"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`ignored_parameters` doit être là : {avec_intrus}"));
+    let nommes: Vec<&str> = nommes.iter().filter_map(Value::as_str).collect();
+    assert!(
+        nommes.contains(&"sectionz") && nommes.contains(&"limit"),
+        "les DEUX paramètres avalés doivent être nommés, pas seulement le premier : {nommes:?}"
+    );
+    assert!(
+        !nommes.contains(&"id"),
+        "un paramètre du schéma n'est pas un intrus : {nommes:?}"
+    );
+
+    // Le canal que l'agent lit vraiment (REQ-AXO-901949 inv.2).
+    let texte = avec_intrus["content"][0]["text"]
+        .as_str()
+        .expect("texte rendu");
+    assert!(
+        texte.contains("sectionz"),
+        "le paramètre ignoré doit se DIRE dans le texte : {texte:?}"
+    );
+
+    // Non-régression : un appel propre ne porte pas le champ. Un signal permanent
+    // n'est plus un signal — c'est la règle posée par la tranche 1 de ce même REQ.
+    let propre = server
+        .execute_tool_direct("soll_get", &json!({ "id": "PIL-TST-905" }))
+        .expect("soll_get returns a result");
+    assert_eq!(
+        propre["data"]["ignored_parameters"],
+        json!(null),
+        "aucun intrus : le champ reste absent : {propre}"
+    );
+}

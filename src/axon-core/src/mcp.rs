@@ -500,6 +500,77 @@ impl McpServer {
             .collect()
     }
 
+    /// REQ-AXO-902583 — les paramètres que l'appelant a écrits et que l'outil n'a
+    /// pas pu lire, faute d'exister dans son schéma.
+    ///
+    /// Deux conditions, et les deux comptent :
+    /// - la clé était dans l'appel D'ORIGINE — sinon on accuserait le serveur, qui
+    ///   injecte `project_code` et consorts ;
+    /// - elle est ENCORE là après les réparations — un alias renommé (`REQ-AXO-902301`)
+    ///   ou un champ hoisté (`REQ-AXO-902303`) a été honoré, pas ignoré, et se
+    ///   divulgue déjà par sa propre note.
+    ///
+    /// Rend une liste VIDE plutôt qu'un verdict quand le contrat de l'outil est
+    /// introuvable : une surface n'affirme jamais plus qu'elle ne sait.
+    fn parameters_outside_the_schema(
+        normalized_name: &str,
+        original: &Value,
+        normalised: &Value,
+    ) -> Vec<String> {
+        // COÛT, dit franchement : ce contrôle est sur le chemin de CHAQUE appel
+        // d'outil. `tool_input_contract_for` reconstruit `tools_catalog(true)` — les
+        // 114 schémas — à chaque invocation ; l'y appeler directement aurait fait
+        // payer ce littéral à toute la surface. Les champs acceptés sont donc
+        // extraits UNE fois et gardés : ils ne changent pas à l'exécution.
+        static ACCEPTED_FIELDS: std::sync::OnceLock<Vec<(String, Vec<String>)>> =
+            std::sync::OnceLock::new();
+        let table = ACCEPTED_FIELDS.get_or_init(|| {
+            crate::mcp::catalog::tools_catalog(true)
+                .get("tools")
+                .and_then(Value::as_array)
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .filter_map(|tool| {
+                            let name = tool.get("name")?.as_str()?.to_string();
+                            let fields = tool
+                                .get("inputSchema")?
+                                .get("properties")?
+                                .as_object()?
+                                .keys()
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            Some((name, fields))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let Some((_, accepted)) = table.iter().find(|(name, _)| {
+            // REQ-AXO-902434 — même prédicat que le routeur, pas une recopie.
+            crate::mcp::catalog::tool_names_denote_the_same_tool(name, normalized_name)
+        }) else {
+            return Vec::new();
+        };
+        // Un schéma sans propriété déclarée ne prouve pas qu'il n'en accepte aucune :
+        // ne rien conclure.
+        if accepted.is_empty() {
+            return Vec::new();
+        }
+        let (Some(original), Some(normalised)) = (original.as_object(), normalised.as_object())
+        else {
+            return Vec::new();
+        };
+        original
+            .keys()
+            // `_meta` appartient au protocole MCP, pas au contrat de l'outil.
+            .filter(|key| key.as_str() != "_meta")
+            .filter(|key| normalised.contains_key(key.as_str()))
+            .filter(|key| !accepted.iter().any(|field| field == *key))
+            .cloned()
+            .collect()
+    }
+
     fn tool_input_contract_for(normalized_name: &str) -> Option<Value> {
         let catalog = tools_catalog(true);
         let tools = catalog.get("tools")?.as_array()?;
@@ -923,6 +994,9 @@ impl McpServer {
             // fermée, réintroduite par le correctif qui rendait `sql` plus bavard.
             // Attrapée par `test_sql_tool_is_read_only_rejects_mutations`.
             "row_count",
+            // REQ-AXO-902583 — même raison : nommer un paramètre avalé est de la
+            // guidance sur l'APPEL, jamais la charge utile de la réponse.
+            "ignored_parameters",
         ];
         let rendered_text = object
             .get("content")
@@ -2156,6 +2230,10 @@ impl McpServer {
         normalized_name: &str,
         arguments: &Value,
     ) -> Option<Value> {
+        // REQ-AXO-902583 — l'appel TEL QUE REÇU, avant toute réparation : c'est la
+        // seule référence qui distingue « le caller l'a écrit » de « le serveur l'a
+        // injecté ».
+        let original_arguments = arguments;
         // REQ-AXO-902239 — normalise the project scope HERE, not in `handle_call_tool`:
         // `axon_batch` calls this function directly, bypassing the dispatch entry
         // point, and LLMs do batch. All three paths (dispatch, batch, async mutation
@@ -2176,6 +2254,22 @@ impl McpServer {
         // `files=`/`paths=`.
         let (listed, list_note) = Self::with_normalised_list_parameter(normalized_name, &aliased);
         let normalised = listed.into_owned();
+        // REQ-AXO-902583 — ce que les quatre réparations ci-dessus n'ont PAS su
+        // rattraper doit être nommé. Mesuré le 2026-09-01 :
+        // `soll_get(id=…, sectionz="Règle", limit=3)` a rendu le corps entier en
+        // silence — l'appelant paie le corps complet, ne reçoit aucun signal, et
+        // reformule en croyant sa syntaxe fautive. C'est le double coût que NEX
+        // a rapporté comme sa priorité n°1.
+        //
+        // Ici plutôt que dans chaque outil : « généraliser plutôt qu'instrumenter
+        // cas par cas ». Un paramètre compte comme ignoré s'il était dans l'appel
+        // D'ORIGINE et s'y trouve ENCORE après les normalisations — ce qu'un alias
+        // renommé, un champ hoisté ou un scope injecté par le serveur ne sont pas.
+        let ignored_parameters = Self::parameters_outside_the_schema(
+            normalized_name,
+            original_arguments,
+            &normalised,
+        );
         let arguments = &normalised;
         let result = match normalized_name {
             "help" => self.axon_help(arguments),
@@ -2343,7 +2437,7 @@ impl McpServer {
             ),
             None => result,
         };
-        match data_note {
+        let result = match data_note {
             Some(note) => Self::append_disclosure(
                 result,
                 &format!(
@@ -2352,7 +2446,38 @@ impl McpServer {
                 ),
             ),
             None => result,
+        };
+        // REQ-AXO-902583 — en DERNIER : ce qu'aucune des réparations ci-dessus n'a
+        // su rattraper. Le champ n'apparaît que s'il porte quelque chose ; un signal
+        // permanent n'est plus un signal, et `data` doit rester « guidance seule »
+        // pour les outils qui dépendent du miroir `rendered_text` (REQ-AXO-902560).
+        if ignored_parameters.is_empty() {
+            return result;
         }
+        let noms = ignored_parameters
+            .iter()
+            .map(|p| format!("`{p}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let result = Self::append_disclosure(
+            result,
+            &format!(
+                "\n\n_↳ paramètre(s) reçu(s) mais INCONNU(S) de cet outil, donc sans \
+                 effet sur cette réponse : {noms} (REQ-AXO-902583). Votre appel n'est \
+                 pas malformé — ces noms n'existent simplement pas dans son schéma ; \
+                 `help` ou `tools/list` donne les noms acceptés._"
+            ),
+        );
+        let mut result = result?;
+        if let Some(data) = result.get_mut("data").and_then(Value::as_object_mut) {
+            data.insert("ignored_parameters".to_string(), json!(ignored_parameters));
+        } else if let Some(object) = result.as_object_mut() {
+            object.insert(
+                "data".to_string(),
+                json!({ "ignored_parameters": ignored_parameters }),
+            );
+        }
+        Some(result)
     }
 
     /// REQ-AXO-902301 — append a line to a response's text channel, the channel an
