@@ -27,6 +27,11 @@ mod datalog {
     relation manifest_build(String);
     relation pending_present();
     relation qualification_false();
+    // REQ-AXO-902585 — le T1 est passé au TRI-ÉTAT : la porte ne passe QUE sur un
+    // `passed` explicite. `skipped` et l'absence sont `Unknown`, et un Unknown
+    // n'est pas un succès. Sans ce fait, l'oracle affirmerait `pass` sur l'absence
+    // de preuve — exactement le défaut que la tranche supprime.
+    relation qualification_true();
 
     /// Liveness input facts (from `LivenessFacts`).
     relation brain_serving_fact();
@@ -45,7 +50,7 @@ mod datalog {
     // no_stale_pending: passes UNLESS a pending.json is present (stratified negation).
     gate_no_stale_pending() <-- seed(), !pending_present();
     // qualification_passed: passes unless an explicit non-ok verdict is recorded.
-    gate_qualification_passed() <-- seed(), !qualification_false();
+    gate_qualification_passed() <-- qualification_true();
     // brain_serving: the brain answered the DB probe.
     gate_brain_serving() <-- brain_serving_fact();
     // indexer_alive: passes if no separate indexer is expected OR it is ready (union).
@@ -101,8 +106,13 @@ pub fn ascent_release_gates(f: &ReleaseFacts) -> (bool, bool, bool) {
     if f.pending_present {
         prog.pending_present = vec![()];
     }
-    if f.qualification_ok == Some(false) {
-        prog.qualification_false = vec![()];
+    // REQ-AXO-902585 — l'oracle suit la source de vérité du T1 : seul un verdict
+    // EXPLICITEMENT rouge rend la porte rouge. `skipped` et l'absence sont
+    // `Unknown` côté T1, et un Unknown n'est pas un échec.
+    match f.qualification_status() {
+        crate::release_reconciler::GateStatus::Fail => prog.qualification_false = vec![()],
+        crate::release_reconciler::GateStatus::Pass => prog.qualification_true = vec![()],
+        crate::release_reconciler::GateStatus::Unknown => {}
     }
     prog.run();
     (
@@ -146,8 +156,13 @@ pub fn ascent_overall_phase(f: &ReleaseFacts, l: &LivenessFacts) -> String {
     if f.pending_present {
         prog.pending_present = vec![()];
     }
-    if f.qualification_ok == Some(false) {
-        prog.qualification_false = vec![()];
+    // REQ-AXO-902585 — l'oracle suit la source de vérité du T1 : seul un verdict
+    // EXPLICITEMENT rouge rend la porte rouge. `skipped` et l'absence sont
+    // `Unknown` côté T1, et un Unknown n'est pas un échec.
+    match f.qualification_status() {
+        crate::release_reconciler::GateStatus::Fail => prog.qualification_false = vec![()],
+        crate::release_reconciler::GateStatus::Pass => prog.qualification_true = vec![()],
+        crate::release_reconciler::GateStatus::Unknown => {}
     }
     if l.brain_serving {
         prog.brain_serving_fact = vec![()];
@@ -186,7 +201,9 @@ mod tests {
                                 live_build_id: live.to_string(),
                                 manifest_build_id: manifest.map(str::to_string),
                                 manifest_state: Some("promoted".to_string()),
-                                qualification_ok: Some(true),
+                                core_qualification_status: Some("passed".to_string()),
+                                core_qualification_evidence: None,
+                                qualification_source: "current.promotion_gates",
                                 pending_present: pending,
                                 pending_build_id: None,
                                 runtime_contract: Some("brain_mcp_indexer_ist".to_string()),
@@ -237,12 +254,12 @@ mod tests {
                             .iter()
                             .find(|g| g.name == "brain_serving")
                             .unwrap()
-                            .pass,
+                            .passes(),
                         gates
                             .iter()
                             .find(|g| g.name == "indexer_alive")
                             .unwrap()
-                            .pass,
+                            .passes(),
                     );
                     assert_eq!(
                         rust,
@@ -260,7 +277,10 @@ mod tests {
     fn ascent_matches_rust_release_gates_exhaustively() {
         let builds = [("v1", Some("v1")), ("v1", Some("v2")), ("v1", None)];
         let pendings = [false, true];
-        let quals = [None, Some(true), Some(false)];
+        // REQ-AXO-902585 — la grille porte les statuts que `record-gate` ECRIT
+        // vraiment, plus l'absence. `skipped` est le cas qui distingue un
+        // tri-etat d'un booleen : ni passe, ni echoue.
+        let quals = [None, Some("passed"), Some("failed"), Some("skipped")];
         for (live, manifest) in builds {
             for &pending in &pendings {
                 for &qual in &quals {
@@ -268,7 +288,13 @@ mod tests {
                         live_build_id: live.to_string(),
                         manifest_build_id: manifest.map(str::to_string),
                         manifest_state: Some("promoted".to_string()),
-                        qualification_ok: qual,
+                        core_qualification_status: qual.map(str::to_string),
+                        core_qualification_evidence: None,
+                        qualification_source: if qual.is_some() {
+                            "current.promotion_gates"
+                        } else {
+                            "absent"
+                        },
                         pending_present: pending,
                         pending_build_id: if pending {
                             Some("v0-staged".to_string())
@@ -287,17 +313,17 @@ mod tests {
                             .iter()
                             .find(|g| g.name == "manifest_runtime_match")
                             .unwrap()
-                            .pass,
+                            .passes(),
                         gates
                             .iter()
                             .find(|g| g.name == "no_stale_pending")
                             .unwrap()
-                            .pass,
+                            .passes(),
                         gates
                             .iter()
                             .find(|g| g.name == "qualification_passed")
                             .unwrap()
-                            .pass,
+                            .passes(),
                     );
                     let asc = ascent_release_gates(&f);
                     assert_eq!(

@@ -26,8 +26,26 @@ pub struct ReleaseFacts {
     pub manifest_build_id: Option<String>,
     /// `state` field of `current.json` (e.g. "promoted").
     pub manifest_state: Option<String>,
-    /// `qualification.verdict == "ok"` when present.
-    pub qualification_ok: Option<bool>,
+    /// REQ-AXO-902585 — `promotion_gates.core_qualification.status` du manifeste qui
+    /// POSSÈDE la question : `pending.json` quand un staging existe (c'est lui qui
+    /// porte la qualification EN VOL), sinon `current.json`.
+    ///
+    /// L'ancien champ lisait `qualification.verdict` — une clé qu'AUCUN écrivain du
+    /// dépôt ne produit : sur 244 manifestes d'historique, 0 en portent une, et 244
+    /// portent `"qualification": {"evidence": []}` (provenance de build, écrite par
+    /// `create_manifest.py`). Deux mécanismes portaient par accident le même mot, et
+    /// la porte lisait celui qui n'est jamais alimenté — d'où un `pass: true`
+    /// structurellement impossible à démentir.
+    ///
+    /// Le vrai verdict est écrit par `axonctl cutover --phase record-gate --gate
+    /// core_qualification`, et `cutover_finalize_prepared_files` REFUSE le promote
+    /// si les quatre gates requis ne sont pas `passed`.
+    pub core_qualification_status: Option<String>,
+    /// Preuve attachée au verdict (`release_attempt_id`, `exit_code`, log).
+    pub core_qualification_evidence: Option<String>,
+    /// Provenance, dite plutôt que devinée — même motif qu'`indexer_source` :
+    /// "pending.promotion_gates" | "current.promotion_gates" | "absent".
+    pub qualification_source: &'static str,
     /// A `pending.json` exists — a promote is mid-flight OR was stranded by a crash.
     pub pending_present: bool,
     /// `runtime_version.build_id` of `pending.json` when present.
@@ -73,12 +91,28 @@ impl ReleaseFacts {
             .and_then(|c| c.get("state"))
             .and_then(Value::as_str)
             .map(str::to_string);
-        let qualification_ok = current.as_ref().and_then(|c| {
-            c.get("qualification")
-                .and_then(|q| q.get("verdict"))
+        // REQ-AXO-902585 — `pending` D'ABORD : `current.promotion_gates` est
+        // tautologiquement tout-vert (le `finalize` refuse de basculer sinon), donc
+        // le cas intéressant est toujours l'autre. `gate_with_attestation` termine
+        // par `|| true` : un promote tué juste après un gate rouge laisse un
+        // `pending.json` qui PORTE ce rouge. Ne lire que `current` le masquerait.
+        let lire_core_qualification = |m: &Value| -> Option<(String, Option<String>)> {
+            let gate = m.get("promotion_gates")?.get("core_qualification")?;
+            let status = gate.get("status")?.as_str()?.to_string();
+            let evidence = gate
+                .get("evidence")
                 .and_then(Value::as_str)
-                .map(|verdict| verdict.eq_ignore_ascii_case("ok"))
-        });
+                .map(str::to_string);
+            Some((status, evidence))
+        };
+        let (core_qualification_status, core_qualification_evidence, qualification_source) =
+            match pending.as_ref().and_then(&lire_core_qualification) {
+                Some((s, e)) => (Some(s), e, "pending.promotion_gates"),
+                None => match current.as_ref().and_then(&lire_core_qualification) {
+                    Some((s, e)) => (Some(s), e, "current.promotion_gates"),
+                    None => (None, None, "absent"),
+                },
+            };
         let runtime_contract = current
             .as_ref()
             .and_then(|c| c.get("runtime_contract"))
@@ -105,7 +139,9 @@ impl ReleaseFacts {
             live_build_id,
             manifest_build_id,
             manifest_state,
-            qualification_ok,
+            core_qualification_status,
+            core_qualification_evidence,
+            qualification_source,
             pending_present: pending.is_some(),
             pending_build_id: pending.as_ref().and_then(extract_build_id),
             runtime_contract,
@@ -123,6 +159,17 @@ impl ReleaseFacts {
         self.runtime_contract
             .as_deref()
             .is_some_and(|c| c.contains("indexer"))
+    }
+
+    /// REQ-AXO-902585 — `skipped` et l'absence sont des `Unknown`, jamais des `Pass`.
+    /// « Sauté » n'est pas « passé », et un manifeste antérieur au two-phase ne
+    /// PORTE simplement pas l'information : la porte ne peut pas mesurer, elle le dit.
+    pub fn qualification_status(&self) -> GateStatus {
+        match self.core_qualification_status.as_deref() {
+            Some("passed") => GateStatus::Pass,
+            Some("failed") | Some("timeout") | Some("error") => GateStatus::Fail,
+            Some(_) | None => GateStatus::Unknown,
+        }
     }
 }
 
@@ -150,26 +197,26 @@ pub struct LivenessFacts {
 /// (N/A when the `runtime_contract` has no separate indexer).
 pub fn evaluate_liveness_gates(l: &LivenessFacts) -> Vec<Gate> {
     vec![
-        Gate {
-            name: "brain_serving",
-            pass: l.brain_serving,
-            detail: if l.brain_serving {
-                "brain DB probe SELECT 1 ok".to_string()
+        Gate::binary(
+            "brain_serving",
+            l.brain_serving,
+            if l.brain_serving {
+                "brain DB probe SELECT 1 ok"
             } else {
-                "brain not serving (db_probe_failed)".to_string()
+                "brain not serving (db_probe_failed)"
             },
-        },
-        Gate {
-            name: "indexer_alive",
-            pass: !l.indexer_expected || l.indexer_ready,
-            detail: if !l.indexer_expected {
+        ),
+        Gate::binary(
+            "indexer_alive",
+            !l.indexer_expected || l.indexer_ready,
+            if !l.indexer_expected {
                 "no separate indexer in runtime_contract — gate N/A".to_string()
             } else if l.indexer_ready {
                 format!("indexer healthy ({})", l.indexer_source)
             } else {
                 format!("indexer {} ({})", l.indexer_lifecycle, l.indexer_source)
             },
-        },
+        ),
     ]
 }
 
@@ -203,32 +250,105 @@ pub fn liveness_next_action(l: &LivenessFacts) -> Option<String> {
     None
 }
 
+/// REQ-AXO-902585 — l'état d'une porte a TROIS valeurs, pas deux.
+///
+/// `Unknown` n'est pas une nuance : `qualification_passed` rendait `pass: true`
+/// sur l'ABSENCE de preuve (« no qualification recorded »), et un `pass` se lit
+/// comme un verdict. Une porte non jouée n'est pas une porte franchie. Même règle
+/// que `ok_uncounted` sur `sql` (REQ-AXO-902583) : une surface n'affirme jamais
+/// plus qu'elle ne sait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateStatus {
+    Pass,
+    Fail,
+    Unknown,
+}
+
 /// A single declarative gate: a named predicate over the facts with a human detail.
+///
+/// Le champ `pass: bool` a été REMPLACÉ par `status` volontairement : le
+/// compilateur force ainsi chaque site de construction à choisir un état, et une
+/// porte future ne peut plus oublier le troisième.
 #[derive(Debug, Clone)]
 pub struct Gate {
     pub name: &'static str,
-    pub pass: bool,
+    pub status: GateStatus,
     pub detail: String,
+}
+
+impl Gate {
+    pub fn pass(name: &'static str, detail: impl Into<String>) -> Self {
+        Gate { name, status: GateStatus::Pass, detail: detail.into() }
+    }
+    pub fn fail(name: &'static str, detail: impl Into<String>) -> Self {
+        Gate { name, status: GateStatus::Fail, detail: detail.into() }
+    }
+    pub fn unknown(name: &'static str, detail: impl Into<String>) -> Self {
+        Gate { name, status: GateStatus::Unknown, detail: detail.into() }
+    }
+    /// Porte binaire — pour les prédicats qui SAVENT toujours répondre.
+    pub fn binary(name: &'static str, pass: bool, detail: impl Into<String>) -> Self {
+        if pass { Gate::pass(name, detail) } else { Gate::fail(name, detail) }
+    }
+    /// Lecture conservatrice pour les consommateurs existants : `Unknown` n'est
+    /// pas un succès.
+    pub fn passes(&self) -> bool {
+        self.status == GateStatus::Pass
+    }
+    /// `Unknown` n'est PAS rouge — capital pour la sûreté : `promote_live_safe.sh`
+    /// escalade en redémarrage complet du brain dès qu'un gate rouge inattendu
+    /// apparaît dans `failed_gates`.
+    pub fn is_red(&self) -> bool {
+        self.status == GateStatus::Fail
+    }
+    pub fn status_str(&self) -> &'static str {
+        match self.status {
+            GateStatus::Pass => "pass",
+            GateStatus::Fail => "fail",
+            GateStatus::Unknown => "unknown",
+        }
+    }
 }
 
 /// Evaluate the release gates. These are the T1 predicates; T2 re-expresses them in
 /// Ascent without changing their meaning.
 pub fn evaluate_gates(f: &ReleaseFacts) -> Vec<Gate> {
     let manifest_match = f.manifest_build_id.as_deref() == Some(f.live_build_id.as_str());
+    let source = f.qualification_source;
+    let evidence = f.core_qualification_evidence.as_deref().unwrap_or("<none>");
+    let qualification = Gate {
+        name: "qualification_passed",
+        status: f.qualification_status(),
+        detail: match f.qualification_status() {
+            GateStatus::Pass => format!("core_qualification=passed (source={source}) — {evidence}"),
+            GateStatus::Fail => format!(
+                "core_qualification={} (source={source}) — {evidence}",
+                f.core_qualification_status.as_deref().unwrap_or("?")
+            ),
+            // REQ-AXO-902585 — dit franchement, et ce sera le cas MAJORITAIRE :
+            // 243 des 244 manifestes d'historique n'ont pas de `promotion_gates`.
+            // Ce n'est pas une régression, c'est la fin d'un faux vert.
+            GateStatus::Unknown => match f.core_qualification_status.as_deref() {
+                Some(other) => format!("core_qualification={other} (source={source}) — ni passé ni échoué : non mesurable"),
+                None if f.pending_present => "un staging est en vol et n'a pas encore enregistré de core_qualification".to_string(),
+                None => "ce manifeste ne porte pas de `promotion_gates` (antérieur au promote en deux phases) — le verdict de qualification n'est PAS mesurable ici. Unknown, pas vert.".to_string(),
+            },
+        },
+    };
     vec![
-        Gate {
-            name: "manifest_runtime_match",
-            pass: manifest_match,
-            detail: format!(
+        Gate::binary(
+            "manifest_runtime_match",
+            manifest_match,
+            format!(
                 "running={} manifest={}",
                 f.live_build_id,
                 f.manifest_build_id.as_deref().unwrap_or("<none>")
             ),
-        },
-        Gate {
-            name: "no_stale_pending",
-            pass: !f.pending_present,
-            detail: if f.pending_present {
+        ),
+        Gate::binary(
+            "no_stale_pending",
+            !f.pending_present,
+            if f.pending_present {
                 format!(
                     "pending.json present (build_id={})",
                     f.pending_build_id.as_deref().unwrap_or("<unknown>")
@@ -236,18 +356,8 @@ pub fn evaluate_gates(f: &ReleaseFacts) -> Vec<Gate> {
             } else {
                 "no pending staging".to_string()
             },
-        },
-        Gate {
-            name: "qualification_passed",
-            // Absent qualification is not a failure (older manifests); only an
-            // explicit non-ok verdict fails the gate.
-            pass: f.qualification_ok != Some(false),
-            detail: match f.qualification_ok {
-                Some(true) => "qualify verdict=ok".to_string(),
-                Some(false) => "qualify verdict=NOT ok".to_string(),
-                None => "no qualification recorded".to_string(),
-            },
-        },
+        ),
+        qualification,
     ]
 }
 
@@ -320,24 +430,24 @@ impl CutoverFacts {
     pub fn new_healthy(&self) -> bool {
         evaluate_liveness_gates(&self.new_liveness)
             .iter()
-            .all(|g| g.pass)
+            .all(|g| g.passes())
             && self.new_qualify_ok != Some(false)
     }
 }
 
 /// Evaluate the cutover gate (pure predicate over `CutoverFacts`).
 pub fn evaluate_cutover_gates(f: &CutoverFacts) -> Vec<Gate> {
-    vec![Gate {
-        name: "new_runtime_healthy",
-        pass: f.new_healthy(),
-        detail: if f.new_healthy() {
+    vec![Gate::binary(
+        "new_runtime_healthy",
+        f.new_healthy(),
+        if f.new_healthy() {
             "new runtime healthy (full runtime_contract + qualify)".to_string()
         } else if f.deadline_exceeded {
             "new runtime NOT healthy within the deadline → auto-rollback".to_string()
         } else {
             "new runtime not yet healthy → awaiting".to_string()
         },
-    }]
+    )]
 }
 
 /// Derive the cutover phase (projection of the cutover FSM state). A `healthy` new
@@ -583,10 +693,10 @@ impl StopFacts {
 pub fn evaluate_stop_gates(f: &StopFacts) -> Vec<Gate> {
     let full = f.is_full_teardown();
     vec![
-        Gate {
-            name: "no_canonical_listeners",
-            pass: f.canonical_listeners.is_empty(),
-            detail: if f.canonical_listeners.is_empty() {
+        Gate::binary(
+            "no_canonical_listeners",
+            f.canonical_listeners.is_empty(),
+            if f.canonical_listeners.is_empty() {
                 format!("no canonical listeners left for role '{}'", f.stop_role)
             } else {
                 format!(
@@ -594,13 +704,13 @@ pub fn evaluate_stop_gates(f: &StopFacts) -> Vec<Gate> {
                     f.stop_role, f.canonical_listeners
                 )
             },
-        },
-        Gate {
-            name: "supervisor_quiesced",
+        ),
+        Gate::binary(
+            "supervisor_quiesced",
             // N/A unless this is a full teardown: a role-scoped stop intentionally
             // leaves the supervisor running for the surviving role (PIL-AXO-004).
-            pass: !full || !f.supervisor_healthy,
-            detail: if !full {
+            !full || !f.supervisor_healthy,
+            if !full {
                 format!(
                     "role-scoped stop ('{}') — supervisor stays up for the other role; gate N/A",
                     f.stop_role
@@ -610,11 +720,11 @@ pub fn evaluate_stop_gates(f: &StopFacts) -> Vec<Gate> {
             } else {
                 "supervisor quiesced".to_string()
             },
-        },
-        Gate {
-            name: "writer_locks_released",
-            pass: f.writer_locks_held.is_empty(),
-            detail: if f.writer_locks_held.is_empty() {
+        ),
+        Gate::binary(
+            "writer_locks_released",
+            f.writer_locks_held.is_empty(),
+            if f.writer_locks_held.is_empty() {
                 "no writer locks held".to_string()
             } else {
                 format!(
@@ -622,16 +732,16 @@ pub fn evaluate_stop_gates(f: &StopFacts) -> Vec<Gate> {
                     f.writer_locks_held.join(", ")
                 )
             },
-        },
-        Gate {
-            name: "sockets_cleaned",
-            pass: !f.sockets_present,
-            detail: if f.sockets_present {
+        ),
+        Gate::binary(
+            "sockets_cleaned",
+            !f.sockets_present,
+            if f.sockets_present {
                 "control sockets still present on disk".to_string()
             } else {
                 "control sockets cleaned".to_string()
             },
-        },
+        ),
     ]
 }
 
@@ -703,7 +813,9 @@ mod tests {
             live_build_id: live.to_string(),
             manifest_build_id: manifest.map(str::to_string),
             manifest_state: Some("promoted".to_string()),
-            qualification_ok: Some(true),
+            core_qualification_status: Some("passed".to_string()),
+            core_qualification_evidence: Some("exit_code=0".to_string()),
+            qualification_source: "current.promotion_gates",
             pending_present: pending,
             pending_build_id: if pending {
                 Some("v0.0.0-staged".to_string())
@@ -746,7 +858,7 @@ mod tests {
     #[test]
     fn liveness_clean_when_brain_serves_and_indexer_fresh() {
         let l = live(true, true, true, "healthy", "pg_heartbeat");
-        assert!(evaluate_liveness_gates(&l).iter().all(|g| g.pass));
+        assert!(evaluate_liveness_gates(&l).iter().all(|g| g.passes()));
         assert!(liveness_phase(&l).is_none());
         assert!(liveness_next_action(&l).is_none());
     }
@@ -758,7 +870,7 @@ mod tests {
         assert!(liveness_next_action(&l).unwrap().contains("DB probe"));
         assert!(evaluate_liveness_gates(&l)
             .iter()
-            .any(|g| g.name == "brain_serving" && !g.pass));
+            .any(|g| g.name == "brain_serving" && !g.passes()));
     }
 
     #[test]
@@ -782,7 +894,7 @@ mod tests {
     fn indexer_gate_na_when_not_expected() {
         // brain-only contract: a missing indexer is not a failure.
         let l = live(true, false, false, "never_launched", "no_heartbeat");
-        assert!(evaluate_liveness_gates(&l).iter().all(|g| g.pass));
+        assert!(evaluate_liveness_gates(&l).iter().all(|g| g.passes()));
         assert!(liveness_phase(&l).is_none());
     }
 
@@ -791,7 +903,7 @@ mod tests {
         let f = facts("v1-gabc", Some("v1-gabc"), false);
         assert_eq!(phase(&f), "clean");
         assert!(next_action(&f).is_none());
-        assert!(evaluate_gates(&f).iter().all(|g| g.pass));
+        assert!(evaluate_gates(&f).iter().all(|g| g.passes()));
     }
 
     #[test]
@@ -802,7 +914,7 @@ mod tests {
         let gates = evaluate_gates(&f);
         assert!(gates
             .iter()
-            .any(|g| g.name == "manifest_runtime_match" && !g.pass));
+            .any(|g| g.name == "manifest_runtime_match" && !g.passes()));
     }
 
     #[test]
@@ -813,7 +925,7 @@ mod tests {
         let gates = evaluate_gates(&f);
         assert!(gates
             .iter()
-            .any(|g| g.name == "no_stale_pending" && !g.pass));
+            .any(|g| g.name == "no_stale_pending" && !g.passes()));
         assert!(next_action(&f).unwrap().contains("resume"));
     }
 
@@ -829,7 +941,11 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("current.json"),
-            r#"{"release_attempt_id":"attempt-current","runtime_version":{"build_id":"v-old"},"state":"promoted","qualification":{"verdict":"ok"},"runtime_contract":"brain_mcp_indexer_ist","artifact":{"sha256":"abc123"}}"#,
+            // REQ-AXO-902585 — la forme REELLE d'un manifeste : `promotion_gates`
+            // porte le verdict, et `qualification` ne porte que la provenance de
+            // build. L'ancienne fixture inventait `qualification.verdict`, une cle
+            // qu'aucun ecrivain du depot ne produit — elle validait une fiction.
+            r#"{"release_attempt_id":"attempt-current","runtime_version":{"build_id":"v-old"},"state":"promoted","qualification":{"evidence":[]},"promotion_gates":{"core_qualification":{"status":"passed","evidence":"exit_code=0"}},"runtime_contract":"brain_mcp_indexer_ist","artifact":{"sha256":"abc123"}}"#,
         )
         .unwrap();
 
@@ -837,7 +953,9 @@ mod tests {
         assert_eq!(f.live_build_id, "v-running");
         assert_eq!(f.manifest_build_id.as_deref(), Some("v-old"));
         assert_eq!(f.manifest_state.as_deref(), Some("promoted"));
-        assert_eq!(f.qualification_ok, Some(true));
+        assert_eq!(f.core_qualification_status.as_deref(), Some("passed"));
+        assert_eq!(f.qualification_source, "current.promotion_gates");
+        assert_eq!(f.qualification_status(), GateStatus::Pass);
         assert!(!f.pending_present);
         assert!(f.indexer_expected()); // "brain_mcp_indexer_ist" names an indexer
         assert_eq!(f.release_attempt_id.as_deref(), Some("attempt-current"));
@@ -881,17 +999,125 @@ mod tests {
         let _ = fs::remove_dir_all(&empty);
     }
 
+    /// REQ-AXO-902585 — la porte lisait `qualification.verdict`, une clé qu'AUCUN
+    /// écrivain du dépôt ne produit : 0 manifeste sur 244 en porte une. Le vrai
+    /// verdict, écrit par `axonctl cutover --phase record-gate` et rendu bloquant
+    /// par le `finalize`, vit sous `promotion_gates.core_qualification.status`.
+    /// Deux mécanismes portaient par accident le même mot.
     #[test]
-    fn failed_qualification_fails_only_that_gate() {
-        let mut f = facts("v1-gabc", Some("v1-gabc"), false);
-        f.qualification_ok = Some(false);
+    fn qualification_gate_reads_promotion_gates_not_build_provenance() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!(
+            "axon-req902585-a-{}",
+            crate::clock::now_unix_ms()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        // La forme RÉELLE : les deux clés coexistent, et seule la seconde compte.
+        fs::write(
+            dir.join("current.json"),
+            r#"{"runtime_version":{"build_id":"v1"},"state":"promoted","qualification":{"evidence":[]},"promotion_gates":{"core_qualification":{"status":"failed","evidence":"exit_code=65"}}}"#,
+        )
+        .unwrap();
+        let f = ReleaseFacts::collect(&dir, "v1".to_string());
+        assert_eq!(
+            f.qualification_status(),
+            GateStatus::Fail,
+            "un verdict rouge doit rendre la porte rouge : {:?}",
+            f.core_qualification_status
+        );
         let gates = evaluate_gates(&f);
         assert!(gates
             .iter()
-            .any(|g| g.name == "qualification_passed" && !g.pass));
+            .any(|g| g.name == "qualification_passed" && g.is_red()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// L'absence de preuve n'est pas une preuve : 243 des 244 manifestes
+    /// d'historique n'ont pas de `promotion_gates`. Ils doivent rendre `unknown`,
+    /// jamais `pass` — c'est la fin d'un faux vert, pas une régression.
+    #[test]
+    fn a_manifest_without_promotion_gates_is_unknown_not_green() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!(
+            "axon-req902585-b-{}",
+            crate::clock::now_unix_ms()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("current.json"),
+            r#"{"runtime_version":{"build_id":"v1"},"state":"promoted","qualification":{"evidence":[]}}"#,
+        )
+        .unwrap();
+        let f = ReleaseFacts::collect(&dir, "v1".to_string());
+        assert_eq!(f.qualification_source, "absent");
+        assert_eq!(f.qualification_status(), GateStatus::Unknown);
+        let gate = evaluate_gates(&f)
+            .into_iter()
+            .find(|g| g.name == "qualification_passed")
+            .expect("gate présent");
+        assert!(!gate.passes(), "ne PAS rendre `pass` faute de preuve");
+        assert!(
+            !gate.is_red(),
+            "et ne PAS rendre rouge non plus : un Unknown dans `failed_gates` \
+             ferait couper le brain à chaque promote (promote_live_safe.sh)"
+        );
+    }
+
+    /// Un staging en vol POSSÈDE la question : `current.promotion_gates` est
+    /// tautologiquement tout-vert (le `finalize` refuse de basculer sinon), donc
+    /// c'est `pending` qui porte le verdict intéressant.
+    #[test]
+    fn an_in_flight_staging_answers_the_qualification_question() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!(
+            "axon-req902585-c-{}",
+            crate::clock::now_unix_ms()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("current.json"),
+            r#"{"runtime_version":{"build_id":"v1"},"state":"promoted","promotion_gates":{"core_qualification":{"status":"passed","evidence":"ancien"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("pending.json"),
+            r#"{"runtime_version":{"build_id":"v2"},"state":"prepared","promotion_gates":{"core_qualification":{"status":"failed","evidence":"exit_code=1"}}}"#,
+        )
+        .unwrap();
+        let f = ReleaseFacts::collect(&dir, "v1".to_string());
+        assert_eq!(f.qualification_source, "pending.promotion_gates");
+        assert_eq!(
+            f.qualification_status(),
+            GateStatus::Fail,
+            "le rouge en vol ne doit pas être masqué par le vert déjà promu"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// « Sauté » n'est pas « passé ».
+    #[test]
+    fn a_skipped_qualification_is_not_a_pass() {
+        let mut f = facts("v1", Some("v1"), false);
+        f.core_qualification_status = Some("skipped".to_string());
+        assert_eq!(f.qualification_status(), GateStatus::Unknown);
+        let gate = evaluate_gates(&f)
+            .into_iter()
+            .find(|g| g.name == "qualification_passed")
+            .expect("gate présent");
+        assert!(!gate.passes() && !gate.is_red());
+    }
+
+    #[test]
+    fn failed_qualification_fails_only_that_gate() {
+        let mut f = facts("v1-gabc", Some("v1-gabc"), false);
+        f.core_qualification_status = Some("failed".to_string());
+        let gates = evaluate_gates(&f);
         assert!(gates
             .iter()
-            .any(|g| g.name == "manifest_runtime_match" && g.pass));
+            .any(|g| g.name == "qualification_passed" && !g.passes()));
+        assert!(gates
+            .iter()
+            .any(|g| g.name == "manifest_runtime_match" && g.passes()));
     }
 
     // --- Cutover FSM ------------------------------------------------------
@@ -906,7 +1132,7 @@ mod tests {
         };
         assert!(f.new_healthy());
         assert_eq!(cutover_phase(&f), "healthy");
-        assert!(evaluate_cutover_gates(&f).iter().all(|g| g.pass));
+        assert!(evaluate_cutover_gates(&f).iter().all(|g| g.passes()));
         assert!(cutover_next_action(&f).is_none());
     }
 
@@ -935,7 +1161,7 @@ mod tests {
         assert_eq!(cutover_phase(&f), "rolling_back");
         assert!(evaluate_cutover_gates(&f)
             .iter()
-            .any(|g| g.name == "new_runtime_healthy" && !g.pass));
+            .any(|g| g.name == "new_runtime_healthy" && !g.passes()));
         assert!(cutover_next_action(&f).unwrap().contains("AUTO-ROLLBACK"));
     }
 
@@ -1265,7 +1491,7 @@ mod tests {
     fn stop_clean_full_teardown_is_stopped() {
         let f = stop_clean_all();
         assert_eq!(stop_phase(&f), "stopped");
-        assert!(evaluate_stop_gates(&f).iter().all(|g| g.pass));
+        assert!(evaluate_stop_gates(&f).iter().all(|g| g.passes()));
         assert!(stop_next_action(&f).is_none());
     }
 
@@ -1277,7 +1503,7 @@ mod tests {
         let gates = evaluate_stop_gates(&f);
         assert!(gates
             .iter()
-            .any(|g| g.name == "supervisor_quiesced" && !g.pass));
+            .any(|g| g.name == "supervisor_quiesced" && !g.passes()));
         // Supervisor takes priority: the action is reap + --hard, not kill-by-pid.
         let action = stop_next_action(&f).unwrap();
         assert!(action.contains("--hard"));
@@ -1292,7 +1518,7 @@ mod tests {
         let gates = evaluate_stop_gates(&f);
         assert!(gates
             .iter()
-            .any(|g| g.name == "no_canonical_listeners" && !g.pass));
+            .any(|g| g.name == "no_canonical_listeners" && !g.passes()));
         let action = stop_next_action(&f).unwrap();
         assert!(action.contains("kill -9 4242 4243"));
     }
@@ -1309,8 +1535,8 @@ mod tests {
         let gates = evaluate_stop_gates(&f);
         assert!(gates
             .iter()
-            .any(|g| g.name == "supervisor_quiesced" && g.pass));
-        assert!(gates.iter().all(|g| g.pass));
+            .any(|g| g.name == "supervisor_quiesced" && g.passes()));
+        assert!(gates.iter().all(|g| g.passes()));
         assert!(stop_next_action(&f).is_none());
     }
 

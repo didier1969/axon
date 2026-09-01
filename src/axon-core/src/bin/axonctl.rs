@@ -450,7 +450,7 @@ fn cmd_liveness(config: InstanceConfig, json: bool) -> Result<()> {
         .to_string(),
     };
     let gates = evaluate_liveness_gates(&l);
-    let all_pass = gates.iter().all(|g| g.pass);
+    let all_pass = gates.iter().all(|g| g.passes());
     let phase = liveness_phase(&l).unwrap_or("healthy");
     if json {
         println!(
@@ -458,7 +458,7 @@ fn cmd_liveness(config: InstanceConfig, json: bool) -> Result<()> {
             serde_json::json!({
                 "healthy": all_pass,
                 "phase": phase,
-                "gates": gates.iter().map(|g| serde_json::json!({"name": g.name, "pass": g.pass, "detail": g.detail})).collect::<Vec<_>>(),
+                "gates": gates.iter().map(|g| serde_json::json!({"name": g.name, "pass": g.passes(), "status": g.status_str(), "detail": g.detail})).collect::<Vec<_>>(),
                 "next_action": liveness_next_action(&l),
                 "probed": {"brain": brain_url, "indexer": indexer_url, "indexer_expected": indexer_expected},
             })
@@ -467,7 +467,7 @@ fn cmd_liveness(config: InstanceConfig, json: bool) -> Result<()> {
         for g in &gates {
             eprintln!(
                 "  [{}] {} — {}",
-                if g.pass { "ok" } else { "FAIL" },
+                g.status_str(),
                 g.name,
                 g.detail
             );
@@ -1867,7 +1867,8 @@ fn cmd_stop(config: InstanceConfig, hard: bool, timeout_ms: u64, json: bool) -> 
     let stop_gates = evaluate_stop_gates(&stop_facts);
     let failed_gates: Vec<String> = stop_gates
         .iter()
-        .filter(|g| !g.pass)
+        // REQ-AXO-902585 — seuls les rouges ; un Unknown n'est pas un échec.
+        .filter(|g| g.is_red())
         .map(|g| g.name.to_string())
         .collect();
     let stop_phase_verdict = stop_phase(&stop_facts).to_string();

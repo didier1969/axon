@@ -50,7 +50,18 @@ impl McpServer {
 
         let mut gates = evaluate_gates(&facts);
         gates.extend(evaluate_liveness_gates(&lf));
-        let failed: Vec<&str> = gates.iter().filter(|g| !g.pass).map(|g| g.name).collect();
+        // REQ-AXO-902585 — `failed_gates` ne porte que les gates VRAIMENT rouges.
+        // Sûreté, pas style : `promote_live_safe.sh` teste `recon_failed ==
+        // "indexer_alive"` par ÉGALITÉ EXACTE, et tout autre contenu le fait basculer
+        // en redémarrage complet — « THIS INTERRUPTS THE BRAIN ». Un `Unknown` qui
+        // fuiterait ici couperait le service à chaque promote sur un manifeste
+        // ancien, c'est-à-dire presque toujours.
+        let failed: Vec<&str> = gates.iter().filter(|g| g.is_red()).map(|g| g.name).collect();
+        let unknown: Vec<&str> = gates
+            .iter()
+            .filter(|g| g.status == crate::release_reconciler::GateStatus::Unknown)
+            .map(|g| g.name)
+            .collect();
         // Liveness failures take precedence over the release-state phase/action.
         let ph = liveness_phase(&lf).unwrap_or_else(|| phase(&facts));
         let action = liveness_next_action(&lf).or_else(|| next_action(&facts));
@@ -77,7 +88,9 @@ impl McpServer {
 
         let gates_json: Vec<Value> = gates
             .iter()
-            .map(|g| json!({ "name": g.name, "pass": g.pass, "detail": g.detail }))
+            // REQ-AXO-902585 — `pass` reste, en lecture conservatrice (Unknown != succès),
+            // et `status` porte le tri-état pour qui sait le lire.
+            .map(|g| json!({ "name": g.name, "pass": g.passes(), "status": g.status_str(), "detail": g.detail }))
             .collect();
 
         let text = format!(
@@ -91,7 +104,11 @@ impl McpServer {
                 ""
             },
             if failed.is_empty() {
-                "none".to_string()
+                if unknown.is_empty() {
+                    "none".to_string()
+                } else {
+                    format!("none (unknown: {})", unknown.join(", "))
+                }
             } else {
                 failed.join(", ")
             },
@@ -109,7 +126,9 @@ impl McpServer {
                     "live_build_id": facts.live_build_id,
                     "manifest_build_id": facts.manifest_build_id,
                     "manifest_state": facts.manifest_state,
-                    "qualification_ok": facts.qualification_ok,
+                    "core_qualification_status": facts.core_qualification_status,
+                    "core_qualification_evidence": facts.core_qualification_evidence,
+                    "qualification_source": facts.qualification_source,
                     "pending_present": facts.pending_present,
                     "pending_build_id": facts.pending_build_id,
                     "runtime_contract": facts.runtime_contract,
@@ -127,6 +146,10 @@ impl McpServer {
                 "gates": gates_json,
                 "trace": trace,
                 "failed_gates": failed,
+                // REQ-AXO-902585 — les gates qui n'ont PAS PU mesurer, tenus à part
+                // des rouges : ce sont deux verdicts différents, et un seul des deux
+                // doit déclencher une reprise.
+                "unknown_gates": unknown,
                 "next_action": action,
                 // REQ-AXO-902256 — `promote_live.sh` is deleted; the resume path is a
                 // re-run of promote_live_safe.sh, which detects the stranded pending.json
