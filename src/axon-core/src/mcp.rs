@@ -561,10 +561,16 @@ impl McpServer {
         else {
             return Vec::new();
         };
+        // REQ-AXO-902583 — champs honorés par le PROTOCOLE, pas par le contrat d'un
+        // outil : `_meta` appartient à MCP, `detail` et `guidance` sont lus par
+        // `attach_default_tool_guidance` pour TOUS les outils (mcp.rs ~791/795) et
+        // ne figurent dans aucun schéma. Les accuser d'être « sans effet » serait
+        // faux — `detail="full"` attache réellement l'enveloppe complète. Une
+        // affirmation positive fausse coûte plus cher qu'un silence (REQ-AXO-902584).
+        const PROTOCOL_LEVEL_FIELDS: &[&str] = &["_meta", "detail", "guidance"];
         original
             .keys()
-            // `_meta` appartient au protocole MCP, pas au contrat de l'outil.
-            .filter(|key| key.as_str() != "_meta")
+            .filter(|key| !PROTOCOL_LEVEL_FIELDS.contains(&key.as_str()))
             .filter(|key| normalised.contains_key(key.as_str()))
             .filter(|key| !accepted.iter().any(|field| field == *key))
             .cloned()
@@ -1980,6 +1986,16 @@ impl McpServer {
         let mut patched = arguments.clone();
         if let Some(obj) = patched.as_object_mut() {
             obj.insert((*canonical).to_string(), list);
+            // REQ-AXO-902583 — DÉPLACER, pas copier. Laisser la clé source en place
+            // la faisait accuser d'être « inconnue et sans effet » par le contrôle
+            // ajouté au chokepoint, dans la phrase qui suit celle qui annonce
+            // qu'elle a été honorée. Deux affirmations contradictoires dans la même
+            // réponse. Le handler cesse aussi de recevoir la valeur en double.
+            // Seulement quand la source EST un alias : une valeur unique donnée
+            // sous le nom canonique doit rester là où l'appelant l'a écrite.
+            if source != *canonical {
+                obj.remove(&source);
+            }
         }
         tracing::debug!(
             tool = normalized_name,
@@ -2029,6 +2045,13 @@ impl McpServer {
         let mut patched = arguments.clone();
         if let Some(obj) = patched.as_object_mut() {
             obj.insert((*canonical).to_string(), Value::from(value));
+            // REQ-AXO-902583 — DÉPLACER, pas copier : voir la note jumelle dans
+            // `with_normalised_list_parameter`. Un alias honoré qui survit dans les
+            // arguments est ensuite accusé d'être sans effet, juste après la phrase
+            // qui dit qu'il a été lu. Mesuré en production sur `sql(query=…)`.
+            // Ce branchement n'est atteint que si le canonique était absent, donc
+            // `alias != canonical` par construction — le retrait est sûr.
+            obj.remove(alias);
         }
         tracing::debug!(
             tool = normalized_name,

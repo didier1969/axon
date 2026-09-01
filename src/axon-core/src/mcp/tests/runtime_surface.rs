@@ -4166,6 +4166,90 @@ fn a_tool_outside_the_alias_table_is_untouched() {
     assert_eq!(used, None);
 }
 
+/// REQ-AXO-902583 — un alias HONORÉ ne doit pas être accusé d'être inconnu.
+///
+/// Mesuré sur le runtime promu `v0.8.0-1691-ga416e13b` : `sql(query="SELECT 1")`
+/// rendait DEUX phrases contradictoires dans la même réponse —
+///   « paramètre reçu sous `query` et lu comme `sql` (REQ-AXO-902301) »
+///   « `query` … INCONNU de cet outil, donc sans effet (REQ-AXO-902583) »
+/// — pendant que la requête tournait pour de bon.
+///
+/// Cause : la réparation COPIE la valeur sous le nom canonique sans retirer
+/// l'alias, alors que `parameters_outside_the_schema` suppose qu'elle l'a
+/// DÉPLACÉ (son filtre est « encore présent après réparation »). On rétablit
+/// l'invariant à la source plutôt que d'ajouter une seconde liste d'exclusion :
+/// le handler cesse aussi de recevoir la clé en double.
+#[test]
+fn un_alias_honore_disparait_des_arguments_et_n_est_pas_accuse() {
+    let as_query = json!({ "query": "SELECT 1" });
+    let (patched, used) = McpServer::with_aliased_parameter("sql", &as_query);
+    assert_eq!(patched.get("sql").and_then(Value::as_str), Some("SELECT 1"));
+    assert_eq!(used, Some(("query".to_string(), "sql".to_string())));
+    assert!(
+        patched.get("query").is_none(),
+        "l'alias honoré doit être RETIRÉ, pas dupliqué : {patched}"
+    );
+
+    // Et le contrôle qui accusait ne trouve plus rien à dire.
+    let ignores = McpServer::parameters_outside_the_schema("sql", &as_query, &patched);
+    assert!(
+        ignores.is_empty(),
+        "un alias honoré n'est pas un paramètre ignoré : {ignores:?}"
+    );
+}
+
+/// Même défaut sur l'autre réparation qui copie : la liste donnée sous un nom
+/// voisin (`files=` pour `diff_paths`).
+#[test]
+fn une_liste_normalisee_depuis_un_alias_ne_laisse_pas_la_cle_source() {
+    let flat = json!({ "files": "src/lib.rs", "message": "fix: x" });
+    let (patched, note) = McpServer::with_normalised_list_parameter("commit_work", &flat);
+    assert!(note.is_some(), "la normalisation doit avoir eu lieu : {patched}");
+    assert_eq!(
+        patched.get("diff_paths"),
+        Some(&json!(["src/lib.rs"])),
+        "la valeur atteint le nom canonique : {patched}"
+    );
+    assert!(
+        patched.get("files").is_none(),
+        "la clé source honorée doit être RETIRÉE : {patched}"
+    );
+}
+
+/// Une valeur unique donnée sous le nom CANONIQUE n'est pas un alias : la clé
+/// doit rester, sinon on retirerait le paramètre que l'appelant a bien nommé.
+#[test]
+fn une_valeur_unique_sous_le_nom_canonique_reste_en_place() {
+    let scalaire = json!({ "diff_paths": "src/lib.rs", "message": "fix: x" });
+    let (patched, note) = McpServer::with_normalised_list_parameter("commit_work", &scalaire);
+    assert!(note.is_some());
+    assert_eq!(patched.get("diff_paths"), Some(&json!(["src/lib.rs"])));
+}
+
+/// REQ-AXO-902583 — `detail` et `guidance` sont lus par
+/// `attach_default_tool_guidance` pour TOUT outil et ne figurent dans AUCUN
+/// schéma. Les accuser d'être « sans effet » est faux : `detail="full"` attache
+/// réellement l'enveloppe complète. C'est la forme `REQ-AXO-902584` — une
+/// affirmation positive fausse, pire qu'un silence.
+#[test]
+fn un_champ_du_protocole_de_guidance_n_est_pas_accuse_d_etre_inconnu() {
+    let args = json!({ "id": "GUI-AXO-1038", "detail": "full", "guidance": "full" });
+    let ignores = McpServer::parameters_outside_the_schema("soll_get", &args, &args);
+    assert!(
+        ignores.is_empty(),
+        "`detail` et `guidance` sont honorés par le protocole, pas ignorés : {ignores:?}"
+    );
+
+    // Et le contrôle garde son mordant sur un vrai intrus.
+    let avec_intrus = json!({ "id": "GUI-AXO-1038", "detail": "full", "sectionz": "Règle" });
+    let ignores = McpServer::parameters_outside_the_schema("soll_get", &avec_intrus, &avec_intrus);
+    assert_eq!(
+        ignores,
+        vec!["sectionz".to_string()],
+        "l'intrus reste nommé, seul : {ignores:?}"
+    );
+}
+
 // REQ-AXO-902303 — the `data` fields written at the top level.
 #[test]
 fn stray_top_level_fields_are_moved_into_data() {
