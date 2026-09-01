@@ -1009,6 +1009,12 @@ impl McpServer {
             "call_count",
             "failed_count",
             "failed_calls",
+            // REQ-AXO-902583 (P4) — nommer un paramètre valide mais SANS EFFET est
+            // de la guidance sur l'APPEL, exactement comme `ignored_parameters`.
+            // L'omettre ici rendrait `soll_get` et `inspect` muets aux clients qui
+            // ne lisent que `structuredContent`, dès qu'un appelant pose un
+            // paramètre conditionnel — la régression de REQ-AXO-902560, une fois de plus.
+            "parameter_dispositions",
         ];
         let rendered_text = object
             .get("content")
@@ -2299,6 +2305,25 @@ impl McpServer {
             original_arguments,
             &normalised,
         );
+        // REQ-AXO-902583 (P4) — l'autre cause, et la plus coûteuse : le nom EXISTE,
+        // l'orthographe est bonne, et la valeur est quand même sans effet. Les deux
+        // remédiations sont OPPOSÉES — « corrigez l'orthographe » pour un inconnu,
+        // « surtout ne la corrigez pas » pour un inerte — donc deux listes et deux
+        // phrases, jamais un seul champ fourre-tout.
+        //
+        // Évalué sur `normalised` (ce que le handler a réellement vu, seule vérité
+        // de l'effet), restreint aux noms présents dans l'appel D'ORIGINE (jamais
+        // accuser un champ que le serveur a lui-même injecté) — même discipline à
+        // deux conditions que `parameters_outside_the_schema`.
+        let inert_parameters: Vec<_> =
+            crate::mcp::tool_contracts::inert_parameters_for_call(normalized_name, &normalised)
+                .into_iter()
+                .filter(|inert| {
+                    original_arguments
+                        .get(inert.name.as_str())
+                        .is_some_and(|value| !value.is_null())
+                })
+                .collect();
         let arguments = &normalised;
         let result = match normalized_name {
             "help" => self.axon_help(arguments),
@@ -2480,31 +2505,86 @@ impl McpServer {
         // su rattraper. Le champ n'apparaît que s'il porte quelque chose ; un signal
         // permanent n'est plus un signal, et `data` doit rester « guidance seule »
         // pour les outils qui dépendent du miroir `rendered_text` (REQ-AXO-902560).
-        if ignored_parameters.is_empty() {
+        // Le retour anticipé teste les DEUX causes. Une seule condition ici
+        // tuerait silencieusement la branche de l'autre — le mode de panne exact
+        // relevé en session 135 (« un `return` ajouté en amont tue des branches
+        // en aval »).
+        if ignored_parameters.is_empty() && inert_parameters.is_empty() {
             return result;
         }
-        let noms = ignored_parameters
-            .iter()
-            .map(|p| format!("`{p}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let result = Self::append_disclosure(
-            result,
-            &format!(
-                "\n\n_↳ paramètre(s) reçu(s) mais INCONNU(S) de cet outil, donc sans \
-                 effet sur cette réponse : {noms} (REQ-AXO-902583). Votre appel n'est \
-                 pas malformé — ces noms n'existent simplement pas dans son schéma ; \
-                 `help` ou `tools/list` donne les noms acceptés._"
-            ),
-        );
-        let mut result = result?;
-        if let Some(data) = result.get_mut("data").and_then(Value::as_object_mut) {
-            data.insert("ignored_parameters".to_string(), json!(ignored_parameters));
-        } else if let Some(object) = result.as_object_mut() {
-            object.insert(
-                "data".to_string(),
-                json!({ "ignored_parameters": ignored_parameters }),
+        let mut result = result;
+        if !ignored_parameters.is_empty() {
+            let noms = ignored_parameters
+                .iter()
+                .map(|p| format!("`{p}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            result = Self::append_disclosure(
+                result,
+                &format!(
+                    "\n\n_↳ paramètre(s) reçu(s) mais INCONNU(S) de cet outil, donc sans \
+                     effet sur cette réponse : {noms} (REQ-AXO-902583). Votre appel n'est \
+                     pas malformé — ces noms n'existent simplement pas dans son schéma ; \
+                     `help` ou `tools/list` donne les noms acceptés._"
+                ),
             );
+        }
+        if !inert_parameters.is_empty() {
+            // Phrase DISTINCTE de la précédente, et le contraire de son conseil :
+            // ici l'orthographe est juste, la corriger ferait perdre un second
+            // aller-retour à qui a déjà payé le premier.
+            let details = inert_parameters
+                .iter()
+                .map(|inert| format!("`{}` ({}) — {}", inert.name, inert.reason, inert.remedy))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            result = Self::append_disclosure(
+                result,
+                &format!(
+                    "\n\n_↳ paramètre(s) VALIDE(S) mais SANS EFFET dans cet appel : \
+                     {details} (REQ-AXO-902583). NE CORRIGEZ PAS l'orthographe, elle est \
+                     bonne — le nom existe et la valeur a été acceptée ; c'est la \
+                     condition d'application qui n'est pas remplie._"
+                ),
+            );
+        }
+        let mut result = result?;
+        // `data` peut manquer : on le crée AVANT d'emprunter, pour n'avoir ensuite
+        // qu'un seul chemin d'écriture au lieu de deux qui divergeraient.
+        //
+        // Effet de bord assumé, hérité de `ignored_parameters` et non introduit
+        // ici : sur un outil qui ne rendait AUCUN `data`, en créer un ne portant
+        // que des clés de guidance le rend éligible au miroir `rendered_text`
+        // (REQ-AXO-902560) qu'il n'avait pas. Aucun des deux outils instrumentés
+        // n'est dans ce cas — `soll_get` et `inspect` rendent tous deux `data`.
+        // À vérifier avant d'ajouter à la table un outil qui, lui, n'en rend pas.
+        if result.get("data").and_then(Value::as_object).is_none() {
+            if let Some(object) = result.as_object_mut() {
+                object.insert("data".to_string(), json!({}));
+            }
+        }
+        if let Some(data) = result.get_mut("data").and_then(Value::as_object_mut) {
+            if !ignored_parameters.is_empty() {
+                data.insert("ignored_parameters".to_string(), json!(ignored_parameters));
+            }
+            if !inert_parameters.is_empty() {
+                data.insert(
+                    "parameter_dispositions".to_string(),
+                    Value::Array(
+                        inert_parameters
+                            .iter()
+                            .map(|inert| {
+                                json!({
+                                    "parameter": inert.name,
+                                    "effective": false,
+                                    "reason": inert.reason,
+                                    "remedy": inert.remedy,
+                                })
+                            })
+                            .collect(),
+                    ),
+                );
+            }
         }
         Some(result)
     }

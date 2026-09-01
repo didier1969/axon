@@ -4666,3 +4666,296 @@ fn le_contrat_publie_ne_peut_pas_contredire_l_auto_resolution() {
         muets.join("\n  ")
     );
 }
+
+// ===========================================================================
+// REQ-AXO-902583 (P4) — le paramètre VALIDE mais INERTE
+// ===========================================================================
+
+/// TIER 1 — anti-dérive UNIVERSELLE : la déclaration doit couvrir EXACTEMENT le
+/// schéma.
+///
+/// C'est la dérive la plus probable, et la plus silencieuse : quelqu'un ajoute
+/// un paramètre à `soll_get`, la table ne bouge pas, et la surface se met à
+/// affirmer d'un appel qu'il n'a rien d'inerte alors qu'elle n'a plus regardé
+/// que trois champs sur quatre. Le contrôle est GÉNÉRÉ depuis le catalogue —
+/// aucune liste recopiée qui pourrait dériver à son tour.
+#[test]
+fn toute_disposition_declaree_couvre_exactement_le_schema_de_son_outil() {
+    let catalogue = crate::mcp::catalog::tools_catalog(true);
+    let outils = catalogue["tools"].as_array().expect("catalogue non vide");
+
+    for (nom, declarations) in crate::mcp::tool_contracts::DECLARED_DISPOSITIONS {
+        let entree = outils
+            .iter()
+            .find(|tool| {
+                tool.get("name").and_then(Value::as_str).is_some_and(|name| {
+                    crate::mcp::catalog::tool_names_denote_the_same_tool(name, nom)
+                })
+            })
+            .unwrap_or_else(|| panic!("`{nom}` est déclaré mais absent du catalogue"));
+
+        let mut du_schema: Vec<String> = entree["inputSchema"]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("`{nom}` n'expose pas de propriétés"))
+            .keys()
+            .cloned()
+            .collect();
+        du_schema.sort();
+
+        // Lu par la RÉSOLUTION, pas depuis la table directement : le contrôle doit
+        // éprouver le chemin que le chokepoint emprunte, sinon il valide une table
+        // que personne n'utilise.
+        let resolues = crate::mcp::tool_contracts::parameter_dispositions(nom)
+            .unwrap_or_else(|| panic!("`{nom}` est dans la table mais la résolution le rate"));
+        // Comparaison par VALEUR, pas par pointeur : un `const` Rust est substitué à
+        // chaque site d'usage, donc deux lectures de la même constante n'ont aucune
+        // raison de partager une adresse. `std::ptr::eq` rougissait ici sans qu'aucune
+        // table ait dérivé — un contrôle qui ne mesure pas ce qu'il croit mesurer.
+        assert_eq!(
+            resolues, *declarations,
+            "`{nom}` — la résolution ne rend pas la table déclarée"
+        );
+        let mut declares: Vec<String> = resolues.iter().map(|d| d.name.to_string()).collect();
+        declares.sort();
+
+        assert_eq!(
+            declares, du_schema,
+            "`{nom}` — la table des dispositions a dérivé de son schéma. Un champ non \
+             déclaré ne sera JAMAIS signalé comme inerte, et la surface se taira en \
+             laissant croire qu'elle a regardé."
+        );
+    }
+}
+
+/// TIER 3, moitié POSITIVE — la condition tient, donc RIEN n'est signalé.
+///
+/// Un contrôle qui crie toujours ne dit rien. Cette moitié est ce qui prouve que
+/// le verdict sait rendre « effectif ».
+#[test]
+fn un_parametre_conditionnel_dont_la_condition_tient_n_est_pas_signale() {
+    use crate::mcp::tool_contracts::inert_parameters_for_call;
+
+    // `section` sans `sections` → la condition `FieldUnset` tient.
+    assert!(
+        inert_parameters_for_call("soll_get", &json!({ "id": "X", "section": "Règle" })).is_empty()
+    );
+    // `sections: false` compte comme non posé — c'est la même intention.
+    assert!(inert_parameters_for_call(
+        "soll_get",
+        &json!({ "id": "X", "section": "Règle", "sections": false })
+    )
+    .is_empty());
+    // `around` AVEC `mode=source` → la condition `FieldEquals` tient.
+    assert!(inert_parameters_for_call(
+        "inspect",
+        &json!({ "symbol": "f", "mode": "source", "around": "foo", "offset": 40 })
+    )
+    .is_empty());
+    // Un outil NON instrumenté ne rend jamais de verdict — silence, pas « rien à
+    // signaler » : les deux se lisent différemment et confondre les deux est le
+    // défaut que ce REQ ferme.
+    assert!(inert_parameters_for_call(
+        "query",
+        &json!({ "query": "f", "around": "foo" })
+    )
+    .is_empty());
+}
+
+/// TIER 3, moitié NÉGATIVE — la condition ne tient pas, donc le paramètre est
+/// signalé, avec la RAISON tirée de l'appel courant.
+#[test]
+fn un_parametre_conditionnel_inerte_est_nomme_avec_sa_cause_et_son_remede() {
+    use crate::mcp::tool_contracts::inert_parameters_for_call;
+
+    let inertes = inert_parameters_for_call(
+        "soll_get",
+        &json!({ "id": "GUI-AXO-1034", "sections": true, "section": "Porte" }),
+    );
+    assert_eq!(inertes.len(), 1, "seul `section` est inerte ici : {inertes:?}");
+    assert_eq!(inertes[0].name, "section");
+    assert!(
+        inertes[0].reason.contains("`sections`") && inertes[0].reason.contains("true"),
+        "la raison doit nommer le champ ET la valeur REÇUE, sinon elle se lit comme \
+         de la documentation : {}",
+        inertes[0].reason
+    );
+    assert!(
+        inertes[0].remedy.contains("sections"),
+        "le remède doit dire quoi changer : {}",
+        inertes[0].remedy
+    );
+
+    // `inspect` sans `mode=source` : les DEUX paramètres de fenêtrage sont inertes.
+    let inertes = inert_parameters_for_call(
+        "inspect",
+        &json!({ "symbol": "f", "around": "foo", "offset": 40 }),
+    );
+    let noms: Vec<_> = inertes.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(noms, vec!["around", "offset"]);
+    assert!(
+        inertes[0].reason.contains("n'est pas fourni"),
+        "un `mode` absent doit se dire ABSENT, pas « vaut null » : {}",
+        inertes[0].reason
+    );
+
+    // `mode` fourni mais AUTRE que `source` : la raison doit citer la valeur reçue.
+    let inertes = inert_parameters_for_call(
+        "inspect",
+        &json!({ "symbol": "f", "mode": "verbose", "around": "foo" }),
+    );
+    assert_eq!(inertes.len(), 1);
+    assert!(
+        inertes[0].reason.contains("verbose"),
+        "la valeur réellement reçue doit apparaître : {}",
+        inertes[0].reason
+    );
+}
+
+/// Un paramètre conditionnel ABSENT de l'appel n'a rien à se voir reprocher.
+///
+/// Sans ce contrôle, `inspect(symbol=f)` — l'appel le plus courant de tout le
+/// parc — signalerait `around` et `offset` à chaque fois. Un avertissement
+/// permanent n'est plus un avertissement.
+#[test]
+fn un_parametre_conditionnel_non_fourni_n_est_jamais_signale() {
+    use crate::mcp::tool_contracts::inert_parameters_for_call;
+
+    assert!(inert_parameters_for_call("inspect", &json!({ "symbol": "f" })).is_empty());
+    assert!(inert_parameters_for_call("soll_get", &json!({ "id": "X" })).is_empty());
+    // `null` explicite = absent, pas « fourni avec une valeur vide ».
+    assert!(inert_parameters_for_call(
+        "inspect",
+        &json!({ "symbol": "f", "around": Value::Null })
+    )
+    .is_empty());
+}
+
+/// TIER 3 COMPORTEMENTAL — ce qui rend la déclaration VRAIE plutôt que supposée.
+///
+/// Les trois tests ci-dessus éprouvent la TABLE. Celui-ci éprouve le FAIT
+/// qu'elle décrit : que `sections=true` rende réellement `section` sans effet.
+/// Sans lui, une évolution de `soll_get` qui inverserait la préséance laisserait
+/// la table mentir sans qu'aucun test ne rougisse — un garde qui ne sait pas
+/// rendre faux.
+#[test]
+fn la_disposition_declaree_de_soll_get_decrit_le_comportement_reel() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('GUI-PDS-001', 'Guideline', 'PDS', 'Probe', \
+             '## Alpha\nCORPS ALPHA\n\n## Beta\nCORPS BETA', 'current', '{}')",
+        )
+        .unwrap();
+
+    let texte = |args: Value| -> String {
+        server
+            .axon_soll_get(&args)
+            .expect("soll_get répond")
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // Moitié NÉGATIVE : avec `sections=true`, ajouter `section` ne change RIEN.
+    let titres_seuls = texte(json!({ "id": "GUI-PDS-001", "sections": true }));
+    let titres_plus_section =
+        texte(json!({ "id": "GUI-PDS-001", "sections": true, "section": "Alpha" }));
+    assert_eq!(
+        titres_seuls, titres_plus_section,
+        "`sections=true` rend `section` INERTE — c'est ce que la table déclare, et \
+         c'est ce qui doit être vrai"
+    );
+
+    // Moitié POSITIVE : sans `sections`, `section` change bien la réponse.
+    let corps_entier = texte(json!({ "id": "GUI-PDS-001" }));
+    let une_section = texte(json!({ "id": "GUI-PDS-001", "section": "Alpha" }));
+    assert_ne!(
+        corps_entier, une_section,
+        "sans `sections`, `section` DOIT mordre — sinon la disposition `Conditional` \
+         est fausse dans les deux sens"
+    );
+    assert!(
+        une_section.contains("CORPS ALPHA") && !une_section.contains("CORPS BETA"),
+        "`section=Alpha` doit rendre Alpha et RIEN d'autre : {une_section}"
+    );
+}
+
+/// La restitution au chokepoint : deux causes, deux phrases, deux clés — et les
+/// remédiations sont OPPOSÉES.
+///
+/// « corrigez l'orthographe » pour un nom inconnu ; « surtout ne la corrigez
+/// pas » pour un inerte. Les fondre en un seul message enverrait la moitié des
+/// appelants au mauvais endroit.
+#[test]
+fn les_deux_causes_se_divulguent_separement_et_ne_s_annulent_pas() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('GUI-PDS-002', 'Guideline', 'PDS', 'Probe', \
+             '## Alpha\nCORPS ALPHA', 'current', '{}')",
+        )
+        .unwrap();
+
+    // (a) INERTE seul — la branche que le retour anticipé sur `ignored_parameters`
+    //     tuait avant ce lot.
+    let inerte = server
+        .execute_tool_direct(
+            "soll_get",
+            &json!({ "id": "GUI-PDS-002", "sections": true, "section": "Alpha" }),
+        )
+        .expect("soll_get répond");
+    let texte = inerte
+        .pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        texte.contains("SANS EFFET") && texte.contains("NE CORRIGEZ PAS"),
+        "un inerte seul doit se divulguer, avec le conseil INVERSE de celui d'un \
+         inconnu : {texte}"
+    );
+    assert_eq!(
+        inerte
+            .pointer("/data/parameter_dispositions/0/parameter")
+            .and_then(Value::as_str),
+        Some("section"),
+        "et il doit être lisible en DONNÉE pour un client qui ne lit pas le texte"
+    );
+    assert!(
+        inerte.pointer("/data/ignored_parameters").is_none(),
+        "aucun nom inconnu ici — ne pas inventer la seconde liste"
+    );
+
+    // (b) les DEUX à la fois — chacune sa phrase, aucune n'écrase l'autre.
+    let deux = server
+        .execute_tool_direct(
+            "soll_get",
+            &json!({
+                "id": "GUI-PDS-002", "sections": true, "section": "Alpha", "zorglub": 1
+            }),
+        )
+        .expect("soll_get répond");
+    let texte = deux
+        .pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        texte.contains("INCONNU(S)") && texte.contains("SANS EFFET"),
+        "les deux phrases doivent coexister : {texte}"
+    );
+    assert_eq!(
+        deux.pointer("/data/ignored_parameters/0").and_then(Value::as_str),
+        Some("zorglub")
+    );
+    assert_eq!(
+        deux.pointer("/data/parameter_dispositions/0/parameter")
+            .and_then(Value::as_str),
+        Some("section")
+    );
+}

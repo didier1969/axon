@@ -991,6 +991,277 @@ pub(crate) fn conditional_clauses_for(name: &str) -> Value {
     }
 }
 
+// ---------------------------------------------------------------------------
+// REQ-AXO-902583 (P4) — le paramètre VALIDE mais INERTE
+// ---------------------------------------------------------------------------
+//
+// `parameters_outside_the_schema` (mcp.rs) ne sait dire qu'une chose : « ce nom
+// n'existe pas dans le schéma ». Le cas fondateur de ce REQ est l'inverse et il
+// coûte plus cher : le nom existe, l'orthographe est bonne, la valeur est
+// acceptée — et elle n'a aucun effet. L'appelant, lui, corrige une syntaxe déjà
+// correcte, et paie deux fois (REQ-AXO-902496 / REQ-AXO-902580).
+//
+// MESURÉ sur le runtime `v0.8.0-1694-g4d2b8ff8` avant d'être déclaré ici, les
+// deux moitiés à chaque fois :
+//
+//   soll_get(id, sections=true, section="Porte")  → 386 o, sha 9dfc8e4b3ea5
+//   soll_get(id, sections=true)                   → 386 o, sha 9dfc8e4b3ea5  ← IDENTIQUE
+//   soll_get(id, section="Porte")                 → 1438 o, sha 159a07b22f7c
+//   soll_get(id)                                  → 3183 o, sha a2045995b926  ← DIFFÈRE
+//
+//   inspect(symbol, around=…, offset=40)          → 498 o, sha 54279316f3df
+//   inspect(symbol)                               → 498 o, sha 54279316f3df   ← IDENTIQUE
+//   inspect(symbol, mode=source, around=…)        → 12106 o, sha 237b534c5bd7
+//   inspect(symbol, mode=source)                  → 11813 o, sha 9a1b73d75290 ← DIFFÈRE
+//
+// Une déclaration sans les DEUX moitiés serait une supposition : la moitié
+// négative (« identique hors condition ») est celle qui rend l'affirmation
+// vraie plutôt que plausible.
+//
+// PORTÉE, et pourquoi elle est étroite. Un outil absent de la table rend `None`,
+// et la surface ne dit alors RIEN à son sujet — jamais « tout a été appliqué ».
+// Une couverture partielle qui se tait est honnête ; une couverture partielle
+// qui conclut ne l'est pas (REQ-AXO-902584).
+//
+// PAS de variante `Inert` (« accepté, jamais effectif ») : aucun cas mesuré. Une
+// branche d'énumération sans instance ni test est une branche que le compilateur
+// couvre et que personne n'éprouve — exactement le « garde qui ne sait pas
+// rendre faux ». Elle s'ajoutera avec son premier cas réel.
+
+/// Ce qu'un outil FAIT d'un paramètre qu'il a accepté.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParameterDisposition {
+    /// Lu et effectif, sans condition.
+    ///
+    /// ⚠ AUCUN test ne prouve cette variante, et c'est su. Le contrôle qui la
+    /// rendrait falsifiable — deux appels ne différant que par ce champ DOIVENT
+    /// différer — est le « tier 2 » du plan, non livré dans ce lot (il demande
+    /// des données réalistes par outil, et le lot en couvre deux). Conséquence
+    /// pour qui ajoute une ligne : `Honoured` est aujourd'hui une AFFIRMATION
+    /// NON ÉPROUVÉE. Le contrôle d'anti-dérive `tier 1` exige que la table
+    /// couvre tout le schéma, et le chemin le plus court pour le satisfaire est
+    /// d'écrire `Honoured` — ce qui produirait exactement la fiction que ce REQ
+    /// combat. Devant un champ dont l'effet est conditionnel, déclarer
+    /// `Conditional` et lui écrire son test comportemental.
+    Honoured,
+    /// Effectif SEULEMENT quand la condition tient ; sinon avalé en silence.
+    Conditional {
+        condition: ParameterCondition,
+        /// Ce que l'appelant doit changer — jamais « vérifiez l'orthographe »,
+        /// qui est la remédiation de l'AUTRE cause et enverrait au mauvais endroit.
+        remedy: &'static str,
+    },
+}
+
+/// Condition ÉVALUABLE contre les arguments d'un appel.
+///
+/// Évaluable et non descriptive : la surface doit pouvoir dire « votre `section`
+/// est resté sans effet PARCE QUE vous avez posé `sections=true` », pas « il
+/// peut arriver que… ». Une condition qu'on ne sait pas trancher sur l'appel
+/// courant ne produit qu'un avertissement générique, c'est-à-dire du bruit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParameterCondition {
+    /// `<field>` vaut exactement `<value>` (comparé sur la forme textuelle).
+    FieldEquals {
+        field: &'static str,
+        value: &'static str,
+    },
+    /// `<field>` est absent, `null`, ou `false`.
+    FieldUnset { field: &'static str },
+}
+
+impl ParameterCondition {
+    /// Rend `true` quand la condition TIENT — donc quand le paramètre est effectif.
+    pub(crate) fn holds(&self, args: &Value) -> bool {
+        match self {
+            Self::FieldEquals { field, value } => args
+                .get(field)
+                .is_some_and(|found| scalar_reads_as(found, value)),
+            Self::FieldUnset { field } => match args.get(field) {
+                None | Some(Value::Null) | Some(Value::Bool(false)) => true,
+                Some(_) => false,
+            },
+        }
+    }
+
+    /// Pourquoi la condition NE tient PAS dans CET appel, en nommant la valeur
+    /// réellement reçue. Une phrase générique se lit comme de la documentation
+    /// et se fait ignorer.
+    pub(crate) fn why_it_failed(&self, args: &Value) -> String {
+        match self {
+            Self::FieldEquals { field, value } => match args.get(field) {
+                None | Some(Value::Null) => {
+                    format!("`{field}` n'est pas fourni, alors qu'il doit valoir `{value}`")
+                }
+                Some(found) => format!(
+                    "`{field}` vaut `{}`, alors qu'il doit valoir `{value}`",
+                    compact_scalar(found)
+                ),
+            },
+            Self::FieldUnset { field } => format!(
+                "`{field}` est posé (`{}`), et il prend le pas",
+                args.get(field).map(compact_scalar).unwrap_or_default()
+            ),
+        }
+    }
+}
+
+/// Compare une valeur JSON à une valeur attendue donnée sous forme textuelle.
+/// Le schéma décrit des chaînes, des booléens et des nombres ; la table les
+/// déclare tous en texte pour rester lisible d'un coup d'œil.
+fn scalar_reads_as(found: &Value, expected: &str) -> bool {
+    match found {
+        Value::String(text) => text == expected,
+        Value::Bool(flag) => flag.to_string() == expected,
+        Value::Number(number) => number.to_string() == expected,
+        _ => false,
+    }
+}
+
+/// Rendu court d'un scalaire pour un message d'erreur (les composés sont réduits
+/// à leur type : leur contenu n'aide pas à comprendre la condition).
+fn compact_scalar(found: &Value) -> String {
+    match found {
+        Value::String(text) => text.clone(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::Null => "null".to_string(),
+        Value::Array(_) => "<liste>".to_string(),
+        Value::Object(_) => "<objet>".to_string(),
+    }
+}
+
+/// Un paramètre déclaré, avec ce que l'outil en fait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParameterDeclaration {
+    pub name: &'static str,
+    pub disposition: ParameterDisposition,
+}
+
+/// `soll_get` — REQ-AXO-902496. `sections` et `section` sont EXCLUSIFS et
+/// `sections` gagne : la table des titres est rendue, le fragment demandé est
+/// jeté sans un mot.
+const SOLL_GET_DISPOSITIONS: &[ParameterDeclaration] = &[
+    ParameterDeclaration {
+        name: "id",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "sections",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "section",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldUnset { field: "sections" },
+            remedy: "retirez `sections=true` pour lire la section demandée, ou renoncez à \
+                     `section` — les deux ne se combinent pas",
+        },
+    },
+];
+
+/// `inspect` — REQ-AXO-902442. `around` et `offset` ne fenêtrent que le CORPS du
+/// symbole, qui n'est rendu que par `mode=\"source\"`. Sans lui, les deux sont
+/// acceptés et jetés (3 302 appels sur 30 jours passent par cet outil).
+const INSPECT_DISPOSITIONS: &[ParameterDeclaration] = &[
+    ParameterDeclaration {
+        name: "symbol",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "project",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "mode",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "around",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldEquals {
+                field: "mode",
+                value: "source",
+            },
+            remedy: "ajoutez `mode=\"source\"` — la fenêtre ne s'applique qu'au corps du symbole",
+        },
+    },
+    ParameterDeclaration {
+        name: "offset",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldEquals {
+                field: "mode",
+                value: "source",
+            },
+            remedy: "ajoutez `mode=\"source\"` — la fenêtre ne s'applique qu'au corps du symbole",
+        },
+    },
+];
+
+/// LA table — une seule, lue par la résolution ET par le contrôle d'anti-dérive.
+///
+/// Un `match` d'un côté et une liste de noms de l'autre feraient DEUX sources
+/// pour le même fait : ajouter un outil au `match` sans l'ajouter à la liste le
+/// rendrait invisible au contrôle tier 1, c'est-à-dire que la table censée
+/// empêcher la dérive dériverait elle-même. C'est précisément le défaut que
+/// `MIL-AXO-054` poursuit ailleurs ; il n'a pas sa place ici.
+pub(crate) const DECLARED_DISPOSITIONS: &[(&str, &[ParameterDeclaration])] = &[
+    ("soll_get", SOLL_GET_DISPOSITIONS),
+    ("inspect", INSPECT_DISPOSITIONS),
+];
+
+/// Les dispositions déclarées d'un outil, ou `None` s'il n'est pas instrumenté.
+///
+/// `None` n'est PAS « aucun paramètre inerte » : c'est « je ne sais pas ». Les
+/// deux se rendent différemment en surface, et confondre les deux est le défaut
+/// que ce REQ existe pour fermer.
+pub(crate) fn parameter_dispositions(tool: &str) -> Option<&'static [ParameterDeclaration]> {
+    DECLARED_DISPOSITIONS
+        .iter()
+        .find(|(name, _)| *name == tool)
+        .map(|(_, declarations)| *declarations)
+}
+
+/// Le verdict rendu à l'appelant pour UN paramètre resté sans effet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InertParameter {
+    pub name: String,
+    pub reason: String,
+    pub remedy: String,
+}
+
+/// Les paramètres que CET appel a fournis, que le schéma accepte, et qui sont
+/// pourtant restés sans effet.
+///
+/// Rend une liste vide pour un outil non instrumenté — silence, jamais un
+/// « rien à signaler » qui se lirait comme une garantie.
+pub(crate) fn inert_parameters_for_call(tool: &str, args: &Value) -> Vec<InertParameter> {
+    let Some(declarations) = parameter_dispositions(tool) else {
+        return Vec::new();
+    };
+    declarations
+        .iter()
+        .filter_map(|declaration| {
+            let ParameterDisposition::Conditional { condition, remedy } = &declaration.disposition
+            else {
+                return None;
+            };
+            // Seul un paramètre RÉELLEMENT fourni peut être resté sans effet.
+            // Un paramètre absent n'a rien à se voir reprocher.
+            args.get(declaration.name)
+                .filter(|value| !value.is_null())?;
+            if condition.holds(args) {
+                return None;
+            }
+            Some(InertParameter {
+                name: declaration.name.to_string(),
+                reason: condition.why_it_failed(args),
+                remedy: (*remedy).to_string(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
