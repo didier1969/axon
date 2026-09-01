@@ -7309,6 +7309,82 @@ fn test_soll_get_returns_node_body_and_repairs_unknown_id() {
     );
 }
 
+/// REQ-AXO-902580 — `sections` / `section` étaient LIVRÉS mais inopérants pour
+/// le client : la sélection n'atteignait que `content[0].text`, tandis que
+/// `data.description` — le champ que le client sérialise vers le LLM — portait
+/// toujours le corps ENTIER. Mesuré deux fois : `sections=true` sur CPT-AXO-052
+/// a rendu 134 369 caractères là où ~120 jetons étaient demandés.
+///
+/// REQ-AXO-902496 avait livré la logique de découpe sans jamais la tester
+/// (`tested: false`) : le seul test couvrait le corps complet et la réparation
+/// d'id. Une troncature qui ne tronque que la moitié rendue n'économise rien.
+#[test]
+fn test_soll_get_sections_and_section_truncate_the_structured_body() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('CPT-SGT-010', 'Concept', 'SGT', 'Sectioned', \
+             '## Premiere section\nCORPS PREMIER\n\n## Deuxieme section\nCORPS DEUXIEME\n\n## Troisieme section\nCORPS TROISIEME', \
+             'current', '{}')",
+        )
+        .unwrap();
+
+    // (1) `sections=true` — les TITRES, et rien du contenu.
+    let sommaire = server
+        .axon_soll_get(&json!({ "id": "CPT-SGT-010", "sections": true }))
+        .expect("soll_get must answer");
+    let body = sommaire["data"]["description"].as_str().unwrap_or_default();
+    assert!(
+        body.contains("Premiere section") && body.contains("Troisieme section"),
+        "le sommaire doit porter les titres, got: {body}"
+    );
+    assert!(
+        !body.contains("CORPS PREMIER") && !body.contains("CORPS TROISIEME"),
+        "`sections=true` doit tronquer data.description, PAS seulement content[0].text — got: {body}"
+    );
+
+    // (2) `section=<fragment>` — cette section, et seulement elle.
+    let une = server
+        .axon_soll_get(&json!({ "id": "CPT-SGT-010", "section": "Deuxieme" }))
+        .expect("soll_get must answer");
+    let body = une["data"]["description"].as_str().unwrap_or_default();
+    assert!(
+        body.contains("CORPS DEUXIEME"),
+        "la section demandee doit etre rendue, got: {body}"
+    );
+    assert!(
+        !body.contains("CORPS PREMIER") && !body.contains("CORPS TROISIEME"),
+        "`section=` ne doit rendre QUE la section retenue dans data.description — got: {body}"
+    );
+
+    // (3) Sans parametre — comportement strictement inchange.
+    let entier = server
+        .axon_soll_get(&json!({ "id": "CPT-SGT-010" }))
+        .expect("soll_get must answer");
+    let body = entier["data"]["description"].as_str().unwrap_or_default();
+    assert!(
+        body.contains("CORPS PREMIER")
+            && body.contains("CORPS DEUXIEME")
+            && body.contains("CORPS TROISIEME"),
+        "sans parametre, le corps entier reste du (non-regression), got: {body}"
+    );
+
+    // (4) `section_titles` reste rendu dans les trois cas.
+    for reponse in [&sommaire, &une, &entier] {
+        let titres = reponse["data"]["section_titles"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert_eq!(
+            titres, 3,
+            "section_titles doit rester rendu dans les trois cas"
+        );
+    }
+}
+
 /// REQ-AXO-902288 — a single-legal pair (`REQ → PIL` admits only `BELONGS_TO`)
 /// now AUTO-CANONIZES a wrong/guessed relation_type on CREATE instead of
 /// rejecting, generalizing REQ-902283's MIL-only behavior to every source kind

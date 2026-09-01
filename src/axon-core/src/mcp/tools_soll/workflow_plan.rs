@@ -1040,16 +1040,23 @@ impl McpServer {
             body.to_string()
         };
 
+        // REQ-AXO-902580 — la sélection doit atteindre `data.description`, pas
+        // seulement `content[0].text`. C'est `data` que le client sérialise vers
+        // le LLM : rendre la découpe dans le texte tout en laissant le corps
+        // ENTIER dans `data.description` n'économisait rien, et faisait payer
+        // 224 000 caractères à un appel qui en demandait 120. Sans paramètre,
+        // `corps_rendu` VAUT `body` — le comportement reste strictement inchangé.
+        let texte =
+            format!("## {id} — {title}\n_{node_type} · {status} · {project}_\n\n{corps_rendu}");
+
         Some(json!({
-            "content": [{ "type": "text", "text": format!(
-                "## {id} — {title}\n_{node_type} · {status} · {project}_\n\n{corps_rendu}"
-            ) }],
+            "content": [{ "type": "text", "text": texte }],
             "data": {
                 "status": "ok",
                 "id": id, "type": node_type, "title": title,
                 "node_status": status, "project_code": project,
                 "section_titles": titres,
-                "description": body,
+                "description": corps_rendu,
                 "next_action": { "kind": "continue_with_follow_up_tool", "tool": "soll_query_context", "when": "if_more_context_needed" }
             }
         }))
