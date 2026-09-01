@@ -183,6 +183,26 @@ impl McpServer {
         let homonym_note = resolved.ambiguity_note().unwrap_or_default();
         let target_id = resolved.id;
 
+        // REQ-AXO-902584 — un symbole qui n'existe QUE comme extremite d'arete
+        // n'est pas un symbole. La traversee d'`impact` est INVERSE, donc son
+        // index RAM porte tout noeud ayant une arete ENTRANTE — y compris une
+        // cible dont le fichier a ete supprime et dont la ligne `Symbol` est
+        // partie avec lui. Mesure chez LLL : `examples/tmph5laa9_f.lll`, fichier
+        // temporaire disparu, laissait `fulfill --CALLS--> stock_reserve` sans
+        // aucune ligne `Symbol`. `query` rendait vide, `inspect` refusait — et
+        // `impact` affirmait `confidence: high` avec `blocking_factors: []`.
+        //
+        // Un silence fait CHERCHER, une fausse certitude fait ECRIRE : un agent
+        // qui suit le contrat (un appel, lecture du `confidence`) inscrivait un
+        // rayon invente dans son graphe d'intention. On refuse, comme le font
+        // deja les deux autres surfaces.
+        let indexed_project = self.symbol_project_code(&target_id);
+        if indexed_project.is_none() {
+            return Some(Self::impact_symbol_absent_from_index_error(
+                symbol, project, depth, &target_id,
+            ));
+        }
+
         // REQ-AXO-91512 — RAM-first via IstGraphView (PIL-AXO-9002,
         // feedback_trimodal_use_ram_graph_not_pg). When the cache is
         // warm, the reverse-traversal runs entirely in RAM ; the PG
@@ -201,9 +221,11 @@ impl McpServer {
         // derive it from the resolved symbol's metadata so an unscoped
         // (workspace-wide) impact still serves from RAM. The graph traversal
         // stays in RAM ; only this metadata lookup touches PG.
+        // REQ-AXO-902584 — le lookup est deja fait par le garde ci-dessus ; on
+        // reutilise son resultat plutot que de repayer la requete.
         let effective_project: Option<String> = match project {
             Some(p) => Some(p.to_string()),
-            None => self.symbol_project_code(&target_id),
+            None => indexed_project,
         };
         let ram_attempted = effective_project
             .as_deref()
@@ -1359,6 +1381,62 @@ impl McpServer {
             .and_then(|r| r.first())
             .and_then(Value::as_str)
             .map(|s| s.to_string())
+    }
+
+    /// REQ-AXO-902584 — refus explicite quand le symbole resolu n'a AUCUNE ligne
+    /// dans `ist.Symbol` : il n'existe que comme extremite d'une arete, typiquement
+    /// le residu d'un fichier supprime dont les aretes ont survecu.
+    ///
+    /// Le refus NOMME le symbole canonique cherche, sans quoi l'appelant ne peut
+    /// pas distinguer « je me suis trompe de nom » de « votre index a un residu ».
+    /// Il oriente vers `query`/`inspect`, qui rendent deja le meme verdict — la
+    /// coherence des trois surfaces est l'objet du REQ.
+    fn impact_symbol_absent_from_index_error(
+        symbol: &str,
+        project: Option<&str>,
+        depth: u64,
+        target_id: &str,
+    ) -> Value {
+        let why = format!(
+            "`{symbol}` resolves to `{target_id}`, which has no row in the symbol index : \
+             it exists only as the endpoint of an edge (typically a residue left by a deleted \
+             file whose edges outlived it). No impact radius can be computed from that, and \
+             none is reported — `query` and `inspect` return the same absent verdict."
+        );
+        json!({
+            "content": [{ "type": "text", "text": format!("impact unavailable : {why}") }],
+            "isError": true,
+            "data": {
+                "status": "input_not_found",
+                "surfaces_used": [],
+                "surfaces_degraded": ["symbol_index_and_edge_graph_disagree"],
+                "total_available": Value::Null,
+                "next_call_hint": "query <symbol> to confirm the symbol is indexed at all",
+                "symbol": symbol,
+                "resolved_id": target_id,
+                "project": project,
+                "depth": depth,
+                "impact_available": false,
+                "impact_radius": Value::Null,
+                "summary": { "confidence": "none", "direct_edges": Value::Null },
+                "operator_guidance": {
+                    "actionable_now": false,
+                    "blocking_factors": [{
+                        "factor": "symbol_absent_from_index",
+                        "severity": "high",
+                        "recommended_action": "confirm with `query`/`inspect` ; if they also report it absent, the edge graph carries a residue and the file may need re-indexing"
+                    }],
+                    "remediation_actions": [
+                        "confirm the symbol exists with `query` or `inspect`",
+                        "verify spelling and project scope",
+                        "if the symbol was in a deleted file, its edges are stale — re-index the project"
+                    ],
+                    "follow_up_tools": ["query", "inspect"],
+                    "next_action": { "kind": "confirm_symbol_exists", "tool": "query", "when": "now" }
+                },
+                "next_action": { "kind": "confirm_symbol_exists", "tool": "query", "when": "now" }
+            }
+        })
     }
 
     /// REQ-AXO-901952 — loud degraded error when the RAM IST snapshot cannot

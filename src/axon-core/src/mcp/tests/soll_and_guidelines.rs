@@ -5891,6 +5891,123 @@ fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
     assert!(!impact_text.contains(&name_beta), "{}", impact_text);
 }
 
+/// REQ-AXO-902584 — `impact` rendait `confidence: high` et un rayon d'impact sur
+/// un symbole qui n'existe QUE comme extrémité d'une arête `CALLS`.
+///
+/// Attribution mesurée chez LLL : `examples/tmph5laa9_f.lll`, un fichier
+/// TEMPORAIRE supprimé du disque, a laissé derrière lui UNE arête
+/// `fulfill --CALLS--> stock_reserve` sans aucune ligne `Symbol` correspondante.
+/// `query` rendait une enveloppe vide et `inspect` refusait — les deux avaient
+/// raison. `impact` affirmait, parce que sa traversée est INVERSE : son index
+/// RAM porte les nœuds ayant une arête ENTRANTE, qu'ils soient des symboles ou
+/// de simples extrémités survivantes.
+///
+/// Un silence fait CHERCHER, une fausse certitude fait ÉCRIRE : LLL était à un
+/// appel d'inscrire un chiffre inventé dans son SOLL.
+///
+/// Les DEUX verdicts sont rejoués sur le même chemin, comme l'exigent les
+/// critères d'acceptation du REQ : un garde incapable de rendre le cas positif
+/// ne prouverait rien.
+#[test]
+fn test_axon_impact_refuses_a_symbol_that_exists_only_as_an_edge_endpoint() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let code = "PJG".to_string();
+    let name_reel = format!("cible_reelle_{code}");
+    let name_appelant = format!("appelant_{code}");
+    let name_fantome = format!("cible_fantome_{code}");
+    let sym_reel = format!("{code}::{name_reel}");
+    let sym_appelant = format!("{code}::{name_appelant}");
+    // Le fantôme porte un id de fichier disparu, comme le cas réel.
+    let sym_fantome = format!("{code}::examples::tmp_disparu.lll::{name_fantome}");
+    let file_api = format!("src/{code}/api.rs");
+    let file_consumer = format!("src/{code}/consumer.rs");
+
+    for path in [&file_api, &file_consumer] {
+        seed_ist_path(&server, &code, path);
+        server
+            .graph_store
+            .execute(&format!("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-{path}', 'symbol', 'sym-{path}', '{code}', '{path}', 'hash-{path}')"))
+            .unwrap();
+    }
+
+    // Deux symboles RÉELS : la cible et son appelant. Le fantôme, lui, n'est
+    // délibérément PAS inséré dans `Symbol` — c'est tout le sujet.
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_reel}', '{name_reel}', 'function', true, true, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('{sym_appelant}', '{name_appelant}', 'function', false, true, false, '{code}')")).unwrap();
+
+    for (file, sym) in [(&file_api, &sym_reel), (&file_consumer, &sym_appelant)] {
+        server
+            .graph_store
+            .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{file}', '{sym}', 'CONTAINS', '{code}', 0)"))
+            .unwrap();
+    }
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{sym_appelant}', '{sym_reel}', 'CALLS', '{code}', 0)"))
+        .unwrap();
+    // L'arête orpheline : elle survit à son fichier, sa cible n'est nulle part.
+    server
+        .graph_store
+        .execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{sym_appelant}', '{sym_fantome}', 'CALLS', '{code}', 0)"))
+        .unwrap();
+
+    let appeler = |symbole: &str, id: i64| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "impact",
+                    "arguments": { "symbol": symbole, "project": code, "depth": 2 }
+                })),
+                id: Some(json!(id)),
+            })
+            .unwrap()
+            .result
+            .expect("impact must answer")
+    };
+
+    // (1) CAS POSITIF — le symbole EST dans l'index. L'impact se calcule et la
+    //     confiance haute est légitime. Sans ce cas, le garde ne prouverait que
+    //     sa capacité à tout refuser.
+    let reel = appeler(&name_reel, 901);
+    let data_reel = reel.get("data").expect("data");
+    assert_ne!(
+        data_reel["impact_available"].as_bool(),
+        Some(false),
+        "un symbole réellement indexé doit rester analysable : {data_reel}"
+    );
+    assert_eq!(
+        data_reel["summary"]["confidence"].as_str(),
+        Some("high"),
+        "confiance haute légitime sur un symbole réel : {data_reel}"
+    );
+
+    // (2) CAS DU DÉFAUT — le symbole n'existe QUE comme cible d'arête.
+    //     `impact` doit refuser, comme `query` et `inspect` le font déjà.
+    let fantome = appeler(&name_fantome, 902);
+    let data_fantome = fantome.get("data").expect("data");
+    assert_eq!(
+        data_fantome["impact_available"].as_bool(),
+        Some(false),
+        "un symbole absent de l'index ne doit JAMAIS produire un rayon d'impact : {data_fantome}"
+    );
+    let facteurs = data_fantome["operator_guidance"]["blocking_factors"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    assert!(
+        facteurs > 0,
+        "le refus doit NOMMER ce qui bloque, pas se contenter d'être vide : {data_fantome}"
+    );
+    assert_ne!(
+        data_fantome["summary"]["confidence"].as_str(),
+        Some("high"),
+        "aucune confiance haute sur un symbole qu'`inspect` refuse : {data_fantome}"
+    );
+}
+
 #[test]
 fn test_axon_query_project_scope_uses_project_code_not_path_substring() {
     // REQ-AXO-91560 — per-test project_code isolation.
