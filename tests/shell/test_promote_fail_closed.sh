@@ -71,11 +71,40 @@ else
   fail "final verdict cannot distinguish/reconstruct gate outcomes"
 fi
 
+# REQ-AXO-902590 — cette assertion vérifiait la PRÉSENCE de la ligne
+# `[[ "$recon_phase" != "clean" && "$recon_failed" != "indexer_alive" ]]`. Elle ne
+# pouvait donc constater que son immobilité, jamais sa justesse : le prédicat était
+# FAUX (égalité de chaîne sur une liste jointe) et le test le gardait tel quel.
+# Le comportement est désormais éprouvé sur des listes réelles par
+# `scripts/lib/axon-promote-recovery.test.sh` ; ici on garde deux choses qu'un test
+# unitaire ne peut pas voir : que le promote passe bien par ces prédicats, et que
+# l'ancienne forme n'est pas revenue.
 if grep -q 'TIER-1 AUTO-RECOVERY: restart the indexer ONLY' "$PROMOTE" \
-  && grep -Fq 'if [[ "$recon_phase" != "clean" && "$recon_failed" != "indexer_alive" ]]; then' "$PROMOTE"; then
-  pass "indexer-only liveness failure cannot escalate to a full Brain restart"
+  && grep -q 'axon_promote_is_indexer_only_failure "\$recon_failed"' "$PROMOTE" \
+  && grep -q 'axon_promote_needs_full_restart "\$recon_failed"' "$PROMOTE"; then
+  pass "les deux paliers se decident par appartenance, via les predicats eprouves"
 else
-  fail "indexer-only liveness failure can still interrupt the Brain"
+  fail "un palier ne passe plus par axon-promote-recovery.sh"
+fi
+
+if grep -Fq '"$recon_failed" == "indexer_alive"' "$PROMOTE" \
+  || grep -Fq '"$recon_failed" != "indexer_alive"' "$PROMOTE"; then
+  fail "l egalite de chaine sur la liste jointe est REVENUE — deux gates rouges couperaient le brain"
+else
+  pass "aucune egalite de chaine ne subsiste sur recon_failed"
+fi
+
+if bash "$ROOT_DIR/scripts/lib/axon-promote-recovery.test.sh" >/dev/null 2>&1; then
+  pass "les predicats de palier passent leur propre suite"
+else
+  fail "scripts/lib/axon-promote-recovery.test.sh echoue"
+fi
+
+if grep -q 'ecartes (hors disponibilite courante)' "$PROMOTE" \
+  || grep -q 'écartés (hors disponibilité courante)' "$PROMOTE"; then
+  pass "le journal nomme les gates ECARTES de la decision, pas seulement les rouges"
+else
+  fail "le journal tait sa propre regle de decision"
 fi
 
 if grep -Fq 'if [[ -f "$ADMISSION_PAUSE_FILE" ]]; then' "$PROMOTE" \

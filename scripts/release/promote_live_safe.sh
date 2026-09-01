@@ -19,6 +19,10 @@ source "$ROOT_DIR/scripts/lib/axon-pg-port.sh"
 source "$ROOT_DIR/scripts/lib/axon-promote-lease.sh"
 # shellcheck source=scripts/lib/axon-time.sh
 source "$ROOT_DIR/scripts/lib/axon-time.sh"
+# REQ-AXO-902590 — classement des gates par palier de reprise. Sourcé ICI et non
+# dans la branche 6c : le verdict final doit pouvoir dire POURQUOI aucune reprise
+# n'a été tentée, y compris quand la branche de reprise n'a pas tourné.
+source "$ROOT_DIR/scripts/lib/axon-promote-recovery.sh"
 AXON_INSTANCE_KIND=live
 axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
 
@@ -1419,10 +1423,29 @@ if [[ "$recon_phase" == "clean" ]]; then
   fi
 fi
 
+# REQ-AXO-902590 — le palier se décide par APPARTENANCE, plus par égalité de chaîne sur
+# la liste jointe. Deux gates rouges ensemble donnaient `a,b`, l'égalité tombait, et un
+# simple indexeur mort partait en `stop --hard`. Les prédicats sont des fonctions PURES,
+# éprouvées sans runtime par axon-promote-recovery.test.sh.
+#
+# Calculé AVANT le test de phase, et non dans la branche : le verdict final en a besoin
+# même quand la branche de reprise n'a pas tourné (phase `admission_paused`), sinon il
+# affirmerait « ces gates ne décrivent pas la disponibilité courante » à propos d'un
+# `indexer_alive` qui la décrit parfaitement.
+# ⚠ PAS de variable figée ici : `_poll_promote_clean` re-sonde après chaque palier et
+# remet `recon_failed` à jour. Une copie prise avant le tier 1 serait périmée dans le
+# journal du tier 2 — un journal qui affirme un état qu'il n'a plus mesuré. Les
+# prédicats étant purs et sans IO, on les rejoue au point d'usage.
+
 if [[ "$recon_phase" != "clean" && "$recon_phase" != "admission_paused" ]]; then
+  # Dire la RÈGLE, pas seulement son résultat : sans cette ligne, l'opérateur lit
+  # « failed_gates: indexer_alive,last_promote_attempt — TIER-1 » et doit deviner
+  # pourquoi le second nom n'a pas compté.
+  promote_log "   🔎 step 6c: gates rouges=${recon_failed:-none} · retenus pour la reprise=$(axon_promote_retained_gates "${recon_failed:-}") · écartés (hors disponibilité courante)=$(axon_promote_ignored_gates "${recon_failed:-}")"
+
   # Tier 1 — the indexer is the ONLY failing gate: recover it without touching the brain.
-  if [[ "$recon_failed" == "indexer_alive" ]]; then
-    promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (failed_gates: indexer_alive) — TIER-1 AUTO-RECOVERY: restart the indexer ONLY (brain keeps serving)."
+  if axon_promote_is_indexer_only_failure "$recon_failed"; then
+    promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (retenus: $(axon_promote_retained_gates "${recon_failed:-}")) — TIER-1 AUTO-RECOVERY: restart the indexer ONLY (brain keeps serving)."
     set +e
     # shellcheck source=../lib/axon-supervisor.sh
     source "$ROOT_DIR/scripts/lib/axon-supervisor.sh"
@@ -1435,14 +1458,19 @@ if [[ "$recon_phase" != "clean" && "$recon_phase" != "admission_paused" ]]; then
     _poll_promote_clean 180 || true
     [[ "$recon_phase" == "clean" ]] && promote_log "   ✅ step 6c tier-1: recovered WITHOUT a brain outage (blast radius contained)."
   else
-    promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) — not indexer-only, skipping tier 1."
+    promote_log "   ⚠️ step 6c: phase=${recon_phase:-unreachable} (retenus: $(axon_promote_retained_gates "${recon_failed:-}")) — not indexer-only, skipping tier 1."
   fi
 
   # Tier 2 is reserved for failures that are not indexer-only. An unhealthy
   # indexer fails the promotion closed without turning a partial degradation
   # into a customer-visible Brain outage.
-  if [[ "$recon_phase" != "clean" && "$recon_failed" != "indexer_alive" ]]; then
-    promote_log "   ⚠️ step 6c: still phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) — TIER-2 AUTO-RECOVERY: full restart (stop --hard + start full). THIS INTERRUPTS THE BRAIN — expect third-party MCP clients to see an outage."
+  # REQ-AXO-902590 — c'est CE prédicat qui coupe le service, et c'était le plus faux :
+  # `!= "indexer_alive"` était vrai pour `indexer_alive,last_promote_attempt`, donc un
+  # promote raté suivi d'une panne d'indexeur suffisait à faire tomber le brain.
+  # Une liste ne portant QUE des gates hors disponibilité courante ne déclenche
+  # désormais aucun palier : le promote échoue fermé, sans couper le service.
+  if [[ "$recon_phase" != "clean" ]] && axon_promote_needs_full_restart "$recon_failed"; then
+    promote_log "   ⚠️ step 6c: still phase=${recon_phase:-unreachable} (retenus: $(axon_promote_retained_gates "${recon_failed:-}")) — TIER-2 AUTO-RECOVERY: full restart (stop --hard + start full). THIS INTERRUPTS THE BRAIN — expect third-party MCP clients to see an outage."
     set +e
     bash "$ROOT_DIR/scripts/axon-live" stop --hard >> "$PROMOTE_LOG" 2>&1
     restart_live_through_systemd_owner >> "$PROMOTE_LOG" 2>&1
@@ -1459,6 +1487,11 @@ if [[ "$recon_phase" == "clean" ]]; then
   promote_log "   ✅ step 6c: phase=clean (manifest↔runtime↔FULL-contract liveness all green)"
 else
   promote_log "   ❌ step 6c: phase=${recon_phase:-unreachable} (failed_gates: ${recon_failed:-none}) — FAILING the promote: the runtime_contract is not fully available. Do NOT trust a 'COMPLETE'; follow the recorded admission/runtime evidence."
+  # REQ-AXO-902590 — chemin NEUF : aucun gate retenu, donc ni tier 1 ni tier 2. Sans
+  # cette ligne la trace dirait « phase non-clean, rien fait » sans en donner la raison.
+  if [[ "$recon_phase" != "admission_paused" && -z "$(axon_promote_retained_gates "${recon_failed:-}")" && -n "${recon_failed:-}" ]]; then
+    promote_log "      ↳ aucune reprise tentée : les gates rouges (${recon_failed}) ne décrivent pas la disponibilité courante — aucun redémarrage ne les répare (REQ-AXO-902590)."
+  fi
   exit 1
 fi
 

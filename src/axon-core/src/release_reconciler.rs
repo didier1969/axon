@@ -1024,6 +1024,85 @@ pub fn stop_next_action(f: &StopFacts) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// REQ-AXO-902590 — anti-dérive ENTRE DEUX LANGAGES.
+    ///
+    /// `scripts/lib/axon-promote-recovery.sh` classe chaque gate en trois : réparable
+    /// par le seul indexeur · hors disponibilité courante · inconnu. La troisième
+    /// classe escalade en `stop --hard`, qui coupe le service pour tous les tenants.
+    ///
+    /// Un gate ajouté ICI sans être classé LÀ-BAS tombe donc silencieusement dans
+    /// « inconnu », et la première panne d'indexeur qui suit prend le brain avec elle.
+    /// Le compilateur ne peut rien voir : les deux fichiers ne se connaissent pas. Ce
+    /// test est le seul lien, et il rougit en NOMMANT le fichier à mettre à jour.
+    ///
+    /// Le contrôle porte sur les NOMS, pas sur les verdicts : c'est le nom qui est la
+    /// clé de la classification côté shell.
+    #[test]
+    fn promote_status_n_emet_que_des_gates_classes_cote_shell() {
+        // Les deux listes du shell, recopiées ici — c'est la recopie que ce test
+        // EXISTE pour surveiller. Toute divergence doit rougir plutôt que de dormir.
+        const REPARABLE_PAR_INDEXEUR: &[&str] = &["indexer_alive", "indexer_process_stable"];
+        const EXIGE_REPRISE_COMPLETE: &[&str] = &["brain_serving"];
+        const HORS_DISPONIBILITE: &[&str] = &[
+            "last_promote_attempt",
+            "qualification_passed",
+            "manifest_runtime_match",
+            "no_stale_pending",
+        ];
+
+        let mut emis: Vec<&str> = Vec::new();
+        emis.extend(evaluate_gates(&ReleaseFacts::default()).iter().map(|g| g.name));
+        emis.extend(
+            evaluate_liveness_gates(&LivenessFacts::default())
+                .iter()
+                .map(|g| g.name),
+        );
+        emis.push(evaluate_attempt_gate(&ReleaseFacts::default()).name);
+        emis.extend(
+            evaluate_supervisor_gates(&SupervisorFacts::default())
+                .iter()
+                .map(|g| g.name),
+        );
+
+        let non_classes: Vec<&str> = emis
+            .iter()
+            .copied()
+            .filter(|nom| {
+                !REPARABLE_PAR_INDEXEUR.contains(nom)
+                    && !EXIGE_REPRISE_COMPLETE.contains(nom)
+                    && !HORS_DISPONIBILITE.contains(nom)
+            })
+            .collect();
+
+        assert!(
+            non_classes.is_empty(),
+            "gate(s) émis par promote_status et NON classés dans \
+             scripts/lib/axon-promote-recovery.sh : {non_classes:?}\n\
+             Un gate non classé tombe dans « inconnu » et escalade en `stop --hard`, \
+             qui COUPE LE BRAIN pour tous les tenants. Classez-le dans \
+             AXON_PROMOTE_INDEXER_ONLY_GATES (un redémarrage du seul indexeur le \
+             répare), AXON_PROMOTE_FULL_RESTART_GATES (il faut la reprise complète) \
+             ou AXON_PROMOTE_NON_RUNTIME_GATES (aucun redémarrage ne le répare), \
+             puis reportez le nom dans les constantes de CE test."
+        );
+
+        // Symétrique : un nom classé côté shell qui n'est plus émis est une entrée
+        // morte. Moins grave — elle ne casse rien — mais elle fait croire à une
+        // couverture qui n'existe plus, et c'est ainsi qu'une liste devient fausse.
+        let orphelins: Vec<&str> = REPARABLE_PAR_INDEXEUR
+            .iter()
+            .chain(EXIGE_REPRISE_COMPLETE.iter())
+            .chain(HORS_DISPONIBILITE.iter())
+            .copied()
+            .filter(|nom| !emis.contains(nom))
+            .collect();
+        assert!(
+            orphelins.is_empty(),
+            "nom(s) classés côté shell mais plus émis par promote_status : \
+             {orphelins:?} — entrées mortes, à retirer des deux endroits"
+        );
+    }
+
     fn facts(live: &str, manifest: Option<&str>, pending: bool) -> ReleaseFacts {
         ReleaseFacts {
             live_build_id: live.to_string(),
