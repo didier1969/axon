@@ -909,7 +909,12 @@ impl McpServer {
                 // SUPERSEDES-only, it stays empty and the policy `match` below rejects with
                 // its existing repair payload (accepted_values + source_can_reach) — the
                 // frontier is unchanged: unambiguous is applied, ambiguous is refused.
-                let relation_type_inferred = attach_to.is_some() && relation_type_raw.is_none();
+                let relation_type_absent = attach_to.is_some() && relation_type_raw.is_none();
+                // REQ-AXO-902583 — garder la relation DEMANDÉE pour pouvoir dire, plus bas,
+                // qu'elle a été remplacée. Sans cette copie, la comparaison est impossible :
+                // `relation_type` est écrasée sur place par l'auto-canonisation.
+                let relation_type_requested: Option<String> =
+                    relation_type_raw.map(|r| r.to_uppercase());
                 let (attach_to, mut relation_type) = match (attach_to, relation_type_raw) {
                     (Some(a), Some(r)) => (a, r.to_uppercase()),
                     (Some(a), None) => (a, String::new()),
@@ -1103,6 +1108,26 @@ impl McpServer {
                         }
                     }
                 }
+                // REQ-AXO-902583 — NOMMER la substitution. Mesuré le 2026-09-01 :
+                // `create(attach_to=MIL-AXO-054, relation_type=BELONGS_TO)` a écrit
+                // `BLOCKED_BY` — sémantique OPPOSÉE — en rendant `relation_type_inferred:
+                // false`. Le champ qui existe pour signaler le remplacement le NIAIT, et
+                // `attach_status: "attached"` se lisait comme un succès : sans comparaison
+                // volontaire avec les REQ voisines, l'arête fausse restait dans le graphe et
+                // `soll_work_plan` la lisait comme un blocage réel.
+                //
+                // `action=link` expose déjà `auto_canonized_from` pour exactement ce geste
+                // (REQ-AXO-901939) ; c'est `create` qui se taisait. Même nom de champ, même
+                // sens — un appelant qui a appris l'un connaît l'autre.
+                //
+                // La substitution elle-même n'est PAS remise en cause : sur une paire
+                // single-legal l'appelant n'avait pas le choix (REQ-AXO-902288). Seul son
+                // silence l'est.
+                let auto_canonized_from: Option<String> = relation_type_requested
+                    .filter(|requested| *requested != relation_type);
+                // « inféré » couvre les DEUX cas où le serveur a choisi la relation :
+                // absente à l'entrée, ou fournie puis remplacée. Le message distingue.
+                let relation_type_inferred = relation_type_absent || auto_canonized_from.is_some();
                 match &policy {
                     // REQ-AXO-902504 — une attache INVERSEE est legale par la paire
                     // inverse, deja verifiee ci-dessus ; ne pas la refuser ici.
@@ -1303,7 +1328,18 @@ impl McpServer {
                                  `{created_id}` reste `{status}`."
                             ));
                         }
-                        if relation_type_inferred {
+                        // REQ-AXO-902583 — deux causes, deux phrases. « non fourni » sur une
+                        // relation que l'appelant a bel et bien écrite l'enverrait chercher
+                        // l'erreur dans sa propre syntaxe : le double coût que ce REQ nomme.
+                        if let Some(requested) = &auto_canonized_from {
+                            report.push_str(&format!(
+                                "\n⚠️ `relation_type` fourni `{requested}` — REMPLACÉ par \
+                                 `{relation_type}`, seule relation canonique pour cette paire. \
+                                 L'arête posée est `{created_id}` -> `{attach_to}` via \
+                                 `{relation_type}` : c'est elle que lisent `soll_work_plan` et \
+                                 les gates."
+                            ));
+                        } else if relation_type_inferred {
                             report.push_str(&format!(
                                 "\nℹ️ `relation_type` non fourni — appliqué `{relation_type}`, \
                                  seule relation canonique pour cette paire."
@@ -1347,6 +1383,10 @@ impl McpServer {
                             "attach_status": "attached",
                             "project_code_inferred_from_parent": project_code_inferred,
                             "relation_type_inferred": relation_type_inferred,
+                            // REQ-AXO-902583 — même champ, même sens que `action=link`.
+                            // `null` quand la relation fournie a été appliquée telle quelle :
+                            // un signal permanent n'est plus un signal.
+                            "auto_canonized_from": auto_canonized_from,
                             "acceptance_criteria_warning": missing_acceptance_criteria
                         });
 

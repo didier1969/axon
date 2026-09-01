@@ -972,6 +972,79 @@ fn create_still_refuses_when_the_pair_is_genuinely_ambiguous() {
 }
 
 #[test]
+fn create_nomme_la_relation_qu_il_a_substituee_au_lieu_de_la_nier() {
+    // REQ-AXO-902583 — mesuré le 2026-09-01 : `create` avec `relation_type: "BELONGS_TO"`
+    // sur un parent Milestone a écrit `BLOCKED_BY` (sémantique OPPOSÉE) et rendu
+    // `relation_type_inferred: false`. Le champ qui existe pour signaler la substitution
+    // la NIAIT — forme pire que le silence, car elle désigne l'appelant comme fautif.
+    // `action=link` expose déjà `auto_canonized_from` pour exactement ce geste.
+    let server = create_test_server();
+    seed_pillar(&server, "TST", "PIL-TST-903", "Ancre 902583");
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('MIL-TST-903', 'Milestone', 'TST', 'jalon 902583', '', 'current', '{}') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .unwrap();
+
+    // (REQ, MIL) n'admet que `BLOCKED_BY` : la substitution elle-même est légitime.
+    // C'est son SILENCE qui ne l'est pas.
+    let res = create_call(
+        &server,
+        json!({ "title": "substitution 902583", "description": "corps",
+                "attach_to": "MIL-TST-903", "relation_type": "BELONGS_TO" }),
+    );
+
+    assert_ne!(
+        res["isError"].as_bool(),
+        Some(true),
+        "la création reste acceptée — seule la divulgation change : {res}"
+    );
+    assert_eq!(res["data"]["applied_relation"], json!("BLOCKED_BY"));
+    assert_eq!(
+        res["data"]["auto_canonized_from"],
+        json!("BELONGS_TO"),
+        "la relation DEMANDÉE doit être nommée, comme `action=link` le fait : {res}"
+    );
+    assert_eq!(
+        res["data"]["relation_type_inferred"],
+        json!(true),
+        "le serveur a bien choisi la relation ; le nier est pire que se taire : {res}"
+    );
+
+    let text = res["content"][0]["text"].as_str().expect("texte");
+    assert!(
+        text.contains("BELONGS_TO") && text.contains("BLOCKED_BY"),
+        "le texte doit porter la relation demandée ET celle appliquée : {text}"
+    );
+}
+
+#[test]
+fn create_ne_declare_aucune_substitution_quand_la_relation_fournie_est_canonique() {
+    // REQ-AXO-902583 — non-régression : le champ ne doit apparaître QUE lorsqu'il y a
+    // vraiment substitution. Un signal permanent n'est plus un signal.
+    let server = create_test_server();
+    seed_pillar(&server, "TST", "PIL-TST-904", "Ancre 902583 bis");
+
+    let res = create_call(
+        &server,
+        json!({ "title": "sans substitution 902583", "description": "corps",
+                "attach_to": "PIL-TST-904", "relation_type": "BELONGS_TO" }),
+    );
+
+    assert_ne!(res["isError"].as_bool(), Some(true), "création simple : {res}");
+    assert_eq!(res["data"]["applied_relation"], json!("BELONGS_TO"));
+    assert_eq!(
+        res["data"]["auto_canonized_from"],
+        json!(null),
+        "aucune substitution : le champ reste nul : {res}"
+    );
+    assert_eq!(res["data"]["relation_type_inferred"], json!(false));
+}
+
+#[test]
 fn the_missing_parent_refusal_names_its_candidates() {
     // Décision opérateur : le serveur ne devine JAMAIS le parent — deviner
     // écrirait une arête SOLL que personne n'a demandée. Mais le refus doit
