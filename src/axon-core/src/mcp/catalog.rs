@@ -1344,7 +1344,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                                     "tool": { "type": "string" },
                                     "args": { "type": "object", "additionalProperties": true }
                                 },
-                                "required": ["tool", "args"]
+                                "required": ["tool"]
                             }
                         }
                     },

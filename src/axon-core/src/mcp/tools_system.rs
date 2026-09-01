@@ -1365,13 +1365,24 @@ impl McpServer {
             // tool is reachable from batch, not just query/inspect/impact. The
             // old hardcoded 3-tool match returned `_ => None`, silently dropping
             // every other tool and yielding `[]` (e.g. status + embedding_status).
+            // REQ-AXO-902583 — le diagnostic `unknown_tool` était INATTEIGNABLE par
+            // sa cause déclarée, et faux quand il tirait : un nom d'outil inconnu
+            // rend `Some({"Tool not found", isError: true})`, jamais `None`. Un
+            // `None` ne peut donc venir que d'un handler RECONNU. Dire à l'appelant
+            // que son outil n'existe pas l'envoie corriger un nom correct — la forme
+            // REQ-AXO-902584, une affirmation positive fausse.
             let res = self
                 .execute_tool_direct(normalized_tool_name, &tool_args)
                 .unwrap_or_else(|| {
                     json!({
-                        "status": "unknown_tool",
-                        "tool": tool_name,
-                        "hint": "tool not recognized by the canonical dispatcher; check `help`"
+                        "content": [{ "type": "text", "text": format!(
+                            "`{tool_name}` n'a rendu aucune enveloppe. Le NOM de l'outil \
+                             est correct — l'outil a refusé ces arguments, ou il n'est pas \
+                             servi dans ce mode runtime. `help` liste la surface réellement \
+                             servie et le contrat de cet outil."
+                        ) }],
+                        "isError": true,
+                        "data": { "status": "handler_returned_no_envelope", "tool": tool_name }
                     })
                 });
             all_results.push(json!({
@@ -1396,20 +1407,63 @@ impl McpServer {
         // que si elle est STRICTEMENT identique partout : deux lots différents ne
         // peuvent pas être confondus.
         let commun = Self::facteur_commun_du_lot(&mut all_results);
-        let charge = if commun == json!({}) {
-            json!(all_results)
-        } else {
-            json!({
-                "contexte_commun_du_lot": commun,
-                "note": "ces champs étaient IDENTIQUES dans tous les résultats : \
-                         écrits une fois ici, retirés de chaque résultat. Rien n'est tronqué.",
-                "results": all_results,
+
+        // REQ-AXO-902583 — RENDRE UN VERDICT, et le rendre dans les DEUX canaux.
+        //
+        // `axon_batch` ne posait jamais de clé `data`. Conséquence mécanique dans
+        // `attach_default_tool_guidance` : `structuredContent` valait `{}` sur TOUTE
+        // réponse, quel que soit le nombre de résultats. Pour un client qui ne lit
+        // que ce champ — le champ canonique du protocole — un lot se lisait comme
+        // une enveloppe vide, sans erreur. C'est le défaut rapporté par NEX
+        // (« 4 appels soll_get sans résultat ni erreur, les mêmes un par un
+        // fonctionnent »), et c'est la classe que REQ-AXO-902560 a fermée sur `sql`,
+        // `fs_read` et `diagnose_indexing` sans jamais passer par ici.
+        //
+        // On pose `data`, JAMAIS `structuredContent` : la branche `None` du
+        // dispatcher le recopie, et comme `results` n'est pas une clé de guidance
+        // aucun miroir `rendered_text` n'est ajouté. La charge est donc écrite
+        // exactement deux fois. La poser soi-même l'écrirait trois fois.
+        let echecs: Vec<String> = all_results
+            .iter()
+            .filter(|r| {
+                r.get("error").is_some()
+                    || r.pointer("/result/isError") == Some(&Value::Bool(true))
             })
+            .filter_map(|r| r.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let statut = match (all_results.len(), echecs.len()) {
+            (0, _) => "ok_empty",
+            (n, e) if e == n => "error",
+            (_, 0) => "ok",
+            _ => "partial",
         };
 
-        Some(
-            json!({ "content": [{ "type": "text", "text": serde_json::to_string(&charge).unwrap_or_default() }] }),
-        )
+        // `results` est TOUJOURS un tableau. Avant, le texte était un tableau nu ou
+        // un objet selon que la déduplication ci-dessus avait mordu : la forme rendue
+        // dépendait des données, si bien qu'un lot de lectures et un lot de mutations
+        // ne se lisaient pas pareil.
+        let mut charge = serde_json::Map::new();
+        charge.insert("status".into(), json!(statut));
+        charge.insert("call_count".into(), json!(all_results.len()));
+        charge.insert("failed_count".into(), json!(echecs.len()));
+        if !echecs.is_empty() {
+            charge.insert("failed_calls".into(), json!(echecs));
+        }
+        if commun != json!({}) {
+            charge.insert("contexte_commun_du_lot".into(), commun);
+            charge.insert(
+                "note".into(),
+                json!("ces champs étaient IDENTIQUES dans tous les résultats : \
+                       écrits une fois ici, retirés de chaque résultat. Rien n'est tronqué."),
+            );
+        }
+        charge.insert("results".into(), json!(all_results));
+        let charge = Value::Object(charge);
+
+        Some(json!({
+            "content": [{ "type": "text", "text": serde_json::to_string(&charge).unwrap_or_default() }],
+            "data": charge
+        }))
     }
 
     /// REQ-AXO-902479 — sort du lot les champs de contexte identiques partout.

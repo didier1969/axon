@@ -1003,6 +1003,12 @@ impl McpServer {
             // REQ-AXO-902583 — même raison : nommer un paramètre avalé est de la
             // guidance sur l'APPEL, jamais la charge utile de la réponse.
             "ignored_parameters",
+            // REQ-AXO-902583 — les comptes de `batch`. `results` en revanche N'Y EST
+            // PAS, et ne doit jamais y entrer : c'est la charge utile, et l'y mettre
+            // ferait écrire le lot une troisième fois.
+            "call_count",
+            "failed_count",
+            "failed_calls",
         ];
         let rendered_text = object
             .get("content")

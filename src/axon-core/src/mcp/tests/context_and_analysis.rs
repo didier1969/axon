@@ -4768,8 +4768,17 @@ fn test_axon_batch_routes_all_tools_not_just_three() {
         .unwrap()
         .as_str()
         .unwrap();
-    let parsed: Vec<Value> =
-        serde_json::from_str(text).expect("batch must return a JSON array of results");
+    // REQ-AXO-902583 — le canal texte porte désormais un OBJET auto-descriptif
+    // (`status`/`call_count`/`results`) et non plus un tableau nu, parce que la
+    // forme d'avant dépendait des données : tableau quand la déduplication de
+    // REQ-AXO-902479 ne mordait pas, objet sinon. Changement de contrat assumé ;
+    // ce lecteur s'y adapte, et `batch_publie_ses_resultats_dans_les_deux_canaux`
+    // couvre la propriété ajoutée.
+    let enveloppe: Value =
+        serde_json::from_str(text).expect("batch must return a JSON object of results");
+    let parsed = enveloppe["results"]
+        .as_array()
+        .expect("`results` est toujours un tableau");
     assert_eq!(
         parsed.len(),
         2,
@@ -4787,6 +4796,100 @@ fn test_axon_batch_routes_all_tools_not_just_three() {
         parsed[0].get("result").is_some(),
         "non-query tool result must be present, not dropped"
     );
+}
+
+/// REQ-AXO-902583 — `batch` rendait une enveloppe structurellement vide.
+///
+/// `axon_batch` ne posait jamais de clé `data`, donc `structuredContent` valait
+/// `{}` sur TOUTE réponse — quel que soit le nombre de résultats. Pour un client
+/// qui ne lit que ce champ (le champ canonique du protocole MCP), un lot se lisait
+/// comme « aucun résultat, aucune erreur ». C'est le défaut rapporté par NEX :
+/// « 4 appels `soll_get` sans résultat ni erreur, les mêmes un par un fonctionnent ».
+#[test]
+fn batch_publie_ses_resultats_dans_les_deux_canaux_et_dit_son_verdict() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "batch",
+            "arguments": { "calls": [
+                {"tool": "status", "args": {"mode": "brief"}},
+                {"tool": "embedding_status", "args": {"project": "AXO"}}
+            ] }
+        })),
+        id: Some(json!(4321)),
+    };
+    let result = server.handle_request(req).unwrap().result.expect("result");
+
+    let structured = result
+        .get("structuredContent")
+        .expect("structuredContent doit exister (REQ-AXO-902517)");
+    let resultats = structured["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("les résultats doivent atteindre le canal structuré : {structured}"));
+    assert_eq!(resultats.len(), 2, "un résultat par appel : {structured}");
+    assert_eq!(structured["status"], json!("ok"));
+    assert_eq!(structured["call_count"], json!(2));
+    assert_eq!(structured["failed_count"], json!(0));
+
+    // Le canal texte reste analysable et porte le même verdict.
+    let texte = result["content"][0]["text"].as_str().expect("texte");
+    let depuis_texte: Value = serde_json::from_str(texte).expect("le texte reste du JSON");
+    assert_eq!(depuis_texte["call_count"], json!(2));
+    assert_eq!(
+        depuis_texte["results"].as_array().map(Vec::len),
+        Some(2),
+        "les deux canaux portent le même lot : {texte}"
+    );
+}
+
+/// Un lot vide se DIT vide, au lieu de laisser l'appelant deviner.
+#[test]
+fn batch_sans_appel_dit_ok_empty_au_lieu_de_se_taire() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let result = server
+        .execute_tool_direct("batch", &json!({ "calls": [] }))
+        .expect("batch returns a result");
+    assert_eq!(result["data"]["status"], json!("ok_empty"));
+    assert_eq!(result["data"]["call_count"], json!(0));
+    assert_eq!(
+        result["data"]["results"],
+        json!([]),
+        "un lot vide porte un tableau vide EXPLICITE : {result}"
+    );
+}
+
+/// REQ-AXO-902583 — le fallback `unknown_tool` était inatteignable par sa cause
+/// déclarée : un nom d'outil inconnu rend `Some({isError, "Tool not found"})`,
+/// jamais `None`. Il ne doit donc jamais accuser le NOM.
+#[test]
+fn batch_ne_declare_pas_unknown_tool_quand_le_nom_est_le_probleme() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let result = server
+        .execute_tool_direct(
+            "batch",
+            &json!({ "calls": [{ "tool": "outil_qui_nexiste_pas", "args": {} }] }),
+        )
+        .expect("batch returns a result");
+    let premier = &result["data"]["results"][0];
+    assert_eq!(premier["name"], json!("outil_qui_nexiste_pas"));
+    assert_eq!(
+        premier["result"]["isError"].as_bool(),
+        Some(true),
+        "un nom inconnu est une erreur nommée par le dispatcheur : {premier}"
+    );
+    assert_ne!(
+        premier["result"]["data"]["status"],
+        json!("unknown_tool"),
+        "ce diagnostic ne doit plus exister : le dispatcheur l'a déjà traité : {premier}"
+    );
+    // Et le lot dit qu'il a échoué, au lieu de rendre un `ok` trompeur.
+    assert_eq!(result["data"]["status"], json!("error"));
+    assert_eq!(result["data"]["failed_count"], json!(1));
 }
 
 #[test]
