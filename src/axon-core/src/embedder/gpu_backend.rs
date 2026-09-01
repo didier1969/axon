@@ -193,7 +193,18 @@ impl OrtGpuFirstTextEmbedding {
                     provider_resolved = "tensorrt";
                 }
                 Err(err) => {
-                    warn!("TensorRT EP unavailable, using CUDA EP: {err}");
+                    // REQ-AXO-902576, point 3 — ne crier QUE si le provider est
+                    // fourni et échoue quand même. Sur un artefact CUDA-only son
+                    // absence est nominale, et un `warn!` à chaque démarrage
+                    // envoie le lecteur sur une fausse piste.
+                    if ort_tensorrt_provider_library_available() {
+                        warn!("TensorRT EP unavailable, using CUDA EP: {err}");
+                    } else {
+                        info!(
+                            "TensorRT non fourni par l'artefact ORT (absence nominale sur un \
+                             artefact CUDA-only) — CUDA EP retenu"
+                        );
+                    }
                     provider_resolved = "cuda";
                 }
             }
@@ -787,4 +798,21 @@ pub(super) fn ort_tensorrt_provider_library_path() -> Option<PathBuf> {
         .filter(|value| !value.trim().is_empty())?;
     let ort_dir = Path::new(&ort_dylib_path).parent()?;
     Some(ort_dir.join("libonnxruntime_providers_tensorrt.so"))
+}
+
+/// REQ-AXO-902576, point 3 — distinguer une absence NOMINALE d'un vrai défaut.
+///
+/// L'artefact ORT de ce poste est déclaré `artifact_kind: onnxruntime_cuda_system`
+/// et ne fournit que `core_lib` + `cuda_provider_lib` : TensorRT n'en a jamais
+/// fait partie, et le repli sur CUDA EP est le comportement PRÉVU. Or le message
+/// « TensorRT EP unavailable » était émis en `warn!` à chaque démarrage, ce qui
+/// a orienté trois sessions vers une fausse piste pendant qu'elles cherchaient
+/// pourquoi l'indexeur mourait.
+///
+/// Le pendant CUDA (`ort_cuda_provider_library_available`) existait déjà ; celui-ci
+/// permet de ne crier que lorsque le provider est FOURNI et échoue quand même.
+pub(super) fn ort_tensorrt_provider_library_available() -> bool {
+    ort_tensorrt_provider_library_path()
+        .map(|path| path.is_file())
+        .unwrap_or(false)
 }

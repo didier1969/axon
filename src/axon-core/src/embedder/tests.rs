@@ -1856,3 +1856,57 @@ fn test_gpu_init_breadcrumb_nomme_l_etape_ou_le_demarrage_precedent_est_mort() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// REQ-AXO-902576, point 3 — « le préflight cesse d'accuser TensorRT quand le
+/// manifeste ne le déclare pas : c'est une absence nominale, pas un défaut ».
+///
+/// Le test rejoue les DEUX cas sur le même chemin, sans quoi il ne prouverait
+/// rien : provider ABSENT (artefact CUDA-only, absence nominale) et provider
+/// PRÉSENT (une panne à ce moment-là serait un vrai défaut, qui mérite le cri).
+#[test]
+fn test_ort_tensorrt_provider_library_available_distingue_absence_nominale_et_defaut() {
+    let _env = lock_env_guard();
+    let tempdir = tempfile::tempdir().unwrap();
+    let ort_dir = tempdir.path().join("lib");
+    std::fs::create_dir_all(&ort_dir).unwrap();
+    std::fs::write(ort_dir.join("libonnxruntime.so"), b"placeholder").unwrap();
+
+    // (1) Artefact CUDA-only : pas de `libonnxruntime_providers_tensorrt.so`.
+    //     C'est la configuration RÉELLE de ce poste (artifact_kind:
+    //     onnxruntime_cuda_system), et son absence ne doit PAS être criée.
+    unsafe {
+        std::env::set_var(
+            "ORT_DYLIB_PATH",
+            ort_dir.join("libonnxruntime.so").display().to_string(),
+        );
+    }
+    let absent = super::gpu_backend::ort_tensorrt_provider_library_available();
+
+    // (2) Contre-exemple obligatoire : le provider EST fourni. Une panne
+    //     d'initialisation à ce moment-là est un vrai défaut, pas du bruit.
+    std::fs::write(
+        ort_dir.join("libonnxruntime_providers_tensorrt.so"),
+        b"placeholder",
+    )
+    .unwrap();
+    let present = super::gpu_backend::ort_tensorrt_provider_library_available();
+
+    // (3) Sans `ORT_DYLIB_PATH`, rien n'est découvrable — donc rien à crier.
+    unsafe {
+        std::env::remove_var("ORT_DYLIB_PATH");
+    }
+    let sans_chemin = super::gpu_backend::ort_tensorrt_provider_library_available();
+
+    assert!(
+        !absent,
+        "un artefact CUDA-only ne FOURNIT pas TensorRT : son absence est nominale"
+    );
+    assert!(
+        present,
+        "quand le provider est fourni, une panne d'init mérite d'être signalée"
+    );
+    assert!(
+        !sans_chemin,
+        "sans ORT_DYLIB_PATH le provider n'est pas découvrable, donc pas exigible"
+    );
+}
