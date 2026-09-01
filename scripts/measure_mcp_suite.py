@@ -60,10 +60,31 @@ def summarize_core(core_payload: dict[str, Any] | None) -> dict[str, Any]:
         for item in results
         if isinstance(item.get("latency_ms"), (int, float)) and float(item["latency_ms"]) > 1500
     ]
+    # REQ-AXO-902589 — `latency_ms` est désormais la MÉDIANE de N appels, donc
+    # `slow_tools_over_1500ms` (ci-dessus) ne bronche plus sur un aberrant isolé :
+    # c'est le but, un promote ne doit pas tomber sur un échantillon malheureux.
+    #
+    # Mais la queue ne doit pas DISPARAÎTRE pour autant. Sans les deux lignes
+    # ci-dessous, un outil qui bloquerait une fois sur trois, à chaque exécution,
+    # deviendrait invisible — et l'on aurait remplacé une porte trop bruyante par
+    # une porte sourde. C'est RENDU, pas gaté : aucun verdict n'en dépend, mais un
+    # opérateur qui lit le résumé voit ce que la machine a réellement fait.
+    tail = [
+        {
+            "tool": item.get("tool"),
+            "latency_max_ms": item.get("latency_max_ms"),
+            "latency_ms": item.get("latency_ms"),
+            "samples_over_1500ms": item.get("samples_over_1500ms"),
+        }
+        for item in results
+        if isinstance(item.get("latency_max_ms"), (int, float))
+        and float(item["latency_max_ms"]) > 1500
+    ]
     return {
         "ok_tools": ok_tools,
         "failed_tools": failed_tools,
         "slow_tools_over_1500ms": slow,
+        "tail_over_1500ms": tail,
     }
 
 

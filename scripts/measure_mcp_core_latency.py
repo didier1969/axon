@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,43 @@ from mcp_probe_common import (
     response_data,
     response_text,
 )
+
+
+DEFAULT_SAMPLES = 3
+
+
+def summarise_samples(samples_ms: list[float]) -> dict[str, Any]:
+    """REQ-AXO-902589 — un échantillon ne fait pas une mesure.
+
+    La porte de promote appelait chaque outil UNE fois et comparait cet unique
+    échantillon à l'unique échantillon du baseline. Or ~1,7 % des appels MCP
+    bloquent 0,6 à 1,6 s (mesuré le 2026-09-01 sur le binaire EN SERVICE, 120
+    appels : p50=10 ms, deux aberrants à 570 et 740 ms). Avec 13 outils, la
+    probabilité qu'au moins un bloque est d'environ 20 % : la porte tirait à pile
+    ou face sur la queue de latence de la machine au lieu de juger le build.
+    Trois promotes ont échoué ainsi le même soir, sur trois outils différents.
+
+    `latency_ms` devient la MÉDIANE — elle absorbe un aberrant isolé et bouge
+    quand même sur un vrai décalage, ce qu'un `min` ne ferait pas. Le `min`
+    aurait rendu la porte AVEUGLE à une dégradation de queue, qui est précisément
+    le défaut de fond ; c'est pourquoi la queue est RENDUE à côté (`latency_max_ms`,
+    `latency_samples_ms`) plutôt que jetée. Une porte ne doit ni se faire piloter
+    par un échantillon, ni cesser de voir ce qu'elle a mesuré.
+
+    Le nom `latency_ms` est conservé : `measure_mcp_suite.py` et
+    `compare_mcp_runs.py` le lisent, et ils veulent tous deux la valeur
+    REPRÉSENTATIVE. Renommer aurait cassé les deux sans rien clarifier.
+    """
+    ordonnes = sorted(samples_ms)
+    return {
+        "latency_ms": round(statistics.median(ordonnes), 1),
+        "latency_min_ms": round(ordonnes[0], 1),
+        "latency_max_ms": round(ordonnes[-1], 1),
+        "latency_samples_ms": [round(v, 1) for v in samples_ms],
+        # Combien d'échantillons ont franchi le plafond, et non « le pire a-t-il
+        # franchi » : 1 sur 5 est une queue, 5 sur 5 est une régression.
+        "samples_over_1500ms": sum(1 for v in samples_ms if v > 1500),
+    }
 
 
 def build_probe_rows(project: str, symbol: str, exact_symbol: str) -> list[tuple[str, dict[str, Any]]]:
@@ -60,6 +98,15 @@ def main() -> int:
     parser.add_argument("--symbol", help="Loose symbol probe for search-oriented tools; defaults to live discovery")
     parser.add_argument("--exact-symbol", help="Exact symbol probe for path/impact/change_safety; defaults to live discovery")
     parser.add_argument("--timeout", type=int, default=20, help="Per-request timeout in seconds")
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=DEFAULT_SAMPLES,
+        help=(
+            "REQ-AXO-902589 — appels par outil (défaut %(default)s). `latency_ms` rend la "
+            "MÉDIANE ; min/max/échantillons sont rendus à côté pour que la queue reste visible."
+        ),
+    )
     parser.add_argument("--json-out", type=Path, help="Optional JSON output path")
     args = parser.parse_args()
 
@@ -71,12 +118,16 @@ def main() -> int:
     results: list[dict[str, Any]] = []
     for tool_name, tool_args in build_probe_rows(args.project, symbol, exact_symbol):
         try:
-            latency_ms, response = call_tool(args.url, args.timeout, tool_name, tool_args)
+            echantillons: list[float] = []
+            response = None
+            for _ in range(max(1, args.samples)):
+                latency_ms, response = call_tool(args.url, args.timeout, tool_name, tool_args)
+                echantillons.append(latency_ms)
             text = response_text(response)
             data = response_data(response)
             row: dict[str, Any] = {
                 "tool": tool_name,
-                "latency_ms": round(latency_ms, 1),
+                **summarise_samples(echantillons),
                 "ok": not bool(response.get("result", {}).get("isError")),
                 "text_preview": preview_text(text),
             }
@@ -104,6 +155,9 @@ def main() -> int:
         "symbol": symbol,
         "exact_symbol": exact_symbol,
         "discovered_probe": probe,
+        # REQ-AXO-902589 — dire COMBIEN d'échantillons ont produit ces chiffres.
+        # Une mesure qui ne déclare pas sa taille d'échantillon ne se compare à rien.
+        "samples_per_tool": max(1, args.samples),
         "results": results,
     }
     rendered = json.dumps(payload, ensure_ascii=False, indent=2)

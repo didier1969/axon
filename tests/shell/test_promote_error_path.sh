@@ -134,5 +134,35 @@ else
   pass "no backtick inside any command substitution (comments excluded)"
 fi
 
+# --- 5. l'avis d'echec ne doit pas etre un garde mort (REQ-AXO-902587) --------------
+# Signale independamment par LLL et DOC le meme jour. La branche testee ici est celle
+# ou `/readyz` vient de repondre : pour le destinataire, le service est REVENU. Un ⚠
+# qui ne lui demande RIEN lui apprend a ignorer les ⚠ qui, eux, demanderont quelque
+# chose — et 75 tenants recoivent ce message a chaque promote rate.
+echec_branche="$(sed -n '/broadcast_promote .*interrompu, sans impact/,+3p' "$PROMOTE")"
+
+if [[ -n "$echec_branche" ]] && ! grep -q '⚠' <<< "$echec_branche"; then
+  pass "l avis d echec ne porte plus de ⚠ alors que le service est revenu pour le lecteur"
+else
+  fail "l avis d echec crie encore sur un lecteur a qui il ne demande rien"
+fi
+
+# Ne pas diffuser une HYPOTHESE a 75 tenants : « a pu false-fail au qualify cold-start »
+# etait une supposition rendue comme une explication, et fausse les trois fois du
+# 2026-09-01 (la cause etait REQ-AXO-902589).
+if ! grep -q 'a pu false-fail' "$PROMOTE"; then
+  pass "aucune hypothese de cause n est diffusee au parc"
+else
+  fail "le broadcast affirme encore une cause qu il ne connait pas"
+fi
+
+# Un FAIT verifiable a la place : l etape qui a echoue. Le seul `rc` ne permettait pas
+# de distinguer un qualify d un cutover, ce que LLL demandait.
+if grep -q 'CURRENT_STEP_NAME:-?' <<< "$echec_branche"; then
+  pass "l avis nomme l ETAPE qui a echoue, un fait, la ou le rc seul ne disait rien"
+else
+  fail "l avis ne nomme toujours pas l etape en echec"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

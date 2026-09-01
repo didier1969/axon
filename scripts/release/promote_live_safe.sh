@@ -475,8 +475,30 @@ on_promote_exit() {
         "build_id=${final_build_id:-?} live. Si ton MCP est tombé depuis ${PROMOTE_TIMESTAMP} c'était CE promote (restart brain), pas un incident. Reconnecte via /mcp si ton binding de catalogue est stale. Tout est de nouveau disponible." \
         "promote-clear-${PROMOTE_TIMESTAMP}"
     else
-      broadcast_promote "⚠️ Promote ${PROJECT_CODE} sorti (rc=${rc}) — brain UP" \
-        "Le brain live RÉPOND (/readyz ok). Si ton MCP est tombé c'était le restart de CE promote (${PROMOTE_TIMESTAMP}), PAS un incident à diagnostiquer. Reconnecte via /mcp. (Le promote a pu false-fail au qualify cold-start ; l'opérateur AXO vérifie.)" \
+      # REQ-AXO-902587 — signalé indépendamment par LLL et DOC le même jour.
+      #
+      # L'ancien message disait « ⚠️ … rc=N » en sujet et « tout va bien » en corps.
+      # LLL : « le sujet dit ⚠, le corps dit que tout va bien, et le code de sortie dit
+      # trois choses différentes. Un avertissement qu'on apprend à ignorer est un garde
+      # mort. » DOC, le même jour : 10 de leurs 10 derniers non-lus étaient nos promotes.
+      #
+      # DEUX corrections, et la première est la vraie.
+      #
+      # 1. LA SÉVÉRITÉ DÉCRIT LA SITUATION DU LECTEUR, PAS CELLE DE L'ÉMETTEUR. Nous
+      #    sommes dans la branche où `/readyz` vient de répondre : pour le destinataire,
+      #    le service est REVENU. Notre promote a échoué, c'est notre affaire ; lui coller
+      #    un ⚠ lui fait ouvrir un diagnostic pour un incident qui n'est pas le sien.
+      #    Un ⚠ qui ne demande rien au lecteur lui apprend à ignorer les ⚠ qui, eux,
+      #    demanderont quelque chose.
+      #
+      # 2. NE PAS SPÉCULER À 75 TENANTS. L'ancien corps affirmait « le promote a pu
+      #    false-fail au qualify cold-start » — une hypothèse, diffusée comme une
+      #    explication, et fausse les trois fois du 2026-09-01 (la cause était
+      #    REQ-AXO-902589). On rend un FAIT vérifiable à la place : l'étape qui a
+      #    échoué. Elle suffit à distinguer un qualify d'un cutover, ce que le seul
+      #    `rc` ne permettait pas.
+      broadcast_promote "✅ MCP rétabli — promote ${PROJECT_CODE} interrompu, sans impact pour toi" \
+        "Le brain live RÉPOND (/readyz ok). Si ton MCP est tombé depuis ${PROMOTE_TIMESTAMP}, c'était le restart de CE promote, pas un incident : reconnecte via /mcp. Rien n'est attendu de toi. Pour mémoire, côté AXO : arrêt à l'étape ${CURRENT_STEP:-?} (${CURRENT_STEP_NAME:-?}), rc=${rc}. Nous n'en donnons pas la cause ici — nous ne la connaissons pas encore, et une hypothèse diffusée se lit comme une explication." \
         "promote-clear-${PROMOTE_TIMESTAMP}"
     fi
     # REQ-AXO-902304 — celui qui pollue nettoie. Le TTL ne sert à rien sans balayage
