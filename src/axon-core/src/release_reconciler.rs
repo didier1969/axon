@@ -469,6 +469,115 @@ pub fn attempt_next_action(f: &ReleaseFacts) -> Option<String> {
     }
 }
 
+/// REQ-AXO-902585 (défaut 3) — ce que le superviseur sait et que le battement PG
+/// ne peut pas savoir. Peuplé par `tools_release.rs` (qui tient l'IO) ; les gates
+/// restent des prédicats purs.
+#[derive(Debug, Clone, Default)]
+pub struct SupervisorFacts {
+    /// La sonde a-t-elle abouti ? Faux ⇒ tout verdict est `Unknown`, jamais vert.
+    pub reachable: bool,
+    /// Cause exacte quand elle n'aboutit pas — dite, pas devinée.
+    pub error: Option<String>,
+    /// Le rôle a-t-il été trouvé dans la réponse ? Un corps parsé sans ce rôle et
+    /// un corps illisible sont deux verdicts différents.
+    pub role_found: bool,
+    pub status: String,
+    pub restarts: i64,
+    pub pid: i64,
+    pub age_ms: i64,
+    /// Fraîcheur du battement PG, pour le recoupement.
+    pub heartbeat_age_ms: Option<i64>,
+}
+
+impl SupervisorFacts {
+    /// REQ-AXO-902585 — quadri-état en CHAÎNE. Un booléen se lirait « false » là où
+    /// la vérité est « je n'ai pas pu mesurer », et c'est exactement la confusion
+    /// que cette tranche supprime. Même principe qu'`ok_uncounted` sur `sql`.
+    pub fn restart_loop_label(&self) -> &'static str {
+        if !self.reachable {
+            "unmeasured"
+        } else if !self.role_found {
+            "unmeasured"
+        } else if self.status == "Restarting"
+            || (self.restarts >= crate::supervisor_probe::SUPERVISOR_RESTART_LOOP_MIN_RESTARTS
+                && self.age_ms < crate::supervisor_probe::SUPERVISOR_YOUNG_PROCESS_MS)
+        {
+            "detected"
+        } else if self.restarts >= 1
+            && self.age_ms < crate::supervisor_probe::SUPERVISOR_YOUNG_PROCESS_MS
+        {
+            "unproven"
+        } else {
+            "not_detected"
+        }
+    }
+}
+
+/// REQ-AXO-902585 — le verdict sur la STABILITÉ du rôle, distinct de sa vivacité.
+///
+/// `indexer_alive` répond « un battement récent existe-t-il ? ». Ce gate répond
+/// « le même processus tient-il ? ». Les deux sont vrais séparément : pendant la
+/// boucle mesurée, le premier passait et le second aurait dû rougir.
+pub fn evaluate_supervisor_gates(s: &SupervisorFacts) -> Vec<Gate> {
+    let gate = if !s.reachable {
+        Gate::unknown(
+            "indexer_process_stable",
+            format!(
+                "supervisor unreachable ({}) — restart-loop detection is NOT measurable here",
+                s.error.as_deref().unwrap_or("no reason given")
+            ),
+        )
+    } else if !s.role_found {
+        Gate::unknown(
+            "indexer_process_stable",
+            "supervisor answered but lists no `axon-indexer` — nothing to judge",
+        )
+    } else if s.status == "Restarting" {
+        // Détecteur PRIMAIRE, et il ne dépend d'aucun seuil : le superviseur dit
+        // lui-même qu'il relance.
+        Gate::fail(
+            "indexer_process_stable",
+            format!(
+                "axon-indexer is `Restarting` (restarts={}, pid={}) — the heartbeat is written by \
+                 each short-lived instance, so liveness looks healthy while nothing holds",
+                s.restarts, s.pid
+            ),
+        )
+    } else if s.restarts >= crate::supervisor_probe::SUPERVISOR_RESTART_LOOP_MIN_RESTARTS
+        && s.age_ms < crate::supervisor_probe::SUPERVISOR_YOUNG_PROCESS_MS
+    {
+        Gate::fail(
+            "indexer_process_stable",
+            format!(
+                "restart loop: {} restarts and the current process is only {} ms old",
+                s.restarts, s.age_ms
+            ),
+        )
+    } else if s.restarts >= 1 && s.age_ms < crate::supervisor_probe::SUPERVISOR_YOUNG_PROCESS_MS {
+        // ⚠ Unknown, PAS Fail. Un rouge ici se déclencherait pendant 60 s après le
+        // remède que l'outil recommande lui-même (« restart the indexer only ») et
+        // pendant chaque cutover, qui redémarre le rôle en place. L'outil dirait de
+        // redémarrer, puis crierait « boucle » sur son propre conseil.
+        Gate::unknown(
+            "indexer_process_stable",
+            format!(
+                "axon-indexer restarted recently ({} restarts, up {} ms) — too early to tell a \
+                 deliberate restart from a loop",
+                s.restarts, s.age_ms
+            ),
+        )
+    } else {
+        Gate::pass(
+            "indexer_process_stable",
+            format!(
+                "axon-indexer {} (pid={}, restarts={}, up {} ms)",
+                s.status, s.pid, s.restarts, s.age_ms
+            ),
+        )
+    };
+    vec![gate]
+}
+
 /// REQ-AXO-902585 — la porte qui rend visible ce que `attempt_next_action` explique.
 /// `running` → `Unknown`, jamais `Fail` : voir la note ci-dessus.
 pub fn evaluate_attempt_gate(f: &ReleaseFacts) -> Gate {
@@ -1258,6 +1367,83 @@ mod tests {
             action.contains("that same attempt then"),
             "le cas « échec APRÈS finalisation » doit être dit à part : {action}"
         );
+    }
+
+    /// REQ-AXO-902585 (défaut 3) — LE test qui nomme le défaut mesuré : la liveness
+    /// PASSE (battement frais) pendant que le superviseur relance en boucle.
+    #[test]
+    fn a_restart_loop_is_caught_even_when_the_heartbeat_looks_healthy() {
+        let l = live(true, true, true, "healthy", "pg_heartbeat");
+        assert!(
+            evaluate_liveness_gates(&l).iter().all(|g| g.passes()),
+            "le battement PG est frais : `indexer_alive` PASSE, et c'est correct"
+        );
+        // Et pourtant, les valeurs exactes de l'incident du 2026-09-01 :
+        let s = SupervisorFacts {
+            reachable: true,
+            role_found: true,
+            status: "Restarting".to_string(),
+            restarts: 13,
+            pid: 527117,
+            age_ms: 8_000,
+            ..Default::default()
+        };
+        let gate = evaluate_supervisor_gates(&s)
+            .into_iter()
+            .next()
+            .expect("un gate");
+        assert!(
+            gate.is_red(),
+            "le superviseur dit `Restarting` : c'est une panne, pas une santé : {gate:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_supervisor_is_unknown_never_green() {
+        let s = SupervisorFacts {
+            reachable: false,
+            error: Some("connect 127.0.0.1:8080: refused".to_string()),
+            ..Default::default()
+        };
+        let gate = evaluate_supervisor_gates(&s).into_iter().next().unwrap();
+        assert!(!gate.passes(), "une sonde muette n'est jamais un feu vert");
+        assert!(!gate.is_red(), "et pas un rouge non plus : on ne sait pas");
+        assert!(
+            gate.detail.contains("refused"),
+            "la cause remonte telle quelle : {}",
+            gate.detail
+        );
+    }
+
+    /// Un redémarrage DÉLIBÉRÉ n'est pas une boucle — et c'est ce qui empêche
+    /// l'outil de crier « boucle » sur le remède qu'il vient lui-même de conseiller.
+    #[test]
+    fn an_intentional_single_restart_is_not_a_loop() {
+        let s = SupervisorFacts {
+            reachable: true,
+            role_found: true,
+            status: "Running".to_string(),
+            restarts: 1,
+            age_ms: 5_000,
+            ..Default::default()
+        };
+        let gate = evaluate_supervisor_gates(&s).into_iter().next().unwrap();
+        assert!(!gate.is_red() && !gate.passes(), "ni l'un ni l'autre : {gate:?}");
+    }
+
+    /// Beaucoup de redémarrages MAIS un processus qui tient depuis une heure : ce
+    /// n'est plus une boucle, c'est une histoire.
+    #[test]
+    fn many_restarts_on_an_old_process_is_a_pass() {
+        let s = SupervisorFacts {
+            reachable: true,
+            role_found: true,
+            status: "Running".to_string(),
+            restarts: 29,
+            age_ms: 3_600_000,
+            ..Default::default()
+        };
+        assert!(evaluate_supervisor_gates(&s)[0].passes());
     }
 
     /// Aucune projection sur disque : on ne sait rien, et on le dit.

@@ -13,10 +13,60 @@ use super::runtime_topology_support::{
 use super::McpServer;
 use crate::release_reconciler::{
     attempt_next_action, evaluate_attempt_gate, evaluate_gates, evaluate_liveness_gates,
-    liveness_next_action, liveness_phase, next_action, phase, LivenessFacts, ReleaseFacts,
+    evaluate_supervisor_gates, liveness_next_action, liveness_phase, next_action, phase,
+    LivenessFacts, ReleaseFacts, SupervisorFacts,
 };
+use crate::supervisor_probe;
 
 impl McpServer {
+    /// REQ-AXO-902585 (défaut 3) — interroger le superviseur, en tolérant strictement
+    /// son absence : injoignable ⇒ champs vides et cause NOMMÉE, jamais un faux vert.
+    ///
+    /// L'échappatoire `AXON_PROMOTE_STATUS_SUPERVISOR_PROBE=0` désactive la sonde ;
+    /// elle se déclare alors comme désactivée, donc impossible à lire comme saine.
+    fn collect_supervisor_facts(&self, heartbeat_age_ms: Option<i64>) -> SupervisorFacts {
+        let mut facts = SupervisorFacts {
+            heartbeat_age_ms,
+            ..Default::default()
+        };
+        if std::env::var("AXON_PROMOTE_STATUS_SUPERVISOR_PROBE").as_deref() == Ok("0") {
+            facts.error = Some("probe disabled (AXON_PROMOTE_STATUS_SUPERVISOR_PROBE=0)".into());
+            return facts;
+        }
+        let port = supervisor_probe::supervisor_port_from(
+            std::env::var("AXON_SUPERVISOR_PORT").ok(),
+            &crate::env_alias::read_with_alias_or("AXON_INSTANCE", "AXON_INSTANCE_KIND", "live"),
+        );
+        let addr = supervisor_probe::supervisor_addr(port);
+        let body = match supervisor_probe::fetch_processes(
+            addr,
+            std::time::Duration::from_millis(supervisor_probe::SUPERVISOR_CONNECT_TIMEOUT_MS),
+            std::time::Duration::from_millis(supervisor_probe::SUPERVISOR_READ_TIMEOUT_MS),
+        ) {
+            Ok(body) => body,
+            Err(error) => {
+                facts.error = Some(error);
+                return facts;
+            }
+        };
+        let processes = match supervisor_probe::parse_processes(&body) {
+            Ok(processes) => processes,
+            Err(error) => {
+                facts.error = Some(error);
+                return facts;
+            }
+        };
+        facts.reachable = true;
+        if let Some(p) = processes.iter().find(|p| p.name == "axon-indexer") {
+            facts.role_found = true;
+            facts.status = p.status.clone();
+            facts.restarts = p.restarts;
+            facts.pid = p.pid;
+            facts.age_ms = p.age_ms();
+        }
+        facts
+    }
+
     pub(crate) fn axon_promote_status(&self, _args: &Value) -> Option<Value> {
         let live_build_id = std::env::var("AXON_BUILD_ID").unwrap_or_default();
         let release_dir = std::env::current_dir()
@@ -52,6 +102,14 @@ impl McpServer {
         gates.extend(evaluate_liveness_gates(&lf));
         // REQ-AXO-902585 (défaut 2) — la dernière tentative enregistrée a son mot à dire.
         gates.push(evaluate_attempt_gate(&facts));
+        // REQ-AXO-902585 (défaut 3) — et le superviseur dit ce que le battement PG
+        // ne peut pas dire : le compteur de redémarrages et l'âge du processus.
+        //
+        // ⚠ Ce gate rejoint `gates` ICI, et surtout PAS `evaluate_liveness_gates` :
+        // `CutoverFacts::new_healthy()` exige que TOUS les gates de liveness passent,
+        // et un `Unknown` y enverrait chaque cutover en auto-rollback.
+        let sup = self.collect_supervisor_facts(hb.as_ref().map(|r| now_ms - r.heartbeat_ms));
+        gates.extend(evaluate_supervisor_gates(&sup));
         // REQ-AXO-902585 — `failed_gates` ne porte que les gates VRAIMENT rouges.
         // Sûreté, pas style : `promote_live_safe.sh` teste `recon_failed ==
         // "indexer_alive"` par ÉGALITÉ EXACTE, et tout autre contenu le fait basculer
@@ -163,6 +221,19 @@ impl McpServer {
                         "indexer_ready": lf.indexer_ready,
                         "indexer_lifecycle": lf.indexer_lifecycle,
                         "indexer_source": lf.indexer_source,
+                        // REQ-AXO-902585 — quadri-état en CHAÎNE, jamais un booléen
+                        // qui se lirait « false » quand la vérité est « je ne sais pas ».
+                        "indexer_restart_loop": sup.restart_loop_label(),
+                        "supervisor": {
+                            "source": "process_compose_http",
+                            "reachable": sup.reachable,
+                            "error": sup.error,
+                            "role_found": sup.role_found,
+                            "status": sup.status,
+                            "pid": sup.pid,
+                            "restarts": sup.restarts,
+                            "process_age_ms": sup.age_ms,
+                        },
                     },
                 },
                 "gates": gates_json,

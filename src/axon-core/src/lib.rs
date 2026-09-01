@@ -55,6 +55,9 @@ pub mod runtime_mode;
 pub mod runtime_observability;
 pub mod runtime_operational_profile;
 pub mod release_reconciler;
+// REQ-AXO-902585 — sonde de lecture du superviseur : le compteur de redémarrages
+// et l'âge du processus, que le battement PG ne peut structurellement pas porter.
+pub mod supervisor_probe;
 pub mod release_reconciler_ascent;
 pub mod structural_health;
 pub mod runtime_capacity_profile;
