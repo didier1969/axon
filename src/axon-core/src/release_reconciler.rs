@@ -64,6 +64,20 @@ pub struct ReleaseFacts {
     pub artifact_sha256: Option<String>,
     /// Last durable attempt projection (`attempt-current.json`).
     pub attempt: Option<Value>,
+    /// REQ-AXO-902585 (défaut 2) — la DERNIÈRE tentative de promotion enregistrée.
+    ///
+    /// `attempt-current.json` est monotone : chaque tentative le réécrit en acquérant
+    /// le bail. C'est donc toujours la plus récente, ce qui autorise la lecture
+    /// « une promotion a échoué DEPUIS ». Sans ces champs, `phase: "clean"` (vrai au
+    /// contrat : manifeste == runtime) produisait `next_action: null`, et un agent
+    /// concluait « rien à faire » alors que l'outil portait lui-même la preuve que le
+    /// changement qu'on voulait livrer n'est PAS en vigueur. Il fallait ouvrir le
+    /// `.jsonl` à la main pour l'apprendre.
+    pub attempt_id: Option<String>,
+    pub attempt_status: Option<String>,
+    pub attempt_phase: Option<String>,
+    pub attempt_last_event_detail: Option<String>,
+    pub attempt_journal_path: Option<String>,
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -135,6 +149,18 @@ impl ReleaseFacts {
             .and_then(Value::as_str)
             .map(str::to_string);
         let attempt = read_json(&release_dir.join("attempt-current.json"));
+        let champ_attempt = |cle: &str| -> Option<String> {
+            attempt
+                .as_ref()?
+                .get(cle)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        let attempt_id = champ_attempt("release_attempt_id");
+        let attempt_status = champ_attempt("status");
+        let attempt_phase = champ_attempt("phase");
+        let attempt_last_event_detail = champ_attempt("last_event_detail");
+        let attempt_journal_path = champ_attempt("journal_path");
         ReleaseFacts {
             live_build_id,
             manifest_build_id,
@@ -149,6 +175,11 @@ impl ReleaseFacts {
             pending_release_attempt_id,
             artifact_sha256,
             attempt,
+            attempt_id,
+            attempt_status,
+            attempt_phase,
+            attempt_last_event_detail,
+            attempt_journal_path,
         }
     }
 
@@ -394,6 +425,82 @@ pub fn next_action(f: &ReleaseFacts) -> Option<String> {
             Some("no current.json manifest — run an initial promote to record the live release.".to_string())
         }
         _ => None,
+    }
+}
+
+/// REQ-AXO-902585 (défaut 2) — l'échec que `phase: "clean"` ne dit pas.
+///
+/// `clean` est vrai AU CONTRAT (manifeste == runtime) et c'est cette vérité étroite
+/// qui produisait `next_action: null`. Mais l'outil porte dans son propre `trace` la
+/// preuve qu'une promotion a échoué depuis, et que le `release_attempt_id` courant
+/// n'est pas celui de cette tentative. Un agent lisait « rien à faire » et repartait.
+///
+/// Rendu en DERNIÈRE priorité : la liveness et la phase de release parlent d'abord,
+/// parce qu'un service à terre prime sur un déploiement raté.
+pub fn attempt_next_action(f: &ReleaseFacts) -> Option<String> {
+    // `running` n'est PAS un échec — et ce n'est pas un détail : pendant un promote,
+    // `attempt-current.status` vaut « running », et le script relit `promote_status`
+    // en boucle. Y voir un problème ferait basculer le promote en redémarrage
+    // complet, en plein vol.
+    if f.attempt_status.as_deref() != Some("failed") {
+        return None;
+    }
+    let id = f.attempt_id.as_deref().unwrap_or("<unknown>");
+    let phase_echec = f.attempt_phase.as_deref().unwrap_or("<unknown>");
+    let detail = f.attempt_last_event_detail.as_deref().unwrap_or("<none>");
+    let journal = f.attempt_journal_path.as_deref().unwrap_or("<none>");
+    let meme_tentative = f.attempt_id.is_some() && f.attempt_id == f.release_attempt_id;
+    if meme_tentative {
+        Some(format!(
+            "the live manifest WAS produced by attempt {id}, and that same attempt then \
+             FAILED at phase={phase_echec} ({detail}). Do not read this as a complete \
+             release: a later step failed after the manifest was finalised. Read the \
+             journal: `tail -5 {journal}`."
+        ))
+    } else {
+        Some(format!(
+            "the release is coherent (running == manifest), BUT the most recent recorded \
+             promote attempt {id} FAILED at phase={phase_echec} ({detail}); the live \
+             manifest was produced by a DIFFERENT attempt ({}). Nothing is down right now \
+             — but the change you tried to ship is NOT live. Read the journal: \
+             `tail -5 {journal}`.",
+            f.release_attempt_id.as_deref().unwrap_or("<none>")
+        ))
+    }
+}
+
+/// REQ-AXO-902585 — la porte qui rend visible ce que `attempt_next_action` explique.
+/// `running` → `Unknown`, jamais `Fail` : voir la note ci-dessus.
+pub fn evaluate_attempt_gate(f: &ReleaseFacts) -> Gate {
+    match f.attempt_status.as_deref() {
+        Some("completed") => Gate::pass(
+            "last_promote_attempt",
+            format!(
+                "attempt {} completed",
+                f.attempt_id.as_deref().unwrap_or("<unknown>")
+            ),
+        ),
+        Some("failed") => Gate::fail(
+            "last_promote_attempt",
+            format!(
+                "attempt {} FAILED at phase={} — {}",
+                f.attempt_id.as_deref().unwrap_or("<unknown>"),
+                f.attempt_phase.as_deref().unwrap_or("<unknown>"),
+                f.attempt_last_event_detail.as_deref().unwrap_or("<none>")
+            ),
+        ),
+        Some("running") => Gate::unknown(
+            "last_promote_attempt",
+            "a promote is running right now — its verdict is not knowable yet",
+        ),
+        Some(other) => Gate::unknown(
+            "last_promote_attempt",
+            format!("attempt status `{other}` — neither completed nor failed"),
+        ),
+        None => Gate::unknown(
+            "last_promote_attempt",
+            "no attempt projection on disk — nothing to say about the last promote",
+        ),
     }
 }
 
@@ -827,6 +934,7 @@ mod tests {
             pending_release_attempt_id: None,
             artifact_sha256: None,
             attempt: None,
+            ..Default::default()
         }
     }
 
@@ -1092,6 +1200,73 @@ mod tests {
             "le rouge en vol ne doit pas être masqué par le vert déjà promu"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// REQ-AXO-902585 (défaut 2) — `phase: "clean"` est vrai au contrat et taisait
+    /// pourtant qu'une promotion venait d'échouer. Mesuré deux fois le 2026-09-01 :
+    /// après un `cutover_finalize` refusé puis un `qualify_mcp` en warn, l'outil
+    /// rendait `phase: clean`, `failed_gates: []`, `next_action: null` — « rien à
+    /// faire » — alors que le changement qu'on voulait livrer n'était pas en vigueur.
+    #[test]
+    fn a_failed_last_attempt_is_not_silent_when_the_release_is_clean() {
+        let mut f = facts("v1", Some("v1"), false);
+        f.release_attempt_id = Some("attempt-QUI-A-PROMU".to_string());
+        f.attempt_id = Some("attempt-QUI-A-ECHOUE".to_string());
+        f.attempt_status = Some("failed".to_string());
+        f.attempt_phase = Some("qualify_mcp".to_string());
+        f.attempt_last_event_detail = Some("exit_code=1".to_string());
+        f.attempt_journal_path = Some("/tmp/attempts/x.jsonl".to_string());
+
+        assert_eq!(phase(&f), "clean", "la phase reste vraie AU CONTRAT");
+        let action = attempt_next_action(&f).expect("l'échec ne doit plus être muet");
+        assert!(
+            action.contains("attempt-QUI-A-ECHOUE") && action.contains("qualify_mcp"),
+            "l'action doit nommer la tentative et l'étape : {action}"
+        );
+        assert!(
+            action.contains("/tmp/attempts/x.jsonl"),
+            "et pointer le journal, pour ne pas le chercher à la main : {action}"
+        );
+        assert!(evaluate_attempt_gate(&f).is_red());
+    }
+
+    /// Un promote EN COURS n'est pas un échec. Cette distinction n'est pas
+    /// cosmétique : pendant un promote, `attempt-current.status` vaut « running » et
+    /// le script relit `promote_status` en boucle — un rouge ici le ferait basculer
+    /// en redémarrage complet du brain, EN PLEIN VOL.
+    #[test]
+    fn a_running_attempt_is_unknown_not_failed() {
+        let mut f = facts("v1", Some("v1"), false);
+        f.attempt_status = Some("running".to_string());
+        let gate = evaluate_attempt_gate(&f);
+        assert!(!gate.is_red(), "jamais rouge pendant un promote : {gate:?}");
+        assert!(!gate.passes(), "et pas vert non plus : rien n'est encore su");
+        assert_eq!(attempt_next_action(&f), None);
+    }
+
+    /// Le manifeste servi a été produit par la tentative qui a ensuite échoué :
+    /// autre conseil, autre phrase.
+    #[test]
+    fn a_failure_after_finalisation_says_so_explicitly() {
+        let mut f = facts("v1", Some("v1"), false);
+        f.release_attempt_id = Some("attempt-MEME".to_string());
+        f.attempt_id = Some("attempt-MEME".to_string());
+        f.attempt_status = Some("failed".to_string());
+        f.attempt_phase = Some("cutover_finalize".to_string());
+        let action = attempt_next_action(&f).expect("action attendue");
+        assert!(
+            action.contains("that same attempt then"),
+            "le cas « échec APRÈS finalisation » doit être dit à part : {action}"
+        );
+    }
+
+    /// Aucune projection sur disque : on ne sait rien, et on le dit.
+    #[test]
+    fn an_absent_attempt_projection_is_unknown_not_green() {
+        let f = facts("v1", Some("v1"), false);
+        let gate = evaluate_attempt_gate(&f);
+        assert!(!gate.passes() && !gate.is_red());
+        assert_eq!(attempt_next_action(&f), None);
     }
 
     /// « Sauté » n'est pas « passé ».

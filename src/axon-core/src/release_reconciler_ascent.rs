@@ -211,6 +211,7 @@ mod tests {
                                 pending_release_attempt_id: None,
                                 artifact_sha256: None,
                                 attempt: None,
+                                ..Default::default()
                             };
                             let l = LivenessFacts {
                                 brain_serving: brain,
@@ -306,6 +307,7 @@ mod tests {
                         pending_release_attempt_id: None,
                         artifact_sha256: None,
                         attempt: None,
+                        ..Default::default()
                     };
                     let gates = evaluate_gates(&f);
                     let rust = (

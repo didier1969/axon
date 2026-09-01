@@ -12,8 +12,8 @@ use super::runtime_topology_support::{
 };
 use super::McpServer;
 use crate::release_reconciler::{
-    evaluate_gates, evaluate_liveness_gates, liveness_next_action, liveness_phase, next_action,
-    phase, LivenessFacts, ReleaseFacts,
+    attempt_next_action, evaluate_attempt_gate, evaluate_gates, evaluate_liveness_gates,
+    liveness_next_action, liveness_phase, next_action, phase, LivenessFacts, ReleaseFacts,
 };
 
 impl McpServer {
@@ -50,6 +50,8 @@ impl McpServer {
 
         let mut gates = evaluate_gates(&facts);
         gates.extend(evaluate_liveness_gates(&lf));
+        // REQ-AXO-902585 (défaut 2) — la dernière tentative enregistrée a son mot à dire.
+        gates.push(evaluate_attempt_gate(&facts));
         // REQ-AXO-902585 — `failed_gates` ne porte que les gates VRAIMENT rouges.
         // Sûreté, pas style : `promote_live_safe.sh` teste `recon_failed ==
         // "indexer_alive"` par ÉGALITÉ EXACTE, et tout autre contenu le fait basculer
@@ -64,7 +66,11 @@ impl McpServer {
             .collect();
         // Liveness failures take precedence over the release-state phase/action.
         let ph = liveness_phase(&lf).unwrap_or_else(|| phase(&facts));
-        let action = liveness_next_action(&lf).or_else(|| next_action(&facts));
+        // REQ-AXO-902585 — en DERNIER : un service à terre prime sur un déploiement
+        // raté, mais un déploiement raté prime sur le silence.
+        let action = liveness_next_action(&lf)
+            .or_else(|| next_action(&facts))
+            .or_else(|| attempt_next_action(&facts));
         let mut trace = facts.attempt.clone().unwrap_or_else(|| {
             json!({
                 "release_attempt_id": facts.release_attempt_id.clone(),
@@ -76,6 +82,22 @@ impl McpServer {
             })
         });
         if let Some(object) = trace.as_object_mut() {
+            // REQ-AXO-902585 — dire si la tentative tracée est celle qui a produit le
+            // manifeste servi. Sans ça, il fallait comparer deux ids à l'œil.
+            object.insert(
+                "manifest_release_attempt_id".to_string(),
+                facts
+                    .release_attempt_id
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            );
+            object.insert(
+                "diverges_from_manifest".to_string(),
+                Value::Bool(
+                    facts.attempt_id.is_some() && facts.attempt_id != facts.release_attempt_id,
+                ),
+            );
             object.insert(
                 "artifact_sha256".to_string(),
                 facts
