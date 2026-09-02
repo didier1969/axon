@@ -74,6 +74,10 @@ fn embed_provider_compute_mismatch(effective_provider: &str, observed_compute: &
     provider_intends_gpu && !observed_compute.eq_ignore_ascii_case("GPU")
 }
 
+fn semantic_lane_is_blocked(pending_chunks: i64, active_workers: Option<i64>) -> bool {
+    pending_chunks > 0 && active_workers.is_some_and(|active| active == 0)
+}
+
 impl McpServer {
     pub(crate) fn axon_resume_vectorization(&self, _args: &Value) -> Option<Value> {
         let runtime_mode = AxonRuntimeMode::from_env();
@@ -699,17 +703,54 @@ impl McpServer {
             .ok()
             .flatten()
             .filter(|row| (now_ms - row.heartbeat_ms).max(0) <= HEARTBEAT_FRESHNESS_MS);
+        let indexer_runtime_truth = self
+            .graph_store
+            .latest_indexer_runtime_truth("indexer")
+            .ok()
+            .flatten()
+            .filter(|row| (now_ms - row.heartbeat_ms).max(0) <= HEARTBEAT_FRESHNESS_MS);
+
+        // REQ-AXO-902597 — a fresh process heartbeat proves only that the
+        // indexer process lives. It does NOT prove pipeline B has a worker.
+        // Project the owner-published admission truth so `embedding_status`
+        // cannot call a 0-worker durable backlog active again.
+        let semantic_lane_blocked = semantic_lane_is_blocked(
+            pending_chunks,
+            indexer_runtime_truth
+                .as_ref()
+                .map(|truth| truth.vector_workers_active_current),
+        );
 
         // Slice 3 SOTA — single source of truth for pipeline status +
         // blocked_reason. Same function dashboard_state.rs uses so the
         // operator sees identical strings across MCP + dashboard.
-        let (pipeline_status, blocked_reason) = crate::dashboard_state::compute_pipeline_status(
-            AxonRuntimeMode::from_env().as_str(),
-            runtime_pending_empty,
-            pending_chunks,
-            None,
-            indexer_heartbeat.is_some(),
-        );
+        let (pipeline_status, blocked_reason) = if semantic_lane_blocked {
+            (
+                "indexer_idle_blocked",
+                Some("semantic_vector_workers_not_running"),
+            )
+        } else {
+            crate::dashboard_state::compute_pipeline_status(
+                AxonRuntimeMode::from_env().as_str(),
+                runtime_pending_empty,
+                pending_chunks,
+                None,
+                indexer_heartbeat.is_some(),
+            )
+        };
+        let semantic_lane_line = match indexer_runtime_truth.as_ref() {
+            Some(truth) => format!(
+                "- Semantic admission (indexer-owned): mode={} enabled={} configured={} active={} started_total={} reason={} allowed_gpu_workers={}",
+                truth.runtime_mode,
+                truth.semantic_workers_enabled,
+                truth.vector_workers_configured,
+                truth.vector_workers_active_current,
+                truth.vector_workers_started_total,
+                truth.vector_worker_admission_reason,
+                truth.allowed_gpu_workers,
+            ),
+            None => "- Semantic admission (indexer-owned): unavailable — a process heartbeat alone does not prove vector workers are running".to_string(),
+        };
 
         // PIL-AXO-007 (REQ-AXO-901916) — the pipeline-A claim feeder and the
         // status='discovered' work queue were retired. Pipeline A is fed directly by the
@@ -1005,6 +1046,7 @@ impl McpServer {
              - B3 batch:          {b3_batch} chunks, timeout {b3_timeout} ms\n\
              - B fed via:        sorted-drain (ORDER BY token_count, reservoir + channel backpressure, 200ms→30s idle backoff) — DEC-AXO-901631\n\
              - Runtime idle (pending=0): {runtime_pending_empty}\n\
+             {semantic_lane_line}\n\
              - Lifecycle phase: {lifecycle_phase}  (wake_count={lifecycle_wake_count}, sleep_count={lifecycle_sleep_count}, source={lifecycle_source}{heartbeat_age_suffix})\n\
              - Compute (observed): {observed_compute}  (source={observed_compute_source}) — DEC-AXO-901626, same canonical signal as status.embedder_runtime + dashboard{provider_mismatch_line}\n\
              {b3_health_line}\n\
@@ -1069,6 +1111,17 @@ impl McpServer {
                 // so MCP + dashboard agree.
                 "pipeline_status": pipeline_status,
                 "blocked_reason": blocked_reason,
+                "semantic_lane": indexer_runtime_truth.as_ref().map(|truth| json!({
+                    "source": "indexer_runtime_truth",
+                    "runtime_mode": truth.runtime_mode,
+                    "semantic_workers_enabled": truth.semantic_workers_enabled,
+                    "vector_workers_configured": truth.vector_workers_configured,
+                    "vector_workers_active_current": truth.vector_workers_active_current,
+                    "vector_workers_started_total": truth.vector_workers_started_total,
+                    "vector_worker_admission_reason": truth.vector_worker_admission_reason,
+                    "allowed_gpu_workers": truth.allowed_gpu_workers,
+                    "heartbeat_age_ms": (now_ms - truth.heartbeat_ms).max(0),
+                })),
                 "lifecycle_phase": lifecycle_phase,
                 "lifecycle_last_used_ms": lifecycle_last_used_ms,
                 "lifecycle_wake_count": lifecycle_wake_count,
@@ -2002,6 +2055,27 @@ mod provider_compute_mismatch_tests {
     fn a_cpu_provider_on_gpu_is_not_a_defect() {
         // The GPU being better than the resolved intent is not a silent fallback.
         assert!(!m("cpu", "GPU"));
+    }
+}
+
+#[cfg(test)]
+mod semantic_lane_status_tests {
+    use super::semantic_lane_is_blocked;
+
+    #[test]
+    fn pending_backlog_and_owner_observed_zero_workers_blocks() {
+        assert!(semantic_lane_is_blocked(29_492, Some(0)));
+    }
+
+    #[test]
+    fn active_worker_or_empty_backlog_does_not_block() {
+        assert!(!semantic_lane_is_blocked(29_492, Some(1)));
+        assert!(!semantic_lane_is_blocked(0, Some(0)));
+    }
+
+    #[test]
+    fn absent_owner_truth_is_unknown_not_a_fabricated_worker_failure() {
+        assert!(!semantic_lane_is_blocked(29_492, None));
     }
 }
 

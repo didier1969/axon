@@ -126,16 +126,11 @@ processes:
     command: "${AXON_INDEXER_BIN:-bin/axon-indexer}"
     working_dir: "."
     environment:
-      # REQ-AXO-902576 — defaut `indexer_graph`, PAS `indexer_full`, tant que le
-      # crash d'init CUDA n'est pas instrumente. C'est le MODE qui declenche
-      # l'init GPU (`runtime_mode.semantic_workers_enabled()`,
-      # pipeline_runtime.rs:375), pas le provider : demarrer en `indexer_full`
-      # avec provider=cpu passait quand meme par l'init CUDA et mourait.
-      # En `indexer_graph` la pipeline B ne demarre pas : le graphe est indexe
-      # (donc la fraicheur revient), seule la vectorisation attend le correctif.
-      # Deroge temporairement au standing live `indexer_full` de DEC-AXO-901672 ;
-      # y revenir des que 902576 est livre : AXON_INDEXER_MODE=indexer_full.
-      - "AXON_RUNTIME_MODE=${AXON_INDEXER_MODE:-indexer_graph}"
+      # DEC-AXO-901672 / REQ-AXO-902597 — the live standing mode includes both
+      # graph ingestion and semantic workers. Operators can still override the
+      # mode explicitly for incident isolation; a silent graph-only default is
+      # forbidden because it leaves the durable embedding queue undrained.
+      - "AXON_RUNTIME_MODE=${AXON_INDEXER_MODE:-indexer_full}"
       # REQ-AXO-902576 — l'init CUDA fait planter le process sans un mot : trois
       # demarrages sur trois s'arretent sur « using CUDA EP » puis silence,
       # exit=-1, aucune trace noyau, GPU LIBRE (l'explication VRAM est refutee).

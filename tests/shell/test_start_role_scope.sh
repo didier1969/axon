@@ -50,6 +50,12 @@ echo 'PASS  dev launcher and child agree on indexer health port 44149'
 LIVE_YAML="$ROOT_DIR/process-compose.live.yaml"
 LIVE_ENV_TEMPLATE="$ROOT_DIR/config/axon-live.env.template"
 
+if ! grep -Fq 'AXON_RUNTIME_MODE=${AXON_INDEXER_MODE:-indexer_full}' "$LIVE_YAML"; then
+    echo 'FAIL  live indexer default does not include semantic workers' >&2
+    exit 1
+fi
+echo 'PASS  live indexer defaults to indexer_full (graph + semantic workers)'
+
 for expected in \
     'AXON_A2_WORKERS=${AXON_INDEXER_A2_WORKERS:-8}' \
     'AXON_A3_WORKERS=${AXON_INDEXER_A3_WORKERS:-2}' \

@@ -368,7 +368,12 @@ fn gpu_vector_lease_owner_identity() -> String {
 fn gpu_vector_lease_path() -> PathBuf {
     std::env::var("AXON_GPU_VECTOR_LEASE_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/axon-gpu-vectorization.lock"))
+        .unwrap_or_else(|_| {
+            let run_root = std::env::var("AXON_RUN_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from(".axon/run"));
+            run_root.join("gpu-vectorization.lock")
+        })
 }
 
 fn try_claim_gpu_vector_lease() -> bool {
@@ -381,6 +386,11 @@ fn try_claim_gpu_vector_lease() -> bool {
         .unwrap_or_else(|poison| poison.into_inner());
     if guard.is_some() {
         return true;
+    }
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return false;
+        }
     }
     let Ok(file) = OpenOptions::new()
         .create(true)
@@ -1254,6 +1264,16 @@ pub struct VectorWorkerAdmissionDecision {
     pub allowed_gpu_workers: usize,
 }
 
+fn publish_vector_worker_admission(
+    decision: VectorWorkerAdmissionDecision,
+) -> VectorWorkerAdmissionDecision {
+    service_guard::record_vector_worker_admission_reason(
+        decision.reason,
+        decision.allowed_gpu_workers,
+    );
+    decision
+}
+
 pub fn vector_worker_admission_decision(
     worker_idx: usize,
     service_pressure: ServicePressure,
@@ -1265,49 +1285,49 @@ pub fn vector_worker_admission_decision(
         let allowed_interactive_workers = if gpu_available { 1 } else { 0 };
         if worker_idx >= allowed_interactive_workers {
             service_guard::record_vectorization_suppressed();
-            return VectorWorkerAdmissionDecision {
+            return publish_vector_worker_admission(VectorWorkerAdmissionDecision {
                 admitted: false,
                 reason: "interactive_requests_in_flight",
                 allowed_gpu_workers: allowed_interactive_workers,
-            };
+            });
         }
     } else if service_guard::interactive_priority_active() {
         service_guard::record_vectorization_suppressed();
-        return VectorWorkerAdmissionDecision {
+        return publish_vector_worker_admission(VectorWorkerAdmissionDecision {
             admitted: false,
             reason: "interactive_priority_active",
             allowed_gpu_workers: 0,
-        };
+        });
     }
     if !gpu_available {
-        return VectorWorkerAdmissionDecision {
+        return publish_vector_worker_admission(VectorWorkerAdmissionDecision {
             admitted: true,
             reason: "gpu_not_required",
             allowed_gpu_workers: 0,
-        };
+        });
     }
     if !try_claim_gpu_vector_lease() {
         service_guard::record_vectorization_suppressed();
-        return VectorWorkerAdmissionDecision {
+        return publish_vector_worker_admission(VectorWorkerAdmissionDecision {
             admitted: false,
             reason: "gpu_vector_lease_unavailable",
             allowed_gpu_workers: 0,
-        };
+        });
     }
     let allowed_gpu_workers = allowed_gpu_vector_workers(file_backlog_depth, service_pressure);
     if worker_idx >= allowed_gpu_workers {
         service_guard::record_vectorization_suppressed();
-        return VectorWorkerAdmissionDecision {
+        return publish_vector_worker_admission(VectorWorkerAdmissionDecision {
             admitted: false,
             reason: "allowed_gpu_worker_cap",
             allowed_gpu_workers,
-        };
+        });
     }
-    VectorWorkerAdmissionDecision {
+    publish_vector_worker_admission(VectorWorkerAdmissionDecision {
         admitted: true,
         reason: "admitted",
         allowed_gpu_workers,
-    }
+    })
 }
 
 pub fn vector_worker_admitted(
@@ -1551,9 +1571,30 @@ mod tests {
         assert!(diagnostics.owned_by_current_instance);
         assert_eq!(diagnostics.owner_identity.as_deref(), Some("test-dev"));
         assert_eq!(diagnostics.path, lease_path.to_string_lossy().to_string());
+        assert_eq!(
+            service_guard::current_vector_worker_admission_reason(),
+            "admitted"
+        );
 
         // The guards restore the environment as they drop; only the process-global lease
         // cache still needs an explicit reset for the tests that follow.
         reset_gpu_vector_lease_for_tests();
+    }
+
+    #[test]
+    fn gpu_vector_lease_defaults_to_the_role_run_root_not_tmp() {
+        let _lock = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _g_path = crate::test_support::EnvVarGuard::unset("AXON_GPU_VECTOR_LEASE_PATH");
+        let _g_root =
+            crate::test_support::EnvVarGuard::set("AXON_RUN_ROOT", "/var/run/axon-test");
+
+        let path = gpu_vector_lease_path();
+        assert_eq!(
+            path,
+            PathBuf::from("/var/run/axon-test/gpu-vectorization.lock")
+        );
+        assert!(!path.starts_with("/tmp"));
     }
 }

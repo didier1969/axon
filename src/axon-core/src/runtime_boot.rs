@@ -2245,6 +2245,10 @@ fn start_indexer_only_services(
 
     if runtime_mode.semantic_workers_enabled() {
         let lane_config = embedding_lane_config_from_env();
+        crate::service_guard::record_vector_worker_admission_reason(
+            "semantic_workers_enabled",
+            lane_config.vector_workers,
+        );
         info!(
             "Runtime services: semantic workers enabled (mode={}, query_workers={}, vector_workers={}, graph_workers={}).",
             runtime_mode.as_str(),
@@ -2258,6 +2262,10 @@ fn start_indexer_only_services(
             SemanticWorkerPool::new(semantic_store, semantic_queue);
         });
     } else {
+        crate::service_guard::record_vector_worker_admission_reason(
+            "runtime_mode_disables_semantic_workers",
+            0,
+        );
         info!("Runtime services: semantic workers disabled by runtime mode.");
     }
 

@@ -276,7 +276,10 @@ impl GraphStore {
             "SELECT process_role, heartbeat_ms, graph_workers_active, chunk_embeddings_per_second, \
                     in_flight_count, oldest_in_flight_path, oldest_in_flight_stage, \
                     oldest_in_flight_age_ms, ready_queue_chunks, persist_queue_depth, \
-                    a3_consecutive_failures, a3_last_error, pg_pool_evictions_total \
+                    a3_consecutive_failures, a3_last_error, pg_pool_evictions_total, \
+                    runtime_mode, semantic_workers_enabled, vector_workers_configured, \
+                    vector_workers_started_total, vector_workers_active_current, \
+                    vector_worker_admission_reason, allowed_gpu_workers \
              FROM {table_ref} \
              WHERE process_role = '{}' \
              LIMIT 1",
@@ -319,6 +322,20 @@ impl GraphStore {
             a3_consecutive_failures: row.get(10).and_then(parse_i64_field).unwrap_or_default(),
             a3_last_error: opt_str(row.get(11)),
             pg_pool_evictions_total: row.get(12).and_then(parse_i64_field).unwrap_or_default(),
+            runtime_mode: opt_str(row.get(13)).unwrap_or_else(|| "unknown".to_string()),
+            semantic_workers_enabled: row
+                .get(14)
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            vector_workers_configured: row.get(15).and_then(parse_i64_field).unwrap_or_default(),
+            vector_workers_started_total: row.get(16).and_then(parse_i64_field).unwrap_or_default(),
+            vector_workers_active_current: row
+                .get(17)
+                .and_then(parse_i64_field)
+                .unwrap_or_default(),
+            vector_worker_admission_reason: opt_str(row.get(18))
+                .unwrap_or_else(|| "unknown".to_string()),
+            allowed_gpu_workers: row.get(19).and_then(parse_i64_field).unwrap_or_default(),
         }))
     }
 
@@ -434,8 +451,11 @@ fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> St
          (process_role, heartbeat_ms, graph_workers_active, chunk_embeddings_per_second, \
           in_flight_count, oldest_in_flight_path, oldest_in_flight_stage, \
           oldest_in_flight_age_ms, ready_queue_chunks, persist_queue_depth, \
-          a3_consecutive_failures, a3_last_error, pg_pool_evictions_total) \
-         VALUES ('{}', {}, {}, {:.6}, {}, {}, {}, {}, {}, {}, {}, {}, {}) \
+          a3_consecutive_failures, a3_last_error, pg_pool_evictions_total, \
+          runtime_mode, semantic_workers_enabled, vector_workers_configured, \
+          vector_workers_started_total, vector_workers_active_current, \
+          vector_worker_admission_reason, allowed_gpu_workers) \
+         VALUES ('{}', {}, {}, {:.6}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}', {}, {}, {}, {}, '{}', {}) \
          ON CONFLICT (process_role) DO UPDATE SET \
             heartbeat_ms = EXCLUDED.heartbeat_ms, \
             graph_workers_active = EXCLUDED.graph_workers_active, \
@@ -448,7 +468,14 @@ fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> St
             persist_queue_depth = EXCLUDED.persist_queue_depth, \
             a3_consecutive_failures = EXCLUDED.a3_consecutive_failures, \
             a3_last_error = EXCLUDED.a3_last_error, \
-            pg_pool_evictions_total = EXCLUDED.pg_pool_evictions_total",
+            pg_pool_evictions_total = EXCLUDED.pg_pool_evictions_total, \
+            runtime_mode = EXCLUDED.runtime_mode, \
+            semantic_workers_enabled = EXCLUDED.semantic_workers_enabled, \
+            vector_workers_configured = EXCLUDED.vector_workers_configured, \
+            vector_workers_started_total = EXCLUDED.vector_workers_started_total, \
+            vector_workers_active_current = EXCLUDED.vector_workers_active_current, \
+            vector_worker_admission_reason = EXCLUDED.vector_worker_admission_reason, \
+            allowed_gpu_workers = EXCLUDED.allowed_gpu_workers",
         GraphStore::escape_sql(&row.process_role),
         row.heartbeat_ms,
         row.graph_workers_active,
@@ -462,6 +489,13 @@ fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> St
         row.a3_consecutive_failures,
         opt_text_sql(&row.a3_last_error),
         row.pg_pool_evictions_total,
+        GraphStore::escape_sql(&row.runtime_mode),
+        row.semantic_workers_enabled,
+        row.vector_workers_configured,
+        row.vector_workers_started_total,
+        row.vector_workers_active_current,
+        GraphStore::escape_sql(&row.vector_worker_admission_reason),
+        row.allowed_gpu_workers,
     )
 }
 
@@ -703,6 +737,13 @@ mod tests {
             a3_consecutive_failures: 3,
             a3_last_error: Some("23503 foreign key violation".to_string()),
             pg_pool_evictions_total: 2,
+            runtime_mode: "indexer_full".to_string(),
+            semantic_workers_enabled: true,
+            vector_workers_configured: 5,
+            vector_workers_started_total: 5,
+            vector_workers_active_current: 5,
+            vector_worker_admission_reason: "semantic_workers_enabled".to_string(),
+            allowed_gpu_workers: 3,
         };
         let sql = super::build_indexer_runtime_truth_upsert_sql(&row);
         assert!(sql.contains("INSERT INTO axon.indexer_runtime_truth"));
@@ -720,14 +761,21 @@ mod tests {
             "a3_consecutive_failures",
             "a3_last_error",
             "pg_pool_evictions_total",
+            "runtime_mode",
+            "semantic_workers_enabled",
+            "vector_workers_configured",
+            "vector_workers_started_total",
+            "vector_workers_active_current",
+            "vector_worker_admission_reason",
+            "allowed_gpu_workers",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),
                 "ON CONFLICT update should refresh column `{col}`"
             );
         }
-        // No fabricated cumulative "workers_started" column — there is no
-        // canonical pipeline source for it (REQ-AXO-901854 canonical-IO).
+        // Graph worker starts remain unreported: unlike vector workers, there
+        // is no canonical cumulative source for them.
         assert!(!sql.contains("graph_workers_started"), "{sql}");
         assert!(sql.contains("'indexer'"));
         assert!(sql.contains("1700000005000"));

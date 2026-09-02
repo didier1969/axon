@@ -212,6 +212,8 @@ fn spawn_indexer_liveness_heartbeat(
             let in_flight_oldest = in_flight.snapshot();
             let vector_metrics = crate::service_guard::vector_runtime_metrics();
             let a3_health = crate::pipeline::stage_health::a3_health().snapshot();
+            let runtime_mode = AxonRuntimeMode::from_env();
+            let lane_config = crate::embedder::embedding_lane_config_from_env();
             let truth = crate::graph_ingestion::IndexerRuntimeTruthRecord {
                 process_role: "indexer".to_string(),
                 heartbeat_ms: snapshot.heartbeat_ms,
@@ -231,6 +233,14 @@ fn spawn_indexer_liveness_heartbeat(
                 a3_last_error: a3_health.last_error.map(|error| error.message),
                 pg_pool_evictions_total: crate::postgres::native::pool_connection_evictions_total()
                     as i64,
+                runtime_mode: runtime_mode.as_str().to_string(),
+                semantic_workers_enabled: runtime_mode.semantic_workers_enabled(),
+                vector_workers_configured: lane_config.vector_workers as i64,
+                vector_workers_started_total: vector_metrics.vector_workers_started_total as i64,
+                vector_workers_active_current: vector_metrics.vector_workers_active_current as i64,
+                vector_worker_admission_reason:
+                    crate::service_guard::current_vector_worker_admission_reason(),
+                allowed_gpu_workers: crate::service_guard::current_allowed_gpu_workers() as i64,
             };
             let runtime_truth_result = store.record_indexer_runtime_truth(&truth);
             if let Err(err) = &runtime_truth_result {

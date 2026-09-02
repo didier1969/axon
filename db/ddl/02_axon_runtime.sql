@@ -289,7 +289,16 @@ CREATE TABLE IF NOT EXISTS axon.indexer_runtime_truth (
     persist_queue_depth         BIGINT NOT NULL DEFAULT 0, -- queued VectorPersistOutbox rows
     a3_consecutive_failures     BIGINT NOT NULL DEFAULT 0,
     a3_last_error               TEXT,
-    pg_pool_evictions_total     BIGINT NOT NULL DEFAULT 0
+    pg_pool_evictions_total     BIGINT NOT NULL DEFAULT 0,
+    -- REQ-AXO-902597: owner-observed semantic-lane admission truth. These
+    -- fields distinguish an idle lane from a lane disabled by boot contract.
+    runtime_mode                    TEXT    NOT NULL DEFAULT 'unknown',
+    semantic_workers_enabled        BOOLEAN NOT NULL DEFAULT FALSE,
+    vector_workers_configured       BIGINT  NOT NULL DEFAULT 0,
+    vector_workers_started_total    BIGINT  NOT NULL DEFAULT 0,
+    vector_workers_active_current   BIGINT  NOT NULL DEFAULT 0,
+    vector_worker_admission_reason  TEXT    NOT NULL DEFAULT 'unknown',
+    allowed_gpu_workers             BIGINT  NOT NULL DEFAULT 0
 );
 -- Additive column evolution for rows migrated from the foundation slice.
 ALTER TABLE axon.indexer_runtime_truth
@@ -310,6 +319,20 @@ ALTER TABLE axon.indexer_runtime_truth
     ADD COLUMN IF NOT EXISTS a3_last_error           TEXT;
 ALTER TABLE axon.indexer_runtime_truth
     ADD COLUMN IF NOT EXISTS pg_pool_evictions_total BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS runtime_mode TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS semantic_workers_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS vector_workers_configured BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS vector_workers_started_total BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS vector_workers_active_current BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS vector_worker_admission_reason TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS allowed_gpu_workers BIGINT NOT NULL DEFAULT 0;
 
 -- REQ-AXO-901893: Watchman reconciliation cursor, one row per watched root.
 -- The indexer threads `clock_json` back into the next `since` subscription so

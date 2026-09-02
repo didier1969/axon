@@ -202,6 +202,15 @@ pub struct IndexerRuntimeTruthRecord {
     pub a3_consecutive_failures: i64,
     pub a3_last_error: Option<String>,
     pub pg_pool_evictions_total: i64,
+    /// REQ-AXO-902597 — boot-contract and vector-lane admission truth observed
+    /// by the indexer owner, not inferred from the brain's environment.
+    pub runtime_mode: String,
+    pub semantic_workers_enabled: bool,
+    pub vector_workers_configured: i64,
+    pub vector_workers_started_total: i64,
+    pub vector_workers_active_current: i64,
+    pub vector_worker_admission_reason: String,
+    pub allowed_gpu_workers: i64,
 }
 
 /// DEC-AXO-901626 — PG-canonical half of the observable embedder state,

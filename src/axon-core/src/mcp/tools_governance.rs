@@ -178,6 +178,33 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902597 — grade a durable vector backlog against the worker
+    /// state published by the indexer itself. Pure so the incident shape is
+    /// pinned without booting MCP or PostgreSQL.
+    fn semantic_vector_cause(
+        pending_embeddings: i64,
+        runtime_mode: &str,
+        semantic_workers_enabled: bool,
+        vector_workers_configured: i64,
+        vector_workers_active: i64,
+        admission_reason: &str,
+    ) -> Option<(&'static str, String, &'static str)> {
+        if pending_embeddings <= 0 || vector_workers_active > 0 {
+            return None;
+        }
+        Some((
+            "semantic_vector_workers_not_running",
+            format!(
+                "{pending_embeddings} chunk embedding(s) are pending but the indexer reports 0 \
+                 active vector workers (mode={runtime_mode}, semantic_enabled={semantic_workers_enabled}, \
+                 configured={vector_workers_configured}, admission_reason={admission_reason})"
+            ),
+            "there is no hot mode switch: set AXON_INDEXER_MODE=indexer_full (or remove the \
+             graph-only override), then perform a controlled axon-indexer cutover/restart; \
+             re-run diagnose_indexing and require active workers > 0 plus a falling pending count",
+        ))
+    }
+
     pub(crate) fn indexing_diagnosis_markdown(&self, project: &str) -> String {
         // Canonical projection (REQ-AXO-901865): diagnose_indexing reads the
         // SAME ist.project_telemetry view as the dashboard + embedding_status,
@@ -239,6 +266,19 @@ impl McpServer {
         // diagnostic data (failures are logged via tracing, not row state).
         let top_reasons: Vec<Vec<Value>> = Vec::new();
         let top_errors: Vec<Vec<Value>> = Vec::new();
+
+        // REQ-AXO-902597 — `embed_status='pending'` is pipeline B's durable
+        // queue. Compare it with OWNER-published indexer truth; the responding
+        // brain's local worker metrics are necessarily zero under brain_only.
+        let pending_embeddings = self.sql_scalar(&format!(
+            "SELECT COUNT(*)::BIGINT FROM ist.Chunk WHERE embed_status = 'pending' AND {}",
+            Self::project_filter(project, "project_code")
+        ));
+        let indexer_truth = self
+            .graph_store
+            .latest_indexer_runtime_truth("indexer")
+            .ok()
+            .flatten();
 
         // REQ-AXO-212 — sub-causes carry ADR-2026-04-18-aligned
         // vocabulary so the LLM gets a single actionable next step
@@ -320,6 +360,26 @@ impl McpServer {
         if let Some(cause) = Self::chunk_coverage_cause(known, enrolled) {
             causes.push(cause);
         }
+        if let Some(truth) = indexer_truth.as_ref() {
+            if let Some(cause) = Self::semantic_vector_cause(
+                pending_embeddings,
+                &truth.runtime_mode,
+                truth.semantic_workers_enabled,
+                truth.vector_workers_configured,
+                truth.vector_workers_active_current,
+                &truth.vector_worker_admission_reason,
+            ) {
+                causes.push(cause);
+            }
+        } else if pending_embeddings > 0 {
+            causes.push((
+                "indexer_runtime_truth_unavailable",
+                format!(
+                    "{pending_embeddings} chunk embedding(s) are pending, but no indexer-owned runtime truth is readable"
+                ),
+                "verify axon-indexer liveness and its PostgreSQL heartbeat; restart it through the controlled live path if the heartbeat remains absent",
+            ));
+        }
         if symbols > 0 && (calls_direct + calls_nif) == 0 {
             causes.push((
                 "call_graph_gap",
@@ -390,6 +450,28 @@ impl McpServer {
         // existed — reported, never guessed.
         let chunk_window_section = self.chunk_time_window_section(project);
 
+        let semantic_lane_section = match indexer_truth.as_ref() {
+            Some(truth) => format!(
+                "**Semantic lane (indexer-owned truth)**\n\
+                 * pending chunk embeddings: {pending_embeddings}\n\
+                 * runtime mode: {} · semantic enabled: {}\n\
+                 * vector workers: configured={} · active={} · started_total={}\n\
+                 * admission: {} · allowed GPU workers={}\n\n",
+                truth.runtime_mode,
+                truth.semantic_workers_enabled,
+                truth.vector_workers_configured,
+                truth.vector_workers_active_current,
+                truth.vector_workers_started_total,
+                truth.vector_worker_admission_reason,
+                truth.allowed_gpu_workers,
+            ),
+            None => format!(
+                "**Semantic lane (indexer-owned truth)**\n\
+                 * pending chunk embeddings: {pending_embeddings}\n\
+                 * indexer runtime truth: unavailable\n\n"
+            ),
+        };
+
         // REQ-AXO-901893 (LEGACY FEED PURGE) — the ingress drain + periodic
         // sweep diagnosis blocks were ripped with the ingress_buffer. Watchman
         // feeds pipeline A directly.
@@ -404,6 +486,7 @@ impl McpServer {
              * symbols: {}\n\
              * calls (direct): {}\n\
              * calls (nif): {}\n\n\
+             {}\
              **Likely root causes**\n{}\n\n\
              **Top status reasons**\n{}\n\n\
              **Top parser/runtime errors**\n{}\n\n\
@@ -431,6 +514,7 @@ impl McpServer {
             symbols,
             calls_direct,
             calls_nif,
+            semantic_lane_section,
             cause_lines,
             reason_lines,
             error_lines,
@@ -2065,6 +2149,40 @@ mod tests {
         assert!(explain.contains("409 file(s)"), "the gap must be stated: {explain}");
         // The remediation must name the actual cure found in session 104.
         assert!(fix.contains("restart axon-indexer"), "got: {fix}");
+    }
+
+    #[test]
+    fn semantic_backlog_with_zero_active_workers_is_never_reported_healthy() {
+        let (id, explain, fix) = McpServer::semantic_vector_cause(
+            29_492,
+            "indexer_graph",
+            false,
+            0,
+            0,
+            "runtime_mode_disables_semantic_workers",
+        )
+        .expect("durable backlog without workers must be diagnosed");
+        assert_eq!(id, "semantic_vector_workers_not_running");
+        assert!(explain.contains("29492 chunk embedding(s)"), "{explain}");
+        assert!(explain.contains("mode=indexer_graph"), "{explain}");
+        assert!(fix.contains("no hot mode switch"), "{fix}");
+        assert!(
+            fix.contains("controlled axon-indexer cutover/restart"),
+            "{fix}"
+        );
+    }
+
+    #[test]
+    fn semantic_backlog_is_not_a_worker_failure_when_a_worker_is_active() {
+        assert!(McpServer::semantic_vector_cause(
+            29_492,
+            "indexer_full",
+            true,
+            5,
+            1,
+            "gpu_worker_admitted",
+        )
+        .is_none());
     }
 
     // --- REQ-AXO-902260 (Q2) chunk time window -----------------------------------
