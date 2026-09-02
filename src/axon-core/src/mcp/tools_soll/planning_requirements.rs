@@ -46,82 +46,6 @@ impl McpServer {
                 &owned_summary
             }
         };
-        let snapshot = self
-            .soll_completeness_snapshot_with_cached_coverage(Some(&project_code), Some(summary))
-            .ok()?;
-        let details = summary
-            .entries
-            .iter()
-            .map(|entry| {
-                let missing_dimensions_detailed = entry
-                    .missing_dimensions
-                    .iter()
-                    .map(|dimension| requirement_dimension_descriptor(dimension))
-                    .collect::<Vec<_>>();
-                let next_actions_detailed = entry
-                    .missing_dimensions
-                    .iter()
-                    .map(|dimension| {
-                        let descriptor = requirement_dimension_descriptor(dimension);
-                        json!({
-                            "dimension": requirement_dimension_canonical_name(dimension),
-                            "legacy_dimension": dimension,
-                            "action": descriptor.get("next_action").cloned().unwrap_or(Value::Null),
-                            "mutation_class": match dimension.as_ref() {
-                                "status" | "criteria" => "update_requirement",
-                                "evidence" => "attach_evidence",
-                                "validation" => "link_validation",
-                                "broken_file_evidence" => "repair_evidence",
-                                _ => "inspect_requirement"
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                json!({
-                    "id": entry.id,
-                    "state": entry.state,
-                    "completion_state": entry.state,
-                    "coverage_reason": requirement_state_reason(&entry.state, &entry.missing_dimensions),
-                    "status": entry.status,
-                    "evidence_count": entry.evidence_count,
-                    "validation_count": entry.validation_count,
-                    "has_criteria": entry.has_criteria,
-                    // REQ-AXO-902501 — absent quand rien n'est déclaré : la sortie des
-                    // nœuds à l'ancienne forme ne change pas d'un octet.
-                    "criteres_declares": entry.criteres_resume,
-                    "broken_file_evidence_count": entry.broken_file_evidence_count,
-                    // REQ-AXO-902337 piste 1 — name the offenders so no raw
-                    // SQL on soll.Traceability is needed to find what to purge.
-                    "broken_file_evidence_offenders": entry
-                        .broken_file_evidence
-                        .iter()
-                        .map(|b| json!({
-                            "traceability_id": b.traceability_id,
-                            "path": b.artifact_ref
-                        }))
-                        .collect::<Vec<_>>(),
-                    "missing_dimensions": entry.missing_dimensions,
-                    "missing_dimensions_detailed": missing_dimensions_detailed,
-                    "suggested_next_actions": entry.suggested_next_actions,
-                    "next_actions_detailed": next_actions_detailed
-                })
-            })
-            .collect::<Vec<_>>();
-        let completion_model = json!({
-            "required_dimensions": [
-                requirement_dimension_descriptor("status"),
-                requirement_dimension_descriptor("criteria"),
-                requirement_dimension_descriptor("evidence"),
-                requirement_dimension_descriptor("validation")
-            ],
-            "warning_dimensions": [
-                requirement_dimension_descriptor("broken_file_evidence")
-            ],
-            "done_rule": "EITHER status is `completed` or `delivered` (terminal — done by definition, REQ-AXO-136) OR (status is `current`|`accepted` AND acceptance criteria exist AND supporting evidence exists AND no broken file evidence)",
-            "partial_rule": "some required dimensions exist but not all required dimensions are satisfied",
-            "missing_rule": "required dimensions are mostly absent or requirement status is not yet operationally accepted"
-        });
-
         // Build compact text with top gaps for LLM actionability.
         let top_gaps: Vec<String> = summary
             .entries
@@ -224,20 +148,25 @@ impl McpServer {
         // Perdre l'information utile par EXCÈS d'information est le pire échec possible
         // pour une surface : le client a bien reçu la réponse, et n'a pas pu la lire.
         //
-        // `mode="brief"` retire les deux listes volumineuses — et elles étaient émises
-        // DEUX FOIS, `details` et `requirements` portant la même valeur (alias de
-        // compatibilité). Le défaut par défaut reste inchangé : un appelant qui lit
-        // `details` aujourd'hui ne doit pas voir sa réponse rétrécir sans l'avoir
-        // demandé.
-        let brief = args.get("mode").and_then(Value::as_str) == Some("brief");
-        if brief {
+        // REQ-AXO-902598 — compact is now the safe default. APS measured a 333k-token
+        // response for 612 requirements after the opt-in brief mode already existed:
+        // discoverability is not a safety boundary. Full details require the explicit
+        // `mode="verbose"`; the compact path returns before constructing them.
+        let compact = args.get("mode").and_then(Value::as_str) != Some("verbose");
+        if compact {
+            let top_gaps_text = if top_gaps.is_empty() {
+                "  (none)".to_string()
+            } else {
+                top_gaps.join("\n")
+            };
             return Some(json!({
                 "content": [{"type":"text","text": format!(
                     "Requirement verification ({project_code}) — mode=brief\n\
-                     done={} · partial={} · missing={} · total={}\n\n\
-                     _↳ les listes détaillées sont omises à votre demande ; \
-                     rappelez sans `mode=\"brief\"` pour les obtenir._",
-                    summary.done, summary.partial, summary.missing, summary.entries.len()
+                     done={} · partial={} · missing={} · total={}\n\nTop gaps:\n{}{}\n\n\
+                     _↳ réponse compacte par défaut ; passez `mode=\"verbose\"` \
+                     pour demander explicitement les listes détaillées._",
+                    summary.done, summary.partial, summary.missing, summary.entries.len(),
+                    top_gaps_text, next_to_close
                 )}],
                 "data": {
                     "project_code": project_code,
@@ -254,13 +183,87 @@ impl McpServer {
                     // Dit ce qui MANQUE et pourquoi. Une réponse abrégée qui tait son
                     // abrègement se lit comme une réponse complète — et un appelant
                     // conclurait « aucune exigence partielle » sur une liste absente.
-                    "omitted_in_brief": ["details", "requirements", "completion_model", "next_to_close"],
+                    "top_gaps": top_gaps,
+                    "next_to_close": next_to_close,
+                    "omitted_in_brief": ["details", "requirements", "completion_model", "completeness_axes"],
                     "unresolvable_file_evidence_count": summary.unresolvable_file_evidence_count,
                     "total_available": total_available,
                     "status": "ok"
                 }
             }));
         }
+
+        let snapshot = self
+            .soll_completeness_snapshot_with_cached_coverage(Some(&project_code), Some(summary))
+            .ok()?;
+        let details = summary
+            .entries
+            .iter()
+            .map(|entry| {
+                let missing_dimensions_detailed = entry
+                    .missing_dimensions
+                    .iter()
+                    .map(|dimension| requirement_dimension_descriptor(dimension))
+                    .collect::<Vec<_>>();
+                let next_actions_detailed = entry
+                    .missing_dimensions
+                    .iter()
+                    .map(|dimension| {
+                        let descriptor = requirement_dimension_descriptor(dimension);
+                        json!({
+                            "dimension": requirement_dimension_canonical_name(dimension),
+                            "legacy_dimension": dimension,
+                            "action": descriptor.get("next_action").cloned().unwrap_or(Value::Null),
+                            "mutation_class": match dimension.as_ref() {
+                                "status" | "criteria" => "update_requirement",
+                                "evidence" => "attach_evidence",
+                                "validation" => "link_validation",
+                                "broken_file_evidence" => "repair_evidence",
+                                _ => "inspect_requirement"
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                json!({
+                    "id": entry.id,
+                    "state": entry.state,
+                    "completion_state": entry.state,
+                    "coverage_reason": requirement_state_reason(&entry.state, &entry.missing_dimensions),
+                    "status": entry.status,
+                    "evidence_count": entry.evidence_count,
+                    "validation_count": entry.validation_count,
+                    "has_criteria": entry.has_criteria,
+                    "criteres_declares": entry.criteres_resume,
+                    "broken_file_evidence_count": entry.broken_file_evidence_count,
+                    "broken_file_evidence_offenders": entry
+                        .broken_file_evidence
+                        .iter()
+                        .map(|b| json!({
+                            "traceability_id": b.traceability_id,
+                            "path": b.artifact_ref
+                        }))
+                        .collect::<Vec<_>>(),
+                    "missing_dimensions": entry.missing_dimensions,
+                    "missing_dimensions_detailed": missing_dimensions_detailed,
+                    "suggested_next_actions": entry.suggested_next_actions,
+                    "next_actions_detailed": next_actions_detailed
+                })
+            })
+            .collect::<Vec<_>>();
+        let completion_model = json!({
+            "required_dimensions": [
+                requirement_dimension_descriptor("status"),
+                requirement_dimension_descriptor("criteria"),
+                requirement_dimension_descriptor("evidence"),
+                requirement_dimension_descriptor("validation")
+            ],
+            "warning_dimensions": [
+                requirement_dimension_descriptor("broken_file_evidence")
+            ],
+            "done_rule": "EITHER status is `completed` or `delivered` (terminal — done by definition, REQ-AXO-136) OR (status is `current`|`accepted` AND acceptance criteria exist AND supporting evidence exists AND no broken file evidence)",
+            "partial_rule": "some required dimensions exist but not all required dimensions are satisfied",
+            "missing_rule": "required dimensions are mostly absent or requirement status is not yet operationally accepted"
+        });
         Some(json!({
             "content": [{"type":"text","text": text}],
             "data": {

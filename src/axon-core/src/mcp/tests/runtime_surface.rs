@@ -5010,14 +5010,14 @@ fn practice_put_repond_a_la_question_posee_est_ce_ecrit() {
     assert!(second.pointer("/data/inserted").is_some());
 }
 
-/// REQ-AXO-902583 (DOC, friction b) — 49 Ko pour quatre chiffres.
+/// REQ-AXO-902598 (APS) — 333k tokens for four counters: compact by default.
 ///
 /// « La réponse a été écrêtée sur disque par notre client. Le verdict utile tenait
 /// en `{done, missing, partial, total}`. » Perdre l'information utile par EXCÈS
 /// d'information est le pire échec possible pour une surface : le client a bien
 /// reçu la réponse, et n'a pas pu la lire.
 #[test]
-fn soll_verify_requirements_brief_rend_les_compteurs_et_dit_ce_qu_il_omet() {
+fn soll_verify_requirements_est_compact_par_defaut_et_verbose_est_explicitement_opt_in() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     // Projet `TST` et NON `AXO` : les instantanés SOLL passent par un cache GLOBAL au
@@ -5034,18 +5034,18 @@ fn soll_verify_requirements_brief_rend_les_compteurs_et_dit_ce_qu_il_omet() {
         )
         .unwrap();
 
-    let brief = server
-        .axon_soll_verify_requirements(&json!({ "project_code": "TST", "mode": "brief" }))
-        .expect("réponse");
-    let complet = server
+    let compact_par_defaut = server
         .axon_soll_verify_requirements(&json!({ "project_code": "TST" }))
+        .expect("réponse");
+    let verbose = server
+        .axon_soll_verify_requirements(&json!({ "project_code": "TST", "mode": "verbose" }))
         .expect("réponse");
 
     // Vérifier le SUCCÈS avant de comparer des clés. Sans ce contrôle, un code projet
     // non résoluble rend une enveloppe d'ERREUR — qui n'a ni `details` ni `summary` —
     // et le test échoue sur une clé absente en laissant croire à un défaut du mode
     // `brief`. C'est exactement ce qui s'est produit au premier passage.
-    for (nom, r) in [("brief", &brief), ("complet", &complet)] {
+    for (nom, r) in [("compact_par_defaut", &compact_par_defaut), ("verbose", &verbose)] {
         assert!(
             r.get("isError").and_then(Value::as_bool) != Some(true),
             "l'appel `{nom}` a échoué, le reste du test ne mesure rien : {}",
@@ -5056,20 +5056,21 @@ fn soll_verify_requirements_brief_rend_les_compteurs_et_dit_ce_qu_il_omet() {
     // Les quatre chiffres — le verdict utile — sont là dans les deux formes, et ÉGAUX.
     for cle in ["done", "partial", "missing"] {
         assert_eq!(
-            brief.pointer(&format!("/data/summary/{cle}")),
-            complet.pointer(&format!("/data/summary/{cle}")),
+            compact_par_defaut.pointer(&format!("/data/summary/{cle}")),
+            verbose.pointer(&format!("/data/summary/{cle}")),
             "`brief` doit abréger, pas changer le verdict : `{cle}` diverge"
         );
     }
 
     // Il abrège réellement — sinon le mode ne sert à rien.
-    assert!(brief.pointer("/data/details").is_none());
-    assert!(complet.pointer("/data/details").is_some());
+    assert!(compact_par_defaut.pointer("/data/details").is_none());
+    assert!(verbose.pointer("/data/details").is_some());
+    assert!(compact_par_defaut.pointer("/data/top_gaps").is_some());
 
     // Et il DIT ce qu'il omet : une réponse abrégée qui tait son abrègement se lit
     // comme une réponse complète, et un appelant conclurait « aucune exigence
     // partielle » sur une liste absente.
-    let omis: Vec<String> = brief
+    let omis: Vec<String> = compact_par_defaut
         .pointer("/data/omitted_in_brief")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
@@ -5079,7 +5080,6 @@ fn soll_verify_requirements_brief_rend_les_compteurs_et_dit_ce_qu_il_omet() {
         "l'abrègement doit être déclaré, got {omis:?}"
     );
 
-    // Le défaut par défaut est INCHANGÉ : un appelant qui lit `details` aujourd'hui
-    // ne doit pas voir sa réponse rétrécir sans l'avoir demandé.
-    assert!(complet.pointer("/data/omitted_in_brief").is_none());
+    // L'opt-in verbose est explicite et ne se fait pas passer pour une réponse abrégée.
+    assert!(verbose.pointer("/data/omitted_in_brief").is_none());
 }

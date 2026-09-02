@@ -8631,7 +8631,7 @@ fn test_soll_attach_evidence_normalizes_entity_type_for_requirement_verification
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "soll_verify_requirements",
-                "arguments": { "project_code": "AXO" }
+                "arguments": { "project_code": "AXO", "mode": "verbose" }
             })),
             id: Some(json!(4112)),
         })
@@ -9121,7 +9121,7 @@ fn test_soll_verify_requirements_terminal_status_counts_as_done() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "soll_verify_requirements",
-                "arguments": { "project_code": "AXO" }
+                "arguments": { "project_code": "AXO", "mode": "verbose" }
             })),
             id: Some(json!(45136)),
         })
@@ -9183,7 +9183,7 @@ fn test_soll_verify_requirements_returns_missing_dimensions_and_actions() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "soll_verify_requirements",
-                "arguments": { "project_code": "AXO" }
+                "arguments": { "project_code": "AXO", "mode": "verbose" }
             })),
             id: Some(json!(41122)),
         })
@@ -9271,7 +9271,7 @@ fn test_soll_verify_requirements_names_broken_file_evidence_offenders() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "soll_verify_requirements",
-                "arguments": { "project_code": "AXO" }
+                "arguments": { "project_code": "AXO", "mode": "verbose" }
             })),
             id: Some(json!(902337)),
         })
@@ -15042,7 +15042,7 @@ fn test_relative_evidence_is_judged_against_the_registry_root_not_the_brain_cwd(
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "soll_verify_requirements",
-                "arguments": { "project_code": "ZZ9" }
+                "arguments": { "project_code": "ZZ9", "mode": "verbose" }
             })),
             id: Some(json!(902436)),
         })

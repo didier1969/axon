@@ -451,12 +451,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_verify_requirements",
-                "description": "[SOLL] Verify requirement coverage: done/partial/missing with top gaps and next-to-close. REQ-AXO-902583 — pass `mode=\"brief\"` for the four counters ALONE: the full envelope reached 49 KB on a 32-requirement project and was truncated to disk by the reporting client, which is information lost by EXCESS of information. The omitted keys are named in `data.omitted_in_brief` so an abridged answer never reads as a complete one.",
+                "description": "[SOLL] Verify requirement coverage: done/partial/missing with bounded top gaps and next-to-close. REQ-AXO-902598 — compact by default because the former full default reached ~333k tokens on a 612-requirement tenant. Pass `mode=\"verbose\"` only when full per-requirement details are explicitly needed. Omitted keys are named in `data.omitted_in_brief`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
-                        "mode": { "type": "string", "enum": ["brief", "verbose"], "description": "REQ-AXO-902583 — `brief` returns only {done, partial, missing, total} plus `omitted_in_brief`. Default (absent) is unchanged: a caller reading `details` today must not see its answer shrink without asking." }
+                        "mode": { "type": "string", "enum": ["brief", "verbose"], "description": "REQ-AXO-902598 — default/`brief` returns counters plus bounded top gaps and `omitted_in_brief`; `verbose` explicitly opts into the full `details` and compatibility alias `requirements`." }
                     },
                     "required": []
                 }
