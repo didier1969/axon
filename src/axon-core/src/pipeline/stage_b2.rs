@@ -26,6 +26,24 @@ use tracing::warn;
 use super::metrics::StageMetrics;
 use super::stage_b1::ChunkForEmbedding;
 
+/// REQ-AXO-902597 — lifecycle accounting for the REAL pipeline-B worker.
+/// The previous counters were only exercised by tests and remained zero while
+/// production drained embeddings, which made owner truth report a false stall.
+struct VectorWorkerLifecycleGuard;
+
+impl VectorWorkerLifecycleGuard {
+    fn start() -> Self {
+        crate::service_guard::record_vector_worker_started();
+        Self
+    }
+}
+
+impl Drop for VectorWorkerLifecycleGuard {
+    fn drop(&mut self) {
+        crate::service_guard::record_vector_worker_stopped();
+    }
+}
+
 /// REQ-AXO-902033 — per-inference watchdog budget (ms). A normal B2 batch
 /// embeds in ms–seconds; the first inference may pay a one-off TensorRT engine
 /// build (~tens of seconds). A genuine hang never returns (minutes+). Default
@@ -149,7 +167,9 @@ pub fn spawn_b2_batched_worker(
 ) {
     let batch_size = batch_size.max(1);
     tokio::spawn(async move {
+        let _worker_lifecycle = VectorWorkerLifecycleGuard::start();
         loop {
+            crate::service_guard::record_vector_worker_heartbeat();
             // REQ-AXO-901608 — t_recv timing (starvation indicator).
             let recv_started = Instant::now();
             // Wait without timeout for the first item — when idle, the
@@ -389,6 +409,24 @@ mod tests {
     /// NOTE: the deliberate short `from_millis(100)` below is a NEGATIVE check
     /// (nothing must arrive) — it must stay short and is intentionally untouched.
     const LIVENESS_TIMEOUT_SECS: u64 = 60;
+
+    #[test]
+    fn production_b2_worker_guard_publishes_active_lifecycle() {
+        let _guard = crate::test_support::service_guard_test_lock().lock();
+        crate::service_guard::reset_for_tests();
+
+        {
+            let _worker = VectorWorkerLifecycleGuard::start();
+            let metrics = crate::service_guard::vector_runtime_metrics();
+            assert_eq!(metrics.vector_workers_started_total, 1);
+            assert_eq!(metrics.vector_workers_active_current, 1);
+            assert!(metrics.vector_worker_heartbeat_at_ms > 0);
+        }
+
+        let metrics = crate::service_guard::vector_runtime_metrics();
+        assert_eq!(metrics.vector_workers_stopped_total, 1);
+        assert_eq!(metrics.vector_workers_active_current, 0);
+    }
 
     #[tokio::test]
     async fn no_op_embedder_returns_canonical_dimension_vectors() {

@@ -9,6 +9,14 @@ use super::{
     VectorLaneStateRecord, VectorWorkerFault,
 };
 
+fn parse_bool_field(value: &serde_json::Value) -> bool {
+    value.as_bool().unwrap_or_else(|| {
+        value
+            .as_str()
+            .is_some_and(|text| text.eq_ignore_ascii_case("true") || text == "1")
+    })
+}
+
 impl GraphStore {
     /// REQ-AXO-271 slice 2e (PG canonical only, post-MIL-AXO-017) :
     /// schema-qualify an `axon` table reference.
@@ -323,10 +331,7 @@ impl GraphStore {
             a3_last_error: opt_str(row.get(11)),
             pg_pool_evictions_total: row.get(12).and_then(parse_i64_field).unwrap_or_default(),
             runtime_mode: opt_str(row.get(13)).unwrap_or_else(|| "unknown".to_string()),
-            semantic_workers_enabled: row
-                .get(14)
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
+            semantic_workers_enabled: row.get(14).is_some_and(parse_bool_field),
             vector_workers_configured: row.get(15).and_then(parse_i64_field).unwrap_or_default(),
             vector_workers_started_total: row.get(16).and_then(parse_i64_field).unwrap_or_default(),
             vector_workers_active_current: row
@@ -502,6 +507,14 @@ fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> St
 #[cfg(test)]
 mod tests {
     // MIL-AXO-015 P4 4e: SQL-shape contract tests for the writer
+
+    #[test]
+    fn runtime_truth_bool_accepts_postgres_gateway_text_and_native_json() {
+        assert!(super::parse_bool_field(&serde_json::json!(true)));
+        assert!(super::parse_bool_field(&serde_json::json!("true")));
+        assert!(super::parse_bool_field(&serde_json::json!("1")));
+        assert!(!super::parse_bool_field(&serde_json::json!("false")));
+    }
     // branches that route to `axon.X` under PG. The methods
     // themselves require a live GraphStore; these tests mirror the
     // string composition so the dual-backend invariant is locked in.
