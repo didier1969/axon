@@ -79,6 +79,11 @@ const INSPECT_NAMED_CAP: usize = 50;
 const INSPECT_SOURCE_LINE_CAP: usize = 160;
 const INSPECT_SIG_CAP: usize = 12;
 
+struct ExactSourceBody {
+    content: String,
+    slice_sha256: String,
+}
+
 /// REQ-AXO-902059 — named caller/callee rows `{name,kind,project_code}` for
 /// `inspect`, capped to `cap`. Kills the round-trip where an LLM had only the
 /// counts and had to re-query (bidi_trace/impact) just to learn the names —
@@ -1990,8 +1995,8 @@ impl McpServer {
     }
 
     /// REQ-AXO-902100 (feedback #18) — `inspect mode=source` body : the symbol's
-    /// source (from `ist.chunk.content`, no file I/O) + direct caller/callee
-    /// signatures, file:line anchored. Serves the prepare_edit case in one call.
+    /// byte-exact, index-hash-verified file slice when available, otherwise an
+    /// explicitly lossy chunk reconstruction, plus direct caller/callee signatures.
     /// REQ-AXO-902442 — `around` / `offset` make the truncation ADDRESSABLE.
     ///
     /// AXO measured the dead end (llm_feedback #214): `inspect
@@ -2014,9 +2019,13 @@ impl McpServer {
         let sql_lit = |s: &str| s.replace('\'', "''");
         let mut out = String::new();
         let body_q = format!(
-            "SELECT file_path, start_line, end_line, content, chunk_part_index \
-             FROM ist.chunk WHERE source_type = 'symbol' AND source_id = '{}' \
-             ORDER BY chunk_part_index",
+            "SELECT c.file_path, c.start_line, c.end_line, c.content, c.chunk_part_index, \
+                    c.project_code, COALESCE(f.content_hash, '') \
+             FROM ist.chunk c \
+             LEFT JOIN ist.IndexedFile f ON f.path = c.file_path \
+                                        AND f.project_code = c.project_code \
+             WHERE c.source_type = 'symbol' AND c.source_id = '{}' \
+             ORDER BY c.chunk_part_index",
             sql_lit(symbol_id)
         );
         if let Ok(res) = self.graph_store.query_json_param(&body_q, &json!({})) {
@@ -2035,15 +2044,9 @@ impl McpServer {
                     .last()
                     .and_then(|r| r.get(2))
                     .and_then(Value::as_i64)
-                    .filter(|n| *n > 0)
-                    .or(start_opt);
-                let bornes = match (start_opt, end_opt) {
-                    (Some(a), Some(b)) => format!("`{file_path}:{a}`-`{b}`"),
-                    _ => format!(
-                        "`{file_path}` (bornes de lignes NON disponibles pour ce symbole — \
-                         ne pas editer sur un numero de ligne deduit d'ici)"
-                    ),
-                };
+                    .filter(|n| *n > 0);
+                let project_code = first.get(5).and_then(Value::as_str).unwrap_or("");
+                let indexed_hash = first.get(6).and_then(Value::as_str).unwrap_or("");
                 // REQ-AXO-902492 (doleance KKI, `blocking`) — le corps rendu NE COMPILAIT
                 // PAS : chaque fragment repete le CONTEXTE d'ouverture du symbole (sa
                 // signature), et la concatenation la faisait donc apparaitre plusieurs fois
@@ -2072,13 +2075,40 @@ impl McpServer {
                     body.push_str(frag);
                     body.push('\n');
                 }
-                let body = Self::strip_repeated_chunk_headers(&body);
+                let reconstructed_body = Self::strip_repeated_chunk_headers(&body);
+                // REQ-AXO-902600 (voix client KKI #401) — une reconstruction de
+                // fragments n'est PAS une source. L'heuristique ci-dessus a omis une
+                // vraie ligne (`phaseStarted = System.nanoTime();`) et provoqué un faux
+                // diagnostic. La voie exacte lit uniquement sous la racine canonique
+                // du projet, exige des bornes valides et compare le SHA-256 du fichier
+                // au hash qui a produit l'index. Si une preuve manque, on conserve le
+                // paquet utile mais il est explicitement LOSSY et impropre à l'édition.
+                let exact = match (start_opt, end_opt) {
+                    (Some(start), Some(end)) => self.exact_indexed_source_body(
+                        project_code,
+                        file_path,
+                        start as usize,
+                        end as usize,
+                        indexed_hash,
+                    ),
+                    _ => Err("line_bounds_unavailable".to_string()),
+                };
+                let (body, exact_truth, fallback_reason) = match exact {
+                    Ok(exact) => (exact.content, Some(exact.slice_sha256), None),
+                    Err(reason) => (reconstructed_body, None, Some(reason)),
+                };
                 let lines: Vec<&str> = body.lines().collect();
                 let total = lines.len();
 
                 let (window_start, window_end, not_found) =
                     Self::source_window_for(&lines, around, offset);
-                let shown = &lines[window_start..window_end];
+                let shown = if exact_truth.is_some() {
+                    Self::byte_slice_for_lines(&body, window_start + 1, window_end)
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    lines[window_start..window_end].join("\n")
+                };
 
                 let cap_note = if total > INSPECT_SOURCE_LINE_CAP {
                     // Name the NEXT call, with its arguments filled in. A count
@@ -2108,19 +2138,136 @@ impl McpServer {
                 } else {
                     String::new()
                 };
+                let heading = if let Some(symbol_sha256) = exact_truth {
+                    let shown_sha256 = crate::pipeline::stage_a1::sha256_hex(&shown);
+                    let absolute_start = start_opt.unwrap_or(1) as usize + window_start;
+                    let absolute_end = absolute_start + window_end.saturating_sub(window_start + 1);
+                    format!(
+                        "#### Exact source — `{file_path}:{absolute_start}-{absolute_end}` \
+                         (byte-exact indexed slice; indexed_file_sha256=`{indexed_hash}`; \
+                         symbol_sha256=`{symbol_sha256}`; \
+                         shown_sha256=`{shown_sha256}`)"
+                    )
+                } else {
+                    format!(
+                        "#### Lossy source reconstruction — `{file_path}` \
+                         (reason=`{}`; DO NOT edit from this block)",
+                        fallback_reason.unwrap_or_else(|| "exact_source_unavailable".to_string())
+                    )
+                };
+                let fence_newline = if shown.ends_with('\n') { "" } else { "\n" };
                 let _ = write!(
                     out,
-                    "\n\n#### Source — {}{}\n{}```\n{}\n```\n",
-                    bornes,
-                    cap_note,
-                    miss_note,
-                    shown.join("\n")
+                    "\n\n{heading}{cap_note}\n{miss_note}```\n{shown}{fence_newline}```\n"
                 );
             }
         }
         out.push_str(&self.neighbor_signature_section("Callers", caller_ids));
         out.push_str(&self.neighbor_signature_section("Callees", callee_ids));
         out
+    }
+
+    fn exact_indexed_source_body(
+        &self,
+        project_code: &str,
+        file_path: &str,
+        start_line: usize,
+        end_line: usize,
+        indexed_hash: &str,
+    ) -> Result<ExactSourceBody, String> {
+        let identity =
+            crate::project_meta::resolve_project_identity(&self.graph_store, project_code)
+                .map_err(|_| "project_root_unresolved".to_string())?;
+        Self::read_exact_indexed_source_body(
+            &identity.project_path,
+            file_path,
+            start_line,
+            end_line,
+            indexed_hash,
+        )
+    }
+
+    fn read_exact_indexed_source_body(
+        project_root: &std::path::Path,
+        file_path: &str,
+        start_line: usize,
+        end_line: usize,
+        indexed_hash: &str,
+    ) -> Result<ExactSourceBody, String> {
+        if indexed_hash.is_empty() {
+            return Err("indexed_hash_unavailable".to_string());
+        }
+        let root = std::fs::canonicalize(project_root)
+            .map_err(|_| "project_root_unreadable".to_string())?;
+        let requested = std::path::Path::new(file_path);
+        let candidate = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            root.join(requested)
+        };
+        let canonical =
+            std::fs::canonicalize(candidate).map_err(|_| "indexed_file_unreadable".to_string())?;
+        if !canonical.starts_with(&root) {
+            return Err("indexed_file_outside_project_root".to_string());
+        }
+        let disk = std::fs::read_to_string(&canonical)
+            .map_err(|_| "indexed_file_not_utf8_or_unreadable".to_string())?;
+        let disk_hash = crate::pipeline::stage_a1::sha256_hex(&disk);
+        if disk_hash != indexed_hash {
+            return Err("disk_hash_differs_from_index".to_string());
+        }
+        let content = Self::byte_slice_for_lines(&disk, start_line, end_line)
+            .ok_or_else(|| "indexed_line_bounds_invalid".to_string())?
+            .to_string();
+        let slice_sha256 = crate::pipeline::stage_a1::sha256_hex(&content);
+        Ok(ExactSourceBody {
+            content,
+            slice_sha256,
+        })
+    }
+
+    /// Return inclusive one-based lines without normalising any byte: CRLF and
+    /// a trailing newline remain part of the returned slice.
+    fn byte_slice_for_lines(source: &str, start_line: usize, end_line: usize) -> Option<&str> {
+        if start_line == 0 || end_line < start_line || source.is_empty() {
+            return None;
+        }
+        let mut cursor = 0usize;
+        let mut start_byte = None;
+        let mut end_byte = None;
+        for (zero_based, segment) in source.split_inclusive('\n').enumerate() {
+            let line = zero_based + 1;
+            if line == start_line {
+                start_byte = Some(cursor);
+            }
+            cursor += segment.len();
+            if line == end_line {
+                end_byte = Some(cursor);
+                break;
+            }
+        }
+        match (start_byte, end_byte) {
+            (Some(start), Some(end)) => source.get(start..end),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_exact_indexed_source_body_for_tests(
+        project_root: &std::path::Path,
+        file_path: &str,
+        start_line: usize,
+        end_line: usize,
+        indexed_hash: &str,
+    ) -> Result<String, String> {
+        Self::read_exact_indexed_source_body(
+            project_root,
+            file_path,
+            start_line,
+            end_line,
+            indexed_hash,
+        )
+        .map(|exact| exact.content)
     }
 
     /// REQ-AXO-902442 — which slice of a symbol body to render.
@@ -2672,9 +2819,9 @@ impl McpServer {
                     },
                 );
                 // REQ-AXO-902100 (feedback #18) — mode=source appends the symbol's
-                // source body + direct-neighbour signatures (all from ist.chunk, no
-                // file I/O) so a single inspect serves the prepare_edit case without
-                // a full-file Read.
+                // source body + direct-neighbour signatures. REQ-AXO-902600 reads a
+                // hash-verified bounded file slice when possible; chunk reconstruction
+                // remains available but is labelled lossy and unsafe for editing.
                 if mode == Some("source") {
                     evidence.push_str(&self.inspect_source_block(
                         &symbol_id,

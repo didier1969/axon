@@ -6207,6 +6207,77 @@ fn test_inspect_source_repeated_chunk_headers_are_collapsed() {
 }
 
 #[test]
+fn test_inspect_exact_source_keeps_the_kki_timer_line_byte_for_byte() {
+    // REQ-AXO-902600 / KKI feedback #401 — the reconstructed chunk stream
+    // silently dropped this exact line and induced a false timer diagnosis.
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("HardAwareAlnsPrototypeBenchmarkTest.java");
+    let source = "class Benchmark {\r\n    void run() {\r\n        phaseStarted = System.nanoTime();\r\n        witnessFailures();\r\n    }\r\n}\r\n";
+    std::fs::write(&path, source).unwrap();
+    let indexed_hash = crate::pipeline::stage_a1::sha256_hex(source);
+
+    let slice = McpServer::read_exact_indexed_source_body_for_tests(
+        root.path(),
+        path.to_str().unwrap(),
+        2,
+        5,
+        &indexed_hash,
+    )
+    .unwrap();
+
+    assert_eq!(
+        slice,
+        "    void run() {\r\n        phaseStarted = System.nanoTime();\r\n        witnessFailures();\r\n    }\r\n"
+    );
+    assert!(slice.contains("phaseStarted = System.nanoTime();"));
+    assert!(slice.contains("\r\n"), "byte-exact means CRLF is preserved");
+}
+
+#[test]
+fn test_inspect_exact_source_rejects_a_stale_index_hash() {
+    // A current disk file with stale indexed bounds is not an exact indexed
+    // source. The caller must take the explicitly-labelled lossy route.
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("changed.rs");
+    std::fs::write(&path, "fn changed() {}\n").unwrap();
+    let error = McpServer::read_exact_indexed_source_body_for_tests(
+        root.path(),
+        path.to_str().unwrap(),
+        1,
+        1,
+        "stale-index-hash",
+    )
+    .unwrap_err();
+    assert_eq!(error, "disk_hash_differs_from_index");
+}
+
+#[test]
+fn test_inspect_source_without_exact_proof_is_explicitly_lossy() {
+    let server = create_test_server();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::lossy', 'lossy', 'function', false, false, false, 'BKS')").unwrap();
+    server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash) VALUES ('chunk-lossy-source', 'symbol', 'bks::lossy', 'BKS', 'body', 'fn lossy() {}', 'chunk-only')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "inspect",
+                "arguments": { "symbol": "lossy", "project": "BKS", "mode": "source" }
+            })),
+            id: Some(json!(902600)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let text = response["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Lossy source reconstruction"), "{text}");
+    assert!(text.contains("reason=`line_bounds_unavailable`"), "{text}");
+    assert!(text.contains("DO NOT edit from this block"), "{text}");
+    assert!(!text.contains("#### Exact source"), "{text}");
+}
+
+#[test]
 fn test_inspect_source_window_reaches_the_middle_of_a_long_symbol() {
     // REQ-AXO-902442 — the measured dead end (llm_feedback #214):
     // `inspect symbol=axon_commit_work mode=source` rendered "showing 160 of
