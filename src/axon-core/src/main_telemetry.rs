@@ -444,9 +444,9 @@ pub(crate) async fn handle_telemetry_command(
     // pushes raw `:alarm_handler` observations as line-based
     // commands; the Rust side owns the alarm→subsystem mapping so
     // the readiness contract authority (PIL-AXO-001 / REQ-AXO-098)
-    // stays in the brain. Unknown alarms are logged but do NOT
-    // mutate the registry (defensive: a dashboard bug or malicious
-    // payload cannot flap arbitrary subsystems).
+    // stays in the brain. Non-canonical alarms are logged but do NOT
+    // mutate the registry (defensive: a dashboard heuristic, bug, or
+    // malicious payload cannot flap arbitrary subsystems).
     if let Some(payload) = command.strip_prefix("BEAM_ALARM ") {
         handle_beam_alarm(payload);
         return;
@@ -477,7 +477,7 @@ pub(crate) fn handle_beam_alarm(payload: &str) {
     let Some((subsystem, degraded_reason)) = beam_alarm_to_subsystem(alarm) else {
         warn!(
             target = "axon::beam_alarm",
-            "BEAM_ALARM ignored: unknown alarm `{alarm}` (no canonical subsystem mapping)"
+            "BEAM_ALARM observed but not projected: `{alarm}` has no canonical subsystem mapping"
         );
         return;
     };
@@ -500,14 +500,18 @@ pub(crate) fn handle_beam_alarm(payload: &str) {
 
 /// REQ-AXO-094 / DEC-AXO-062 — canonical mapping of BEAM
 /// `:alarm_handler` events to subsystem+reason. Returns None for
-/// alarms that have no defined mapping (those are logged but do
-/// not mutate the registry).
+/// alarms that have no authoritative mapping (those are logged but
+/// do not mutate the registry). REQ-AXO-902605: BEAM's
+/// `system_memory_high_watermark` is deliberately non-canonical: OTP
+/// derives it from raw free memory, so reclaimable Linux page cache can
+/// trigger it while MemAvailable and PSI prove the host is healthy. The
+/// native memory watchdog remains authoritative and continues to use
+/// MemAvailable for backpressure and allocator reclaim.
 fn beam_alarm_to_subsystem(
     alarm: &str,
 ) -> Option<(crate::runtime_readiness::Subsystem, &'static str)> {
     use crate::runtime_readiness::Subsystem;
     match alarm {
-        "system_memory_high_watermark" => Some((Subsystem::Dashboard, "memory_pressure")),
         "disk_almost_full" => Some((Subsystem::IstWriter, "disk_almost_full")),
         _ => None,
     }

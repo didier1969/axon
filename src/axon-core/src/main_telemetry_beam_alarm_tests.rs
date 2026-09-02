@@ -1,7 +1,7 @@
 // REQ-AXO-094 — sibling tests for BEAM alarm projection. The brain
 // is the authority for the alarm→subsystem mapping (PIL-AXO-001 /
 // REQ-AXO-098). These tests pin: (a) known alarms produce the right
-// Subsystem state transition, (b) unknown alarms are silently
+// Subsystem state transition, (b) non-canonical/unknown alarms are
 // ignored (no registry mutation), (c) action=clear restores Ready.
 
 use super::handle_beam_alarm;
@@ -12,12 +12,14 @@ use crate::runtime_readiness::{
 use crate::test_support::registry_test_lock;
 
 #[test]
-fn beam_alarm_memory_high_watermark_set_marks_dashboard_degraded() {
+fn beam_alarm_memory_high_watermark_does_not_override_linux_memory_truth() {
     let _guard = registry_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
-    // Pre-condition: explicitly Ready so the transition is observable.
+    // Linux MemAvailable + PSI are the canonical host-pressure signals. The
+    // BEAM alarm uses raw free memory and therefore fires on reclaimable cache.
+    // It must remain diagnostic and must not override readiness.
     report_subsystem_state(Subsystem::Dashboard, SubsystemState::Ready);
 
     handle_beam_alarm(r#"{"alarm":"system_memory_high_watermark","action":"set"}"#);
@@ -26,16 +28,12 @@ fn beam_alarm_memory_high_watermark_set_marks_dashboard_degraded() {
     let dashboard = reports
         .iter()
         .find(|r| r.subsystem == "dashboard")
-        .expect("dashboard subsystem must be reported after BEAM alarm projection");
-    match &dashboard.state {
-        SubsystemState::Degraded { reason } => {
-            assert_eq!(
-                reason, "memory_pressure",
-                "memory_high_watermark must map to reason=memory_pressure"
-            );
-        }
-        other => panic!("expected Degraded(memory_pressure), got {other:?}"),
-    }
+        .expect("dashboard precondition must remain reported");
+    assert!(
+        matches!(dashboard.state, SubsystemState::Ready),
+        "BEAM raw-free-memory watermark must not override canonical Linux memory truth, got {:?}",
+        dashboard.state
+    );
 }
 
 #[test]
@@ -67,18 +65,18 @@ fn beam_alarm_clear_restores_ready() {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     reset_for_tests();
-    handle_beam_alarm(r#"{"alarm":"system_memory_high_watermark","action":"set"}"#);
-    handle_beam_alarm(r#"{"alarm":"system_memory_high_watermark","action":"clear"}"#);
+    handle_beam_alarm(r#"{"alarm":"disk_almost_full","action":"set"}"#);
+    handle_beam_alarm(r#"{"alarm":"disk_almost_full","action":"clear"}"#);
 
     let reports = snapshot_subsystem_reports();
-    let dashboard = reports
+    let writer = reports
         .iter()
-        .find(|r| r.subsystem == "dashboard")
-        .expect("dashboard must still be reported after clear");
+        .find(|r| r.subsystem == "ist_writer")
+        .expect("ist_writer must still be reported after clear");
     assert!(
-        matches!(dashboard.state, SubsystemState::Ready),
+        matches!(writer.state, SubsystemState::Ready),
         "clear must restore Ready, got {:?}",
-        dashboard.state
+        writer.state
     );
 }
 
