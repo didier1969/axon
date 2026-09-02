@@ -4959,3 +4959,127 @@ fn les_deux_causes_se_divulguent_separement_et_ne_s_annulent_pas() {
         Some("section")
     );
 }
+
+// ===========================================================================
+// Lot 902588 / 902583 — trois surfaces qui affirmaient plus qu'elles ne savaient
+// ===========================================================================
+
+/// REQ-AXO-902583 (DOC, friction c) — `practice_put` disait `inserted: false` sur
+/// une pratique bel et bien stockée.
+///
+/// DOC : « deux champs qui se contredisent dans une seule réponse coûtent un
+/// aller-retour à chaque appel ». Ils ont dû faire un `practice_recall` de contrôle.
+/// Le champ n'était pas faux — `inserted` est un fait de LIGNE (INSERT neuf contre
+/// UPDATE, la fonction étant idempotente sur (scope, practice)) — il répondait à une
+/// autre question que celle que l'appelant se pose.
+#[test]
+fn practice_put_repond_a_la_question_posee_est_ce_ecrit() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    let premier = server
+        .axon_practice_put(&json!({
+            "context": "situation de contrôle",
+            "practice": "la même pratique, écrite deux fois",
+            "scope": "PDS"
+        }))
+        .expect("practice_put répond");
+    assert_eq!(premier.pointer("/data/persisted").and_then(Value::as_bool), Some(true));
+    assert_eq!(premier.pointer("/data/write").and_then(Value::as_str), Some("stored"));
+
+    // Rejouée à l'identique : c'est un UPDATE, donc `inserted` passe à false — et
+    // c'est CE cas qui trompait DOC. `persisted` doit rester vrai.
+    let second = server
+        .axon_practice_put(&json!({
+            "context": "situation de contrôle",
+            "practice": "la même pratique, écrite deux fois",
+            "scope": "PDS"
+        }))
+        .expect("practice_put répond");
+    assert_eq!(
+        second.pointer("/data/persisted").and_then(Value::as_bool),
+        Some(true),
+        "une pratique ré-écrite est TOUJOURS en base — c'est la question de l'appelant"
+    );
+    assert_eq!(
+        second.pointer("/data/write").and_then(Value::as_str),
+        Some("updated"),
+        "et la nuance reste disponible, en toutes lettres"
+    );
+    // Le champ historique survit : des appelants le lisent.
+    assert!(second.pointer("/data/inserted").is_some());
+}
+
+/// REQ-AXO-902583 (DOC, friction b) — 49 Ko pour quatre chiffres.
+///
+/// « La réponse a été écrêtée sur disque par notre client. Le verdict utile tenait
+/// en `{done, missing, partial, total}`. » Perdre l'information utile par EXCÈS
+/// d'information est le pire échec possible pour une surface : le client a bien
+/// reçu la réponse, et n'a pas pu la lire.
+#[test]
+fn soll_verify_requirements_brief_rend_les_compteurs_et_dit_ce_qu_il_omet() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    // Projet `TST` et NON `AXO` : les instantanés SOLL passent par un cache GLOBAL au
+    // processus, et les tests tournent en parallèle. Une sonde écrite sous `AXO` a fait
+    // rougir `test_project_status_reports_delta_vs_previous_snapshot`, qui exige
+    // `delta_vs_previous.available == false` sur un serveur neuf : mon instantané lui
+    // servait de « précédent ». Une base par test ne suffit pas quand un cache est
+    // partagé — l'isolation doit aussi porter sur le NOM du projet.
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('REQ-TST-990001', 'Requirement', 'TST', 'Sonde', 'corps', 'current', '{}')",
+        )
+        .unwrap();
+
+    let brief = server
+        .axon_soll_verify_requirements(&json!({ "project_code": "TST", "mode": "brief" }))
+        .expect("réponse");
+    let complet = server
+        .axon_soll_verify_requirements(&json!({ "project_code": "TST" }))
+        .expect("réponse");
+
+    // Vérifier le SUCCÈS avant de comparer des clés. Sans ce contrôle, un code projet
+    // non résoluble rend une enveloppe d'ERREUR — qui n'a ni `details` ni `summary` —
+    // et le test échoue sur une clé absente en laissant croire à un défaut du mode
+    // `brief`. C'est exactement ce qui s'est produit au premier passage.
+    for (nom, r) in [("brief", &brief), ("complet", &complet)] {
+        assert!(
+            r.get("isError").and_then(Value::as_bool) != Some(true),
+            "l'appel `{nom}` a échoué, le reste du test ne mesure rien : {}",
+            r.pointer("/content/0/text").and_then(Value::as_str).unwrap_or("?")
+        );
+    }
+
+    // Les quatre chiffres — le verdict utile — sont là dans les deux formes, et ÉGAUX.
+    for cle in ["done", "partial", "missing"] {
+        assert_eq!(
+            brief.pointer(&format!("/data/summary/{cle}")),
+            complet.pointer(&format!("/data/summary/{cle}")),
+            "`brief` doit abréger, pas changer le verdict : `{cle}` diverge"
+        );
+    }
+
+    // Il abrège réellement — sinon le mode ne sert à rien.
+    assert!(brief.pointer("/data/details").is_none());
+    assert!(complet.pointer("/data/details").is_some());
+
+    // Et il DIT ce qu'il omet : une réponse abrégée qui tait son abrègement se lit
+    // comme une réponse complète, et un appelant conclurait « aucune exigence
+    // partielle » sur une liste absente.
+    let omis: Vec<String> = brief
+        .pointer("/data/omitted_in_brief")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    assert!(
+        omis.contains(&"details".to_string()),
+        "l'abrègement doit être déclaré, got {omis:?}"
+    );
+
+    // Le défaut par défaut est INCHANGÉ : un appelant qui lit `details` aujourd'hui
+    // ne doit pas voir sa réponse rétrécir sans l'avoir demandé.
+    assert!(complet.pointer("/data/omitted_in_brief").is_none());
+}

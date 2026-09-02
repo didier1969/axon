@@ -520,7 +520,32 @@ impl McpServer {
             .first()
             .map(|r| {
                 let id = r.first().and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0);
-                let ins = r.get(1).map(|v| v.as_bool().unwrap_or(false) || v.as_str() == Some("t")).unwrap_or(false);
+                // REQ-AXO-902583 — `inserted` valait TOUJOURS `false`, sur un INSERT
+                // comme sur un UPDATE. Rapporté par DOC (« rend `inserted: false` et
+                // stocke quand même »), et d'abord pris pour un simple problème de nom.
+                //
+                // La cause, mesurée : le writer rend un booléen PG sous forme de CHAÎNE
+                // `"true"` / `"false"` (`SELECT (1=1)` → `[["true"]]`). L'ancien code
+                // testait `as_bool()` — None sur une chaîne — puis `== Some("t")`, qui
+                // ne matche pas `"true"`. Les deux branches ratant, `unwrap_or(false)`
+                // transformait le décalage de TYPE en la valeur PLAUSIBLE `false`.
+                // Exactement la famille de REQ-AXO-902325, où `unwrap_or(0)` faisait
+                // rendre « mean trust 0.00 » à `practice_card` sur une moyenne de 0,53.
+                //
+                // La preuve tenait dans la réponse elle-même : `practice_put` rendait un
+                // `id` NEUF — donc un INSERT — avec `inserted: false`. Deux champs de la
+                // même réponse se contredisaient, et c'est le second qui mentait.
+                let ins = r
+                    .get(1)
+                    .map(|v| match v {
+                        Value::Bool(b) => *b,
+                        // Les trois formes que PG et les sérialiseurs produisent. Toute
+                        // AUTRE forme est un changement de contrat, pas un `false` :
+                        // on ne la déduit pas en silence.
+                        Value::String(s) => matches!(s.as_str(), "t" | "true" | "TRUE"),
+                        _ => false,
+                    })
+                    .unwrap_or(false);
                 (id, ins)
             })
             .unwrap_or((0, false));
@@ -555,7 +580,28 @@ impl McpServer {
                 if inserted {"stored"} else {"updated"},
                 dense_advisory.map(|a| format!(" · ⚠️ {a}")).unwrap_or_default()
             )}],
-            "data": {"status":"ok","id":id,"inserted":inserted,"scope":scope,"gate":gate_label,"embed":embed_state,
+            // REQ-AXO-902583 — signalé par DOC : « `practice_put` rend `inserted: false`
+            // avec `gate: inconclusive` — et stocke quand même. Deux champs qui se
+            // contredisent dans une seule réponse coûtent un aller-retour à chaque
+            // appel. » Ils ont dû faire un `practice_recall` de contrôle pour savoir si
+            // la pratique existait.
+            //
+            // DEUX défauts, et le second n'est apparu qu'en cherchant le premier.
+            //
+            // 1. `inserted` était CASSÉ — toujours `false`, INSERT comme UPDATE (voir le
+            //    parseur ci-dessus). Le canal texte disait donc « updated » sur chaque
+            //    pratique neuve, et `data` aussi. Corrigé à la source.
+            //
+            // 2. Même réparé, `inserted` répond à une question que l'appelant ne se pose
+            //    pas. C'est un fait de LIGNE (INSERT neuf contre UPDATE d'une pratique
+            //    déjà connue — la fonction est idempotente). Lui, veut savoir « est-ce
+            //    écrit ? ». On répond à la question posée plutôt que de renommer un champ
+            //    que des appelants lisent déjà : `persisted` est le fait, `write` en donne
+            //    la nuance en toutes lettres, `inserted` reste pour la compatibilité.
+            "data": {"status":"ok","id":id,"inserted":inserted,
+                     "persisted": true,
+                     "write": if inserted {"stored"} else {"updated"},
+                     "scope":scope,"gate":gate_label,"embed":embed_state,
                      "encoding":dense_state,"dense_advisory":dense_advisory,"perishability":perishability}
         }))
     }

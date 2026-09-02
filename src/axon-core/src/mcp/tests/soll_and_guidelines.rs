@@ -989,8 +989,21 @@ fn create_nomme_la_relation_qu_il_a_substituee_au_lieu_de_la_nier() {
         )
         .unwrap();
 
-    // (REQ, MIL) n'admet que `BLOCKED_BY` : la substitution elle-même est légitime.
-    // C'est son SILENCE qui ne l'est pas.
+    // REQ-AXO-902583 puis REQ-AXO-902588 — l'histoire de ce test en deux temps.
+    //
+    // Écrit d'abord pour épingler que la substitution est NOMMÉE : `create` posait
+    // `BLOCKED_BY` en rendant `relation_type_inferred: false`, donc le champ qui existe
+    // pour signaler le remplacement le NIAIT.
+    //
+    // Il a ensuite ROUGI, et c'était son travail : `REQ-AXO-902588` a montré que la
+    // substitution elle-même était fausse. `REQ --BLOCKED_BY--> MIL` se lit « cette
+    // exigence est BLOQUÉE par ce jalon », l'inverse du sens demandé, et
+    // `soll_work_plan` LIT les blocages pour ordonner ses vagues. `attach_to` étant un
+    // geste de FILIATION, l'attache passe désormais par le sens inverse :
+    // `MIL --TARGETS--> REQ`.
+    //
+    // Ce qui NE change pas, et qui est l'objet historique du test : la substitution
+    // reste NOMMÉE. `auto_canonized_from` porte toujours la relation demandée.
     let res = create_call(
         &server,
         json!({ "title": "substitution 902583", "description": "corps",
@@ -1002,7 +1015,12 @@ fn create_nomme_la_relation_qu_il_a_substituee_au_lieu_de_la_nier() {
         Some(true),
         "la création reste acceptée — seule la divulgation change : {res}"
     );
-    assert_eq!(res["data"]["applied_relation"], json!("BLOCKED_BY"));
+    assert_eq!(
+        res["data"]["applied_relation"],
+        json!("TARGETS"),
+        "REQ-AXO-902588 — l'attache prend le sens INVERSE plutôt qu'un blocage \
+         sémantiquement faux : {res}"
+    );
     assert_eq!(
         res["data"]["auto_canonized_from"],
         json!("BELONGS_TO"),
@@ -1015,9 +1033,22 @@ fn create_nomme_la_relation_qu_il_a_substituee_au_lieu_de_la_nier() {
     );
 
     let text = res["content"][0]["text"].as_str().expect("texte");
+    // REQ-AXO-902588 — la relation APPLIQUÉE est désormais `TARGETS`, plus
+    // `BLOCKED_BY`. L'assertion exigeait encore l'ancienne : elle est restée verte
+    // tant que la substitution n'avait pas changé, puis a rougi sur un texte JUSTE.
+    // Les trois assertions structurées ci-dessus disaient déjà `TARGETS` ; celle-ci
+    // ne les avait pas suivies. Ce que le test garde ne change pas : les DEUX
+    // relations sont nommées, la demandée et l'appliquée.
     assert!(
-        text.contains("BELONGS_TO") && text.contains("BLOCKED_BY"),
+        text.contains("BELONGS_TO") && text.contains("TARGETS"),
         "le texte doit porter la relation demandée ET celle appliquée : {text}"
+    );
+    // Et il ne doit PAS ressusciter l'ancienne substitution : `BLOCKED_BY` dans le
+    // texte signifierait que le sens sémantiquement faux est revenu.
+    assert!(
+        !text.contains("BLOCKED_BY"),
+        "la substitution vers `BLOCKED_BY` est retirée — la voir revenir est le \
+         défaut que REQ-AXO-902588 ferme : {text}"
     );
 }
 

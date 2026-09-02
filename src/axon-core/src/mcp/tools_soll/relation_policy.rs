@@ -1312,4 +1312,41 @@ mod matrix_version_tests {
             "la matrice complète ne peut pas avoir l'empreinte d'une matrice à une paire"
         );
     }
+
+    /// REQ-AXO-902588 — une attache ne doit jamais se canoniser vers un BLOCAGE.
+    ///
+    /// Mesuré le 2026-09-01 sur une création RÉELLE (pas un nœud jetable, que
+    /// `GUI-AXO-1038` interdit) : `create(requirement, attach_to=MIL-AXO-054,
+    /// relation_type=BELONGS_TO)` posait `REQ --BLOCKED_BY--> MIL`, qui se lit
+    /// « cette exigence est BLOQUÉE par ce jalon ». C'est l'inverse du sens demandé,
+    /// et `soll_work_plan` LIT les blocages pour ordonner ses vagues : l'arête
+    /// fabriquait une dépendance inexistante entre une exigence et son propre parent.
+    ///
+    /// Le test porte sur la POLITIQUE, pas sur une écriture : la paire `(REQ, MIL)`
+    /// n'admet qu'une relation et c'est `BLOCKED_BY`, la paire inverse n'en admet
+    /// qu'une et c'est autre chose. C'est cette arithmétique qui rendait le choix
+    /// syntaxique — et c'est elle qu'il faut épingler pour que le correctif ne se
+    /// dilue pas dans un renommage.
+    #[test]
+    fn la_paire_requirement_milestone_est_bien_le_piege_a_deux_faces() {
+            let directe = relation_policy_for_pair("REQ", "MIL").expect("(REQ, MIL) doit être connue");
+        assert_eq!(
+            directe.allowed,
+            vec!["BLOCKED_BY"],
+            "si cette paire cesse d'être single-legal sur un BLOCAGE, le correctif de \
+             REQ-AXO-902588 n'a plus d'objet — relire avant de le retirer"
+        );
+
+        let inverse = relation_policy_for_pair("MIL", "REQ").expect("(MIL, REQ) doit être connue");
+        assert_eq!(
+            inverse.allowed.len(),
+            1,
+            "les DEUX sens sont single-legal : c'est ce qui rendait le choix syntaxique"
+        );
+        assert_ne!(
+            inverse.allowed[0], "BLOCKED_BY",
+            "le sens inverse doit offrir autre chose qu'un blocage, sinon renoncer est la \
+             seule issue honnête"
+        );
+    }
 }

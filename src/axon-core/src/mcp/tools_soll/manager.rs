@@ -1098,10 +1098,57 @@ impl McpServer {
                     }
                 }
 
+                // REQ-AXO-902588 — `attach_to` est un geste de FILIATION : le paramètre
+                // est documenté « Parent node id to attach to ». Le substituer en
+                // `BLOCKED_BY`, qui est une relation de DÉPENDANCE, retourne le sens.
+                //
+                // Mesuré le 2026-09-01 sur une création réelle : `create(requirement,
+                // attach_to=MIL-AXO-054, relation_type=BELONGS_TO)` posait
+                // `REQ --BLOCKED_BY--> MIL`, qui se lit « cette exigence est BLOQUÉE par
+                // ce jalon ». Faux, et pas seulement inélégant : `soll_work_plan` LIT les
+                // blocages pour ordonner ses vagues, donc l'arête fabriquait une
+                // dépendance inexistante entre une exigence et son propre parent.
+                //
+                // La cause est arithmétique : la paire directe `(REQ, MIL)` n'admet qu'une
+                // relation (`BLOCKED_BY`) et la paire inverse `(MIL, REQ)` n'en admet
+                // qu'une autre (`TARGETS`). `REQ-AXO-902288` choisissait la directe parce
+                // qu'elle correspond à l'ordre des arguments — un critère SYNTAXIQUE
+                // appliqué à une question SÉMANTIQUE. `REQ-AXO-902504` n'avait traité que
+                // le cas où la paire inverse admet la relation DEMANDÉE.
+                //
+                // On étend donc l'exclusion qui protégeait déjà `SUPERSEDES` : une paire
+                // dont l'unique relation est `BLOCKED_BY` ne peut pas accueillir une
+                // attache, et l'on regarde le sens inverse avant de renoncer.
+                if !attache_inversee && !pair_directe_admet {
+                    let directe_ne_propose_qu_un_blocage = policy
+                        .as_ref()
+                        .map(|p| p.allowed.len() == 1 && p.allowed[0] == "BLOCKED_BY")
+                        .unwrap_or(false);
+                    if directe_ne_propose_qu_un_blocage {
+                        if let Some(pi) = relation_policy_for_pair(&target_prefix, source_prefix) {
+                            // Une seule candidate inverse, et elle ne doit être ni
+                            // destructive ni un blocage à son tour : sinon on n'a rien
+                            // gagné et il vaut mieux refuser en nommant les deux.
+                            if pi.allowed.len() == 1
+                                && pi.allowed[0] != "SUPERSEDES"
+                                && pi.allowed[0] != "BLOCKED_BY"
+                            {
+                                relation_type = pi.allowed[0].to_string();
+                                attache_inversee = true;
+                            }
+                        }
+                    }
+                }
+
                 if !attache_inversee {
                     if let Some(p) = &policy {
                         if p.allowed.len() == 1
                             && p.allowed[0] != "SUPERSEDES"
+                            // REQ-AXO-902588 — jamais vers un blocage : voir ci-dessus.
+                            // Le cas tombe alors dans le refus, qui nomme les relations
+                            // acceptées ; un refus explicite vaut mieux qu'une arête
+                            // fausse que personne ne relira.
+                            && p.allowed[0] != "BLOCKED_BY"
                             && !p.allowed.iter().any(|a| *a == relation_type.as_str())
                         {
                             relation_type = p.allowed[0].to_string();
@@ -1287,6 +1334,22 @@ impl McpServer {
                 match insert_res {
                     Ok(()) => {
                         let created_id = formatted_id.clone();
+                        // REQ-AXO-902588 — UNE seule source pour la direction de l'arête.
+                        //
+                        // Deux blocs de message plus bas la décrivaient chacun de leur côté,
+                        // et l'un des deux la codait en dur (`created -> attach_to`). Tant
+                        // que « relation substituée » et « sens inversé » s'excluaient, la
+                        // contradiction restait invisible ; `REQ-AXO-902588` crée le cas où
+                        // les DEUX sont vrais, et la surface s'est mise à affirmer une arête
+                        // qu'elle n'avait pas posée — et qui n'est même pas canonique.
+                        //
+                        // C'est la faute que ce jalon poursuit, commise dans le correctif qui
+                        // la poursuit. Un fait décrit à deux endroits diverge tôt ou tard.
+                        let (arete_source, arete_cible) = if attache_inversee {
+                            (attach_to, created_id.as_str())
+                        } else {
+                            (created_id.as_str(), attach_to)
+                        };
                         // REQ-AXO-902504 — quand l'arete a ete INVERSEE, le rapport doit
                         // montrer le sens REELLEMENT pose, pas celui demande. L'ancienne
                         // formulation annoncait « created -> attach_to » quoi qu'il arrive :
@@ -1294,13 +1357,13 @@ impl McpServer {
                         let mut report = if attache_inversee {
                             format!(
                                 "SOLL entity created: `{}`\n\
-                                 ⚠️ Lien pose DEPUIS le parent (sens conserve) : `{}` -> `{}` via `{}`\n\
-                                 `{}` -> `{}` via `{}` n'est pas canonique ; la paire inverse l'est, \
-                                 et c'est le SENS DE LECTURE qui etait inverse, pas le lien. \
-                                 L'arete posee est celle que `soll_work_plan` et les gates lisent.",
+                                 ⚠️ Lien posé DEPUIS le parent : `{}` -> `{}` via `{}`\n\
+                                 Le sens direct `{}` -> `{}` n'est pas canonique pour cette paire ; \
+                                 c'est le SENS DE LECTURE qui était inversé, pas le lien. \
+                                 L'arête ci-dessus est celle que `soll_work_plan` et les gates lisent.",
                                 created_id,
-                                attach_to, created_id, relation_type,
-                                created_id, attach_to, relation_type
+                                arete_source, arete_cible, relation_type,
+                                created_id, attach_to
                             )
                         } else {
                             format!(
@@ -1334,8 +1397,8 @@ impl McpServer {
                         if let Some(requested) = &auto_canonized_from {
                             report.push_str(&format!(
                                 "\n⚠️ `relation_type` fourni `{requested}` — REMPLACÉ par \
-                                 `{relation_type}`, seule relation canonique pour cette paire. \
-                                 L'arête posée est `{created_id}` -> `{attach_to}` via \
+                                 `{relation_type}`, seule relation canonique retenue pour cette \
+                                 attache. L'arête posée est `{arete_source}` -> `{arete_cible}` via \
                                  `{relation_type}` : c'est elle que lisent `soll_work_plan` et \
                                  les gates."
                             ));

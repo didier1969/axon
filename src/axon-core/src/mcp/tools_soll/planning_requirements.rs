@@ -217,6 +217,50 @@ impl McpServer {
         // petgraph snapshot (REQ-AXO-322) for sub-ms p99 once the
         // snapshot exposes coverage scoring.
         let total_available = summary.entries.len() as u64;
+        // REQ-AXO-902583 — friction rapportée par DOC : « 49 Ko pour quatre chiffres.
+        // La réponse a été écrêtée sur disque par notre client. Le verdict utile tenait
+        // en {done, missing, partial, total}. »
+        //
+        // Perdre l'information utile par EXCÈS d'information est le pire échec possible
+        // pour une surface : le client a bien reçu la réponse, et n'a pas pu la lire.
+        //
+        // `mode="brief"` retire les deux listes volumineuses — et elles étaient émises
+        // DEUX FOIS, `details` et `requirements` portant la même valeur (alias de
+        // compatibilité). Le défaut par défaut reste inchangé : un appelant qui lit
+        // `details` aujourd'hui ne doit pas voir sa réponse rétrécir sans l'avoir
+        // demandé.
+        let brief = args.get("mode").and_then(Value::as_str) == Some("brief");
+        if brief {
+            return Some(json!({
+                "content": [{"type":"text","text": format!(
+                    "Requirement verification ({project_code}) — mode=brief\n\
+                     done={} · partial={} · missing={} · total={}\n\n\
+                     _↳ les listes détaillées sont omises à votre demande ; \
+                     rappelez sans `mode=\"brief\"` pour les obtenir._",
+                    summary.done, summary.partial, summary.missing, summary.entries.len()
+                )}],
+                "data": {
+                    "project_code": project_code,
+                    "mode": "brief",
+                    "done": summary.done,
+                    "partial": summary.partial,
+                    "missing": summary.missing,
+                    "summary": {
+                        "done": summary.done,
+                        "partial": summary.partial,
+                        "missing": summary.missing,
+                        "total": summary.entries.len()
+                    },
+                    // Dit ce qui MANQUE et pourquoi. Une réponse abrégée qui tait son
+                    // abrègement se lit comme une réponse complète — et un appelant
+                    // conclurait « aucune exigence partielle » sur une liste absente.
+                    "omitted_in_brief": ["details", "requirements", "completion_model", "next_to_close"],
+                    "unresolvable_file_evidence_count": summary.unresolvable_file_evidence_count,
+                    "total_available": total_available,
+                    "status": "ok"
+                }
+            }));
+        }
         Some(json!({
             "content": [{"type":"text","text": text}],
             "data": {
