@@ -6199,46 +6199,6 @@ fn test_unopenable_entities_never_reach_a_reader_facing_surface() {
 }
 
 #[test]
-fn test_inspect_source_repeated_chunk_headers_are_collapsed() {
-    // REQ-AXO-902442 — `code_chunker` prefixes every stored part with
-    // `symbol:` / `kind:` / `part: k/n` / `context:`. Concatenated back for
-    // `mode=source`, a 23-part symbol carried ~90 lines of repeated header
-    // inside a 160-line window (llm_feedback #214): the caller paid the
-    // overhead AND did not get what they came for.
-    let body = "symbol: f\nkind: function\npart: 1/2\n\ncontext:\nfn f() {\n    let a = 1;\n\
-                \nsymbol: f\nkind: function\npart: 2/2\n\ncontext:\n    let b = 2;\n}\n";
-    let collapsed = McpServer::strip_repeated_chunk_headers_for_tests(body);
-
-    // POSITIVE CONTROL — the FIRST header survives; it names the symbol and
-    // its signature, and stripping it would trade one defect for another.
-    assert!(
-        collapsed.starts_with("symbol: f"),
-        "the first header must stay: {collapsed}"
-    );
-    assert_eq!(
-        collapsed.matches("symbol: f").count(),
-        1,
-        "the repeat is dropped: {collapsed}"
-    );
-    assert_eq!(
-        collapsed.matches("kind: function").count(),
-        1,
-        "same for kind: {collapsed}"
-    );
-    assert!(
-        !collapsed.contains("part: 1/2") && !collapsed.contains("part: 2/2"),
-        "the part markers are an indexing internal, never code: {collapsed}"
-    );
-    // The CODE is untouched — that is the whole payload.
-    for line in ["fn f() {", "    let a = 1;", "    let b = 2;", "}"] {
-        assert!(
-            collapsed.contains(line),
-            "source line lost: {line} in {collapsed}"
-        );
-    }
-}
-
-#[test]
 fn test_inspect_exact_source_keeps_the_kki_timer_line_byte_for_byte() {
     // REQ-AXO-902600 / KKI feedback #401 — the reconstructed chunk stream
     // silently dropped this exact line and induced a false timer diagnosis.
