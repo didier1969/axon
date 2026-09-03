@@ -1216,7 +1216,7 @@ fn test_status_graph_only_reports_semantic_drain_not_applicable() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "status",
-                "arguments": { "mode": "brief" }
+                "arguments": { "mode": "verbose" }
             })),
             id: Some(json!(2165)),
         })
@@ -1844,12 +1844,10 @@ fn test_cwd_provenance_disclosed_only_when_auto_resolved() {
 }
 
 #[test]
-fn test_status_brief_omits_public_tools_list_in_text() {
-    // REQ-AXO-104 — status mode=brief (the default) must NOT inline the
-    // 60-name public_tools list in the human-readable text. The list
-    // does not change within a session and is also exposed in
-    // `data.public_tools`, so spending ~700 chars per status call on
-    // it wastes the LLM context. mode=verbose keeps the list inline.
+fn test_status_brief_bounds_the_complete_serialized_payload() {
+    // REQ-AXO-104 / REQ-AXO-902609 — brief must omit the catalog from both
+    // human text and structuredContent. A short rendering wrapped around a
+    // huge machine payload is not compact for an MCP client.
     let server = create_test_server();
     let brief = server
         .handle_request(JsonRpcRequest {
@@ -1879,14 +1877,21 @@ fn test_status_brief_omits_public_tools_list_in_text() {
             || brief_content.contains("count:"),
         "brief mode must show a tool count summary or pointer; got: {brief_content}"
     );
-    // data.public_tools must remain always-on for machine consumers.
-    let data_tools = brief["data"]["public_tools"]
+    assert!(brief["data"]["public_tools"].is_null());
+    assert!(brief["data"]["public_tool_count"]
+        .as_u64()
+        .is_some_and(|n| n >= 30));
+    assert_eq!(
+        brief["data"]["detail_continuation"],
+        json!({"tool": "status", "arguments": {"mode": "verbose"}})
+    );
+    assert!(brief["data"]["omitted_in_brief"]
         .as_array()
-        .expect("data.public_tools must be present even in brief mode");
+        .is_some_and(|keys| keys.iter().any(|key| key == "runtime_authority")));
+    let serialized_len = serde_json::to_vec(&brief).unwrap().len();
     assert!(
-        data_tools.len() >= 30,
-        "data.public_tools should still enumerate the catalog; got {} entries",
-        data_tools.len()
+        serialized_len <= 12_000,
+        "brief status must stay within its 12 KiB serialized budget, got {serialized_len} bytes"
     );
 
     let verbose = server
@@ -2551,7 +2556,7 @@ fn test_status_reports_public_surface_and_runtime_truth() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "status",
-                "arguments": { "mode": "brief" }
+                "arguments": { "mode": "verbose" }
             })),
             id: Some(json!(2202)),
         })
@@ -3075,7 +3080,7 @@ fn test_status_reports_public_surface_and_runtime_truth() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "status",
-                "arguments": { "mode": "brief" }
+                "arguments": { "mode": "verbose" }
             })),
             id: Some(json!(2203)),
         })
@@ -3114,7 +3119,7 @@ fn test_status_reports_public_surface_and_runtime_truth() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "status",
-                "arguments": { "mode": "brief" }
+                "arguments": { "mode": "verbose" }
             })),
             id: Some(json!(2204)),
         })
@@ -3240,7 +3245,7 @@ fn test_status_reports_brain_and_indexer_authorities() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "status",
-                "arguments": { "mode": "brief" }
+                "arguments": { "mode": "verbose" }
             })),
             id: Some(json!(2207)),
         })
@@ -3283,7 +3288,7 @@ fn test_status_reports_brain_and_indexer_authorities() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "status",
-                "arguments": { "mode": "brief" }
+                "arguments": { "mode": "verbose" }
             })),
             id: Some(json!(2208)),
         })
@@ -3356,7 +3361,7 @@ fn test_status_exposes_tensorrt_ready_vector_pipeline_telemetry() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "status",
-                "arguments": { "mode": "brief" }
+                "arguments": { "mode": "verbose" }
             })),
             id: Some(json!(2203)),
         })
@@ -3493,7 +3498,7 @@ fn test_status_reports_retrieve_context_in_public_surface_when_full_autonomous()
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "status",
-                "arguments": { "mode": "brief" }
+                "arguments": { "mode": "verbose" }
             })),
             id: Some(json!(22021)),
         })
@@ -3551,7 +3556,7 @@ fn test_status_reports_information_surface_in_brain_only() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "status",
-                "arguments": { "mode": "brief" }
+                "arguments": { "mode": "verbose" }
             })),
             id: Some(json!(22022)),
         })

@@ -1510,6 +1510,21 @@ impl McpServer {
                 data.remove("traceability");
             }
         }
+        // REQ-AXO-902609 — `brief` is a payload contract, not merely a text
+        // rendering preference.  The former response removed debug_snapshot
+        // while still returning runtime_authority, the complete tool catalog,
+        // and several diagnostic trees in structuredContent.  Clients paid
+        // roughly 14.5k tokens for a response whose visible text looked small.
+        // Keep the operator verdict and immediate routing facts here; every
+        // omitted diagnostic remains available through the explicit verbose
+        // continuation below.
+        let brief_mode = mode
+            .map(|value| value.eq_ignore_ascii_case("brief"))
+            .unwrap_or(true);
+        if brief_mode {
+            let full_data = response.get("data").cloned().unwrap_or_else(|| json!({}));
+            response["data"] = compact_status_brief_data(&full_data);
+        }
         // REQ-AXO-91484 — call-graph coverage surfaced only in verbose/full so
         // brief stays fast. Cached at the response level via status_cache.
         let verbose_or_full = matches!(mode, Some("verbose") | Some("VERBOSE") | Some("full"));
@@ -1528,9 +1543,15 @@ impl McpServer {
         // invocation-tracking via skill_invoke audit log = slice 2 (a
         // future REQ adds the audit ring buffer + diff computation).
         if let Some(data) = response.get_mut("data").and_then(Value::as_object_mut) {
+            let methodology_drift = self.methodology_drift_warnings_v0();
+            let methodology_drift = if brief_mode {
+                compact_methodology_drift_for_brief(&methodology_drift)
+            } else {
+                methodology_drift
+            };
             data.insert(
                 "methodology_drift_warnings".to_string(),
-                self.methodology_drift_warnings_v0(),
+                methodology_drift,
             );
         }
         cache_write(Self::status_cache(), cache_key, now_ms, &response);
@@ -1647,6 +1668,110 @@ impl McpServer {
             .filter_map(|row| row.into_iter().next())
             .find(|s| !s.is_empty())
     }
+}
+
+fn compact_status_brief_data(data: &Value) -> Value {
+    let public_tool_count = data
+        .get("public_tools")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let runtime_state = data.pointer("/runtime_authority/runtime_state");
+    let runtime_health = json!({
+        "process_role": runtime_state.and_then(|value| value.get("process_role")).cloned().unwrap_or(Value::Null),
+        "system_converged": runtime_state.and_then(|value| value.get("system_converged")).cloned().unwrap_or(Value::Null),
+        "indexer_feed": runtime_state.and_then(|value| value.get("indexer_feed")).map(|feed| json!({
+            "state": feed.get("state").cloned().unwrap_or(Value::Null),
+            "stale": feed.get("stale").cloned().unwrap_or(Value::Null),
+        })).unwrap_or(Value::Null),
+        "ist_snapshot": runtime_state.and_then(|value| value.get("ist_snapshot")).map(|snapshot| json!({
+            "state": snapshot.get("state").cloned().unwrap_or(Value::Null),
+            "stale": snapshot.get("stale").cloned().unwrap_or(Value::Null),
+        })).unwrap_or(Value::Null),
+        "embedder": {
+            "lifecycle": data.pointer("/runtime_authority/embedder_lifecycle/lifecycle_phase").cloned().unwrap_or(Value::Null),
+            "compute": data.pointer("/runtime_authority/embedder_runtime/compute").cloned().unwrap_or(Value::Null),
+            "heartbeat_age_ms": data.pointer("/runtime_authority/embedder_runtime/heartbeat_age_ms").cloned().unwrap_or(Value::Null),
+        }
+    });
+    let identity = data.get("instance_identity").unwrap_or(&Value::Null);
+    let machine = data.get("machine_status").unwrap_or(&Value::Null);
+
+    json!({
+        "truth_status": data.get("truth_status").cloned().unwrap_or(Value::Null),
+        "truth_cockpit": data.get("truth_cockpit").cloned().unwrap_or(Value::Null),
+        "next_action": data.get("next_action").cloned().unwrap_or(Value::Null),
+        "runtime_mode": data.get("runtime_mode").cloned().unwrap_or(Value::Null),
+        "runtime_profile": data.get("runtime_profile").cloned().unwrap_or(Value::Null),
+        "drain_state": data.get("drain_state").cloned().unwrap_or(Value::Null),
+        "inbox_unread": data.get("inbox_unread").cloned().unwrap_or(Value::Null),
+        "availability": data.get("availability").cloned().unwrap_or(Value::Null),
+        "readiness": data.get("readiness").cloned().unwrap_or(Value::Null),
+        "subsystems": data.get("subsystems").cloned().unwrap_or_else(|| json!([])),
+        "instance_identity": {
+            "instance_kind": identity.get("instance_kind").cloned().unwrap_or(Value::Null),
+            "runtime_identity": identity.get("runtime_identity").cloned().unwrap_or(Value::Null),
+            "auto_detected_project": identity.get("auto_detected_project").cloned().unwrap_or(Value::Null),
+            "session_pointer": identity.get("session_pointer").cloned().unwrap_or(Value::Null),
+        },
+        "advertised_endpoints": data.get("advertised_endpoints").cloned().unwrap_or(Value::Null),
+        "resource_policy": data.get("resource_policy").cloned().unwrap_or(Value::Null),
+        "runtime_version": data.get("runtime_version").cloned().unwrap_or(Value::Null),
+        "file_vectorization_queue": data.get("file_vectorization_queue").cloned().unwrap_or(Value::Null),
+        "utility_first_scheduler": {
+            "state": data.pointer("/utility_first_scheduler/state").cloned().unwrap_or(Value::Null),
+            "reason": data.pointer("/utility_first_scheduler/reason").cloned().unwrap_or(Value::Null),
+        },
+        "machine_status": {
+            "source": machine.get("source").cloned().unwrap_or(Value::Null),
+            "truth_status": machine.get("truth_status").cloned().unwrap_or(Value::Null),
+            "freshness_state": machine.get("freshness_state").cloned().unwrap_or(Value::Null),
+            "process_role": machine.get("process_role").cloned().unwrap_or(Value::Null),
+            "blocking": machine.get("blocking").cloned().unwrap_or(Value::Null),
+            "pipeline": machine.get("pipeline").cloned().unwrap_or(Value::Null),
+            "queues": machine.get("queues").cloned().unwrap_or(Value::Null),
+        },
+        "runtime_health": runtime_health,
+        "public_tool_count": public_tool_count,
+        "omitted_in_brief": [
+            "public_tools", "runtime_authority", "async_policy", "async_contract",
+            "job_counts", "viz_freshness", "soll_read_coverage",
+            "soll_fusion_lane_coverage", "client_reachability_notes"
+        ],
+        "detail_continuation": {
+            "tool": "status",
+            "arguments": {"mode": "verbose"}
+        }
+    })
+}
+
+fn compact_methodology_drift_for_brief(data: &Value) -> Value {
+    let count = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0)
+    };
+    let top = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    json!({
+        "mandated_count": count("mandated_skills"),
+        "recently_invoked_count": count("recently_invoked"),
+        "drift_warning_count": count("drift_warnings"),
+        "mandated_skills": top("mandated_skills"),
+        "recently_invoked": top("recently_invoked"),
+        "drift_warnings": top("drift_warnings"),
+        "window_minutes": data.get("window_minutes").cloned().unwrap_or(Value::Null),
+        "tracking_version": data.get("tracking_version").cloned().unwrap_or(Value::Null),
+        "detail_continuation": {"tool": "status", "arguments": {"mode": "verbose"}}
+    })
 }
 
 // REQ-AXO-91484 — pure builder factored out so the JSON shape, the alert

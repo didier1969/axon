@@ -351,25 +351,25 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     assert!(data["runtime"]["runtime_mode"].as_str().is_some());
     assert_eq!(data["runtime"]["mode"].as_str(), Some("brief_compact"));
     assert!(data["runtime"]["debug_snapshot"].is_null());
-    assert_eq!(data["conception"]["module_count"].as_u64(), Some(1));
-    assert_eq!(data["conception"]["interface_count"].as_u64(), Some(0));
-    assert_eq!(data["conception"]["contract_count"].as_u64(), Some(1));
-    assert_eq!(data["conception"]["flow_count"].as_u64(), Some(0));
-    assert!(data["conception"]["modules"]
-        .as_array()
-        .is_some_and(|items| !items.is_empty()));
-    assert!(data["conception"]["interfaces"].as_array().is_some());
-    assert!(data["conception"]["contracts"]
-        .as_array()
-        .is_some_and(|items| !items.is_empty()));
-    assert!(data["conception"]["flows"].as_array().is_some());
+    assert_eq!(data["conception_summary"]["module_count"].as_u64(), Some(1));
+    assert_eq!(
+        data["conception_summary"]["interface_count"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        data["conception_summary"]["contract_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(data["conception_summary"]["flow_count"].as_u64(), Some(0));
+    assert!(data["conception"].is_null());
     // REQ-AXO-901926 — project_status now surfaces the REAL (RAM-first,
     // TTL-cached) anomalies summary instead of the old decoupled stub, so the
     // structural counts are no longer forced to 0/0/0.
-    assert!(data["anomalies"]["summary"].is_object());
-    assert!(data["soll_context"]["visions"]
-        .as_array()
-        .is_some_and(|items| !items.is_empty()));
+    assert!(data["anomalies_summary"].is_object());
+    assert!(data["soll_context_counts"]["visions"]
+        .as_u64()
+        .is_some_and(|n| n > 0));
+    assert!(data["soll_context"].is_null());
     assert!(data["operator_guidance"].as_object().is_some());
     assert!(data["operator_guidance"]["recommended_next_step"]
         .as_str()
@@ -391,11 +391,29 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
         data["next_action"],
         data["truth_cockpit"]["next_best_action"]
     );
+    assert_eq!(
+        data["detail_continuation"],
+        json!({
+            "tool": "project_status",
+            "arguments": {"project_code": "AXO", "mode": "verbose"}
+        })
+    );
+    let serialized_len = serde_json::to_vec(&response).unwrap().len();
+    assert!(
+        serialized_len <= 12_000,
+        "brief project_status must stay within its 12 KiB serialized budget, got {serialized_len} bytes"
+    );
     let text = response["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Project Status"), "{text}");
     assert!(text.contains("Axon Vision"), "{text}");
-    assert!(text.contains("Snapshot degradation notes (runtime + project)"), "{text}");
-    assert!(text.contains("Global runtime authority:** `status`"), "{text}");
+    assert!(
+        text.contains("Snapshot degradation notes (runtime + project)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Global runtime authority:** `status`"),
+        "{text}"
+    );
 }
 
 #[test]

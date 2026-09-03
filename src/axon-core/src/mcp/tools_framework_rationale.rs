@@ -10,6 +10,57 @@ use super::tools_framework_support::{
 use super::McpServer;
 use crate::mcp::format::Compte;
 
+fn compact_project_status_brief_data(data: &Value) -> Value {
+    let conception = data.get("conception").unwrap_or(&Value::Null);
+    let soll = data.get("soll_context").unwrap_or(&Value::Null);
+    let list_count = |key: &str| {
+        soll.get(key)
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0)
+    };
+
+    json!({
+        "project_code": data.get("project_code").cloned().unwrap_or(Value::Null),
+        "snapshot_id": data.get("snapshot_id").cloned().unwrap_or(Value::Null),
+        "generated_at": data.get("generated_at").cloned().unwrap_or(Value::Null),
+        "delta_vs_previous": data.get("delta_vs_previous").cloned().unwrap_or(Value::Null),
+        "vision": data.get("vision").cloned().unwrap_or(Value::Null),
+        "conception_summary": {
+            "module_count": conception.get("module_count").cloned().unwrap_or(Value::Null),
+            "interface_count": conception.get("interface_count").cloned().unwrap_or(Value::Null),
+            "contract_count": conception.get("contract_count").cloned().unwrap_or(Value::Null),
+            "flow_count": conception.get("flow_count").cloned().unwrap_or(Value::Null),
+        },
+        "runtime": data.get("runtime").cloned().unwrap_or(Value::Null),
+        "truth_cockpit": data.get("truth_cockpit").cloned().unwrap_or(Value::Null),
+        "anomalies_summary": data.pointer("/anomalies/summary").cloned().unwrap_or_else(|| json!({})),
+        "snapshot_storage": data.get("snapshot_storage").cloned().unwrap_or(Value::Null),
+        "operator_guidance": data.get("operator_guidance").cloned().unwrap_or(Value::Null),
+        "next_action": data.get("next_action").cloned().unwrap_or(Value::Null),
+        "soll_context_counts": {
+            "visions": list_count("visions"),
+            "requirements": list_count("requirements"),
+            "decisions": list_count("decisions"),
+            "revisions": list_count("revisions"),
+        },
+        "stage_timings_ms": data.get("stage_timings_ms").cloned().unwrap_or(Value::Null),
+        "omitted_in_brief": [
+            "conception.modules", "conception.interfaces", "conception.contracts",
+            "conception.flows", "anomalies.findings", "anomalies.recommendations",
+            "soll_context.visions", "soll_context.requirements",
+            "soll_context.decisions", "soll_context.revisions"
+        ],
+        "detail_continuation": {
+            "tool": "project_status",
+            "arguments": {
+                "project_code": data.get("project_code").cloned().unwrap_or(Value::Null),
+                "mode": "verbose"
+            }
+        }
+    })
+}
+
 impl McpServer {
     fn project_status_degradation_display(indexed_files: i64, degraded_notes: &[String]) -> String {
         let mut notes = degraded_notes.to_vec();
@@ -272,11 +323,19 @@ impl McpServer {
             .into_iter()
             .filter_map(|value| value.as_str().map(ToString::to_string))
             .collect::<Vec<_>>();
+        let public_tool_count = status_data
+            .get("public_tool_count")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(public_tools.len());
         let brief_mode = mode.unwrap_or("brief") == "brief";
-        let public_tools_evidence = if public_tools.is_empty() {
+        let public_tools_evidence = if public_tool_count == 0 {
             "unknown".to_string()
         } else if brief_mode {
-            format!("{} tools (use `status` for list)", public_tools.len())
+            format!(
+                "{} tools (use `status mode=verbose` for list)",
+                public_tool_count
+            )
         } else {
             public_tools.join(", ")
         };
@@ -290,7 +349,7 @@ impl McpServer {
                 "runtime_version": status_data.get("runtime_version").cloned().unwrap_or_else(|| json!({})),
                 "runtime_state": status_data.pointer("/runtime_authority/runtime_state").cloned().unwrap_or_else(|| json!({})),
                 "file_vectorization_queue": status_data.get("file_vectorization_queue").cloned().unwrap_or_else(|| json!({})),
-                "public_tool_count": public_tools.len(),
+                "public_tool_count": public_tool_count,
                 "mode": "brief_compact"
             })
         } else {
@@ -412,7 +471,7 @@ impl McpServer {
             )
         );
 
-        Some(json!({
+        let mut response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
                 "project_code": project_code,
@@ -443,7 +502,16 @@ impl McpServer {
                 "canonical_sources": Self::canonical_sources_snapshot(),
                 "stage_timings_ms": stage_timings_ms
             }
-        }))
+        });
+        // REQ-AXO-902609 — the old brief response embedded complete
+        // conception, anomaly findings, and SOLL lists.  The text was concise,
+        // but structuredContent was not.  Preserve decisions and counters,
+        // state every omitted subtree, and make verbose retrieval executable.
+        if brief_mode {
+            let full_data = response.get("data").cloned().unwrap_or_else(|| json!({}));
+            response["data"] = compact_project_status_brief_data(&full_data);
+        }
+        Some(response)
     }
 
     pub(super) fn axon_why_impl(&self, args: &Value) -> Option<Value> {

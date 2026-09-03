@@ -707,11 +707,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "status",
-                "description": "[SYSTEM] Return runtime mode, profile, public tools, pressure signals, auto-detected project. Call second after help().",
+                "description": "[SYSTEM] Return runtime mode, profile, pressure signals, and auto-detected project. REQ-AXO-902609: brief/default bounds the complete serialized payload and returns public_tool_count plus omitted_in_brief/detail_continuation; verbose returns the full tool catalog and diagnostic trees. Call second after help().",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                        "mode": { "type": "string", "enum": ["brief", "verbose"], "description": "brief (default) is a bounded operator snapshot; verbose explicitly retrieves the full machine diagnostics and public tool catalog." }
                     },
                     "required": []
                 }
@@ -729,12 +729,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "project_status",
-                "description": "[SYSTEM/SOLL] Return project vision, SOLL coverage, runtime state, diagnostics. Use for project-scoped truth.",
+                "description": "[SYSTEM/SOLL] Return project vision, SOLL coverage, runtime state, diagnostics. REQ-AXO-902609: brief/default returns bounded verdicts and counters with an executable verbose continuation; verbose returns complete conception, anomalies, and SOLL lists. Use for project-scoped truth.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
-                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                        "mode": { "type": "string", "enum": ["brief", "verbose"], "description": "brief (default) bounds the whole serialized response; verbose explicitly retrieves detailed conception, findings, recommendations, and SOLL lists." }
                     },
                     "required": []
                 }
