@@ -1050,6 +1050,11 @@ impl McpServer {
             .and_then(ScopedSymbolResolution::ambiguity_note)
             .unwrap_or_default();
         let resolved_symbol_id = resolved_symbol.map(|resolved| resolved.id);
+        let unindexed_observability = if target_type == "symbol" && resolved_symbol_id.is_none() {
+            self.unindexed_workspace_target(project_code, target)
+        } else {
+            None
+        };
         let validation_signals = match target_type {
             "intent" => self.intent_validation_signals(project_code, target),
             "symbol" => {
@@ -1058,13 +1063,17 @@ impl McpServer {
                 // historical "RAM doesn't carry tested" claim was stale); resolved
                 // via the canonical symbol id (conservative `false` when the symbol
                 // can't be resolved / the snapshot is cold). No PG `Symbol` count.
-                let tested = resolved_symbol_id
-                    .as_deref()
-                    .filter(|_| self.ensure_ram_snapshot_warm(project_code))
-                    .and_then(|id| {
-                        crate::ist_snapshot::process_view().node_tested(project_code, id)
-                    })
-                    .unwrap_or(false);
+                let tested = if unindexed_observability.is_some() {
+                    Value::Null
+                } else {
+                    json!(resolved_symbol_id
+                        .as_deref()
+                        .filter(|_| self.ensure_ram_snapshot_warm(project_code))
+                        .and_then(|id| {
+                            crate::ist_snapshot::process_view().node_tested(project_code, id)
+                        })
+                        .unwrap_or(false))
+                };
                 // Traceability link count from the SOLL RAM snapshot, matching the
                 // legacy `artifact_type='Symbol' AND artifact_ref IN (name,id)`.
                 // No PG `soll.Traceability` count.
@@ -1086,7 +1095,8 @@ impl McpServer {
                     "tested": tested,
                     "traceability_links": traceability_links,
                     "validation_nodes": 0,
-                    "verifies_edges": 0
+                    "verifies_edges": 0,
+                    "target_observability": unindexed_observability.clone()
                 })
             }
             _ => self.symbol_validation_signals(project_code, target),
@@ -1131,7 +1141,10 @@ impl McpServer {
             coverage_signals
                 .get("tested")
                 .and_then(|value| value.as_bool())
-                .unwrap_or(false)
+                .map(|value| value.to_string())
+                .unwrap_or_else(
+                    || "unknown (target is present on disk but absent from IST)".to_string()
+                )
         );
         let report = format!(
             "## 🛡️ Change Safety\n\n{}",
@@ -1209,6 +1222,14 @@ impl McpServer {
         });
         if let Some(lp) = legacy_proximity_value {
             response["data"]["legacy_proximity"] = lp;
+        }
+        if let Some(observability) = unindexed_observability {
+            response["data"]["target_observability"] = observability;
+            response["data"]["surfaces_degraded"] = json!(["target_absent_from_ist"]);
+            response["data"]["next_action"] = json!({
+                "tool": "rescan_project",
+                "arguments": {"project_code": project_code}
+            });
         }
         Some(response)
     }

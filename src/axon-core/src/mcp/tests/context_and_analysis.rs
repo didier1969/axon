@@ -1183,6 +1183,139 @@ fn test_tested_truth_is_identical_across_inspect_change_safety_and_test_impact()
 }
 
 #[test]
+fn test_unindexed_workspace_target_never_becomes_proven_missing_coverage() {
+    // REQ-AXO-902608 / KKI feedback #408 — a newly-created test file can be
+    // present on disk before Watchman/parser publication reaches the IST.  The
+    // safety surfaces must say "unknown/unindexed", never "tested=false".
+    let _guard = env_lock();
+    let root = tempdir().expect("tempdir");
+    let test_dir = root.path().join("src/test/java/example");
+    std::fs::create_dir_all(&test_dir).expect("test dir");
+    let test_path = test_dir.join("CriticalCorridorEjectionPrototypeTest.java");
+    std::fs::write(
+        &test_path,
+        "class CriticalCorridorEjectionPrototypeTest { @Test void independentColdEnumerationMatchesStreamingOnWideAndSmallRealGraphs() {} }",
+    )
+    .expect("write unindexed Java test");
+    let indexed_mention_path = root.path().join("src/indexed_mention.rs");
+    std::fs::write(
+        &indexed_mention_path,
+        "const OBSERVED_TARGET: &str = \"independentColdEnumerationMatchesStreamingOnWideAndSmallRealGraphs\";",
+    )
+    .expect("write indexed textual mention");
+    std::fs::write(
+        root.path().join("src/unindexed_quoted_mention.rs"),
+        "const NOTE: &str = \"QuotedOnlyWorkspaceMention\";",
+    )
+    .expect("write unindexed textual mention");
+
+    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(
+        crate::test_support::ist_fixtures::IstSeed::new().symbol(
+            crate::test_support::ist_fixtures::SymbolFixture::new(
+                "UJF::fixture::AlreadyIndexed",
+                "AlreadyIndexed",
+                "class",
+                "UJF",
+            ),
+        ),
+    )
+    .unwrap();
+    let root_str = root.path().to_string_lossy().to_string();
+    harness
+        .store
+        .sync_project_registry_entry("UJF", Some("unindexed-java-fixture"), Some(&root_str))
+        .unwrap();
+    harness
+        .store
+        .execute(&format!(
+            "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) \
+             VALUES ('{}', 'UJF', 'indexed-mention', 0)",
+            indexed_mention_path.to_string_lossy().replace('\'', "''")
+        ))
+        .unwrap();
+
+    let call = |name: &str, arguments: Value, id: i64| {
+        harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": name, "arguments": arguments })),
+                id: Some(json!(id)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+    let target = "independentColdEnumerationMatchesStreamingOnWideAndSmallRealGraphs";
+
+    let safety = call(
+        "change_safety",
+        json!({"project_code": "UJF", "target": target, "target_type": "symbol"}),
+        90260801,
+    );
+    assert!(safety["data"]["coverage_signals"]["tested"].is_null());
+    assert_eq!(safety["data"]["change_safety"], json!("unknown_unindexed"));
+    assert_eq!(
+        safety["data"]["target_observability"]["state"],
+        json!("target_unindexed_workspace_file")
+    );
+    assert_eq!(
+        safety["data"]["target_observability"]["file_path"],
+        json!(test_path.to_string_lossy())
+    );
+
+    let impact = call(
+        "test_impact",
+        json!({"project_code": "UJF", "symbols": [target]}),
+        90260802,
+    );
+    assert_eq!(impact["data"]["status"], json!("partial_observability"));
+    assert!(impact["data"]["unresolved"].as_array().unwrap().is_empty());
+    assert_eq!(
+        impact["data"]["unindexed_workspace_targets"][target]["coverage_truth"],
+        json!("unknown")
+    );
+    assert_eq!(
+        impact["data"]["next_action"]["tool"],
+        json!("rescan_project")
+    );
+
+    let substring = call(
+        "test_impact",
+        json!({"project_code": "UJF", "symbols": ["ColdEnumerationMatches"]}),
+        90260803,
+    );
+    assert_eq!(
+        substring["data"]["unresolved"],
+        json!(["ColdEnumerationMatches"]),
+        "a substring inside a larger Java identifier is not a workspace target"
+    );
+    assert!(substring["data"]["unindexed_workspace_targets"]
+        .as_object()
+        .unwrap()
+        .is_empty());
+
+    let quoted_only = call(
+        "test_impact",
+        json!({"project_code": "UJF", "symbols": ["QuotedOnlyWorkspaceMention"]}),
+        90260804,
+    );
+    assert_eq!(
+        quoted_only["data"]["unresolved"],
+        json!(["QuotedOnlyWorkspaceMention"]),
+        "a quoted token in an unindexed source file is not declaration evidence"
+    );
+    assert!(quoted_only["data"]["unindexed_workspace_targets"]
+        .as_object()
+        .unwrap()
+        .is_empty());
+
+    crate::ist_snapshot::evict_process_snapshot("UJF");
+    harness.server.soll_cache().invalidate("UJF");
+}
+
+#[test]
 fn test_change_safety_rejects_unregistered_project_code() {
     let server = create_test_server();
     let response = server

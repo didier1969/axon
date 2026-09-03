@@ -1,7 +1,167 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use super::McpServer;
+
+fn token_is_code_on_line(line: &str, token_start: usize) -> bool {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    while index < token_start {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            return false;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            // Conservatively reject the rest of a line after a block-comment
+            // opener.  A false negative here is safer than inventing a target.
+            return false;
+        }
+        if byte == b'#' && line[..index].trim().is_empty() {
+            return false;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            quote = Some(byte);
+        }
+        index += 1;
+    }
+    quote.is_none()
+}
+
+fn contains_declaration_like_identifier(content: &str, needle: &str, extension: &str) -> bool {
+    let is_identifier = |ch: char| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$';
+    let declaration_keywords = [
+        "class",
+        "def",
+        "enum",
+        "fn",
+        "func",
+        "function",
+        "interface",
+        "module",
+        "record",
+        "struct",
+        "trait",
+        "type",
+    ];
+    let typed_callable_extensions = [
+        "c", "cc", "cpp", "cs", "java", "kt", "kts", "php", "scala", "swift",
+    ];
+    let non_type_prefixes = [
+        "await", "break", "case", "else", "if", "match", "new", "return", "throw", "while", "yield",
+    ];
+
+    content.lines().any(|line| {
+        line.match_indices(needle).any(|(start, _)| {
+            if !token_is_code_on_line(line, start) {
+                return false;
+            }
+            let before_char = line[..start].chars().next_back();
+            let after = &line[start + needle.len()..];
+            let after_char = after.chars().next();
+            if before_char.is_some_and(is_identifier) || after_char.is_some_and(is_identifier) {
+                return false;
+            }
+
+            let prefix = line[..start].trim_end();
+            let previous_word = prefix
+                .rsplit(|ch: char| !is_identifier(ch))
+                .find(|part| !part.is_empty())
+                .unwrap_or("");
+            if declaration_keywords.contains(&previous_word) {
+                return true;
+            }
+
+            // Java/C-family methods have no declaration keyword.  Require a
+            // type-like word immediately before the identifier, a call shape
+            // immediately after it, and no assignment/call punctuation in the
+            // current statement segment.  This rejects strings, JSON values,
+            // member calls and ordinary invocations.
+            if !typed_callable_extensions.contains(&extension)
+                || !before_char.is_some_and(char::is_whitespace)
+                || !after.trim_start().starts_with('(')
+                || previous_word.is_empty()
+                || non_type_prefixes.contains(&previous_word)
+            {
+                return false;
+            }
+            let statement_prefix = prefix
+                .rsplit(['{', '}', ';'])
+                .next()
+                .unwrap_or(prefix)
+                .trim();
+            !statement_prefix.contains('=')
+                && !statement_prefix.ends_with('.')
+                && !statement_prefix.ends_with(')')
+                && !statement_prefix.ends_with(']')
+        })
+    })
+}
+
+#[cfg(test)]
+mod workspace_declaration_evidence_tests {
+    use super::contains_declaration_like_identifier;
+
+    #[test]
+    fn declarations_are_evidence_but_literals_and_invocations_are_not() {
+        let target = "cs_target_fn";
+        assert!(contains_declaration_like_identifier(
+            "public void cs_target_fn() {}",
+            target,
+            "java"
+        ));
+        assert!(contains_declaration_like_identifier(
+            "fn cs_target_fn() {}",
+            target,
+            "rs"
+        ));
+        assert!(!contains_declaration_like_identifier(
+            r#"{"target": "cs_target_fn"}"#,
+            target,
+            "rs"
+        ));
+        assert!(!contains_declaration_like_identifier(
+            "const TARGET: &str = \"cs_target_fn\";",
+            target,
+            "rs"
+        ));
+        assert!(!contains_declaration_like_identifier(
+            "assert!(contains(\"fn cs_target_fn() {}\"));",
+            target,
+            "rs"
+        ));
+        assert!(!contains_declaration_like_identifier(
+            "service.cs_target_fn();",
+            target,
+            "java"
+        ));
+        assert!(!contains_declaration_like_identifier(
+            include_str!("tools_framework_validation.rs"),
+            target,
+            "rs"
+        ));
+        assert!(!contains_declaration_like_identifier(
+            include_str!("tests/context_and_analysis.rs"),
+            target,
+            "rs"
+        ));
+    }
+}
 
 pub(super) fn linked_validations_from_intentions(intentions: &[Value]) -> Vec<Value> {
     intentions
@@ -18,6 +178,137 @@ pub(super) fn linked_validations_from_intentions(intentions: &[Value]) -> Vec<Va
 }
 
 impl McpServer {
+    fn workspace_file_is_confirmed_unindexed(
+        &self,
+        project: &str,
+        project_root: &Path,
+        path: &Path,
+    ) -> bool {
+        let absolute = path.to_string_lossy().replace('\'', "''");
+        let relative = path
+            .strip_prefix(project_root)
+            .ok()
+            .map(|value| value.to_string_lossy().replace('\'', "''"));
+        let escaped_project = project.replace('\'', "''");
+        let mut candidates = vec![format!("path = '{absolute}'")];
+        if let Some(relative) = relative.filter(|value| !value.is_empty()) {
+            candidates.push(format!("path = '{relative}'"));
+            candidates.push(format!("path = './{relative}'"));
+        }
+        let query = format!(
+            "SELECT count(*) FROM ist.IndexedFile \
+             WHERE project_code = '{escaped_project}' AND ({})",
+            candidates.join(" OR ")
+        );
+
+        // A storage/query failure is not evidence that a file is absent from
+        // the IST.  Fail closed instead of manufacturing an unindexed claim.
+        self.graph_store
+            .query_count(&query)
+            .ok()
+            .is_some_and(|count| count == 0)
+    }
+
+    /// REQ-AXO-902608 — absence from the IST is not evidence of absence from
+    /// the workspace.  This deliberately bounded fallback is only called after
+    /// canonical symbol resolution failed.  It identifies a file containing
+    /// the requested identifier; it does not attempt to reconstruct a symbol
+    /// or infer test coverage from source text.
+    pub(super) fn unindexed_workspace_target(&self, project: &str, target: &str) -> Option<Value> {
+        const MAX_FILES: usize = 10_000;
+        const MAX_BYTES: u64 = 32 * 1024 * 1024;
+        const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+        const MAX_WALL: Duration = Duration::from_millis(250);
+
+        let project_root = self.lookup_project_path(project)?;
+        let root = Path::new(&project_root);
+        let needle = target
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
+            .filter(|part| !part.is_empty())
+            .next_back()?;
+        if needle.len() < 3 {
+            return None;
+        }
+
+        let started = Instant::now();
+        let mut scanned_files = 0usize;
+        let mut scanned_bytes = 0u64;
+        let source_extensions = [
+            "c", "cc", "cpp", "cs", "ex", "exs", "go", "java", "js", "jsx", "kt", "kts", "php",
+            "py", "rb", "rs", "scala", "swift", "ts", "tsx",
+        ];
+        let walker = ignore::WalkBuilder::new(root)
+            .hidden(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .parents(true)
+            .build();
+
+        for entry in walker.filter_map(Result::ok) {
+            if started.elapsed() >= MAX_WALL
+                || scanned_files >= MAX_FILES
+                || scanned_bytes >= MAX_BYTES
+            {
+                break;
+            }
+            let Some(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+            if !source_extensions.contains(&extension) {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.len() > MAX_FILE_BYTES {
+                continue;
+            }
+            scanned_files += 1;
+            scanned_bytes = scanned_bytes.saturating_add(metadata.len());
+
+            let filename_match = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == needle);
+            let content_match = !filename_match
+                && fs::read_to_string(path).ok().is_some_and(|content| {
+                    contains_declaration_like_identifier(&content, needle, extension)
+                });
+            if (filename_match || content_match)
+                && self.workspace_file_is_confirmed_unindexed(project, root, path)
+            {
+                return Some(json!({
+                    "state": "target_unindexed_workspace_file",
+                    "target": target,
+                    "matched_identifier": needle,
+                    "matching_rule": if filename_match { "filename_stem" } else { "declaration_like" },
+                    "file_path": path.to_string_lossy(),
+                    "coverage_truth": "unknown",
+                    "indexed_symbol_found": false,
+                    "scan": {
+                        "bounded": true,
+                        "max_files": MAX_FILES,
+                        "max_bytes": MAX_BYTES,
+                        "max_wall_ms": MAX_WALL.as_millis(),
+                        "scanned_files": scanned_files,
+                        "scanned_bytes": scanned_bytes,
+                    },
+                    "next_action": {
+                        "tool": "rescan_project",
+                        "arguments": {"project_code": project}
+                    }
+                }));
+            }
+        }
+        None
+    }
+
     pub(super) fn symbol_validation_signals(&self, project: &str, symbol_name: &str) -> Value {
         let escaped_project = project.replace('\'', "''");
         let escaped_name = symbol_name.replace('\'', "''");

@@ -1622,6 +1622,7 @@ impl McpServer {
         let mut all_tests: BTreeSet<String> = BTreeSet::new();
         let mut per_symbol = serde_json::Map::new();
         let mut unresolved: Vec<String> = Vec::new();
+        let mut unindexed_workspace_targets = BTreeMap::<String, Value>::new();
         for sym in &symbols {
             match self.resolve_test_target_id(&project, sym) {
                 Some(id) => {
@@ -1631,20 +1632,41 @@ impl McpServer {
                     }
                     per_symbol.insert(sym.clone(), json!(t));
                 }
-                None => unresolved.push(sym.clone()),
+                None => {
+                    if let Some(observation) = self.unindexed_workspace_target(&project, sym) {
+                        unindexed_workspace_targets.insert(sym.clone(), observation);
+                    } else {
+                        unresolved.push(sym.clone());
+                    }
+                }
             }
         }
         let minimal: Vec<String> = all_tests.into_iter().collect();
+        let has_unindexed_targets = !unindexed_workspace_targets.is_empty();
         Some(json!({
-            "content": [{ "type": "text", "text": format!("Minimal test set: {} test(s) across {} changed symbol(s)", minimal.len(), symbols.len()) }],
+            "content": [{ "type": "text", "text": if has_unindexed_targets {
+                format!(
+                    "Coverage unknown for {} workspace target(s) absent from the IST; resolved minimal set: {} test(s)",
+                    unindexed_workspace_targets.len(), minimal.len()
+                )
+            } else {
+                format!("Minimal test set: {} test(s) across {} changed symbol(s)", minimal.len(), symbols.len())
+            }}],
             "data": {
-                "status": "ok",
+                "status": if has_unindexed_targets { "partial_observability" } else { "ok" },
                 "project": project,
                 "minimal_test_set": minimal,
                 "per_symbol": per_symbol,
                 "unresolved": unresolved,
+                "unindexed_workspace_targets": unindexed_workspace_targets,
                 "surfaces_used": ["graph_ram"],
-                "follow_up_tools": ["tests_for"]
+                "surfaces_degraded": if has_unindexed_targets { json!(["target_absent_from_ist"]) } else { json!([]) },
+                "follow_up_tools": if has_unindexed_targets { json!(["rescan_project", "tests_for"]) } else { json!(["tests_for"]) },
+                "next_action": if has_unindexed_targets {
+                    json!({"tool": "rescan_project", "arguments": {"project_code": project}})
+                } else {
+                    Value::Null
+                }
             }
         }))
     }
