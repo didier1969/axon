@@ -305,6 +305,10 @@ fn is_write_capable(tool: &str) -> bool {
 /// liste : rouge, avec le nom en clair.
 #[test]
 fn every_declared_mutating_tool_still_exists_in_the_catalog() {
+    // REQ-AXO-902610 — catalog membership is runtime-dependent. Without a
+    // guarded mode this test races every parallel test that temporarily sets
+    // brain_only and can hide the internal resume_vectorization entry.
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     // `include_internal = true` : la question est « ce nom designe-t-il un outil
     // qui EXISTE », pas « est-il public ». Un outil interne (`resume_vectorization`)
     // est un nom parfaitement legitime dans ces inventaires ; le comparer au seul
