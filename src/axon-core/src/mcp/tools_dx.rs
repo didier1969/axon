@@ -2642,6 +2642,17 @@ impl McpServer {
                 let callers = ram_callers_count;
                 let callees = ram_callees_count;
                 if let Some(first) = rows.first_mut() {
+                    // REQ-AXO-902601 — `inspect`, `change_safety` and
+                    // `test_impact` must answer the same question from the same
+                    // snapshot.  The SQL row may advance ahead of the process
+                    // RAM snapshot while indexing is in flight; using its
+                    // `tested` bit here made inspect say true while the two
+                    // safety surfaces (correctly RAM-bound) said false.
+                    if let Some(tested) = inspect_view.node_tested(project_key, &symbol_id) {
+                        if first.len() > 2 {
+                            first[2] = Value::from(tested);
+                        }
+                    }
                     first.push(Value::from(callers));
                     first.push(Value::from(callees));
                 }
@@ -2709,8 +2720,8 @@ impl McpServer {
                 );
                 // REQ-AXO-902100 (feedback #18) — mode=source appends the symbol's
                 // source body + direct-neighbour signatures. REQ-AXO-902600 reads a
-                // hash-verified bounded file slice when possible; chunk reconstruction
-                // remains available but is labelled lossy and unsafe for editing.
+                // hash-verified bounded file slice when possible; when exact
+                // proof is unavailable the response withholds the body.
                 if mode == Some("source") {
                     evidence.push_str(&self.inspect_source_block(
                         &symbol_id,

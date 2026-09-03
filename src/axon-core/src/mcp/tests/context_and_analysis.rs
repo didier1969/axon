@@ -1079,6 +1079,92 @@ fn test_change_safety_exposes_trimodal_envelope_on_happy_path() {
 }
 
 #[test]
+fn test_tested_truth_is_identical_across_inspect_change_safety_and_test_impact() {
+    // REQ-AXO-902601 / KKI feedback #400 — the SQL symbol row can advance
+    // while the process snapshot remains warm.  Every safety surface must use
+    // one snapshot, and a test symbol must be its own minimal oracle.
+    let _guard = env_lock();
+    let symbol_id = "AXO::fixture::CanonicalHarnessTest";
+    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(
+        crate::test_support::ist_fixtures::IstSeed::new().symbol(
+            crate::test_support::ist_fixtures::SymbolFixture::new(
+                symbol_id,
+                "CanonicalHarnessTest",
+                "class",
+                "AXO",
+            )
+            .tested(true),
+        ),
+    )
+    .unwrap();
+
+    assert!(harness.server.ensure_ram_snapshot_warm("AXO"));
+    // Deliberately diverge PG after the snapshot was published.  Before the
+    // fix inspect read this false directly while change_safety read RAM=true.
+    harness
+        .store
+        .execute(&format!(
+            "UPDATE ist.Symbol SET tested = false WHERE id = '{}'",
+            symbol_id
+        ))
+        .unwrap();
+
+    let call = |name: &str, arguments: Value, id: i64| {
+        harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": name, "arguments": arguments })),
+                id: Some(json!(id)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    let inspect = call(
+        "inspect",
+        json!({ "project": "AXO", "symbol": symbol_id }),
+        90260101,
+    );
+    assert_eq!(
+        inspect["data"]["summary"]["tested"],
+        json!(true),
+        "{inspect:?}"
+    );
+
+    let safety = call(
+        "change_safety",
+        json!({
+            "project_code": "AXO",
+            "target": symbol_id,
+            "target_type": "symbol"
+        }),
+        90260102,
+    );
+    assert_eq!(
+        safety["data"]["coverage_signals"]["tested"],
+        json!(true),
+        "{safety:?}"
+    );
+
+    let impact = call(
+        "test_impact",
+        json!({ "project_code": "AXO", "symbols": [symbol_id] }),
+        90260103,
+    );
+    assert_eq!(
+        impact["data"]["minimal_test_set"],
+        json!([symbol_id]),
+        "a test symbol must be its own oracle: {impact:?}"
+    );
+
+    crate::ist_snapshot::evict_process_snapshot("AXO");
+    harness.server.soll_cache().invalidate("AXO");
+}
+
+#[test]
 fn test_change_safety_rejects_unregistered_project_code() {
     let server = create_test_server();
     let response = server

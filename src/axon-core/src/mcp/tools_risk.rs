@@ -1521,6 +1521,14 @@ impl McpServer {
             .into_iter()
             .filter(|c| view.node_tested(project, c) == Some(true))
             .collect();
+        // REQ-AXO-902601 — a test is at minimum its own executable oracle.
+        // Reverse traversal intentionally excludes the start node, so without
+        // this explicit inclusion `inspect` could report Tested=true for a test
+        // class/function while `test_impact` returned an empty set for the same
+        // canonical symbol.
+        if view.node_tested(project, symbol_id) == Some(true) {
+            tests.push(symbol_id.to_string());
+        }
         tests.sort();
         tests.dedup();
         tests
