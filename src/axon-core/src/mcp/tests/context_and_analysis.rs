@@ -1192,10 +1192,32 @@ fn test_path_returns_bounded_call_path_between_symbols() {
 #[test]
 fn test_path_not_found_branch_exposes_trimodal_envelope() {
     // REQ-AXO-91510 — envelope must populate on the no-path branch too.
-    let server = create_test_server();
-    super::delete_fixture_symbols(&server, &["bks::isolated_a", "bks::isolated_b"]);
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::isolated_a', 'isolated_a', 'function', true, true, false, 'BKS')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::isolated_b', 'isolated_b', 'function', true, true, false, 'BKS')").unwrap();
+    // A raw BKS insert bypassed process-snapshot invalidation. In the full suite,
+    // another isolated database could warm the process-global BKS snapshot first,
+    // making these two symbols disappear and returning an unresolved-target envelope
+    // (no `path_found`) even though this database contained them. Use the governed
+    // fixture, which seeds before construction and evicts the scoped RAM snapshot,
+    // with a test-unique project code so parallel databases cannot alias one another.
+    use crate::test_support::ist_fixtures::{
+        create_test_server_with_ist_seed, IstSeed, SymbolFixture,
+    };
+    let harness = create_test_server_with_ist_seed(
+        IstSeed::new()
+            .symbol(SymbolFixture::new(
+                "pnf::isolated_a",
+                "isolated_a",
+                "function",
+                "PNF",
+            ))
+            .symbol(SymbolFixture::new(
+                "pnf::isolated_b",
+                "isolated_b",
+                "function",
+                "PNF",
+            )),
+    )
+    .unwrap();
+    let server = &harness.server;
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -1206,7 +1228,7 @@ fn test_path_not_found_branch_exposes_trimodal_envelope() {
                 "arguments": {
                     "source": "isolated_a",
                     "sink": "isolated_b",
-                    "project": "BKS",
+                    "project": "PNF",
                     "depth": 3
                 }
             })),
