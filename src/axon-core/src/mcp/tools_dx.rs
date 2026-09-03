@@ -2047,42 +2047,13 @@ impl McpServer {
                     .filter(|n| *n > 0);
                 let project_code = first.get(5).and_then(Value::as_str).unwrap_or("");
                 let indexed_hash = first.get(6).and_then(Value::as_str).unwrap_or("");
-                // REQ-AXO-902492 (doleance KKI, `blocking`) — le corps rendu NE COMPILAIT
-                // PAS : chaque fragment repete le CONTEXTE d'ouverture du symbole (sa
-                // signature), et la concatenation la faisait donc apparaitre plusieurs fois
-                // AU MILIEU du corps. `mode=source` etant vendu comme « preparer une edition
-                // sans lire le fichier », un modele qui suit ce contrat edite du code qui
-                // n'existe pas — et l'erreur lui est attribuee.
-                //
-                // Deduplication CONSERVATRICE, appliquee AVANT la concatenation (apres, les
-                // frontieres de fragments sont perdues) : d'un fragment au suivant, on retire
-                // le plus long prefixe de lignes deja emis A L'IDENTIQUE en fin du corps
-                // courant. On ne touche jamais a du contenu qui n'est pas un rappel immediat
-                // — supprimer du vrai code coûterait plus cher que la repetition.
-                let mut body = String::new();
-                let mut fragments: Vec<String> = Vec::new();
-                for r in &rows {
-                    if let Some(c) = r.get(3).and_then(Value::as_str) {
-                        fragments.push(c.to_string());
-                    }
-                }
-                for (i, frag) in fragments.iter().enumerate() {
-                    let frag = if i == 0 {
-                        frag.as_str()
-                    } else {
-                        Self::strip_repeated_context_prefix(&body, frag)
-                    };
-                    body.push_str(frag);
-                    body.push('\n');
-                }
-                let reconstructed_body = Self::strip_repeated_chunk_headers(&body);
                 // REQ-AXO-902600 (voix client KKI #401) — une reconstruction de
                 // fragments n'est PAS une source. L'heuristique ci-dessus a omis une
                 // vraie ligne (`phaseStarted = System.nanoTime();`) et provoqué un faux
                 // diagnostic. La voie exacte lit uniquement sous la racine canonique
                 // du projet, exige des bornes valides et compare le SHA-256 du fichier
-                // au hash qui a produit l'index. Si une preuve manque, on conserve le
-                // paquet utile mais il est explicitement LOSSY et impropre à l'édition.
+                // au hash qui a produit l'index. Si une preuve manque, le motif est
+                // explicite et aucun paquet reconstruit ne peut se faire passer pour du code.
                 let exact = match (start_opt, end_opt) {
                     (Some(start), Some(end)) => self.exact_indexed_source_body(
                         project_code,
@@ -2093,22 +2064,36 @@ impl McpServer {
                     ),
                     _ => Err("line_bounds_unavailable".to_string()),
                 };
-                let (body, exact_truth, fallback_reason) = match exact {
-                    Ok(exact) => (exact.content, Some(exact.slice_sha256), None),
-                    Err(reason) => (reconstructed_body, None, Some(reason)),
+                // REQ-AXO-902606 (voix client KKI #402) — marquer le paquet
+                // `lossy` ne suffit pas : du Java mutile reste plausible et peut encore
+                // contaminer une revue. Sans preuve exacte, ne rendre AUCUN corps et
+                // donner le chemin de lecture filesystem canonique.
+                let exact = match exact {
+                    Ok(exact) => exact,
+                    Err(reason) => {
+                        let _ = write!(
+                            out,
+                            "\n\n#### Lossy source reconstruction withheld — `{file_path}` \
+                             (reason=`{reason}`)\n\
+                             _No source body rendered: indexed fragments are not token-safe. \
+                             Read the canonical file directly at `{file_path}` with the client's \
+                             filesystem read tool, then search the requested anchor there._\n"
+                        );
+                        out.push_str(&self.neighbor_signature_section("Callers", caller_ids));
+                        out.push_str(&self.neighbor_signature_section("Callees", callee_ids));
+                        return out;
+                    }
                 };
+                let body = exact.content;
+                let symbol_sha256 = exact.slice_sha256;
                 let lines: Vec<&str> = body.lines().collect();
                 let total = lines.len();
 
                 let (window_start, window_end, not_found) =
                     Self::source_window_for(&lines, around, offset);
-                let shown = if exact_truth.is_some() {
-                    Self::byte_slice_for_lines(&body, window_start + 1, window_end)
-                        .unwrap_or_default()
-                        .to_string()
-                } else {
-                    lines[window_start..window_end].join("\n")
-                };
+                let shown = Self::byte_slice_for_lines(&body, window_start + 1, window_end)
+                    .unwrap_or_default()
+                    .to_string();
 
                 let cap_note = if total > INSPECT_SOURCE_LINE_CAP {
                     // Name the NEXT call, with its arguments filled in. A count
@@ -2138,23 +2123,15 @@ impl McpServer {
                 } else {
                     String::new()
                 };
-                let heading = if let Some(symbol_sha256) = exact_truth {
-                    let shown_sha256 = crate::pipeline::stage_a1::sha256_hex(&shown);
-                    let absolute_start = start_opt.unwrap_or(1) as usize + window_start;
-                    let absolute_end = absolute_start + window_end.saturating_sub(window_start + 1);
-                    format!(
-                        "#### Exact source — `{file_path}:{absolute_start}-{absolute_end}` \
-                         (byte-exact indexed slice; indexed_file_sha256=`{indexed_hash}`; \
-                         symbol_sha256=`{symbol_sha256}`; \
-                         shown_sha256=`{shown_sha256}`)"
-                    )
-                } else {
-                    format!(
-                        "#### Lossy source reconstruction — `{file_path}` \
-                         (reason=`{}`; DO NOT edit from this block)",
-                        fallback_reason.unwrap_or_else(|| "exact_source_unavailable".to_string())
-                    )
-                };
+                let shown_sha256 = crate::pipeline::stage_a1::sha256_hex(&shown);
+                let absolute_start = start_opt.unwrap_or(1) as usize + window_start;
+                let absolute_end = absolute_start + window_end.saturating_sub(window_start + 1);
+                let heading = format!(
+                    "#### Exact source — `{file_path}:{absolute_start}-{absolute_end}` \
+                     (byte-exact indexed slice; indexed_file_sha256=`{indexed_hash}`; \
+                     symbol_sha256=`{symbol_sha256}`; \
+                     shown_sha256=`{shown_sha256}`)"
+                );
                 let fence_newline = if shown.ends_with('\n') { "" } else { "\n" };
                 let _ = write!(
                     out,

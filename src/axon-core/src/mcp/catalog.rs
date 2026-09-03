@@ -943,13 +943,13 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "inspect",
-                "description": "[DX] Inspect symbol detail: callers, callees, stats. mode=source ALSO returns a bounded source body + direct-neighbour signatures. When file bounds and the indexed SHA-256 are verifiable, the body is a byte-exact file slice with line bounds and hashes; otherwise it is explicitly labelled `Lossy source reconstruction` and MUST NOT be used as an edit base (REQ-AXO-902600). On a LONG symbol the body is windowed: pass `around=\"<text>\"` to jump straight to the first line containing that text (no line number needed), or `offset=<line>` to continue where the previous window stopped — the response names the exact next call (REQ-AXO-902442). Use after query identifies target.",
+                "description": "[DX] Inspect symbol detail: callers, callees, stats. mode=source ALSO returns a bounded source body + direct-neighbour signatures. When file bounds and the indexed SHA-256 are verifiable, the body is a byte-exact file slice with line bounds and hashes. Otherwise NO reconstructed body is rendered: the response names the exact-proof failure and points to the canonical path for a filesystem read (REQ-AXO-902600/902606). On a LONG exact symbol the body is windowed: pass `around=\"<text>\"` to jump straight to the first line containing that text (no line number needed), or `offset=<line>` to continue where the previous window stopped — the response names the exact next call (REQ-AXO-902442). Use after query identifies target.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "symbol": { "type": "string" },
                         "project": { "type": "string" },
-                        "mode": { "type": "string", "enum": ["brief", "verbose", "source"], "description": "brief (default) / verbose (rich evidence) / source (bounded byte-exact indexed file slice when hash-verifiable, otherwise an explicitly lossy reconstruction, plus direct caller/callee signatures)." },
+                        "mode": { "type": "string", "enum": ["brief", "verbose", "source"], "description": "brief (default) / verbose (rich evidence) / source (bounded byte-exact indexed file slice when hash-verifiable; otherwise no body, an exact-proof failure reason, and a canonical filesystem-read path; plus direct caller/callee signatures)." },
                         "around": { "type": "string", "description": "REQ-AXO-902442 — mode=source only: show the window around the FIRST line containing this text, instead of the first lines of the symbol. This is the way to reach the middle of a long function without knowing a line number (`around=\"git commit\"`). No match → the response says so and falls back to `offset`." },
                         "offset": { "type": "integer", "description": "REQ-AXO-902442 — mode=source only: first body line to render (0-based), for continuing where the previous window stopped. The truncation note names the exact next call." }
                     },

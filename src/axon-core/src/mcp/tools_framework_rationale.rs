@@ -11,6 +11,32 @@ use super::McpServer;
 use crate::mcp::format::Compte;
 
 impl McpServer {
+    fn project_status_degradation_display(indexed_files: i64, degraded_notes: &[String]) -> String {
+        let mut notes = degraded_notes.to_vec();
+        if indexed_files == 0 {
+            notes.push(
+                "aucun fichier indexe pour ce projet — les metriques derivees du code ne \
+                 sont PAS mesurees ; voir `diagnose_indexing`"
+                    .to_string(),
+            );
+        }
+        if notes.is_empty() {
+            "none in this snapshot — this is not a claim that global runtime is healthy; \
+             `status` is the runtime authority"
+                .to_string()
+        } else {
+            notes.join(", ")
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn project_status_degradation_display_for_tests(
+        indexed_files: i64,
+        degraded_notes: &[String],
+    ) -> String {
+        Self::project_status_degradation_display(indexed_files, degraded_notes)
+    }
+
     /// REQ-AXO-901926 — resolve the CANONICAL current Vision for a project.
     /// The previous `.first()` over `soll_query_context.visions` surfaced a
     /// rejected/test Vision (shared-PG test fixtures inject `VIS-*-90x`
@@ -329,7 +355,8 @@ impl McpServer {
 **Public tools:** {}\n\
 **Wrappers / Orphan code / Orphan intent:** {} / {} / {}\n\
 **Validation coverage:** {}\n\
-**Degradation notes:** {}\n",
+**Snapshot degradation notes (runtime + project):** {}\n\
+**Global runtime authority:** `status`\n",
             vision
                 .get("id")
                 .and_then(|value| value.as_str())
@@ -364,23 +391,10 @@ impl McpServer {
             compte_code("orphan_code_count"),
             compte_soll("orphan_intent_count"),
             validation_coverage_display,
-            // REQ-AXO-902409 — « none » etait FAUX sur un projet non indexe : la
-            // degradation y est totale. Le rapporteur (DVM #255) l'a mesure — son
-            // `project_status` disait « Degradation notes: none » et « Confidence:
-            // high » pendant que `health` disait « indexed: 0 » sur le meme scope.
-            if fichiers_indexes == 0 {
-                let mut notes = degraded_notes.clone();
-                notes.push(
-                    "aucun fichier indexe pour ce projet — les metriques derivees du \
-                     code ne sont PAS mesurees ; voir `diagnose_indexing`"
-                        .to_string(),
-                );
-                notes.join(", ")
-            } else if degraded_notes.is_empty() {
-                "none".to_string()
-            } else {
-                degraded_notes.join(", ")
-            }
+            // REQ-AXO-902607 / KKI #402 — cette ligne est un SNAPSHOT compose
+            // de la sante runtime et de la couverture projet. Un `none` nu etait
+            // lu comme une negation de `status`; nommer l'autorite et la portee.
+            Self::project_status_degradation_display(fichiers_indexes, &degraded_notes)
         );
         let report = format!(
             "## 🧭 Project Status\n\n{}",

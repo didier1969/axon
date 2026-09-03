@@ -394,6 +394,8 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     let text = response["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Project Status"), "{text}");
     assert!(text.contains("Axon Vision"), "{text}");
+    assert!(text.contains("Snapshot degradation notes (runtime + project)"), "{text}");
+    assert!(text.contains("Global runtime authority:** `status`"), "{text}");
 }
 
 #[test]
@@ -573,39 +575,43 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
     let server = create_test_server();
     server
         .graph_store
-        .execute(
-            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-test-src/lib.rs', 'symbol', 'sym-src/lib.rs', 'AXO', 'src/lib.rs', 'hash-src/lib.rs')",
-        )
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::target', 'target_fn', 'function', true, true, false, 'AXO')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::wrapper', 'wrapper_fn', 'function', false, false, false, 'AXO')")
+        .sync_project_registry_entry("PSD", Some("project-status-delta"), Some("/tmp/psd"))
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::wrapper', 'CONTAINS', 'AXO', 0)",
+            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('chunk-psd-src/lib.rs', 'symbol', 'sym-psd-src/lib.rs', 'PSD', 'src/lib.rs', 'hash-psd-src/lib.rs')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('axo::wrapper', 'axo::target', 'CALLS', 'AXO', 0)")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('psd::target', 'target_fn', 'function', true, true, false, 'PSD')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'current', '{}')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('psd::wrapper', 'wrapper_fn', 'function', false, false, false, 'PSD')")
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'psd::wrapper', 'CONTAINS', 'PSD', 0)",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('psd::wrapper', 'psd::target', 'CALLS', 'PSD', 0)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-PSD-001', 'Vision', 'PSD', 'Project Status Delta Vision', 'Isolated delta fixture', 'current', '{}')")
         .unwrap();
     // REQ-AXO-901970 — project_status → conception/orphan now read the RAM
     // snapshot; raw-SQL inserts bypass invalidation, so evict before each capture
     // so the baseline (no orphan) and the second read (with the orphan inserted
     // below) each warm fresh — otherwise the orphan delta is hidden by a stale
     // snapshot warmed at the first call.
-    crate::ist_snapshot::evict_process_snapshot("AXO");
-    server.soll_cache().invalidate("AXO");
+    crate::ist_snapshot::evict_process_snapshot("PSD");
+    server.soll_cache().invalidate("PSD");
 
     let first = server
         .handle_request(JsonRpcRequest {
@@ -613,7 +619,7 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "project_status",
-                "arguments": { "project_code": "AXO", "mode": "brief" }
+                "arguments": { "project_code": "PSD", "mode": "brief" }
             })),
             id: Some(json!(22032)),
         })
@@ -627,16 +633,20 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
 
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::orphan', 'orphan_fn', 'function', false, false, false, 'AXO')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('psd::orphan', 'orphan_fn', 'function', false, false, false, 'PSD')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'axo::orphan', 'CONTAINS', 'AXO', 0)")
+        .execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'psd::orphan', 'CONTAINS', 'PSD', 0)")
         .unwrap();
-    // Evict again so the second capture warms a snapshot that includes axo::orphan
+    // Evict again so the second capture warms a snapshot that includes psd::orphan
     // (raw insert bypassed invalidation).
-    crate::ist_snapshot::evict_process_snapshot("AXO");
-    server.soll_cache().invalidate("AXO");
+    crate::ist_snapshot::evict_process_snapshot("PSD");
+    McpServer::anomalies_cache()
+        .lock()
+        .unwrap()
+        .remove("PSD::brief");
+    server.soll_cache().invalidate("PSD");
 
     let second = server
         .handle_request(JsonRpcRequest {
@@ -644,7 +654,7 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "project_status",
-                "arguments": { "project_code": "AXO", "mode": "brief" }
+                "arguments": { "project_code": "PSD", "mode": "brief" }
             })),
             id: Some(json!(22033)),
         })
@@ -654,7 +664,7 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
     let delta = &second["data"]["delta_vs_previous"];
     assert_eq!(delta["available"].as_bool(), Some(true));
     // REQ-AXO-901926 — counts are recoupled (real, not the 0/0/0 stub), so the
-    // delta now genuinely tracks structural change: one orphan (axo::orphan)
+    // delta now genuinely tracks structural change: one orphan (psd::orphan)
     // was inserted between the two snapshots.
     assert!(
         delta["orphan_code_count_delta"].as_i64().unwrap_or(0) >= 1,
@@ -6277,7 +6287,7 @@ fn test_inspect_exact_source_rejects_a_stale_index_hash() {
 fn test_inspect_source_without_exact_proof_is_explicitly_lossy() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::lossy', 'lossy', 'function', false, false, false, 'BKS')").unwrap();
-    server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash) VALUES ('chunk-lossy-source', 'symbol', 'bks::lossy', 'BKS', 'body', 'fn lossy() {}', 'chunk-only')").unwrap();
+    server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, file_path, content, content_hash) VALUES ('chunk-lossy-source', 'symbol', 'bks::lossy', 'BKS', 'body', 'src/lossy.rs', 'fn lossy() {}', 'chunk-only')").unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -6295,8 +6305,24 @@ fn test_inspect_source_without_exact_proof_is_explicitly_lossy() {
     let text = response["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Lossy source reconstruction"), "{text}");
     assert!(text.contains("reason=`line_bounds_unavailable`"), "{text}");
-    assert!(text.contains("DO NOT edit from this block"), "{text}");
+    assert!(text.contains("No source body rendered"), "{text}");
+    assert!(text.contains("filesystem read tool"), "{text}");
+    assert!(text.contains("`src/lossy.rs`"), "{text}");
+    assert!(!text.contains("```\nfn lossy() {}"), "{text}");
     assert!(!text.contains("#### Exact source"), "{text}");
+}
+
+#[test]
+fn test_project_status_labels_snapshot_notes_without_denying_global_runtime_health() {
+    let clean = McpServer::project_status_degradation_display_for_tests(1, &[]);
+    assert!(clean.contains("none in this snapshot"), "{clean}");
+    assert!(clean.contains("`status` is the runtime authority"), "{clean}");
+
+    let degraded = McpServer::project_status_degradation_display_for_tests(
+        1,
+        &["dashboard: memory_pressure".to_string()],
+    );
+    assert_eq!(degraded, "dashboard: memory_pressure");
 }
 
 #[test]
