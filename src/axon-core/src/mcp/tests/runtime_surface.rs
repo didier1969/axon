@@ -1881,6 +1881,10 @@ fn test_status_brief_bounds_the_complete_serialized_payload() {
     assert!(brief["data"]["public_tool_count"]
         .as_u64()
         .is_some_and(|n| n >= 30));
+    assert!(brief["data"]["canonical_sources"].is_object());
+    assert!(brief["data"]["async_allowlisted_tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty()));
     assert_eq!(
         brief["data"]["detail_continuation"],
         json!({"tool": "status", "arguments": {"mode": "verbose"}})

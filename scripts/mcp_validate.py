@@ -138,10 +138,14 @@ def extract_result_data(result_payload: dict[str, Any]) -> dict[str, Any]:
 
 def extract_async_allowlisted_tools(result_payload: dict[str, Any]) -> set[str]:
     data = extract_result_data(result_payload)
-    async_policy = data.get("async_policy") if isinstance(data, dict) else None
-    if not isinstance(async_policy, dict):
+    if not isinstance(data, dict):
         return set()
-    allowlisted_tools = async_policy.get("allowlisted_tools")
+    async_policy = data.get("async_policy")
+    allowlisted_tools = (
+        async_policy.get("allowlisted_tools")
+        if isinstance(async_policy, dict)
+        else data.get("async_allowlisted_tools")
+    )
     if not isinstance(allowlisted_tools, list):
         return set()
     return {
@@ -374,14 +378,8 @@ def evaluate_response(
             return "fail", "project_status missing delta_vs_previous"
         if not isinstance(data.get("vision"), dict):
             return "fail", "project_status missing vision"
-        if not isinstance(data.get("conception"), dict):
-            return "fail", "project_status missing conception"
         if not isinstance(data.get("runtime"), dict):
             return "fail", "project_status missing runtime"
-        if not isinstance(data.get("anomalies"), dict):
-            return "fail", "project_status missing anomalies"
-        if not isinstance(data.get("soll_context"), dict):
-            return "fail", "project_status missing soll_context"
         if not isinstance(data.get("operator_guidance"), dict):
             return "fail", "project_status missing operator_guidance"
         operator_guidance = data.get("operator_guidance", {})
@@ -393,6 +391,45 @@ def evaluate_response(
             return "fail", "project_status missing remediation_actions"
         if not isinstance(data.get("next_action"), dict):
             return "fail", "project_status missing next_action"
+        compact_keys = {
+            "conception_summary",
+            "anomalies_summary",
+            "soll_context_counts",
+        }
+        if compact_keys.intersection(data):
+            for key in compact_keys:
+                if not isinstance(data.get(key), dict):
+                    return "fail", f"project_status brief missing {key}"
+            omitted = data.get("omitted_in_brief")
+            required_omissions = {
+                "conception.modules",
+                "anomalies.findings",
+                "soll_context.requirements",
+            }
+            if not isinstance(omitted, list) or not required_omissions.issubset(
+                {value for value in omitted if isinstance(value, str)}
+            ):
+                return "fail", "project_status brief missing explicit omitted details"
+            continuation = data.get("detail_continuation")
+            continuation_args = (
+                continuation.get("arguments")
+                if isinstance(continuation, dict)
+                else None
+            )
+            if (
+                not isinstance(continuation, dict)
+                or continuation.get("tool") != "project_status"
+                or not isinstance(continuation_args, dict)
+                or continuation_args.get("mode") != "verbose"
+            ):
+                return "fail", "project_status brief missing verbose continuation"
+        else:
+            if not isinstance(data.get("conception"), dict):
+                return "fail", "project_status missing conception"
+            if not isinstance(data.get("anomalies"), dict):
+                return "fail", "project_status missing anomalies"
+            if not isinstance(data.get("soll_context"), dict):
+                return "fail", "project_status missing soll_context"
     if tool_name == "snapshot_history":
         data = extract_result_data(resp)
         if not isinstance(data.get("snapshots"), list):
@@ -553,18 +590,41 @@ def evaluate_response(
         data = extract_result_data(resp)
         async_contract = data.get("async_contract") if isinstance(data, dict) else None
         async_policy = data.get("async_policy") if isinstance(data, dict) else None
-        if not isinstance(async_contract, dict):
-            return "fail", "status missing async_contract"
-        if not isinstance(async_policy, dict):
-            return "fail", "status missing async_policy"
-        if async_contract.get("canonical_follow_up_tool") != "job_status":
-            return "fail", "status missing canonical async follow-up"
-        if async_policy.get("mode") != "allowlist":
-            return "fail", "status missing async allowlist mode"
-        if async_policy.get("sync_by_default") is not True:
-            return "fail", "status missing sync-by-default policy"
-        if async_policy.get("latency_target_p95_ms") != 200:
-            return "fail", "status missing p95 latency target"
+        compact_allowlist = data.get("async_allowlisted_tools") if isinstance(data, dict) else None
+        if isinstance(compact_allowlist, list):
+            omitted = data.get("omitted_in_brief")
+            continuation = data.get("detail_continuation")
+            continuation_args = (
+                continuation.get("arguments")
+                if isinstance(continuation, dict)
+                else None
+            )
+            if (
+                not isinstance(omitted, list)
+                or "async_policy" not in omitted
+                or "async_contract" not in omitted
+            ):
+                return "fail", "status brief missing explicit async omissions"
+            if (
+                not isinstance(continuation, dict)
+                or continuation.get("tool") != "status"
+                or not isinstance(continuation_args, dict)
+                or continuation_args.get("mode") != "verbose"
+            ):
+                return "fail", "status brief missing verbose continuation"
+        else:
+            if not isinstance(async_contract, dict):
+                return "fail", "status missing async_contract"
+            if not isinstance(async_policy, dict):
+                return "fail", "status missing async_policy"
+            if async_contract.get("canonical_follow_up_tool") != "job_status":
+                return "fail", "status missing canonical async follow-up"
+            if async_policy.get("mode") != "allowlist":
+                return "fail", "status missing async allowlist mode"
+            if async_policy.get("sync_by_default") is not True:
+                return "fail", "status missing sync-by-default policy"
+            if async_policy.get("latency_target_p95_ms") != 200:
+                return "fail", "status missing p95 latency target"
         allowlisted_tools = extract_async_allowlisted_tools(resp)
         if not allowlisted_tools:
             return "fail", "status missing async allowlisted tools"

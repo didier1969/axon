@@ -13,6 +13,13 @@ SPEC.loader.exec_module(MODULE)
 
 
 class McpValidateTests(unittest.TestCase):
+    def test_extract_async_allowlisted_tools_accepts_full_and_brief_contracts(self) -> None:
+        full = {"result": {"data": {"async_policy": {"allowlisted_tools": ["query"]}}}}
+        brief = {"result": {"data": {"async_allowlisted_tools": ["status"]}}}
+
+        self.assertEqual(MODULE.extract_async_allowlisted_tools(full), {"query"})
+        self.assertEqual(MODULE.extract_async_allowlisted_tools(brief), {"status"})
+
     def test_build_args_covers_public_operator_surface(self) -> None:
         self.assertEqual(
             MODULE.build_args("status", {}, "AXO", "axon", "checkout", {})["mode"],
@@ -83,6 +90,12 @@ class McpValidateTests(unittest.TestCase):
                     "canonical_sources": {
                         "soll_export": {"reimportable": True},
                     },
+                    "async_allowlisted_tools": ["soll_manager"],
+                    "omitted_in_brief": ["async_policy", "async_contract"],
+                    "detail_continuation": {
+                        "tool": "status",
+                        "arguments": {"mode": "verbose"},
+                    },
                 },
             }
         }
@@ -106,6 +119,12 @@ class McpValidateTests(unittest.TestCase):
                     "anomalies": {"summary": {}},
                     "conception": {"module_count": 1},
                     "soll_context": {"visions": []},
+                    "operator_guidance": {
+                        "recommended_next_step": "continue",
+                        "blocking_factors": [],
+                        "remediation_actions": [],
+                    },
+                    "next_action": {"tool": "status"},
                 },
             }
         }
@@ -114,6 +133,65 @@ class McpValidateTests(unittest.TestCase):
 
         self.assertEqual(status, "ok")
         self.assertEqual(note, "ok")
+
+    def test_evaluate_tool_result_accepts_project_status_brief_contract(self) -> None:
+        data = {
+            "project_code": "AXO",
+            "snapshot_id": "project-status-1",
+            "generated_at": 123456789,
+            "delta_vs_previous": {"available": False},
+            "vision": {"id": "VIS-AXO-001"},
+            "runtime": {"runtime_mode": "mcp_http"},
+            "conception_summary": {"module_count": 1},
+            "anomalies_summary": {},
+            "soll_context_counts": {"requirements": 1},
+            "operator_guidance": {
+                "recommended_next_step": "continue",
+                "blocking_factors": [],
+                "remediation_actions": [],
+            },
+            "next_action": {"tool": "status"},
+            "omitted_in_brief": [
+                "conception.modules",
+                "anomalies.findings",
+                "soll_context.requirements",
+            ],
+            "detail_continuation": {
+                "tool": "project_status",
+                "arguments": {"project_code": "AXO", "mode": "verbose"},
+            },
+        }
+        resp = {"result": {"content": [{"type": "text", "text": "ok"}], "data": data}}
+
+        status, note = MODULE.evaluate_tool_result("project_status", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(note, "ok")
+
+    def test_evaluate_tool_result_rejects_untraceable_project_status_brief(self) -> None:
+        data = {
+            "project_code": "AXO",
+            "snapshot_id": "project-status-1",
+            "generated_at": 123456789,
+            "delta_vs_previous": {"available": False},
+            "vision": {"id": "VIS-AXO-001"},
+            "runtime": {},
+            "conception_summary": {},
+            "anomalies_summary": {},
+            "soll_context_counts": {},
+            "operator_guidance": {
+                "recommended_next_step": "continue",
+                "blocking_factors": [],
+                "remediation_actions": [],
+            },
+            "next_action": {},
+        }
+        resp = {"result": {"content": [{"type": "text", "text": "ok"}], "data": data}}
+
+        status, note = MODULE.evaluate_tool_result("project_status", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "fail")
+        self.assertIn("omitted details", note)
 
     def test_evaluate_tool_result_checks_snapshot_history_contract(self) -> None:
         resp = {
@@ -176,6 +254,11 @@ class McpValidateTests(unittest.TestCase):
                     "coverage_signals": {},
                     "traceability_signals": {},
                     "validation_signals": {},
+                    "operator_guidance": {
+                        "mutation_class_recommendation": "targeted",
+                        "recommended_next_step": "continue",
+                        "blocking_factors": [],
+                    },
                 },
             }
         }
@@ -225,6 +308,10 @@ class McpValidateTests(unittest.TestCase):
                     "requirements": [],
                     "decisions": [],
                     "revisions": [],
+                    "operational_digest": {
+                        "entity_counts": [],
+                        "last_meaningful_revision": {},
+                    },
                 },
             }
         }
@@ -238,7 +325,11 @@ class McpValidateTests(unittest.TestCase):
         resp = {"result": {"data": {"accepted": True}}}
 
         status, note = MODULE.evaluate_tool_result(
-            "soll_apply_plan", resp, "http://example.test", 1
+            "soll_apply_plan",
+            resp,
+            "http://example.test",
+            1,
+            {"soll_apply_plan"},
         )
 
         self.assertEqual(status, "fail")
@@ -248,9 +339,49 @@ class McpValidateTests(unittest.TestCase):
         calls = []
         responses = iter(
             [
-                {"result": {"data": {"status": "queued", "error_text": ""}}},
-                {"result": {"data": {"status": "running", "error_text": ""}}},
-                {"result": {"data": {"status": "succeeded", "error_text": ""}}},
+                {
+                    "result": {
+                        "data": {
+                            "status": "queued",
+                            "state": "queued",
+                            "error_text": "",
+                            "known_ids": {},
+                            "result_contract": {},
+                            "polling_guidance": {},
+                            "recovery_hint": "wait",
+                            "next_action": {},
+                        }
+                    }
+                },
+                {
+                    "result": {
+                        "data": {
+                            "status": "running",
+                            "state": "running",
+                            "error_text": "",
+                            "known_ids": {},
+                            "result_contract": {},
+                            "polling_guidance": {},
+                            "recovery_hint": "wait",
+                            "next_action": {},
+                        }
+                    }
+                },
+                {
+                    "result": {
+                        "data": {
+                            "status": "succeeded",
+                            "state": "completed",
+                            "error_text": "",
+                            "known_ids": {},
+                            "result_contract": {},
+                            "polling_guidance": {},
+                            "recovery_hint": "none",
+                            "next_action": {},
+                            "result_data": {},
+                        }
+                    }
+                },
             ]
         )
 
@@ -263,9 +394,28 @@ class McpValidateTests(unittest.TestCase):
         try:
             MODULE.rpc_call = fake_rpc_call
             MODULE.time.sleep = lambda _: None
-            resp = {"result": {"data": {"accepted": True, "job_id": "JOB-123"}}}
+            resp = {
+                "result": {
+                    "data": {
+                        "accepted": True,
+                        "job_id": "JOB-123",
+                        "next_action": {
+                            "tool": "job_status",
+                            "arguments": {"job_id": "JOB-123"},
+                        },
+                        "result_contract": {},
+                        "polling_guidance": {
+                            "poll_interval_seconds": 2,
+                            "until_states": ["completed", "failed"],
+                            "on_completed": "consume result_data",
+                            "on_failed": "fix and retry",
+                        },
+                        "recovery_hint": "poll job_status",
+                    }
+                }
+            }
             status, note = MODULE.evaluate_tool_result(
-                "soll_manager", resp, "http://example.test", 2
+                "soll_manager", resp, "http://example.test", 2, {"soll_manager"}
             )
         finally:
             MODULE.rpc_call = original_rpc_call
@@ -283,7 +433,13 @@ class McpValidateTests(unittest.TestCase):
                 "result": {
                     "data": {
                         "status": "failed",
+                        "state": "failed",
                         "error_text": "synthetic validation failure",
+                        "known_ids": {},
+                        "result_contract": {},
+                        "polling_guidance": {},
+                        "recovery_hint": "retry",
+                        "next_action": {"kind": "fix_and_retry_original_mutation"},
                     }
                 }
             }
@@ -293,9 +449,32 @@ class McpValidateTests(unittest.TestCase):
         try:
             MODULE.rpc_call = fake_rpc_call
             MODULE.time.sleep = lambda _: None
-            resp = {"result": {"data": {"accepted": True, "job_id": "JOB-456"}}}
+            resp = {
+                "result": {
+                    "data": {
+                        "accepted": True,
+                        "job_id": "JOB-456",
+                        "next_action": {
+                            "tool": "job_status",
+                            "arguments": {"job_id": "JOB-456"},
+                        },
+                        "result_contract": {},
+                        "polling_guidance": {
+                            "poll_interval_seconds": 2,
+                            "until_states": ["completed", "failed"],
+                            "on_completed": "consume result_data",
+                            "on_failed": "fix and retry",
+                        },
+                        "recovery_hint": "poll job_status",
+                    }
+                }
+            }
             status, note = MODULE.evaluate_tool_result(
-                "soll_commit_revision", resp, "http://example.test", 2
+                "soll_commit_revision",
+                resp,
+                "http://example.test",
+                2,
+                {"soll_commit_revision"},
             )
         finally:
             MODULE.rpc_call = original_rpc_call

@@ -1700,6 +1700,7 @@ fn compact_status_brief_data(data: &Value) -> Value {
     json!({
         "truth_status": data.get("truth_status").cloned().unwrap_or(Value::Null),
         "truth_cockpit": data.get("truth_cockpit").cloned().unwrap_or(Value::Null),
+        "canonical_sources": data.get("canonical_sources").cloned().unwrap_or(Value::Null),
         "next_action": data.get("next_action").cloned().unwrap_or(Value::Null),
         "runtime_mode": data.get("runtime_mode").cloned().unwrap_or(Value::Null),
         "runtime_profile": data.get("runtime_profile").cloned().unwrap_or(Value::Null),
@@ -1733,6 +1734,9 @@ fn compact_status_brief_data(data: &Value) -> Value {
         },
         "runtime_health": runtime_health,
         "public_tool_count": public_tool_count,
+        "async_allowlisted_tools": data.pointer("/async_policy/allowlisted_tools")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
         "omitted_in_brief": [
             "public_tools", "runtime_authority", "async_policy", "async_contract",
             "job_counts", "viz_freshness", "soll_read_coverage",
