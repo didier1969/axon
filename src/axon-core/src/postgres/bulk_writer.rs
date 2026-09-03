@@ -859,6 +859,7 @@ pub(crate) async fn flush_batch_async(
                     }
                     flush_edges_resilient_async(client, &edge_rows).await?;
                 }
+                reconcile_data_artifact_edges(client, batch).await?;
                 Ok(())
             }
             // Transient (lock/deadlock/connection) or Other → propagate unchanged.
@@ -948,7 +949,77 @@ async fn flush_batch_tx(client: &mut deadpool_postgres::Client, batch: &PgBulkBa
         copy_edges_in_tx(&tx, &edge_rows).await?;
     }
 
+    reconcile_data_artifact_edges_in_tx(&tx, batch).await?;
+
     tx.commit().await.context("bulk_writer batch commit")?;
+    Ok(())
+}
+
+/// REQ-AXO-902603 — derive code-symbol -> JSON-artifact bridges for the
+/// current A3 slice. Changed code is matched against every known artifact;
+/// newly discovered artifacts are matched against already indexed code, so
+/// scanner order cannot change the graph. The normal per-file purge removes
+/// stale outbound edges before this reconstruction runs.
+async fn reconcile_data_artifact_edges_in_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    batch: &PgBulkBatch,
+) -> Result<()> {
+    if batch.indexed_files.is_empty() {
+        return Ok(());
+    }
+    let changed_paths: Vec<String> = batch
+        .indexed_files
+        .iter()
+        .map(|(path, ..)| path.clone())
+        .collect();
+    let new_artifacts: Vec<String> = batch
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == "data_artifact")
+        .map(|symbol| symbol.symbol_id.clone())
+        .collect();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    tx.execute(
+        "INSERT INTO ist.Edge \
+             (source_id, target_id, relation_type, project_code, created_at_ms) \
+         SELECT DISTINCT c.source_id, artifact.id, 'READS_ARTIFACT', $1, $4::bigint \
+         FROM ist.Chunk c \
+         JOIN ist.Symbol reader \
+           ON reader.project_code = c.project_code \
+          AND reader.id = c.source_id \
+         JOIN ist.Symbol artifact \
+           ON artifact.project_code = c.project_code \
+          AND artifact.kind = 'data_artifact' \
+         WHERE c.project_code = $1 \
+           AND c.source_type = 'symbol' \
+           AND reader.kind NOT IN ('section', 'element', 'config_key', 'data_artifact', 'table', 'view') \
+           AND c.source_id <> artifact.id \
+           AND char_length(artifact.name) >= 4 \
+           AND (c.file_path = ANY($2::text[]) OR artifact.id = ANY($3::text[])) \
+           AND position(artifact.name in c.content) > 0 \
+         ON CONFLICT (source_id, target_id, relation_type, project_code) DO NOTHING",
+        &[&batch.project_code, &changed_paths, &new_artifacts, &now_ms],
+    )
+    .await
+    .context("A3 reconcile READS_ARTIFACT edges")?;
+    Ok(())
+}
+
+async fn reconcile_data_artifact_edges(
+    client: &mut deadpool_postgres::Client,
+    batch: &PgBulkBatch,
+) -> Result<()> {
+    if batch.indexed_files.is_empty() {
+        return Ok(());
+    }
+    let tx = client
+        .transaction()
+        .await
+        .context("A3 READS_ARTIFACT reconcile begin")?;
+    reconcile_data_artifact_edges_in_tx(&tx, batch).await?;
+    tx.commit()
+        .await
+        .context("A3 READS_ARTIFACT reconcile commit")?;
     Ok(())
 }
 
@@ -1053,6 +1124,15 @@ async fn purge_reindexed_files_in_tx(
         tx.execute("DELETE FROM ist.Edge WHERE source_id = $1", &path_params)
             .await
             .context("purge_reindexed: Edge")?;
+        tx.execute("DELETE FROM ist.Edge WHERE target_id = $1", &path_params)
+            .await
+            .context("purge_reindexed: inbound file/artifact edges")?;
+        tx.execute("DELETE FROM ist.DataArtifact WHERE id = $1", &path_params)
+            .await
+            .context("purge_reindexed: DataArtifact")?;
+        tx.execute("DELETE FROM ist.Symbol WHERE id = $1", &path_params)
+            .await
+            .context("purge_reindexed: file/data-artifact Symbol")?;
     }
     Ok(())
 }

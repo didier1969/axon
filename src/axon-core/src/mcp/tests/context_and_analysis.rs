@@ -1183,6 +1183,94 @@ fn test_tested_truth_is_identical_across_inspect_change_safety_and_test_impact()
 }
 
 #[test]
+fn test_json_data_artifact_resolves_by_path_and_inherits_consumer_tests() {
+    // REQ-AXO-902603 / FSF feedback #27427. The real target is an enrolled
+    // JSON corpus with no parser symbols. A documentary section contains the
+    // same basename, proving that the exact file path wins first.
+    let _guard = env_lock();
+    let project = "TST";
+    let relative = "documents/jurisdictions/validation_corpus.json";
+    let artifact = "/workspace/fiscaly/documents/jurisdictions/validation_corpus.json";
+    let consumer = "TST::lib/corpus.ex::Fiscaly.Corpus.cases!";
+    let test = "TST::test/corpus_test.exs::loads_validation_corpus";
+    let homonym = "TST::docs/soll.md::Couverture (validation_corpus.json)";
+
+    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(
+        crate::test_support::ist_fixtures::IstSeed::new()
+            .symbol(crate::test_support::ist_fixtures::SymbolFixture::new(
+                artifact, "validation_corpus.json", "data_artifact", project,
+            ))
+            .symbol(crate::test_support::ist_fixtures::SymbolFixture::new(
+                consumer, "Fiscaly.Corpus.cases!", "function", project,
+            ))
+            .symbol(
+                crate::test_support::ist_fixtures::SymbolFixture::new(
+                    test, "loads_validation_corpus", "function", project,
+                )
+                .tested(true),
+            )
+            .symbol(crate::test_support::ist_fixtures::SymbolFixture::new(
+                homonym,
+                "Couverture (validation_corpus.json)",
+                "section",
+                project,
+            ))
+            .node(crate::test_support::ist_fixtures::SollNodeFixture::new(
+                "REQ-TST-902603", "Requirement", project, "Validated corpus",
+            ))
+            .edge(crate::test_support::ist_fixtures::EdgeFixture::new(
+                "READS_ARTIFACT", consumer, artifact, project,
+            ))
+            .call(crate::test_support::ist_fixtures::CallFixture::canonical(
+                test, consumer, project,
+            )),
+    )
+    .unwrap();
+    harness.store.execute(&format!(
+        "INSERT INTO soll.Traceability \
+         (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, artifact_status, created_at) \
+         VALUES ('TRC-TST-902603', 'Requirement', 'REQ-TST-902603', 'File', '{relative}', 1.0, 'present', 0)"
+    )).unwrap();
+
+    let call = |name: &str, arguments: Value, id: i64| {
+        harness.server.handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({ "name": name, "arguments": arguments })),
+            id: Some(json!(id)),
+        }).unwrap().result.unwrap()
+    };
+
+    let impact = call(
+        "impact",
+        json!({"project": project, "symbol": relative, "depth": 3, "mode": "verbose"}),
+        90260301,
+    );
+    assert_ne!(impact["data"]["impact_available"].as_bool(), Some(false), "{impact:?}");
+    let rendered = impact["content"][0]["text"].as_str().unwrap_or("");
+    assert!(rendered.contains("Fiscaly.Corpus.cases!"), "{rendered}");
+    assert!(!rendered.contains("symbol not found"), "{rendered}");
+
+    let safety = call(
+        "change_safety",
+        json!({"project_code": project, "target": relative, "target_type": "file"}),
+        90260302,
+    );
+    assert_eq!(safety["data"]["coverage_signals"]["tested"], json!(true), "{safety:?}");
+    assert_eq!(safety["data"]["traceability_signals"]["traceability_links"], json!(1), "{safety:?}");
+
+    let tests = call(
+        "test_impact",
+        json!({"project_code": project, "symbols": [relative], "radius": 4}),
+        90260303,
+    );
+    assert_eq!(tests["data"]["minimal_test_set"], json!([test]), "{tests:?}");
+
+    crate::ist_snapshot::evict_process_snapshot(project);
+    harness.server.soll_cache().invalidate(project);
+}
+
+#[test]
 fn test_unindexed_workspace_target_never_becomes_proven_missing_coverage() {
     // REQ-AXO-902608 / KKI feedback #408 — a newly-created test file can be
     // present on disk before Watchman/parser publication reaches the IST.  The

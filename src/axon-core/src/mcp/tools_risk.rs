@@ -1488,29 +1488,57 @@ impl McpServer {
     /// REQ-AXO-162/160 — resolve a user symbol (canonical id or bare name) to its
     /// canonical IST id: exact id first, else the shortest `::name` suffix match.
     fn resolve_test_target_id(&self, project: &str, symbol: &str) -> Option<String> {
-        let esc = |s: &str| s.replace('\'', "''");
-        let sql = format!(
-            "SELECT id FROM ist.Symbol WHERE project_code = '{p}' AND (id = '{s}' OR id LIKE '%::{s}') ORDER BY length(id) ASC LIMIT 1",
-            p = esc(project),
-            s = esc(symbol)
-        );
-        let raw = self.graph_store.query_json(&sql).ok()?;
-        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).ok()?;
-        rows.into_iter()
-            .next()?
-            .into_iter()
-            .next()?
-            .as_str()
-            .map(String::from)
+        self.resolve_scoped_symbol(symbol, Some(project))
+            .map(|resolved| resolved.id)
     }
 
     /// REQ-AXO-162 — tests that exercise `symbol_id`: reverse-CALLS callers
     /// (radius ≤ N) carrying the `tested` flag (test fns + folded pytest
     /// fixtures, REQ-AXO-901958). Pure RAM IST traversal (PIL-AXO-9002).
-    fn tests_exercising(&self, project: &str, symbol_id: &str, radius: u32) -> Vec<String> {
+    pub(super) fn tests_exercising(
+        &self,
+        project: &str,
+        symbol_id: &str,
+        radius: u32,
+    ) -> Vec<String> {
         let view = process_view();
-        let mut tests: Vec<String> = view
-            .reverse_at_radius(
+        let is_artifact = view.node_kind_db(project, symbol_id) == Some("data_artifact");
+        let mut tests: Vec<String> = if is_artifact {
+            // An artifact is not called: first find its READS_ARTIFACT
+            // consumers, then follow CALLS/CALLS_NIF back to their tests.
+            let readers = view
+                .reverse_at_radius(
+                    project,
+                    symbol_id,
+                    1,
+                    10_000,
+                    &[RelationType::ReadsArtifact],
+                )
+                .unwrap_or_default();
+            readers
+                .into_iter()
+                .flat_map(|reader| {
+                    let mut reached = if radius > 1 {
+                        view.reverse_at_radius(
+                            project,
+                            &reader,
+                            radius - 1,
+                            10_000,
+                            &[RelationType::Calls, RelationType::CallsNif],
+                        )
+                        .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    if view.node_tested(project, &reader) == Some(true) {
+                        reached.push(reader);
+                    }
+                    reached
+                })
+                .filter(|candidate| view.node_tested(project, candidate) == Some(true))
+                .collect()
+        } else {
+            view.reverse_at_radius(
                 project,
                 symbol_id,
                 radius,
@@ -1519,8 +1547,9 @@ impl McpServer {
             )
             .unwrap_or_default()
             .into_iter()
-            .filter(|c| view.node_tested(project, c) == Some(true))
-            .collect();
+            .filter(|candidate| view.node_tested(project, candidate) == Some(true))
+            .collect()
+        };
         // REQ-AXO-902601 — a test is at minimum its own executable oracle.
         // Reverse traversal intentionally excludes the start node, so without
         // this explicit inclusion `inspect` could report Tested=true for a test

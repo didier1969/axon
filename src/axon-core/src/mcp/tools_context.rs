@@ -180,12 +180,16 @@ impl McpServer {
             if let Some(ids) = view.ids_for_short_name(proj, symbol) {
                 crate::soll_snapshot::record_fusion_read(true);
                 let mut candidates = ids.into_iter();
-                let id = candidates.next()?;
-                return Some(ScopedSymbolResolution {
-                    id,
-                    homonyms: candidates.collect(),
-                    homonyms_truncated: false,
-                });
+                if let Some(id) = candidates.next() {
+                    return Some(ScopedSymbolResolution {
+                        id,
+                        homonyms: candidates.collect(),
+                        homonyms_truncated: false,
+                    });
+                }
+                // A warm snapshot with zero exact short-name hits is not a
+                // terminal absence: file/data-artifact paths are resolved by
+                // exact suffix in the bounded PG fallback below.
             }
             // ids_for_short_name returned None ⇒ snapshot cold ⇒ PG fallback.
         }
@@ -199,14 +203,21 @@ impl McpServer {
         let query = if project.is_some() {
             format!(
                 "SELECT id FROM Symbol \
-                 WHERE (name = $sym OR id = $sym){project_filter} \
-                 ORDER BY id LIMIT {PG_CANDIDATES}",
+                 WHERE (name = $sym OR id = $sym OR \
+                        (kind IN ('file', 'data_artifact') AND \
+                         right(id, char_length($sym) + 1) = '/' || $sym)){project_filter} \
+                 ORDER BY CASE WHEN id = $sym THEN 0 WHEN name = $sym THEN 1 ELSE 2 END, id \
+                 LIMIT {PG_CANDIDATES}",
                 project_filter = Self::sql_project_filter_for_fields(project, &["project_code"])
             )
         } else {
             format!(
-                "SELECT id FROM Symbol WHERE name = $sym OR id = $sym \
-                 ORDER BY id LIMIT {PG_CANDIDATES}"
+                "SELECT id FROM Symbol \
+                 WHERE name = $sym OR id = $sym OR \
+                       (kind IN ('file', 'data_artifact') AND \
+                        right(id, char_length($sym) + 1) = '/' || $sym) \
+                 ORDER BY CASE WHEN id = $sym THEN 0 WHEN name = $sym THEN 1 ELSE 2 END, id \
+                 LIMIT {PG_CANDIDATES}"
             )
         };
         let params = json!({ "sym": symbol });

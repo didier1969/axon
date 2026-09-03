@@ -35,6 +35,25 @@ fn parsed_cyclomatic_complexity(sym: &crate::parser::Symbol) -> Option<i32> {
         .and_then(|s| s.parse::<i32>().ok())
 }
 
+/// REQ-AXO-902603 — a symbol-less JSON file is still a structural input.
+/// JSON documents that already expose parsed symbols retain those richer nodes
+/// and do not gain a competing generic identity.
+fn json_data_artifact_name(path: &str, symbol_count: usize) -> Option<String> {
+    if symbol_count != 0
+        || !std::path::Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    {
+        return None;
+    }
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
 impl GraphStore {
     // REQ-AXO-901653 slice-5a: `claimable_file_vectorization_candidates_query`
     // deleted ; legacy FileVectorizationQueue + File join.
@@ -924,6 +943,9 @@ impl GraphStore {
                 (SELECT target_id FROM Edge WHERE source_id = '{safe}' AND relation_type = 'CONTAINS'); \
              DELETE FROM Edge WHERE source_id = '{safe}' OR target_id IN \
                 (SELECT target_id FROM Edge e2 WHERE e2.source_id = '{safe}' AND e2.relation_type = 'CONTAINS'); \
+             DELETE FROM Edge WHERE target_id = '{safe}'; \
+             DELETE FROM DataArtifact WHERE id = '{safe}'; \
+             DELETE FROM Symbol WHERE id = '{safe}'; \
              DELETE FROM IndexedFile WHERE path = '{safe}';"
         ))
     }
@@ -965,6 +987,22 @@ impl GraphStore {
         let mut seen_calls_nif: HashSet<RelationRow> = HashSet::new();
         let mut seen_other: HashSet<(&'static str, RelationRow)> = HashSet::new();
         let mut chunk_ids_emitted: Vec<String> = Vec::new();
+
+        if let Some(name) = json_data_artifact_name(path, symbols.len()) {
+            symbol_rows.push(SymbolRow {
+                symbol_id: path.to_string(),
+                name,
+                kind: "data_artifact".to_string(),
+                tested: false,
+                is_public: false,
+                is_nif: false,
+                is_unsafe: false,
+                is_entry_point: false,
+                project_code: project_code.to_string(),
+                embedding: None,
+                cyclomatic_complexity: None,
+            });
+        }
 
         let mut tagged_chunks: Vec<crate::code_chunker::TaggedChunk> = Vec::new();
         // REQ-AXO-902024 fix B+C — collect the unique symbols, then chunk them in
@@ -1211,6 +1249,24 @@ impl GraphStore {
         for parsed in files {
             let path_str = parsed.path.to_string_lossy().into_owned();
             let mut chunk_ids_emitted: Vec<(String, String, String)> = Vec::new();
+
+            if let Some(name) = json_data_artifact_name(&path_str, parsed.symbols.len()) {
+                if seen_symbols.insert((path_str.clone(), project_code.to_string())) {
+                    symbol_rows.push(SymbolRow {
+                        symbol_id: path_str.clone(),
+                        name,
+                        kind: "data_artifact".to_string(),
+                        tested: false,
+                        is_public: false,
+                        is_nif: false,
+                        is_unsafe: false,
+                        is_entry_point: false,
+                        project_code: project_code.to_string(),
+                        embedding: None,
+                        cyclomatic_complexity: None,
+                    });
+                }
+            }
 
             // Phase 1: collect symbols + per-symbol chunks as tagged items.
             let mut tagged_chunks: Vec<crate::code_chunker::TaggedChunk> = Vec::new();
@@ -1946,8 +2002,150 @@ impl GraphStore {
 
 #[cfg(test)]
 mod req_axo_140_call_resolution {
-    use super::GraphStore;
+    use super::{json_data_artifact_name, GraphStore};
     use std::collections::HashMap;
+
+    #[test]
+    fn only_symbol_less_json_becomes_a_data_artifact() {
+        assert_eq!(
+            json_data_artifact_name(
+                "/workspace/fiscaly/documents/jurisdictions/validation_corpus.json",
+                0,
+            )
+            .as_deref(),
+            Some("validation_corpus.json")
+        );
+        assert_eq!(json_data_artifact_name("/workspace/config.json", 2), None);
+        assert_eq!(json_data_artifact_name("/workspace/corpus.csv", 0), None);
+    }
+
+    #[test]
+    fn a3_materializes_and_reconciles_json_artifact_reads() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let project = "DAI";
+        store
+            .sync_project_registry_entry(project, Some("data-artifact-ingestion"), None)
+            .unwrap();
+        let artifact = "/workspace/dai/documents/validation_corpus.json";
+        store
+            .upsert_graph(
+                artifact,
+                project,
+                r#"{"cases":[1,2,3]}"#,
+                "artifact-hash",
+                1,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let reader_path = "/workspace/dai/lib/corpus.rs";
+        let reader_name = "load_corpus";
+        let reader = crate::parser::Symbol {
+            name: reader_name.to_string(),
+            kind: "function".to_string(),
+            start_line: 1,
+            end_line: 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: false,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: HashMap::new(),
+            embedding: None,
+        };
+        store
+            .upsert_graph(
+                reader_path,
+                project,
+                r#"fn load_corpus() { include_str!("validation_corpus.json"); }"#,
+                "reader-hash-1",
+                2,
+                std::slice::from_ref(&reader),
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .query_count(&format!(
+                    "SELECT count(*) FROM ist.Symbol WHERE id='{artifact}' AND kind='data_artifact'"
+                ))
+                .unwrap(),
+            1
+        );
+        let reader_id = GraphStore::symbol_id(project, reader_path, reader_name);
+        assert_eq!(
+            store
+                .query_count(&format!(
+                    "SELECT count(*) FROM ist.Edge WHERE source_id='{reader_id}' \
+                     AND target_id='{artifact}' AND relation_type='READS_ARTIFACT'"
+                ))
+                .unwrap(),
+            1
+        );
+
+        let documentary_path = "/workspace/dai/docs/corpus.md";
+        let documentary_name = "Validation corpus";
+        let documentary = crate::parser::Symbol {
+            name: documentary_name.to_string(),
+            kind: "section".to_string(),
+            start_line: 1,
+            end_line: 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: false,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: HashMap::new(),
+            embedding: None,
+        };
+        store
+            .upsert_graph(
+                documentary_path,
+                project,
+                "# Validation corpus\nSee validation_corpus.json.",
+                "documentary-hash",
+                2,
+                &[documentary],
+                &[],
+            )
+            .unwrap();
+        let documentary_id =
+            GraphStore::symbol_id(project, documentary_path, documentary_name);
+        assert_eq!(
+            store
+                .query_count(&format!(
+                    "SELECT count(*) FROM ist.Edge WHERE source_id='{documentary_id}' \
+                     AND target_id='{artifact}' AND relation_type='READS_ARTIFACT'"
+                ))
+                .unwrap(),
+            0
+        );
+
+        store
+            .upsert_graph(
+                reader_path,
+                project,
+                "fn load_corpus() {}",
+                "reader-hash-2",
+                3,
+                &[reader],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .query_count(&format!(
+                    "SELECT count(*) FROM ist.Edge WHERE source_id='{reader_id}' \
+                     AND target_id='{artifact}' AND relation_type='READS_ARTIFACT'"
+                ))
+                .unwrap(),
+            0
+        );
+    }
 
     fn index(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
         let mut m: HashMap<String, Vec<String>> = HashMap::new();

@@ -329,14 +329,6 @@ impl McpServer {
         } else {
             format!("s.name = '{escaped_name}'")
         };
-        let artifact_match_clause = if let Some(symbol_id) = resolved_symbol_id.as_deref() {
-            format!(
-                "(t.artifact_ref = s.id OR t.artifact_ref = s.name OR t.artifact_ref = '{}')",
-                symbol_id.replace('\'', "''")
-            )
-        } else {
-            "t.artifact_ref = s.id OR t.artifact_ref = s.name".to_string()
-        };
         let scoped_clause = if project == "*" {
             String::new()
         } else {
@@ -344,12 +336,8 @@ impl McpServer {
         };
         let query = format!(
             "SELECT
-                COALESCE(MAX(CASE WHEN s.tested THEN 1 ELSE 0 END), 0) AS tested,
-                COUNT(DISTINCT t.id) AS traceability_links
+                COALESCE(MAX(CASE WHEN s.tested THEN 1 ELSE 0 END), 0) AS tested
              FROM Symbol s
-             LEFT JOIN soll.Traceability t
-               ON t.artifact_type = 'Symbol'
-              AND ({artifact_match_clause})
              WHERE {symbol_match_clause}
              {}",
             scoped_clause
@@ -359,17 +347,51 @@ impl McpServer {
             .query_json(&query)
             .unwrap_or_else(|_| "[]".to_string());
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        let tested = rows
+        let mut tested = rows
             .first()
             .and_then(|row| row.first())
             .and_then(|value| value.as_i64())
             .unwrap_or(0)
             > 0;
-        let traceability_links = rows
-            .first()
-            .and_then(|row| row.get(1))
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0);
+        // Data artifacts inherit coverage from tests that reach their explicit
+        // READS_ARTIFACT consumers. Ordinary symbols keep the direct flag.
+        if !tested {
+            if let Some(symbol_id) = resolved_symbol_id.as_deref() {
+                if self.ensure_ram_snapshot_warm(project)
+                    && crate::ist_snapshot::process_view().node_kind_db(project, symbol_id)
+                        == Some("data_artifact")
+                {
+                    tested = !self.tests_exercising(project, symbol_id, 4).is_empty();
+                }
+            }
+        }
+        let mut artifact_refs = vec![escaped_name.clone()];
+        if let Some(symbol_id) = resolved_symbol_id.as_deref() {
+            artifact_refs.push(symbol_id.replace('\'', "''"));
+        }
+        artifact_refs.sort();
+        artifact_refs.dedup();
+        let refs_sql = artifact_refs
+            .iter()
+            .map(|reference| format!("'{reference}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let trace_project_clause = if project == "*" {
+            String::new()
+        } else {
+            format!(" AND n.project_code = '{escaped_project}'")
+        };
+        let traceability_links = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(DISTINCT t.id) FROM soll.Traceability t \
+                 JOIN soll.Node n ON n.id = t.soll_entity_id \
+                 WHERE lower(t.artifact_type) IN \
+                       ('symbol', 'file', 'dataartifact', 'data_artifact') \
+                   AND t.artifact_ref IN ({refs_sql}){trace_project_clause}"
+            ))
+            .unwrap_or(0)
+            .max(0) as u64;
         json!({
             "tested": tested,
             "traceability_links": traceability_links
