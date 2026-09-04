@@ -219,6 +219,7 @@ mod tests {
                                 indexer_ready: ready,
                                 indexer_lifecycle: "healthy".to_string(),
                                 indexer_source: "pg_heartbeat".to_string(),
+                                ..Default::default()
                             };
                             let rust = liveness_phase(&l)
                                 .map(str::to_string)
@@ -248,6 +249,7 @@ mod tests {
                         indexer_ready: ready,
                         indexer_lifecycle: "healthy".to_string(),
                         indexer_source: "pg_heartbeat".to_string(),
+                        ..Default::default()
                     };
                     let gates = evaluate_liveness_gates(&l);
                     let rust = (

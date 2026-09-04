@@ -221,6 +221,12 @@ pub struct LivenessFacts {
     pub indexer_lifecycle: String,
     /// Liveness source: "pg_heartbeat" | "pg_heartbeat_stale" | "no_heartbeat".
     pub indexer_source: String,
+    /// REQ-AXO-902616 — qui tient le verrou d'écriture IST. `Default` = non mesuré :
+    /// `CutoverFacts::new_healthy()` et tout appelant qui ne sonde pas gardent le
+    /// verdict d'avant, au bit près.
+    pub ist_ownership: IstOwnershipFacts,
+    /// REQ-AXO-902616 — le pid que le SUPERVISEUR suit, pour le recoupement.
+    pub supervised_pid: Option<i64>,
 }
 
 /// Evaluate the runtime liveness gates (pure predicates over `LivenessFacts`).
@@ -237,18 +243,58 @@ pub fn evaluate_liveness_gates(l: &LivenessFacts) -> Vec<Gate> {
                 "brain not serving (db_probe_failed)"
             },
         ),
-        Gate::binary(
-            "indexer_alive",
-            !l.indexer_expected || l.indexer_ready,
-            if !l.indexer_expected {
-                "no separate indexer in runtime_contract — gate N/A".to_string()
-            } else if l.indexer_ready {
-                format!("indexer healthy ({})", l.indexer_source)
-            } else {
-                format!("indexer {} ({})", l.indexer_lifecycle, l.indexer_source)
-            },
-        ),
+        indexer_alive_gate(l),
     ]
+}
+
+/// REQ-AXO-902616 critère 1 — `indexer_alive` compare le propriétaire du battement
+/// au processus que le SUPERVISEUR suit, et n'est jamais vert quand les deux
+/// divergent.
+///
+/// `Unknown` et non `Fail` : un battement frais n'est pas une panne, c'est une
+/// vivacité dont on ne sait plus DE QUI elle parle. Et `Fail` ferait basculer un
+/// promote en tier-2 (`stop --hard`, coupure du brain) là où le remède est le
+/// redémarrage du seul indexeur — `indexer_alive` et `indexer_process_stable` sont
+/// déjà tous deux dans `REPARABLE_PAR_INDEXEUR`.
+///
+/// Quand la propriété n'est pas mesurée (`Default`), le verdict est celui d'avant
+/// au bit près : `CutoverFacts::new_healthy()` en dépend, et un `Unknown` glissé là
+/// enverrait chaque cutover en auto-rollback.
+fn indexer_alive_gate(l: &LivenessFacts) -> Gate {
+    if !l.indexer_expected {
+        return Gate::binary(
+            "indexer_alive",
+            true,
+            "no separate indexer in runtime_contract — gate N/A".to_string(),
+        );
+    }
+    if l.indexer_ready && l.ist_ownership.label(l.supervised_pid) == "diverged" {
+        return Gate::unknown(
+            "indexer_alive",
+            format!(
+                "heartbeat is fresh ({}) but the IST writer lock is held by pid={} while the \
+                 supervisor tracks pid={} — the indexer that works is NOT the one being \
+                 supervised, so this heartbeat says nothing about the supervised process",
+                l.indexer_source,
+                l.ist_ownership
+                    .owner_pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+                l.supervised_pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+            ),
+        );
+    }
+    Gate::binary(
+        "indexer_alive",
+        l.indexer_ready,
+        if l.indexer_ready {
+            format!("indexer healthy ({})", l.indexer_source)
+        } else {
+            format!("indexer {} ({})", l.indexer_lifecycle, l.indexer_source)
+        },
+    )
 }
 
 /// Liveness phase, taking precedence over the release-state phase when red.
@@ -469,6 +515,70 @@ pub fn attempt_next_action(f: &ReleaseFacts) -> Option<String> {
     }
 }
 
+/// REQ-AXO-902616 — qui tient VRAIMENT le verrou d'écriture IST.
+///
+/// La sonde `indexer_alive` juge sur la fraîcheur du battement PG. Elle est restée
+/// verte 21 heures pendant que le processus SUPERVISÉ mourait toutes les 30 s : le
+/// battement était alimenté par un orphelin que le superviseur ne suivait plus.
+/// Une sonde qui reste verte pendant une panne totale de supervision ne mesure pas
+/// ce que son nom promet.
+///
+/// `probed: false` est le défaut et signifie « je n'ai pas mesuré » — jamais
+/// « personne ne tient ». C'est exactement la confusion que ce type supprime :
+/// le gate disait « nothing holds » sans l'avoir vérifié une seule fois.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IstOwnershipFacts {
+    /// La sonde du flock a-t-elle abouti ? Faux ⇒ « unmeasured », jamais un verdict.
+    pub probed: bool,
+    /// Un processus VIVANT tient le flock (source : `guard_liveness_ist`, qui teste
+    /// le flock lui-même et non `/proc/<pid>`, lequel répond vrai pour un zombie).
+    pub held_by_live_process: bool,
+    /// Pid inscrit dans la métadonnée du verrou, quand elle est lisible.
+    pub owner_pid: Option<i64>,
+    /// Identité runtime auto-déclarée du propriétaire.
+    pub owner_identity: Option<String>,
+}
+
+impl IstOwnershipFacts {
+    /// REQ-AXO-902616 — quadri-état en CHAÎNE, comme `restart_loop_label` : un
+    /// booléen se lirait `false` là où la vérité est « je n'ai pas pu mesurer ».
+    ///
+    /// `supervised_pid` est le pid que le SUPERVISEUR suit. `diverged` dit
+    /// exactement la panne du 2026-09-04 : un indexeur vivant tient le verrou, et
+    /// ce n'est pas celui que le superviseur croit piloter.
+    pub fn label(&self, supervised_pid: Option<i64>) -> &'static str {
+        if !self.probed {
+            return "unmeasured";
+        }
+        if !self.held_by_live_process {
+            return "free";
+        }
+        match (self.owner_pid, supervised_pid) {
+            (Some(owner), Some(supervised)) if owner == supervised => "supervised",
+            (Some(_), Some(_)) => "diverged",
+            _ => "held_by_unknown",
+        }
+    }
+
+    /// REQ-AXO-902616 critère 3 — nommer le propriétaire réel quand il existe, et
+    /// dire s'il est vivant. Jamais supposer.
+    pub fn describe(&self) -> String {
+        if !self.probed {
+            return "IST writer lock NOT probed".to_string();
+        }
+        if !self.held_by_live_process {
+            return "no live process holds the IST writer lock".to_string();
+        }
+        let who = match (self.owner_pid, self.owner_identity.as_deref()) {
+            (Some(pid), Some(identity)) => format!("pid={pid}, identity={identity}"),
+            (Some(pid), None) => format!("pid={pid}"),
+            (None, Some(identity)) => format!("identity={identity}"),
+            (None, None) => "owner metadata unreadable".to_string(),
+        };
+        format!("a LIVE process holds the IST writer lock ({who})")
+    }
+}
+
 /// REQ-AXO-902585 (défaut 3) — ce que le superviseur sait et que le battement PG
 /// ne peut pas savoir. Peuplé par `tools_release.rs` (qui tient l'IO) ; les gates
 /// restent des prédicats purs.
@@ -487,6 +597,9 @@ pub struct SupervisorFacts {
     pub age_ms: i64,
     /// Fraîcheur du battement PG, pour le recoupement.
     pub heartbeat_age_ms: Option<i64>,
+    /// REQ-AXO-902616 — qui tient le verrou d'écriture IST. `Default` = non mesuré,
+    /// donc un appelant qui ne sonde pas garde exactement l'ancien comportement.
+    pub ist_ownership: IstOwnershipFacts,
 }
 
 impl SupervisorFacts {
@@ -535,12 +648,18 @@ pub fn evaluate_supervisor_gates(s: &SupervisorFacts) -> Vec<Gate> {
     } else if s.status == "Restarting" {
         // Détecteur PRIMAIRE, et il ne dépend d'aucun seuil : le superviseur dit
         // lui-même qu'il relance.
+        // REQ-AXO-902616 défaut 2 — le message disait « nothing holds ». C'était FAUX
+        // le 2026-09-04 : 650712 tenait, vivant, propriétaire légitime du flock IST.
+        // Et les instances éphémères n'écrivent AUCUN battement — elles sont refusées
+        // au boot, avant toute écriture observable (`runtime_boot.rs:815-830`). Le
+        // gate décrit désormais ce qu'il a MESURÉ, et se tait quand il n'a rien sondé.
         Gate::fail(
             "indexer_process_stable",
             format!(
-                "axon-indexer is `Restarting` (restarts={}, pid={}) — the heartbeat is written by \
-                 each short-lived instance, so liveness looks healthy while nothing holds",
-                s.restarts, s.pid
+                "axon-indexer is `Restarting` (restarts={}, pid={}) — {}",
+                s.restarts,
+                s.pid,
+                s.ist_ownership.describe()
             ),
         )
     } else if s.restarts >= crate::supervisor_probe::SUPERVISOR_RESTART_LOOP_MIN_RESTARTS
@@ -549,8 +668,10 @@ pub fn evaluate_supervisor_gates(s: &SupervisorFacts) -> Vec<Gate> {
         Gate::fail(
             "indexer_process_stable",
             format!(
-                "restart loop: {} restarts and the current process is only {} ms old",
-                s.restarts, s.age_ms
+                "restart loop: {} restarts and the current process is only {} ms old — {}",
+                s.restarts,
+                s.age_ms,
+                s.ist_ownership.describe()
             ),
         )
     } else if s.restarts >= 1 && s.age_ms < crate::supervisor_probe::SUPERVISOR_YOUNG_PROCESS_MS {
@@ -1139,6 +1260,7 @@ mod tests {
             indexer_ready: ready,
             indexer_lifecycle: lifecycle.to_string(),
             indexer_source: source.to_string(),
+            ..Default::default()
         }
     }
 
@@ -1989,5 +2111,187 @@ mod tests {
         f.sockets_present = true;
         assert_eq!(stop_phase(&f), "stopping");
         assert!(stop_next_action(&f).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // REQ-AXO-902616 — la vivacité doit dire QUEL indexeur vit, et le gate
+    // ne doit pas expliquer faux.
+    //
+    // Valeurs réelles de l'incident du 2026-09-04 : l'orphelin 650712 tenait
+    // le flock IST et alimentait le battement PG pendant que le superviseur
+    // relançait en vain le pid 544703, 2 686 fois en 22 heures.
+    // ------------------------------------------------------------------
+
+    fn proprietaire_vivant(pid: i64) -> IstOwnershipFacts {
+        IstOwnershipFacts {
+            probed: true,
+            held_by_live_process: true,
+            owner_pid: Some(pid),
+            owner_identity: Some("axon-indexer@live".to_string()),
+        }
+    }
+
+    #[test]
+    fn l_etiquette_de_propriete_ist_distingue_les_quatre_cas() {
+        assert_eq!(
+            IstOwnershipFacts::default().label(Some(1)),
+            "unmeasured",
+            "ne pas avoir mesuré n'est pas « personne ne tient »"
+        );
+        let libre = IstOwnershipFacts {
+            probed: true,
+            ..Default::default()
+        };
+        assert_eq!(libre.label(Some(1)), "free");
+        assert_eq!(proprietaire_vivant(544_703).label(Some(544_703)), "supervised");
+        assert_eq!(proprietaire_vivant(650_712).label(Some(544_703)), "diverged");
+        let anonyme = IstOwnershipFacts {
+            probed: true,
+            held_by_live_process: true,
+            ..Default::default()
+        };
+        assert_eq!(anonyme.label(Some(544_703)), "held_by_unknown");
+    }
+
+    /// Critère 1 — jamais vert sur une divergence.
+    #[test]
+    fn indexer_alive_ne_reste_pas_vert_quand_le_proprietaire_du_verrou_diverge() {
+        let l = LivenessFacts {
+            brain_serving: true,
+            indexer_expected: true,
+            indexer_ready: true,
+            indexer_lifecycle: "healthy".to_string(),
+            indexer_source: "pg_heartbeat".to_string(),
+            ist_ownership: proprietaire_vivant(650_712),
+            supervised_pid: Some(544_703),
+        };
+        let gate = evaluate_liveness_gates(&l)
+            .into_iter()
+            .find(|g| g.name == "indexer_alive")
+            .expect("le gate existe");
+        assert!(
+            !gate.passes(),
+            "un battement frais écrit par un indexeur que le superviseur ne suit plus \
+             n'est pas une vivacité : {gate:?}"
+        );
+        assert!(
+            gate.detail.contains("650712") && gate.detail.contains("544703"),
+            "le message doit nommer LES DEUX pids : {}",
+            gate.detail
+        );
+    }
+
+    /// Le gate reste vert quand le propriétaire EST le processus supervisé —
+    /// sinon la correction crierait au loup à chaque runtime sain.
+    #[test]
+    fn indexer_alive_reste_vert_quand_le_proprietaire_est_le_processus_supervise() {
+        let l = LivenessFacts {
+            brain_serving: true,
+            indexer_expected: true,
+            indexer_ready: true,
+            indexer_lifecycle: "healthy".to_string(),
+            indexer_source: "pg_heartbeat".to_string(),
+            ist_ownership: proprietaire_vivant(544_703),
+            supervised_pid: Some(544_703),
+        };
+        assert!(evaluate_liveness_gates(&l).iter().all(|g| g.passes()));
+    }
+
+    /// Rétrocompatibilité stricte : un appelant qui ne sonde pas la propriété —
+    /// `CutoverFacts::new_healthy()` en tête — garde le verdict d'avant au bit près.
+    /// Un `Unknown` glissé ici enverrait chaque cutover en auto-rollback.
+    #[test]
+    fn indexer_alive_garde_son_verdict_quand_la_propriete_n_est_pas_mesuree() {
+        let l = LivenessFacts {
+            brain_serving: true,
+            indexer_expected: true,
+            indexer_ready: true,
+            indexer_lifecycle: "healthy".to_string(),
+            indexer_source: "pg_heartbeat".to_string(),
+            ..Default::default()
+        };
+        assert!(
+            evaluate_liveness_gates(&l).iter().all(|g| g.passes()),
+            "sans mesure de propriété, le comportement historique est conservé"
+        );
+    }
+
+    /// Critère 2 + 4 — « nothing holds » n'est affirmé qu'après vérification.
+    #[test]
+    fn le_gate_de_stabilite_n_affirme_nothing_holds_que_s_il_l_a_verifie() {
+        let s = SupervisorFacts {
+            reachable: true,
+            role_found: true,
+            status: "Restarting".to_string(),
+            restarts: 2_686,
+            pid: 544_703,
+            age_ms: 40,
+            ist_ownership: proprietaire_vivant(650_712),
+            ..Default::default()
+        };
+        let gate = evaluate_supervisor_gates(&s).into_iter().next().unwrap();
+        assert!(gate.is_red(), "le verdict reste rouge, c'est bien une panne");
+        assert!(
+            !gate.detail.contains("nothing holds"),
+            "quelque chose tenait : 650712, vivant. Le message ment : {}",
+            gate.detail
+        );
+        assert!(
+            gate.detail.contains("650712"),
+            "critère 3 : nommer le pid du propriétaire réel : {}",
+            gate.detail
+        );
+    }
+
+    /// L'autre moitié du critère 4 — un verrou réellement libre se dit tel quel.
+    #[test]
+    fn le_gate_de_stabilite_dit_le_verrou_libre_quand_il_l_a_mesure_libre() {
+        let s = SupervisorFacts {
+            reachable: true,
+            role_found: true,
+            status: "Restarting".to_string(),
+            restarts: 45,
+            pid: 544_703,
+            age_ms: 40,
+            ist_ownership: IstOwnershipFacts {
+                probed: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let gate = evaluate_supervisor_gates(&s).into_iter().next().unwrap();
+        assert!(gate.is_red());
+        assert!(
+            gate.detail.contains("no live process holds"),
+            "un verrou mesuré libre se dit, sans supposer : {}",
+            gate.detail
+        );
+    }
+
+    /// Sans sonde, le gate décrit le symptôme SANS en supposer la cause.
+    #[test]
+    fn sans_sonde_le_gate_de_stabilite_ne_suppose_aucune_cause() {
+        let s = SupervisorFacts {
+            reachable: true,
+            role_found: true,
+            status: "Restarting".to_string(),
+            restarts: 45,
+            pid: 544_703,
+            age_ms: 40,
+            ..Default::default()
+        };
+        let gate = evaluate_supervisor_gates(&s).into_iter().next().unwrap();
+        assert!(gate.is_red());
+        assert!(
+            !gate.detail.contains("nothing holds")
+                && !gate.detail.contains("no live process holds"),
+            "sans mesure, aucune affirmation sur le verrou : {}",
+            gate.detail
+        );
+        assert!(
+            gate.detail.contains("NOT probed"),
+            "et l'absence de mesure est DITE : {}",
+            gate.detail
+        );
     }
 }

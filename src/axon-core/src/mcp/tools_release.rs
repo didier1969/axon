@@ -11,6 +11,7 @@ use super::runtime_topology_support::{
     resolve_indexer_liveness, EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
 };
 use super::McpServer;
+use crate::release_reconciler::IstOwnershipFacts;
 use crate::release_reconciler::{
     attempt_next_action, evaluate_attempt_gate, evaluate_gates, evaluate_liveness_gates,
     evaluate_supervisor_gates, liveness_next_action, liveness_phase, next_action, phase,
@@ -90,12 +91,26 @@ impl McpServer {
             hb.as_ref().map(|r| r.heartbeat_ms),
             EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
         );
+        // REQ-AXO-902616 — sonder QUI tient le verrou d'écriture IST AVANT tout
+        // verdict de vivacité, et renseigner les deux jeux de faits avec la MÊME
+        // mesure : un battement frais écrit par un indexeur que le superviseur ne
+        // suit plus n'est pas une vivacité, c'est une vivacité orpheline.
+        let ist_ownership = probe_ist_ownership();
+        let mut sup = self.collect_supervisor_facts(hb.as_ref().map(|r| now_ms - r.heartbeat_ms));
+        sup.ist_ownership = ist_ownership.clone();
+        let supervised_pid = if sup.role_found && sup.pid > 0 {
+            Some(sup.pid)
+        } else {
+            None
+        };
         let lf = LivenessFacts {
             brain_serving: self.execute_raw_sql("SELECT 1").is_ok(),
             indexer_expected: facts.indexer_expected(),
             indexer_ready: live.ready,
             indexer_lifecycle: live.lifecycle.to_string(),
             indexer_source: live.source.to_string(),
+            ist_ownership,
+            supervised_pid,
         };
 
         let mut gates = evaluate_gates(&facts);
@@ -108,7 +123,6 @@ impl McpServer {
         // ⚠ Ce gate rejoint `gates` ICI, et surtout PAS `evaluate_liveness_gates` :
         // `CutoverFacts::new_healthy()` exige que TOUS les gates de liveness passent,
         // et un `Unknown` y enverrait chaque cutover en auto-rollback.
-        let sup = self.collect_supervisor_facts(hb.as_ref().map(|r| now_ms - r.heartbeat_ms));
         gates.extend(evaluate_supervisor_gates(&sup));
         // REQ-AXO-902585 — `failed_gates` ne porte que les gates VRAIMENT rouges.
         // Sûreté, pas style : `promote_live_safe.sh` teste `recon_failed ==
@@ -259,5 +273,97 @@ impl McpServer {
                 }
             }
         }))
+    }
+}
+
+/// REQ-AXO-902616 — qui tient le verrou d'écriture IST, mesuré et non supposé.
+///
+/// L'autorité est le flock lui-même (`guard_liveness_ist`), jamais `/proc/<pid>` :
+/// ce dernier répond vrai pour un zombie, et c'est exactement l'erreur que
+/// `REQ-AXO-902157` a corrigée côté bash. Le `pid=` de la métadonnée sert
+/// uniquement à NOMMER le propriétaire, jamais à juger de sa vivacité.
+///
+/// Une sonde qui échoue rend `Default` — « non mesuré » — et surtout pas
+/// « personne ne tient » : c'est la confusion que `REQ-AXO-902616` supprime.
+///
+/// ⚠ Quand le verrou est libre, la sonde le prend et le relâche aussitôt
+/// (mécanique de `guard_liveness`, REQ-AXO-902157). Un indexeur qui démarrerait
+/// dans cette fenêtre de quelques microsecondes serait refusé et relancé par le
+/// superviseur ; le coût est borné et le bénéfice — savoir QUI tient — ne
+/// s'obtient pas autrement.
+fn probe_ist_ownership() -> IstOwnershipFacts {
+    probe_ist_ownership_at(&crate::runtime_writer_guard::resolve_db_root())
+}
+
+/// REQ-AXO-902616 — la sonde, paramétrée par sa racine pour être testable.
+/// Le câblage EST le défaut qu'on répare : une sonde qu'aucun test ne peut
+/// exécuter est une sonde dont on ne sait pas si elle est branchée
+/// (`GUI-PRO-115`).
+fn probe_ist_ownership_at(db_root: &str) -> IstOwnershipFacts {
+    use crate::runtime_writer_guard::{guard_liveness_ist, parse_recorded_owner};
+    let (held, recorded) = match guard_liveness_ist(db_root) {
+        Ok(crate::runtime_writer_guard::GuardLiveness::Free { recorded_owner }) => {
+            (false, recorded_owner)
+        }
+        Ok(crate::runtime_writer_guard::GuardLiveness::HeldByLiveProcess { recorded_owner }) => {
+            (true, recorded_owner)
+        }
+        Err(_) => return IstOwnershipFacts::default(),
+    };
+    let (owner_identity, owner_pid) = recorded
+        .as_deref()
+        .map(parse_recorded_owner)
+        .unwrap_or((None, None));
+    IstOwnershipFacts {
+        probed: true,
+        held_by_live_process: held,
+        owner_pid,
+        owner_identity,
+    }
+}
+
+/// REQ-AXO-902616 — la sonde est branchée, et elle ne suppose rien.
+#[cfg(test)]
+mod ist_ownership_probe_tests {
+    use super::probe_ist_ownership_at;
+    use crate::runtime_writer_guard::WriterGuard;
+    use tempfile::tempdir;
+
+    #[test]
+    fn sans_verrou_la_sonde_mesure_et_dit_libre() {
+        let dir = tempdir().expect("tempdir");
+        let facts = probe_ist_ownership_at(dir.path().to_str().unwrap());
+        assert!(facts.probed, "l'absence de verrou est une MESURE, pas un échec");
+        assert!(!facts.held_by_live_process);
+        assert_eq!(facts.label(Some(1)), "free");
+    }
+
+    #[test]
+    fn un_verrou_tenu_par_un_processus_vivant_est_vu_et_nomme() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().to_str().unwrap().to_string();
+        let _guard = WriterGuard::acquire_ist(&root).expect("acquisition");
+        let facts = probe_ist_ownership_at(&root);
+        assert!(facts.probed);
+        assert!(
+            facts.held_by_live_process,
+            "un flock tenu se voit : c'est toute la question de REQ-AXO-902616"
+        );
+        assert_eq!(
+            facts.owner_pid,
+            Some(std::process::id() as i64),
+            "et le propriétaire est NOMMÉ, pas supposé"
+        );
+        // Le processus supervisé est quelqu'un d'autre : divergence.
+        assert_eq!(facts.label(Some(1)), "diverged");
+        // Et lui-même : pas de divergence.
+        assert_eq!(facts.label(Some(std::process::id() as i64)), "supervised");
+    }
+
+    #[test]
+    fn une_racine_en_memoire_ne_fabrique_aucun_proprietaire() {
+        let facts = probe_ist_ownership_at(":memory:");
+        assert!(!facts.held_by_live_process);
+        assert!(facts.owner_pid.is_none());
     }
 }

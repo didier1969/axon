@@ -448,6 +448,7 @@ fn cmd_liveness(config: InstanceConfig, json: bool) -> Result<()> {
             "http_readyz_down"
         }
         .to_string(),
+        ..Default::default()
     };
     let gates = evaluate_liveness_gates(&l);
     let all_pass = gates.iter().all(|g| g.passes());
