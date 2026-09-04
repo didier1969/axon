@@ -28,6 +28,15 @@ processes:
       done
       echo "[postgres-check] TIMEOUT"
       exit 1
+    # REQ-AXO-902615 — mirror stdout/stderr to a stable file. Symmetric to
+    # process-compose.dev.yaml, which has carried log_location since
+    # REQ-AXO-901893. Without it the live supervisor keeps only a 500-line
+    # ring buffer (log_length above): on 2026-09-04 the indexer died 2565
+    # times over 21 h and not one cause line survived. /tmp is chosen for
+    # the same reason as dev — it always exists, so a missing directory can
+    # never keep a process from starting. No rotation: process-compose 1.94
+    # has none, and a diagnostic tail is worth more than a bounded file.
+    log_location: "/tmp/axon-live-postgres-check.log"
     availability:
       restart: "no"
     is_daemon: false
@@ -35,6 +44,15 @@ processes:
   axon-brain:
     command: "${AXON_BRAIN_BIN:-bin/axon-brain}"
     working_dir: "."
+    # REQ-AXO-902615 — mirror stdout/stderr to a stable file. Symmetric to
+    # process-compose.dev.yaml, which has carried log_location since
+    # REQ-AXO-901893. Without it the live supervisor keeps only a 500-line
+    # ring buffer (log_length above): on 2026-09-04 the indexer died 2565
+    # times over 21 h and not one cause line survived. /tmp is chosen for
+    # the same reason as dev — it always exists, so a missing directory can
+    # never keep a process from starting. No rotation: process-compose 1.94
+    # has none, and a diagnostic tail is worth more than a bounded file.
+    log_location: "/tmp/axon-live-brain.log"
     environment:
       - "AXON_RUNTIME_MODE=brain_only"
       - "AXON_INSTANCE_KIND=live"
@@ -125,6 +143,15 @@ processes:
   axon-indexer:
     command: "${AXON_INDEXER_BIN:-bin/axon-indexer}"
     working_dir: "."
+    # REQ-AXO-902615 — mirror stdout/stderr to a stable file. Symmetric to
+    # process-compose.dev.yaml, which has carried log_location since
+    # REQ-AXO-901893. Without it the live supervisor keeps only a 500-line
+    # ring buffer (log_length above): on 2026-09-04 the indexer died 2565
+    # times over 21 h and not one cause line survived. /tmp is chosen for
+    # the same reason as dev — it always exists, so a missing directory can
+    # never keep a process from starting. No rotation: process-compose 1.94
+    # has none, and a diagnostic tail is worth more than a bounded file.
+    log_location: "/tmp/axon-live-indexer.log"
     environment:
       # DEC-AXO-901672 / REQ-AXO-902597 — the live standing mode includes both
       # graph ingestion and semantic workers. Operators can still override the
@@ -234,6 +261,15 @@ processes:
         --cookie "${AXON_ERLANG_COOKIE}" \
         -S mix phx.server
     working_dir: "."
+    # REQ-AXO-902615 — mirror stdout/stderr to a stable file. Symmetric to
+    # process-compose.dev.yaml, which has carried log_location since
+    # REQ-AXO-901893. Without it the live supervisor keeps only a 500-line
+    # ring buffer (log_length above): on 2026-09-04 the indexer died 2565
+    # times over 21 h and not one cause line survived. /tmp is chosen for
+    # the same reason as dev — it always exists, so a missing directory can
+    # never keep a process from starting. No rotation: process-compose 1.94
+    # has none, and a diagnostic tail is worth more than a bounded file.
+    log_location: "/tmp/axon-live-dashboard.log"
     environment:
       - "AXON_INSTANCE_KIND=live"
       # REQ-AXO-901822 — PHX_PORT for Phoenix comes from
