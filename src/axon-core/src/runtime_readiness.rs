@@ -286,6 +286,32 @@ pub(crate) fn set_last_observed_for_tests(subsystem: Subsystem, last_observed_at
 
 /// Convenience that snapshots the registry and rolls up overall
 /// readiness in one atomic-ish operation.
+/// REQ-AXO-902618 — la dégradation de l'ÉCRIVAIN IST, dite en une note que
+/// `status` peut pousser dans `degraded_notes`.
+///
+/// Mesuré le 2026-09-04 : `status` rendait `ist_projection_fresh: true`,
+/// `truth_status: canonical` et `freshness: fresh` pendant que `readiness`
+/// portait `ist_writer degraded — A3 persistence failed 101 consecutive batches`
+/// et que le graphe n'avait pas bougé depuis onze heures.
+///
+/// La cause, vérifiée avant correctif : `truth_status` se calcule sur le retard de
+/// publication et la convergence d'autorité, JAMAIS sur la santé de l'écrivain.
+/// Un écrivain mort ne modifie rien, et l'absence de modification se lisait alors
+/// comme de la fraîcheur. `freshness` calibre la confiance (`CPT-AXO-029`) : se
+/// tromper ici, c'est se tromper dans le sens qui fait faire confiance.
+pub fn ist_writer_degradation_note(reports: &[SubsystemReport]) -> Option<String> {
+    reports
+        .iter()
+        .find(|report| report.subsystem == Subsystem::IstWriter.as_str())
+        .and_then(|report| match &report.state {
+            // Un registre froid, ou un écrivain sain, ne dégradent RIEN : ne pas
+            // savoir n'est pas savoir que c'est cassé.
+            SubsystemState::Ready => None,
+            SubsystemState::Degraded { reason } => Some(format!("ist_writer_degraded: {reason}")),
+            SubsystemState::Failed { reason } => Some(format!("ist_writer_failed: {reason}")),
+        })
+}
+
 pub fn snapshot_runtime_readiness() -> (RuntimeReadiness, Vec<SubsystemReport>) {
     let reports = snapshot_subsystem_reports();
     let readiness = RuntimeReadiness::roll_up(&reports);
@@ -300,5 +326,73 @@ pub(crate) fn reset_for_tests() {
 }
 
 #[cfg(test)]
-#[path = "runtime_readiness_tests.rs"]
-mod runtime_readiness_tests;
+mod ist_writer_degradation_tests {
+    use super::{ist_writer_degradation_note, SubsystemReport, SubsystemState};
+
+    // ------------------------------------------------------------------
+    // REQ-AXO-902618 — « rien n'a changé » et « rien n'a pu être écrit » sont
+    // deux états différents. Valeurs verbatim de l'incident du 2026-09-04.
+    // ------------------------------------------------------------------
+
+    fn rapport(subsystem: &str, state: SubsystemState) -> SubsystemReport {
+        SubsystemReport {
+            subsystem: subsystem.to_string(),
+            state,
+            last_observed_at_ms: 1_788_000_000_000,
+        }
+    }
+
+    #[test]
+    fn un_ecrivain_ist_degrade_produit_une_note_qui_porte_sa_raison() {
+        let note = ist_writer_degradation_note(&[
+            rapport("brain_mcp", SubsystemState::Ready),
+            rapport(
+                "ist_writer",
+                SubsystemState::Degraded {
+                    reason: "A3 persistence failed 101 consecutive batches".to_string(),
+                },
+            ),
+        ])
+        .expect("un ecrivain degrade DOIT degrader la verite rendue");
+        assert!(
+            note.contains("ist_writer"),
+            "la note nomme le sous-systeme : {note}"
+        );
+        assert!(
+            note.contains("101 consecutive batches"),
+            "et transporte la raison telle quelle : {note}"
+        );
+    }
+
+    #[test]
+    fn un_ecrivain_ist_en_panne_degrade_aussi() {
+        let note = ist_writer_degradation_note(&[rapport(
+            "ist_writer",
+            SubsystemState::Failed {
+                reason: "writer lock lost".to_string(),
+            },
+        )]);
+        assert!(note.is_some(), "`failed` est au moins aussi grave que `degraded`");
+    }
+
+    #[test]
+    fn un_ecrivain_ist_sain_ne_degrade_rien() {
+        assert!(ist_writer_degradation_note(&[
+            rapport("ist_writer", SubsystemState::Ready),
+            rapport(
+                "embedder",
+                SubsystemState::Degraded {
+                    reason: "cpu fallback".to_string()
+                }
+            ),
+        ])
+        .is_none());
+    }
+
+    #[test]
+    fn sans_rapport_d_ecrivain_ist_on_n_invente_aucune_degradation() {
+        // Registre froid : ne rien savoir n'est pas savoir que c'est cassé.
+        assert!(ist_writer_degradation_note(&[]).is_none());
+        assert!(ist_writer_degradation_note(&[rapport("brain_mcp", SubsystemState::Ready)]).is_none());
+    }
+}

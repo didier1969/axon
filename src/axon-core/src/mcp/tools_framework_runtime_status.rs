@@ -524,22 +524,22 @@ impl McpServer {
             process_role == "brain" && runtime_mode == AxonRuntimeMode::BrainOnly;
         let indexer_feed_degraded = !standalone_brain_only
             && (indexer_feed_state != "fresh" || indexer_feed_reason.as_deref().is_some());
-        let mut degraded_notes =
-            if process_role == "brain" && runtime_mode == AxonRuntimeMode::BrainOnly {
-                Vec::<String>::new()
-            } else {
-                Vec::<String>::new()
-            };
-        if !indexed_projection_fresh {
-            degraded_notes.push("indexed_projections_not_fresh".to_string());
-        }
-        if indexer_feed_degraded {
-            degraded_notes
-                .push(indexer_feed_reason.unwrap_or_else(|| "indexer_feed_degraded".to_string()));
-        }
-        if !runtime_authority_converged && !standalone_brain_only {
-            degraded_notes.push("runtime_authority_not_converged".to_string());
-        }
+        // REQ-AXO-902618 — l'instantané de readiness est pris ICI, AVANT le calcul
+        // de `truth_status`. Il était pris 750 lignes plus bas, uniquement pour être
+        // rendu : la vérité servie ne consultait donc JAMAIS la santé de l'écrivain.
+        // Le 2026-09-04, `status` a rendu `freshness: fresh` et `truth_status:
+        // canonical` pendant onze heures sur un graphe que l'écrivain n'arrivait
+        // plus à écrire.
+        let (readiness_snapshot, subsystem_reports) =
+            crate::runtime_readiness::snapshot_runtime_readiness();
+        let degraded_notes = compute_degraded_notes(
+            indexed_projection_fresh,
+            indexer_feed_degraded,
+            indexer_feed_reason,
+            runtime_authority_converged,
+            standalone_brain_only,
+            &subsystem_reports,
+        );
         let truth_status = if degraded_notes.is_empty() {
             "canonical"
         } else {
@@ -1281,8 +1281,6 @@ impl McpServer {
         // REQ-AXO-098 / DEC-AXO-062 — snapshot subsystem-tagged
         // tristate readiness once and pass both the rolled-up overall
         // and the per-subsystem reports through to the response.
-        let (readiness_snapshot, subsystem_reports) =
-            crate::runtime_readiness::snapshot_runtime_readiness();
         let readiness_json = serde_json::to_value(&readiness_snapshot)
             .unwrap_or_else(|_| serde_json::json!({"kind": "ready"}));
         let subsystems_json =
@@ -1878,6 +1876,42 @@ pub(crate) fn staleness_from_row(row: Option<&[String]>) -> Value {
 /// degraded notes. When the first blocker has a known concrete recovery
 /// command, surface it ; otherwise fall back to a non-recursive default.
 /// `next_best_action.tool` MUST NEVER be `status` itself (the prior bug).
+/// REQ-AXO-902618 — TOUT ce qui dégrade la vérité servie, en une fonction pure.
+///
+/// Extraite du corps de `status` pour une raison de fond : le câblage était le
+/// défaut. La santé de l'écrivain IST EXISTAIT dans `readiness`, mais n'entrait
+/// nulle part dans `truth_status` — et aucun test unitaire ne pouvait le voir,
+/// puisque le calcul vivait au milieu de 700 lignes d'IO. Une invariante qu'on ne
+/// peut pas tester est une invariante qu'on ne tient pas (`GUI-PRO-115`).
+pub(crate) fn compute_degraded_notes(
+    indexed_projection_fresh: bool,
+    indexer_feed_degraded: bool,
+    indexer_feed_reason: Option<String>,
+    runtime_authority_converged: bool,
+    standalone_brain_only: bool,
+    subsystem_reports: &[crate::runtime_readiness::SubsystemReport],
+) -> Vec<String> {
+    let mut degraded_notes = Vec::<String>::new();
+    if !indexed_projection_fresh {
+        degraded_notes.push("indexed_projections_not_fresh".to_string());
+    }
+    if indexer_feed_degraded {
+        degraded_notes
+            .push(indexer_feed_reason.unwrap_or_else(|| "indexer_feed_degraded".to_string()));
+    }
+    if !runtime_authority_converged && !standalone_brain_only {
+        degraded_notes.push("runtime_authority_not_converged".to_string());
+    }
+    // REQ-AXO-902618 — « rien n'a changé » et « rien n'a pu être écrit » sont deux
+    // états, pas un. Un écrivain mort ne modifie rien, et l'absence de modification
+    // se lisait comme de la fraîcheur : la surface se trompait dans le sens qui
+    // fait faire confiance (`CPT-AXO-029`).
+    if let Some(note) = crate::runtime_readiness::ist_writer_degradation_note(subsystem_reports) {
+        degraded_notes.push(note);
+    }
+    degraded_notes
+}
+
 pub(crate) fn derive_recovery_action(degraded_notes: &[String]) -> (Value, Value) {
     let first = degraded_notes.first().map(String::as_str).unwrap_or("");
     match first {
@@ -1901,6 +1935,23 @@ pub(crate) fn derive_recovery_action(degraded_notes: &[String]) -> (Value, Value
                 "command": "./scripts/axon-live start --indexer-graph",
                 "reason": "brain alone serves frozen IST snapshot; indexer process required for freshness (CPT-AXO-029)",
                 "verification": "status mode=brief should report freshness=fresh after ~30s"
+            }),
+        ),
+        // REQ-AXO-902618 — le remède d'un écrivain en échec n'est PAS de démarrer un
+        // indexeur : il en tourne peut-être déjà un, qui échoue. Lire la raison, qui
+        // voyage avec la note.
+        other if other.starts_with("ist_writer_") => (
+            json!({
+                "kind": "inspect_ist_writer",
+                "tool": "status",
+                "arguments": { "mode": "verbose" },
+                "when": "now"
+            }),
+            json!({
+                "action": "inspect_ist_writer",
+                "command": "status mode=verbose | jq .data.subsystems",
+                "reason": other,
+                "verification": "readiness.subsystems.ist_writer must read `ready` before the served truth is canonical again"
             }),
         ),
         _ => (
@@ -2255,5 +2306,111 @@ mod tests_ligne_code_intel {
                 "une portee degradee se declare operationnelle : {ligne}"
             );
         }
+    }
+}
+
+/// REQ-AXO-902618 — le remède doit distinguer « rien n'a changé » de « rien n'a pu
+/// être écrit ». Les deux se soignent par des gestes opposés.
+#[cfg(test)]
+mod ist_writer_degradation_recovery_tests {
+    use super::derive_recovery_action;
+
+    #[test]
+    fn un_ecrivain_ist_en_echec_ne_conseille_pas_de_demarrer_un_indexeur() {
+        let notes = vec![
+            "ist_writer_degraded: A3 persistence failed 101 consecutive batches".to_string(),
+        ];
+        let (action, hint) = derive_recovery_action(&notes);
+        assert_eq!(
+            action["kind"], "inspect_ist_writer",
+            "démarrer un indexeur ne soigne pas un indexeur qui tourne et échoue : {action}"
+        );
+        assert_ne!(action["kind"], "start_indexer");
+        assert!(
+            hint["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("101 consecutive batches"),
+            "la raison mesurée voyage jusqu'à l'opérateur : {hint}"
+        );
+    }
+
+    #[test]
+    fn une_projection_en_retard_garde_son_remede_historique() {
+        let notes = vec!["indexed_projections_not_fresh".to_string()];
+        let (action, _) = derive_recovery_action(&notes);
+        assert_eq!(
+            action["kind"], "start_indexer",
+            "le remède d'un retard de publication ne change pas"
+        );
+    }
+}
+
+/// REQ-AXO-902618 critère 3 — la contradiction mesurée le 2026-09-04, reproduite.
+#[cfg(test)]
+mod degraded_notes_tests {
+    use super::compute_degraded_notes;
+    use crate::runtime_readiness::{SubsystemReport, SubsystemState};
+
+    fn rapport(subsystem: &str, state: SubsystemState) -> SubsystemReport {
+        SubsystemReport {
+            subsystem: subsystem.to_string(),
+            state,
+            last_observed_at_ms: 1_788_000_000_000,
+        }
+    }
+
+    /// Écrivain en échec + instantané NON modifié : c'est exactement l'état qui
+    /// rendait `truth_status: canonical` pendant onze heures.
+    #[test]
+    fn un_ecrivain_ist_en_echec_degrade_la_verite_meme_quand_rien_n_a_change() {
+        let notes = compute_degraded_notes(
+            true,  // indexed_projection_fresh : rien n'a changé, donc « frais »
+            false, // le flux n'est pas dégradé
+            None,
+            true,  // autorité convergée
+            false,
+            &[rapport(
+                "ist_writer",
+                SubsystemState::Degraded {
+                    reason: "A3 persistence failed 101 consecutive batches".to_string(),
+                },
+            )],
+        );
+        assert!(
+            !notes.is_empty(),
+            "un écrivain en échec DOIT dégrader la vérité servie : sans ça, \
+             `truth_status` rend `canonical` sur un graphe figé depuis onze heures"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("101 consecutive batches")),
+            "et la raison mesurée voyage jusqu'à l'appelant : {notes:?}"
+        );
+        assert!(
+            !notes.iter().any(|n| n == "indexed_projections_not_fresh"),
+            "« rien n'a changé » et « rien n'a pu être écrit » restent DEUX notes \
+             distinctes, parce qu'elles se soignent par des gestes opposés : {notes:?}"
+        );
+    }
+
+    /// Et un runtime réellement sain reste canonique — sinon la correction
+    /// dégraderait tout le parc en permanence.
+    #[test]
+    fn un_runtime_sain_ne_porte_aucune_note() {
+        let notes = compute_degraded_notes(
+            true,
+            false,
+            None,
+            true,
+            false,
+            &[rapport("ist_writer", SubsystemState::Ready)],
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// Registre froid : ne rien savoir de l'écrivain n'est pas savoir qu'il est cassé.
+    #[test]
+    fn un_registre_froid_ne_degrade_pas_la_verite() {
+        assert!(compute_degraded_notes(true, false, None, true, false, &[]).is_empty());
     }
 }
