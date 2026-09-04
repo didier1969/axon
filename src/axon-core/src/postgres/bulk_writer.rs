@@ -979,30 +979,79 @@ async fn reconcile_data_artifact_edges_in_tx(
         .map(|symbol| symbol.symbol_id.clone())
         .collect();
     let now_ms = chrono::Utc::now().timestamp_millis();
-    tx.execute(
-        "INSERT INTO ist.Edge \
-             (source_id, target_id, relation_type, project_code, created_at_ms) \
-         SELECT DISTINCT c.source_id, artifact.id, 'READS_ARTIFACT', $1, $4::bigint \
-         FROM ist.Chunk c \
-         JOIN ist.Symbol reader \
-           ON reader.project_code = c.project_code \
-          AND reader.id = c.source_id \
-         JOIN ist.Symbol artifact \
-           ON artifact.project_code = c.project_code \
-          AND artifact.kind = 'data_artifact' \
-         WHERE c.project_code = $1 \
-           AND c.source_type = 'symbol' \
-           AND reader.kind NOT IN ('section', 'element', 'config_key', 'data_artifact', 'table', 'view') \
-           AND c.source_id <> artifact.id \
-           AND char_length(artifact.name) >= 4 \
-           AND (c.file_path = ANY($2::text[]) OR artifact.id = ANY($3::text[])) \
-           AND position(artifact.name in c.content) > 0 \
-         ON CONFLICT (source_id, target_id, relation_type, project_code) DO NOTHING",
-        &[&batch.project_code, &changed_paths, &new_artifacts, &now_ms],
-    )
-    .await
-    .context("A3 reconcile READS_ARTIFACT edges")?;
+    for (sql, selector) in a3_reconcile_statements(&changed_paths, &new_artifacts) {
+        tx.execute(sql.as_str(), &[&batch.project_code, &selector, &now_ms])
+            .await
+            .context("A3 reconcile READS_ARTIFACT edges")?;
+    }
     Ok(())
+}
+
+/// REQ-AXO-902617 — how many freshly discovered artifacts are confronted with
+/// the whole already-indexed code base in a single statement. Measured on the
+/// live FSF project: 200 artifacts cost 12 767 ms, so 100 sits an order of
+/// magnitude under the 30 s production `statement_timeout`.
+const A3_NEW_ARTIFACT_SLICE: usize = 100;
+
+/// REQ-AXO-902617 — how many changed paths are confronted with every artifact
+/// of the project in a single statement. Measured on the live FSF project:
+/// 20 real paths cost 20 ms, so a 200-path slice stays around 200 ms.
+///
+/// The pipeline already caps a batch at `AXON_A3_BATCH_SIZE` (32 by default,
+/// `runtime_config.rs`), but that cap is an environment variable: raising it
+/// to speed a rescan up would bring the cartesian scan back on the path side,
+/// silently. A statement that must stay under a timeout carries its own bound.
+const A3_CHANGED_PATH_SLICE: usize = 200;
+
+/// REQ-AXO-902617 — the shared trunk of both A3 statements. `$1` is the
+/// project code, `$2` the selector array, `$3` the timestamp. The two
+/// statements differ by their selector alone.
+const A3_TRUNK: &str = "INSERT INTO ist.Edge \
+     (source_id, target_id, relation_type, project_code, created_at_ms) \
+ SELECT DISTINCT c.source_id, artifact.id, 'READS_ARTIFACT', $1, $3::bigint \
+ FROM ist.Chunk c \
+ JOIN ist.Symbol reader \
+   ON reader.project_code = c.project_code \
+  AND reader.id = c.source_id \
+ JOIN ist.Symbol artifact \
+   ON artifact.project_code = c.project_code \
+  AND artifact.kind = 'data_artifact' \
+ WHERE c.project_code = $1 \
+   AND c.source_type = 'symbol' \
+   AND reader.kind NOT IN ('section', 'element', 'config_key', 'data_artifact', 'table', 'view') \
+   AND c.source_id <> artifact.id \
+   AND char_length(artifact.name) >= 4 \
+   AND ";
+
+const A3_TAIL: &str = " \
+   AND position(artifact.name in c.content) > 0 \
+ ON CONFLICT (source_id, target_id, relation_type, project_code) DO NOTHING";
+
+/// REQ-AXO-902617 — selector of statement 1: code that just changed, matched
+/// against every artifact already known in the project.
+const A3_SELECTOR_CHANGED_PATHS: &str = "c.file_path = ANY($2::text[])";
+
+/// REQ-AXO-902617 — selector of statement 2: artifacts that just appeared,
+/// matched against every code chunk already indexed in the project.
+const A3_SELECTOR_NEW_ARTIFACTS: &str = "artifact.id = ANY($2::text[])";
+
+fn a3_sql(selector: &str) -> String {
+    format!("{A3_TRUNK}{selector}{A3_TAIL}")
+}
+
+/// REQ-AXO-902617 — split the reconciliation into bounded statements.
+fn a3_reconcile_statements<'a>(
+    changed_paths: &'a [String],
+    new_artifacts: &'a [String],
+) -> Vec<(String, &'a [String])> {
+    let mut statements: Vec<(String, &'a [String])> = Vec::new();
+    for slice in changed_paths.chunks(A3_CHANGED_PATH_SLICE) {
+        statements.push((a3_sql(A3_SELECTOR_CHANGED_PATHS), slice));
+    }
+    for slice in new_artifacts.chunks(A3_NEW_ARTIFACT_SLICE) {
+        statements.push((a3_sql(A3_SELECTOR_NEW_ARTIFACTS), slice));
+    }
+    statements
 }
 
 async fn reconcile_data_artifact_edges(
@@ -2081,5 +2130,138 @@ mod tests {
         // by absence of a runtime panic if AXON_*_DATABASE_URL is unset.
         let res = flush_batch(&PgBulkBatch::default());
         assert!(res.is_ok(), "empty batch flush must not touch the DB");
+    }
+
+    // ------------------------------------------------------------------
+    // REQ-AXO-902617 — A3 READS_ARTIFACT reconciliation must stay bounded.
+    //
+    // Measured on the live database on 2026-09-04, project FSF
+    // (23 814 code chunks x 1 654 data artifacts). The predicate is
+    // `position(artifact.name in c.content)`, a substring scan no index can
+    // serve, so the row count of the join IS the cost:
+    //
+    //   single statement, both selectors joined by OR ... 43 410 ms
+    //   changed paths only (20 paths) ..................      20 ms
+    //   new artifacts only (5 artifacts) ...............     347 ms
+    //   new artifacts only (200 artifacts) .............  12 767 ms
+    //
+    // Production `statement_timeout` is 30 s. The OR made PostgreSQL widen
+    // the scan to every chunk of the project as soon as one new artifact
+    // appeared, which is how A3 failed 101 consecutive batches.
+    // ------------------------------------------------------------------
+
+    fn ids(prefix: &str, n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{prefix}{i}")).collect()
+    }
+
+    #[test]
+    fn la_requete_a3_ne_confronte_jamais_le_projet_entier_par_un_ou() {
+        let changed = ids("path", 3);
+        let new = ids("artifact", 3);
+        let statements = a3_reconcile_statements(&changed, &new);
+        assert_eq!(statements.len(), 2, "un selecteur par requete");
+        for (sql, _) in &statements {
+            assert!(
+                !sql.contains(" OR "),
+                "un OR laisse PostgreSQL elargir le scan a tout le projet: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn sans_artefact_neuf_la_reconciliation_a3_ne_fait_qu_une_requete() {
+        let changed = ids("path", 3);
+        let statements = a3_reconcile_statements(&changed, &[]);
+        assert_eq!(statements.len(), 1, "le regime stable ne paie que les chemins");
+        assert!(statements[0].0.contains(A3_SELECTOR_CHANGED_PATHS));
+        assert_eq!(statements[0].1, changed.as_slice());
+    }
+
+    #[test]
+    fn les_artefacts_neufs_sont_traites_par_tranches_bornees() {
+        let changed = ids("path", 1);
+        let new = ids("artifact", 250);
+        let statements = a3_reconcile_statements(&changed, &new);
+        assert_eq!(statements.len(), 4, "1 requete de chemins + 3 tranches");
+        let slices: Vec<usize> = statements[1..].iter().map(|(_, s)| s.len()).collect();
+        assert_eq!(slices, vec![100, 100, 50]);
+        for (_, slice) in &statements[1..] {
+            assert!(
+                slice.len() <= A3_NEW_ARTIFACT_SLICE,
+                "une tranche au-dessus de {A3_NEW_ARTIFACT_SLICE} depasse le statement_timeout"
+            );
+        }
+        let rejoined: Vec<String> = statements[1..]
+            .iter()
+            .flat_map(|(_, slice)| slice.iter().cloned())
+            .collect();
+        assert_eq!(rejoined, new, "le decoupage ne perd aucun artefact");
+    }
+
+    #[test]
+    fn les_deux_requetes_a3_ne_different_que_par_leur_selecteur() {
+        let par_chemin = a3_sql(A3_SELECTOR_CHANGED_PATHS);
+        let par_artefact = a3_sql(A3_SELECTOR_NEW_ARTIFACTS);
+        assert_ne!(par_chemin, par_artefact);
+        assert_eq!(
+            par_chemin.replace(A3_SELECTOR_CHANGED_PATHS, "<SEL>"),
+            par_artefact.replace(A3_SELECTOR_NEW_ARTIFACTS, "<SEL>"),
+            "les deux requetes doivent partager le meme tronc"
+        );
+    }
+
+    #[test]
+    fn chaque_requete_a3_prend_exactement_trois_parametres() {
+        let changed = ids("path", 1);
+        let new = ids("artifact", 1);
+        for (sql, _) in a3_reconcile_statements(&changed, &new) {
+            for placeholder in ["$1", "$2", "$3"] {
+                assert!(sql.contains(placeholder), "{placeholder} manquant: {sql}");
+            }
+            assert!(
+                !sql.contains("$4"),
+                "l'appelant ne lie que trois parametres: {sql}"
+            );
+        }
+    }
+
+    // REQ-AXO-902617 — la borne amont sur le nombre de chemins d'un lot est
+    // `AXON_A3_BATCH_SIZE` (32 par defaut, `runtime_config.rs`). C'est une
+    // variable d'environnement : la relever pour accelerer un rescan
+    // ressusciterait le produit cartesien du cote des chemins, sans aucun
+    // signal. La borne doit donc vivre ici, dans la requete elle-meme.
+    #[test]
+    fn les_chemins_changes_sont_traites_par_tranches_bornees() {
+        let changed = ids("path", 450);
+        let statements = a3_reconcile_statements(&changed, &[]);
+        let slices: Vec<usize> = statements.iter().map(|(_, s)| s.len()).collect();
+        assert_eq!(slices, vec![200, 200, 50], "un lot large doit etre tranche");
+        let rejoined: Vec<String> = statements
+            .iter()
+            .flat_map(|(_, slice)| slice.iter().cloned())
+            .collect();
+        assert_eq!(rejoined, changed, "le decoupage ne perd aucun chemin");
+    }
+
+    // REQ-AXO-902617 — l'invariant que la panne a viole : AUCUN tableau lie a
+    // une requete A3 ne doit croitre avec la taille du projet ou du lot.
+    #[test]
+    fn aucune_requete_a3_ne_recoit_un_tableau_non_borne() {
+        let changed = ids("path", 1_000);
+        let new = ids("artifact", 1_000);
+        let statements = a3_reconcile_statements(&changed, &new);
+        assert!(!statements.is_empty());
+        for (sql, slice) in statements {
+            let borne = if sql.contains(A3_SELECTOR_CHANGED_PATHS) {
+                A3_CHANGED_PATH_SLICE
+            } else {
+                A3_NEW_ARTIFACT_SLICE
+            };
+            assert!(
+                slice.len() <= borne,
+                "une tranche de {} depasse la borne {borne}",
+                slice.len()
+            );
+        }
     }
 }
