@@ -5,6 +5,15 @@ use super::tools_system_debug;
 use super::McpServer;
 use crate::pipeline::orchestrator::PipelineAWorkerCounts;
 use crate::runtime_mode::AxonRuntimeMode;
+
+/// REQ-AXO-902621 (suite) — plafond de RESTITUTION de `sql`, en caractères.
+///
+/// 60 000 : au-dessus de la quasi-totalité des appels mesurés, et très en dessous
+/// du seuil auquel le client REFUSE la réponse (une sortie de 343 165 caractères
+/// a été rejetée le 2026-09-05 avant d'être lue). Le chiffre est un compromis
+/// choisi, pas hérité : plus haut, on paie des réponses que personne ne lira ;
+/// plus bas, on force une pagination à des lectures qui passaient très bien.
+const SEUIL_RENDU_SQL_CHARS: usize = 60_000;
 use crate::runtime_topology::{current_runtime_process_role, AxonProcessRole};
 
 /// CPT-AXO-90052 — normalize a SQL query to a content-free SHAPE for the
@@ -1200,6 +1209,75 @@ impl McpServer {
         );
     }
 
+    /// REQ-AXO-902621 (suite) — BORNER `sql`, la surface la plus lourde de tout le
+    /// serveur, et de deux ordres de grandeur.
+    ///
+    /// Mesure du 2026-09-05 sur `axon.mcp_call_stat` : **515 Mo rendus sur 135 507
+    /// appels, dont UN de 13,7 Mo**. `status` vient loin derrière (17 Mo), et
+    /// `batch` — que le plan désignait comme le prochain chantier — pèse 38 Ko en
+    /// tout. La thèse « borner `batch` » est réfutée par la mesure ; c'est `sql`
+    /// qu'il fallait borner.
+    ///
+    /// Une réponse de 13,7 Mo est REFUSÉE par le client avant d'être lue :
+    /// l'appelant paie le calcul, le transport et l'attente, et n'obtient rien.
+    /// Borner domine strictement.
+    ///
+    /// Ce que cette fonction ne fait PAS : effacer en silence. Le nombre de lignes
+    /// TOTAL reste `row_count` — il est compté sur la sortie entière, pas sur ce qui
+    /// est rendu — et le texte dit combien de lignes il porte et comment obtenir les
+    /// suivantes. `REQ-AXO-902409` interdit l'inverse.
+    pub(crate) fn borner_lignes_sql(resultat: &str, seuil: usize) -> (String, usize, bool) {
+        if resultat.chars().count() <= seuil {
+            return (resultat.to_string(), 0, false);
+        }
+        // `RawValue` DÉLIMITE les lignes sans désérialiser leur contenu : la coupe
+        // se fait sur des lignes entières, jamais au milieu d'un objet JSON.
+        let Ok(lignes) = serde_json::from_str::<Vec<&serde_json::value::RawValue>>(resultat) else {
+            // Sortie non délimitable. La borner aux caractères produirait du JSON
+            // invalide, ce qui est pire qu'un texte long : on rend donc un texte
+            // PLAT, annoncé comme tel, plutôt qu'un tableau cassé.
+            let tete: String = resultat.chars().take(seuil).collect();
+            return (
+                format!(
+                    "{tete}\n\n… sortie tronquée à {seuil} caractères (elle n'a pas pu être \
+                     délimitée en lignes, donc elle est rendue TELLE QUELLE et coupée ; le JSON \
+                     ci-dessus est incomplet). Réduisez la requête — `LIMIT`, moins de colonnes."
+                ),
+                0,
+                true,
+            );
+        };
+        let total = lignes.len();
+        let mut rendues = 0usize;
+        let mut poids = 2usize; // les crochets
+        for ligne in &lignes {
+            let taille = ligne.get().chars().count() + 1; // + la virgule
+            if rendues > 0 && poids + taille > seuil {
+                break;
+            }
+            poids += taille;
+            rendues += 1;
+        }
+        // Au moins UNE ligne, même énorme : rendre zéro ligne se lirait comme un
+        // résultat vide, et c'est exactement la confusion que `ok_empty` existe pour
+        // éviter.
+        let rendues = rendues.max(1).min(total);
+        let corps: Vec<&serde_json::value::RawValue> = lignes.into_iter().take(rendues).collect();
+        let json_rendu = serde_json::to_string(&corps).unwrap_or_else(|_| "[]".to_string());
+        (
+            format!(
+                "{json_rendu}\n\nStatus: ok_truncated — {rendues} ligne(s) rendue(s) sur \
+                 {total}. La requête a tourné ENTIÈREMENT ; c'est la RESTITUTION qui est bornée \
+                 à {seuil} caractères, parce qu'une réponse plus longue est refusée par le \
+                 client avant d'être lue. Pour la suite : ajoutez `LIMIT {rendues} OFFSET \
+                 {rendues}`, ou sélectionnez moins de colonnes. `row_count` ci-dessous porte \
+                 le total, pas le rendu."
+            ),
+            rendues,
+            true,
+        )
+    }
+
     pub(crate) fn axon_sql(&self, args: &Value) -> Option<Value> {
         let sql = args.get("sql")?.as_str()?;
         let q = sql.trim();
@@ -1280,9 +1358,22 @@ impl McpServer {
                 } else {
                     result
                 };
+                // REQ-AXO-902621 (suite) — la borne, posée APRÈS le comptage :
+                // `row_count` reste le total réel, et le texte dit ce qu'il porte.
+                let (texte, lignes_rendues, tronque) =
+                    Self::borner_lignes_sql(&texte, SEUIL_RENDU_SQL_CHARS);
+                let status = if tronque { "ok_truncated" } else { status };
                 Some(json!({
                     "content": [{ "type": "text", "text": texte }],
-                    "data": { "next": next, "row_count": row_count, "status": status }
+                    "data": {
+                        "next": next,
+                        "row_count": row_count,
+                        "status": status,
+                        // Dits SEULEMENT quand la borne a mordu : les poser toujours
+                        // ferait payer deux champs à 135 000 appels pour rien.
+                        "rows_rendered": if tronque { json!(lignes_rendues) } else { Value::Null },
+                        "truncated": if tronque { json!(true) } else { Value::Null }
+                    }
                 }))
             }
             Err(e) => {

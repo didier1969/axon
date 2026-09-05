@@ -123,6 +123,10 @@ mod tools_friction;
 mod tools_soll;
 pub(crate) mod tools_srs;
 pub(crate) mod tools_system;
+// REQ-AXO-902621 (suite) — la borne de `sql`, la surface la plus lourde du serveur.
+#[cfg(test)]
+#[path = "mcp/tools_system_sql_bounds_tests.rs"]
+mod tools_system_sql_bounds_tests;
 mod tools_system_debug;
 
 use self::catalog::tools_catalog;
