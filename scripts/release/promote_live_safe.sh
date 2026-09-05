@@ -418,7 +418,23 @@ PY
       then state="down"; diagnosis="mcp_nonready"
       elif ! grep -q '"promote_status"' "$local_body"; then state="down"; diagnosis="functional_failure"
       fi
-      printf '%s,%s,%s\n' "$(date -u +%s)" "$state" "$diagnosis"
+      # REQ-AXO-902604 — la DEUXIEME dimension. Le sondeur ci-dessus ne mesure que le
+      # BRAIN ; VPC a mesure l'ecart apres la promotion c5ed296b : 16 s de coupure
+      # contigue annoncees, ~45 s percues jusqu'au retour de brain+indexeur. Les deux
+      # chiffres etaient justes, ils ne mesuraient pas la meme chose. Un promote qui
+      # ne publie que le plus flatteur des deux n'est pas faux, il est incomplet — et
+      # l'incompletude se lit comme un dementi.
+      #
+      # `/readyz` de l'indexeur, pas son `/livez` : un processus HTTP qui repond n'est
+      # pas un indexeur pret. `-m 1` et non 2 — cette sonde ne doit pas doubler la
+      # periode d'echantillonnage, dont la resolution est deja publiee.
+      full_state="down"
+      if [[ "$state" == "up" ]]; then
+        idx_code="$(curl -sS -m 1 -o /dev/null -w '%{http_code}' \
+          "http://127.0.0.1:${AXON_INDEXER_HEALTH_PORT:-44130}/readyz" 2>/dev/null)" || true
+        [[ "$idx_code" == "200" ]] && full_state="up"
+      fi
+      printf '%s,%s,%s,%s\n' "$(date -u +%s)" "$state" "$diagnosis" "$full_state"
       rm -f "$local_body"
       sleep 1
     done
@@ -432,6 +448,10 @@ _report_mcp_outage() {
   MCP_SAMPLER_PID=""
   local worst total n span res
   read -r worst total n span res < <(python3 "$ROOT_DIR/scripts/release/mcp_outage_report.py" "$MCP_SAMPLE_FILE" 2>/dev/null || echo "0 0 0 0 0")
+  # REQ-AXO-902604 — la meme mesure sur la colonne 3 : disponibilite COMPLETE
+  # (brain repond ET indexeur `readyz`). C'est le chiffre que le client percoit.
+  local fworst ftotal fn fspan fres
+  read -r fworst ftotal fn fspan fres < <(python3 "$ROOT_DIR/scripts/release/mcp_outage_report.py" --column 3 "$MCP_SAMPLE_FILE" 2>/dev/null || echo "0 0 0 0 0")
   promote_log ""
   promote_log "== MCP availability (measured across steps 5→6c) =="
   # A silent instrument reads exactly like a green result: publish the sample count and the
@@ -439,7 +459,18 @@ _report_mcp_outage() {
   if [[ "$n" -lt 5 ]]; then
     promote_log "   ⚠️ NOT MEASURED — only ${n} sample(s) collected. Treat the figures below as UNKNOWN, not as zero."
   fi
-  promote_log "   worst contiguous outage: ${worst}s · total unreachable: ${total}s"
+  promote_log "   BRAIN — worst contiguous outage: ${worst}s · total unreachable: ${total}s"
+  # REQ-AXO-902604 — les DEUX chiffres, cote a cote, et l'ecart nomme. Publier le
+  # seul chiffre du brain a fait dire au client que la mesure etait fausse ; elle
+  # etait partielle, ce qui se lit pareil.
+  if [[ "$fn" -lt 5 ]]; then
+    promote_log "   COMPLET (brain + indexeur readyz) — NON MESURE (${fn} echantillon(s)) : traiter comme INCONNU, pas comme zero."
+  else
+    promote_log "   COMPLET (brain + indexeur readyz) — worst contiguous outage: ${fworst}s · total unreachable: ${ftotal}s"
+    if [[ "${fworst:-0}" -gt "${worst:-0}" ]]; then
+      promote_log "   ecart brain -> complet : $(( fworst - worst ))s. C'est ce delta que le client percoit et que le seul chiffre du brain n'annoncait pas (REQ-AXO-902604)."
+    fi
+  fi
   # The resolution is MEASURED from the samples, not asserted. It is the number that says
   # how finely this instrument may be quoted — a sub-second claim from a ~3s instrument is
   # not a measurement.

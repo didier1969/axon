@@ -95,20 +95,34 @@ def score(rows):
     return (worst, total, n, span, resolution)
 
 
-def parse(path):
+def parse(path, column=1):
+    """REQ-AXO-902604 — `column` choisit la DIMENSION lue.
+
+    1 = disponibilité du BRAIN (`tools/list` répond), la seule mesurée jusqu'ici.
+    3 = disponibilité COMPLÈTE (brain répond ET l'indexeur est `readyz`).
+
+    VPC a mesuré l'écart après la promotion c5ed296b : le promote annonçait 16 s de
+    coupure contiguë, le client en percevait ~45 s. Les deux chiffres étaient justes —
+    ils ne mesuraient pas la même chose. Un promote qui publie le plus flatteur des
+    deux n'est pas faux, il est incomplet, et l'incomplétude se lit comme un démenti.
+
+    Une ligne trop courte pour porter la colonne demandée est IGNORÉE plutôt que
+    comptée `down` : un fichier écrit par une version antérieure du sondeur doit rendre
+    « non mesuré », jamais « coupure totale ».
+    """
     rows = []
     with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
             parts = line.strip().split(",")
-            if len(parts) < 2:
+            if len(parts) <= column:
                 continue
             try:
                 ts = int(parts[0])
             except ValueError:
                 continue
-            if parts[1] not in ("up", "down"):
+            if parts[column] not in ("up", "down"):
                 continue
-            rows.append((ts, parts[1]))
+            rows.append((ts, parts[column]))
     return rows
 
 
@@ -116,8 +130,25 @@ def main():
     if len(sys.argv) < 2:
         print("0 0 0 0 0")
         return 0
+    # REQ-AXO-902604 — argument optionnel `--column N`. La forme de sortie ne change
+    # PAS : l'appelant lit toujours cinq entiers, et interroge deux fois pour obtenir
+    # les deux dimensions. Ajouter des colonnes à la sortie aurait cassé le
+    # `read -r worst total n span res` du script de promotion.
+    column = 1
+    args = [a for a in sys.argv[1:]]
+    if "--column" in args:
+        i = args.index("--column")
+        try:
+            column = int(args[i + 1])
+        except (IndexError, ValueError):
+            print("0 0 0 0 0")
+            return 0
+        del args[i : i + 2]
+    if not args:
+        print("0 0 0 0 0")
+        return 0
     try:
-        rows = parse(sys.argv[1])
+        rows = parse(args[0], column)
     except OSError:
         print("0 0 0 0 0")
         return 0

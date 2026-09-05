@@ -141,5 +141,62 @@ CSV
 assert_score 'fichier vide : zéros et n=0, pour que le vide ne passe pas pour du vert' \
     '0 0 0 0 0' </dev/null
 
+# ---------------------------------------------------------------------------------
+# REQ-AXO-902604 — la DEUXIEME dimension : disponibilite COMPLETE (colonne 3).
+#
+# VPC, apres la promotion c5ed296b : le promote annoncait 16 s de coupure contigue,
+# le client percevait ~45 s. Les deux chiffres etaient justes — le premier mesurait le
+# BRAIN, le second le retour de brain ET indexeur. Un promote qui ne publie que le
+# plus flatteur n'est pas faux, il est incomplet, et l'incompletude se lit pareil.
+# ---------------------------------------------------------------------------------
+
+# assert_score_col <desc> <colonne> "<attendu>" <<< csv-on-stdin
+assert_score_col() {
+    local desc="$1" col="$2" expected="$3" got
+    cat > "$TMP/c.csv"
+    got="$(python3 "$SCORER" --column "$col" "$TMP/c.csv")"
+    if [[ "$got" == "$expected" ]]; then
+        pass "$desc"
+    else
+        fail "$desc (attendu «$expected», obtenu «$got»)"
+    fi
+}
+
+# LE cas VPC, reproduit a l'echelle : le brain revient a t=20, l'indexeur a t=40.
+# La fenetre s'ouvre au DERNIER echantillon qui a repondu (t=0) et se ferme au
+# PREMIER qui repond de nouveau — semantique pessimiste documentee en tete du
+# scorer, et deja verrouillee par le cas « la fenetre s'ouvre au dernier up ».
+# Colonne 1 : 0 -> 20 = 20 s. Colonne 3 : 0 -> 40 = 40 s. MEME fichier.
+VPC_CSV='0,up,ready,up
+10,down,connection_refused,down
+20,up,ready,down
+30,up,ready,down
+40,up,ready,up'
+
+assert_score_col "colonne 1 (brain) : la coupure courte, celle qu'on publiait deja" 1 \
+    "20 20 5 40 10" <<< "$VPC_CSV"
+
+assert_score_col "colonne 3 (complet) : la coupure LONGUE, celle que le client percoit" 3 \
+    "40 40 5 40 10" <<< "$VPC_CSV"
+
+# Compatibilite : un fichier ecrit par l'ANCIEN sondeur n'a que trois colonnes. La
+# colonne 3 doit rendre « non mesure » (0 echantillon), JAMAIS « coupure totale » —
+# c'est la difference entre un instrument muet et un verdict rouge.
+assert_score_col "un fichier a 3 colonnes rend 0 echantillon sur la colonne 3, pas une coupure" 3 \
+    "0 0 0 0 0" <<< '0,up,ready
+10,down,connection_refused
+20,up,ready'
+
+# MUTANT — sans ce cas, les deux premiers passeraient meme si `--column` etait ignore
+# et que le scorer lisait toujours la colonne 1 : il faut que les deux colonnes du
+# MEME fichier rendent des verdicts DIFFERENTS, et que la difference soit celle-la.
+mut_c1="$(python3 "$SCORER" --column 1 <(printf '%s\n' "$VPC_CSV") 2>/dev/null || echo x)"
+mut_c3="$(python3 "$SCORER" --column 3 <(printf '%s\n' "$VPC_CSV") 2>/dev/null || echo y)"
+if [[ "$mut_c1" != "$mut_c3" ]]; then
+    pass "MUTANT : les deux colonnes du MEME fichier rendent des verdicts differents"
+else
+    fail "MUTANT : «$mut_c1» dans les deux colonnes — `--column` est ignore, les cas ci-dessus ne prouvent rien"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
