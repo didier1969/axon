@@ -16981,3 +16981,87 @@ fn un_parametre_hors_schema_est_nomme_au_lieu_d_etre_avale() {
         "aucun intrus : le champ reste absent : {propre}"
     );
 }
+
+/// REQ-AXO-902619 — un bundle d'ouverture ne sert QUE des nœuds vivants.
+///
+/// La fixture porte SES PROPRES nœuds morts : le premier jet de ce test lisait
+/// le projet AXO du serveur de test, qui n'en contient aucun — il passait donc
+/// avec ET sans le filtre. Un test qui ne peut pas échouer ne prouve rien.
+#[cfg(test)]
+mod bundle_serves_only_living_nodes_tests {
+    use super::create_test_server;
+    use serde_json::Value;
+
+    // Code à 3 lettres : `soll_node_canonical_id_format` impose `TYP-XXX-NNN`.
+    const CODE: &str = "LVG";
+    const CORPS_MORT: &str = "CORPS-D-UN-PILIER-REJETE-NE-DOIT-JAMAIS-SORTIR";
+    const CORPS_VIVANT: &str = "CORPS-D-UN-PILIER-VIVANT-ATTENDU";
+
+    fn serveur_avec_un_pilier_mort_et_un_vivant() -> crate::mcp::McpServer {
+        let server = create_test_server();
+        for (id, statut, corps) in [
+            ("PIL-LVG-001", "current", CORPS_VIVANT),
+            ("PIL-LVG-902", "rejected", CORPS_MORT),
+            ("PIL-LVG-903", "superseded", CORPS_MORT),
+        ] {
+            server
+                .graph_store
+                .execute(&format!(
+                    "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+                     VALUES ('{id}', 'Pillar', '{CODE}', 'Pilier {statut}', '{corps}', '{statut}', '{{}}') \
+                     ON CONFLICT (id) DO NOTHING"
+                ))
+                .unwrap();
+        }
+        server
+    }
+
+    /// Mesuré le 2026-09-05 sur le bundle réel : `PIL-AXO-902 "Test Pillar"`
+    /// (rejected, stub « placeholder rejected session 64 »), `PIL-AXO-102`
+    /// (rejected) et `PIL-AXO-006` (superseded) étaient servis en corps ENTIER à
+    /// chaque ouverture, pendant que `PIL-AXO-9003` (8 152 car) était évincé
+    /// faute de budget. Le tri par id dépense le budget d'inline dans l'ordre des
+    /// identifiants : des nœuds MORTS passaient donc avant des nœuds VIVANTS.
+    #[test]
+    fn le_squelette_ne_pousse_aucun_corps_de_noeud_mort() {
+        let server = serveur_avec_un_pilier_mort_et_un_vivant();
+        let skeleton = server.soll_skeleton_for_tests(CODE);
+        let rendu = serde_json::to_string(&skeleton).unwrap_or_default();
+        assert!(
+            !rendu.contains(CORPS_MORT),
+            "le corps d'un pilier rejeté/supersédé est servi à l'ouverture — il \
+             consomme le budget d'inline et évince un pilier vivant : {rendu}"
+        );
+        assert!(
+            rendu.contains(CORPS_VIVANT),
+            "le filtre ne doit pas emporter les vivants avec les morts : {rendu}"
+        );
+    }
+
+    /// L'invariant qui EXPLIQUE le défaut : les deux surfaces du même squelette
+    /// filtrent pareil. C'est leur asymétrie — `index_current` filtrait,
+    /// `push_bodies` non — qui a laissé passer les corps morts.
+    #[test]
+    fn les_corps_pousses_et_les_index_tires_filtrent_le_meme_statut() {
+        let server = serveur_avec_un_pilier_mort_et_un_vivant();
+        let skeleton = server.soll_skeleton_for_tests(CODE);
+        let statuts: Vec<String> = skeleton
+            .get("pillars")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.get("status").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !statuts.is_empty(),
+            "la fixture porte un pilier vivant : le squelette ne peut pas être vide"
+        );
+        assert!(
+            statuts.iter().all(|s| s == "current"),
+            "les corps poussés doivent filtrer comme les index tirés : {statuts:?}"
+        );
+    }
+}

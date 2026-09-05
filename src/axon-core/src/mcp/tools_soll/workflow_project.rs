@@ -1084,6 +1084,14 @@ impl McpServer {
     ///     with a `pull_with` hint so the LLM fetches a body on demand via
     ///     `soll_query_context`. Their bodies are deliberately NOT inlined —
     ///     that bulk is the real dilution this split removes.
+    /// REQ-AXO-902619 — accès de test à `soll_skeleton`, qui est privé et n'a
+    /// aucune raison de cesser de l'être : c'est l'invariant qu'on teste, pas
+    /// l'encapsulation qu'on ouvre.
+    #[cfg(test)]
+    pub(crate) fn soll_skeleton_for_tests(&self, project_code: &str) -> serde_json::Value {
+        self.soll_skeleton(project_code)
+    }
+
     fn soll_skeleton(&self, project_code: &str) -> serde_json::Value {
         let Ok(snapshot) = self.soll_cache().snapshot(project_code) else {
             return serde_json::json!({
@@ -1093,12 +1101,27 @@ impl McpServer {
         };
 
         // PUSH: full bodies for the few, Phase-B-critical macro nodes.
+        //
+        // REQ-AXO-902619 — filtre `status == "current"`, comme `index_current`
+        // juste en dessous. L'asymétrie était un DÉFAUT DE CORRECTION, pas une
+        // question de taille : mesuré le 2026-09-05 sur le bundle réel, les corps
+        // servis en entier incluaient `PIL-AXO-902 "Test Pillar"` (rejected, stub
+        // « placeholder rejected session 64 »), `PIL-AXO-102 "New Pillar"`
+        // (rejected) et `PIL-AXO-006` (superseded) — pendant que
+        // `PIL-AXO-9003 "Axon Two-Sided Identity"` (8 152 car), `PIL-AXO-004`,
+        // `007`, `008` et `009` étaient évincés, budget de 12 Ko atteint.
+        //
+        // Le tri par id dépense le budget d'inline dans l'ordre des identifiants :
+        // des nœuds MORTS passaient donc avant des nœuds VIVANTS. Toute session
+        // s'ouvrait sur « Test Pillar » et n'avait jamais le pilier d'identité du
+        // produit.
         let push_bodies = |entity_type: &str| -> serde_json::Value {
             let mut ids: Vec<&String> = snapshot.node_ids_of_type(entity_type).iter().collect();
             ids.sort();
             serde_json::Value::Array(
                 ids.into_iter()
                     .filter_map(|id| snapshot.nodes.get(id).map(|n| (id, n)))
+                    .filter(|(_, n)| n.status == "current")
                     .map(|(id, n)| {
                         serde_json::json!({
                             "id": id,
