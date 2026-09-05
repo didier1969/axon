@@ -42,7 +42,7 @@ fn une_sortie_SOUS_le_seuil_passe_intacte() {
     let (rendu, rendues, tronque) = McpServer::borner_lignes_sql(&petite, 60_000);
     assert_eq!(rendu, petite, "une sortie courte ne doit pas être touchée");
     assert!(!tronque);
-    assert_eq!(rendues, 0, "0 = « la borne n'a pas mordu », pas « aucune ligne »");
+    assert_eq!(rendues, None, "rien n'a été coupé : il n'y a pas de « lignes rendues »");
 }
 
 #[test]
@@ -51,6 +51,7 @@ fn une_sortie_AU_DESSUS_du_seuil_rend_des_lignes_ENTIERES_et_le_dit() {
     let (rendu, rendues, tronque) = McpServer::borner_lignes_sql(&grosse, 10_000);
 
     assert!(tronque);
+    let rendues = rendues.expect("une coupe sur lignes délimitées doit savoir compter");
     assert!(rendues > 0 && rendues < 500, "coupe partielle attendue, obtenu {rendues}");
     // La coupe porte sur des LIGNES : le JSON rendu doit rester parsable, sinon un
     // appelant programmatique reçoit un tableau cassé — pire qu'une réponse longue.
@@ -71,7 +72,7 @@ fn une_ligne_ENORME_est_rendue_plutot_que_zero() {
     let enorme = lignes(2, 50_000);
     let (rendu, rendues, tronque) = McpServer::borner_lignes_sql(&enorme, 1_000);
     assert!(tronque);
-    assert_eq!(rendues, 1, "au moins une ligne, même au-delà du seuil");
+    assert_eq!(rendues, Some(1), "au moins une ligne, même au-delà du seuil");
     let json_seul = rendu.split("\n\n").next().unwrap();
     let reparse: Vec<serde_json::Value> = serde_json::from_str(json_seul).expect("JSON valide");
     assert_eq!(reparse.len(), 1);
@@ -85,10 +86,55 @@ fn une_sortie_NON_delimitable_est_coupee_a_plat_et_annoncee_comme_telle() {
     let brut = "x".repeat(5_000);
     let (rendu, rendues, tronque) = McpServer::borner_lignes_sql(&brut, 1_000);
     assert!(tronque);
-    assert_eq!(rendues, 0);
+    // `None`, PAS `Some(0)` : sur ce chemin on n'a pas su compter. Un `0` ici se
+    // lirait « bornée à zéro ligne » alors que du texte EST rendu, et il vaudrait
+    // la MÊME chose que « la borne n'a pas mordu » deux cas plus haut.
+    assert_eq!(rendues, None);
     assert!(
         rendu.contains("n'a pas pu être délimitée") && rendu.contains("incomplet"),
         "l'appelant doit savoir que ce qu'il lit n'est pas du JSON valide : {rendu:.300}"
+    );
+}
+
+/// Le triplet que le CLIENT reçoit — `status` / `row_count` / `rows_rendered` — doit
+/// se lire sans ambiguïté. C'est le seul endroit où les trois se rencontrent, et
+/// `axon_sql` n'est pas exerçable sans base : le mapping est donc testé ici.
+#[test]
+fn les_deux_coupes_ne_portent_PAS_le_meme_statut() {
+    use crate::mcp::McpServer as S;
+
+    // Rien coupé : le statut d'origine passe, quel qu'il soit.
+    assert_eq!(S::statut_apres_borne("ok", None, false), "ok");
+    assert_eq!(S::statut_apres_borne("ok_empty", None, false), "ok_empty");
+    assert_eq!(S::statut_apres_borne("ok_uncounted", None, false), "ok_uncounted");
+
+    // Coupe sur lignes délimitées : comptable.
+    assert_eq!(S::statut_apres_borne("ok", Some(12), true), "ok_truncated");
+
+    // Coupe à plat : NON comptable. Le client y lit `row_count: null` ET
+    // `rows_rendered: null` ; sans un statut distinct, il ne pourrait pas
+    // distinguer « bornée sans savoir compter » de « bornée à 0 ligne ».
+    assert_eq!(
+        S::statut_apres_borne("ok_uncounted", None, true),
+        "ok_truncated_undelimited"
+    );
+}
+
+/// MUTANT du mapping — l'ANCIENNE règle, rejouée : un seul statut pour les deux
+/// coupes. Elle confond les deux cas ; si elle les distinguait déjà, le test
+/// ci-dessus ne prouverait rien.
+#[test]
+fn MUTANT_un_statut_unique_confond_les_deux_coupes() {
+    fn ancienne_regle(status: &str, tronque: bool) -> &str {
+        if tronque { "ok_truncated" } else { status }
+    }
+    assert_eq!(ancienne_regle("ok", true), ancienne_regle("ok_uncounted", true));
+    // Et l'ancien `rows_rendered` valait 0 dans les DEUX cas où rien n'est comptable.
+    let ancien_rendu_non_delimitable = 0usize;
+    let ancien_rendu_sans_coupe = 0usize;
+    assert_eq!(
+        ancien_rendu_non_delimitable, ancien_rendu_sans_coupe,
+        "l'ancien entier confondait « pas de coupe » et « coupe non comptable »"
     );
 }
 

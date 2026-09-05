@@ -1226,9 +1226,18 @@ impl McpServer {
     /// TOTAL reste `row_count` — il est compté sur la sortie entière, pas sur ce qui
     /// est rendu — et le texte dit combien de lignes il porte et comment obtenir les
     /// suivantes. `REQ-AXO-902409` interdit l'inverse.
-    pub(crate) fn borner_lignes_sql(resultat: &str, seuil: usize) -> (String, usize, bool) {
+    ///
+    /// Retour : `(texte, lignes_rendues, tronqué)`. `lignes_rendues` vaut `Some(n)`
+    /// UNIQUEMENT quand la coupe a porté sur des lignes délimitées ; il vaut `None`
+    /// quand la borne n'a pas mordu ET quand elle a mordu sur une sortie qu'on n'a
+    /// pas su découper. Ces deux `None` se distinguent par le troisième membre — un
+    /// entier ne le pourrait pas, et `0` y voudrait dire deux choses opposées.
+    pub(crate) fn borner_lignes_sql(
+        resultat: &str,
+        seuil: usize,
+    ) -> (String, Option<usize>, bool) {
         if resultat.chars().count() <= seuil {
-            return (resultat.to_string(), 0, false);
+            return (resultat.to_string(), None, false);
         }
         // `RawValue` DÉLIMITE les lignes sans désérialiser leur contenu : la coupe
         // se fait sur des lignes entières, jamais au milieu d'un objet JSON.
@@ -1243,7 +1252,11 @@ impl McpServer {
                      délimitée en lignes, donc elle est rendue TELLE QUELLE et coupée ; le JSON \
                      ci-dessus est incomplet). Réduisez la requête — `LIMIT`, moins de colonnes."
                 ),
-                0,
+                // `None`, jamais `0` : sur ce chemin on N'A PAS su compter les lignes,
+                // et un `rows_rendered: 0` se lirait comme « aucune ligne rendue » alors
+                // que du texte EST rendu. Deux sens dans un même entier, c'est la
+                // confusion que `ok_empty` existe déjà pour éviter (REQ-AXO-902583).
+                None,
                 true,
             );
         };
@@ -1273,9 +1286,32 @@ impl McpServer {
                  {rendues}`, ou sélectionnez moins de colonnes. `row_count` ci-dessous porte \
                  le total, pas le rendu."
             ),
-            rendues,
+            Some(rendues),
             true,
         )
+    }
+
+    /// REQ-AXO-902621 (suite) — le STATUT que le client lit, en fonction de la coupe.
+    ///
+    /// Sortie ici plutôt qu'en ligne dans `axon_sql` : ce mapping est la seule chose
+    /// qui rende `rows_rendered` interprétable, et `axon_sql` n'est pas exerçable
+    /// sans base. Le triplet que le client reçoit doit se lire sans ambiguïté :
+    ///
+    /// | `status` | `row_count` | `rows_rendered` | sens |
+    /// |---|---|---|---|
+    /// | `ok` / `ok_empty` / `ok_uncounted` | total ou `null` | `null` | rien n'a été coupé |
+    /// | `ok_truncated` | total | `n` | `n` lignes rendues sur le total |
+    /// | `ok_truncated_undelimited` | `null` | `null` | coupé à plat, non comptable |
+    pub(crate) fn statut_apres_borne<'a>(
+        status: &'a str,
+        lignes_rendues: Option<usize>,
+        tronque: bool,
+    ) -> &'a str {
+        match (tronque, lignes_rendues) {
+            (false, _) => status,
+            (true, Some(_)) => "ok_truncated",
+            (true, None) => "ok_truncated_undelimited",
+        }
     }
 
     pub(crate) fn axon_sql(&self, args: &Value) -> Option<Value> {
@@ -1362,7 +1398,11 @@ impl McpServer {
                 // `row_count` reste le total réel, et le texte dit ce qu'il porte.
                 let (texte, lignes_rendues, tronque) =
                     Self::borner_lignes_sql(&texte, SEUIL_RENDU_SQL_CHARS);
-                let status = if tronque { "ok_truncated" } else { status };
+                // Deux coupes, deux statuts. Sur une sortie qu'on n'a pas su délimiter,
+                // le texte rendu est PLAT et incomplet : l'annoncer `ok_truncated` avec
+                // `rows_rendered: 0` ferait lire « bornée à zéro ligne » là où il faut
+                // lire « bornée, et pas comptable ». `row_count` y vaut déjà `null`.
+                let status = Self::statut_apres_borne(status, lignes_rendues, tronque);
                 Some(json!({
                     "content": [{ "type": "text", "text": texte }],
                     "data": {
@@ -1371,7 +1411,10 @@ impl McpServer {
                         "status": status,
                         // Dits SEULEMENT quand la borne a mordu : les poser toujours
                         // ferait payer deux champs à 135 000 appels pour rien.
-                        "rows_rendered": if tronque { json!(lignes_rendues) } else { Value::Null },
+                        "rows_rendered": match lignes_rendues {
+                            Some(n) => json!(n),
+                            None => Value::Null,
+                        },
                         "truncated": if tronque { json!(true) } else { Value::Null }
                     }
                 }))
