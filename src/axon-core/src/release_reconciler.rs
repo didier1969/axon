@@ -321,6 +321,12 @@ pub fn liveness_next_action(l: &LivenessFacts) -> Option<String> {
         return Some(match l.indexer_lifecycle.as_str() {
             "crashed_or_abandoned" => "indexer heartbeat went stale — restart the indexer only (`curl -X POST :8080/process/restart/axon-indexer`), NOT the whole stack: a full restart takes the brain down with it (PIL-AXO-008, REQ-AXO-902256). Then re-check.".to_string(),
             "never_launched" => "no indexer heartbeat — the split indexer was never started; start the full runtime (`./scripts/axon-live start full`).".to_string(),
+            // REQ-AXO-902581 — ces deux verdicts remplacent l'inférence « périmé
+            // donc mort ». `exited_clean` est OBSERVÉ : rien à réparer, l'indexeur
+            // a fini sa passe. `stopped_or_idle` est INFÉRÉ : la remédiation
+            // commence par MESURER, pas par redémarrer un processus sain.
+            "exited_clean" => "l'indexeur a terminé sa passe proprement (`Completed`, exit 0) — RIEN à réparer. Relancer une passe si un nouveau travail est en attente : `curl -X POST :8080/process/start/axon-indexer`.".to_string(),
+            "stopped_or_idle" => "le battement de l'indexeur s'est tu ; personne n'a observé POURQUOI. Demander au superviseur avant de conclure : `curl -s :8080/processes | jq '.data[] | select(.name==\"axon-indexer\")'`. `Completed` + exit 0 = fin de passe normale ; `Failed` ou `Restarting` = la panne.".to_string(),
             _ => "indexer not ready — inspect the indexer process and its heartbeat.".to_string(),
         });
     }
@@ -595,6 +601,13 @@ pub struct SupervisorFacts {
     pub restarts: i64,
     pub pid: i64,
     pub age_ms: i64,
+    /// REQ-AXO-902581 — le code de sortie que le SUPERVISEUR a observé. `Completed`
+    /// avec 0 est une fin de passe NORMALE ; sans ce champ, le battement PG périmé
+    /// restait la seule source et concluait au crash.
+    pub exit_code: i64,
+    /// REQ-AXO-902581 — le processus tourne-t-il encore ? Un processus en marche
+    /// mais muet n'est ni une fin de passe ni une sortie : c'est un blocage.
+    pub is_running: bool,
     /// Fraîcheur du battement PG, pour le recoupement.
     pub heartbeat_age_ms: Option<i64>,
     /// REQ-AXO-902616 — qui tient le verrou d'écriture IST. `Default` = non mesuré,

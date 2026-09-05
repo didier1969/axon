@@ -8,6 +8,7 @@
 use serde_json::{json, Value};
 
 use super::runtime_topology_support::{
+    IndexerSupervisorObservation,
     resolve_indexer_liveness, EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
 };
 use super::McpServer;
@@ -64,6 +65,11 @@ impl McpServer {
             facts.restarts = p.restarts;
             facts.pid = p.pid;
             facts.age_ms = p.age_ms();
+            // REQ-AXO-902581 — les deux champs qui permettent de distinguer une fin
+            // de passe d'un crash. Ils étaient déjà parsés par `parse_processes` et
+            // jetés ici même.
+            facts.exit_code = p.exit_code;
+            facts.is_running = p.is_running;
         }
         facts
     }
@@ -86,11 +92,6 @@ impl McpServer {
             .latest_lifecycle_heartbeat("indexer")
             .ok()
             .flatten();
-        let live = resolve_indexer_liveness(
-            now_ms,
-            hb.as_ref().map(|r| r.heartbeat_ms),
-            EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
-        );
         // REQ-AXO-902616 — sonder QUI tient le verrou d'écriture IST AVANT tout
         // verdict de vivacité, et renseigner les deux jeux de faits avec la MÊME
         // mesure : un battement frais écrit par un indexeur que le superviseur ne
@@ -98,6 +99,27 @@ impl McpServer {
         let ist_ownership = probe_ist_ownership();
         let mut sup = self.collect_supervisor_facts(hb.as_ref().map(|r| now_ms - r.heartbeat_ms));
         sup.ist_ownership = ist_ownership.clone();
+        // REQ-AXO-902581 — la sonde du superviseur passe AVANT le verdict de
+        // vivacité, et le nourrit. Sur ce chemin la source qui sait est déjà
+        // interrogée : l'ignorer pour inférer « battement périmé donc mort » était
+        // gratuit ET faux. `None` quand la sonde n'a pas abouti ou n'a pas trouvé le
+        // rôle — le verdict redevient alors `stopped_or_idle`/`inferred`, ce qui est
+        // exactement ce qu'on sait.
+        let observation = if sup.reachable && sup.role_found {
+            Some(IndexerSupervisorObservation {
+                status: sup.status.clone(),
+                exit_code: sup.exit_code,
+                is_running: sup.is_running,
+            })
+        } else {
+            None
+        };
+        let live = resolve_indexer_liveness(
+            now_ms,
+            hb.as_ref().map(|r| r.heartbeat_ms),
+            EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+            observation.as_ref(),
+        );
         let supervised_pid = if sup.role_found && sup.pid > 0 {
             Some(sup.pid)
         } else {

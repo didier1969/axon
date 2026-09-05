@@ -115,13 +115,22 @@ impl McpServer {
         // (PIL-AXO-001). If no fresh heartbeat exists the indexer is not
         // provably alive and we say so loudly rather than infer from launch
         // mode.
+        //
+        // REQ-AXO-902581 — `None` : `status` ne sonde PAS le superviseur. Ajouter un
+        // aller-retour HTTP au chemin synchrone de `status` paierait en latence ce
+        // qu'on gagne en certitude (la queue à 1 Hz de REQ-AXO-902589 vient de le
+        // rappeler). Le verdict le DIT — `indexer_lifecycle_certainty: "inferred"`
+        // — au lieu de trancher à la place de l'observateur. `promote_status`, lui,
+        // sonde déjà le superviseur et passe l'observation.
         let indexer_liveness = resolve_indexer_liveness(
             crate::clock::now_unix_ms(),
             indexer_heartbeat_row.as_ref().map(|row| row.heartbeat_ms),
             EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+            None,
         );
         let indexer_liveness_source = indexer_liveness.source;
         let indexer_lifecycle = indexer_liveness.lifecycle;
+        let indexer_liveness_certainty = indexer_liveness.certainty;
         let indexer_ready = indexer_liveness.ready;
         let indexer_feed = indexer_liveness.feed;
 
@@ -162,6 +171,12 @@ impl McpServer {
             // misreported as a silent idle: `healthy` / `crashed_or_abandoned`
             // / `never_launched`. The age/reason lives in `indexer_feed`.
             "indexer_lifecycle": indexer_lifecycle,
+            // REQ-AXO-902581 — d'où vient ce verdict. `inferred` = déduit du seul
+            // battement PG ; `observed` = recoupé avec le superviseur. Sur un
+            // processus qui travaille par passes, l'inférence « battement périmé
+            // donc mort » est structurellement fausse, et elle a coûté deux
+            // sessions de chasse à un crash inexistant.
+            "indexer_lifecycle_certainty": indexer_liveness_certainty,
             "indexer_runtime": {
                 "available": !peer_runtime_telemetry.is_null(),
                 "telemetry_source": if peer_runtime_telemetry.is_null() {

@@ -514,6 +514,10 @@ impl McpServer {
                 now_ms,
                 hb.as_ref().map(|row| row.heartbeat_ms),
                 super::runtime_topology_support::EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+                // REQ-AXO-902581 — cet appelant ne lit que `.ready`, que
+                // l'observation du superviseur ne change pas. `None` plutôt qu'une
+                // sonde HTTP de plus sur le chemin synchrone de `status`.
+                None,
             )
             .ready
         };
