@@ -9958,8 +9958,21 @@ fn test_axon_pre_flight_check_default_mode_remains_batch() {
         .and_then(|t| t.as_str())
         .unwrap_or("");
     assert!(
-        text.contains("Validation passed"),
+        text.contains("Conformité SOLL : OK"),
         "batch mode must surface the batch validation message"
+    );
+    // REQ-AXO-902624 (friction MRG 431) — LE contrôle qui manquait : le verdict
+    // doit NOMMER ce qu'il n'a pas exécuté. Un tenant a commité un fichier de
+    // configuration qui ne s'évaluait plus, sur un « Validation passed » nu, et
+    // l'a découvert trois tours plus tard. Le mot « passed » seul se lit comme un
+    // feu vert que ce gate ne porte pas.
+    assert!(
+        text.contains("AUCUN test, formateur ni oracle"),
+        "le verdict du pré-vol doit désavouer ce qu'il ne vérifie pas ; obtenu : {text}"
+    );
+    assert!(
+        !text.contains("Validation passed"),
+        "le libellé nu « Validation passed » est précisément ce qui a induit en erreur ; obtenu : {text}"
     );
     // Default mode never sets the incremental marker.
     let incremental_marker = res

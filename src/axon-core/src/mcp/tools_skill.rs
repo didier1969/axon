@@ -720,6 +720,65 @@ impl McpServer {
     ///   - `session_pointer` : body of the canonical CPT-{P}-NNN session_pointer
     ///   - `work_plan_top` : top of soll_work_plan (unblockers)
     ///   - `reason` : echo of caller's reason (for audit / telemetry)
+    /// REQ-AXO-902621 — le corps du session pointer est le PREMIER poste de tout
+    /// `re_anchor`, et de loin.
+    ///
+    /// Mesuré le 2026-09-05 sur AXO : `re_anchor` rend **691 654 octets**, dont
+    /// **323 777 pour ce seul champ** — plus que tous les autres outils de la fenêtre
+    /// RÉUNIS. Le reste de l'enveloppe (`active_methodology` 3 197, `work_plan_top`
+    /// 1 377, `recent_revisions` 1 202) est négligeable à côté.
+    ///
+    /// Ce que ça coûte est pire que sa taille : `re_anchor` est l'outil de RECALAGE,
+    /// celui qu'on appelle quand le contexte est déjà rare. Il en consommait ~170 k
+    /// jetons pour rappeler où l'on en est.
+    ///
+    /// On rend donc les TITRES de sections plus la DERNIÈRE — ce que le pointeur
+    /// lui-même ordonne (« LIRE LA DERNIÈRE SECTION »), et ce dont un recalage a
+    /// besoin. `soll_get(id, section=…)` sert le reste à la demande (REQ-AXO-902496).
+    ///
+    /// Un corps sous le seuil passe INTACT : borner ce qui n'a pas besoin de l'être
+    /// ferait perdre du contexte sans rien gagner. `body_truncated` et
+    /// `body_full_chars` disent toujours ce qui a été retenu — un tronquage muet est
+    /// la faute que REQ-AXO-902583 combat.
+    pub(crate) fn borner_corps_pointeur(corps: &str) -> (String, Vec<String>, bool) {
+        const SEUIL_CHARS: usize = 8_000;
+
+        let titres: Vec<String> = corps
+            .lines()
+            .filter_map(|l| l.strip_prefix("## "))
+            .map(|t| t.trim().to_string())
+            .collect();
+
+        if corps.chars().count() <= SEUIL_CHARS {
+            return (corps.to_string(), titres, false);
+        }
+
+        // La dernière section = depuis le dernier `## ` en début de ligne.
+        let debut_derniere = corps
+            .match_indices("\n## ")
+            .last()
+            .map(|(i, _)| i + 1)
+            .or_else(|| corps.starts_with("## ").then_some(0));
+
+        let retenu = match debut_derniere {
+            Some(i) => &corps[i..],
+            // Aucun `## ` : on garde la QUEUE, pas la tête — sur un journal
+            // append-only, le récent est en bas.
+            None => {
+                let total = corps.chars().count();
+                let saut = total.saturating_sub(SEUIL_CHARS);
+                let octet = corps
+                    .char_indices()
+                    .nth(saut)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                &corps[octet..]
+            }
+        };
+
+        (retenu.to_string(), titres, true)
+    }
+
     pub(crate) fn axon_re_anchor(&self, arguments: &Value) -> Option<Value> {
         let reason = arguments
             .get("reason")
@@ -864,7 +923,18 @@ impl McpServer {
                 ))
                 .iter()
                 .filter(|r| r.len() >= 3)
-                .map(|r| json!({ "id": r[0], "title": r[1], "body": r[2], "kind": "soll_node" }))
+                .map(|r| {
+                    let (body, sections, tronque) = Self::borner_corps_pointeur(&r[2]);
+                    json!({
+                        "id": r[0],
+                        "title": r[1],
+                        "body": body,
+                        "body_sections": sections,
+                        "body_truncated": tronque,
+                        "body_full_chars": r[2].chars().count(),
+                        "kind": "soll_node",
+                    })
+                })
                 .next()
                 .unwrap_or(json!(null))
             }
@@ -965,3 +1035,7 @@ impl McpServer {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "tools_skill_pointer_bounds_tests.rs"]
+mod tools_skill_pointer_bounds_tests;

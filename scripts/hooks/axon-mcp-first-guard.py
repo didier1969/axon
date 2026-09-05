@@ -80,20 +80,91 @@ def _is_code_search(command: str) -> bool:
     return False
 
 
-def _axon_reachable() -> bool:
-    """Fail-open probe. Returns False (=> allow grep) when Axon is unreachable."""
+def _axon_can_answer_code_search() -> bool:
+    """Fail-open probe. False (=> allow grep) when Axon cannot answer a CODE search.
+
+    REQ-AXO-902624 (friction MRG 430) — la sonde demandait « Axon repond-il ? »
+    (`tools/list`), qui n'est pas la question. Sur un projet dont le code n'est pas
+    indexe, Axon repond parfaitement et `query`/`inspect`/`impact` ne servent a
+    RIEN : un tenant a passe une session entiere de ~20 commits a prefixer chaque
+    commande par `AXON_OK=1`. Un garde qui impose un outil ABSENT n'empeche rien —
+    il entraine a contourner les gardes par reflexe, ce qui est le pire resultat
+    possible pour un garde.
+
+    On demande donc a `status` si les surfaces indexees sont VISIBLES. Le champ
+    existe deja (`availability.advanced_indexed_surfaces_visible`) et bascule a
+    `false` des que la projection IST n'est pas fraiche.
+
+    Tout doute reste fail-open : reponse illisible, champ absent, delai depasse —
+    y compris la queue de latence de REQ-AXO-902589, qui peut depasser le budget —
+    rendent False, donc laissent passer. Un garde muet vaut mieux qu'un garde faux.
+    """
     url = os.environ.get("AXON_MCP_URL", "http://127.0.0.1:44129/mcp")
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "status", "arguments": {"mode": "brief"}},
+        }
+    ).encode()
     try:
         req = urllib.request.Request(
             url,
-            data=b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}',
+            data=body,
             headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=0.6) as resp:
-            return resp.status == 200
+            if resp.status != 200:
+                return False
+            raw = resp.read().decode("utf-8", "replace")
     except Exception:
         return False
+
+    # Le transport peut etre du SSE : on retient la derniere ligne `data:` utile.
+    for candidate in _json_candidates(raw):
+        try:
+            doc = json.loads(candidate)
+        except Exception:
+            continue
+        visible = _dig(doc, "availability", "advanced_indexed_surfaces_visible")
+        if isinstance(visible, bool):
+            return visible
+    # Champ introuvable : on ne sait pas, donc on ne bloque pas.
+    return False
+
+
+def _json_candidates(raw: str):
+    """Le corps entier, puis chaque charge utile `data:` d'un flux SSE."""
+    yield raw
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("data:"):
+            yield line[5:].strip()
+
+
+def _dig(doc, *keys):
+    """Premiere valeur trouvee pour ce chemin de cles, a n'importe quelle profondeur."""
+    if isinstance(doc, dict):
+        cur = doc
+        for k in keys:
+            if not isinstance(cur, dict) or k not in cur:
+                cur = None
+                break
+            cur = cur[k]
+        if cur is not None:
+            return cur
+        for v in doc.values():
+            found = _dig(v, *keys)
+            if found is not None:
+                return found
+    elif isinstance(doc, list):
+        for v in doc:
+            found = _dig(v, *keys)
+            if found is not None:
+                return found
+    return None
 
 
 def main() -> int:
@@ -110,8 +181,8 @@ def main() -> int:
         return 0
     if not _is_code_search(command):
         return 0
-    # About to block — but never break the consumer if Axon is actually down.
-    if not _axon_reachable():
+    # About to block — but never break the consumer if Axon cannot actually answer.
+    if not _axon_can_answer_code_search():
         return 0
     sys.stderr.write(
         "Axon MCP is available — use it instead of grep/find for code search.\n"

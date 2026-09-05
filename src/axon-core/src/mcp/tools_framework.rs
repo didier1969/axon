@@ -346,8 +346,11 @@ impl McpServer {
         }
 
         let summary_text = if total_violations == 0 {
+            // REQ-AXO-902624 (friction MRG 431) — même désaveu que la voie
+            // non incrémentale : un verdict qui dit seulement « passed » se lit
+            // comme un feu vert que ce gate ne porte pas.
             format!(
-                "Validation passed (Dry Run, incremental). {} file(s) checked individually.",
+                "Conformité SOLL : OK (Dry Run, incrémental). {} fichier(s) vérifié(s) un par un.\n⚠ AUCUN test, formateur ni oracle projet n'a été exécuté.",
                 per_file.len()
             )
         } else {
@@ -870,6 +873,11 @@ impl McpServer {
         Some(self.axon_snapshot_diff_impl(args))
     }
 
+    /// REQ-AXO-902621 — combien d'éléments par liste en mode `brief`. Assez pour
+    /// reconnaître la forme d'une architecture, pas assez pour la recopier : les
+    /// COMPTES restent exacts, et `mode=full` rend tout.
+    const CONCEPTION_BRIEF_ECHANTILLON: usize = 12;
+
     pub(crate) fn axon_conception_view(&self, args: &Value) -> Option<Value> {
         let explicit_project_code = args.get("project_code").and_then(|value| value.as_str());
         // REQ-AXO-043 — when project_code is supplied but unregistered,
@@ -897,12 +905,40 @@ impl McpServer {
             .and_then(|value| value.as_str())
             .unwrap_or("brief");
         let conception = self.cached_conception_view(project_code);
-        let boundary_violations: Vec<Value> = if mode == "brief" {
-            Vec::new()
-        } else {
-            // Decoupled: We no longer fetch anomalies inline to avoid timeouts.
-            // The operator must call 'anomalies' directly if needed.
-            Vec::new()
+        // Decoupled: anomalies are no longer fetched inline to avoid timeouts.
+        // The operator must call `anomalies` directly if needed — in BOTH modes,
+        // which is why this no longer branches on `mode`.
+        let boundary_violations: Vec<Value> = Vec::new();
+
+        // REQ-AXO-902621 — `brief` ne bornait RIEN. Le schéma publiait
+        // `mode: brief|full` et les deux branches rendaient `Vec::new()` pour les
+        // seules violations, pendant que `modules` / `interfaces` / `contracts` /
+        // `flows` / `boundaries` / `owners` sortaient ENTIERS dans les deux cas.
+        //
+        // Mesuré le 2026-09-05 : 25 appels pour **369 642 octets**, pic à 28 434 —
+        // troisième poste de la surface, et un poste qu'aucun agent de la session
+        // n'appelait (c'est un autre client qui le paie).
+        //
+        // Un mode qui ne fait rien est pire qu'un mode absent : l'appelant croit
+        // avoir déjà économisé. C'est la classe MIL-AXO-054 appliquée à nous-mêmes.
+        // `brief` (le défaut) borne donc réellement, en NOMMANT ce qu'il retient —
+        // même contrat que `status` et `project_status`.
+        let bref = mode == "brief";
+        let borner = |cle: &str| -> Value {
+            let liste = conception
+                .get(cle)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if !bref || liste.len() <= Self::CONCEPTION_BRIEF_ECHANTILLON {
+                return Value::Array(liste);
+            }
+            Value::Array(
+                liste
+                    .into_iter()
+                    .take(Self::CONCEPTION_BRIEF_ECHANTILLON)
+                    .collect(),
+            )
         };
         let evidence = format!(
             "**Project:** `{}`\n\
@@ -970,15 +1006,15 @@ impl McpServer {
                 "project_code": project_code,
                 "mode": mode,
                 "module_count": conception.get("module_count").cloned().unwrap_or_else(|| json!(0)),
-                "modules": conception.get("modules").cloned().unwrap_or_else(|| json!([])),
+                "modules": borner("modules"),
                 "interface_count": conception.get("interface_count").cloned().unwrap_or_else(|| json!(0)),
-                "interfaces": conception.get("interfaces").cloned().unwrap_or_else(|| json!([])),
+                "interfaces": borner("interfaces"),
                 "contract_count": conception.get("contract_count").cloned().unwrap_or_else(|| json!(0)),
-                "contracts": conception.get("contracts").cloned().unwrap_or_else(|| json!([])),
+                "contracts": borner("contracts"),
                 "flow_count": conception.get("flow_count").cloned().unwrap_or_else(|| json!(0)),
-                "flows": conception.get("flows").cloned().unwrap_or_else(|| json!([])),
-                "boundaries": conception.get("boundaries").cloned().unwrap_or_else(|| json!([])),
-                "owners": conception.get("owners").cloned().unwrap_or_else(|| json!([])),
+                "flows": borner("flows"),
+                "boundaries": borner("boundaries"),
+                "owners": borner("owners"),
                 "suspected_boundary_violation_count": boundary_violations.len(),
                 "suspected_boundary_violations": boundary_violations,
                 "transitions": transitions,
@@ -992,7 +1028,21 @@ impl McpServer {
                     + conception.get("interface_count").and_then(Value::as_u64).unwrap_or(0)
                     + conception.get("contract_count").and_then(Value::as_u64).unwrap_or(0)
                     + conception.get("flow_count").and_then(Value::as_u64).unwrap_or(0),
-                "next_call_hint": "why symbol=<flow-or-module-id> to inspect rationale"
+                "next_call_hint": "why symbol=<flow-or-module-id> to inspect rationale",
+                // Ce que `brief` a retenu, dit tel quel : les COMPTES restent exacts
+                // au-dessus, seules les listes sont échantillonnées. Un appelant qui
+                // lit `module_count: 40` et quatre modules doit savoir pourquoi.
+                "brief_sample_size": if bref { json!(Self::CONCEPTION_BRIEF_ECHANTILLON) } else { Value::Null },
+                "omitted_in_brief": if bref {
+                    json!(["modules", "interfaces", "contracts", "flows", "boundaries", "owners"])
+                } else {
+                    json!([])
+                },
+                "detail_continuation": if bref {
+                    json!({ "tool": "conception_view", "arguments": { "project_code": project_code, "mode": "full" } })
+                } else {
+                    Value::Null
+                }
             }
         }))
     }

@@ -892,6 +892,13 @@ impl McpServer {
     ///
     /// Terse by default (GUI-AXO-1026 inv.4): the body IS the answer, since that
     /// is what the procedures reach for. Identity/status ride along in `data`.
+/// REQ-AXO-902621 — au-delà de ce nombre de caractères, `soll_get` sans `sections`
+/// ni `section` ne sert plus le corps entier. Calé sur la même valeur que le bornage
+/// de `re_anchor` : les deux servent le même objet, un session pointer de plusieurs
+/// centaines de milliers de caractères, et deux seuils différents pour un même corps
+/// seraient une source de surprise pour rien.
+const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
+
     pub(crate) fn axon_soll_get(&self, args: &Value) -> Option<Value> {
         let Some(id) = args
             .get("id")
@@ -1035,6 +1042,60 @@ impl McpServer {
                         .collect::<Vec<_>>()
                         .join("\n")
                 ),
+            }
+        } else if body.chars().count() > Self::SEUIL_CORPS_ENTIER_CHARS {
+            // REQ-AXO-902621 — un corps qui dépasse le seuil n'est plus servi entier
+            // par défaut. Mesuré le 2026-09-05 : `soll_get` a rendu **115 227 octets
+            // pour UN appel** (le session pointer, 330 k caractères), sur un total de
+            // 260 279 pour huit appels. La sous-commande existe depuis
+            // REQ-AXO-902496 ; c'est son EMPLOI qui n'était pas systématique, et un
+            // défaut qu'il faut penser à éviter n'est pas un défaut évité.
+            //
+            // On rend la table des titres plus la DERNIÈRE section — sur un journal
+            // append-only, c'est le récent qui oriente, et c'est ce que ces pointeurs
+            // ordonnent eux-mêmes dans leur titre (« LIRE LA DERNIÈRE SECTION »).
+            //
+            // JAMAIS EN SILENCE (REQ-AXO-902583) : le rendu dit ce qu'il a retenu, ce
+            // qu'il a écarté, et comment obtenir le reste. Un tronquage muet ferait
+            // lire un corps amputé comme un corps complet.
+            let derniere = body
+                .match_indices("\n## ")
+                .last()
+                .map(|(i, _)| &body[i + 1..])
+                .or_else(|| body.starts_with("## ").then_some(body));
+            let table = if titres.is_empty() {
+                "_(ce corps ne porte aucun titre `##`)_".to_string()
+            } else {
+                titres
+                    .iter()
+                    .map(|t| format!("- {t}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            match derniere {
+                Some(sec) => format!(
+                    "_corps de {} caractères — au-delà du seuil de {}, seule la DERNIÈRE section \
+                     est rendue. Les {} titres sont ci-dessous ; `section=\"<fragment>\"` en tire \
+                     une autre, `sections=true` ne rend que la table._\n{}\n\n---\n\n{}",
+                    body.chars().count(),
+                    Self::SEUIL_CORPS_ENTIER_CHARS,
+                    titres.len(),
+                    table,
+                    sec
+                ),
+                // Aucune section : on garde la QUEUE, jamais la tête — sur un journal
+                // append-only, la tête est le plus ancien.
+                None => {
+                    let saut = body.chars().count().saturating_sub(Self::SEUIL_CORPS_ENTIER_CHARS);
+                    let octet = body.char_indices().nth(saut).map(|(i, _)| i).unwrap_or(0);
+                    format!(
+                        "_corps de {} caractères sans titre `##` — au-delà du seuil de {}, seule \
+                         la FIN est rendue._\n\n{}",
+                        body.chars().count(),
+                        Self::SEUIL_CORPS_ENTIER_CHARS,
+                        &body[octet..]
+                    )
+                }
             }
         } else {
             body.to_string()

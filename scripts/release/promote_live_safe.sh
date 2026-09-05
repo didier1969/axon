@@ -304,6 +304,16 @@ print(json.dumps({
     # (ni lecture ni TTL) ; les laisser en 'high' les rendrait immortels et recréerait
     # exactement l'accumulation que REQ-AXO-902304 vient de résorber (8217 messages).
     'idempotency_key': key, 'priority': 'low',
+    # REQ-AXO-902624 (doleance MRG 434) — 'infra' et non 'message'. Un locataire a
+    # trouve SIX avis de promote AXO non lus a sa cloture, tous disant explicitement
+    # « rien n'est attendu de toi », dont trois cycles annonce/reprise pour un seul
+    # promote finalement reussi. C'est le journal d'AXO diffuse a ses locataires.
+    # Le cout n'est pas le volume mais l'ATTENTION : REQ-AXO-902358 impose de relever
+    # l'inbox en dernier geste, et un canal rempli d'infrastructure erode cette
+    # obligation — a la dixieme notification sans objet, on cesse de lire.
+    # `mcp_inbox_read mode=unread` les masque desormais par defaut en annoncant leur
+    # nombre ; `kind="infra"` ou `mode=all` les rend.
+    'kind': 'infra',
     # REQ-AXO-902304 — ces avis sont périssables : « coupure dans 3 minutes » n'a
     # aucune valeur le lendemain. Sans TTL ils s'empilaient à jamais (8217 messages
     # depuis juillet, 118 par projet, 100% de l'inbox pour quatre d'entre eux) alors

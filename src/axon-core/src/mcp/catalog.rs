@@ -154,6 +154,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "project_code": { "type": "string", "description": "Optional, reserved for internal compatibility. In normal usage, omit it: the server assigns and returns the canonical code." },
                         "project_path": { "type": "string", "description": "Canonical absolute path of the project (e.g. /home/dstadel/projects/BookingSystem)." },
                         "concept_document_url_or_text": { "type": "string", "description": "Optional: text or link to the project vision." },
+                        "mode": { "type": "string", "enum": ["full", "resume"], "description": "REQ-AXO-902624 — `full` (default) returns the complete kickoff bundle: Vision, Pillars, `soll_skeleton`, `capabilities_map`, methodology bodies, debt digest. Right for a project you have never opened. `resume` returns ORIENTATION ONLY — session_pointer, git HEAD, in-progress requirements, recent REQ commits, inbox_unread, readiness, code_intel — and names what it left out in `omitted_in_resume`, with the exact call to get it all in `detail_continuation`. Measured on AXO: the full bundle is 105 677 characters (~26k tokens), of which `soll_skeleton` alone is 67 371. Use `resume` after a compaction or a drift, when context is scarcest and you already know the project." },
                         "session_pointer": {
                             "type": "object",
                             "description": "REQ-AXO-143: workflow-agnostic onboarding pointer persisted on the project. Surfaced by `axon_init_project.data.kickoff_bundle.session_pointer` and `status.data.instance_identity.session_pointer`. Pass null to clear. `kind=file` → value is a path; `kind=url` → value is a URL (Linear/Notion/etc.); `kind=soll_node` → value is a canonical SOLL ID (e.g. CPT-AXO-019); `kind=none` → declares no pointer (value optional).",
@@ -816,7 +817,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "conception_view",
-                "description": "[SYSTEM/DX] Read-only derived conception view: modules, interfaces, contracts, flows, and suspected boundary violations.",
+                "description": "[SYSTEM/DX] Read-only derived conception view: modules, interfaces, contracts, flows, and suspected boundary violations. REQ-AXO-902621 — `brief` (default) now BOUNDS what it returns: counts stay exact, each list is sampled to `brief_sample_size`, and `omitted_in_brief` names the sampled lists with the exact `mode=full` call in `detail_continuation`. Until this change `brief` bounded nothing at all — 25 calls returned 369 642 characters.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

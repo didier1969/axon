@@ -229,6 +229,13 @@ pub(crate) struct SollManagerData {
     /// `CANONICAL_NODE_STATUSES`; it is deliberately NOT re-listed here, where it
     /// would drift. Anything outside it is rejected with the accepted values and
     /// a suggested normalisation — no status is ever silently rewritten.
+    ///
+    /// REQ-AXO-902624 (friction MRG 433) — `partial` N'EST PAS un statut. C'est un
+    /// VERDICT de couverture rendu par `soll_verify_requirements` (`done` / `partial`
+    /// / `missing`), et les corps de nœuds emploient le mot. Un appelant lit donc
+    /// « partial » quelque part, l'essaie ici, et paie un rejet. Une exigence
+    /// commencée mais non finie reste `current` : c'est le statut d'engagement, pas
+    /// un aveu d'inachèvement.
     #[serde(default)]
     pub status: Option<String>,
     /// Priority bucket P0..P3 (metadata-routed; consumed by soll_work_plan).

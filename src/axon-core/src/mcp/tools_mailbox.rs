@@ -623,6 +623,31 @@ impl McpServer {
         // est le sens même du mode. Seul `all` — la lecture « montre-moi la boîte » — passe
         // aux plus récents. `unread` reste strictement id ASC (sécurité du curseur, voir
         // ci-dessus) : l'inverser ferait sauter des messages sous le max(id).
+        // REQ-AXO-902624 (friction MRG 434) — `unread` ne sert plus les notifications
+        // d'INFRASTRUCTURE par défaut.
+        //
+        // Le rapporteur a trouvé six messages non lus à sa clôture, tous des avis de
+        // promote AXO (« coupure à venir » / « rétabli »), tous disant explicitement
+        // « rien n'est attendu de toi ». Le coût n'est pas le volume (3 348 caractères)
+        // mais l'ATTENTION : `REQ-AXO-902358` impose de relever l'inbox en dernier
+        // geste, et cette obligation est juste — une session peut recevoir du vrai
+        // courrier pendant qu'elle travaille. Mais si le canal est rempli
+        // d'infrastructure, l'obligation s'érode : à la dixième notification sans
+        // objet, on cesse de lire. C'est le mécanisme d'un contrôle qui sonne en
+        // marche normale et finit débranché.
+        //
+        // Ils ne sont pas SUPPRIMÉS : ils restent visibles par `kind="infra"`, par
+        // `mode=all`, et leur nombre est toujours annoncé (`infra_masques`). Le
+        // curseur les dépasse comme les autres — sinon ils reviendraient sans fin.
+        let kind_demande = args.get("kind").and_then(Value::as_str);
+        let masquer_infra = mode == "unread" && kind_demande.is_none();
+        let filters = if masquer_infra {
+            format!("{filters} AND COALESCE(kind,'message') <> 'infra'")
+        } else if let Some(k) = kind_demande {
+            format!("{filters} AND COALESCE(kind,'message') = '{}'", esc(k))
+        } else {
+            filters
+        };
         let recents_dabord = mode == "all";
         let order_clause = if cursor_advances {
             "ORDER BY id ASC".to_string()
@@ -953,6 +978,9 @@ impl McpServer {
                 "project": project,
                 "mode": mode,
                 "count": messages.len(),
+                // REQ-AXO-902624 — ce qui a été écarté, dit en une ligne plutôt que
+                // disparu. `kind="infra"` ou `mode=all` les rend.
+                "infra_masques": if masquer_infra { self.mailbox_infra_unread_count(&project) } else { 0 },
                 "cursor": max_id,
                 "messages": messages,
             }
@@ -965,10 +993,38 @@ impl McpServer {
     pub(crate) fn mailbox_unread_count(&self, project: &str) -> i64 {
         self.graph_store
             .query_single_i64_writer(&format!(
+                // REQ-AXO-902624 (friction MRG 434) — le compteur DOIT s'accorder
+                // avec ce que `mcp_inbox_read mode=unread` sert, sinon il annonce
+                // « 6 messages à traiter » pour une relève qui n'en montre aucun.
+                // Le rapporteur a dépensé un tour à les ouvrir sur la foi de ce
+                // nombre. Les infra sont comptés séparément par
+                // `mailbox_infra_unread_count`.
                 "SELECT count(*) FROM axon.mailbox_message m \
                  LEFT JOIN axon.mailbox_cursor c ON c.project_code = m.to_project \
                  WHERE m.to_project='{p}' AND m.id > COALESCE(c.last_read_id, 0) \
-                 AND m.archived_at IS NULL",
+                 AND m.archived_at IS NULL \
+                 AND COALESCE(m.kind,'message') <> 'infra'",
+                p = esc(project)
+            ))
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+    }
+
+    /// REQ-AXO-902624 — les notifications d'INFRASTRUCTURE non lues, comptées à
+    /// part de `mailbox_unread_count`.
+    ///
+    /// Masquer sans compter serait une perte silencieuse : ce qu'on retire d'une
+    /// vue doit rester annonçable en une ligne (« N notifications d'infrastructure
+    /// masquées »), et retrouvable par `kind="infra"`.
+    pub(crate) fn mailbox_infra_unread_count(&self, project: &str) -> i64 {
+        self.graph_store
+            .query_single_i64_writer(&format!(
+                "SELECT count(*) FROM axon.mailbox_message m \
+                 LEFT JOIN axon.mailbox_cursor c ON c.project_code = m.to_project \
+                 WHERE m.to_project='{p}' AND m.id > COALESCE(c.last_read_id, 0) \
+                 AND m.archived_at IS NULL \
+                 AND COALESCE(m.kind,'message') = 'infra'",
                 p = esc(project)
             ))
             .ok()

@@ -181,6 +181,34 @@ fn git_output(
     cmd.args(args).output().ok()
 }
 
+/// REQ-AXO-902624 — les deux régimes du bundle d'ouverture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum KickoffMode {
+    /// Première ouverture d'un projet inconnu : tout, comme avant.
+    Full,
+    /// Recalage — après une compaction, une dérive, un réveil. L'orientation seule.
+    Resume,
+}
+
+impl KickoffMode {
+    pub(crate) fn depuis_arguments(args: &serde_json::Value) -> Self {
+        match args.get("mode").and_then(serde_json::Value::as_str) {
+            Some(m) if m.eq_ignore_ascii_case("resume") => Self::Resume,
+            // Tout le reste — absent, vide, mal orthographié — reste `full`. Un
+            // bundle trop riche coûte des jetons ; un bundle amputé par une faute de
+            // frappe fait repartir une session sans son orientation.
+            _ => Self::Full,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Resume => "resume",
+        }
+    }
+}
+
 impl McpServer {
     /// REQ-AXO-902296 — sort `diff_paths` into (stageable, already-staged, rejected)
     /// BEFORE touching the index.
@@ -522,7 +550,12 @@ impl McpServer {
 
         if dry_run {
             return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("Validation passed (Dry Run). No commit performed. Message '{}' is valid.", message) }]
+                // REQ-AXO-902624 (friction MRG 431) — le verdict NOMME ce qu'il n'a pas
+                // exécuté. La description de l'outil le disait déjà (REQ-AXO-902451),
+                // mais personne ne relit une description après un vert : un tenant a
+                // commité un devenv.nix qui ne s'évaluait plus, sur ce « passed », et
+                // l'a découvert trois tours plus tard sous une erreur sans rapport.
+                "content": [{ "type": "text", "text": format!("Conformité SOLL : OK (Dry Run). Aucun commit. Message '{}' valide.\n⚠ AUCUN test, formateur ni oracle projet n'a été exécuté — ce vert ne dit rien de la syntaxe ni du comportement des fichiers.", message) }]
             }));
         }
 
@@ -1977,17 +2010,49 @@ impl McpServer {
         )
     }
 
+    /// REQ-AXO-902624 (friction MRG 432) / REQ-AXO-902621 — `mode` borne le bundle.
+    ///
+    /// Mesuré le 2026-09-05 sur AXO : le bundle rend **105 677 caractères** (~26 k
+    /// jetons), et non les ~10 k annoncés. Les deux premiers postes — `soll_skeleton`
+    /// **67 371** et `capabilities_map` **16 706** — pèsent 80 % à eux seuls.
+    ///
+    /// Le rapporteur (MRG) le rechargeait ENTIER à chaque `axon init`, y compris
+    /// après une compaction, c'est-à-dire au moment précis où le contexte est le plus
+    /// rare. Et ce qui lui servait réellement au réveil tient en ~800 jetons.
+    ///
+    /// `full` (défaut) reste strictement l'ancien comportement : un projet inconnu a
+    /// besoin de sa Vision, de ses Pillars et de sa carte de capacités. `resume` sert
+    /// l'ORIENTATION seule — pointeur, HEAD, travail en cours, courrier, état du
+    /// code-intel. Le reste se tire à la demande, ce que les outils permettent déjà.
+    ///
+    /// Ce qui est écarté est NOMMÉ (`omitted_in_resume`), jamais retiré en silence :
+    /// c'est la règle de REQ-AXO-902583, et elle vaut aussi quand c'est nous qui
+    /// coupons.
     fn axon_init_project_bundle(
         &self,
         project_code: &str,
         project_path: &str,
+        mode: KickoffMode,
     ) -> serde_json::Value {
-        let kickoff_prompt = self
-            .read_soll_node_description("DEC-PRO-001")
-            .unwrap_or_else(|| Self::default_kickoff_prompt().to_string());
-        let methodology_summary = self
-            .read_soll_node_description("CPT-AXO-019")
-            .unwrap_or_else(|| Self::default_methodology_summary().to_string());
+        let resume = mode == KickoffMode::Resume;
+        // Les deux corps de méthodologie ne sont LUS que si on les sert : en mode
+        // `resume`, les charger pour les jeter ferait payer la requête sans le gain.
+        let kickoff_prompt = if resume {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(
+                self.read_soll_node_description("DEC-PRO-001")
+                    .unwrap_or_else(|| Self::default_kickoff_prompt().to_string()),
+            )
+        };
+        let methodology_summary = if resume {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(
+                self.read_soll_node_description("CPT-AXO-019")
+                    .unwrap_or_else(|| Self::default_methodology_summary().to_string()),
+            )
+        };
         // REQ-AXO-143 — `session_pointer` is the canonical workflow-agnostic
         // onboarding pointer. `active_handoff` is retained as a backward-compat
         // alias for one release cycle (LLM clients that already read
@@ -2066,7 +2131,7 @@ impl McpServer {
             "kickoff_prompt_source": "soll://Node/DEC-PRO-001",
             "methodology_summary": methodology_summary,
             "methodology_summary_source": "soll://Node/CPT-AXO-019",
-            "entry_points": Self::cold_start_entry_points(),
+            "entry_points": if resume { serde_json::Value::Null } else { Self::cold_start_entry_points() },
             "session_pointer": session_pointer,
             "derived_session_pointer": derived_session_pointer,
             "active_handoff": active_handoff_alias,
@@ -2074,7 +2139,7 @@ impl McpServer {
             "wave_1_unblockers": wave_1_unblockers,
             // REQ-AXO-902360 — worst structural debt at a glance (counts + pointer); pull the
             // ranked offenders on demand via the `debt_digest` tool.
-            "debt_digest": debt_digest,
+            "debt_digest": if resume { serde_json::Value::Null } else { debt_digest },
             // REQ-AXO-902114 (MBX-2) — unread mailbox at wake: a session onboarding
             // sees pending inter-project messages alongside its SOLL backlog.
             "inbox_unread": self.mailbox_unread_count(project_code),
@@ -2085,9 +2150,29 @@ impl McpServer {
             "code_intel": code_intel,
             // REQ-AXO-902078 — init context economy (PUSH/PULL skeleton +
             // runtime capabilities map + toolset hint).
-            "soll_skeleton": soll_skeleton,
-            "capabilities_map": capabilities_map,
+            // REQ-AXO-902624 — et c'est ici que `resume` coupe : ces trois postes,
+            // plus les deux corps de méthodologie, sont ce qu'un recalage connaît
+            // déjà. Nommés dans `omitted_in_resume` plutôt que disparus.
+            "soll_skeleton": if resume { serde_json::Value::Null } else { soll_skeleton },
+            "capabilities_map": if resume { serde_json::Value::Null } else { capabilities_map },
             "session_toolset_hint": session_toolset_hint,
+            "mode": mode.as_str(),
+            "omitted_in_resume": if resume {
+                serde_json::json!([
+                    "soll_skeleton", "capabilities_map", "kickoff_prompt",
+                    "methodology_summary", "debt_digest", "entry_points"
+                ])
+            } else {
+                serde_json::json!([])
+            },
+            "detail_continuation": if resume {
+                serde_json::json!({
+                    "tool": "axon_init_project",
+                    "arguments": { "project_path": project_path, "mode": "full" }
+                })
+            } else {
+                serde_json::Value::Null
+            },
         })
     }
 
@@ -2736,7 +2821,11 @@ impl McpServer {
         // REQ-AXO-119 — append the kickoff bundle pointer to the
         // human-readable response so an LLM scanning content alone
         // sees that the structured bundle is available in data.
-        let bundle = self.axon_init_project_bundle(&project_code, project_path);
+        // REQ-AXO-902624 — `mode=resume` pour un recalage, `full` (défaut) pour une
+        // première ouverture. Un mode inconnu retombe sur `full` : un bundle trop
+        // riche est un coût, un bundle amputé par une faute de frappe est une panne.
+        let mode = KickoffMode::depuis_arguments(args);
+        let bundle = self.axon_init_project_bundle(&project_code, project_path, mode);
         response_text.push_str(
             "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, derived_session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, soll_skeleton, capabilities_map, session_toolset_hint). derived_session_pointer (REQ-AXO-902160) auto-orients a fresh session from git HEAD + in-progress REQs + recent REQ commits — no hand-write ; `.explicit` carries the operator-set session_pointer when present. soll_skeleton's Vision + Pillar bodies are INLINED in full in the Continuation block ABOVE (Pillars up to a byte budget; any overflow is listed there by id with a soll_get hint) and mirrored here for programmatic use — no read needed; Decisions/Guidelines are INDEXED (id+title — pull a body via soll_get(id=<ID>)); capabilities_map lists the live tool surface; session_toolset_hint is a ready ToolSearch select. Use it to onboard yourself or any future LLM session before doing project-specific work.",
         );
