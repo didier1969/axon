@@ -102,6 +102,12 @@ fn test_axon_soll_manager_auto_id() {
     assert_eq!(count, 1);
 }
 
+/// REQ-AXO-902621 — la même mesure que la production, pour que le test ne
+/// réinvente pas une seconde définition du poids.
+fn payload_bytes_of(v: &serde_json::Value) -> i64 {
+    crate::mcp::tools_friction::payload_bytes(v)
+}
+
 #[test]
 fn test_mcp_call_telemetry_aggregates_per_call_with_latency() {
     // REQ-AXO-901961 S1 — every call records a time-bucketed stat (ok + error),
@@ -121,9 +127,12 @@ fn test_mcp_call_telemetry_aggregates_per_call_with_latency() {
         }
     });
     // 2 ok (5ms + 15ms) into one bucket, 1 error (10ms) into another.
-    server.record_mcp_call(tool, &ok, 5);
-    server.record_mcp_call(tool, &ok, 15);
-    server.record_mcp_call(tool, &err, 10);
+    // REQ-AXO-902621 — les arguments voyagent aussi : ils sont MESURÉS (taille),
+    // jamais stockés (contenu). Le secret ci-dessous le prouve deux fois.
+    let args = json!({ "x": "SUPER_SECRET_TELEMETRY_VALUE" });
+    server.record_mcp_call(tool, &args, &ok, 5);
+    server.record_mcp_call(tool, &args, &ok, 15);
+    server.record_mcp_call(tool, &args, &err, 10);
 
     // Privacy: no argument content may appear anywhere in the table.
     let dump = server
@@ -159,6 +168,52 @@ fn test_mcp_call_telemetry_aggregates_per_call_with_latency() {
         ))
         .unwrap();
     assert_eq!(err_count, 1, "the error call is recorded under status=error");
+
+    // REQ-AXO-902621 — le POIDS est alimenté, dans les DEUX sens. C'est le
+    // câblage qui est testé ici, pas la fonction de mesure : une colonne qui
+    // existe sans être remplie est exactement le défaut qu'on répare (GUI-PRO-115).
+    let resp_bytes = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT response_bytes_sum FROM axon.mcp_call_stat \
+             WHERE project_code='{proj}' AND tool='{tool}' AND status='ok'"
+        ))
+        .unwrap();
+    assert!(
+        resp_bytes > 0,
+        "les octets de réponse doivent être comptés, pas rester à zéro"
+    );
+    let req_bytes = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT request_bytes_sum FROM axon.mcp_call_stat \
+             WHERE project_code='{proj}' AND tool='{tool}' AND status='ok'"
+        ))
+        .unwrap();
+    assert!(
+        req_bytes > 0,
+        "les ARGUMENTS pèsent 38,4 % du contexte relu : les ignorer manquerait \
+         la moitié la plus lourde"
+    );
+    // Deux appels `ok` avec les mêmes arguments : la somme est bien cumulative.
+    let une_fois = payload_bytes_of(&args);
+    assert_eq!(
+        req_bytes,
+        une_fois * 2,
+        "la somme s'accumule sur les appels du même seau"
+    );
+    let resp_max = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT response_bytes_max::BIGINT FROM axon.mcp_call_stat \
+             WHERE project_code='{proj}' AND tool='{tool}' AND status='ok'"
+        ))
+        .unwrap();
+    assert_eq!(
+        resp_max,
+        payload_bytes_of(&ok),
+        "le pic garde la plus grosse réponse du seau, comme latency_max_ms"
+    );
 
     // S4 — mcp_telemetry_report projects the rollup into usage+latency analytics.
     let report = server

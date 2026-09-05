@@ -1506,13 +1506,14 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "mcp_telemetry_report",
-                "description": "[SYSTEM] REQ-AXO-901961 — MCP usage + latency analytics over the per-call rollup (axon.mcp_call_stat). Returns per-tool call volume, error rate, average + max latency over a window. Signature-only (tool + ok/error + project) — NEVER any argument content. PG-native (no external analytics tool). Args: optional `project_code` (tenant filter), `window_hours` (default 168 = 7d), `limit` (default 20).",
+                "description": "[SYSTEM] REQ-AXO-901961 — MCP usage + latency analytics over the per-call rollup (axon.mcp_call_stat). Returns per-tool call volume, error rate, average + max latency over a window. REQ-AXO-902621 — returns the WEIGHT too: `response_bytes`, `response_bytes_max`, `request_bytes` per tool, and `sort=\"bytes\"` ranks by payload weight instead of call volume. Weight is what a client RE-READS on every later turn, so it compounds where latency does not; and the ARGUMENTS sent outweigh the results returned (38.4 % vs 26.5 % of re-read context, measured 2026-09-05). Still signature-only (tool + ok/error + project) — sizes are measured, argument CONTENT never is. PG-native (no external analytics tool). Args: optional `project_code` (tenant filter), `window_hours` (default 168 = 7d), `limit` (default 20), `sort` (`calls` default | `bytes`).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Filter to one tenant; omit for the cross-tenant aggregate." },
                         "window_hours": { "type": "integer", "description": "Look-back window in hours (default 168 = 7 days)." },
-                        "limit": { "type": "integer", "description": "Max tools returned, busiest first (default 20)." }
+                        "limit": { "type": "integer", "description": "Max tools returned, busiest first (default 20)." },
+                        "sort": { "type": "string", "enum": ["calls", "bytes"], "description": "REQ-AXO-902621 — ranking. `calls` (default) = busiest first. `bytes` = heaviest first, response + request summed: the ranking that answers « what saturates the context we re-read », which call volume does not — a tool called 6 000 times with a one-line verdict costs less than one 108 000-character opening payload." }
                     },
                     "required": []
                 }

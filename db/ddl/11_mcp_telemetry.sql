@@ -23,6 +23,26 @@ CREATE TABLE IF NOT EXISTS axon.mcp_call_stat (
     PRIMARY KEY (tool, project_code, status, bucket_hour)
 );
 
+-- REQ-AXO-902621 — le POIDS des appels, à côté de leur latence.
+--
+-- Mesuré le 2026-09-05 sur 15 078 requêtes : 78,6 % du coût d'une session est de
+-- la RELECTURE de contexte (447 352 tokens relus par requête), et cette table
+-- pilotait la latence sans jamais regarder la taille. On ne priorise pas ce
+-- qu'on ne mesure pas — `REQ-AXO-901934` pose pourtant que « les tokens-en-sortie
+-- SONT la fonction de coût ».
+--
+-- `request_bytes_sum` n'est pas un doublon décoratif : les ARGUMENTS pèsent
+-- 38,4 % du contexte relu contre 26,5 % pour les résultats. Le sens de la
+-- circulation qu'on croit optimiser n'est pas le plus lourd.
+--
+-- Toujours signature-only : on stocke des TAILLES, jamais un octet de contenu.
+-- Additif et idempotent — une table déjà peuplée garde ses lignes, les nouvelles
+-- colonnes démarrant à 0.
+ALTER TABLE axon.mcp_call_stat
+    ADD COLUMN IF NOT EXISTS response_bytes_sum BIGINT  NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS response_bytes_max INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS request_bytes_sum  BIGINT  NOT NULL DEFAULT 0;
+
 -- Recent-window scans (analytics projections + retention sweeps).
 CREATE INDEX IF NOT EXISTS mcp_call_stat_recent_idx
     ON axon.mcp_call_stat (bucket_hour DESC, tool);

@@ -129,6 +129,28 @@ fn render_friction_rows(rows: &[Value], total: i64, header: &str) -> String {
     out
 }
 
+/// REQ-AXO-902621 — le poids d'une charge MCP, en octets de sa sérialisation.
+///
+/// C'est ce que le client relit à CHAQUE tour suivant, pas seulement une fois :
+/// un résultat de 27 000 jetons entré en ouverture de session est relu ~1 300 fois
+/// avant la compaction. La latence se paie une fois, le poids se paie en boucle.
+///
+/// Mesure la MÊME chose que ce qui voyage : la forme compacte, celle que le
+/// transport sérialise. `Null` et l'absence rendent 0 — ne rien envoyer n'est pas
+/// envoyer « null ».
+pub(crate) fn payload_bytes(value: &Value) -> i64 {
+    // Ne rien envoyer n'est pas envoyer « null » : sans cette garde, chaque appel
+    // nu gonflerait le compteur de 4 octets fictifs.
+    if value.is_null() {
+        return 0;
+    }
+    // Pas de plafond, volontairement : 11 % des appels portent 72 % du volume, et
+    // un plafond de mesure rendrait invisible exactement la queue qu'on cherche.
+    serde_json::to_string(value)
+        .map(|s| s.len() as i64)
+        .unwrap_or(0)
+}
+
 impl McpServer {
     /// REQ-AXO-901957 — best-effort friction capture, called for EVERY tool
     /// response on the dispatch chokepoint. Records ONLY the problem SHAPE
@@ -214,7 +236,13 @@ impl McpServer {
     /// tool response (`let _`). Average latency derives from latency_sum_ms /
     /// call_count; latency_max_ms keeps the tail outlier. The observability
     /// surfaces themselves are skipped so they never self-inflate the stats.
-    pub(crate) fn record_mcp_call(&self, tool: &str, response: &Value, latency_ms: i64) {
+    pub(crate) fn record_mcp_call(
+        &self,
+        tool: &str,
+        arguments: &Value,
+        response: &Value,
+        latency_ms: i64,
+    ) {
         if tool == "mcp_friction_report"
             || tool == "mcp_telemetry_report"
             || tool == "mcp_feedback_report"
@@ -246,15 +274,23 @@ impl McpServer {
         let build_id =
             std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
         let lm = latency_ms.max(0);
+        // REQ-AXO-902621 — le POIDS, à côté de la latence. Ce sont des TAILLES :
+        // pas un octet de contenu d'argument n'entre en base (PIL-AXO-9003), et
+        // c'est justement ce qui rend la mesure publiable aux tenants.
+        let rq = payload_bytes(arguments);
+        let rs = payload_bytes(response);
         let _ = self.graph_store.execute_param(
-            "INSERT INTO axon.mcp_call_stat (tool, project_code, status, bucket_hour, call_count, latency_sum_ms, latency_max_ms, contract_version)
-             VALUES (?, ?, ?, date_trunc('hour', now()), 1, ?, ?, ?)
+            "INSERT INTO axon.mcp_call_stat (tool, project_code, status, bucket_hour, call_count, latency_sum_ms, latency_max_ms, contract_version, response_bytes_sum, response_bytes_max, request_bytes_sum)
+             VALUES (?, ?, ?, date_trunc('hour', now()), 1, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (tool, project_code, status, bucket_hour)
              DO UPDATE SET call_count = axon.mcp_call_stat.call_count + 1,
                            latency_sum_ms = axon.mcp_call_stat.latency_sum_ms + EXCLUDED.latency_sum_ms,
                            latency_max_ms = greatest(axon.mcp_call_stat.latency_max_ms, EXCLUDED.latency_max_ms),
+                           response_bytes_sum = axon.mcp_call_stat.response_bytes_sum + EXCLUDED.response_bytes_sum,
+                           response_bytes_max = greatest(axon.mcp_call_stat.response_bytes_max, EXCLUDED.response_bytes_max),
+                           request_bytes_sum = axon.mcp_call_stat.request_bytes_sum + EXCLUDED.request_bytes_sum,
                            contract_version = EXCLUDED.contract_version",
-            &json!([tool, project_code, status, lm, lm, build_id]),
+            &json!([tool, project_code, status, lm, lm, build_id, rs, rs, rq]),
         );
     }
 
@@ -1051,6 +1087,20 @@ impl McpServer {
             .and_then(Value::as_i64)
             .unwrap_or(168) // 7 days
             .max(1);
+        // REQ-AXO-902621 — classer par POIDS, pas seulement par volume d'appels.
+        // Le classement par appels place `sql` en tête (6 142 appels) alors que
+        // son verdict est court ; le classement par octets fait remonter ce qui
+        // sature réellement le contexte relu. Vocabulaire fermé sur deux valeurs :
+        // la clause est construite ici, jamais interpolée depuis l'appelant.
+        let sort_by_bytes = args
+            .get("sort")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.eq_ignore_ascii_case("bytes"));
+        let order_clause = if sort_by_bytes {
+            "(sum(response_bytes_sum) + sum(request_bytes_sum)) DESC, calls DESC"
+        } else {
+            "calls DESC"
+        };
 
         let rows = self
             .graph_store
@@ -1058,17 +1108,21 @@ impl McpServer {
                 // sum(bigint) → numeric, which the sql-gateway renderer can't
                 // decode yet (REQ-AXO-901905) — cast counts to ::bigint and the
                 // average to ::float8 so every cell renders as a readable scalar.
+                &format!(
                 "SELECT tool,
                         sum(call_count)::bigint AS calls,
                         COALESCE(sum(call_count) FILTER (WHERE status='error'), 0)::bigint AS errors,
                         round((sum(latency_sum_ms)::numeric / nullif(sum(call_count),0)), 1)::float8 AS avg_ms,
-                        max(latency_max_ms) AS max_ms
+                        max(latency_max_ms) AS max_ms,
+                        sum(response_bytes_sum)::bigint AS resp_bytes,
+                        max(response_bytes_max) AS resp_max,
+                        sum(request_bytes_sum)::bigint AS req_bytes
                  FROM axon.mcp_call_stat
                  WHERE bucket_hour > now() - make_interval(hours => ?)
                    AND (? = '' OR project_code = ?)
                  GROUP BY tool
-                 ORDER BY calls DESC
-                 LIMIT ?",
+                 ORDER BY {order_clause}
+                 LIMIT ?"),
                 &json!([window_hours, project_code, project_code, limit]),
             )
             .ok()
@@ -1087,6 +1141,7 @@ impl McpServer {
 
         let mut total_calls = 0i64;
         let mut total_errors = 0i64;
+        let mut total_bytes = 0i64;
         let mut lines = String::new();
         let tools: Vec<Value> = rows
             .iter()
@@ -1096,19 +1151,30 @@ impl McpServer {
                 let errors = to_i(&cell(r, 2));
                 let avg_ms = cell(r, 3);
                 let max_ms = cell(r, 4);
+                let resp_bytes = to_i(&cell(r, 5));
+                let resp_max = to_i(&cell(r, 6));
+                let req_bytes = to_i(&cell(r, 7));
                 total_calls += calls;
                 total_errors += errors;
+                total_bytes += resp_bytes + req_bytes;
                 let err_pct = if calls > 0 {
                     (errors as f64) * 100.0 / (calls as f64)
                 } else {
                     0.0
                 };
+                let kb = |n: i64| format!("{:.1}", n as f64 / 1024.0);
                 lines.push_str(&format!(
-                    "| {tool} | {calls} | {errors} ({err_pct:.0}%) | {avg_ms} | {max_ms} |\n"
+                    "| {tool} | {calls} | {errors} ({err_pct:.0}%) | {avg_ms} | {max_ms} | {} | {} | {} |\n",
+                    kb(resp_bytes),
+                    kb(req_bytes),
+                    resp_max
                 ));
                 json!({
                     "tool": tool, "calls": calls, "errors": errors,
                     "avg_latency_ms": avg_ms, "max_latency_ms": max_ms,
+                    "response_bytes": resp_bytes,
+                    "response_bytes_max": resp_max,
+                    "request_bytes": req_bytes,
                 })
             })
             .collect();
@@ -1119,8 +1185,11 @@ impl McpServer {
             0.0
         };
         let report = format!(
-            "## 📊 MCP Telemetry (last {window_hours}h{})\n\n**Total calls:** {total_calls} · **errors:** {total_errors} ({overall_err_pct:.1}%)\n\n| tool | calls | errors | avg ms | max ms |\n|---|---|---|---|---|\n{lines}\n_Signature-only (tool + ok/error + project) — no argument content. PG-native rollup._",
+            "## 📊 MCP Telemetry (last {window_hours}h{})\n\n**Total calls:** {total_calls} · **errors:** {total_errors} ({overall_err_pct:.1}%) · **payload:** {:.1} MiB{}\n\n| tool | calls | errors | avg ms | max ms | resp KiB | req KiB | resp max B |\n|---|---|---|---|---|---|---|---|\n{lines}\n_Signature-only (tool + ok/error + project) — sizes are measured, argument CONTENT never is. Sorted by {}. PG-native rollup._",
             if project_code.is_empty() { String::new() } else { format!(", project {project_code}") },
+            total_bytes as f64 / 1_048_576.0,
+            if sort_by_bytes { " · sorted by weight" } else { "" },
+            if sort_by_bytes { "payload weight" } else { "call volume" },
         );
 
         Some(json!({
@@ -1253,5 +1322,45 @@ mod friction_rendering_tests {
         assert_eq!(McpServer::i64_cell_for_tests(&json!("  42 ")), Some(42));
         assert_eq!(McpServer::i64_cell_for_tests(&json!("oops")), None);
         assert_eq!(McpServer::i64_cell_for_tests(&json!(null)), None);
+    }
+}
+
+/// REQ-AXO-902621 — mesurer le poids, sans jamais stocker le contenu.
+#[cfg(test)]
+mod payload_bytes_tests {
+    use super::payload_bytes;
+    use serde_json::json;
+
+    #[test]
+    fn le_poids_est_celui_de_la_forme_compacte_qui_voyage() {
+        let v = json!({ "a": 1, "b": "xy" });
+        assert_eq!(
+            payload_bytes(&v),
+            serde_json::to_string(&v).unwrap().len() as i64,
+            "on mesure ce qui voyage, pas une forme indentee qui ne voyage jamais"
+        );
+    }
+
+    #[test]
+    fn ne_rien_envoyer_ne_pese_rien() {
+        // `null` n'est pas une charge : un appel sans arguments doit peser 0,
+        // sinon chaque appel nu gonflerait le compteur de 4 octets fictifs.
+        assert_eq!(payload_bytes(&serde_json::Value::Null), 0);
+    }
+
+    #[test]
+    fn un_objet_vide_pese_ses_deux_accolades() {
+        assert_eq!(payload_bytes(&json!({})), 2);
+    }
+
+    #[test]
+    fn une_grosse_charge_est_mesuree_a_sa_vraie_taille() {
+        // Le cas qui motive la tranche : 11 % des appels portent 72 % du volume.
+        // Un plafond de mesure rendrait la queue invisible — donc pas de plafond.
+        let gros = json!({ "corps": "x".repeat(200_000) });
+        assert!(
+            payload_bytes(&gros) >= 200_000,
+            "la queue ne doit pas etre tronquee par la mesure elle-meme"
+        );
     }
 }

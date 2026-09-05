@@ -302,8 +302,11 @@ impl McpServer {
         self.record_mcp_friction(normalized_name, arguments, &final_response);
         // REQ-AXO-901961 S1 — per-call telemetry (every call, ok or error) with
         // latency, at the same chokepoint. Best-effort, signature-only.
+        // REQ-AXO-902621 — le POIDS des deux sens au même point d'étranglement :
+        // les arguments pèsent plus que les résultats, et rien ne le montrait.
         self.record_mcp_call(
             normalized_name,
+            arguments,
             &final_response,
             started.elapsed().as_millis() as i64,
         );
