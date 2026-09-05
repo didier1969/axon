@@ -944,6 +944,47 @@ impl McpServer {
             }
         }
 
+        // REQ-AXO-902596 (voix client KKI) — `token_budget` devient une BORNE DURE
+        // sur le paquet réellement rendu, pas une estimation imprimée à côté.
+        //
+        // `token_budget` ne pilotait que la sélection des chunks
+        // (`consumed_tokens + estimated > token_budget / 2`) ; le paquet assemblé
+        // pouvait ensuite le dépasser, et l'enveloppe se contentait de le CONSTATER
+        // dans `token_budget_estimate`. Un plafond qu'on mesure après coup n'est pas
+        // un plafond.
+        //
+        // La coupe se fait par BANDE, de la moins prioritaire vers la plus, et elle
+        // NOMME chaque bande retirée avec son compte — jamais un effacement muet
+        // (REQ-AXO-902409). `answer_sketch`, `direct_evidence` et
+        // `explicit_soll_anchors` ne sont JAMAIS coupés : ce sont la réponse et les
+        // ancres que l'appelant a explicitement nommées.
+        let bandes_omises = Self::borner_paquet_au_budget(&mut packet, token_budget);
+        if let Some(obj) = packet.as_object_mut() {
+            // `estimated_tokens` était calculé AVANT la coupe : le laisser tel quel
+            // ferait annoncer un poids que l'enveloppe ne porte plus. Il est
+            // recalculé sur ce qui part réellement.
+            let rendu = estimate_tokens(&[&serde_json::to_string(&obj).unwrap_or_default()]);
+            if let Some(estimate) = obj.get_mut("token_budget_estimate") {
+                if let Some(e) = estimate.as_object_mut() {
+                    e.insert("rendered_tokens".to_string(), json!(rendu));
+                    e.insert("within_budget".to_string(), json!(token_budget == 0 || rendu <= token_budget));
+                }
+            }
+            if !bandes_omises.is_empty() {
+                let total: usize = bandes_omises
+                    .iter()
+                    .map(|b| b.get("items_omitted").and_then(Value::as_u64).unwrap_or(0) as usize)
+                    .sum();
+                obj.insert("omitted_bands".to_string(), json!(bandes_omises));
+                obj.insert(
+                    "detail_continuation".to_string(),
+                    json!(format!(
+                        "{total} élément(s) retiré(s) pour tenir dans token_budget={token_budget}.                          Les bandes retirées sont NOMMÉES dans `omitted_bands` et rendues comme                          tableaux VIDES, jamais supprimées — « retiré faute de place » et « rien                          trouvé » ne doivent pas se confondre. Pour les obtenir : relancer avec un                          `token_budget` plus élevé, ou poser la question restreinte à la bande                          voulue. `answer_sketch`, `direct_evidence` et `explicit_soll_anchors` ne                          sont JAMAIS coupés."
+                    )),
+                );
+            }
+        }
+
         // REQ-AXO-901752 — SRS slice 2: detect legacy proximity from
         // artifacts returned in the evidence packet.
         let legacy_proximity_value =
@@ -3023,6 +3064,66 @@ impl McpServer {
         })
     }
 
+
+    /// REQ-AXO-902596 — coupe le paquet jusqu'à tenir dans `token_budget`, et rend
+    /// la liste de ce qui a été retiré.
+    ///
+    /// PURE (hors la mutation du paquet qu'on lui confie) pour que la matrice de
+    /// coupe soit testable sans base ni plongement.
+    ///
+    /// ## Ce qui n'est JAMAIS coupé, et pourquoi
+    ///
+    /// `answer_sketch` (la réponse), `direct_evidence` (ce qui la fonde) et
+    /// `explicit_soll_anchors` (ce que l'appelant a NOMMÉ). Couper l'une des trois
+    /// pour tenir un budget rendrait une enveloppe conforme et inutile — le mode
+    /// d'échec que KKI a rapporté sous une autre forme.
+    ///
+    /// ## L'ordre de coupe
+    ///
+    /// Du plus périphérique au plus central : les voisins structurels, puis les
+    /// documents de support, puis les chunks de support. Chaque bande retirée est
+    /// NOMMÉE avec son compte et remplacée par un tableau vide — jamais supprimée
+    /// de l'enveloppe, pour qu'un lecteur ne confonde pas « retiré faute de place »
+    /// avec « rien trouvé ».
+    pub(crate) fn borner_paquet_au_budget(
+        packet: &mut Value,
+        token_budget: usize,
+    ) -> Vec<Value> {
+        /// Bandes coupables, de la moins prioritaire à la plus.
+        const BANDES: [&str; 5] = [
+            "structural_neighbors",
+            "supporting_docs",
+            "supporting_code_context",
+            "supporting_guidelines",
+            "supporting_chunks",
+        ];
+        let poids = |v: &Value| -> usize {
+            estimate_tokens(&[&serde_json::to_string(v).unwrap_or_default()])
+        };
+        let mut omises: Vec<Value> = Vec::new();
+        if token_budget == 0 || poids(packet) <= token_budget {
+            return omises;
+        }
+        for bande in BANDES {
+            if poids(packet) <= token_budget {
+                break;
+            }
+            let Some(obj) = packet.as_object_mut() else { break };
+            let Some(valeur) = obj.get(bande) else { continue };
+            let compte = valeur.as_array().map(|a| a.len()).unwrap_or(0);
+            if compte == 0 {
+                continue;
+            }
+            let cout = poids(valeur);
+            obj.insert(bande.to_string(), json!([]));
+            omises.push(json!({
+                "band": bande,
+                "items_omitted": compte,
+                "tokens_freed": cout
+            }));
+        }
+        omises
+    }
 
     fn render_evidence_packet(&self, packet: &Value, route: RetrievalRoute) -> String {
         let answer_sketch = packet

@@ -85,6 +85,10 @@ mod tool_contracts;
 #[path = "mcp/tool_contracts_coverage_tests.rs"]
 mod tool_contracts_coverage_tests;
 mod tools_context;
+// REQ-AXO-902596 — `token_budget` comme borne DURE sur le paquet rendu.
+#[cfg(test)]
+#[path = "mcp/tools_context_budget_tests.rs"]
+mod tools_context_budget_tests;
 mod tools_data_catalog;
 mod tools_dx;
 mod tools_framework;
