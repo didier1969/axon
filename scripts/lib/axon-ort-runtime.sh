@@ -36,6 +36,26 @@ axon_resolve_nix_gcc_lib_dir() {
     fi
 }
 
+# REQ-AXO-902622 — reconnaître le chemin du store à sa FORME, jamais à sa POSITION.
+#
+# `nix build --print-out-paths` est capturé plus bas avec `2>&1`, pour que `tee` garde un
+# log complet quand le build échoue vraiment. Mais le `nix` du PATH est un shim
+# d'admission (`nexus-heavy-command.sh`) qui écrit son rapport — deux lignes de prose puis
+# un objet JSON de ~10 Ko — sur stderr, APRÈS que la commande réelle a rendu son résultat.
+# Fusionnés par le `2>&1`, le `tail -n 1` d'origine rendait ce JSON : le test
+# `-f "$ORT_OUT_PATH/lib/libonnxruntime.so"` échouait, et le script annonçait
+# « Unable to materialize a valid ONNX Runtime output path » sur un build RÉUSSI.
+#
+# `tail -n 1` suppose que la dernière ligne écrite est le résultat. Rien ne le garantit :
+# un avertissement nix tardif, un wrapper, une trace différée suffisent à le démentir.
+# On retient donc la dernière ligne qui EST un chemin du store et rien d'autre — ce qui
+# écarte la liste indentée des paths à télécharger, les `copying path '/nix/store/…'`
+# (qui commencent par `copying`) et le JSON du courtier (qui commence par `{`).
+# La DERNIÈRE, pour préserver la sémantique de `tail -n 1` sur une cible multi-sorties.
+axon_ort_last_store_path() {
+    awk '/^\/nix\/store\/[^[:space:]]+$/ { last = $0 } END { if (last != "") print last }'
+}
+
 # REQ-AXO-902347 — locate the NVIDIA *driver* library directory.
 #
 # `libcuda.so.1` ships with the DRIVER, not with the CUDA toolkit: it is not in
@@ -245,9 +265,9 @@ axon_resolve_ort_runtime() {
         # diagnostic, le « Build log: » final) sont dans ce bloc.
         ORT_BUILD_LOG="$(mktemp /tmp/axon-ort-build.XXXXXX.log)"
         if [[ "$ORT_BUILD_TARGET" == "nixpkgs#onnxruntime" ]]; then
-            ORT_OUT_PATH="$(nix build --no-link --print-out-paths "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | tail -n 1)"
+            ORT_OUT_PATH="$(nix build --no-link --print-out-paths "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | axon_ort_last_store_path)"
         else
-            ORT_OUT_PATH="$(nix build --impure --no-link --print-out-paths --expr "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | tail -n 1)"
+            ORT_OUT_PATH="$(nix build --impure --no-link --print-out-paths --expr "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | axon_ort_last_store_path)"
         fi
         if [[ -z "${ORT_OUT_PATH:-}" || ! -f "$ORT_OUT_PATH/lib/libonnxruntime.so" ]]; then
             echo "❌ Unable to materialize a valid ONNX Runtime output path."
