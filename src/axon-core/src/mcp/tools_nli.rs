@@ -48,6 +48,61 @@ fn err_json(msg: String, status: &str) -> Value {
 /// lui-même est mal calibré, pas que la bande est trop large.
 const BORDERLINE_RATIO: f32 = 0.90;
 
+/// REQ-AXO-902602 — les identifiants SOLL cités EXPLICITEMENT dans le candidat.
+///
+/// Voix client KKI (feedback #399, satisfaction 4/10) : une affirmation citant
+/// `REQ-KKI-126` n'a inclus AUCUN passage de ce nœud parmi 24 candidats, et a jugé
+/// des artefacts sans rapport. La cause n'est pas un mauvais classement ANN — c'est
+/// que le corpus interrogé ne contient PAS la SOLL : `ist.chunk` ne porte que
+/// `source_type` `symbol` (532 538 lignes) et `file` (8 894), mesuré le 2026-09-05.
+/// Le nœud cité était structurellement inatteignable. Aucun réglage de seuil ne
+/// pouvait le faire apparaître.
+///
+/// La forme reconnue est la forme canonique : trois lettres, tiret, trois lettres,
+/// tiret, chiffres. Écrite à la main plutôt que par regex — la dépendance n'existe
+/// pas dans ce crate et le motif est trop simple pour la justifier.
+pub(crate) fn soll_ids_cites(candidat: &str) -> Vec<String> {
+    let octets = candidat.as_bytes();
+    let mut trouves: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < octets.len() {
+        // Un identifiant commence sur une frontière de mot : sinon `XREQ-AXO-1` et
+        // le fragment `-AXO-1` d'un identifiant plus long deviendraient des ancres.
+        let debut_de_mot = i == 0 || !(octets[i - 1].is_ascii_alphanumeric() || octets[i - 1] == b'-');
+        if !debut_de_mot {
+            i += 1;
+            continue;
+        }
+        let reste = &octets[i..];
+        if reste.len() < 9 {
+            break;
+        }
+        let forme = reste[0].is_ascii_uppercase()
+            && reste[1].is_ascii_uppercase()
+            && reste[2].is_ascii_uppercase()
+            && reste[3] == b'-'
+            && reste[4].is_ascii_uppercase()
+            && reste[5].is_ascii_uppercase()
+            && reste[6].is_ascii_uppercase()
+            && reste[7] == b'-'
+            && reste[8].is_ascii_digit();
+        if !forme {
+            i += 1;
+            continue;
+        }
+        let mut fin = i + 9;
+        while fin < octets.len() && octets[fin].is_ascii_digit() {
+            fin += 1;
+        }
+        let id = candidat[i..fin].to_string();
+        if !trouves.contains(&id) {
+            trouves.push(id);
+        }
+        i = fin;
+    }
+    trouves
+}
+
 impl McpServer {
     pub(crate) fn axon_contradiction_check(&self, args: &Value) -> Option<Value> {
         let candidate = match args.get("candidate").and_then(Value::as_str) {
@@ -145,10 +200,64 @@ impl McpServer {
             self.graph_store.query_ann_json(&ann_sql, ef_search)
         };
         let exact_scan = scope_chunk_count > 0 && scope_chunk_count <= EXACT_SCAN_MAX;
-        let rows: Vec<Vec<Value>> = match ann_result {
+        let mut rows: Vec<Vec<Value>> = match ann_result {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(e) => return Some(err_json(format!("ANN shortlist failed: {e}"), "degraded")),
         };
+
+        // REQ-AXO-902602 — les ancres citées passent DEVANT, et ne dépendent pas de
+        // l'ANN. Un identifiant SOLL écrit dans le candidat est une réservation
+        // déterministe : le nœud est chargé depuis `soll.node`, jamais recherché par
+        // similarité. C'est la seule façon de le voir — `ist.chunk` ne contient pas
+        // la SOLL, donc aucune shortlist ne pouvait le ramener.
+        //
+        // En TÊTE parce que le budget de jugement est borné : si le temps manque, ce
+        // qui doit être jugé en premier est ce que l'appelant a explicitement cité,
+        // pas le 24ᵉ voisin d'un plongement.
+        let ancres_citees = soll_ids_cites(candidate);
+        let mut ancres_absentes: Vec<String> = Vec::new();
+        let mut ancres_chargees: Vec<String> = Vec::new();
+        if !ancres_citees.is_empty() {
+            // Borné à 8 : au-delà, le candidat n'est plus une affirmation ancrée mais
+            // un catalogue, et jugerait le budget entier sur des citations.
+            const MAX_ANCRES: usize = 8;
+            let mut lignes_ancres: Vec<Vec<Value>> = Vec::new();
+            for id in ancres_citees.iter().take(MAX_ANCRES) {
+                let id_echappe = id.replace('\'', "''");
+                let sql = format!(
+                    "SELECT id, title, description FROM {} WHERE id = '{}'",
+                    self.graph_store.soll_table("Node"),
+                    id_echappe
+                );
+                let charge = self
+                    .graph_store
+                    .query_json(&sql)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+                    .and_then(|lignes| lignes.into_iter().next());
+                match charge {
+                    Some(ligne) if ligne.len() >= 3 => {
+                        // Même forme que les lignes de l'ANN — la boucle de jugement
+                        // retire l'en-tête sur `\n\n`, donc le modèle voit le corps.
+                        let corps: String = ligne[2].chars().take(4_000).collect();
+                        lignes_ancres.push(vec![
+                            json!(id),
+                            json!(format!("soll:{id}\n\n{}\n{}", ligne[1], corps)),
+                            json!(format!("soll://{id}")),
+                            json!(id),
+                        ]);
+                        ancres_chargees.push(id.clone());
+                    }
+                    _ => ancres_absentes.push(id.clone()),
+                }
+            }
+            for id in ancres_citees.iter().skip(MAX_ANCRES) {
+                ancres_absentes.push(id.clone());
+            }
+            lignes_ancres.append(&mut rows);
+            rows = lignes_ancres;
+        }
+        let nb_ancres = ancres_chargees.len();
 
         // 3. NLI re-rank: judge each passage (premise) vs the candidate (hypothesis).
         //    Bounded by a wall-clock budget so a slow provider (CPU ≈ 5s/pair) or
@@ -179,7 +288,11 @@ impl McpServer {
         let mut truncated = false;
         let mut max_contradiction = 0f32;
         let mut max_entailment = 0f32;
-        for row in &rows {
+        // REQ-AXO-902602 — combien d'ancres ont RÉELLEMENT été jugées. Le budget peut
+        // s'épuiser, un nœud peut manquer : le verdict doit le savoir, pas le supposer.
+        let mut ancres_jugees = 0usize;
+        for (position, row) in rows.iter().enumerate() {
+            let est_ancre = position < nb_ancres;
             if started.elapsed().as_millis() > budget_ms {
                 // Budget exhausted before judging the whole shortlist — stop and
                 // flag it so the verdict is honest about partial coverage.
@@ -199,6 +312,9 @@ impl McpServer {
             match crate::nli::judge_global(passage, candidate) {
                 Ok(scores) => {
                     judged += 1;
+                    if est_ancre {
+                        ancres_jugees += 1;
+                    }
                     max_contradiction = max_contradiction.max(scores.contradiction);
                     max_entailment = max_entailment.max(scores.entailment);
                     // A passage is a genuine conflict only if its ARGMAX verdict is
@@ -213,6 +329,11 @@ impl McpServer {
                             "contradiction": scores.contradiction,
                             "entailment": scores.entailment,
                             "verdict": scores.verdict().as_str(),
+                            // REQ-AXO-902602 — d'où vient ce passage. Sans cette
+                            // provenance, l'appelant ne peut pas distinguer un
+                            // jugement porté sur le nœud qu'il a cité d'un jugement
+                            // porté sur le 24ᵉ voisin d'un plongement.
+                            "provenance": if est_ancre { "soll_anchor" } else { "ann_shortlist" },
                         }));
                     }
                 }
@@ -270,7 +391,16 @@ impl McpServer {
             && !conflicts.is_empty()
             && max_contradiction >= threshold
             && margin >= net_margin * BORDERLINE_RATIO;
-        let verdict = if rows.is_empty() || truncated {
+        // REQ-AXO-902602 — fail-closed sur l'ancre canonique. Si l'appelant a cité un
+        // identifiant SOLL et que ce nœud n'a PAS été jugé — introuvable, ou budget
+        // épuisé avant lui — le verdict ne peut pas être « pas de contradiction » : la
+        // pièce que l'affirmation invoque n'a pas été lue. C'est exactement ce que KKI
+        // a reçu, avec une satisfaction de 4/10 : un verdict rendu sur 24 artefacts
+        // sans rapport et sur zéro passage du nœud cité.
+        let ancre_manquee = !ancres_citees.is_empty() && ancres_jugees < ancres_citees.len();
+        let verdict = if ancre_manquee && !contradicted {
+            "inconclusive"
+        } else if rows.is_empty() || truncated {
             "inconclusive"
         } else if contradicted {
             "contradicts"
@@ -286,6 +416,24 @@ impl McpServer {
             conflicts.clear();
         }
 
+        // REQ-AXO-902602 — l'ancre citée est annoncée dans le canal TEXTE, pas
+        // seulement dans `data` : c'est là que l'appelant lit son verdict.
+        let ancre_note = if ancres_citees.is_empty() {
+            String::new()
+        } else if ancre_manquee {
+            format!(
+                " ⚠️ {}/{} ancre(s) SOLL citée(s) JUGÉE(S) — non lues : {}. Le verdict ne peut pas être un feu vert : la pièce que l'affirmation invoque n'a pas été examinée.",
+                ancres_jugees,
+                ancres_citees.len(),
+                ancres_absentes.join(", ")
+            )
+        } else {
+            format!(
+                " ✅ {} ancre(s) SOLL citée(s) chargée(s) depuis la SOLL et jugée(s) en tête de shortlist : {}.",
+                ancres_jugees,
+                ancres_chargees.join(", ")
+            )
+        };
         let report = if rows.is_empty() {
             format!(
                 "### 🧪 contradiction_check\n\nverdict=**inconclusive** — 0 passage retrieved from scope `{}`. Diagnostic: {} embedded symbol-chunk(s) exist in scope, candidate embed dim={} norm={:.3}, ef_search={}. (count>0 + valid embed ⇒ ANN/over-filtering, not an empty scope or a failed embed.) NOT a clean bill of health — nothing was checked.",
@@ -335,7 +483,7 @@ impl McpServer {
                 conflicts.len(),
                 margin_note,
                 trunc_note
-            )
+            ) + &ancre_note
         };
         Some(json!({
             "content": [{ "type": "text", "text": report }],
@@ -362,6 +510,18 @@ impl McpServer {
                     "max_contradiction": max_contradiction,
                     "max_entailment": max_entailment,
                     "margin": margin
+                },
+                // REQ-AXO-902602 — la provenance de la shortlist, dite plutôt que
+                // supposée. `cited` vient du texte du candidat ; `judged` est ce qui a
+                // RÉELLEMENT été lu ; `missing` nomme les nœuds introuvables ou
+                // écartés par la borne. Un écart entre `cited` et `judged` force le
+                // verdict à `inconclusive`.
+                "soll_anchors": {
+                    "cited": ancres_citees,
+                    "loaded": ancres_chargees,
+                    "judged": ancres_jugees,
+                    "missing": ancres_absentes,
+                    "note": "REQ-AXO-902602 — un identifiant SOLL cité dans le candidat réserve un slot DÉTERMINISTE en tête de shortlist : `ist.chunk` ne contient pas la SOLL (source_type ∈ {symbol, file}), donc aucune recherche ANN ne pouvait ramener le nœud cité."
                 },
                 "top_conflicts": conflicts
             }
@@ -435,5 +595,56 @@ mod contrat_publie_tests {
              sans savoir quoi en faire",
             muets.len()
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// REQ-AXO-902602 — l'extraction des ancres citées.
+//
+// Ce qui est couvert ICI : la reconnaissance des identifiants. Ce qui ne l'est PAS :
+// le chargement depuis `soll.node`, le jugement NLI et le verdict fail-closed —
+// tous trois exigent une base ET le modèle NLI provisionné. La preuve de bout en
+// bout est un appel réel sur le cas KKI, décrit dans le nœud ; un test vert ici n'en
+// dit rien, et c'est pourquoi les deux existent.
+// ---------------------------------------------------------------------------------
+#[cfg(test)]
+mod soll_ids_cites_tests {
+    use super::soll_ids_cites;
+
+    #[test]
+    fn LE_cas_KKI_l_identifiant_cite_est_reconnu() {
+        let ids = soll_ids_cites("La claim affirme que REQ-KKI-126 impose un oracle.");
+        assert_eq!(ids, vec!["REQ-KKI-126".to_string()]);
+    }
+
+    #[test]
+    fn plusieurs_identifiants_sans_doublon_dans_l_ordre_du_texte() {
+        let ids = soll_ids_cites("DEC-AXO-098 raffine REQ-AXO-902602, cf. DEC-AXO-098.");
+        assert_eq!(
+            ids,
+            vec!["DEC-AXO-098".to_string(), "REQ-AXO-902602".to_string()],
+            "un identifiant répété ne doit réserver qu'UN slot"
+        );
+    }
+
+    #[test]
+    fn un_fragment_au_MILIEU_d_un_mot_n_est_pas_un_identifiant() {
+        // Sans la frontière de mot, `XREQ-AXO-1` et le suffixe d'un identifiant plus
+        // long deviendraient des ancres, et chaque fausse ancre coûte un jugement NLI
+        // (~5 s sur CPU) prélevé sur le budget des vraies.
+        assert!(soll_ids_cites("XREQ-AXO-126").is_empty());
+        assert!(soll_ids_cites("req-axo-126").is_empty(), "la casse est significative");
+        assert!(soll_ids_cites("REQ-AXO-").is_empty(), "sans chiffre, pas d'identifiant");
+        assert!(soll_ids_cites("REQAXO126").is_empty());
+    }
+
+    #[test]
+    fn MUTANT_un_texte_sans_citation_ne_reserve_RIEN() {
+        // Sans ce contrôle, une extraction qui rendrait toujours quelque chose
+        // passerait les cas ci-dessus : ils vérifient ce qu'elle TROUVE, jamais
+        // qu'elle sait ne rien trouver. Or c'est ce cas qui décide que le
+        // comportement historique — shortlist ANN pure — reste intact.
+        assert!(soll_ids_cites("Le service utilise PostgreSQL et non MongoDB.").is_empty());
+        assert!(soll_ids_cites("").is_empty());
     }
 }
