@@ -130,6 +130,54 @@ axon_compose_ort_ld_library_path() {
     return 0
 }
 
+# REQ-AXO-902623 — refuser un ORT sans provider CUDA, au lieu d'avertir et de continuer.
+#
+# Pourquoi ce n'était PAS déjà le cas : le repli « materialization nixpkgs » ne
+# s'achevait jamais. `REQ-AXO-902622` l'a réparé, et il aboutit désormais sur
+# `nixpkgs#onnxruntime` — le paquet générique du cache, qui ne porte PAS
+# `libonnxruntime_providers_cuda.so` (vérifié le 2026-09-05 sur
+# bqs4pjxbw1jp2gq48m33myy9iq19m0ws-onnxruntime-1.27.1). L'ancien code émettait un
+# `axon_log_warn` puis CONTINUAIT : l'embedder tombait sur CPU, `query` / `why` /
+# `retrieve_context` passaient de ~ms à ~secondes, et le runtime se déclarait HEALTHY.
+# Un avertissement dans un log de démarrage n'est pas un canal : personne ne le relit.
+#
+# Aucun faux positif possible sur les branches par manifeste : celle du manifeste
+# principal exige déjà `-f "$CUDA_PROVIDER_PATH"` avant de peupler ORT_OUT_PATH, et
+# celle du frère TensorRT exige `-f "$sibling_cuda"`. Seul le repli nixpkgs arrive ici
+# sans garantie — c'est exactement la branche visée.
+#
+# La branche TensorRT juste en dessous refusait déjà de la même façon ; l'asymétrie
+# entre les deux n'avait pas de raison écrite.
+#
+# L'échappatoire opérateur reste entière : `AXON_EMBEDDING_PROVIDER=cpu`
+# (REQ-AXO-902021) ne passe pas par ici — la fonction rend 0 pour tout autre provider.
+axon_ort_assert_cuda_provider() {
+    local provider_request="${1:-}"
+    local ort_out_path="${2:-}"
+    local manifest="${3:-}"
+
+    case "$provider_request" in
+        cuda|tensorrt) ;;
+        *) return 0 ;;
+    esac
+
+    if [[ -n "$ort_out_path" && -f "$ort_out_path/lib/libonnxruntime_providers_cuda.so" ]]; then
+        return 0
+    fi
+
+    echo "❌ Provider \"$provider_request\" demandé, mais le paquet ONNX Runtime retenu ne fournit pas libonnxruntime_providers_cuda.so." >&2
+    echo "   Paquet retenu :   ${ort_out_path:-<aucun>}" >&2
+    if [[ -n "$manifest" ]]; then
+        if [[ -f "$manifest" ]]; then
+            echo "   Manifeste attendu : $manifest (présent — il n'a pas été retenu, lire les messages ci-dessus)" >&2
+        else
+            echo "   Manifeste attendu : $manifest (ABSENT — c'est pourquoi le repli nixpkgs a été emprunté)" >&2
+        fi
+    fi
+    echo "   Reconstruire l'artefact (bash scripts/build_ort_tensorrt_artifact.sh) ou démarrer explicitement en CPU avec AXON_EMBEDDING_PROVIDER=cpu." >&2
+    return 1
+}
+
 axon_resolve_ort_runtime() {
     local project_root="${1:?project root required}"
     local embedding_provider_request="${2:?embedding provider required}"
@@ -301,9 +349,10 @@ axon_resolve_ort_runtime() {
             fi
         fi
 
-        if [[ ! -f "$ORT_OUT_PATH/lib/libonnxruntime_providers_cuda.so" ]]; then
-            axon_log_warn "The selected ONNX Runtime package does not include libonnxruntime_providers_cuda.so."
-            echo "   CUDA embedding cannot activate with this system ORT package; Axon will fall back to CPU diagnostics."
+        # REQ-AXO-902623 — refus, plus avertissement : le corps de la règle et la
+        # preuve d'absence de faux positif sont sur axon_ort_assert_cuda_provider.
+        if ! axon_ort_assert_cuda_provider "$embedding_provider_request" "$ORT_OUT_PATH" "${ORT_ARTIFACT_MANIFEST:-}"; then
+            return 1
         fi
         if [[ "$gpu_service_tensorrt_requested" == "1" && ! -f "$ORT_OUT_PATH/lib/libonnxruntime_providers_tensorrt.so" ]]; then
             echo "❌ TensorRT mode requested but the selected ONNX Runtime package does not include libonnxruntime_providers_tensorrt.so."
