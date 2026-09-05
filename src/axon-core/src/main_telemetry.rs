@@ -41,247 +41,277 @@ pub(crate) fn spawn_runtime_telemetry(
 ) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
+        // REQ-AXO-902589 (a) — un tick qui BLOQUE le worker bloque TOUTE la surface MCP.
+        //
+        // Mesuré le 2026-09-05 sur le binaire promu, par appels HTTP directs : 12 aberrants
+        // sur 1 639 appels, TOUS commencés entre 75 et 89 ms après la seconde ronde, durant
+        // 0,7 à 1,7 s. La grille est celle de ce `interval` — 1 Hz, à ±7 ms.
+        //
+        // Le contrôle qui a déplacé la cause : `help()`, qui ne touche ni GraphStore ni PG,
+        // bloque IDENTIQUEMENT. Ce n'est donc pas une contention de base ni un verrou
+        // applicatif : c'est le worker thread tokio. Or le corps de ce tick est ~240 lignes
+        // SYNCHRONES (`runtime_telemetry_snapshot`, `latest_lifecycle_heartbeat`,
+        // `latest_indexer_runtime_truth`… aucun `.await`) exécutées dans une tâche `spawn`.
+        // C'est le motif exact qui immobilise un worker du scheduler.
+        //
+        // `Skip` plutôt que le défaut `Burst` : si un tick déborde la seconde, rattraper les
+        // ticks manqués empilerait le blocage au lieu de le résorber. Une télémétrie en
+        // retard doit sauter une mesure, pas doubler la peine.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             interval.tick().await;
-            let mut snapshot = main_background::runtime_telemetry_snapshot(&store, &queue);
-            let runtime_mode = AxonRuntimeMode::from_env();
-            // REQ-AXO-901854 — pairing + runtime truth sourced from the
-            // indexer's fresh PG lifecycle heartbeat (canonical; replaces the
-            // runtime-heartbeat.json file bridge). Fetched once per tick and
-            // reused below for the dashboard Pipeline-B compute verdict.
-            let now_ms_tick: u64 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let indexer_peer_hb = store
-                .latest_lifecycle_heartbeat("indexer")
-                .ok()
-                .flatten()
-                .filter(|row| {
-                    (now_ms_tick as i64 - row.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS
-                });
-            let indexer_paired = indexer_peer_hb.is_some();
-            // REQ-AXO-901854 (additive foundation slice) — when this brain does
-            // not run the pipeline (brain_only), its own telemetry snapshot has
-            // empty worker/embed-rate counters. Project the indexer's published
-            // truth (observed at the OWNER) over those fields when the row is
-            // fresh. The brain stays a pure reader (PIL-AXO-001).
-            if !runtime_mode.ingestion_enabled() {
-                if let Ok(Some(truth)) = store.latest_indexer_runtime_truth("indexer") {
-                    if (now_ms_tick as i64 - truth.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS {
-                        // Canonical, owner-observed (pipeline). graph_workers_active
-                        // = Σ A-stage inflight; embed rate = indexer's own accessor;
-                        // ready_queue_chunks = the dashboard funnel's backlog signal.
-                        // graph_workers_started_total is left untouched — no canonical
-                        // owner source exists, so it is not fabricated here. The
-                        // in-flight gauge (in_flight_count / oldest_in_flight_*) and
-                        // persist_queue_depth are published to the row (canonically
-                        // available cross-process) but have no existing dashboard field
-                        // to project onto — surfacing them is a presentation slice.
-                        snapshot.graph_workers_active_current =
-                            truth.graph_workers_active.max(0) as u64;
-                        snapshot.chunk_embeddings_per_second = truth.chunk_embeddings_per_second;
-                        snapshot.ready_queue_chunks_current =
-                            truth.ready_queue_chunks.max(0) as u64;
-                        let writer_state = if truth.a3_consecutive_failures
-                            >= axon_core::pipeline::stage_health::A3_SYSTEMIC_FAILURE_THRESHOLD
-                                as i64
-                        {
-                            axon_core::runtime_readiness::SubsystemState::Degraded {
-                                reason: format!(
-                                    "A3 persistence failed {} consecutive batches: {}",
-                                    truth.a3_consecutive_failures,
-                                    truth.a3_last_error.as_deref().unwrap_or("unknown error")
-                                ),
-                            }
-                        } else {
-                            axon_core::runtime_readiness::SubsystemState::Ready
-                        };
-                        axon_core::runtime_readiness::report_subsystem_state(
-                            axon_core::runtime_readiness::Subsystem::IstWriter,
-                            writer_state,
-                        );
+            // Le corps entier part sur le pool bloquant : il n'a aucun `.await`, donc rien
+            // n'y gagne à rester sur le runtime qui sert MCP.
+            let store = Arc::clone(&store);
+            let queue = Arc::clone(&queue);
+            let results_tx = results_tx.clone();
+            if tokio::task::spawn_blocking(move || {
+                let mut snapshot = main_background::runtime_telemetry_snapshot(&store, &queue);
+                let runtime_mode = AxonRuntimeMode::from_env();
+                // REQ-AXO-901854 — pairing + runtime truth sourced from the
+                // indexer's fresh PG lifecycle heartbeat (canonical; replaces the
+                // runtime-heartbeat.json file bridge). Fetched once per tick and
+                // reused below for the dashboard Pipeline-B compute verdict.
+                let now_ms_tick: u64 = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let indexer_peer_hb = store
+                    .latest_lifecycle_heartbeat("indexer")
+                    .ok()
+                    .flatten()
+                    .filter(|row| {
+                        (now_ms_tick as i64 - row.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS
+                    });
+                let indexer_paired = indexer_peer_hb.is_some();
+                // REQ-AXO-901854 (additive foundation slice) — when this brain does
+                // not run the pipeline (brain_only), its own telemetry snapshot has
+                // empty worker/embed-rate counters. Project the indexer's published
+                // truth (observed at the OWNER) over those fields when the row is
+                // fresh. The brain stays a pure reader (PIL-AXO-001).
+                if !runtime_mode.ingestion_enabled() {
+                    if let Ok(Some(truth)) = store.latest_indexer_runtime_truth("indexer") {
+                        if (now_ms_tick as i64 - truth.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS {
+                            // Canonical, owner-observed (pipeline). graph_workers_active
+                            // = Σ A-stage inflight; embed rate = indexer's own accessor;
+                            // ready_queue_chunks = the dashboard funnel's backlog signal.
+                            // graph_workers_started_total is left untouched — no canonical
+                            // owner source exists, so it is not fabricated here. The
+                            // in-flight gauge (in_flight_count / oldest_in_flight_*) and
+                            // persist_queue_depth are published to the row (canonically
+                            // available cross-process) but have no existing dashboard field
+                            // to project onto — surfacing them is a presentation slice.
+                            snapshot.graph_workers_active_current =
+                                truth.graph_workers_active.max(0) as u64;
+                            snapshot.chunk_embeddings_per_second = truth.chunk_embeddings_per_second;
+                            snapshot.ready_queue_chunks_current =
+                                truth.ready_queue_chunks.max(0) as u64;
+                            let writer_state = if truth.a3_consecutive_failures
+                                >= axon_core::pipeline::stage_health::A3_SYSTEMIC_FAILURE_THRESHOLD
+                                    as i64
+                            {
+                                axon_core::runtime_readiness::SubsystemState::Degraded {
+                                    reason: format!(
+                                        "A3 persistence failed {} consecutive batches: {}",
+                                        truth.a3_consecutive_failures,
+                                        truth.a3_last_error.as_deref().unwrap_or("unknown error")
+                                    ),
+                                }
+                            } else {
+                                axon_core::runtime_readiness::SubsystemState::Ready
+                            };
+                            axon_core::runtime_readiness::report_subsystem_state(
+                                axon_core::runtime_readiness::Subsystem::IstWriter,
+                                writer_state,
+                            );
+                        }
                     }
                 }
-            }
-            let runtime_truth_feed = if runtime_mode.ingestion_enabled() {
-                service_guard::record_runtime_truth_bridge_dispatch(None)
-            } else if let Some(ref hb) = indexer_peer_hb {
-                service_guard::runtime_truth_feed_from_peer_heartbeat(hb.heartbeat_ms.max(0) as u64)
-            } else {
-                service_guard::current_runtime_truth_feed()
-            };
-            let telemetry_source = "local_runtime".to_string();
-            let telemetry_process_role = current_runtime_process_role().as_str().to_string();
-            let telemetry_freshness_state = freshness_state_for_feed(&runtime_truth_feed);
-            let telemetry_observed_age_ms = runtime_truth_feed.observed_age_ms;
-            let telemetry_degraded_reason = runtime_truth_feed.degraded_reason.clone();
-            // REQ-AXO-901806 — clone owned strings before they're moved
-            // into BridgeEvent so the dashboard composer below can still
-            // read them. Cheap (small strings, ~100 bytes total).
-            let dashboard_last_lane = snapshot.last_consumed_batch_lane.clone();
-            let dashboard_service_pressure = snapshot.service_pressure.clone();
-            let dashboard_claim_mode = snapshot.claim_mode.clone();
-            let event = BridgeEvent::RuntimeTelemetry {
-                telemetry_source,
-                telemetry_process_role,
-                telemetry_freshness_state,
-                telemetry_observed_age_ms,
-                telemetry_degraded_reason,
-                budget_bytes: snapshot.budget_bytes,
-                reserved_bytes: snapshot.reserved_bytes,
-                exhaustion_ratio: snapshot.exhaustion_ratio,
-                reserved_task_count: snapshot.reserved_task_count,
-                anonymous_trace_reserved_tasks: snapshot.anonymous_trace_reserved_tasks,
-                anonymous_trace_admissions_total: snapshot.anonymous_trace_admissions_total,
-                reservation_release_misses_total: snapshot.reservation_release_misses_total,
-                queue_depth: snapshot.queue_depth,
-                claim_mode: snapshot.claim_mode,
-                service_pressure: snapshot.service_pressure,
-                interactive_priority_active: snapshot.interactive_priority_active,
-                interactive_priority_level: snapshot.interactive_priority_level,
-                interactive_requests_in_flight: snapshot.interactive_requests_in_flight,
-                oversized_refusals_total: snapshot.oversized_refusals_total,
-                degraded_mode_entries_total: snapshot.degraded_mode_entries_total,
-                background_launches_suppressed_total: snapshot.background_launches_suppressed_total,
-                vectorization_suppressed_due_to_interactive: snapshot
-                    .vectorization_suppressed_due_to_interactive,
-                vectorization_interrupted_due_to_interactive: snapshot
-                    .vectorization_interrupted_due_to_interactive,
-                vectorization_requeued_for_interactive: snapshot
-                    .vectorization_requeued_for_interactive,
-                vectorization_resumed_after_interactive: snapshot
-                    .vectorization_resumed_after_interactive,
-                projection_suppressed_due_to_interactive: snapshot
-                    .projection_suppressed_due_to_interactive,
-                memory_trim_attempts_total: snapshot.memory_trim_attempts_total,
-                memory_trim_successes_total: snapshot.memory_trim_successes_total,
-                cpu_load: snapshot.cpu_load,
-                ram_load: snapshot.ram_load,
-                io_wait: snapshot.io_wait,
-                host_state: snapshot.host_state,
-                host_guidance_slots: snapshot.host_guidance_slots,
-                rss_bytes: snapshot.rss_bytes,
-                rss_anon_bytes: snapshot.rss_anon_bytes,
-                rss_file_bytes: snapshot.rss_file_bytes,
-                rss_shmem_bytes: snapshot.rss_shmem_bytes,
-                pg_database_bytes: snapshot.pg_database_bytes,
-                pg_chunkembedding_total_bytes: snapshot.pg_chunkembedding_total_bytes,
-                pg_wal_bytes: snapshot.pg_wal_bytes,
-                pg_buffer_hit_ratio: snapshot.pg_buffer_hit_ratio,
-                vector_chunks_embedded_cumulative: snapshot.vector_chunks_embedded_cumulative,
-                chunk_embeddings_per_second: snapshot.chunk_embeddings_per_second,
-                chunk_embeddings_rate_window_ms: snapshot.chunk_embeddings_rate_window_ms,
-                prepare_inflight_chunks_current: snapshot.prepare_inflight_chunks_current,
-                ready_queue_chunks_current: snapshot.ready_queue_chunks_current,
-                ready_queue_chunks_small: snapshot.ready_queue_chunks_small,
-                ready_queue_chunks_medium: snapshot.ready_queue_chunks_medium,
-                ready_queue_chunks_large: snapshot.ready_queue_chunks_large,
-                ready_batches_small: snapshot.ready_batches_small,
-                ready_batches_medium: snapshot.ready_batches_medium,
-                ready_batches_large: snapshot.ready_batches_large,
-                mixed_fallback_batches_total: snapshot.mixed_fallback_batches_total,
-                homogeneous_batches_total: snapshot.homogeneous_batches_total,
-                last_consumed_batch_lane: snapshot.last_consumed_batch_lane,
-                active_small_max_tokens: snapshot.active_small_max_tokens,
-                active_medium_max_tokens: snapshot.active_medium_max_tokens,
-                last_embed_attempt_wall_ms: snapshot.last_embed_attempt_wall_ms,
-                avg_embed_attempt_wall_ms: snapshot.avg_embed_attempt_wall_ms,
-                max_embed_attempt_wall_ms: snapshot.max_embed_attempt_wall_ms,
-                last_embed_gap_ms: snapshot.last_embed_gap_ms,
-                avg_embed_gap_ms: snapshot.avg_embed_gap_ms,
-                max_embed_gap_ms: snapshot.max_embed_gap_ms,
-                graph_workers_started_total: snapshot.graph_workers_started_total,
-                graph_workers_active_current: snapshot.graph_workers_active_current,
-                graph_worker_heartbeat_at_ms: snapshot.graph_worker_heartbeat_at_ms,
-                runtime_truth_feed: runtime_truth_feed.clone(),
-            };
-
-            if let Ok(message) = serde_json::to_string(&event) {
-                let _ = results_tx.send(message + "\n");
-            }
-
-            // REQ-AXO-901806 — dashboard_state_v1 emit (single-event
-            // architecture replacing dashboard's polling triple).
-            // PG functions are TTL-cached server-side ; warm-path cost
-            // ~18 ms vs ~200 ms cold. Failures degrade gracefully.
-            let dashboard_ts_ms = now_ms_tick;
-            let dashboard_install_generation = std::env::var("AXON_INSTALL_GENERATION")
-                .unwrap_or_else(|_| "workspace".to_string());
-            let dashboard_instance_kind =
-                std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string());
-            let dashboard_embedder = crate::embedder::current_embedding_provider_diagnostics();
-            let dashboard_build_id = std::env::var("AXON_BUILD_ID")
-                .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
-            // DEC-AXO-901626 — observable Pipeline B compute for the dashboard
-            // is READ from the indexer's PG heartbeat (the indexer self-observes
-            // and publishes the verdict). The brain does no nvidia-smi here.
-            // Brain = CPU and Pipeline A = CPU are rendered as constants
-            // dashboard-side (architectural invariants).
-            // Reuse the peer heartbeat already fetched at the top of the tick
-            // (REQ-AXO-901854) — no second PG round-trip per tick.
-            let dashboard_heartbeat = indexer_peer_hb.as_ref();
-            let dashboard_compute = dashboard_heartbeat
-                .as_ref()
-                .and_then(|row| row.compute.as_deref())
-                .unwrap_or("CPU");
-            let dashboard_compute_source = dashboard_heartbeat
-                .as_ref()
-                .and_then(|row| row.compute_source.as_deref())
-                .unwrap_or("unknown");
-            // Effective provider label coherent with the observed compute:
-            // the brain-local diagnostics slot would say "cpu" (the brain
-            // never embeds), so derive the label from the observed verdict
-            // instead — otherwise the dashboard would resurface the old lie.
-            let dashboard_effective_label = if dashboard_compute == "GPU" {
-                if dashboard_embedder
-                    .provider_requested
-                    .eq_ignore_ascii_case("tensorrt")
-                {
-                    "tensorrt"
+                let runtime_truth_feed = if runtime_mode.ingestion_enabled() {
+                    service_guard::record_runtime_truth_bridge_dispatch(None)
+                } else if let Some(ref hb) = indexer_peer_hb {
+                    service_guard::runtime_truth_feed_from_peer_heartbeat(hb.heartbeat_ms.max(0) as u64)
                 } else {
-                    "cuda"
-                }
-            } else {
-                "cpu"
-            };
-            crate::dashboard_state::compose_publish_and_emit(
-                &store,
-                &results_tx,
-                crate::dashboard_state::LiveMetrics {
-                    ts_ms: dashboard_ts_ms,
-                    build_id: &dashboard_build_id,
-                    install_generation: &dashboard_install_generation,
-                    runtime_mode: runtime_mode.as_str(),
-                    instance_kind: &dashboard_instance_kind,
-                    degraded_reason: runtime_truth_feed.degraded_reason.as_deref(),
-                    embedder_requested: &dashboard_embedder.provider_requested,
-                    embedder_effective: dashboard_effective_label,
-                    embedder_init_error: dashboard_embedder.provider_init_error.as_deref(),
-                    embedder_compute: dashboard_compute,
-                    embedder_compute_source: dashboard_compute_source,
-                    last_consumed_batch_lane: dashboard_last_lane.as_str(),
-                    chunk_embeddings_per_second: snapshot.chunk_embeddings_per_second,
+                    service_guard::current_runtime_truth_feed()
+                };
+                let telemetry_source = "local_runtime".to_string();
+                let telemetry_process_role = current_runtime_process_role().as_str().to_string();
+                let telemetry_freshness_state = freshness_state_for_feed(&runtime_truth_feed);
+                let telemetry_observed_age_ms = runtime_truth_feed.observed_age_ms;
+                let telemetry_degraded_reason = runtime_truth_feed.degraded_reason.clone();
+                // REQ-AXO-901806 — clone owned strings before they're moved
+                // into BridgeEvent so the dashboard composer below can still
+                // read them. Cheap (small strings, ~100 bytes total).
+                let dashboard_last_lane = snapshot.last_consumed_batch_lane.clone();
+                let dashboard_service_pressure = snapshot.service_pressure.clone();
+                let dashboard_claim_mode = snapshot.claim_mode.clone();
+                let event = BridgeEvent::RuntimeTelemetry {
+                    telemetry_source,
+                    telemetry_process_role,
+                    telemetry_freshness_state,
+                    telemetry_observed_age_ms,
+                    telemetry_degraded_reason,
+                    budget_bytes: snapshot.budget_bytes,
+                    reserved_bytes: snapshot.reserved_bytes,
+                    exhaustion_ratio: snapshot.exhaustion_ratio,
+                    reserved_task_count: snapshot.reserved_task_count,
+                    anonymous_trace_reserved_tasks: snapshot.anonymous_trace_reserved_tasks,
+                    anonymous_trace_admissions_total: snapshot.anonymous_trace_admissions_total,
+                    reservation_release_misses_total: snapshot.reservation_release_misses_total,
+                    queue_depth: snapshot.queue_depth,
+                    claim_mode: snapshot.claim_mode,
+                    service_pressure: snapshot.service_pressure,
+                    interactive_priority_active: snapshot.interactive_priority_active,
+                    interactive_priority_level: snapshot.interactive_priority_level,
+                    interactive_requests_in_flight: snapshot.interactive_requests_in_flight,
+                    oversized_refusals_total: snapshot.oversized_refusals_total,
+                    degraded_mode_entries_total: snapshot.degraded_mode_entries_total,
+                    background_launches_suppressed_total: snapshot.background_launches_suppressed_total,
+                    vectorization_suppressed_due_to_interactive: snapshot
+                        .vectorization_suppressed_due_to_interactive,
+                    vectorization_interrupted_due_to_interactive: snapshot
+                        .vectorization_interrupted_due_to_interactive,
+                    vectorization_requeued_for_interactive: snapshot
+                        .vectorization_requeued_for_interactive,
+                    vectorization_resumed_after_interactive: snapshot
+                        .vectorization_resumed_after_interactive,
+                    projection_suppressed_due_to_interactive: snapshot
+                        .projection_suppressed_due_to_interactive,
+                    memory_trim_attempts_total: snapshot.memory_trim_attempts_total,
+                    memory_trim_successes_total: snapshot.memory_trim_successes_total,
+                    cpu_load: snapshot.cpu_load,
+                    ram_load: snapshot.ram_load,
+                    io_wait: snapshot.io_wait,
+                    host_state: snapshot.host_state,
+                    host_guidance_slots: snapshot.host_guidance_slots,
+                    rss_bytes: snapshot.rss_bytes,
+                    rss_anon_bytes: snapshot.rss_anon_bytes,
+                    rss_file_bytes: snapshot.rss_file_bytes,
+                    rss_shmem_bytes: snapshot.rss_shmem_bytes,
+                    pg_database_bytes: snapshot.pg_database_bytes,
+                    pg_chunkembedding_total_bytes: snapshot.pg_chunkembedding_total_bytes,
+                    pg_wal_bytes: snapshot.pg_wal_bytes,
+                    pg_buffer_hit_ratio: snapshot.pg_buffer_hit_ratio,
                     vector_chunks_embedded_cumulative: snapshot.vector_chunks_embedded_cumulative,
-                    graph_workers_active: snapshot.graph_workers_active_current,
-                    graph_workers_started: snapshot.graph_workers_started_total,
-                    // REQ-AXO-901893 (LEGACY FEED PURGE) — ingress_buffer ripped;
-                    // Watchman feeds pipeline A directly so these meter 0.
-                    ingress_buffered_entries: 0,
-                    ingress_hot_entries: 0,
+                    chunk_embeddings_per_second: snapshot.chunk_embeddings_per_second,
+                    chunk_embeddings_rate_window_ms: snapshot.chunk_embeddings_rate_window_ms,
+                    prepare_inflight_chunks_current: snapshot.prepare_inflight_chunks_current,
                     ready_queue_chunks_current: snapshot.ready_queue_chunks_current,
                     ready_queue_chunks_small: snapshot.ready_queue_chunks_small,
                     ready_queue_chunks_medium: snapshot.ready_queue_chunks_medium,
                     ready_queue_chunks_large: snapshot.ready_queue_chunks_large,
-                    homogeneous_batches_total: snapshot.homogeneous_batches_total,
+                    ready_batches_small: snapshot.ready_batches_small,
+                    ready_batches_medium: snapshot.ready_batches_medium,
+                    ready_batches_large: snapshot.ready_batches_large,
                     mixed_fallback_batches_total: snapshot.mixed_fallback_batches_total,
-                    service_pressure: dashboard_service_pressure.as_str(),
-                    scheduler_state: dashboard_claim_mode.as_str(),
-                    runtime_idle: snapshot.queue_depth == 0 && snapshot.exhaustion_ratio < 0.1,
-                    indexer_paired,
-                },
-            );
+                    homogeneous_batches_total: snapshot.homogeneous_batches_total,
+                    last_consumed_batch_lane: snapshot.last_consumed_batch_lane,
+                    active_small_max_tokens: snapshot.active_small_max_tokens,
+                    active_medium_max_tokens: snapshot.active_medium_max_tokens,
+                    last_embed_attempt_wall_ms: snapshot.last_embed_attempt_wall_ms,
+                    avg_embed_attempt_wall_ms: snapshot.avg_embed_attempt_wall_ms,
+                    max_embed_attempt_wall_ms: snapshot.max_embed_attempt_wall_ms,
+                    last_embed_gap_ms: snapshot.last_embed_gap_ms,
+                    avg_embed_gap_ms: snapshot.avg_embed_gap_ms,
+                    max_embed_gap_ms: snapshot.max_embed_gap_ms,
+                    graph_workers_started_total: snapshot.graph_workers_started_total,
+                    graph_workers_active_current: snapshot.graph_workers_active_current,
+                    graph_worker_heartbeat_at_ms: snapshot.graph_worker_heartbeat_at_ms,
+                    runtime_truth_feed: runtime_truth_feed.clone(),
+                };
+
+                if let Ok(message) = serde_json::to_string(&event) {
+                    let _ = results_tx.send(message + "\n");
+                }
+
+                // REQ-AXO-901806 — dashboard_state_v1 emit (single-event
+                // architecture replacing dashboard's polling triple).
+                // PG functions are TTL-cached server-side ; warm-path cost
+                // ~18 ms vs ~200 ms cold. Failures degrade gracefully.
+                let dashboard_ts_ms = now_ms_tick;
+                let dashboard_install_generation = std::env::var("AXON_INSTALL_GENERATION")
+                    .unwrap_or_else(|_| "workspace".to_string());
+                let dashboard_instance_kind =
+                    std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string());
+                let dashboard_embedder = crate::embedder::current_embedding_provider_diagnostics();
+                let dashboard_build_id = std::env::var("AXON_BUILD_ID")
+                    .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+                // DEC-AXO-901626 — observable Pipeline B compute for the dashboard
+                // is READ from the indexer's PG heartbeat (the indexer self-observes
+                // and publishes the verdict). The brain does no nvidia-smi here.
+                // Brain = CPU and Pipeline A = CPU are rendered as constants
+                // dashboard-side (architectural invariants).
+                // Reuse the peer heartbeat already fetched at the top of the tick
+                // (REQ-AXO-901854) — no second PG round-trip per tick.
+                let dashboard_heartbeat = indexer_peer_hb.as_ref();
+                let dashboard_compute = dashboard_heartbeat
+                    .as_ref()
+                    .and_then(|row| row.compute.as_deref())
+                    .unwrap_or("CPU");
+                let dashboard_compute_source = dashboard_heartbeat
+                    .as_ref()
+                    .and_then(|row| row.compute_source.as_deref())
+                    .unwrap_or("unknown");
+                // Effective provider label coherent with the observed compute:
+                // the brain-local diagnostics slot would say "cpu" (the brain
+                // never embeds), so derive the label from the observed verdict
+                // instead — otherwise the dashboard would resurface the old lie.
+                let dashboard_effective_label = if dashboard_compute == "GPU" {
+                    if dashboard_embedder
+                        .provider_requested
+                        .eq_ignore_ascii_case("tensorrt")
+                    {
+                        "tensorrt"
+                    } else {
+                        "cuda"
+                    }
+                } else {
+                    "cpu"
+                };
+                crate::dashboard_state::compose_publish_and_emit(
+                    &store,
+                    &results_tx,
+                    crate::dashboard_state::LiveMetrics {
+                        ts_ms: dashboard_ts_ms,
+                        build_id: &dashboard_build_id,
+                        install_generation: &dashboard_install_generation,
+                        runtime_mode: runtime_mode.as_str(),
+                        instance_kind: &dashboard_instance_kind,
+                        degraded_reason: runtime_truth_feed.degraded_reason.as_deref(),
+                        embedder_requested: &dashboard_embedder.provider_requested,
+                        embedder_effective: dashboard_effective_label,
+                        embedder_init_error: dashboard_embedder.provider_init_error.as_deref(),
+                        embedder_compute: dashboard_compute,
+                        embedder_compute_source: dashboard_compute_source,
+                        last_consumed_batch_lane: dashboard_last_lane.as_str(),
+                        chunk_embeddings_per_second: snapshot.chunk_embeddings_per_second,
+                        vector_chunks_embedded_cumulative: snapshot.vector_chunks_embedded_cumulative,
+                        graph_workers_active: snapshot.graph_workers_active_current,
+                        graph_workers_started: snapshot.graph_workers_started_total,
+                        // REQ-AXO-901893 (LEGACY FEED PURGE) — ingress_buffer ripped;
+                        // Watchman feeds pipeline A directly so these meter 0.
+                        ingress_buffered_entries: 0,
+                        ingress_hot_entries: 0,
+                        ready_queue_chunks_current: snapshot.ready_queue_chunks_current,
+                        ready_queue_chunks_small: snapshot.ready_queue_chunks_small,
+                        ready_queue_chunks_medium: snapshot.ready_queue_chunks_medium,
+                        ready_queue_chunks_large: snapshot.ready_queue_chunks_large,
+                        homogeneous_batches_total: snapshot.homogeneous_batches_total,
+                        mixed_fallback_batches_total: snapshot.mixed_fallback_batches_total,
+                        service_pressure: dashboard_service_pressure.as_str(),
+                        scheduler_state: dashboard_claim_mode.as_str(),
+                        runtime_idle: snapshot.queue_depth == 0 && snapshot.exhaustion_ratio < 0.1,
+                        indexer_paired,
+                    },
+                );
+            })
+            .await
+            .is_err()
+            {
+                // Le pool bloquant a rendu une erreur de join : le runtime s'arrête.
+                break;
+            }
         }
     });
 }
@@ -520,3 +550,7 @@ fn beam_alarm_to_subsystem(
 #[cfg(test)]
 #[path = "main_telemetry_beam_alarm_tests.rs"]
 mod main_telemetry_beam_alarm_tests;
+
+#[cfg(test)]
+#[path = "main_telemetry_blocking_tests.rs"]
+mod main_telemetry_blocking_tests;
