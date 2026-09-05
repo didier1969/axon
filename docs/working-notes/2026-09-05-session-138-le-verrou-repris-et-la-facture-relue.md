@@ -157,3 +157,75 @@ corrections. `axon-indexer` est `Completed` **volontairement**.
 Chantier suivant arrêté et approuvé : **B1** (colonnes d'octets) → **B2** (double émission
 `content`/`structuredContent`) → **B3** (squelette au-dessus de 4 000 caractères) → **B4**
 (`token_budget`) → **B5** (ce qu'on envoie). Plan : `~/.claude/plans/sequential-stargazing-token.md`.
+
+---
+
+## Suite de session — le chantier token, et ce que la mesure a corrigé
+
+### Livré
+
+| commit | REQ | contenu |
+|---|---|---|
+| `189346c8` | `902621` | le POIDS des appels MCP, à côté de la latence |
+| `58f914a5` | `902619` | le bundle d'ouverture ne sert plus de nœuds morts |
+
+### ⭐⭐ Deux prémisses à moi, réfutées par la mesure
+
+**1. « La double émission `content` / `structuredContent` coûte un facteur 2 » — faux pour ce client.**
+
+Mesuré sur 2 286 résultats Axon : **0 %** portent les deux canaux. Le client Claude Code reçoit
+`content[0].text` — du markdown — et **jamais** `data.kickoff_bundle` ; le mot `"pillars"` n'apparaît
+nulle part dans ce qu'il relit. Le code le disait déjà, en commentaire, à l'endroit exact que je
+m'apprêtais à modifier : *« the PROJECT indexes … only ever reached `data.kickoff_bundle`, which the
+Claude Code client does not expose to the LLM »*. Je l'ai lu **après** avoir mesuré de travers.
+
+B2 ne réduit donc rien de notre facture. Il reste vrai pour un client qui lit le canal structuré —
+c'est le signal FSF, porté par `REQ-AXO-902537`. **Requalifié P2, B3 passe devant.**
+
+**2. Ma décomposition « 108 841 caractères, `pillars` = 42 % » portait sur le mauvais objet.**
+
+C'était la réponse *complète* écrite dans `tool-results/` au dépassement de budget — pas ce qui entre
+dans le contexte. Le vrai objet relu fait **30 232 caractères**. Deux objets, deux conclusions
+opposées. Pratique `2168` : *décomposer ce que le CLIENT REÇOIT, jamais ce que le serveur produit.*
+
+### ⭐ Le défaut que la bonne mesure a trouvé — et ce n'est pas une économie
+
+En décomposant le markdown réellement relu, le bundle d'ouverture servait **en corps entier** :
+
+| pilier | statut |
+|---|---|
+| `PIL-AXO-902` « Test Pillar » | rejected — stub « placeholder rejected session 64 » |
+| `PIL-AXO-102` « New Pillar » | rejected |
+| `PIL-AXO-006` | superseded |
+
+…pendant que `PIL-AXO-9003` « Axon Two-Sided Identity » (**8 152 car**), `PIL-AXO-004`, `007`, `008`,
+`009` étaient **évincés**, budget de 12 Ko atteint.
+
+Cause : `push_bodies` ne filtrait aucun statut, alors qu'`index_current` — dix lignes plus bas, dans
+la même fonction — filtre `current`. Le budget d'inline se dépense dans l'ordre des identifiants,
+donc des nœuds **morts** passaient avant des nœuds **vivants**. Toute session s'ouvrait sur « Test
+Pillar » et n'avait jamais le pilier d'identité du produit.
+
+**Une surface qui sert faux, pas une surface trop bavarde.** Je cherchais des jetons, j'ai trouvé une
+erreur de contenu.
+
+### ⭐ Mon test était complaisant, et seul le mutant l'a dit
+
+Le premier jet lisait le projet AXO du serveur de test — qui ne porte **aucun** pilier rejeté. Il
+passait donc avec **et** sans le filtre : 2 verts dans les deux cas. Un test d'absence écrit sur un
+jeu de données d'emprunt passe pour la mauvaise raison — ce qu'il cherche n'y est simplement pas.
+
+Fixture réécrite avec ses propres nœuds `rejected` + `superseded` et un corps repérable : le mutant
+rougit désormais les deux tests **sur assertion**. Pratique `2169`.
+
+Corollaire, et c'est le même défaut que `REQ-AXO-902616` sous une autre forme : *un test qui ne peut
+pas échouer coûte plus cher que pas de test, parce qu'il fait croire que l'invariant est tenu.*
+
+### Ce qui reste du chantier token
+
+Ordre **mesuré** sur la queue (appels > 20 000 car, poids cumulé) : `batch` **170 358**,
+`soll_get` **79 173**, `mcp_inbox_read` **49 793**. Puis B4 (`token_budget`), B5 (ce qu'on envoie —
+38,4 % du contexte relu, la moitié qu'on oublie).
+
+`REQ-AXO-902621` a instrumenté `axon.mcp_call_stat` : le gain de chaque tranche suivante se lit dans
+`mcp_telemetry_report sort="bytes"`, il ne s'estime plus.
