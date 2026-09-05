@@ -39,6 +39,7 @@ fn indexing_verdict(
     indexed: i64,
     discovered: i64,
     discovered_without_chunks: i64,
+    files_with_chunks: i64,
 ) -> String {
     if eligible == 0 {
         return "⚠️ zero eligible source files under the project root — check the watch root / ignore rules.".to_string();
@@ -46,6 +47,36 @@ fn indexing_verdict(
     if discovered_without_chunks > 0 {
         return format!(
             "⛔ {discovered_without_chunks} file(s) ENROLLED but NOTHING EXTRACTED (IndexedFile row present, zero chunks): 'indexed' counts the ROW, not extracted content — so eligible==indexed does NOT mean the source is searchable. The feeder is not draining this backlog; the index is stale/incomplete. Check the indexer is running and Watchman is reachable, or trigger a fresh boot (REQ-AXO-902253)."
+        );
+    }
+    // REQ-AXO-902599 (voix client VPC, promotion c5ed296b) — la preuve la plus
+    // EXIGEANTE decide, et elle manquait a cette matrice.
+    //
+    // Snapshot rapporte : enrolled 118, files WITH chunks 117, gap 1 — et le verdict
+    // concluait « every eligible source file is indexed AND parsed ». Les deux gardes
+    // existantes ne voyaient rien : le fichier sans chunks n'etait pas `discovered`
+    // (donc `discovered_without_chunks == 0`) et `eligible == indexed` (donc
+    // `gap == 0`). Le vert tombait par defaut.
+    //
+    // Placee AVANT la branche `discovered > 0` : celle-ci rend un vert des que les
+    // fichiers `discovered` portent des chunks, sans rien savoir des AUTRES. C'est
+    // exactement par la que le cas VPC passait.
+    //
+    // `status='discovered'` etait le mauvais discriminateur (REQ-AXO-902389 l'avait
+    // deja dit) ; le compte de LIGNES l'est tout autant. La seule preuve de
+    // recuperabilite est la PRESENCE DE CHUNKS, quel que soit le statut de la ligne.
+    //
+    // Conditionnee a `indexed >= eligible` : tant que l'enrolement n'est pas fini,
+    // les fichiers encore absents de la base ne sont pas « sans chunks », ils sont
+    // EN ATTENTE — c'est la branche ⏳ qui les dit, et cette garde la volerait.
+    let sans_chunks = eligible - files_with_chunks;
+    if indexed >= eligible && sans_chunks > 0 {
+        return format!(
+            "⛔ {sans_chunks} eligible file(s) with ZERO CHUNKS ({files_with_chunks}/{eligible} covered): \
+             the IndexedFile row exists and its status says nothing, but nothing was extracted — \
+             those files are UNREACHABLE by semantic search. `eligible == indexed` counts ROWS, \
+             not retrievable content. List them: SELECT f.path FROM ist.indexedfile f WHERE \
+             f.project_code = <code> AND NOT EXISTS (SELECT 1 FROM ist.chunk c WHERE c.file_path = f.path)."
         );
     }
     if discovered > 0 {
@@ -57,7 +88,7 @@ fn indexing_verdict(
     }
     let gap = eligible - indexed;
     if gap == 0 {
-        "✅ every eligible source file is indexed AND parsed (no `discovered` backlog); the wider on-disk population is fully accounted for by the exclusion reasons below (assert: all relevant source is indexed).".to_string()
+        "✅ every eligible source file is indexed AND parsed (chunk coverage confirmed, no `discovered` backlog); the wider on-disk population is fully accounted for by the exclusion reasons below (assert: all relevant source is indexed).".to_string()
     } else if gap > 0 {
         "⏳ indexing incomplete: eligible source files are not yet all enrolled — wait an indexer cycle or check pipeline A health.".to_string()
     } else {
@@ -624,7 +655,23 @@ impl McpServer {
             escaped
         ));
 
-        let verdict = indexing_verdict(eligible, indexed, discovered, discovered_without_chunks);
+        // REQ-AXO-902599 — la couverture par CHUNKS, indépendante du statut de la
+        // ligne : c'est la seule preuve de récupérabilité, et le verdict la reçoit
+        // désormais au lieu de la déduire d'un compte de lignes.
+        let files_with_chunks = self.sql_scalar(&format!(
+            "SELECT COUNT(*)::BIGINT FROM ist.indexedfile f \
+             WHERE f.project_code = '{}' \
+               AND EXISTS (SELECT 1 FROM ist.chunk c WHERE c.file_path = f.path)",
+            escaped
+        ));
+
+        let verdict = indexing_verdict(
+            eligible,
+            indexed,
+            discovered,
+            discovered_without_chunks,
+            files_with_chunks,
+        );
 
         let reason_lines = if breakdown.excluded_by_reason.is_empty() {
             "* (none — every walked file is eligible)".to_string()
@@ -2341,7 +2388,7 @@ mod tests {
     #[test]
     fn indexing_verdict_flags_discovered_backlog_as_blocker() {
         // The exact #44 shape: 429 LLL files enrolled, none parsed (all `discovered`).
-        let v = indexing_verdict(429, 429, 429, 429);
+        let v = indexing_verdict(429, 429, 429, 429, 429 - 429);
         assert!(v.starts_with("⛔"), "discovered backlog must block, got: {v}");
         assert!(v.contains("429"), "the backlog size must be stated: {v}");
         // REQ-AXO-902389 — was `contains("discovered")`. The verdict deliberately
@@ -2365,7 +2412,7 @@ mod tests {
         // Mesuré au moment du correctif, la même forme partout : KKI 16164
         // découverts / 12 vides · NEX 753/3 · AXO 660/1. Le verdict criait un
         // facteur 1000 au-dessus du réel.
-        let v = indexing_verdict(1454, 1454, 710, 0);
+        let v = indexing_verdict(1454, 1454, 710, 0, 1454 - 0);
         assert!(v.starts_with("✅"), "des fichiers parsés ne bloquent pas : {v}");
         assert!(
             v.contains("710") && v.contains("stale"),
@@ -2379,7 +2426,7 @@ mod tests {
         // LA falsification : la branche qui détecte une vraie panne d'extraction
         // doit rester ATTEIGNABLE. Un correctif qui rend l'outil muet ne vaut pas
         // mieux que celui qui le rend bavard.
-        let v = indexing_verdict(1454, 1454, 710, 5);
+        let v = indexing_verdict(1454, 1454, 710, 5, 1454 - 5);
         assert!(v.starts_with("⛔"), "5 fichiers sans rien extrait bloquent : {v}");
         assert!(v.contains('5'), "le nombre RÉEL est nommé, pas les 710 : {v}");
         assert!(
@@ -2391,16 +2438,45 @@ mod tests {
     #[test]
     fn indexing_verdict_green_only_when_parsed_and_no_backlog() {
         // LLL after the post-outage reindex: 457 parsed, zero discovered.
-        let v = indexing_verdict(457, 457, 0, 0);
+        let v = indexing_verdict(457, 457, 0, 0, 457 - 0);
         assert!(v.starts_with("✅"), "clean parsed state is green: {v}");
         assert!(v.contains("parsed"), "the green verdict distinguishes parsed: {v}");
     }
 
     #[test]
     fn indexing_verdict_incomplete_empty_and_discovered_precedence() {
-        assert!(indexing_verdict(100, 90, 0, 0).starts_with("⏳"), "under-enrolled → waiting");
-        assert!(indexing_verdict(0, 0, 0, 0).starts_with("⚠"), "no eligible → watch-root warning");
+        // REQ-AXO-902599 — LE cas VPC, reproduit tel quel : 118 enrôlés, 117 avec
+        // chunks, aucun `discovered`. Les deux gardes antérieures étaient aveugles —
+        // `discovered_without_chunks == 0` et `eligible == indexed` — et le verdict
+        // tombait sur un ✅ par défaut alors qu'un fichier est introuvable.
+        let vpc = indexing_verdict(118, 118, 0, 0, 117);
+        assert!(
+            vpc.starts_with("⛔"),
+            "un fichier éligible sans chunk doit BLOQUER le verdict ; obtenu : {vpc}"
+        );
+        assert!(
+            vpc.contains("117/118"),
+            "le verdict doit CHIFFRER la couverture, pas seulement alerter ; obtenu : {vpc}"
+        );
+        // Le symetrique : tant que l'enrolement court, une couverture partielle est
+        // une ATTENTE, pas une panne. Sans cette assertion, la garde ci-dessus
+        // transformerait tout demarrage de projet en ⛔.
+        let en_cours = indexing_verdict(100, 90, 0, 0, 90);
+        assert!(
+            en_cours.starts_with("⏳"),
+            "un enrolement inacheve doit rester une attente ; obtenu : {en_cours}"
+        );
+        // MUTANT — la même fixture avec une couverture complète rend bien un ✅.
+        // Sans ce contrôle, l'assertion ci-dessus passerait aussi si le verdict
+        // bloquait TOUJOURS, ce qui serait le défaut symétrique.
+        let complet = indexing_verdict(118, 118, 0, 0, 118);
+        assert!(
+            complet.starts_with("✅"),
+            "une couverture complète doit rester verte, sinon la garde crie sans discriminer ; obtenu : {complet}"
+        );
+        assert!(indexing_verdict(100, 90, 0, 0, 100 - 0).starts_with("⏳"), "under-enrolled → waiting");
+        assert!(indexing_verdict(0, 0, 0, 0, 0 - 0).starts_with("⚠"), "no eligible → watch-root warning");
         // A discovered backlog dominates a raw row gap: the parse stall is the actionable cause.
-        assert!(indexing_verdict(100, 90, 5, 5).starts_with("⛔"), "discovered dominates the gap verdict");
+        assert!(indexing_verdict(100, 90, 5, 5, 100 - 5).starts_with("⛔"), "discovered dominates the gap verdict");
     }
 }
