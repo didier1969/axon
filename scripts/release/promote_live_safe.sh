@@ -178,25 +178,13 @@ PY
 }
 
 historical_promote_estimate() {
-  python3 - "$LOG_DIR/attempts" <<'PY' 2>/dev/null || printf 'historique indisponible'
-import json, pathlib, statistics, sys
-durations=[]
-for path in sorted(pathlib.Path(sys.argv[1]).glob("*.jsonl"))[-20:]:
-    try:
-        rows=[json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    except Exception:
-        continue
-    if not rows or not any(r.get("event")=="lease_released" and r.get("status")=="completed" for r in rows):
-        continue
-    start=rows[0].get("monotonic_ms")
-    cut=next((r.get("monotonic_ms") for r in rows if r.get("event")=="step_started" and r.get("phase") in {"cutover","cutover_prepare"}), None)
-    if isinstance(start, int) and isinstance(cut, int) and cut >= start:
-        durations.append((cut-start)//1000)
-if durations:
-    print(f"médiane historique jusqu'au cutover={int(statistics.median(durations))}s sur {len(durations)} tentative(s) réussie(s)")
-else:
-    print("historique insuffisant; aucune durée promise")
-PY
+  # REQ-AXO-902543 — le calcul vit dans un fichier TESTÉ depuis que son prédicat
+  # s'est révélé faux : il retenait `lease_released/completed`, qui est vrai dès que
+  # le SCRIPT s'arrête proprement — rollback compris — et imprimait « tentative(s)
+  # réussie(s) ». Deuxième instrument du promote faux dans la direction flatteuse,
+  # après le compteur de coupure ; même remède.
+  python3 "$ROOT_DIR/scripts/release/promote_history_estimate.py" "$LOG_DIR/attempts" \
+    2>/dev/null || printf 'historique indisponible'
 }
 
 # REQ-AXO-902285 — refuse the promote FAIL-FAST (0s of MCP outage) when the WSL2 GPU
