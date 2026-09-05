@@ -78,6 +78,12 @@ mod soll;
 #[cfg(test)]
 mod tests;
 mod tool_contracts;
+// REQ-AXO-902583 — les gardes qui confrontent le SCHÉMA SERVI aux dispositions
+// déclarées. Séparées de `tool_contracts` : elles lisent l'arbre source, ce qui
+// n'a rien à faire dans le module qui porte les contrats.
+#[cfg(test)]
+#[path = "mcp/tool_contracts_coverage_tests.rs"]
+mod tool_contracts_coverage_tests;
 mod tools_context;
 mod tools_data_catalog;
 mod tools_dx;

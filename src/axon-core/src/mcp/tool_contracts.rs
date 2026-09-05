@@ -1075,6 +1075,19 @@ pub(crate) enum ParameterCondition {
     },
     /// `<field>` est absent, `null`, ou `false`.
     FieldUnset { field: &'static str },
+    /// REQ-AXO-902583 — `<field>` est absent, `null`, ou VAUT AUTRE CHOSE que les
+    /// valeurs listées.
+    ///
+    /// Les deux variantes ci-dessus ne savent pas exprimer « effectif SAUF si le
+    /// champ prend telle valeur ». C'est pourtant la forme la plus courante d'un
+    /// paramètre conditionnel : un drapeau dont le DÉFAUT est actif, qu'une valeur
+    /// explicite désarme. `half_life_days` sous `include_decay=false`,
+    /// `wait_for_semantic` sous `semantic=off` — les deux se disent ainsi et ne se
+    /// disaient pas autrement.
+    FieldNotOneOf {
+        field: &'static str,
+        values: &'static [&'static str],
+    },
 }
 
 impl ParameterCondition {
@@ -1087,6 +1100,10 @@ impl ParameterCondition {
             Self::FieldUnset { field } => match args.get(field) {
                 None | Some(Value::Null) | Some(Value::Bool(false)) => true,
                 Some(_) => false,
+            },
+            Self::FieldNotOneOf { field, values } => match args.get(field) {
+                None | Some(Value::Null) => true,
+                Some(found) => !values.iter().any(|v| scalar_reads_as(found, v)),
             },
         }
     }
@@ -1108,6 +1125,15 @@ impl ParameterCondition {
             Self::FieldUnset { field } => format!(
                 "`{field}` est posé (`{}`), et il prend le pas",
                 args.get(field).map(compact_scalar).unwrap_or_default()
+            ),
+            Self::FieldNotOneOf { field, values } => format!(
+                "`{field}` vaut `{}`, ce qui désactive ce paramètre (valeurs neutralisantes : {})",
+                args.get(field).map(compact_scalar).unwrap_or_default(),
+                values
+                    .iter()
+                    .map(|v| format!("`{v}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }
@@ -1212,9 +1238,64 @@ const INSPECT_DISPOSITIONS: &[ParameterDeclaration] = &[
 /// rendrait invisible au contrôle tier 1, c'est-à-dire que la table censée
 /// empêcher la dérive dériverait elle-même. C'est précisément le défaut que
 /// `MIL-AXO-054` poursuit ailleurs ; il n'a pas sa place ici.
+/// `retrieve_context` — REQ-AXO-902583, deuxième vague (1 981 appels mesurés).
+///
+/// `wait_for_semantic` fait DORMIR l'appel jusqu'à ce que la pression de service
+/// redevienne saine, pour que l'expansion ANN du corpus puisse tourner. Avec
+/// `semantic=lexical|off`, la question n'est jamais plongée : l'attente est payée
+/// en latence et ne rachète rien. Pire qu'inerte — activement coûteux.
+const RETRIEVE_CONTEXT_DISPOSITIONS: &[ParameterDeclaration] = &[
+    ParameterDeclaration {
+        name: "question",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "semantic",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "wait_for_semantic",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldNotOneOf {
+                field: "semantic",
+                values: &["lexical", "off"],
+            },
+            remedy: "retirez `semantic=lexical|off` pour que l'attente serve à quelque chose, \
+                     ou retirez `wait_for_semantic` — sans plongement, l'attente ne fait que \
+                     rallonger l'appel",
+        },
+    },
+];
+
+/// `soll_work_plan` — REQ-AXO-902583, deuxième vague (1 564 appels mesurés).
+///
+/// `decay_factor_for_node` rend `1.0` dès la première ligne quand `include_decay`
+/// est faux : la demi-vie est alors lue, passée, et jetée. Le défaut d'
+/// `include_decay` étant TRUE, seul un `false` explicite neutralise — d'où
+/// `FieldNotOneOf` et non `FieldUnset`, dont la polarité est inverse.
+const SOLL_WORK_PLAN_DISPOSITIONS: &[ParameterDeclaration] = &[
+    ParameterDeclaration {
+        name: "include_decay",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "half_life_days",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldNotOneOf {
+                field: "include_decay",
+                values: &["false"],
+            },
+            remedy: "retirez `include_decay=false` pour que la demi-vie compte, ou retirez \
+                     `half_life_days` — sans décroissance, le score n'en tient aucun compte",
+        },
+    },
+];
+
 pub(crate) const DECLARED_DISPOSITIONS: &[(&str, &[ParameterDeclaration])] = &[
     ("soll_get", SOLL_GET_DISPOSITIONS),
     ("inspect", INSPECT_DISPOSITIONS),
+    ("retrieve_context", RETRIEVE_CONTEXT_DISPOSITIONS),
+    ("soll_work_plan", SOLL_WORK_PLAN_DISPOSITIONS),
 ];
 
 /// Les dispositions déclarées d'un outil, ou `None` s'il n'est pas instrumenté.
