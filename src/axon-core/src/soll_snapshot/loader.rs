@@ -88,7 +88,7 @@ pub fn load_snapshot(
     // migration and has NULL.
     let trace_query = format!(
         "SELECT id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, \
-                COALESCE(artifact_status, '') \
+                COALESCE(artifact_status, ''), COALESCE(metadata->>'role', '') \
          FROM soll.Traceability \
          WHERE soll_entity_id LIKE '%-{}-%'",
         project_code_escaped
@@ -99,7 +99,7 @@ pub fn load_snapshot(
     let trace_rows: Vec<Vec<String>> = serde_json::from_str(&trace_rows_raw).unwrap_or_default();
     let mut traceability: Vec<SnapshotTraceability> = Vec::with_capacity(trace_rows.len());
     for row in trace_rows {
-        if row.len() < 6 {
+        if row.len() < 7 {
             continue;
         }
         traceability.push(SnapshotTraceability {
@@ -109,6 +109,10 @@ pub fn load_snapshot(
             artifact_type: row[3].clone(),
             artifact_ref: row[4].clone(),
             artifact_status: row[5].clone(),
+            // REQ-AXO-902592 — chaîne vide (rôle absent) et rôle inconnu sont deux
+            // choses : `None` dit « aucun rôle déclaré », ce que `wiring` doit
+            // pouvoir distinguer de `entry`.
+            role: Some(row[6].clone()).filter(|r| !r.is_empty()),
         });
     }
 

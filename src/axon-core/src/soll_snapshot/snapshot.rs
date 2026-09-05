@@ -41,6 +41,13 @@ pub struct SnapshotTraceability {
     pub artifact_type: String,
     pub artifact_ref: String,
     pub artifact_status: String,
+    /// REQ-AXO-902592 — `metadata->>'role'` de la ligne de traçabilité, projeté
+    /// dans le snapshot RAM. `entry` = « ceci EST un point d'entrée déclaré » ;
+    /// `deliverable` = « ceci est une sortie livrée ». Sans ce champ, `wiring` ne
+    /// pouvait pas distinguer une DÉCLARATION d'entrée d'une simple preuve de
+    /// livraison, et exemptait les deux (REQ-AXO-902213 écrivait déjà la donnée ;
+    /// personne ne la lisait).
+    pub role: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -416,6 +423,7 @@ mod tests {
             artifact_type: "file".to_string(),
             artifact_ref: format!("/tmp/x-{}", idx),
             artifact_status: "ok".to_string(),
+            role: None,
         }
     }
 
@@ -481,6 +489,7 @@ mod tests {
                 artifact_type: "Symbol".into(),
                 artifact_ref: "render".into(),
                 artifact_status: "ok".into(),
+                role: None,
             },
             SnapshotTraceability {
                 id: "T2".into(),
@@ -489,6 +498,7 @@ mod tests {
                 artifact_type: "Symbol".into(),
                 artifact_ref: "AXO::widget.rs::render".into(),
                 artifact_status: "ok".into(),
+                role: None,
             },
             // artifact_type mismatch — excluded.
             SnapshotTraceability {
@@ -498,6 +508,7 @@ mod tests {
                 artifact_type: "file".into(),
                 artifact_ref: "render".into(),
                 artifact_status: "ok".into(),
+                role: None,
             },
         ];
         let snap = SollSnapshot::build("AXO", 1, nodes, vec![], trace);

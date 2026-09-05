@@ -222,6 +222,7 @@ fn fusion_snapshot() -> crate::soll_snapshot::SollSnapshot {
         artifact_type: "Symbol".to_string(),
         artifact_ref: "render".to_string(),
         artifact_status: "ok".to_string(),
+        role: None,
     }];
     SollSnapshot::build("TSF", 1, nodes, edges, trace)
 }

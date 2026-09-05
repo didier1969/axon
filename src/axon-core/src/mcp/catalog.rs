@@ -662,7 +662,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." },
-                        "top": { "type": "integer", "description": "Max orphans returned (default 20, max 200)." }
+                        "top": { "type": "integer", "description": "Max orphans returned (default 20, max 200)." },
+                        "exemption_policy": { "type": "string", "enum": ["legacy", "declared_entry"], "description": "REQ-AXO-902592 — quelles traçabilités SOLL exemptent un symbole. `legacy` (défaut) : TOUTE ligne `artifact_type=Symbol`, y compris une preuve de livraison ordinaire — c'est le comportement historique, et il désarme le détecteur pour qui livre proprement (signalé par NEX, `msg-e78e0cf73593e5b7b08a3458`). `declared_entry` : uniquement les lignes portant `role=entry` (écrites par `soll_attach_evidence role=entry`), la seule affirmation qui dise « ceci EST un point d'entrée » plutôt que « ceci a été livré ». Le défaut n'a PAS basculé parce qu'aucun locataire n'écrit encore `role=entry` (0 ligne mesurée sur AXO/NEX/KKI/VPC au 2026-09-05) : basculer ne rétrécirait pas l'exemption, il la supprimerait. Quelle que soit la politique, la réponse NOMME ce qu'elle a écarté (`exempted_by_declaration`) et les déclarations qui ne désignent aucun symbole (`declarations_matching_nothing`)." }
                     },
                     "required": []
                 }

@@ -881,6 +881,20 @@ impl McpServer {
         // symbol is wired to INTENT, so a dispatch-dynamic / lazy-import / hook entry the static
         // CALLS graph can't reach is not an orphan (the OPV blind spots). RAM-first via the SOLL
         // snapshot (PIL-AXO-9002); cold snapshot → empty set → no exemption (safe default).
+        //
+        // REQ-AXO-902592 — deux ensembles, pas un. `legacy` exempte toute
+        // tracabilite `Symbol` (le comportement livre) ; `declared_entry` n'exempte
+        // que les lignes portant `role=entry`, la seule qui affirme « ceci EST une
+        // entree » plutot que « ceci a ete livre ». Le defaut reste `legacy` : au
+        // 2026-09-05 AUCUN locataire n'ecrit `role=entry` (0 ligne sur AXO/NEX/KKI/
+        // VPC), donc basculer le defaut ne retrecirait pas l'exemption, il la
+        // supprimerait — 263 symboles remontant le meme jour. Le parametre rend la
+        // bascule MESURABLE par chaque locataire avant qu'elle ne soit imposee.
+        let politique = args
+            .get("exemption_policy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("legacy");
+        let politique_stricte = politique == "declared_entry";
         let declared: std::collections::HashSet<String> = self
             .soll_cache()
             .snapshot(&project)
@@ -888,10 +902,19 @@ impl McpServer {
                 snap.traceability
                     .iter()
                     .filter(|t| t.artifact_type == "Symbol")
+                    .filter(|t| {
+                        !politique_stricte || t.role.as_deref() == Some("entry")
+                    })
                     .map(|t| t.artifact_ref.to_ascii_lowercase())
                     .collect()
             })
             .unwrap_or_default();
+        // REQ-AXO-902592 — ce que l'exemption efface, NOMME. Calcule sous la
+        // politique en vigueur, donc `declared_entry` rend une liste vide : c'est
+        // la preuve, et non l'affirmation, que la bascule ne cache plus rien.
+        let audit = crate::ist_snapshot::code_smells::wiring_exemption_audit(
+            &snapshot, &project, &declared,
+        );
         let orphans =
             crate::ist_snapshot::code_smells::wiring_orphans(&snapshot, &project, &declared, top);
         let test_only = orphans.iter().filter(|o| o.category == "test_only").count();
@@ -914,9 +937,31 @@ impl McpServer {
         let orphan_names: Vec<String> =
             orphans.iter().map(|o| format!("{} [{}]", o.name, o.category)).collect();
         let orphan_phrase = sample_identities("orphans", &orphan_names, 12);
+        // REQ-AXO-902592 — l'exemption est annoncee dans le MEME canal que le
+        // resultat. Un rapport vide qui ne dit pas combien de symboles il a ecartes
+        // se lit comme « rien a signaler » ; c'est exactement ce que NEX a vecu.
+        let phrase_exemption = if audit.exempted.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ⚠ {} symbole(s) ECARTE(S) par une declaration SOLL sous la politique `{}` — sans elle ils seraient signales{}. Rejouer avec exemption_policy=\"declared_entry\" pour voir le rapport sans cette exemption.",
+                audit.exempted.len(),
+                politique,
+                sample_identities("exempted", &audit.exempted, 12)
+            )
+        };
+        let phrase_mortes = if audit.declarations_matching_nothing.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ℹ️ {} declaration(s) SOLL ne designent AUCUN symbole de ce projet — elles n'exemptent rien et leur auteur le croit{}.",
+                audit.declarations_matching_nothing.len(),
+                sample_identities("dead declarations", &audit.declarations_matching_nothing, 8)
+            )
+        };
         let summary = format!(
-            "wiring {} : {} orphan(s) — {} test_only (delivered+tested but NO prod caller — the OPV class) + {} isolated (no caller at all, advisory). A test_only symbol tagged deliverable = must be wired before delivery (gate S3, axon_pre_flight_check).{}",
-            project, orphans.len(), test_only, isolated, orphan_phrase
+            "wiring {} : {} orphan(s) — {} test_only (delivered+tested but NO prod caller — the OPV class) + {} isolated (no caller at all, advisory). A test_only symbol tagged deliverable = must be wired before delivery (gate S3, axon_pre_flight_check).{}{}{}",
+            project, orphans.len(), test_only, isolated, orphan_phrase, phrase_exemption, phrase_mortes
         );
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
@@ -927,6 +972,10 @@ impl McpServer {
                 "test_only_count": test_only,
                 "isolated_count": isolated,
                 "soll_declared_symbols": declared.len(),
+                "exemption_policy": politique,
+                "exempted_by_declaration": audit.exempted,
+                "exempted_count": audit.exempted.len(),
+                "declarations_matching_nothing": audit.declarations_matching_nothing,
                 "note": "REQ-AXO-902192 volet 1a+S2 — test_only = high-confidence unwired deliverable (0 prod caller, ≥1 test); isolated = advisory (may be an undetected entry). Symbols with a SOLL traceability edge are EXEMPT (declared intent — covers dispatch-dynamic/lazy-import/hook entries the static CALLS graph misses). Gate in axon_pre_flight_check = slice S3."
             }
         }))
@@ -2025,6 +2074,7 @@ mod structural_health_helpers_tests {
             artifact_type: "Symbol".to_string(),
             artifact_ref: "AXO::x::y.rs::f".to_string(),
             artifact_status: "current".to_string(),
+            role: None,
         };
 
         let mut nodes: HashMap<String, SnapshotNode> = HashMap::new();

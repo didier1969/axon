@@ -991,6 +991,7 @@ mod tests {
             artifact_type: artifact_type.to_string(),
             artifact_ref: r#ref.to_string(),
             artifact_status: status.to_string(),
+            role: None,
         }
     }
 

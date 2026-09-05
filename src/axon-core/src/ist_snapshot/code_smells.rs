@@ -1379,6 +1379,75 @@ pub fn wiring_orphans_among(
     out
 }
 
+/// REQ-AXO-902592 — ce que l'exemption SOLL a RETIRE du rapport, et ce qu'elle
+/// n'a pas pu retirer.
+///
+/// `wiring` exempte tout symbole portant une tracabilite SOLL de type `Symbol`
+/// (`wiring_classify_node`, ligne du `declared.contains`). NEX (`msg-e78e0cf7…`)
+/// a signale que le detecteur de facade est desarme par le geste meme qui atteste
+/// la livraison. Leur MECANISME etait faux — un commit attache par
+/// `axon_commit_work` porte `artifact_type = Commit`, jamais `Symbol`, il n'entre
+/// donc pas dans `declared` — mais leur MESURE tient : le canal reel est
+/// `soll_attach_evidence artifact_type=symbol`, utilise 119 fois chez eux, 102
+/// fois chez nous, et JAMAIS avec `role=entry` (0 ligne sur AXO/NEX/KKI/VPC au
+/// 2026-09-05).
+///
+/// Retirer l'exemption d'un coup ne la retrecirait pas, cela la SUPPRIMERAIT :
+/// 263 symboles remonteraient le meme jour chez quatre locataires. On rend donc
+/// l'effacement VISIBLE avant de le changer — meme forme que `body_truncated` ou
+/// `omitted_in_brief` : une surface qui retire quelque chose doit le NOMMER.
+#[derive(Debug, Clone, Default)]
+pub struct WiringExemptionAudit {
+    /// Symboles qui SERAIENT des orphelins sans leur declaration SOLL. C'est la
+    /// mesure exacte de ce que l'exemption cache, nom par nom.
+    pub exempted: Vec<String>,
+    /// Refs declarees qui ne designent AUCUN symbole du projet. Un operateur qui
+    /// ecrit `axon-core::vector_control::allowed_gpu_vector_workers` croit avoir
+    /// declare une entree ; la comparaison porte sur la FEUILLE de l'identifiant
+    /// (`name_from_id`), donc rien ne matche et l'exemption ne s'arme jamais.
+    /// Mesure AXO : 51 refs sur 99 sont mortes. Un canal de declaration qui echoue
+    /// en silence est pire qu'une absence de canal.
+    pub declarations_matching_nothing: Vec<String>,
+}
+
+/// REQ-AXO-902592 — calcule l'audit ci-dessus. Une passe de plus sur le graphe,
+/// avec un ensemble `declared` VIDE : un symbole classe orphelin sans declaration
+/// et dont le nom est declare est, par construction, exempte par la declaration.
+pub fn wiring_exemption_audit(
+    graph: &IstGraph,
+    project: &str,
+    declared: &HashSet<String>,
+) -> WiringExemptionAudit {
+    let file_map = build_file_path_map(graph);
+    let phantom_callers = phantom_dispatch_callers(graph);
+    let sans_declaration: HashSet<String> = HashSet::new();
+    let mut exempted: Vec<String> = Vec::new();
+    let mut noms_du_projet: HashSet<String> = HashSet::new();
+    for idx in 0..(graph.node_count() as u32) {
+        if !project_matches(graph, idx, project) {
+            continue;
+        }
+        noms_du_projet.insert(name_from_id(graph.id_of(idx)).to_ascii_lowercase());
+        if !declared.contains(&name_from_id(graph.id_of(idx)).to_ascii_lowercase()) {
+            continue;
+        }
+        if wiring_classify_node(graph, idx, &sans_declaration, &file_map, &phantom_callers)
+            .is_some()
+        {
+            exempted.push(name_from_id(graph.id_of(idx)).to_string());
+        }
+    }
+    exempted.sort();
+    exempted.dedup();
+    let mut declarations_matching_nothing: Vec<String> = declared
+        .iter()
+        .filter(|r| !noms_du_projet.contains(*r))
+        .cloned()
+        .collect();
+    declarations_matching_nothing.sort();
+    WiringExemptionAudit { exempted, declarations_matching_nothing }
+}
+
 /// REQ-AXO-902211 — dead clusters: how many otherwise-eligible callables of
 /// `project` are unreachable from any root, grouped by mutual connectivity.
 #[derive(Debug, Clone, Default)]
@@ -3041,6 +3110,90 @@ mod tests {
         assert!(
             !with_decl.iter().any(|o| o.name == "lazy_target"),
             "the SOLL `declared` guard exempts a lazy import, not the phantom bridge"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // REQ-AXO-902592 — l'exemption doit se NOMMER.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn l_audit_nomme_le_symbole_que_la_declaration_a_ECARTE() {
+        // Le cas NEX : un symbole public sans aucun appelant, exempte parce qu'une
+        // tracabilite SOLL porte son nom. `wiring` rend une liste vide et le
+        // lecteur conclut « rien a signaler ». L'audit dit ce qui a ete retire.
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::mission.rs::evaluator", true),
+        ];
+        let g = IstGraph::build(nodes, vec![]);
+        let declared: HashSet<String> = ["evaluator".to_string()].into_iter().collect();
+
+        let rapport = wiring_orphans(&g, "AXO", &declared, 10);
+        assert!(
+            !rapport.iter().any(|o| o.name == "evaluator"),
+            "prealable : la declaration doit bien exempter, sinon l'audit n'a rien a dire"
+        );
+
+        let audit = wiring_exemption_audit(&g, "AXO", &declared);
+        assert_eq!(
+            audit.exempted,
+            vec!["evaluator".to_string()],
+            "l'audit doit NOMMER le symbole ecarte, pas seulement le compter"
+        );
+        assert!(
+            audit.declarations_matching_nothing.is_empty(),
+            "une declaration qui matche ne doit pas etre annoncee comme morte"
+        );
+    }
+
+    #[test]
+    fn une_declaration_qui_ne_designe_RIEN_est_annoncee() {
+        // Mesure AXO du 2026-09-05 : 51 refs sur 99 ne designent aucun symbole —
+        // typiquement `axon-core::vector_control::allowed_gpu_vector_workers`, alors
+        // que la comparaison porte sur la FEUILLE (`allowed_gpu_vector_workers`).
+        // L'auteur croit avoir declare une entree ; l'exemption ne s'arme jamais.
+        let nodes = vec![func("AXO::app.rs::run_main", true)];
+        let g = IstGraph::build(nodes, vec![]);
+        let declared: HashSet<String> =
+            ["axon-core::vector_control::allowed_gpu_vector_workers".to_string()]
+                .into_iter()
+                .collect();
+
+        let audit = wiring_exemption_audit(&g, "AXO", &declared);
+        assert!(audit.exempted.is_empty(), "elle n'exempte rien");
+        assert_eq!(
+            audit.declarations_matching_nothing,
+            vec!["axon-core::vector_control::allowed_gpu_vector_workers".to_string()],
+            "une declaration inerte doit etre dite, sinon l'echec du canal est silencieux"
+        );
+    }
+
+    #[test]
+    fn un_symbole_DEJA_branche_n_est_pas_compte_comme_exempte() {
+        // MUTANT — sans ce cas, l'audit pourrait se contenter de recopier
+        // l'intersection « noms declares ∩ noms du projet » et les deux assertions
+        // ci-dessus passeraient. Ce qui compte est qu'il SERAIT orphelin sans la
+        // declaration : un symbole appele en production n'a rien a devoir a
+        // l'exemption, et le dire gonflerait le chiffre d'alarme.
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::util.rs::branche", true),
+        ];
+        let edges = vec![edge("AXO::app.rs::run_main", "AXO::util.rs::branche", RelationType::Calls)];
+        let g = IstGraph::build(nodes, edges);
+        let declared: HashSet<String> = ["branche".to_string()].into_iter().collect();
+
+        let sans = wiring_orphans(&g, "AXO", &HashSet::new(), 10);
+        assert!(
+            !sans.iter().any(|o| o.name == "branche"),
+            "prealable : ce symbole a un appelant de production, il n'est pas orphelin"
+        );
+        let audit = wiring_exemption_audit(&g, "AXO", &declared);
+        assert!(
+            audit.exempted.is_empty(),
+            "l'exemption ne lui doit rien ; le compter serait une fausse alarme : {:?}",
+            audit.exempted
         );
     }
 }

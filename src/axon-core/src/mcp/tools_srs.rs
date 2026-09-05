@@ -262,6 +262,7 @@ mod tests {
             artifact_type: "file".to_string(),
             artifact_ref: artifact_ref.to_string(),
             artifact_status: "ok".to_string(),
+            role: None,
         }
     }
 
