@@ -46,7 +46,7 @@ Corps via `soll_get(id=…)` — ne pas recopier :
 
 | ID | Règle |
 |---|---|
-| `GUI-AXO-1034` | Porte de build : `--lib` + `--bins` + `cargo build --tests` |
+| `GUI-AXO-1034` | Porte de build : CINQ commandes (`build --bins` d'abord), via `nexus-job --memory 12G --cpus 12` |
 | `GUI-AXO-1035` | Sonder l'hôte avant toute suite `--lib` complète |
 | `GUI-AXO-1036` | Build et test **dans** `devenv shell` |
 | `GUI-AXO-1037` | `promote_live_safe.sh` est le seul chemin vers `bin/` |
