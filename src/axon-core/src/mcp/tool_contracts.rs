@@ -1291,23 +1291,121 @@ const SOLL_WORK_PLAN_DISPOSITIONS: &[ParameterDeclaration] = &[
     },
 ];
 
-pub(crate) const DECLARED_DISPOSITIONS: &[(&str, &[ParameterDeclaration])] = &[
-    ("soll_get", SOLL_GET_DISPOSITIONS),
-    ("inspect", INSPECT_DISPOSITIONS),
-    ("retrieve_context", RETRIEVE_CONTEXT_DISPOSITIONS),
-    ("soll_work_plan", SOLL_WORK_PLAN_DISPOSITIONS),
+/// Ce qu'on sait des paramètres d'un outil — et ce qu'on ne sait PAS encore.
+///
+/// REQ-AXO-902583. `unexamined` n'est pas une variante de `ParameterDisposition`,
+/// et ce n'est pas un oubli de conception : c'est une affirmation sur l'état de
+/// MA connaissance, pas sur ce que l'outil fait du paramètre. Dans l'énumération,
+/// elle se lirait comme une disposition — « ce paramètre est sans effet » — alors
+/// qu'elle dit « personne n'a encore lu le handler ».
+///
+/// Sans ce champ, l'invariant d'égalité exacte force un tout-ou-rien par outil :
+/// le chemin le plus court pour le satisfaire est d'écrire `Honoured` partout, ce
+/// qui produirait exactement la fiction que ce REQ combat. Avec lui, l'invariant
+/// tient — `declared ∪ unexamined` doit couvrir le schéma, sans chevauchement —
+/// et la queue non lue coûte une ligne au lieu d'un mensonge.
+pub(crate) struct ToolDispositions {
+    /// Paramètres dont le handler a été LU.
+    pub declared: &'static [ParameterDeclaration],
+    /// Propriétés du schéma que personne n'a encore lues.
+    pub unexamined: &'static [&'static str],
+}
+
+pub(crate) const DECLARED_DISPOSITIONS: &[(&str, ToolDispositions)] = &[
+    (
+        "soll_get",
+        ToolDispositions { declared: SOLL_GET_DISPOSITIONS, unexamined: &[] },
+    ),
+    (
+        "inspect",
+        ToolDispositions { declared: INSPECT_DISPOSITIONS, unexamined: &[] },
+    ),
+    (
+        "retrieve_context",
+        ToolDispositions {
+            declared: RETRIEVE_CONTEXT_DISPOSITIONS,
+            unexamined: &[
+                "include_graph",
+                "include_soll",
+                "mode",
+                "project",
+                "project_code",
+                "token_budget",
+                "top_k",
+            ],
+        },
+    ),
+    (
+        "soll_work_plan",
+        ToolDispositions {
+            declared: SOLL_WORK_PLAN_DISPOSITIONS,
+            unexamined: &[
+                "actionable",
+                "format",
+                "include_ist",
+                "include_validation_details",
+                "limit",
+                "mode",
+                "project_code",
+                "seed_node",
+                "top",
+            ],
+        },
+    ),
 ];
+
+/// L'écart entre ce qu'un outil SERT et ce que la table en dit — `None` quand la
+/// table couvre exactement le schéma.
+///
+/// Sortie en fonction pure pour que le gardien du dépôt
+/// (`runtime_surface::toute_disposition_declaree_couvre_exactement_le_schema_de_son_outil`)
+/// et son MUTANT éprouvent LE MÊME code. Deux vérificateurs pour le même fait, et
+/// le mutant ne prouve plus rien sur celui qui garde réellement.
+pub(crate) fn ecart_de_couverture(
+    proprietes_du_schema: &[String],
+    dispositions: &ToolDispositions,
+) -> Option<String> {
+    let declares: Vec<&str> = dispositions.declared.iter().map(|d| d.name).collect();
+
+    let chevauchement: Vec<&str> = declares
+        .iter()
+        .copied()
+        .filter(|n| dispositions.unexamined.contains(n))
+        .collect();
+    if !chevauchement.is_empty() {
+        return Some(format!(
+            "déclaré ET non examiné à la fois : {chevauchement:?} — un paramètre ne peut pas              être lu et pas lu ; l'un des deux est faux"
+        ));
+    }
+
+    let mut couvert: Vec<String> = declares.iter().map(|n| (*n).to_string()).collect();
+    couvert.extend(dispositions.unexamined.iter().map(|n| (*n).to_string()));
+    couvert.sort();
+    let mut attendu: Vec<String> = proprietes_du_schema.to_vec();
+    attendu.sort();
+
+    if couvert == attendu {
+        return None;
+    }
+    let manquants: Vec<&String> = attendu.iter().filter(|p| !couvert.contains(p)).collect();
+    let fantomes: Vec<&String> = couvert.iter().filter(|p| !attendu.contains(p)).collect();
+    Some(format!(
+        "la table a dérivé de son schéma. Absents de la table : {manquants:?} — un champ non \
+         déclaré ne sera JAMAIS signalé comme inerte, et la surface se taira en laissant croire \
+         qu'elle a regardé. Dans la table mais plus au schéma : {fantomes:?}"
+    ))
+}
 
 /// Les dispositions déclarées d'un outil, ou `None` s'il n'est pas instrumenté.
 ///
 /// `None` n'est PAS « aucun paramètre inerte » : c'est « je ne sais pas ». Les
 /// deux se rendent différemment en surface, et confondre les deux est le défaut
 /// que ce REQ existe pour fermer.
-pub(crate) fn parameter_dispositions(tool: &str) -> Option<&'static [ParameterDeclaration]> {
+pub(crate) fn parameter_dispositions(tool: &str) -> Option<&'static ToolDispositions> {
     DECLARED_DISPOSITIONS
         .iter()
         .find(|(name, _)| *name == tool)
-        .map(|(_, declarations)| *declarations)
+        .map(|(_, dispositions)| dispositions)
 }
 
 /// Le verdict rendu à l'appelant pour UN paramètre resté sans effet.
@@ -1324,10 +1422,13 @@ pub(crate) struct InertParameter {
 /// Rend une liste vide pour un outil non instrumenté — silence, jamais un
 /// « rien à signaler » qui se lirait comme une garantie.
 pub(crate) fn inert_parameters_for_call(tool: &str, args: &Value) -> Vec<InertParameter> {
-    let Some(declarations) = parameter_dispositions(tool) else {
+    let Some(dispositions) = parameter_dispositions(tool) else {
         return Vec::new();
     };
-    declarations
+    // `unexamined` n'entre JAMAIS ici : on ne signale pas comme inerte un paramètre
+    // dont on n'a pas lu le handler. Le silence est le seul verdict honnête.
+    dispositions
+        .declared
         .iter()
         .filter_map(|declaration| {
             let ParameterDisposition::Conditional { condition, remedy } = &declaration.disposition

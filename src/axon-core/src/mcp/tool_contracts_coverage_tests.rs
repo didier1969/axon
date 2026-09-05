@@ -38,6 +38,22 @@ use serde_json::Value;
 /// un test serait retirer un contrat servi à des locataires.
 const PLANCHER_OUTILS_INSTRUMENTES: usize = 4;
 
+/// Second plancher — le nombre de paramètres RÉELLEMENT examinés.
+///
+/// Le plancher d'outils seul devient gamable dès que `unexamined` existe : un outil
+/// déclaré entièrement non examiné ajoute 1 au compte d'outils et 0 à l'honnêteté.
+/// Les deux planchers doivent donc vivre ensemble, et celui-ci est le seul qui
+/// mesure du travail de lecture.
+const PLANCHER_PARAMETRES_EXAMINES: usize = 13;
+
+/// Les paramètres dont un handler a été lu, tous outils confondus.
+fn parametres_examines() -> usize {
+    DECLARED_DISPOSITIONS
+        .iter()
+        .map(|(_, d)| d.declared.len())
+        .sum()
+}
+
 /// Tous les `.rs` du crate, concaténés. Le scanner est volontairement grossier :
 /// il cherche un littéral, pas une analyse de flot. Une analyse fine serait plus
 /// juste et ne tiendrait pas dans un test ; celle-ci tient, et son unique
@@ -134,14 +150,14 @@ fn MUTANT_le_scanner_sait_dire_NON() {
 #[test]
 fn une_disposition_declaree_correspond_au_schema_servi() {
     let catalogue = proprietes_par_outil();
-    for (outil, declarations) in DECLARED_DISPOSITIONS {
+    for (outil, dispositions) in DECLARED_DISPOSITIONS {
         let Some((_, props)) = catalogue.iter().find(|(nom, _)| nom == outil) else {
             panic!(
                 "`{outil}` porte des dispositions déclarées mais n'existe pas au catalogue — \
                  une déclaration orpheline ne protège rien et se lit comme une couverture"
             );
         };
-        for declaration in *declarations {
+        for declaration in dispositions.declared {
             assert!(
                 props.iter().any(|p| p == declaration.name),
                 "`{outil}` déclare une disposition pour `{}`, absent de son schéma : la \
@@ -160,13 +176,27 @@ fn la_couverture_des_dispositions_ne_REGRESSE_pas() {
         "la couverture est tombée à {instrumentes} outil(s) instrumenté(s), sous le \
          plancher de {PLANCHER_OUTILS_INSTRUMENTES} : un contrat servi a été retiré"
     );
-    // Le chiffre est PUBLIÉ, pas seulement gardé. « 2 sur 107 » est une dette qu'on
-    // peut discuter ; une couverture tue se lit comme une couverture complète.
+    let examines = parametres_examines();
+    assert!(
+        examines >= PLANCHER_PARAMETRES_EXAMINES,
+        "les paramètres examinés sont tombés à {examines}, sous le plancher de \
+         {PLANCHER_PARAMETRES_EXAMINES} : une lecture de handler a été remplacée par un \
+         `unexamined`, ce qui fait baisser la connaissance sans faire baisser le compte d'outils"
+    );
+    // Les chiffres sont PUBLIÉS, pas seulement gardés. « 2 sur 107 » est une dette qu'on
+    // peut discuter ; une couverture tue se lit comme une couverture complète. DEUX
+    // chiffres, parce qu'un outil déclaré n'est pas un outil lu.
     let total = proprietes_par_outil().len();
+    let non_examines: usize = DECLARED_DISPOSITIONS
+        .iter()
+        .map(|(_, d)| d.unexamined.len())
+        .sum();
     eprintln!(
-        "REQ-AXO-902583 — dispositions déclarées : {instrumentes} outil(s) sur {total}. \
-         Les autres rendent une liste vide, ce qui signifie « je ne sais pas », jamais \
-         « rien à signaler »."
+        "REQ-AXO-902583 — dispositions déclarées : {instrumentes} outil(s) sur {total} · \
+         {examines} paramètre(s) examiné(s), {non_examines} encore non lu(s). Les outils \
+         absents rendent une liste vide, ce qui signifie « je ne sais pas », jamais « rien \
+         à signaler ». Les objets imbriqués ne sont PAS descendus : l'invariant ne compare \
+         que les clés de premier niveau."
     );
     // Et l'invariant qui rend ce chiffre lisible : aucun outil n'est déclaré deux fois.
     let mut noms: Vec<&str> = DECLARED_DISPOSITIONS.iter().map(|(n, _)| *n).collect();
@@ -274,3 +304,65 @@ fn half_life_days_est_INERTE_seulement_sous_include_decay_false() {
     assert!(explicite.is_empty(), "`include_decay=true` : idem : {explicite:?}");
 }
 
+// ---------------------------------------------------------------------------------
+// LES MUTANTS du contrôle de couverture — REQ-AXO-902583.
+//
+// Ils éprouvent `ecart_de_couverture`, LA fonction que le gardien du dépôt
+// (`runtime_surface::toute_disposition_declaree_couvre_exactement…`) appelle. Un
+// mutant qui exercerait une copie ne dirait rien du code qui garde réellement.
+// ---------------------------------------------------------------------------------
+
+/// Sans lui, un vérificateur qui rendrait toujours `None` laisserait passer les
+/// quatre tables réelles, et tous les tests ci-dessus resteraient verts.
+#[test]
+fn MUTANT_le_controle_sait_REFUSER_une_table_incomplete() {
+    use crate::mcp::tool_contracts::{ecart_de_couverture, ParameterDeclaration,
+                                     ParameterDisposition, ToolDispositions};
+
+    const LUE: &[ParameterDeclaration] = &[ParameterDeclaration {
+        name: "question",
+        disposition: ParameterDisposition::Honoured,
+    }];
+    let schema = vec!["question".to_string(), "top_k".to_string()];
+
+    // La table RATE `top_k` : c'est exactement la dérive que 5c7218cd avait laissée
+    // passer sur `retrieve_context` (3 déclarés sur 10 servis).
+    let incomplete = ToolDispositions { declared: LUE, unexamined: &[] };
+    let ecart = ecart_de_couverture(&schema, &incomplete)
+        .expect("une table qui rate une propriété DOIT être refusée");
+    assert!(ecart.contains("top_k"), "l'écart doit NOMMER ce qui manque : {ecart}");
+
+    // La même table, complétée par un `unexamined` honnête, passe.
+    let complete = ToolDispositions { declared: LUE, unexamined: &["top_k"] };
+    assert_eq!(ecart_de_couverture(&schema, &complete), None);
+
+    // Et un paramètre déclaré LU et non lu à la fois est refusé : sans ce cas, on
+    // pourrait satisfaire l'invariant en listant tout des deux côtés.
+    let contradictoire = ToolDispositions { declared: LUE, unexamined: &["question", "top_k"] };
+    assert!(ecart_de_couverture(&schema, &contradictoire).is_some());
+}
+
+/// Ferme le vecteur de triche que `unexamined` ouvre : gonfler le compte d'outils
+/// instrumentés sans lire une seule ligne de handler.
+#[test]
+fn MUTANT_un_outil_entierement_unexamined_ne_compte_pas_comme_examine() {
+    use crate::mcp::tool_contracts::ToolDispositions;
+
+    let vitrine = ToolDispositions { declared: &[], unexamined: &["a", "b", "c"] };
+    assert_eq!(
+        vitrine.declared.len(),
+        0,
+        "un outil sans aucune lecture de handler doit compter ZÉRO paramètre examiné, \
+         quel que soit le nombre de propriétés qu'il énumère"
+    );
+    // Le contrôle de couverture, lui, l'accepte — c'est voulu : déclarer qu'on n'a
+    // pas lu est honnête. C'est le PLANCHER des paramètres examinés qui empêche que
+    // cette honnêteté serve à faire monter un chiffre.
+    assert_eq!(
+        crate::mcp::tool_contracts::ecart_de_couverture(
+            &["a".to_string(), "b".to_string(), "c".to_string()],
+            &vitrine
+        ),
+        None
+    );
+}

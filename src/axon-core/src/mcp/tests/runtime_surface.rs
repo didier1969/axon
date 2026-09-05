@@ -4693,7 +4693,7 @@ fn toute_disposition_declaree_couvre_exactement_le_schema_de_son_outil() {
     let catalogue = crate::mcp::catalog::tools_catalog(true);
     let outils = catalogue["tools"].as_array().expect("catalogue non vide");
 
-    for (nom, declarations) in crate::mcp::tool_contracts::DECLARED_DISPOSITIONS {
+    for (nom, dispositions) in crate::mcp::tool_contracts::DECLARED_DISPOSITIONS {
         let entree = outils
             .iter()
             .find(|tool| {
@@ -4721,18 +4721,16 @@ fn toute_disposition_declaree_couvre_exactement_le_schema_de_son_outil() {
         // raison de partager une adresse. `std::ptr::eq` rougissait ici sans qu'aucune
         // table ait dérivé — un contrôle qui ne mesure pas ce qu'il croit mesurer.
         assert_eq!(
-            resolues, *declarations,
+            resolues.declared, dispositions.declared,
             "`{nom}` — la résolution ne rend pas la table déclarée"
         );
-        let mut declares: Vec<String> = resolues.iter().map(|d| d.name.to_string()).collect();
-        declares.sort();
 
-        assert_eq!(
-            declares, du_schema,
-            "`{nom}` — la table des dispositions a dérivé de son schéma. Un champ non \
-             déclaré ne sera JAMAIS signalé comme inerte, et la surface se taira en \
-             laissant croire qu'elle a regardé."
-        );
+        // La règle vit dans `ecart_de_couverture`, PAS ici : son MUTANT
+        // (tool_contracts_coverage_tests) doit éprouver le code qui garde vraiment
+        // le dépôt, sinon il valide un second vérificateur que personne n'invoque.
+        if let Some(ecart) = crate::mcp::tool_contracts::ecart_de_couverture(&du_schema, resolues) {
+            panic!("`{nom}` — {ecart}");
+        }
     }
 }
 
