@@ -298,6 +298,24 @@ pub fn spawn_pipeline_indexer(
         ));
     }
     let registered_count = identities.len();
+
+    // REQ-AXO-902626 — réconcilier les parents FK AVANT d'ouvrir le pipeline.
+    //
+    // `ist.IndexedFile.project_code` est une FK NOT NULL vers `axon.Project(code)`.
+    // `c72cd227` (2026-08-28) a retiré le dernier écrivain de cette table sans donner
+    // la charge au registre déclaré propriétaire par REQ-AXO-902541 : tout tenant
+    // enregistré depuis voyait A3 refuser 100 % de ses lots
+    // (`indexedfile_project_code_fkey`), IST vide, `query`/`inspect`/`impact`/`why`
+    // inutilisables chez lui. Mesuré le 2026-09-06 : 20 codes sans parent, 7 tenants
+    // vivants. Le pont d'enrôlement soigne le futur ; ceci solde le passé, et le fait
+    // ICI parce que c'est le seul endroit qui tient déjà la liste hydratée du registre.
+    let parents_enrolled = store.reconcile_project_fk_parents(&identities);
+    info!(
+        registered = registered_count,
+        parents_enrolled,
+        "pipeline: axon.Project FK parents reconciled from ProjectCodeRegistry (REQ-AXO-902626)"
+    );
+
     let snapshot = ProjectRegistrySnapshot::from_rows(
         identities
             .into_iter()

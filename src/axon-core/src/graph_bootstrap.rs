@@ -569,6 +569,25 @@ impl GraphStore {
             &serde_json::json!([normalized_code, normalized_name, normalized_path]),
         )?;
 
+        // REQ-AXO-902626 — écrire le PARENT FK, pas seulement le registre.
+        //
+        // `ist.IndexedFile.project_code` est une FK NOT NULL vers `axon.Project(code)`.
+        // Le seul écrivain de production était l'UPSERT de REQ-AXO-901860 dans
+        // `bulk_writer` ; `c72cd227` (2026-08-28) l'a retiré au nom de REQ-AXO-902541
+        // — « ProjectCodeRegistry owns tenant creation » — SANS donner cette charge au
+        // registre. Le retrait était juste (le rétablir rouvrirait le bucket UNK et la
+        // cascade 25P02) ; c'est ici que l'écriture manquait. Mesuré le 2026-09-06 :
+        // dernier enrôlement réussi le 2026-08-26, 20 codes au registre sans parent,
+        // dont 7 tenants vivants dont A3 refusait 100 % des lots.
+        //
+        // Non best-effort, contrairement au NOTIFY ci-dessous : un registre écrit sans
+        // son parent FK est exactement l'état que ceci répare.
+        self.ensure_project_fk_parent(
+            &normalized_code,
+            &normalized_name,
+            normalized_path.as_deref().unwrap_or(""),
+        )?;
+
         // REQ-AXO-901985 — ring the live-enrolment bell. A running indexer's
         // `axon_registry_changed` LISTENer (watchman_source::spawn_registry_discovery)
         // resolves the project_path into a Watchman root and starts indexing the
@@ -600,6 +619,72 @@ impl GraphStore {
         }
 
         Ok(())
+    }
+
+    /// REQ-AXO-902626 — écrire la ligne PARENTE de `axon.Project`, cible de la FK
+    /// `ist.IndexedFile.project_code`. Partagé par les deux appelants : l'enrôlement
+    /// (`sync_project_registry_entry`) et la réconciliation de démarrage
+    /// (`reconcile_project_fk_parents`) — un seul SQL, une seule sémantique.
+    ///
+    /// `enrolled_at_ms` date l'écriture de CE parent, jamais l'adoption du projet :
+    /// `soll.ProjectCodeRegistry` ne porte aucune colonne de date, il n'y a rien à
+    /// reprendre. Elle n'est donc pas réécrite sur conflit. Et un champ vide côté
+    /// appelant ne doit jamais écraser une valeur déjà acquise — d'où le `WHERE` :
+    /// un appel sans chemin (il en existe) ne met rien à jour, au lieu de remplacer
+    /// le nom acquis par le code du projet. La clause ne cite QUE `EXCLUDED`, comme
+    /// tous les `DO UPDATE` de ce dépôt ; référencer la relation cible aurait été
+    /// une forme inédite ici, sur le chemin critique de l'enrôlement.
+    pub(crate) fn ensure_project_fk_parent(
+        &self,
+        project_code: &str,
+        project_name: &str,
+        root_path: &str,
+    ) -> Result<()> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as i64)
+            .unwrap_or(0);
+        self.execute_param(
+            "INSERT INTO axon.Project (code, name, root_path, enrolled_at_ms) VALUES (?, ?, ?, ?) \
+             ON CONFLICT (code) DO UPDATE SET \
+             name = EXCLUDED.name, root_path = EXCLUDED.root_path \
+             WHERE EXCLUDED.root_path <> ''",
+            &serde_json::json!([project_code, project_name, root_path, now_ms]),
+        )?;
+        Ok(())
+    }
+
+    /// REQ-AXO-902626 — réconciliation de démarrage : le pont d'enrôlement ne soigne
+    /// que le futur, et 20 codes du registre avaient déjà perdu leur parent quand
+    /// `c72cd227` (2026-08-28) a retiré le dernier écrivain de `axon.Project`.
+    ///
+    /// Le filtre est le **répertoire existant**, pas une liste en dur : il écarte les
+    /// fixtures `/tmp` disparues, et le sentinel `PRO` est déjà exclu en amont par
+    /// `registered_project_identities`. Rend le nombre de parents écrits.
+    ///
+    /// Best-effort par entrée : un code qui échoue ne doit pas empêcher les autres de
+    /// retrouver leur parent — l'appelant démarre un indexeur pour tout le parc.
+    pub(crate) fn reconcile_project_fk_parents(
+        &self,
+        identities: &[crate::project_meta::CanonicalProjectIdentity],
+    ) -> usize {
+        let mut enrolled = 0usize;
+        for identity in identities {
+            if !identity.project_path.is_dir() {
+                continue;
+            }
+            let root_path = identity.project_path.to_string_lossy().to_string();
+            let name = identity.name.clone().unwrap_or_default();
+            match self.ensure_project_fk_parent(&identity.code, &name, &root_path) {
+                Ok(()) => enrolled += 1,
+                Err(e) => tracing::warn!(
+                    project_code = %identity.code,
+                    error = %e,
+                    "REQ-AXO-902626: FK parent reconciliation failed for one tenant"
+                ),
+            }
+        }
+        enrolled
     }
 
     /// REQ-AXO-143 — persist a project's session pointer (file|url|soll_node|none).
