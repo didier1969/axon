@@ -543,13 +543,36 @@ fn no_test_touches_global_service_state_without_the_lock() {
 
     let mut offenders: Vec<String> = Vec::new();
     for (path, text) in crate_sources() {
-        // Production code legitimately drives this state; only TESTS must queue.
-        if !path.contains("tests") {
+        // REQ-AXO-902630 — la portee se lit dans le CONTENU, pas dans le CHEMIN.
+        //
+        // Ce filtre etait `if !path.contains("tests") { continue; }`. Un
+        // `#[cfg(test)] mod tests` inline dans un fichier de PRODUCTION
+        // (`scanner.rs`, `mcp_http.rs`) n'a pas « tests » dans son chemin : la
+        // garde ne le lisait pas, et deux tests y touchaient l'etat global sans
+        // verrou. Symptome vecu le 2026-09-06, mot pour mot ce que le
+        // commentaire ci-dessus annonce : `semantic_policy` rend 1 ms au lieu de
+        // 50 ms, vert en isolation, rouge en suite, sur du code que personne
+        // n'avait touche — et ajouter UN test ailleurs suffit a faire basculer
+        // le verdict.
+        //
+        // Meme trou de portee que celui deja rencontre par la garde de minting
+        // (voir `is_test_file`), et meme outillage pour le fermer : on ne
+        // retient que les fonctions situees DANS une region de test, ce qui
+        // laisse le code de production libre de piloter cet etat — c'est son
+        // role (`stage_b2.rs` le fait legitimement).
+        let lines: Vec<&str> = text.lines().collect();
+        let regions = test_regions(&lines, is_test_file(&path));
+        if regions.is_empty() {
             continue;
         }
-        let lines: Vec<&str> = text.lines().collect();
         for (name, start, end, inside_impl) in fn_blocks(&lines) {
             if inside_impl {
+                continue;
+            }
+            if !regions
+                .iter()
+                .any(|(debut, fin)| *debut <= start && start <= *fin)
+            {
                 continue;
             }
             let body = lines[start..=end].join("\n");

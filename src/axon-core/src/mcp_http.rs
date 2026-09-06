@@ -589,6 +589,11 @@ mod tests {
 
     #[test]
     fn test_observer_requests_do_not_increment_interactive_inflight() {
+        // REQ-AXO-902274 / REQ-AXO-902630 — meme raison qu'en `scanner.rs` :
+        // etat PROCESSUS-global, donc le reset doit passer par le verrou
+        // partage. Vu de ce test, tout allait bien ; c'est ailleurs que ca
+        // cassait.
+        let _sg_guard = crate::test_support::service_guard_test_lock().lock();
         service_guard::reset_for_tests();
         mcp_request_started_with_class(McpRequestClass::Observer);
         assert_eq!(service_guard::interactive_requests_in_flight(), 0);

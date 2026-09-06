@@ -833,6 +833,11 @@ mod tests {
 
     #[test]
     fn test_discovery_policy_does_not_slow_down_just_because_runtime_is_quiescent() {
+        // REQ-AXO-902274 / REQ-AXO-902630 — l'etat de `service_guard` est
+        // PROCESSUS-global : ce reset corrompait les tests qui le lisaient au
+        // meme instant, pas celui-ci. La garde ne le voyait pas parce qu'elle
+        // filtrait sur le CHEMIN du fichier.
+        let _sg_guard = crate::test_support::service_guard_test_lock().lock();
         service_guard::reset_for_tests();
         let policy = discovery_policy(0, Some(2 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024, 0);
         assert_eq!(policy.sleep, std::time::Duration::ZERO);
