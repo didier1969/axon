@@ -12,7 +12,7 @@ stdio `~/.local/bin/axon-mcp` · HTTP `http://127.0.0.1:44129/mcp`
 ## Séquence d'ouverture de session — `GUI-PRO-102`
 
 1. `status mode=brief` — état runtime + fraîcheur. La fraîcheur **calibre la confiance, elle ne bloque jamais** (`CPT-AXO-029`).
-2. `axon_init_project project_path=<cwd>` — Vision et Pillars arrivent inlinés dans la réponse. **Jamais de `sql SELECT description`.**
+2. `axon_init_project project_path=<cwd>` — Vision et Pillars arrivent inlinés en **identité** (id + titre + première phrase) ; le corps se tire par `soll_get(id=<ID>)`. `mode=full` pousse les corps entiers et dépasse le cap de ce client — ne le demander qu'en connaissance de cause (`REQ-AXO-902619`). **Jamais de `sql SELECT description`.**
 3. `practice_recall scope=AXO` — mémoire « comment travailler ». Primaire, pas optionnelle.
 4. `mcp_inbox_read` — lire les **corps**, pas seulement les sujets.
 5. `soll_get(id=<session pointer>)`, puis `soll_validate`, puis `soll_work_plan top=8`.

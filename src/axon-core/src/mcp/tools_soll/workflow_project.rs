@@ -181,11 +181,24 @@ fn git_output(
     cmd.args(args).output().ok()
 }
 
-/// REQ-AXO-902624 — les deux régimes du bundle d'ouverture.
+/// REQ-AXO-902624 / REQ-AXO-902619 — les trois régimes du bundle d'ouverture.
+///
+/// Mesuré le 2026-09-05 : le `data` seul du bundle rend **103 315 caractères**, et
+/// `content[0].text` s'y AJOUTE. Le client REFUSE la réponse. Le défaut ne pouvait
+/// donc pas rester « tout, comme avant » : ce qu'un défaut sert doit tenir dans ce
+/// qu'un client accepte, sinon il ne sert rien du tout.
+///
+/// `Brief` est le DÉFAUT et n'a pas de nom à passer : on l'obtient en n'écrivant
+/// rien. Il inline l'IDENTITÉ des nœuds macro (id + titre + statut + première
+/// phrase) et borne les index ; chaque corps se tire par `soll_get(id)`.
+/// `Full` reste la sortie de secours — strictement l'ancien comportement, corps
+/// entiers compris. `Resume` sert l'orientation seule.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum KickoffMode {
-    /// Première ouverture d'un projet inconnu : tout, comme avant.
+    /// Sortie de secours : tout, corps entiers, comme avant REQ-AXO-902619.
     Full,
+    /// DÉFAUT — identité des nœuds macro, index bornés, comptes exacts.
+    Brief,
     /// Recalage — après une compaction, une dérive, un réveil. L'orientation seule.
     Resume,
 }
@@ -194,18 +207,26 @@ impl KickoffMode {
     pub(crate) fn depuis_arguments(args: &serde_json::Value) -> Self {
         match args.get("mode").and_then(serde_json::Value::as_str) {
             Some(m) if m.eq_ignore_ascii_case("resume") => Self::Resume,
-            // Tout le reste — absent, vide, mal orthographié — reste `full`. Un
-            // bundle trop riche coûte des jetons ; un bundle amputé par une faute de
-            // frappe fait repartir une session sans son orientation.
-            _ => Self::Full,
+            Some(m) if m.eq_ignore_ascii_case("full") => Self::Full,
+            // Tout le reste — absent, vide, mal orthographié — retombe sur `brief`.
+            // Ce n'est plus un bundle « amputé » : il porte les mêmes CLÉS, les
+            // comptes exacts, et nomme ce qu'il a laissé de côté avec l'appel qui
+            // le rend. Un défaut que le client refuse, lui, n'oriente personne.
+            _ => Self::Brief,
         }
     }
 
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Full => "full",
+            Self::Brief => "brief",
             Self::Resume => "resume",
         }
+    }
+
+    /// Vrai quand les CORPS se tirent au lieu d'être poussés.
+    pub(crate) fn identity_only(self) -> bool {
+        matches!(self, Self::Brief)
     }
 }
 
@@ -1106,61 +1127,141 @@ impl McpServer {
             .filter(|s| !s.is_empty())
     }
 
-    /// REQ-AXO-902078 — init context economy. The kickoff bundle previously
-    /// risked diluting a cold-start LLM's context by leaving it to discover
-    /// macro intent through several follow-up reads. `soll_skeleton` applies a
-    /// PUSH/PULL split that keeps the bundle small while front-loading the
-    /// Phase-B-critical material (GUI-PRO-102):
-    ///   - Vision + Pillars are PUSHED with full bodies (few nodes, mandatory
-    ///     for Phase B reasoning) — descriptions read straight from soll.Node.
-    ///   - Decisions + Guidelines are INDEXED (id + title only, status=current)
-    ///     with a `pull_with` hint so the LLM fetches a body on demand via
-    ///     `soll_query_context`. Their bodies are deliberately NOT inlined —
-    ///     that bulk is the real dilution this split removes.
     /// REQ-AXO-902619 — accès de test à `soll_skeleton`, qui est privé et n'a
     /// aucune raison de cesser de l'être : c'est l'invariant qu'on teste, pas
-    /// l'encapsulation qu'on ouvre.
+    /// l'encapsulation qu'on ouvre. Sert le DÉFAUT (`brief`) ; la sortie de
+    /// secours se teste par `shape_skeleton(&snapshot, KickoffMode::Full)`.
     #[cfg(test)]
     pub(crate) fn soll_skeleton_for_tests(&self, project_code: &str) -> serde_json::Value {
-        self.soll_skeleton(project_code)
+        self.soll_skeleton(project_code, KickoffMode::Brief)
     }
 
-    fn soll_skeleton(&self, project_code: &str) -> serde_json::Value {
+    /// REQ-AXO-902619 — plafond d'UNE identité servie par défaut. La « première
+    /// phrase » n'est pas une borne : `first_sentence` rend la chaîne ENTIÈRE
+    /// quand le corps ne porte aucun point, et un pilier de 8 Ko sans point
+    /// repasserait donc en entier par la porte qu'on vient de fermer
+    /// (pratique 2140 : borner une seule dimension laisse la panne revenir).
+    pub(crate) const KICKOFF_BRIEF_SUMMARY_CHARS: usize = 200;
+
+    /// Nombre d'identités macro (Vision, Pillars) servies par défaut. Mesuré au
+    /// 2026-09-05 : AXO porte 14 piliers `current`, le plus gros parc connu. Le
+    /// plafond borne le pathologique sans amputer le réel — et le compte exact
+    /// reste servi à côté (`pillars_total`).
+    pub(crate) const KICKOFF_BRIEF_MACRO_SAMPLE: usize = 24;
+
+    /// Nombre d'entrées d'index (Decisions, Guidelines) servies par défaut.
+    /// Ces deux listes n'avaient AUCUN plafond : ~15 000 caractères sur AXO.
+    pub(crate) const KICKOFF_BRIEF_INDEX_SAMPLE: usize = 12;
+
+    /// Nombre de noms d'outils échantillonnés dans `capabilities_map`.
+    pub(crate) const KICKOFF_BRIEF_CAPABILITIES_SAMPLE: usize = 12;
+
+    /// REQ-AXO-902078 — init context economy. Le bundle d'ouverture diluait le
+    /// contexte d'un LLM à froid en le laissant découvrir l'intention macro par
+    /// plusieurs lectures. `soll_skeleton` applique un partage PUSH/PULL, borné
+    /// par `mode` depuis REQ-AXO-902619 :
+    ///   - Vision + Pillars sont POUSSÉS — en IDENTITÉ par défaut (id, titre,
+    ///     statut, première phrase bornée, `body_chars`), en corps entiers sous
+    ///     `mode=full`. La source est le snapshot RAM, et non plus un `SELECT`
+    ///     par nœud (REQ-AXO-902458 y a mis `description` en 2026-08-22).
+    ///   - Decisions + Guidelines sont INDEXÉS (id + titre, status=current),
+    ///     échantillonnés par défaut avec leur total exact à côté. Leurs corps ne
+    ///     sont jamais inlinés — c'est ce volume que le partage retire.
+    fn soll_skeleton(&self, project_code: &str, mode: KickoffMode) -> serde_json::Value {
         let Ok(snapshot) = self.soll_cache().snapshot(project_code) else {
             return serde_json::json!({
                 "status": "unavailable",
                 "note": "SOLL snapshot not resolvable for this project",
             });
         };
+        Self::shape_skeleton(&snapshot, mode)
+    }
 
-        // PUSH: full bodies for the few, Phase-B-critical macro nodes.
-        //
-        // REQ-AXO-902619 — filtre `status == "current"`, comme `index_current`
-        // juste en dessous. L'asymétrie était un DÉFAUT DE CORRECTION, pas une
-        // question de taille : mesuré le 2026-09-05 sur le bundle réel, les corps
-        // servis en entier incluaient `PIL-AXO-902 "Test Pillar"` (rejected, stub
-        // « placeholder rejected session 64 »), `PIL-AXO-102 "New Pillar"`
-        // (rejected) et `PIL-AXO-006` (superseded) — pendant que
-        // `PIL-AXO-9003 "Axon Two-Sided Identity"` (8 152 car), `PIL-AXO-004`,
-        // `007`, `008` et `009` étaient évincés, budget de 12 Ko atteint.
-        //
-        // Le tri par id dépense le budget d'inline dans l'ordre des identifiants :
-        // des nœuds MORTS passaient donc avant des nœuds VIVANTS. Toute session
-        // s'ouvrait sur « Test Pillar » et n'avait jamais le pilier d'identité du
-        // produit.
+    /// Les nœuds VIVANTS d'un type, triés par id.
+    ///
+    /// Le filtre `status == "current"` vaut pour TOUTES les surfaces du squelette :
+    /// c'est son asymétrie — `push_bodies` ne filtrait pas, `index_current` si —
+    /// qui faisait ouvrir chaque session sur `PIL-AXO-902 "Test Pillar"` (rejected)
+    /// pendant que `PIL-AXO-9003` (8 152 car) était évincé faute de budget.
+    /// Une fonction, pas une fermeture : le résultat emprunte au SNAPSHOT, pas au
+    /// nom de type, et l'élision de durée de vie d'une fermeture dit le contraire.
+    fn noeuds_vivants<'a>(
+        snapshot: &'a crate::soll_snapshot::SollSnapshot,
+        entity_type: &str,
+    ) -> Vec<(&'a String, &'a crate::soll_snapshot::SnapshotNode)> {
+        let mut ids: Vec<&'a String> = snapshot.node_ids_of_type(entity_type).iter().collect();
+        ids.sort();
+        ids.into_iter()
+            .filter_map(|id| snapshot.nodes.get(id).map(|n| (id, n)))
+            .filter(|(_, n)| n.status == "current")
+            .collect()
+    }
+
+    /// REQ-AXO-902078 / REQ-AXO-902619 — la mise en forme du squelette, PURE au
+    /// dessus du snapshot RAM.
+    ///
+    /// Deux changements de fond par rapport à la première version :
+    ///
+    /// 1. Les corps ne viennent plus d'un `SELECT` PAR NŒUD. `SnapshotNode` porte
+    ///    `description` depuis REQ-AXO-902458 : le N+1 n'achetait rien, et il
+    ///    servait un corps FRAIS sous un statut STALE — deux sources pour un même
+    ///    nœud. Une seule source, c'est aussi une fonction pure, donc testable
+    ///    sans base (comme `planning_work_plan`).
+    /// 2. Le défaut ne POUSSE plus les corps. Mesuré le 2026-09-05, `data` seul
+    ///    rendait 103 315 caractères et le client refusait la réponse ; les
+    ///    `pillars[].body` en portaient 42 585 (41 %). Ce qu'un défaut sert doit
+    ///    tenir dans ce qu'un client accepte.
+    ///
+    /// Les CLÉS ne changent pas — `vision`, `pillars`, `decisions_index`,
+    /// `guidelines_index` restent des tableaux, et le rendu de `content.text` les
+    /// lit toujours (GUI-PRO-102 Phase A). Ce sont les VALEURS qui maigrissent, et
+    /// chaque coupe est nommée avec l'appel qui la rend (forme `conception_view` :
+    /// comptes exacts conservés, listes échantillonnées).
+    pub(crate) fn shape_skeleton(
+        snapshot: &crate::soll_snapshot::SollSnapshot,
+        mode: KickoffMode,
+    ) -> serde_json::Value {
+        let bref = mode.identity_only();
+
+        // PUSH — corps entiers. `full` seulement : c'est la sortie de secours.
         let push_bodies = |entity_type: &str| -> serde_json::Value {
-            let mut ids: Vec<&String> = snapshot.node_ids_of_type(entity_type).iter().collect();
-            ids.sort();
             serde_json::Value::Array(
-                ids.into_iter()
-                    .filter_map(|id| snapshot.nodes.get(id).map(|n| (id, n)))
-                    .filter(|(_, n)| n.status == "current")
+                Self::noeuds_vivants(snapshot, entity_type)
+                    .into_iter()
                     .map(|(id, n)| {
+                        let body = if n.description.trim().is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::Value::from(n.description.clone())
+                        };
                         serde_json::json!({
                             "id": id,
                             "title": n.title,
                             "status": n.status,
-                            "body": self.read_soll_node_description(id),
+                            "body": body,
+                        })
+                    })
+                    .collect(),
+            )
+        };
+
+        // PUSH — IDENTITÉ. Ce qu'il faut pour SAVOIR qu'un nœud existe et de quoi
+        // il parle : id, titre, statut, première phrase bornée. `body_chars` dit
+        // ce qu'on n'a pas servi, pour que « c'est court » ne se confonde pas avec
+        // « c'est tout ».
+        let push_identity = |entity_type: &str| -> serde_json::Value {
+            serde_json::Value::Array(
+                Self::noeuds_vivants(snapshot, entity_type)
+                    .into_iter()
+                    .take(Self::KICKOFF_BRIEF_MACRO_SAMPLE)
+                    .map(|(id, n)| {
+                        let summary = Self::identity_summary(&n.description);
+                        serde_json::json!({
+                            "id": id,
+                            "title": n.title,
+                            "status": n.status,
+                            "summary": summary,
+                            "body_chars": n.description.chars().count(),
                         })
                     })
                     .collect(),
@@ -1169,12 +1270,14 @@ impl McpServer {
 
         // PULL: id + title index only, restricted to status='current'.
         let index_current = |entity_type: &str| -> serde_json::Value {
-            let mut ids: Vec<&String> = snapshot.node_ids_of_type(entity_type).iter().collect();
-            ids.sort();
             serde_json::Value::Array(
-                ids.into_iter()
-                    .filter_map(|id| snapshot.nodes.get(id).map(|n| (id, n)))
-                    .filter(|(_, n)| n.status == "current")
+                Self::noeuds_vivants(snapshot, entity_type)
+                    .into_iter()
+                    .take(if bref {
+                        Self::KICKOFF_BRIEF_INDEX_SAMPLE
+                    } else {
+                        usize::MAX
+                    })
                     .map(|(id, n)| {
                         serde_json::json!({
                             "id": id,
@@ -1185,16 +1288,79 @@ impl McpServer {
             )
         };
 
+        let compte = |entity_type: &str| Self::noeuds_vivants(snapshot, entity_type).len();
+        let macro_nodes = |entity_type: &str| -> serde_json::Value {
+            if bref {
+                push_identity(entity_type)
+            } else {
+                push_bodies(entity_type)
+            }
+        };
+
         serde_json::json!({
-            "vision": push_bodies("Vision"),
-            "pillars": push_bodies("Pillar"),
+            "vision": macro_nodes("Vision"),
+            "pillars": macro_nodes("Pillar"),
             "decisions_index": index_current("Decision"),
             "guidelines_index": index_current("Guideline"),
+            // Les COMPTES restent exacts quel que soit le mode : une liste
+            // échantillonnée qui ne dit pas son total est une liste qui ment.
+            "vision_total": compte("Vision"),
+            "pillars_total": compte("Pillar"),
+            "decisions_index_total": compte("Decision"),
+            "guidelines_index_total": compte("Guideline"),
+            "brief_sample_size": if bref {
+                serde_json::json!({
+                    "macro_nodes": Self::KICKOFF_BRIEF_MACRO_SAMPLE,
+                    "index": Self::KICKOFF_BRIEF_INDEX_SAMPLE,
+                    "summary_chars": Self::KICKOFF_BRIEF_SUMMARY_CHARS,
+                })
+            } else {
+                serde_json::Value::Null
+            },
+            "omitted_in_brief": if bref {
+                serde_json::json!([
+                    "vision[].body", "pillars[].body",
+                    "vision/pillars beyond brief_sample_size.macro_nodes (see vision_total/pillars_total)",
+                    "decisions_index (beyond the sample)",
+                    "guidelines_index (beyond the sample)"
+                ])
+            } else {
+                serde_json::json!([])
+            },
+            "detail_continuation": if bref {
+                serde_json::json!({ "tool": "soll_get", "arguments": { "id": "<ID>" } })
+            } else {
+                serde_json::Value::Null
+            },
             // Bodies for the indexed Decisions/Guidelines are intentionally
             // omitted (PULL on demand) to keep the bundle lean.
             "pull_with": "soll_query_context",
-            "pull_note": "decisions_index/guidelines_index list id+title only — fetch a body on demand via soll_get(id=<ID>) (canonical, REQ-AXO-902248) or soll_query_context(question=<ID>).",
+            "pull_note": if bref {
+                "vision/pillars carry id+title+status+summary (first sentence, capped) and body_chars — the FULL body of any node comes from soll_get(id=<ID>) (canonical, REQ-AXO-902248); decisions_index/guidelines_index are id+title samples, their totals are in *_total. Re-call axon_init_project with mode=full to inline every body again (REQ-AXO-902619)."
+            } else {
+                "decisions_index/guidelines_index list id+title only — fetch a body on demand via soll_get(id=<ID>) (canonical, REQ-AXO-902248) or soll_query_context(question=<ID>)."
+            },
         })
+    }
+
+    /// REQ-AXO-902619 — l'identité d'un corps : première phrase, BORNÉE.
+    ///
+    /// `first_sentence` seule ne borne rien — sans point, elle rend la chaîne
+    /// entière. La coupe est visible (`…`) : une troncature muette est la classe
+    /// de défaut que REQ-AXO-902355 a déjà payée une fois.
+    /// Rend `null` sur un corps vide, pour que le rendu retombe sur l'index au
+    /// lieu d'imprimer un bloc creux.
+    fn identity_summary(description: &str) -> serde_json::Value {
+        let phrase = Self::first_sentence(description);
+        if phrase.trim().is_empty() {
+            return serde_json::Value::Null;
+        }
+        let borne = Self::KICKOFF_BRIEF_SUMMARY_CHARS;
+        if phrase.chars().count() <= borne {
+            return serde_json::Value::from(phrase);
+        }
+        let coupe: String = phrase.chars().take(borne).collect();
+        serde_json::Value::from(format!("{coupe}…"))
     }
 
     /// REQ-AXO-902078 — capabilities_map. Derived at RUNTIME from
@@ -1202,13 +1368,38 @@ impl McpServer {
     /// so it can never drift from the live tool surface. Hard-coding it would
     /// re-introduce the non-conformity this REQ closes: a stale list misleads
     /// the cold-start LLM about which tools exist.
-    fn capabilities_map() -> serde_json::Value {
+    /// REQ-AXO-902619 — 114 outils × une phrase = 17 161 caractères (17 % du
+    /// bundle) pour une carte que `help` rend à la demande, complète et à jour.
+    /// Le défaut sert le COMPTE (qui, lui, oriente : « la surface fait 114
+    /// outils »), un échantillon de noms, et l'appel qui rend le reste.
+    fn capabilities_map(mode: KickoffMode) -> serde_json::Value {
         let catalog = crate::mcp::catalog::tools_catalog(false);
         let tools = catalog
             .get("tools")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        if mode.identity_only() {
+            // Le compte se dérive EXACTEMENT comme la liste de `full` (même filtre
+            // sur `name`) : un compte qui ne compte pas la même chose que la liste
+            // qu'il remplace ne remplace rien.
+            let noms: Vec<serde_json::Value> = tools
+                .iter()
+                .filter_map(|tool| tool.get("name").filter(|v| v.is_string()).cloned())
+                .collect();
+            let count = noms.len();
+            let sample: Vec<serde_json::Value> = noms
+                .into_iter()
+                .take(Self::KICKOFF_BRIEF_CAPABILITIES_SAMPLE)
+                .collect();
+            return serde_json::json!({
+                "count": count,
+                "sample": sample,
+                "omitted_in_brief": ["summary", "the remaining tool names"],
+                "detail_continuation": { "tool": "help", "arguments": {} },
+                "note": "`help` returns the live tool surface with its descriptions — it never drifts, and it costs one call instead of 17 KB at every open (REQ-AXO-902619). `session_toolset_hint` below is the ready ToolSearch select for a working session.",
+            });
+        }
         serde_json::Value::Array(
             tools
                 .into_iter()
@@ -1243,8 +1434,8 @@ impl McpServer {
             { "step": 3, "kind": "file", "target": "<persistent_memory>/MEMORY.md", "purpose": "accumulated session memory and active handoff pointer" },
             { "step": 4, "kind": "mcp", "target": "mcp__axon__help", "purpose": "confirm MCP reachable, return Axon identity and tool routing" },
             { "step": 5, "kind": "mcp", "target": "mcp__axon__status mode=brief", "purpose": "runtime instance, profile, freshness, vector backlog" },
-            { "step": 6, "kind": "bundle", "target": "kickoff_bundle.soll_skeleton.vision — also inlined in full in the Continuation block at the top of this response", "purpose": "project Vision in full — already PUSHED, no read needed (REQ-AXO-902355)" },
-            { "step": 7, "kind": "bundle", "target": "kickoff_bundle.soll_skeleton.pillars — bodies inlined in the Continuation block up to a byte budget; any budget-truncated pillar is listed there with its id", "purpose": "every Pillar description — PUSHED; fetch a truncated body via soll_get(id=<ID>) (REQ-AXO-902355)" },
+            { "step": 6, "kind": "bundle", "target": "kickoff_bundle.soll_skeleton.vision — inlined in the Continuation block at the top of this response (identity: id + title + first sentence by default, full body under mode=full)", "purpose": "project Vision — PUSHED, no read needed to know WHAT it says; the full body comes from soll_get(id=<ID>) or mode=full (REQ-AXO-902355/902619)" },
+            { "step": 7, "kind": "bundle", "target": "kickoff_bundle.soll_skeleton.pillars — same identity inline in the Continuation block; under mode=full the bodies inline up to a byte budget and any truncated pillar is listed there with its id", "purpose": "every living Pillar — PUSHED as identity (`pillars_total` gives the exact count); fetch a body via soll_get(id=<ID>) (REQ-AXO-902355/902619)" },
             { "step": 8, "kind": "mcp", "target": "mcp__axon__soll_get(id=<ID>) for a Decision/Milestone body — ids are in kickoff_bundle.soll_skeleton.decisions_index (id+title)", "purpose": "already-completed work — indexed in soll_skeleton, pull a body on demand (REQ-AXO-902248/902355)" },
             { "step": 9, "kind": "mcp", "target": "mcp__axon__soll_validate project_code=<CODE>", "purpose": "current SOLL invariant violations (target zero)" },
             { "step": 10, "kind": "mcp", "target": "mcp__axon__soll_work_plan project_code=<CODE> format=brief top=5 limit=15", "purpose": "scored topological order of unblockers; wave 1 score is authoritative" }
@@ -1836,47 +2027,68 @@ impl McpServer {
         // truncation is LOUD — silent truncation is the exact bug class filed.
         // The `unavailable` skeleton shape (no vision/pillars keys) and an empty
         // body both fall through to no dangling block / an explicit note.
+        // REQ-AXO-902619 — trois formes, pas deux : un nœud arrive avec son CORPS
+        // (mode=full), avec sa seule IDENTITÉ (défaut : première phrase bornée), ou
+        // sans rien. L'identité se rend INLINE — c'est le but de la coupe : savoir
+        // ce que dit un pilier sans payer ses 8 Ko. La renvoyer à l'index sous le
+        // message « budget atteint » dirait deux choses fausses à la fois.
         if let Some(sk) = bundle.get("soll_skeleton") {
-            let node_parts = |n: &serde_json::Value| -> (String, String, Option<String>) {
-                let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-                let title = n.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let body = n
-                    .get("body")
+            let texte = |n: &serde_json::Value, key: &str| -> Option<String> {
+                n.get(key)
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.trim().is_empty())
-                    .map(|s| s.to_string());
-                (id, title, body)
+                    .map(|s| s.to_string())
+            };
+            let node_parts = |n: &serde_json::Value| -> (String, String, Option<String>, Option<String>) {
+                let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                let title = n.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                (id, title, texte(n, "body"), texte(n, "summary"))
             };
 
             // Vision — full body, unconditional (one mandatory node).
             if let Some(vision) = sk.get("vision").and_then(|v| v.as_array()) {
                 for v in vision {
-                    let (id, title, body) = node_parts(v);
-                    match body {
-                        Some(b) => out.push_str(&format!("\n### {id} — {title}\n{b}\n")),
-                        None => out.push_str(&format!(
+                    let (id, title, body, summary) = node_parts(v);
+                    match (body, summary) {
+                        (Some(b), _) => out.push_str(&format!("\n### {id} — {title}\n{b}\n")),
+                        (None, Some(s)) => out.push_str(&format!(
+                            "\n### {id} — {title}\n{s}\n_(identité — corps entier via soll_get(id={id}))_\n"
+                        )),
+                        (None, None) => out.push_str(&format!(
                             "\n### {id} — {title}\n_(corps vide/illisible — soll_get(id={id}))_\n"
                         )),
                     }
                 }
             }
 
-            // Pillars — full bodies in id order under the byte budget; overflow
-            // and body-less nodes fall to an index carrying a soll_get hint.
+            // Pillars — full bodies in id order under the byte budget; identity
+            // (first sentence) when that is all the bundle carries; overflow and
+            // body-less nodes fall to an index carrying a soll_get hint.
             if let Some(pillars) = sk.get("pillars").and_then(|v| v.as_array()) {
                 if !pillars.is_empty() {
                     out.push_str("\n**Pillars (PUSH):**\n");
                     let mut spent = 0usize;
                     let mut indexed: Vec<String> = Vec::new();
+                    let mut identites = 0usize;
                     for p in pillars {
-                        let (id, title, body) = node_parts(p);
-                        match body {
-                            Some(b) if spent + b.len() <= Self::PILLAR_INLINE_BUDGET_BYTES => {
+                        let (id, title, body, summary) = node_parts(p);
+                        match (body, summary) {
+                            (Some(b), _) if spent + b.len() <= Self::PILLAR_INLINE_BUDGET_BYTES => {
                                 spent += b.len();
                                 out.push_str(&format!("\n#### {id} — {title}\n{b}\n"));
                             }
+                            (_, Some(s)) if spent + s.len() <= Self::PILLAR_INLINE_BUDGET_BYTES => {
+                                spent += s.len();
+                                identites += 1;
+                                out.push_str(&format!("\n#### {id} — {title}\n{s}\n"));
+                            }
                             _ => indexed.push(format!("{id} — {title}")),
                         }
+                    }
+                    if identites > 0 {
+                        out.push_str(&format!(
+                            "\n_{identites} pilier(s) servis en IDENTITÉ (première phrase) — corps entier via soll_get(id=…), ou axon_init_project(mode=full) pour les inliner tous (REQ-AXO-902619)._\n"
+                        ));
                     }
                     if !indexed.is_empty() {
                         out.push_str(&format!(
@@ -1905,6 +2117,11 @@ impl McpServer {
             //
             // id+title only: an index, not bodies (a project carries a handful,
             // and `soll_get(id=…)` opens any of them).
+            //
+            // REQ-AXO-902619 — le compte affiché est le TOTAL vivant, pas la
+            // longueur de l'échantillon. Ces deux index n'avaient aucun plafond
+            // (~15 000 car sur AXO) ; maintenant qu'ils en ont un, afficher
+            // « (12) » quand il y en a 87 serait une troncature muette.
             let index_block = |key: &str, label: &str, out: &mut String| {
                 let Some(items) = sk.get(key).and_then(|v| v.as_array()) else {
                     return;
@@ -1915,15 +2132,25 @@ impl McpServer {
                 let lines: Vec<String> = items
                     .iter()
                     .map(|n| {
-                        let (id, title, _) = node_parts(n);
+                        let (id, title, _, _) = node_parts(n);
                         format!("`{id}` {title}")
                     })
                     .collect();
-                out.push_str(&format!(
-                    "\n**{label} ({}):** {}\n",
-                    lines.len(),
-                    lines.join(" · ")
-                ));
+                let total = sk
+                    .get(format!("{key}_total").as_str())
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|t| t as usize)
+                    .unwrap_or(lines.len());
+                let compte = if total > lines.len() {
+                    format!(
+                        "{} sur {total} — les {} autres via soll_get(id=…) ou mode=full",
+                        lines.len(),
+                        total - lines.len()
+                    )
+                } else {
+                    lines.len().to_string()
+                };
+                out.push_str(&format!("\n**{label} ({compte}):** {}\n", lines.join(" · ")));
             };
             index_block(
                 "guidelines_index",
@@ -2035,6 +2262,7 @@ impl McpServer {
         mode: KickoffMode,
     ) -> serde_json::Value {
         let resume = mode == KickoffMode::Resume;
+        let bref = mode.identity_only();
         // Les deux corps de méthodologie ne sont LUS que si on les sert : en mode
         // `resume`, les charger pour les jeter ferait payer la requête sans le gain.
         let kickoff_prompt = if resume {
@@ -2045,8 +2273,14 @@ impl McpServer {
                     .unwrap_or_else(|| Self::default_kickoff_prompt().to_string()),
             )
         };
+        // REQ-AXO-902619 — le corps entier de `CPT-AXO-019` pèse ~3 400 caractères
+        // pour dire une boucle qui tient en cinq lignes. Le résumé statique EST
+        // cette boucle, et il finit déjà par la référence canonique : la coupe ne
+        // retire pas l'instruction, elle retire sa deuxième copie.
         let methodology_summary = if resume {
             serde_json::Value::Null
+        } else if bref {
+            serde_json::Value::String(Self::default_methodology_summary().to_string())
         } else {
             serde_json::Value::String(
                 self.read_soll_node_description("CPT-AXO-019")
@@ -2119,13 +2353,20 @@ impl McpServer {
         // Pillars), INDEX Decisions/Guidelines (id+title, pull-on-demand),
         // expose a runtime-derived capabilities_map and a session_toolset_hint
         // so the cold-start LLM provisions its tool surface in one move.
-        let soll_skeleton = self.soll_skeleton(project_code);
-        let capabilities_map = Self::capabilities_map();
+        let soll_skeleton = self.soll_skeleton(project_code, mode);
+        let capabilities_map = Self::capabilities_map(mode);
         let session_toolset_hint = "select:query,inspect,retrieve_context,impact,soll_query_context,soll_work_plan,soll_manager,document_intent,axon_pre_flight_check,axon_commit_work";
         // REQ-AXO-902360 — debt_digest at init: counts + pointer ONLY (the "score+pointer"
         // surface). RAM-native and cheap (no ranking); a cold IST snapshot degrades to
         // available:false and never blocks init.
-        let debt_digest = self.debt_digest_kickoff(project_code);
+        // REQ-AXO-902619 — trois offenders par section au lieu de dix : ce qui ouvre
+        // une session est le PREMIER geste, pas la liste. Les COMPTES restent entiers,
+        // et `debt_digest top=N` rend la profondeur. Le handoff, lui, garde ses dix
+        // (`debt_digest_kickoff`) : il ferme sur une punch-list, il n'ouvre pas.
+        let debt_digest = self.debt_digest_avec_plafond(
+            project_code,
+            if bref { 3 } else { 10 },
+        );
         serde_json::json!({
             "kickoff_prompt": kickoff_prompt,
             "kickoff_prompt_source": "soll://Node/DEC-PRO-001",
@@ -2165,7 +2406,22 @@ impl McpServer {
             } else {
                 serde_json::json!([])
             },
-            "detail_continuation": if resume {
+            // REQ-AXO-902619 — ce que le DÉFAUT laisse de côté, nommé au même
+            // endroit et sous la même règle que `resume` : jamais retiré en
+            // silence, toujours avec l'appel qui le rend.
+            "omitted_in_brief": if bref {
+                serde_json::json!([
+                    "soll_skeleton.vision[].body", "soll_skeleton.pillars[].body",
+                    "soll_skeleton.decisions_index (beyond the sample)",
+                    "soll_skeleton.guidelines_index (beyond the sample)",
+                    "capabilities_map[].summary",
+                    "methodology_summary (CPT-AXO-019 body — the static loop is served instead)",
+                    "debt_digest.sections (3 offenders per section instead of 10)"
+                ])
+            } else {
+                serde_json::json!([])
+            },
+            "detail_continuation": if resume || bref {
                 serde_json::json!({
                     "tool": "axon_init_project",
                     "arguments": { "project_path": project_path, "mode": "full" }
@@ -2183,6 +2439,21 @@ impl McpServer {
     /// snapshot degrades to `available:false` rather than blocking init. Single source with the
     /// `debt_digest` tool via `collect_debt_sections`.
     pub(crate) fn debt_digest_kickoff(&self, project_code: &str) -> serde_json::Value {
+        self.debt_digest_avec_plafond(project_code, 10)
+    }
+
+    /// REQ-AXO-902619 — le même digest, avec son plafond DIT plutôt que figé.
+    ///
+    /// Init et handoff n'ont pas le même besoin : un handoff ferme sur une
+    /// punch-list (dix par section, `debt_digest_kickoff`), une ouverture n'a
+    /// besoin que du premier geste (trois). Le plafond appliqué est dans le
+    /// `hint` — un compte affiché qui ne dit pas sa borne est une troncature
+    /// muette, et c'est la classe de défaut que REQ-AXO-902583 interdit.
+    pub(crate) fn debt_digest_avec_plafond(
+        &self,
+        project_code: &str,
+        top: usize,
+    ) -> serde_json::Value {
         let cold = || {
             serde_json::json!({
                 "available": false,
@@ -2197,12 +2468,15 @@ impl McpServer {
             Some(s) => s,
             None => return cold(),
         };
-        let (counts, sections) = self.collect_debt_sections(&snapshot, project_code, 10, None);
+        let (counts, sections) = self.collect_debt_sections(&snapshot, project_code, top, None);
         serde_json::json!({
             "available": true,
             "counts": counts,
             "sections": sections,
-            "hint": "top 10 actionable offenders per section are inline above; call `debt_digest top=N` for a deeper list",
+            "section_top": top,
+            "hint": format!(
+                "top {top} actionable offenders per section are inline above (the `counts` are the FULL totals); call `debt_digest top=N` for a deeper list"
+            ),
         })
     }
 
@@ -2821,14 +3095,25 @@ impl McpServer {
         // REQ-AXO-119 — append the kickoff bundle pointer to the
         // human-readable response so an LLM scanning content alone
         // sees that the structured bundle is available in data.
-        // REQ-AXO-902624 — `mode=resume` pour un recalage, `full` (défaut) pour une
-        // première ouverture. Un mode inconnu retombe sur `full` : un bundle trop
-        // riche est un coût, un bundle amputé par une faute de frappe est une panne.
+        // REQ-AXO-902624 / REQ-AXO-902619 — `mode=resume` pour un recalage,
+        // `mode=full` pour tout inliner (corps entiers), et le DÉFAUT — rien à
+        // écrire — pour l'identité des nœuds macro plus des index bornés. Un mode
+        // inconnu retombe sur le défaut : il porte les mêmes clés, les comptes
+        // exacts, et l'appel qui rend le reste.
         let mode = KickoffMode::depuis_arguments(args);
         let bundle = self.axon_init_project_bundle(&project_code, project_path, mode);
-        response_text.push_str(
-            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, derived_session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, soll_skeleton, capabilities_map, session_toolset_hint). derived_session_pointer (REQ-AXO-902160) auto-orients a fresh session from git HEAD + in-progress REQs + recent REQ commits — no hand-write ; `.explicit` carries the operator-set session_pointer when present. soll_skeleton's Vision + Pillar bodies are INLINED in full in the Continuation block ABOVE (Pillars up to a byte budget; any overflow is listed there by id with a soll_get hint) and mirrored here for programmatic use — no read needed; Decisions/Guidelines are INDEXED (id+title — pull a body via soll_get(id=<ID>)); capabilities_map lists the live tool surface; session_toolset_hint is a ready ToolSearch select. Use it to onboard yourself or any future LLM session before doing project-specific work.",
-        );
+        // REQ-AXO-902619 — cette phrase DÉCRIT le bundle : elle doit donc suivre le
+        // mode, sinon elle promet des corps entiers que le défaut ne sert plus. Une
+        // description fausse du contenu servi est le défaut qu'ont payé
+        // REQ-AXO-902355 puis REQ-AXO-902441, chacune une session entière.
+        let macro_clause = if mode.identity_only() {
+            "soll_skeleton's Vision + Pillars are PUSHED as IDENTITY — id, title, status, first sentence (capped) and body_chars — inlined in the Continuation block ABOVE and mirrored here; `*_total` gives the exact living count of each list, `omitted_in_brief` names every cut, and `soll_get(id=<ID>)` (or a re-call with mode=full) returns any full body. Decisions/Guidelines are INDEXED (id+title, sampled — totals in `decisions_index_total`/`guidelines_index_total`); capabilities_map is a count + sample (call `help` for the live surface)"
+        } else {
+            "soll_skeleton's Vision + Pillar bodies are INLINED in full in the Continuation block ABOVE (Pillars up to a byte budget; any overflow is listed there by id with a soll_get hint) and mirrored here for programmatic use — no read needed; Decisions/Guidelines are INDEXED (id+title — pull a body via soll_get(id=<ID>)); capabilities_map lists the live tool surface"
+        };
+        response_text.push_str(&format!(
+            "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, derived_session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, soll_skeleton, capabilities_map, session_toolset_hint). derived_session_pointer (REQ-AXO-902160) auto-orients a fresh session from git HEAD + in-progress REQs + recent REQ commits — no hand-write ; `.explicit` carries the operator-set session_pointer when present. {macro_clause}; session_toolset_hint is a ready ToolSearch select. Use it to onboard yourself or any future LLM session before doing project-specific work."
+        ));
 
         // REQ-AXO-902172 — lead with the essential Continuation block INLINE so a client
         // reading content.text alone is oriented without cracking data.kickoff_bundle
@@ -3561,6 +3846,375 @@ mod continuation_block_tests {
         assert!(b.contains("indexé(s) seulement"), "bodyless pillars degrade to index: {b}");
         assert!(b.contains("PIL-AXO-009") && b.contains("PIL-AXO-010"), "both listed in index: {b}");
         assert!(!b.contains("#### PIL-AXO-009"), "no empty inline block for bodyless pillar: {b}");
+    }
+}
+
+#[cfg(test)]
+mod kickoff_identity_tests {
+    //! REQ-AXO-902619 — le bundle d'ouverture rendait 103 315 caractères de `data`
+    //! (plus `content[0].text` par-dessus) et le client le REFUSAIT. Le défaut sert
+    //! désormais l'IDENTITÉ des nœuds macro ; `mode=full` reste la sortie de secours.
+    //!
+    //! Tests PURS sur `SollSnapshot::build` — pas de base, pas de serveur, comme
+    //! `planning_work_plan`. Le squelette ne lit plus un `SELECT` par nœud : le
+    //! corps vient du snapshot RAM (`SnapshotNode.description`, REQ-AXO-902458),
+    //! donc la mise en forme est une fonction pure et se teste comme telle.
+    use super::{KickoffMode, McpServer};
+    use crate::soll_snapshot::{SnapshotNode, SollSnapshot};
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+
+    fn noeud(id: &str, ty: &str, statut: &str, corps: &str) -> SnapshotNode {
+        SnapshotNode {
+            id: id.to_string(),
+            entity_type: ty.to_string(),
+            title: format!("titre-{id}"),
+            status: statut.to_string(),
+            metadata_raw: "{}".to_string(),
+            description: corps.to_string(),
+        }
+    }
+
+    fn snapshot(noeuds: Vec<SnapshotNode>) -> SollSnapshot {
+        let mut map: HashMap<String, SnapshotNode> = HashMap::new();
+        for n in noeuds {
+            map.insert(n.id.clone(), n);
+        }
+        SollSnapshot::build("TST", 1, map, Vec::new(), Vec::new())
+    }
+
+    /// Un corps VOLUMINEUX, dont la première phrase est courte. C'est la forme
+    /// réelle d'un pilier : une thèse, puis des pages de justification.
+    fn gros_corps(marqueur: &str) -> String {
+        format!("{marqueur} en une phrase. {}", "PADDING-QUE-NUL-NE-LIT ".repeat(400))
+    }
+
+    fn parc_des_piliers() -> SollSnapshot {
+        snapshot(vec![
+            noeud("VIS-TST-001", "Vision", "current", &gros_corps("LA-VISION")),
+            noeud("PIL-TST-001", "Pillar", "current", &gros_corps("PILIER-UN")),
+            noeud("PIL-TST-002", "Pillar", "current", &gros_corps("PILIER-DEUX")),
+            noeud("PIL-TST-003", "Pillar", "current", &gros_corps("PILIER-TROIS")),
+            // Un mort : il ne doit sortir sous AUCUN mode (REQ-AXO-902619, 1re tranche).
+            noeud("PIL-TST-904", "Pillar", "rejected", &gros_corps("PILIER-MORT")),
+        ])
+    }
+
+    #[test]
+    fn le_defaut_ne_pousse_aucun_corps_de_pilier_et_rend_l_identite() {
+        let skeleton = McpServer::shape_skeleton(&parc_des_piliers(), KickoffMode::Brief);
+        let pillars = skeleton["pillars"].as_array().expect("pillars reste un tableau");
+        assert_eq!(pillars.len(), 3, "les trois piliers VIVANTS sont servis : {pillars:?}");
+        for p in pillars {
+            assert!(
+                p.get("body").is_none(),
+                "le défaut ne pousse aucun corps de pilier : {p}"
+            );
+            assert!(p["id"].is_string() && p["title"].is_string(), "identité complète : {p}");
+            assert_eq!(p["status"], "current", "le statut reste servi : {p}");
+            assert!(
+                p["summary"].as_str().is_some_and(|s| s.ends_with("en une phrase.")),
+                "la première phrase, et elle seule : {p}"
+            );
+            assert!(
+                p["body_chars"].as_u64().unwrap_or(0) > 1000,
+                "ce qu'on n'a PAS servi est dit, pas caché : {p}"
+            );
+        }
+        // Le padding — c'est-à-dire le volume — ne sort nulle part.
+        let rendu = serde_json::to_string(&skeleton).unwrap();
+        assert!(
+            !rendu.contains("PADDING-QUE-NUL-NE-LIT"),
+            "aucun corps de pilier ne doit atteindre le défaut : {rendu}"
+        );
+        // La Vision suit la même règle (coupe 4).
+        let vision = skeleton["vision"].as_array().expect("vision reste un tableau");
+        assert_eq!(vision.len(), 1);
+        assert!(vision[0].get("body").is_none(), "vision en identité : {}", vision[0]);
+        assert!(vision[0]["summary"].as_str().is_some_and(|s| s.starts_with("LA-VISION")));
+        // Le nœud mort ne passe sous aucun prétexte.
+        assert!(!rendu.contains("PIL-TST-904"), "un nœud rejeté reste dehors : {rendu}");
+    }
+
+    #[test]
+    fn le_mode_full_restitue_les_corps_entiers() {
+        let skeleton = McpServer::shape_skeleton(&parc_des_piliers(), KickoffMode::Full);
+        let pillars = skeleton["pillars"].as_array().unwrap();
+        assert_eq!(pillars.len(), 3);
+        for p in pillars {
+            let body = p["body"].as_str().expect("mode=full pousse le corps entier");
+            assert!(body.contains("PADDING-QUE-NUL-NE-LIT"), "corps ENTIER, pas résumé : {p}");
+        }
+        assert!(
+            skeleton["vision"][0]["body"]
+                .as_str()
+                .is_some_and(|b| b.contains("PADDING-QUE-NUL-NE-LIT")),
+            "la sortie de secours vaut aussi pour la Vision : {skeleton}"
+        );
+        // Et elle reste une SORTIE : rien n'est annoncé comme omis.
+        assert_eq!(skeleton["omitted_in_brief"], json!([]));
+        assert!(skeleton["brief_sample_size"].is_null());
+        // Le mort reste dehors même en `full` : la coupe de volume n'a pas
+        // desserré le filtre de statut.
+        let rendu = serde_json::to_string(&skeleton).unwrap();
+        assert!(!rendu.contains("PILIER-MORT"), "filtre de statut conservé : {rendu}");
+    }
+
+    #[test]
+    fn les_index_bornes_disent_leur_total_exact_et_nomment_ce_qu_ils_omettent() {
+        let mut noeuds = vec![noeud("VIS-TST-001", "Vision", "current", "V.")];
+        for i in 1..=30 {
+            noeuds.push(noeud(&format!("DEC-TST-{i:03}"), "Decision", "current", "D."));
+            noeuds.push(noeud(&format!("GUI-TST-{i:03}"), "Guideline", "current", "G."));
+        }
+        // Deux morts, pour que le TOTAL soit celui des VIVANTS et pas celui des lignes.
+        noeuds.push(noeud("DEC-TST-901", "Decision", "superseded", "D."));
+        noeuds.push(noeud("GUI-TST-901", "Guideline", "rejected", "G."));
+        let skeleton = McpServer::shape_skeleton(&snapshot(noeuds), KickoffMode::Brief);
+
+        let echantillon = McpServer::KICKOFF_BRIEF_INDEX_SAMPLE;
+        for (liste, total) in [
+            ("decisions_index", "decisions_index_total"),
+            ("guidelines_index", "guidelines_index_total"),
+        ] {
+            assert_eq!(
+                skeleton[liste].as_array().unwrap().len(),
+                echantillon,
+                "l'index est borné : {}",
+                skeleton[liste]
+            );
+            assert_eq!(
+                skeleton[total].as_u64(),
+                Some(30),
+                "le total est celui des nœuds VIVANTS, exact et non tronqué : {skeleton}"
+            );
+        }
+        let omis = serde_json::to_string(&skeleton["omitted_in_brief"]).unwrap();
+        assert!(
+            omis.contains("decisions_index") && omis.contains("guidelines_index"),
+            "ce qui est coupé est NOMMÉ : {omis}"
+        );
+        assert_eq!(
+            skeleton["detail_continuation"]["tool"], "soll_get",
+            "et l'appel qui le rend est donné : {skeleton}"
+        );
+        // Contre-preuve : sans plafond, la même donnée sort en entier.
+        let complet = McpServer::shape_skeleton(
+            &snapshot({
+                let mut n = vec![];
+                for i in 1..=30 {
+                    n.push(noeud(&format!("DEC-TST-{i:03}"), "Decision", "current", "D."));
+                }
+                n
+            }),
+            KickoffMode::Full,
+        );
+        assert_eq!(complet["decisions_index"].as_array().unwrap().len(), 30);
+    }
+
+    /// MUTANT (pratique 2169) — la fixture doit prouver qu'elle produisait
+    /// RÉELLEMENT le volume supprimé. Sans cette mesure, les trois tests
+    /// ci-dessus passeraient AUSSI sur un squelette qui n'a jamais rien coupé :
+    /// ils décrivent une forme, pas un gain.
+    #[test]
+    fn le_defaut_pese_au_moins_cinq_fois_moins_que_full() {
+        let parc = snapshot({
+            let mut n = vec![noeud("VIS-TST-001", "Vision", "current", &gros_corps("LA-VISION"))];
+            for i in 1..=14 {
+                n.push(noeud(
+                    &format!("PIL-TST-{i:03}"),
+                    "Pillar",
+                    "current",
+                    &gros_corps(&format!("PILIER-{i}")),
+                ));
+            }
+            n
+        });
+        let plein = serde_json::to_string(&McpServer::shape_skeleton(&parc, KickoffMode::Full))
+            .unwrap()
+            .len();
+        let bref = serde_json::to_string(&McpServer::shape_skeleton(&parc, KickoffMode::Brief))
+            .unwrap()
+            .len();
+        // La fixture PORTE le volume : sans ça, le rapport ne prouverait rien.
+        assert!(
+            plein > 100_000,
+            "la fixture doit reproduire l'ordre de grandeur mesuré le 2026-09-05 \
+             (103 315 car de `data`) ; elle ne pèse que {plein}"
+        );
+        assert!(
+            plein >= bref * 5,
+            "le défaut doit couper d'au moins un facteur 5 : full={plein}, brief={bref} \
+             (rapport {:.1}×)",
+            plein as f64 / bref as f64
+        );
+    }
+
+    /// `first_sentence` ne borne RIEN : sans point, elle rend la chaîne entière.
+    /// Un pilier de 8 Ko sans ponctuation repasserait donc par la porte qu'on
+    /// vient de fermer (pratique 2140).
+    #[test]
+    fn un_corps_sans_point_est_borne_quand_meme() {
+        let sans_point = "A".repeat(9000);
+        let skeleton = McpServer::shape_skeleton(
+            &snapshot(vec![noeud("PIL-TST-001", "Pillar", "current", &sans_point)]),
+            KickoffMode::Brief,
+        );
+        let resume = skeleton["pillars"][0]["summary"].as_str().unwrap();
+        assert!(
+            resume.chars().count() <= McpServer::KICKOFF_BRIEF_SUMMARY_CHARS + 1,
+            "la borne s'applique même sans phrase à couper : {} caractères",
+            resume.chars().count()
+        );
+        assert!(resume.ends_with('…'), "et la coupe est VISIBLE, jamais muette : {resume}");
+    }
+
+    #[test]
+    fn un_corps_vide_ne_produit_pas_de_resume_creux() {
+        let skeleton = McpServer::shape_skeleton(
+            &snapshot(vec![noeud("PIL-TST-001", "Pillar", "current", "   ")]),
+            KickoffMode::Brief,
+        );
+        assert!(
+            skeleton["pillars"][0]["summary"].is_null(),
+            "un corps vide rend null — le rendu retombe alors sur l'index : {skeleton}"
+        );
+    }
+
+    /// Le pendant côté TEXTE : l'identité doit atteindre `content.text`, et
+    /// surtout pas sous le message « budget atteint », qui dirait deux choses
+    /// fausses. Sans ce test, un refactor renverrait les identités à l'index et
+    /// rien ne protesterait — `bodyless_pillar_falls_to_index` ne couvre que le
+    /// cas sans corps ET sans résumé.
+    #[test]
+    fn le_rendu_inline_l_identite_sans_crier_au_budget() {
+        let bundle = json!({
+            "session_pointer": {"kind": "none"},
+            "soll_skeleton": {
+                "vision": [{"id": "VIS-TST-001", "title": "V", "summary": "LA-VISION-EN-UNE-PHRASE."}],
+                "pillars": [
+                    {"id": "PIL-TST-001", "title": "P1", "summary": "PILIER-UN-EN-UNE-PHRASE."},
+                    {"id": "PIL-TST-002", "title": "P2", "summary": "PILIER-DEUX-EN-UNE-PHRASE."},
+                ],
+                "decisions_index": [{"id": "DEC-TST-001", "title": "D1"}],
+                "decisions_index_total": 87,
+            },
+        });
+        let rendu = McpServer::render_continuation_block(&bundle);
+        assert!(rendu.contains("LA-VISION-EN-UNE-PHRASE."), "vision en identité : {rendu}");
+        assert!(
+            rendu.contains("#### PIL-TST-001") && rendu.contains("PILIER-UN-EN-UNE-PHRASE."),
+            "l'identité d'un pilier est INLINE, pas reléguée : {rendu}"
+        );
+        assert!(
+            !rendu.contains("indexé(s) seulement") && !rendu.contains("budget"),
+            "une identité servie n'est pas une troncature de budget : {rendu}"
+        );
+        assert!(
+            rendu.contains("IDENTITÉ") && rendu.contains("mode=full"),
+            "et la coupe se nomme, avec l'appel qui la lève : {rendu}"
+        );
+        // Le compte affiché est le TOTAL vivant, pas la longueur de l'échantillon.
+        assert!(
+            rendu.contains("1 sur 87"),
+            "un index borné dit son total : {rendu}"
+        );
+    }
+
+    /// MIROIR du test ci-dessus : quand un nœud porte les DEUX, c'est le CORPS
+    /// qui gagne tant qu'il tient dans le budget, et le résumé qui prend le
+    /// relais quand il déborde. Sans ce test, échanger les deux bras du `match`
+    /// passe toutes les autres assertions — `mode=full` servirait alors des
+    /// premières phrases en croyant servir des corps.
+    #[test]
+    fn le_corps_gagne_sur_le_resume_tant_qu_il_tient_dans_le_budget() {
+        let gros = "CORPS-ENTIER ".repeat(400); // ~5 200 octets
+        let bundle = json!({
+            "session_pointer": {"kind": "none"},
+            "soll_skeleton": {
+                "vision": [{"id": "VIS-TST-001", "title": "V", "body": "CORPS-DE-VISION", "summary": "RESUME-DE-VISION"}],
+                "pillars": [
+                    {"id": "PIL-TST-001", "title": "A", "body": gros.clone(), "summary": "RESUME-UN"},
+                    {"id": "PIL-TST-002", "title": "B", "body": gros.clone(), "summary": "RESUME-DEUX"},
+                    {"id": "PIL-TST-003", "title": "C", "body": gros.clone(), "summary": "RESUME-TROIS"},
+                ],
+            },
+        });
+        // 2 × 5 200 tient sous 12 288 ; le troisième déborde.
+        assert!(2 * gros.len() <= McpServer::PILLAR_INLINE_BUDGET_BYTES);
+        assert!(3 * gros.len() > McpServer::PILLAR_INLINE_BUDGET_BYTES);
+        let rendu = McpServer::render_continuation_block(&bundle);
+        assert!(
+            rendu.contains("CORPS-DE-VISION") && !rendu.contains("RESUME-DE-VISION"),
+            "un corps présent l'emporte sur le résumé : {rendu}"
+        );
+        assert!(
+            !rendu.contains("RESUME-UN") && !rendu.contains("RESUME-DEUX"),
+            "les deux premiers piliers tiennent : leur CORPS est servi, pas leur résumé"
+        );
+        assert!(
+            rendu.contains("#### PIL-TST-003") && rendu.contains("RESUME-TROIS"),
+            "le pilier qui déborde retombe sur son identité, pas dans le silence : {rendu}"
+        );
+        assert!(
+            !rendu.contains("indexé(s) seulement"),
+            "un nœud qui a un résumé n'est pas « indexé seulement » : {rendu}"
+        );
+    }
+
+    #[test]
+    fn un_snapshot_sans_total_reste_rendu_comme_avant() {
+        // POSITIF DE CONTRÔLE : sans `*_total` (bundle ancien, ou mode full), le
+        // rendu ne doit pas inventer de mention « sur N ».
+        let bundle = json!({
+            "session_pointer": {"kind": "none"},
+            "soll_skeleton": {
+                "vision": [],
+                "guidelines_index": [{"id": "GUI-TST-001", "title": "G1"}],
+            },
+        });
+        let rendu = McpServer::render_continuation_block(&bundle);
+        assert!(rendu.contains("(1):"), "compte simple quand aucun total n'est donné : {rendu}");
+        assert!(!rendu.contains(" sur "), "pas de mention d'omission inventée : {rendu}");
+    }
+
+    #[test]
+    fn le_mode_se_lit_dans_les_arguments_et_le_defaut_est_bref() {
+        assert_eq!(KickoffMode::depuis_arguments(&json!({})), KickoffMode::Brief);
+        assert_eq!(
+            KickoffMode::depuis_arguments(&json!({"mode": "fulll"})),
+            KickoffMode::Brief,
+            "une faute de frappe retombe sur le défaut, qui porte toutes les clés"
+        );
+        assert_eq!(KickoffMode::depuis_arguments(&json!({"mode": "FULL"})), KickoffMode::Full);
+        assert_eq!(KickoffMode::depuis_arguments(&json!({"mode": "resume"})), KickoffMode::Resume);
+        assert_eq!(KickoffMode::Brief.as_str(), "brief");
+        assert!(KickoffMode::Brief.identity_only());
+        assert!(!KickoffMode::Full.identity_only());
+        assert!(!KickoffMode::Resume.identity_only());
+    }
+
+    #[test]
+    fn la_carte_des_capacites_garde_son_compte_exact() {
+        let plein = McpServer::capabilities_map(KickoffMode::Full);
+        let total = plein.as_array().expect("mode=full rend la liste entière").len();
+        let bref = McpServer::capabilities_map(KickoffMode::Brief);
+        assert_eq!(
+            bref["count"].as_u64(),
+            Some(total as u64),
+            "le COMPTE reste exact — c'est lui qui oriente : {bref}"
+        );
+        let echantillon = bref["sample"].as_array().unwrap();
+        assert_eq!(echantillon.len(), McpServer::KICKOFF_BRIEF_CAPABILITIES_SAMPLE);
+        assert!(echantillon.iter().all(Value::is_string), "des NOMS, pas des objets : {bref}");
+        assert_eq!(bref["detail_continuation"]["tool"], "help");
+        // Et le gain est réel, pas décoratif.
+        let poids_plein = serde_json::to_string(&plein).unwrap().len();
+        let poids_bref = serde_json::to_string(&bref).unwrap().len();
+        assert!(
+            poids_plein >= poids_bref * 5,
+            "la carte doit maigrir d'un facteur 5 : full={poids_plein}, brief={poids_bref}"
+        );
     }
 }
 
