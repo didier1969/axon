@@ -1982,9 +1982,31 @@ impl McpServer {
         project_path: &str,
         _full: bool,
     ) -> String {
+        let subtree = std::path::PathBuf::from(project_path);
+
+        // REQ-AXO-902632 — REFUSER plutot que promettre. Ce scanner-ci est
+        // enracine sur le PROJET, donc il ne voit pas les exclusions de
+        // l'ANCETRE ; la marche de reconciliation et la purge, elles, jugent
+        // depuis la racine de surveillance. Quand les deux divergent, l'enrolement
+        // ecrit des lignes `status='discovered'` a `content_hash` vide que rien
+        // ne parsera jamais et que la purge effacera — mesure du 2026-09-06 :
+        // 8 190 lignes pour DFD, erodees a ~900 par passe, pendant que l'outil
+        // rendait `enrolled:8190`. Un instrument qui ment dans la direction
+        // flatteuse (meme famille que REQ-AXO-902628).
+        let watch_root = crate::config::watch_root_dir();
+        if let Some(verdict) =
+            crate::scanner::refus_d_enrolement(&watch_root, &subtree, _project_code)
+        {
+            return format!(
+                "refused:{verdict} — {project_path} is excluded from the watch root \
+                 ({watch_root}); enrolling it would write IndexedFile rows the \
+                 reconciliation walk never parses and the stale purge erases. \
+                 Lift the exclusion in the watch root's .axonignore/.axoninclude/.gitignore first."
+            );
+        }
+
         let scanner = crate::scanner::Scanner::new(project_path, _project_code);
         let graph = self.graph_store.clone();
-        let subtree = std::path::PathBuf::from(project_path);
         let enrolled = scanner.scan_subtree(graph, &subtree);
         format!("enrolled:{enrolled}")
     }

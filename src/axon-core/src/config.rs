@@ -49,6 +49,24 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| {
     })
 });
 
+/// REQ-AXO-902632 — la racine du parc, resolue a UN endroit. Le defaut en dur
+/// vient de `runtime_boot`, ou il etait ecrit ; il n'est pas invente ici.
+pub fn projects_root_dir() -> String {
+    std::env::var("AXON_PROJECTS_ROOT").unwrap_or_else(|_| "/home/dstadel/projects".to_string())
+}
+
+/// REQ-AXO-902632 — LA racine de surveillance : celle depuis laquelle la marche
+/// de reconciliation enumere et depuis laquelle la purge juge l'eligibilite.
+///
+/// Elle doit etre lisible AILLEURS que dans l'indexeur : `rescan_project` tourne
+/// cote brain et enrolait des fichiers que cette racine-ci exclut — 8 190 lignes
+/// `status='discovered'` a `content_hash` vide pour le tenant DFD, que la marche
+/// n'a jamais parsees et que la purge a effacees. L'outil promettait un
+/// enrolement que le systeme defaisait.
+pub fn watch_root_dir() -> String {
+    std::env::var("AXON_WATCH_DIR").unwrap_or_else(|_| projects_root_dir())
+}
+
 fn default_supported_extensions() -> Vec<String> {
     vec![
         "py".to_string(),
@@ -75,6 +93,34 @@ fn default_supported_extensions() -> Vec<String> {
         "conf".to_string(),
         "html".to_string(),
         "css".to_string(),
+        // REQ-AXO-902631 — ces extensions ont TOUJOURS eu un parser
+        // (`parser::get_parser_for_file`) et n'ont jamais franchi ce filtre : le
+        // scanner les ecartait avant que le parser existe pour elles. Mesure du
+        // 2026-09-06 : 1 054 fichiers du parc, dont 716 `.hpp` — et 100 % des
+        // en-tetes du tenant MRG, qui s'en plaignait par courrier. Les parsers
+        // C#, Ruby, Kotlin, PHP et Scheme etaient INATTEIGNABLES en production.
+        // L'invariant est tenu par `le_scanner_admet_tout_ce_que_le_parser_sait_lire`.
+        "hpp".to_string(),
+        "cc".to_string(),
+        "cxx".to_string(),
+        "hxx".to_string(),
+        "cs".to_string(),
+        "rb".to_string(),
+        "ruby".to_string(),
+        "kt".to_string(),
+        "kts".to_string(),
+        "php".to_string(),
+        "scm".to_string(),
+        "ss".to_string(),
+        "sld".to_string(),
+        "sls".to_string(),
+        "htm".to_string(),
+        "scss".to_string(),
+        "tql".to_string(),
+        "typeql".to_string(),
+        "dl".to_string(),
+        "datalog".to_string(),
+        "ini".to_string(),
         // llmlang: a `.lll` file is parsed by the shell-out bridge (parser/lll.rs
         // → `lll export-ist`), which yields semantic symbols (content-hash,
         // purity, contracts). Without this the scanner excludes it pre-parse
@@ -157,6 +203,31 @@ mod tests {
                 "expected {expected} in {exts:?}"
             );
         }
+    }
+
+    /// REQ-AXO-902631 — L'INVARIANT MANQUANT. Deux tables decrivaient la meme
+    /// chose sans jamais se confronter : `parser::get_parser_for_file` (ce que
+    /// le systeme sait lire) et cette liste (ce que le scanner laisse passer).
+    /// La seconde est evaluee EN AMONT de la premiere, donc toute extension
+    /// presente la-bas et absente ici rend son parser inatteignable — sans une
+    /// seule erreur, sans une seule ligne de log. Mesure du defaut : 1 054
+    /// fichiers du parc, 716 `.hpp`, et cinq langages entiers muets.
+    ///
+    /// La relation est DIRECTIONNELLE, pas une egalite : le scanner a le droit
+    /// d'admettre PLUS (`json`, `toml` sont indexes comme texte, sans parser).
+    #[test]
+    fn le_scanner_admet_tout_ce_que_le_parser_sait_lire() {
+        let admises = default_supported_extensions();
+        let inatteignables: Vec<&str> = crate::parser::PARSEABLE_EXTENSIONS
+            .iter()
+            .copied()
+            .filter(|ext| !admises.iter().any(|a| a == ext))
+            .collect();
+        assert!(
+            inatteignables.is_empty(),
+            "ces extensions ont un parser mais le scanner ne les laisse jamais passer \
+             — leur parser est inatteignable en production : {inatteignables:?}"
+        );
     }
 
     #[test]

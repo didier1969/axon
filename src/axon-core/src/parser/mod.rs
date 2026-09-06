@@ -274,6 +274,32 @@ pub fn supported_parser_ecosystems() -> &'static [EcosystemId] {
     SUPPORTED_PARSER_ECOSYSTEMS
 }
 
+/// REQ-AXO-902631 — les extensions qu'un parser sait effectivement lire.
+///
+/// C'est la moitie DECLARATIVE du dispatch ci-dessous. Elle existe parce que
+/// deux tables decrivaient la meme chose sans jamais se confronter : ce `match`
+/// sait lire `hpp cc cxx hxx cs rb kt php scm scss htm ini tql dl`, et
+/// `config::default_supported_extensions` — le filtre que le scanner applique
+/// EN AMONT — n'en laissait passer aucune. Mesure du 2026-09-06 : 1 054 fichiers
+/// du parc (dont 716 `.hpp`) n'atteignaient jamais un parser pourtant ecrit,
+/// compile et teste ; les parsers C#, Ruby, Kotlin, PHP et Scheme etaient
+/// INATTEIGNABLES en production.
+///
+/// L'invariant est DIRECTIONNEL : `supported_extensions` ⊇ `PARSEABLE_EXTENSIONS`.
+/// L'inverse reste legitime — `json` / `toml` sont admis SANS parser (indexes
+/// comme texte, chunks sans symboles).
+///
+/// Ce dispatch ne consulte volontairement PAS cette constante. Un parser branche
+/// dans le `match` et oublie ici doit rester DECOUVRABLE (la garde
+/// `chaque_extension_declaree_a_bien_un_parser` le dit), jamais devenir inerte :
+/// filtrer sur la constante deplacerait le trou au lieu de le fermer.
+pub const PARSEABLE_EXTENSIONS: &[&str] = &[
+    "py", "ex", "exs", "rs", "scm", "ss", "sld", "sls", "ts", "tsx", "js", "jsx", "go", "java",
+    "c", "h", "cpp", "hpp", "cc", "cxx", "hxx", "cs", "rb", "ruby", "kt", "kts", "php", "yaml",
+    "yml", "html", "htm", "css", "scss", "md", "markdown", "sql", "tql", "typeql", "dl",
+    "datalog", "lll", "txt", "conf", "ini",
+];
+
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
     let ext = path.extension()?.to_str()?.to_lowercase();
     match ext.as_str() {
@@ -482,6 +508,48 @@ mod chained_call_class_regression {
                 targets.contains(inner),
                 "{file}: inner call `{inner}` must be captured (REQ-AXO-902200 \
                  class regression), got {targets:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod extensions_parsables_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// REQ-AXO-902631 — la constante ne doit pas MENTIR : chaque extension
+    /// declaree parsable doit reellement obtenir un parser du dispatch. Sans
+    /// cette garde, `PARSEABLE_EXTENSIONS` pourrait grossir d'une extension
+    /// imaginaire et forcer le scanner a admettre des fichiers que rien ne sait
+    /// lire.
+    #[test]
+    fn chaque_extension_declaree_a_bien_un_parser() {
+        let orphelines: Vec<&str> = PARSEABLE_EXTENSIONS
+            .iter()
+            .copied()
+            .filter(|ext| get_parser_for_file(&PathBuf::from(format!("fichier.{ext}"))).is_none())
+            .collect();
+        assert!(
+            orphelines.is_empty(),
+            "extensions declarees parsables mais sans parser dans le dispatch : {orphelines:?}"
+        );
+    }
+
+    /// REQ-AXO-902631 — le cas qui a coute 28 fichiers / 4 371 lignes a MRG :
+    /// `parser/mod.rs` savait lire `.hpp` depuis toujours, le scanner ne l'a
+    /// jamais laisse passer. Nommee a part pour que le rouge designe le defaut,
+    /// pas une liste.
+    #[test]
+    fn les_en_tetes_cpp_sont_parsables() {
+        for ext in ["hpp", "hxx", "cc", "cxx"] {
+            assert!(
+                PARSEABLE_EXTENSIONS.contains(&ext),
+                "{ext} doit etre declaree parsable"
+            );
+            assert!(
+                get_parser_for_file(&PathBuf::from(format!("entete.{ext}"))).is_some(),
+                "{ext} doit obtenir un parser"
             );
         }
     }

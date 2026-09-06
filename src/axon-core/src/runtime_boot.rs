@@ -756,10 +756,10 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
 
     apply_graph_first_indexer_memory_defaults(profile, &runtime_profile);
 
-    let projects_root_env = std::env::var("AXON_PROJECTS_ROOT")
-        .unwrap_or_else(|_| "/home/dstadel/projects".to_string());
-    let watch_root_env =
-        std::env::var("AXON_WATCH_DIR").unwrap_or_else(|_| projects_root_env.clone());
+    // REQ-AXO-902632 — resolution deportee dans `config` pour que le brain lise
+    // LA MEME racine que l'indexeur (rescan_project en avait besoin).
+    let projects_root_env = crate::config::projects_root_dir();
+    let watch_root_env = crate::config::watch_root_dir();
     let projects_root = projects_root_env.leak();
     let watch_root = watch_root_env.leak();
     let db_root_env = std::env::var("AXON_DB_ROOT").unwrap_or_else(|_| {

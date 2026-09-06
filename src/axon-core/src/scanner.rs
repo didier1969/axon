@@ -702,6 +702,35 @@ fn persist_discovery_batch(
     graph.execute(&sql)
 }
 
+/// REQ-AXO-902632 — la decision de REFUS d'enrolement, extraite en fonction
+/// PURE pour etre exercable sans serveur MCP.
+///
+/// `rescan_project` juge l'eligibilite depuis la racine du PROJET ; la marche de
+/// reconciliation et la purge jugent depuis la racine de SURVEILLANCE. Quand les
+/// deux divergent, l'enrolement ecrit des lignes que rien ne parsera et que la
+/// purge effacera — 8 190 pour le tenant DFD le 2026-09-06, pendant que l'outil
+/// rendait `enrolled:8190`.
+///
+/// Rend `Some(raison)` quand l'enrolement doit etre refuse, `None` quand il peut
+/// avoir lieu. Un chemin HORS de la racine de surveillance n'est pas refuse :
+/// cette racine ne le gouverne pas, et le refuser bloquerait les tenants hors
+/// parc (BOO vit sous `/home/dstadel/`).
+pub fn refus_d_enrolement(
+    watch_root: &str,
+    project_path: &Path,
+    project_code: &str,
+) -> Option<String> {
+    if !project_path.starts_with(watch_root) {
+        return None;
+    }
+    let gardien = Scanner::new(watch_root, project_code);
+    let verdict = gardien.explain_ignore_decision(project_path, true);
+    if verdict == "eligible" || verdict == "included_by_axoninclude" {
+        return None;
+    }
+    Some(verdict)
+}
+
 fn ancestor_chain(root: &Path, path: &Path) -> Vec<PathBuf> {
     let parent = path.parent().unwrap_or(path);
     let mut dirs = Vec::new();
@@ -1416,5 +1445,149 @@ mod tests {
         let _ = store.execute(&format!(
             "DELETE FROM ist.IndexedFile WHERE path LIKE '{root_canon}/%'"
         ));
+    }
+}
+
+/// REQ-AXO-902632 — la divergence d'autorite qui a fabrique 8 190 lignes
+/// fantomes : `rescan_project` juge l'eligibilite depuis la racine du PROJET,
+/// la marche de reconciliation et la purge depuis la racine de SURVEILLANCE.
+#[cfg(test)]
+mod eligibilite_selon_la_racine_tests {
+    use super::*;
+
+    /// Le meme repertoire, juge depuis deux racines, rend deux verdicts
+    /// OPPOSES. C'est le defaut entier, en une assertion : sans elle, un
+    /// correctif qui ferait juger `rescan_project` depuis la mauvaise racine
+    /// repasserait sans bruit.
+    #[test]
+    fn un_projet_exclu_par_l_ancetre_est_eligible_vu_de_lui_meme() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        std::fs::write(racine.join(".axonignore"), "/locataire/\n").unwrap();
+        let projet = racine.join("locataire");
+        std::fs::create_dir_all(projet.join("src")).unwrap();
+        std::fs::write(projet.join("src/a.rs"), "fn a() {}").unwrap();
+
+        let depuis_la_surveillance = Scanner::new(racine.to_str().unwrap(), "TST");
+        let depuis_le_projet = Scanner::new(projet.to_str().unwrap(), "TST");
+
+        assert_eq!(
+            depuis_la_surveillance.explain_ignore_decision(&projet, true),
+            "ignored_by_legacy_axonignore",
+            "la racine de surveillance doit exclure le locataire"
+        );
+        assert_eq!(
+            depuis_le_projet.explain_ignore_decision(&projet, true),
+            "eligible",
+            "vu de lui-meme le projet se croit eligible — c'est CE verdict qui \
+             enrolait des lignes que la purge efface ensuite"
+        );
+    }
+
+    /// Le pendant necessaire : sans lui, un refus qui bloquerait TOUT passerait
+    /// la garde precedente. Un locataire non exclu doit rester enrolable.
+    #[test]
+    fn un_projet_non_exclu_reste_eligible_depuis_la_surveillance() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        std::fs::write(racine.join(".axonignore"), "/autre/\n").unwrap();
+        let projet = racine.join("locataire");
+        std::fs::create_dir_all(&projet).unwrap();
+
+        let depuis_la_surveillance = Scanner::new(racine.to_str().unwrap(), "TST");
+        assert_eq!(
+            depuis_la_surveillance.explain_ignore_decision(&projet, true),
+            "eligible"
+        );
+    }
+
+    /// REQ-AXO-902632 — LA garde du refus : un projet exclu par sa racine de
+    /// surveillance ne doit PAS etre enrole, quelle que soit l'opinion qu'il a
+    /// de lui-meme.
+    #[test]
+    fn le_refus_nomme_la_regle_qui_exclut() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path().to_str().unwrap();
+        std::fs::write(parc.path().join(".axonignore"), "/locataire/\n").unwrap();
+        let projet = parc.path().join("locataire");
+        std::fs::create_dir_all(&projet).unwrap();
+
+        assert_eq!(
+            refus_d_enrolement(racine, &projet, "TST").as_deref(),
+            Some("ignored_by_legacy_axonignore"),
+            "le refus doit NOMMER la regle, pas juste refuser"
+        );
+    }
+
+    /// Le pendant : sans lui, un refus systematique passerait la garde d'au-dessus.
+    #[test]
+    fn un_projet_eligible_n_est_pas_refuse() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path().to_str().unwrap();
+        let projet = parc.path().join("locataire");
+        std::fs::create_dir_all(&projet).unwrap();
+
+        assert!(refus_d_enrolement(racine, &projet, "TST").is_none());
+    }
+
+    /// REQ-AXO-902632 — le cas de DVM et SWT apres la decision operateur du
+    /// 2026-09-06 : exclus de GIT (donnees sensibles, jamais dans le depot
+    /// partage) mais REINTRODUITS dans l'index par `.axoninclude`. Le refus doit
+    /// laisser passer, sinon la reintroduction ne sert a rien.
+    #[test]
+    fn un_axoninclude_leve_le_refus_pose_par_gitignore() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path().to_str().unwrap();
+        std::fs::write(parc.path().join(".gitignore"), "sensible/\n").unwrap();
+        let projet = parc.path().join("sensible");
+        std::fs::create_dir_all(&projet).unwrap();
+
+        assert_eq!(
+            refus_d_enrolement(racine, &projet, "TST").as_deref(),
+            Some("ignored_by_gitignore_or_exclude"),
+            "sans .axoninclude le refus doit tomber"
+        );
+
+        std::fs::write(parc.path().join(".axoninclude"), "sensible/\n").unwrap();
+        let apres = refus_d_enrolement(racine, &projet, "TST");
+        assert!(
+            apres.is_none(),
+            "l'.axoninclude doit lever le refus, sinon la decision operateur \
+             (indexer ce que git ecarte) reste lettre morte — obtenu {apres:?}"
+        );
+    }
+
+    /// Un tenant HORS de la racine de surveillance (BOO vit sous `/home/dstadel/`)
+    /// ne doit pas etre refuse : cette racine ne le gouverne pas.
+    #[test]
+    fn un_chemin_hors_de_la_racine_n_est_pas_refuse() {
+        let parc = tempfile::tempdir().unwrap();
+        let ailleurs = tempfile::tempdir().unwrap();
+        std::fs::write(parc.path().join(".axonignore"), "/*\n").unwrap();
+        assert!(refus_d_enrolement(parc.path().to_str().unwrap(), ailleurs.path(), "TST").is_none());
+    }
+
+    /// Le cas reel de DVM et SWT : exclus par le `.gitignore` de la racine, pas
+    /// par le `.axonignore`. `should_descend_into_directory` ne les voit PAS
+    /// (il ne prune jamais sur gitignore seul) — d'ou le choix
+    /// d'`explain_ignore_decision` comme predicat du refus.
+    #[test]
+    fn une_exclusion_gitignore_de_l_ancetre_est_vue_par_explain() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        std::fs::write(racine.join(".gitignore"), "sensible/\n").unwrap();
+        let projet = racine.join("sensible");
+        std::fs::create_dir_all(&projet).unwrap();
+
+        let depuis_la_surveillance = Scanner::new(racine.to_str().unwrap(), "TST");
+        assert_eq!(
+            depuis_la_surveillance.explain_ignore_decision(&projet, true),
+            "ignored_by_gitignore_or_exclude"
+        );
+        assert!(
+            depuis_la_surveillance.should_descend_into_directory(&projet),
+            "should_descend_into_directory ne prune PAS sur gitignore — c'est \
+             pourquoi il ne peut pas servir de predicat au refus"
+        );
     }
 }
