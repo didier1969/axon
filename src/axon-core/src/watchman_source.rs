@@ -704,13 +704,34 @@ async fn run_root_subscription(
                 // executor so a large fresh batch never starves other tasks.
                 let plan_root = root_path.clone();
                 let plan_scanner = scanner.clone();
-                let actions = tokio::task::spawn_blocking(move || {
-                    plan_feed_actions(&plan_root, entries, &|p| {
+                let (actions, regles_perimees) = tokio::task::spawn_blocking(move || {
+                    // REQ-AXO-902633 — une regle d'ignore modifiee perime les
+                    // matchers en cache AVANT que le lot soit classe. Sans cela
+                    // le lot qui PORTE la regle neuve est juge sur l'ancienne,
+                    // et l'entree `None` d'un fichier absent ne se perimait
+                    // JAMAIS : un `.axoninclude` cree indexeur vivant restait
+                    // invisible jusqu'au redemarrage.
+                    let regles_perimees =
+                        perimer_les_regles_du_lot(&plan_root, &entries, plan_scanner.as_ref());
+                    let actions = plan_feed_actions(&plan_root, entries, &|p| {
                         plan_scanner.should_process_path(p)
-                    })
+                    });
+                    (actions, regles_perimees)
                 })
                 .await
                 .unwrap_or_default();
+
+                // Les fichiers que la regle neuve ADMET n'ont pas change : ils
+                // n'arriveront jamais par un lot Watchman. Seule la marche de
+                // reconciliation les reverra — d'ou le reveil (REQ-AXO-902268).
+                if regles_perimees > 0 {
+                    info!(
+                        root = %root_path.display(),
+                        regles = regles_perimees,
+                        "Watchman: regle d'ignore modifiee — matchers perimes, marche reveillee"
+                    );
+                    crate::pipeline::indexed_file_cache::walk_wake_signal().notify_one();
+                }
 
                 // Hand off to the feeder (UNBOUNDED — never blocks next()).
                 let mut feeder_closed = false;
@@ -812,6 +833,25 @@ async fn record_unregistered_skip(store: &Arc<GraphStore>, path: &Path, reason: 
 /// entries to [`FeedAction`]s. Kept side-effect-free so the upsert/delete/prune
 /// branches are unit-testable without a Watchman server or PG. `eligible` is the
 /// per-file gate (production: `Scanner::should_process_path`).
+/// REQ-AXO-902633 — perime les matchers d'ignore pour chaque fichier de regles
+/// present dans un lot Watchman, et rend le nombre d'entrees retirees.
+///
+/// Les chemins d'un lot Watchman sont RELATIFS a la racine surveillee ; les
+/// cles des cinq caches sont ABSOLUES et canoniques. Joindre `root` ici n'est
+/// pas cosmetique : sans elle la purge ne trouverait jamais l'entree et serait
+/// inerte sans qu'aucun appel n'echoue — exactement la classe de defaut que ce
+/// REQ repare.
+fn perimer_les_regles_du_lot(root: &Path, entries: &[(PathBuf, bool)], scanner: &Scanner) -> usize {
+    let mut perimees = 0;
+    for (relative, _) in entries {
+        let absolute = root.join(relative);
+        if scanner.is_ignore_control_path(&absolute) && scanner.forget_ignore_rules_for(&absolute) {
+            perimees += 1;
+        }
+    }
+    perimees
+}
+
 fn plan_feed_actions(
     root: &Path,
     entries: Vec<(PathBuf, bool)>,
@@ -1278,6 +1318,52 @@ mod tests {
         assert_eq!(parsed.project_path, "/only/path");
         assert_eq!(parsed.op, "");
         assert_eq!(parsed.project_code, "");
+    }
+
+    /// REQ-AXO-902633 — la garde qui compte : le lot Watchman porte un chemin
+    /// RELATIF, la cle de cache est ABSOLUE. Elle observe la DECISION du
+    /// scanner, pas le retour de la purge : une purge qui viserait la mauvaise
+    /// cle rendrait `0` ici, et une purge qui rendrait un compte sans rien
+    /// perimer laisserait la decision inchangee.
+    #[test]
+    fn un_fichier_de_regles_dans_un_lot_perime_les_matchers() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        std::fs::write(racine.join(".gitignore"), "note.rs\n").unwrap();
+        let note = racine.join("note.rs");
+        std::fs::write(&note, "fn note() {}").unwrap();
+
+        let scanner = Scanner::new(racine.to_str().unwrap(), "TST");
+        assert!(
+            !scanner.should_process_path(&note),
+            "le .gitignore ecarte le fichier, et met en cache l'ABSENCE du .axoninclude"
+        );
+
+        std::fs::write(racine.join(".axoninclude"), "note.rs\n").unwrap();
+
+        // Le lot tel que Watchman le livre : des chemins RELATIFS.
+        let lot = rels(&[(".axoninclude", true), ("note.rs", true)]);
+        let perimees = perimer_les_regles_du_lot(racine, &lot, &scanner);
+
+        assert_eq!(perimees, 1, "le seul fichier de regles du lot doit etre perime");
+        assert!(
+            scanner.should_process_path(&note),
+            "apres la purge la regle neuve doit s'appliquer — sinon la purge a vise une autre cle"
+        );
+    }
+
+    /// Le pendant necessaire : un lot ordinaire ne perime rien. Sans lui, une
+    /// purge qui viderait les caches a chaque lot passerait la garde ci-dessus
+    /// tout en annulant le cache.
+    #[test]
+    fn un_lot_sans_regle_ne_perime_rien() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        std::fs::write(racine.join(".gitignore"), "note.rs\n").unwrap();
+        let scanner = Scanner::new(racine.to_str().unwrap(), "TST");
+
+        let lot = rels(&[("src/main.rs", true), ("README.md", true)]);
+        assert_eq!(perimer_les_regles_du_lot(racine, &lot, &scanner), 0);
     }
 
     #[test]

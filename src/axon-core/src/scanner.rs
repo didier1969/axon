@@ -656,6 +656,76 @@ impl Scanner {
         cache.insert(matcher_path.to_path_buf(), matcher.clone());
         matcher
     }
+
+    /// REQ-AXO-902633 — perimer les matchers mis en cache pour UN fichier de
+    /// controle d'ignore. Rend `true` si au moins une entree a ete retiree.
+    ///
+    /// Le defaut repare : `cached_matcher_for` memorise aussi l'ABSENCE (une
+    /// entree `None`), et rien ne la retirait jamais. Une regle ecrite apres le
+    /// demarrage — un `.axoninclude` cree pour reintroduire un locataire — ne
+    /// pouvait donc etre lue qu'en redemarrant l'indexeur.
+    ///
+    /// La cle visee est celle que les cinq chargeurs construisent :
+    /// `dir.join(<suffixe>)`, ou `dir` vient de `ancestor_chain(root, absolute)`
+    /// et est donc ABSOLU et CANONIQUE. On canonicalise le repertoire porteur
+    /// (il existe encore meme quand le fichier vient d'etre supprime) plutot que
+    /// le fichier lui-meme. Purger la mauvaise cle rendrait cette fonction
+    /// inerte sans qu'aucun appel n'echoue — c'est ce que la garde verifie.
+    pub fn forget_ignore_rules_for(&self, control_path: &Path) -> bool {
+        let Some((porteur, suffixe)) = dossier_porteur_de_controle(control_path) else {
+            return false;
+        };
+        let porteur = std::fs::canonicalize(&porteur).unwrap_or(porteur);
+        let cle = porteur.join(suffixe);
+
+        let mut retire = false;
+        for cache in [
+            &self.gitignore_cache,
+            &self.git_exclude_cache,
+            &self.axoninclude_cache,
+            &self.axonignore_cache,
+            &self.axonignore_local_cache,
+        ] {
+            let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+            if cache.remove(&cle).is_some() {
+                retire = true;
+            }
+        }
+        retire
+    }
+}
+
+/// REQ-AXO-902633 — les suffixes qui PORTENT une regle d'ignore, dans la forme
+/// dont la purge a besoin. Meme ensemble que `is_ignore_control_path`, mais vu
+/// depuis la cle de cache : le suffixe permet de remonter au repertoire
+/// porteur, seul endroit ou le matcher est enregistre.
+///
+/// `.axonignore.local` precede `.axonignore` par prudence de lecture ; l'ordre
+/// n'est pas load-bearing (`Path::ends_with` compare des composants ENTIERS,
+/// jamais des sous-chaines).
+const IGNORE_CONTROL_SUFFIXES: &[&str] = &[
+    ".gitignore",
+    ".axonignore.local",
+    ".axonignore",
+    ".axoninclude",
+    ".git/info/exclude",
+];
+
+/// Rend le repertoire porteur d'un fichier de controle et le suffixe reconnu.
+/// `None` quand le chemin n'est pas un fichier de regles — la purge ne touche
+/// alors a rien.
+fn dossier_porteur_de_controle(control_path: &Path) -> Option<(PathBuf, &'static str)> {
+    for suffixe in IGNORE_CONTROL_SUFFIXES {
+        if control_path.ends_with(suffixe) {
+            let profondeur = Path::new(suffixe).components().count();
+            let mut porteur = control_path.to_path_buf();
+            for _ in 0..profondeur {
+                porteur.pop();
+            }
+            return Some((porteur, suffixe));
+        }
+    }
+    None
 }
 
 fn dispatch_scanner_batch(graph: &Arc<GraphStore>, batch: &[(String, String, i64, i64)]) -> bool {
@@ -1680,5 +1750,158 @@ mod eligibilite_selon_la_racine_tests {
             "should_descend_into_directory ne prune PAS sur gitignore — c'est \
              pourquoi il ne peut pas servir de predicat au refus"
         );
+    }
+}
+
+#[cfg(test)]
+mod invalidation_des_regles_tests {
+    use super::*;
+
+    /// REQ-AXO-902633 — LE defaut, en trois observations sur la MEME decision :
+    /// elle est fausse tant que le cache n'est pas purge, et elle devient juste
+    /// apres. Sans l'observation du milieu, une purge inerte passerait la garde.
+    #[test]
+    fn une_regle_ecrite_apres_la_mise_en_cache_reste_invisible_jusqu_a_la_purge() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        std::fs::write(racine.join(".gitignore"), "note.rs\n").unwrap();
+        let note = racine.join("note.rs");
+        std::fs::write(&note, "fn note() {}").unwrap();
+
+        let scanner = Scanner::new(racine.to_str().unwrap(), "TST");
+
+        // 1. Premiere decision : exclue. Elle met AUSSI en cache l'ABSENCE du
+        //    `.axoninclude` — l'entree `None` que rien ne retirait jamais.
+        assert!(
+            !scanner.should_process_path(&note),
+            "le .gitignore doit ecarter le fichier"
+        );
+
+        // 2. La regle qui le reintroduit est ecrite maintenant, indexeur vivant.
+        let inclusion = racine.join(".axoninclude");
+        std::fs::write(&inclusion, "note.rs\n").unwrap();
+        assert!(
+            !scanner.should_process_path(&note),
+            "sans purge la regle neuve reste INVISIBLE — c'est le defaut repare"
+        );
+
+        // 3. La purge vise la cle reelle du cache ; la decision change.
+        assert!(
+            scanner.forget_ignore_rules_for(&inclusion),
+            "la purge doit avoir retire une entree — sinon elle vise la mauvaise cle"
+        );
+        assert!(
+            scanner.should_process_path(&note),
+            "apres purge la regle neuve doit s'appliquer"
+        );
+    }
+
+    /// Le cas symetrique : un fichier de regles qui EXISTAIT deja et qu'on
+    /// modifie. Sans lui, une purge qui ne saurait traiter que l'entree `None`
+    /// passerait la garde precedente.
+    #[test]
+    fn une_regle_modifiee_est_relue_apres_la_purge() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        let regles = racine.join(".gitignore");
+        std::fs::write(&regles, "autre.rs\n").unwrap();
+        let note = racine.join("note.rs");
+        std::fs::write(&note, "fn note() {}").unwrap();
+
+        let scanner = Scanner::new(racine.to_str().unwrap(), "TST");
+        assert!(scanner.should_process_path(&note));
+
+        std::fs::write(&regles, "note.rs\n").unwrap();
+        assert!(
+            scanner.should_process_path(&note),
+            "le matcher en cache tient encore l'ancienne regle"
+        );
+
+        assert!(scanner.forget_ignore_rules_for(&regles));
+        assert!(
+            !scanner.should_process_path(&note),
+            "apres purge la regle modifiee doit exclure"
+        );
+    }
+
+    /// La purge doit viser la CLE REELLE, absolue et canonique, celle que
+    /// `ancestor_chain` construit. Un chemin non canonique (`.../a/../`) qui
+    /// designe le meme fichier doit purger la meme entree : sinon le flux
+    /// Watchman, qui joint sa racine telle qu'elle est configuree, purgerait
+    /// dans le vide sans qu'aucun appel n'echoue.
+    #[test]
+    fn la_purge_vise_la_cle_canonique_pas_le_chemin_ecrit() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        std::fs::write(racine.join(".gitignore"), "note.rs\n").unwrap();
+        let note = racine.join("note.rs");
+        std::fs::write(&note, "fn note() {}").unwrap();
+        std::fs::create_dir(racine.join("detour")).unwrap();
+
+        let scanner = Scanner::new(racine.to_str().unwrap(), "TST");
+        assert!(!scanner.should_process_path(&note));
+
+        let inclusion = racine.join(".axoninclude");
+        std::fs::write(&inclusion, "note.rs\n").unwrap();
+
+        // Le MEME fichier, ecrit par un detour : la purge doit le reconnaitre.
+        let detourne = racine.join("detour").join("..").join(".axoninclude");
+        assert!(
+            scanner.forget_ignore_rules_for(&detourne),
+            "un chemin non canonique doit purger la meme entree"
+        );
+        assert!(scanner.should_process_path(&note));
+    }
+
+    /// Un chemin ordinaire ne purge rien : la fonction ne doit pas vider les
+    /// caches a chaque fichier d'un lot Watchman, ce qui annulerait le cache.
+    ///
+    /// Les deux assertions ne disent PAS la meme chose, et la seconde est celle
+    /// qui mord. Le controle-mutant l'a montre : rendre `false` parce que la
+    /// cle visee n'etait de toute facon pas en cache est indistinguable d'un
+    /// refus de reconnaitre le chemin. Une reconnaissance rendue AVEUGLE
+    /// laissait passer la premiere assertion — c'est `dossier_porteur_de_controle`
+    /// qu'il faut interroger pour prouver le REFUS lui-meme.
+    #[test]
+    fn un_chemin_ordinaire_ne_purge_rien() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        let scanner = Scanner::new(racine.to_str().unwrap(), "TST");
+
+        for ordinaire in ["src/main.rs", "gitignore", ".gitignore.bak", "info/exclude"] {
+            let chemin = racine.join(ordinaire);
+            assert!(
+                dossier_porteur_de_controle(&chemin).is_none(),
+                "{ordinaire} n'est pas un fichier de regles — il doit etre REFUSE, \
+                 pas simplement rendre une cle absente du cache"
+            );
+            assert!(!scanner.forget_ignore_rules_for(&chemin));
+        }
+    }
+
+    /// Les CINQ familles de regles sont couvertes, `.git/info/exclude` compris —
+    /// dont la cle n'est pas `dir.join(<nom de fichier>)` mais porte trois
+    /// composants. Une purge qui n'aurait su remonter que d'un cran le raterait.
+    #[test]
+    fn les_cinq_familles_de_regles_sont_reconnues() {
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        for suffixe in [
+            ".gitignore",
+            ".axonignore",
+            ".axonignore.local",
+            ".axoninclude",
+            ".git/info/exclude",
+        ] {
+            let chemin = racine.join(suffixe);
+            let (porteur, reconnu) = dossier_porteur_de_controle(&chemin)
+                .unwrap_or_else(|| panic!("{suffixe} doit etre reconnu comme fichier de regles"));
+            assert_eq!(reconnu, suffixe);
+            assert_eq!(
+                porteur,
+                racine,
+                "le repertoire porteur de {suffixe} est la racine, pas un intermediaire"
+            );
+        }
     }
 }
