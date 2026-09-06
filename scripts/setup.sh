@@ -199,12 +199,19 @@ if [[ "${AXON_REQUIRE_NEXUS_ADMISSION:-0}" == "1" ]] && ! axon_inside_nexus_batc
         echo "❌ Promotion build requires Nexus admission, but nexus-job is unavailable." >&2
         exit 1
     fi
-    echo "🛡️  Waiting for Nexus admission (medium, 6G estimate / 8G ceiling, thermal + memory gates)..."
+    # REQ-AXO-902629 — DÉCLARER les ressources, sinon le courtier en prête 4.
+    # `--class` est OBSOLÈTE et IGNORÉ depuis REQ-VPC-290 : c'est lui qui portait
+    # le dimensionnement CPU, et rien ne l'a remplacé ici. Le courtier appliquait
+    # donc son défaut de transition — 6G et 4 cœurs — pendant que cargo lançait
+    # $CARGO_JOBS (14) threads. Mesuré le 2026-09-06 : build complet sur cache
+    # froid à 4 cœurs = timeout à 3600 s (rc=124), trois promotes perdus.
+    # GUI-AXO-1034 fixe la norme du dépôt : --memory 12G --cpus 12.
+    echo "🛡️  Waiting for Nexus admission (12G / 12 cpus déclarés, thermal + memory gates)..."
     if ! "$NEXUS_JOB_BIN" run \
             --project AXON \
-            --class medium \
             --priority interactive \
-            --memory 6G \
+            --memory 12G \
+            --cpus 12 \
             --gpu-mib 0 \
             --timeout 90m \
             -- "$AXON_RELEASE_BUILD_RUNNER" build "$RUST_CORE_DIR" \
