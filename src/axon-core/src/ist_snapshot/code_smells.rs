@@ -80,6 +80,109 @@ fn name_from_id(id: &str) -> &str {
     id.rsplit("::").next().unwrap_or(id)
 }
 
+/// Les segments d'un identifiant ou d'une référence, en ASCII minuscule.
+///
+/// REQ-AXO-902592 — on découpe sur `:`, `/` et `.`, les trois séparateurs que les
+/// indexeurs produisent : `a::b` (Rust), `a/b.ex` (chemin), `A.B.C` (Elixir, C#).
+fn segments_qualifiants(texte: &str) -> Vec<String> {
+    texte
+        .split(|c: char| c == ':' || c == '/' || c == '.')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect()
+}
+
+fn feuille_qualifiante(texte: &str) -> Option<String> {
+    segments_qualifiants(texte).pop()
+}
+
+/// REQ-AXO-902592 — une référence déclarée DÉSIGNE-t-elle ce symbole ?
+///
+/// Sémantique : SUFFIXE QUALIFIÉ. La référence matche si ses segments apparaissent
+/// DANS L'ORDRE parmi ceux de l'id, ET si son dernier segment est le dernier de
+/// l'id.
+///
+/// L'ancrage sur la feuille est ce qui garantit l'INCLUSION : une référence d'un
+/// seul segment se réduit EXACTEMENT à l'égalité de feuille d'avant. Aucune
+/// déclaration qui matchait ne cesse de matcher — la réparation ne peut donc
+/// qu'élargir l'exemption, jamais faire remonter un orphelin chez un locataire.
+///
+/// Pourquoi c'était cassé : la comparaison se faisait sur la seule FEUILLE, or
+/// Rust et Elixir intercalent le chemin de fichier dans l'id
+/// (`AXO::axon::src::axon-core::src::vector_control.rs::allowed_gpu_vector_workers`),
+/// si bien qu'une déclaration qualifiée ne désignait jamais rien. Mesuré sur AXO
+/// le 2026-09-05 : 51 déclarations sur 99 ne désignaient AUCUN symbole.
+///
+/// Ambiguïté : le prédicat PEUT désigner plusieurs symboles (deux homonymes dans
+/// deux fichiers, référencés par une feuille nue). Ce n'est pas nouveau et ça ne
+/// peut que RÉTRÉCIR — chaque segment qualifiant supplémentaire restreint. En
+/// sémantique d'exemption c'est inoffensif : exempter plusieurs symboles est
+/// monotone, on n'exempte jamais « le mauvais à la place du bon ». Le cas est
+/// néanmoins RENDU VISIBLE (`declarations_matching_many`) plutôt que promis
+/// impossible.
+pub fn declaration_designe_ce_symbole(id_du_symbole: &str, reference_declaree: &str) -> bool {
+    let attendus = segments_qualifiants(reference_declaree);
+    let reels = segments_qualifiants(id_du_symbole);
+    let (Some((feuille_attendue, qualifiants)), Some((feuille_reelle, amont))) =
+        (attendus.split_last(), reels.split_last())
+    else {
+        // Une référence vide ne désigne RIEN — surtout pas « tout ».
+        return false;
+    };
+    if feuille_attendue != feuille_reelle {
+        return false;
+    }
+    let mut reste = amont.iter();
+    qualifiants.iter().all(|q| reste.any(|reel| reel == q))
+}
+
+/// Les références déclarées, indexées par leur FEUILLE.
+///
+/// Sans index, le prédicat coûterait |noeuds| × |refs| découpages par appel — sur
+/// un locataire à 13 000 symboles et 800 refs, c'est 10 M par passe. La feuille
+/// étant l'ancre obligatoire du prédicat, elle est aussi la bonne clé : on ne
+/// teste que les rares candidats qui la partagent.
+pub struct DeclaredSymbolRefs {
+    par_feuille: HashMap<String, Vec<String>>,
+}
+
+impl DeclaredSymbolRefs {
+    pub fn from_set(refs: &HashSet<String>) -> Self {
+        let mut par_feuille: HashMap<String, Vec<String>> = HashMap::new();
+        for reference in refs {
+            if let Some(feuille) = feuille_qualifiante(reference) {
+                par_feuille.entry(feuille).or_default().push(reference.clone());
+            }
+        }
+        Self { par_feuille }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.par_feuille.is_empty()
+    }
+
+    /// Une déclaration désigne-t-elle ce symbole ?
+    pub fn designe(&self, id_du_symbole: &str) -> bool {
+        !self.references_designant(id_du_symbole).is_empty()
+    }
+
+    /// Les références qui désignent ce symbole — vide si aucune.
+    fn references_designant(&self, id_du_symbole: &str) -> Vec<&String> {
+        let Some(feuille) = feuille_qualifiante(id_du_symbole) else {
+            return Vec::new();
+        };
+        self.par_feuille
+            .get(&feuille)
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .filter(|r| declaration_designe_ce_symbole(id_du_symbole, r))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 fn project_matches(graph: &IstGraph, idx: u32, project: &str) -> bool {
     if project == "*" {
         return true;
@@ -1228,7 +1331,7 @@ fn phantom_dispatch_callers(graph: &IstGraph) -> HashMap<String, (usize, usize)>
 fn wiring_classify_node(
     graph: &IstGraph,
     idx: u32,
-    declared: &HashSet<String>,
+    declared: &DeclaredSymbolRefs,
     file_map: &std::collections::HashMap<u32, String>,
     phantom_callers: &HashMap<String, (usize, usize)>,
 ) -> Option<WiringOrphan> {
@@ -1264,7 +1367,11 @@ fn wiring_classify_node(
     // DECLARED, not an accidental orphan: this exempts hooks / lazy-imports / wrapper-
     // dispatched callables the static CALLS graph can't reach (the OPV blind spots). The set
     // is built by the caller from the SOLL snapshot, so this fn stays free of SOLL coupling.
-    if declared.contains(&name.to_ascii_lowercase()) {
+    // REQ-AXO-902592 — SUFFIXE QUALIFIÉ, plus seulement la feuille. Une déclaration
+    // qualifiée (`axon-core::vector_control::allowed_gpu_vector_workers`) ne
+    // désignait AUCUN symbole tant qu'on comparait `allowed_gpu_vector_workers` à
+    // l'id entier, chemin de fichier compris.
+    if declared.designe(graph.id_of(idx)) {
         return None;
     }
     let mut prod_callers = 0usize;
@@ -1330,6 +1437,10 @@ pub fn wiring_orphans(
     declared: &HashSet<String>,
     limit: usize,
 ) -> Vec<WiringOrphan> {
+    // L'index est construit ICI plutôt que d'être exigé de l'appelant : la signature
+    // publique ne bouge pas, et `declared` compte au plus quelques centaines
+    // d'entrées — négligeable devant la passe sur le graphe.
+    let index_declare = DeclaredSymbolRefs::from_set(declared);
     let file_map = build_file_path_map(graph);
     let phantom_callers = phantom_dispatch_callers(graph);
     let mut out: Vec<WiringOrphan> = Vec::new();
@@ -1338,7 +1449,7 @@ pub fn wiring_orphans(
             continue;
         }
         if let Some(orphan) =
-            wiring_classify_node(graph, idx, declared, &file_map, &phantom_callers)
+            wiring_classify_node(graph, idx, &index_declare, &file_map, &phantom_callers)
         {
             out.push(orphan);
         }
@@ -1364,13 +1475,14 @@ pub fn wiring_orphans_among(
     declared: &HashSet<String>,
     candidate_ids: &HashSet<String>,
 ) -> Vec<WiringOrphan> {
+    let index_declare = DeclaredSymbolRefs::from_set(declared);
     let file_map = build_file_path_map(graph);
     let phantom_callers = phantom_dispatch_callers(graph);
     let mut out: Vec<WiringOrphan> = Vec::new();
     for id in candidate_ids {
         let Some(idx) = graph.index_of(id) else { continue };
         if let Some(orphan) =
-            wiring_classify_node(graph, idx, declared, &file_map, &phantom_callers)
+            wiring_classify_node(graph, idx, &index_declare, &file_map, &phantom_callers)
         {
             out.push(orphan);
         }
@@ -1405,9 +1517,21 @@ pub struct WiringExemptionAudit {
     /// ecrit `axon-core::vector_control::allowed_gpu_vector_workers` croit avoir
     /// declare une entree ; la comparaison porte sur la FEUILLE de l'identifiant
     /// (`name_from_id`), donc rien ne matche et l'exemption ne s'arme jamais.
-    /// Mesure AXO : 51 refs sur 99 sont mortes. Un canal de declaration qui echoue
-    /// en silence est pire qu'une absence de canal.
+    /// Mesure AXO du 2026-09-05, AVANT la reparation : 51 refs sur 99 etaient
+    /// mortes. Un canal de declaration qui echoue en silence est pire qu'une
+    /// absence de canal. La comparaison porte desormais sur le SUFFIXE QUALIFIE
+    /// (`declaration_designe_ce_symbole`), plus sur la seule feuille.
     pub declarations_matching_nothing: Vec<String>,
+    /// REQ-AXO-902592 — refs qui designent PLUSIEURS symboles.
+    ///
+    /// Mesure a 0 sur AXO aujourd'hui, et le prédicat qualifié ne peut que
+    /// RETRECIR l'ambiguite — chaque segment supplementaire restreint. Mais
+    /// promettre l'impossibilite serait faux : deux homonymes dans deux fichiers,
+    /// references par une feuille nue, matchent tous les deux. C'est inoffensif en
+    /// semantique d'exemption (exempter plusieurs symboles est monotone, on
+    /// n'exempte jamais « le mauvais a la place du bon »), mais le jour ou ce
+    /// compte quitte 0, la surface doit le DIRE au lieu d'elargir en silence.
+    pub declarations_matching_many: Vec<String>,
 }
 
 /// REQ-AXO-902592 — calcule l'audit ci-dessus. Une passe de plus sur le graphe,
@@ -1418,34 +1542,57 @@ pub fn wiring_exemption_audit(
     project: &str,
     declared: &HashSet<String>,
 ) -> WiringExemptionAudit {
+    let index_declare = DeclaredSymbolRefs::from_set(declared);
     let file_map = build_file_path_map(graph);
     let phantom_callers = phantom_dispatch_callers(graph);
-    let sans_declaration: HashSet<String> = HashSet::new();
+    let sans_declaration = DeclaredSymbolRefs::from_set(&HashSet::new());
     let mut exempted: Vec<String> = Vec::new();
-    let mut noms_du_projet: HashSet<String> = HashSet::new();
+    // REQ-AXO-902592 — combien de symboles CHAQUE référence désigne. Le compte, pas
+    // seulement le booléen : c'est lui qui distingue « morte » (0) de « ambiguë »
+    // (> 1), et l'ambiguïté ne doit pas s'élargir en silence le jour où elle quitte 0.
+    let mut designes_par_reference: HashMap<String, usize> = HashMap::new();
+    for reference in declared {
+        designes_par_reference.insert(reference.clone(), 0);
+    }
     for idx in 0..(graph.node_count() as u32) {
         if !project_matches(graph, idx, project) {
             continue;
         }
-        noms_du_projet.insert(name_from_id(graph.id_of(idx)).to_ascii_lowercase());
-        if !declared.contains(&name_from_id(graph.id_of(idx)).to_ascii_lowercase()) {
+        let id = graph.id_of(idx);
+        let designant = index_declare.references_designant(id);
+        if designant.is_empty() {
             continue;
+        }
+        for reference in &designant {
+            *designes_par_reference
+                .entry((*reference).clone())
+                .or_insert(0) += 1;
         }
         if wiring_classify_node(graph, idx, &sans_declaration, &file_map, &phantom_callers)
             .is_some()
         {
-            exempted.push(name_from_id(graph.id_of(idx)).to_string());
+            exempted.push(name_from_id(id).to_string());
         }
     }
     exempted.sort();
     exempted.dedup();
-    let mut declarations_matching_nothing: Vec<String> = declared
+    let mut declarations_matching_nothing: Vec<String> = designes_par_reference
         .iter()
-        .filter(|r| !noms_du_projet.contains(*r))
-        .cloned()
+        .filter(|(_, n)| **n == 0)
+        .map(|(r, _)| r.clone())
         .collect();
     declarations_matching_nothing.sort();
-    WiringExemptionAudit { exempted, declarations_matching_nothing }
+    let mut declarations_matching_many: Vec<String> = designes_par_reference
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .map(|(r, _)| r.clone())
+        .collect();
+    declarations_matching_many.sort();
+    WiringExemptionAudit {
+        exempted,
+        declarations_matching_nothing,
+        declarations_matching_many,
+    }
 }
 
 /// REQ-AXO-902211 — dead clusters: how many otherwise-eligible callables of
@@ -3195,5 +3342,163 @@ mod tests {
             "l'exemption ne lui doit rien ; le compter serait une fausse alarme : {:?}",
             audit.exempted
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // REQ-AXO-902592 — le prédicat de SUFFIXE QUALIFIÉ.
+    // ---------------------------------------------------------------------------
+
+    /// Épingle la MONOTONIE au lieu de la raisonner : une référence d'un seul
+    /// segment se réduit exactement à l'égalité de feuille d'avant. C'est ce qui
+    /// garantit qu'aucun locataire ne voit remonter un orphelin.
+    #[test]
+    fn une_reference_FEUILLE_matche_exactement_comme_avant() {
+        assert!(declaration_designe_ce_symbole("AXO::a::src::x.rs::run", "run"));
+        assert!(declaration_designe_ce_symbole("AXO::app.rs::evaluator", "EVALUATOR"));
+        assert!(!declaration_designe_ce_symbole("AXO::a::src::x.rs::run", "autre"));
+    }
+
+    /// LA réparation : une déclaration qualifiée traverse le chemin de fichier que
+    /// l'indexeur Rust intercale dans l'identifiant.
+    #[test]
+    fn une_reference_QUALIFIEE_traverse_les_segments_de_chemin() {
+        let id = "AXO::axon::src::axon-core::src::vector_control.rs::allowed_gpu_vector_workers";
+        assert!(declaration_designe_ce_symbole(
+            id,
+            "axon-core::vector_control::allowed_gpu_vector_workers"
+        ));
+    }
+
+    /// Les quatre formes de séparateur réellement présentes en base donnent le même
+    /// verdict — `::` (Rust), `/` (chemin), `.` (Elixir, C#), `:` simple.
+    #[test]
+    fn les_separateurs_sont_equivalents() {
+        let id = "APS::lib::demand::order.ex::create";
+        for reference in ["demand::order::create", "demand/order/create", "demand.order.create"] {
+            assert!(
+                declaration_designe_ce_symbole(id, reference),
+                "`{reference}` doit désigner ce symbole"
+            );
+        }
+    }
+
+    /// L'ordre compte : sans lui, le prédicat dégénérerait en « ces mots figurent
+    /// quelque part », ce qui exempterait bien plus large que déclaré.
+    #[test]
+    fn l_ordre_des_segments_compte() {
+        let id = "AXO::axon::src::axon-core::src::vector_control.rs::allowed_gpu_vector_workers";
+        assert!(!declaration_designe_ce_symbole(
+            id,
+            "vector_control::axon-core::allowed_gpu_vector_workers"
+        ));
+    }
+
+    /// LE MUTANT du prédicat — il fabrique lui-même ce qu'il interdit.
+    ///
+    /// Une implémentation naïve par `id.ends_with(reference)` passerait les quatre
+    /// tests ci-dessus. Elle échoue ICI : `my_runner.rs::do_run` se TERMINE par la
+    /// chaîne `run` sans que `run` en soit un SEGMENT.
+    #[test]
+    fn MUTANT_un_suffixe_de_CHAINE_qui_n_est_pas_un_suffixe_de_SEGMENTS_est_refuse() {
+        let id = "AXO::x::src::my_runner.rs::do_run";
+        assert!(
+            id.ends_with("run"),
+            "préalable : la fixture doit bien piéger un `ends_with` naïf, sinon elle ne \
+             prouve rien sur l'ancrage par segments"
+        );
+        assert!(
+            !declaration_designe_ce_symbole(id, "run"),
+            "`do_run` n'est pas `run` : l'ancrage doit porter sur les SEGMENTS, pas sur la chaîne"
+        );
+    }
+
+    /// Une référence vide ne désigne rien — surtout pas tout.
+    #[test]
+    fn une_reference_VIDE_ne_designe_rien() {
+        assert!(!declaration_designe_ce_symbole("AXO::app.rs::run", ""));
+        assert!(!declaration_designe_ce_symbole("", "run"));
+    }
+
+    /// Bout en bout : la déclaration qualifiée qui était MORTE exempte désormais.
+    #[test]
+    fn une_declaration_QUALIFIEE_exempte_desormais_son_symbole() {
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func(
+                "AXO::axon::src::axon-core::src::vector_control.rs::allowed_gpu_vector_workers",
+                true,
+            ),
+        ];
+        let g = IstGraph::build(nodes, vec![]);
+        let declared: HashSet<String> =
+            ["axon-core::vector_control::allowed_gpu_vector_workers".to_string()]
+                .into_iter()
+                .collect();
+
+        let audit = wiring_exemption_audit(&g, "AXO", &declared);
+        assert_eq!(
+            audit.exempted,
+            vec!["allowed_gpu_vector_workers".to_string()],
+            "la déclaration qualifiée doit désormais désigner son symbole"
+        );
+        assert!(
+            audit.declarations_matching_nothing.is_empty(),
+            "elle n'est plus morte : {:?}",
+            audit.declarations_matching_nothing
+        );
+        assert!(audit.declarations_matching_many.is_empty());
+    }
+
+    /// L'ambiguïté est mesurée à 0 sur AXO. On la FABRIQUE ici pour vérifier qu'elle
+    /// est annoncée le jour où elle apparaîtra, plutôt que d'élargir en silence.
+    #[test]
+    fn une_reference_AMBIGUE_est_annoncee_et_non_avalee() {
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            func("AXO::a.rs::handler", true),
+            func("AXO::b.rs::handler", true),
+        ];
+        let g = IstGraph::build(nodes, vec![]);
+        let declared: HashSet<String> = ["handler".to_string()].into_iter().collect();
+
+        let audit = wiring_exemption_audit(&g, "AXO", &declared);
+        assert_eq!(
+            audit.declarations_matching_many,
+            vec!["handler".to_string()],
+            "une référence désignant deux symboles doit être NOMMÉE"
+        );
+        assert!(audit.declarations_matching_nothing.is_empty());
+    }
+
+    /// NON-RÉGRESSION — l'heuristique façade lit `name_from_id`, dont le corps n'a
+    /// PAS été touché. Ce test éprouve la fonction publique, donc le comportement
+    /// OBSERVABLE, qui est la vraie garantie demandée.
+    #[test]
+    fn l_heuristique_facade_est_INCHANGEE() {
+        for (impl_id, doit_apparier) in [
+            ("src/svc.rs::StorageImpl", true),
+            ("src/svc.rs::Storage_impl", true),
+            ("src/svc.rs::StorageAdapter", true),
+            // Cas NÉGATIF : sans lui, le test passerait aussi avec un `name_matches`
+            // qui rendrait toujours vrai.
+            ("src/svc.rs::StorageProbe", false),
+        ] {
+            let nodes = vec![
+                file("src/svc.rs"),
+                typed_node("src/svc.rs::Storage", NodeKind::Interface),
+                typed_node(impl_id, NodeKind::Struct),
+            ];
+            let edges = vec![
+                edge("src/svc.rs", "src/svc.rs::Storage", RelationType::Contains),
+                edge("src/svc.rs", impl_id, RelationType::Contains),
+            ];
+            let g = IstGraph::build(nodes, edges);
+            let (paires, _) = abstraction_detour_candidates(&g, "AXO", 10);
+            assert_eq!(
+                !paires.is_empty(),
+                doit_apparier,
+                "`{impl_id}` : appariement attendu = {doit_apparier}, obtenu {paires:?}"
+            );
+        }
     }
 }

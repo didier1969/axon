@@ -959,9 +959,21 @@ impl McpServer {
                 sample_identities("dead declarations", &audit.declarations_matching_nothing, 8)
             )
         };
+        // REQ-AXO-902592 — l'ambiguite est mesuree a 0 aujourd'hui. On la publie
+        // quand meme : le jour ou elle quitte 0, une exemption s'elargit, et une
+        // surface qui elargit en silence est exactement ce que ce REQ corrige.
+        let phrase_ambigues = if audit.declarations_matching_many.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ⚠ {} declaration(s) designent PLUSIEURS symboles — l'exemption porte sur tous{}.",
+                audit.declarations_matching_many.len(),
+                sample_identities("ambiguous declarations", &audit.declarations_matching_many, 8)
+            )
+        };
         let summary = format!(
-            "wiring {} : {} orphan(s) — {} test_only (delivered+tested but NO prod caller — the OPV class) + {} isolated (no caller at all, advisory). A test_only symbol tagged deliverable = must be wired before delivery (gate S3, axon_pre_flight_check).{}{}{}",
-            project, orphans.len(), test_only, isolated, orphan_phrase, phrase_exemption, phrase_mortes
+            "wiring {} : {} orphan(s) — {} test_only (delivered+tested but NO prod caller — the OPV class) + {} isolated (no caller at all, advisory). A test_only symbol tagged deliverable = must be wired before delivery (gate S3, axon_pre_flight_check).{}{}{}{}",
+            project, orphans.len(), test_only, isolated, orphan_phrase, phrase_exemption, phrase_mortes, phrase_ambigues
         );
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
@@ -976,6 +988,7 @@ impl McpServer {
                 "exempted_by_declaration": audit.exempted,
                 "exempted_count": audit.exempted.len(),
                 "declarations_matching_nothing": audit.declarations_matching_nothing,
+                "declarations_matching_many": audit.declarations_matching_many,
                 "note": "REQ-AXO-902192 volet 1a+S2 — test_only = high-confidence unwired deliverable (0 prod caller, ≥1 test); isolated = advisory (may be an undetected entry). Symbols with a SOLL traceability edge are EXEMPT (declared intent — covers dispatch-dynamic/lazy-import/hook entries the static CALLS graph misses). Gate in axon_pre_flight_check = slice S3."
             }
         }))
