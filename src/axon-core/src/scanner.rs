@@ -46,6 +46,18 @@ pub struct ScopeBreakdown {
     pub walked_files: u64,
     /// `(reason, count)` sorted by count desc, then reason asc.
     pub excluded_by_reason: Vec<(String, u64)>,
+    /// REQ-AXO-902636 — `(extension, count)` des fichiers ECARTES par le filtre
+    /// d'extensions ALORS QU'UN PARSER EXISTE pour eux. Le compte agrege
+    /// `ignored_by_extension_or_hidden_filter` melange deux choses tres
+    /// differentes : du bruit legitime (binaire, media, verrous) et du CODE
+    /// SOURCE que le systeme sait lire mais n'admet pas. Sans cette separation,
+    /// `diagnose_indexing` a certifie MRG complet pendant que 100 % de ses
+    /// en-tetes `.hpp` etaient ecartes.
+    ///
+    /// Ce compte lit la configuration EFFECTIVE, pas le defaut compile : la
+    /// garde unitaire de REQ-AXO-902631 protege `default_supported_extensions()`,
+    /// qu'un `.axon/capabilities.toml` peut surcharger.
+    pub parsable_but_excluded: Vec<(String, u64)>,
 }
 
 /// REQ-AXO-902045 MUR 0 — true when the file walker must NOT descend into
@@ -271,6 +283,10 @@ impl Scanner {
         let mut eligible = 0u64;
         let mut walked = 0u64;
         let mut reasons: HashMap<String, u64> = HashMap::new();
+        let mut parsables: HashMap<String, u64> = HashMap::new();
+        // REQ-AXO-902636 — calcule UNE fois, depuis la config EFFECTIVE.
+        let non_admises =
+            extensions_parsables_non_admises(&crate::config::CONFIG.indexing.supported_extensions);
         // `build_walker_from` already prunes build/dependency/VCS/tooling
         // directories at descent (REQ-AXO-902045 MUR 0), so this walk only
         // enumerates the source neighbourhood — never the millions of build
@@ -288,19 +304,31 @@ impl Scanner {
             if self.should_process_path(path) {
                 eligible += 1;
             } else {
-                *reasons
-                    .entry(self.explain_ignore_decision(path, false))
-                    .or_insert(0) += 1;
+                let raison = self.explain_ignore_decision(path, false);
+                // REQ-AXO-902636 — separer le bruit legitime du code source que
+                // le systeme SAIT lire et n'admet pas.
+                if raison == "ignored_by_extension_or_hidden_filter" {
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        let ext = ext.to_lowercase();
+                        if non_admises.contains(&ext.as_str()) {
+                            *parsables.entry(ext).or_insert(0) += 1;
+                        }
+                    }
+                }
+                *reasons.entry(raison).or_insert(0) += 1;
             }
         }
 
         let mut excluded_by_reason: Vec<(String, u64)> = reasons.into_iter().collect();
         excluded_by_reason.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut parsable_but_excluded: Vec<(String, u64)> = parsables.into_iter().collect();
+        parsable_but_excluded.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         ScopeBreakdown {
             eligible,
             walked_files: walked,
             excluded_by_reason,
+            parsable_but_excluded,
         }
     }
 
@@ -700,6 +728,26 @@ fn persist_discovery_batch(
         values.join(", ")
     );
     graph.execute(&sql)
+}
+
+/// REQ-AXO-902636 — les extensions qu'un parser sait lire et que la
+/// configuration EFFECTIVE n'admet PAS. Fonction PURE : elle prend la liste
+/// admise en parametre, parce que `config::CONFIG` est un `Lazy` global qu'un
+/// test ne peut pas simuler — le patron `_with_config` du meme fichier.
+///
+/// Pourquoi la config EFFECTIVE et pas le defaut compile : la garde unitaire de
+/// REQ-AXO-902631 protege `default_supported_extensions()`, mais
+/// `supported_extensions` porte `#[serde(default = …)]` — un
+/// `.axon/capabilities.toml` peut le surcharger et reproduire exactement le
+/// defaut d'origine (1 054 fichiers du parc hors index, cinq langages muets)
+/// sans qu'aucun test unitaire le voie. C'est le seul endroit ou la surcharge
+/// se constate.
+pub fn extensions_parsables_non_admises(admises: &[String]) -> Vec<&'static str> {
+    crate::parser::PARSEABLE_EXTENSIONS
+        .iter()
+        .copied()
+        .filter(|ext| !admises.iter().any(|a| a.to_lowercase() == *ext))
+        .collect()
 }
 
 /// REQ-AXO-902632 — la decision de REFUS d'enrolement, extraite en fonction
@@ -1498,6 +1546,49 @@ mod eligibilite_selon_la_racine_tests {
         assert_eq!(
             depuis_la_surveillance.explain_ignore_decision(&projet, true),
             "eligible"
+        );
+    }
+
+    /// REQ-AXO-902636 — la decision, exercee dans les DEUX sens sur une liste
+    /// admise FABRIQUEE : c'est le seul moyen de simuler la surcharge
+    /// `.axon/capabilities.toml` que `CONFIG` (un `Lazy` global) rend
+    /// intestable autrement.
+    #[test]
+    fn une_extension_parsable_absente_de_la_config_est_denoncee() {
+        let amputee: Vec<String> = ["rs", "py", "md"].iter().map(|s| s.to_string()).collect();
+        let manquantes = extensions_parsables_non_admises(&amputee);
+        assert!(
+            manquantes.contains(&"hpp"),
+            "hpp a un parser et n'est pas admis — il doit etre denonce : {manquantes:?}"
+        );
+        assert!(
+            !manquantes.contains(&"rs"),
+            "rs est admis, il ne doit PAS etre denonce : {manquantes:?}"
+        );
+    }
+
+    /// Le pendant NECESSAIRE : sans lui, une fonction qui denoncerait TOUT
+    /// passerait la garde d'au-dessus.
+    #[test]
+    fn une_config_complete_ne_denonce_rien() {
+        let complete: Vec<String> = crate::parser::PARSEABLE_EXTENSIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(extensions_parsables_non_admises(&complete).is_empty());
+    }
+
+    /// REQ-AXO-902636 — la garde qui MANQUAIT a REQ-AXO-902631 : celle-ci lit la
+    /// configuration EFFECTIVE de CETTE machine, pas le defaut compile. Un
+    /// `.axon/capabilities.toml` qui amputerait `supported_extensions` la fait
+    /// rougir, la ou le test unitaire de `config.rs` resterait vert.
+    #[test]
+    fn la_config_effective_admet_tout_ce_que_le_parser_sait_lire() {
+        let manquantes =
+            extensions_parsables_non_admises(&crate::config::CONFIG.indexing.supported_extensions);
+        assert!(
+            manquantes.is_empty(),
+            "la config EFFECTIVE ecarte des extensions parsables — leur parser est inatteignable sur cette machine : {manquantes:?}"
         );
     }
 

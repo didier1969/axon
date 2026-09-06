@@ -41,6 +41,7 @@ fn indexing_verdict(
     discovered_without_chunks: i64,
     files_with_chunks: i64,
     files_without_chunks: i64,
+    parsables_ecartes: &[(String, u64)],
 ) -> String {
     if eligible == 0 {
         return "⚠️ zero eligible source files under the project root — check the watch root / ignore rules.".to_string();
@@ -95,6 +96,37 @@ fn indexing_verdict(
             "✅ every eligible source file is indexed AND parsed (chunk coverage is the truth). ℹ️ {discovered} file(s) still carry the legacy `status='discovered'` flag while HAVING chunks — stale bookkeeping on a column nothing reads (REQ-AXO-901916), not an indexing gap."
         );
     }
+    // REQ-AXO-902636 — le verdict comptait l'EXCLUSION comme une explication.
+    //
+    // Mesure du 2026-09-06 sur MRG : « ✅ all relevant source is indexed », et en
+    // dessous « ignored_by_extension_or_hidden_filter: 37 » — dont les 28 `.hpp`
+    // du projet, du C++ que `parser::get_parser_for_file` sait lire depuis
+    // toujours. Le tenant s'etait plaint par courrier ; le diagnostic lui donnait
+    // tort. Troisieme vert-par-defaut de cette matrice (REQ-AXO-902384 le ✅ vide,
+    // REQ-AXO-902599 la voix VPC) : la branche verte tombe parce qu'aucune branche
+    // rouge ne connait la question posee.
+    //
+    // La garde unitaire de REQ-AXO-902631 protege `default_supported_extensions()`
+    // — le DEFAUT compile. `supported_extensions` porte `#[serde(default = …)]` :
+    // un `.axon/capabilities.toml` peut le surcharger et retrouver exactement le
+    // defaut d'origine sans qu'aucun test le voie. CETTE garde-ci lit la
+    // configuration EFFECTIVE. Les deux sont complementaires, pas redondantes.
+    //
+    // Deliberement borne aux EXTENSIONS : elargir a toutes les raisons
+    // d'exclusion nommerait 1 041 `ignored_by_gitignore_or_exclude` legitimes sur
+    // le seul MRG, et le bruit noierait le signal.
+    if !parsables_ecartes.is_empty() {
+        let total: u64 = parsables_ecartes.iter().map(|(_, n)| n).sum();
+        let detail = parsables_ecartes
+            .iter()
+            .map(|(ext, n)| format!(".{ext}×{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!(
+            "⛔ {total} SOURCE file(s) excluded by the extension filter ALTHOUGH A PARSER EXISTS for              them ({detail}): they never reach A2, so their symbols are absent from the index and              `query`/`inspect`/`impact` answer as if the code did not exist. This is NOT the              out-of-ecosystem noise the exclusion table below suggests. Add the extension(s) to              `indexing.supported_extensions` (the effective config — check `.axon/capabilities.toml`,              which overrides the compiled default) — REQ-AXO-902636."
+        );
+    }
+
     let gap = eligible - indexed;
     if gap == 0 {
         "✅ every eligible source file is indexed AND parsed (chunk coverage confirmed, no `discovered` backlog); the wider on-disk population is fully accounted for by the exclusion reasons below (assert: all relevant source is indexed).".to_string()
@@ -692,6 +724,7 @@ impl McpServer {
             discovered_without_chunks,
             files_with_chunks,
             files_without_chunks,
+            &breakdown.parsable_but_excluded,
         );
 
         let reason_lines = if breakdown.excluded_by_reason.is_empty() {
@@ -2406,10 +2439,52 @@ mod tests {
     }
 
     // --- REQ-AXO-902280 eligible↔indexed↔parsed verdict (feedback #44, LLL) -----------
+    /// REQ-AXO-902636 — LA garde : un fichier ecarte par le filtre d'extensions
+    /// ALORS QU'UN PARSER EXISTE doit faire TAIRE le ✅ et etre NOMME. Le cas
+    /// exact de MRG le 2026-09-06 : 119 fichiers, coverage 100 %, gap 0 — toutes
+    /// les branches vertes satisfaites — et 28 `.hpp` de C++ hors de l'index.
+    #[test]
+    fn un_ecarte_parsable_fait_taire_le_verdict_vert() {
+        let ecartes = vec![("hpp".to_string(), 28u64)];
+        let v = indexing_verdict(119, 119, 0, 0, 119, 0, &ecartes);
+        assert!(
+            !v.contains('✅'),
+            "le verdict vert doit disparaitre — obtenu : {v}"
+        );
+        assert!(v.contains("hpp"), "l'extension doit etre NOMMEE — obtenu : {v}");
+        assert!(v.contains("28"), "le compte doit etre donne — obtenu : {v}");
+    }
+
+    /// Le pendant NECESSAIRE : sans lui, une garde qui rougirait toujours
+    /// passerait celle d'au-dessus. Un projet qui n'ecarte que du non-parsable
+    /// (binaires, media, verrous) garde son ✅ — sinon le rouge serait permanent
+    /// sur tout le parc, et un rouge permanent ne se lit plus.
+    #[test]
+    fn n_ecarter_que_du_non_parsable_garde_le_verdict_vert() {
+        let v = indexing_verdict(119, 119, 0, 0, 119, 0, &[]);
+        assert!(
+            v.contains('✅'),
+            "aucun ecarte parsable ⇒ le vert reste legitime — obtenu : {v}"
+        );
+    }
+
+    /// L'ordre compte : un blocage REEL (fichiers enroles sans chunks) prime sur
+    /// le signalement d'extension. Sinon le correctif de REQ-AXO-902599 serait
+    /// masque par celui-ci.
+    #[test]
+    fn un_blocage_reel_prime_sur_le_signalement_d_extension() {
+        let ecartes = vec![("hpp".to_string(), 28u64)];
+        let v = indexing_verdict(119, 119, 0, 0, 117, 2, &ecartes);
+        assert!(
+            v.contains("ZERO CHUNKS"),
+            "le blocage reel doit rester le verdict — obtenu : {v}"
+        );
+    }
+
     #[test]
     fn indexing_verdict_flags_discovered_backlog_as_blocker() {
         // The exact #44 shape: 429 LLL files enrolled, none parsed (all `discovered`).
-        let v = indexing_verdict(429, 429, 429, 429, 0, 0);
+    let v = indexing_verdict(429, 429, 429, 429, 0, 0, &[]);
         assert!(v.starts_with("⛔"), "discovered backlog must block, got: {v}");
         assert!(v.contains("429"), "the backlog size must be stated: {v}");
         // REQ-AXO-902389 — was `contains("discovered")`. The verdict deliberately
@@ -2433,7 +2508,7 @@ mod tests {
         // Mesuré au moment du correctif, la même forme partout : KKI 16164
         // découverts / 12 vides · NEX 753/3 · AXO 660/1. Le verdict criait un
         // facteur 1000 au-dessus du réel.
-        let v = indexing_verdict(1454, 1454, 710, 0, 1454, 0);
+        let v = indexing_verdict(1454, 1454, 710, 0, 1454, 0, &[]);
         assert!(v.starts_with("✅"), "des fichiers parsés ne bloquent pas : {v}");
         assert!(
             v.contains("710") && v.contains("stale"),
@@ -2447,7 +2522,7 @@ mod tests {
         // LA falsification : la branche qui détecte une vraie panne d'extraction
         // doit rester ATTEIGNABLE. Un correctif qui rend l'outil muet ne vaut pas
         // mieux que celui qui le rend bavard.
-        let v = indexing_verdict(1454, 1454, 710, 5, 1449, 5);
+        let v = indexing_verdict(1454, 1454, 710, 5, 1449, 5, &[]);
         assert!(v.starts_with("⛔"), "5 fichiers sans rien extrait bloquent : {v}");
         assert!(v.contains('5'), "le nombre RÉEL est nommé, pas les 710 : {v}");
         assert!(
@@ -2459,7 +2534,7 @@ mod tests {
     #[test]
     fn indexing_verdict_green_only_when_parsed_and_no_backlog() {
         // LLL after the post-outage reindex: 457 parsed, zero discovered.
-        let v = indexing_verdict(457, 457, 0, 0, 457, 0);
+        let v = indexing_verdict(457, 457, 0, 0, 457, 0, &[]);
         assert!(v.starts_with("✅"), "clean parsed state is green: {v}");
         assert!(v.contains("parsed"), "the green verdict distinguishes parsed: {v}");
     }
@@ -2470,7 +2545,7 @@ mod tests {
         // chunks, aucun `discovered`. Les deux gardes antérieures étaient aveugles —
         // `discovered_without_chunks == 0` et `eligible == indexed` — et le verdict
         // tombait sur un ✅ par défaut alors qu'un fichier est introuvable.
-        let vpc = indexing_verdict(118, 118, 0, 0, 117, 1);
+        let vpc = indexing_verdict(118, 118, 0, 0, 117, 1, &[]);
         assert!(
             vpc.starts_with("⛔"),
             "un fichier éligible sans chunk doit BLOQUER le verdict ; obtenu : {vpc}"
@@ -2482,7 +2557,7 @@ mod tests {
         // Le symetrique : tant que l'enrolement court, les fichiers pas encore en base
         // ne sont pas « sans chunks », ils sont EN ATTENTE. C'est la raison pour
         // laquelle le compte arrive de la BASE et n'est pas derive de `eligible`.
-        let en_cours = indexing_verdict(100, 90, 0, 0, 90, 0);
+        let en_cours = indexing_verdict(100, 90, 0, 0, 90, 0, &[]);
         assert!(
             en_cours.starts_with("⏳"),
             "un enrolement inacheve doit rester une attente ; obtenu : {en_cours}"
@@ -2492,7 +2567,7 @@ mod tests {
         // notes de travail, module vide). L'appelant les exclut des DEUX comptes, donc
         // `files_without_chunks` vaut 0 et le verdict reste vert. Une garde qui crie sur
         // un etat delibere ne serait pas lue la fois ou elle aurait raison.
-        let axo = indexing_verdict(933, 933, 0, 0, 925, 0);
+        let axo = indexing_verdict(933, 933, 0, 0, 925, 0, &[]);
         assert!(
             axo.starts_with("✅"),
             "8 fichiers `skipped` ne sont pas une lacune d'index ; obtenu : {axo}"
@@ -2500,14 +2575,14 @@ mod tests {
         // MUTANT — la même fixture avec une couverture complète rend bien un ✅.
         // Sans ce contrôle, l'assertion ci-dessus passerait aussi si le verdict
         // bloquait TOUJOURS, ce qui serait le défaut symétrique.
-        let complet = indexing_verdict(118, 118, 0, 0, 118, 0);
+        let complet = indexing_verdict(118, 118, 0, 0, 118, 0, &[]);
         assert!(
             complet.starts_with("✅"),
             "une couverture complète doit rester verte, sinon la garde crie sans discriminer ; obtenu : {complet}"
         );
-        assert!(indexing_verdict(100, 90, 0, 0, 90, 0).starts_with("⏳"), "under-enrolled → waiting");
-        assert!(indexing_verdict(0, 0, 0, 0, 0, 0).starts_with("⚠"), "no eligible → watch-root warning");
+        assert!(indexing_verdict(100, 90, 0, 0, 90, 0, &[]).starts_with("⏳"), "under-enrolled → waiting");
+        assert!(indexing_verdict(0, 0, 0, 0, 0, 0, &[]).starts_with("⚠"), "no eligible → watch-root warning");
         // A discovered backlog dominates a raw row gap: the parse stall is the actionable cause.
-        assert!(indexing_verdict(100, 90, 5, 5, 90, 5).starts_with("⛔"), "discovered dominates the gap verdict");
+        assert!(indexing_verdict(100, 90, 5, 5, 90, 5, &[]).starts_with("⛔"), "discovered dominates the gap verdict");
     }
 }
