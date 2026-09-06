@@ -216,6 +216,25 @@ mod tests {
             "un orphelin au chemin vivant doit retrouver son parent FK (REQ-AXO-902626)"
         );
 
+        // REQ-AXO-902626 — le compteur doit rendre les TROUS COMBLÉS, pas les projets
+        // traités. `ensure_project_fk_parent` étant un UPSERT, il réussit aussi sur un
+        // parent déjà là : compter ses succès annonçait « 63 réparations » un jour où
+        // il n'y avait rien à réparer. Rejouer sur le MÊME jeu doit donc rendre 0 —
+        // c'est ce second appel qui distingue les deux comptages, le premier ne le
+        // pouvait pas (1 identité, 1 succès, 1 trou : les trois coïncident).
+        let rejoue = store.reconcile_project_fk_parents(&identities);
+        assert_eq!(
+            rejoue, 0,
+            "rejouée sur un parc déjà sain, la réconciliation ne doit signaler AUCUNE \
+             réparation — sinon elle compte les projets traités et son alerte crie \
+             au loup à chaque démarrage (REQ-AXO-902626)"
+        );
+        assert_eq!(
+            parent_rows(&store, &code),
+            1,
+            "et elle reste idempotente : toujours une seule ligne parente"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

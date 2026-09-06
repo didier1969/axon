@@ -668,15 +668,30 @@ impl GraphStore {
         &self,
         identities: &[crate::project_meta::CanonicalProjectIdentity],
     ) -> usize {
-        let mut enrolled = 0usize;
+        // REQ-AXO-902626 — rendre le nombre de TROUS COMBLÉS, jamais le nombre de
+        // projets traités.
+        //
+        // `ensure_project_fk_parent` est un UPSERT : il réussit aussi quand le parent
+        // existait déjà. Compter ses succès annonçait « 63 parents enrôlés » un jour
+        // où il n'y avait RIEN à réparer — un chiffre faux dans la direction
+        // rassurante, et la garde qui l'assertait passait pour la même mauvaise
+        // raison. On lit donc l'état AVANT, et on ne touche qu'aux manquants.
+        let deja_presents: std::collections::HashSet<String> = self
+            .query_json("SELECT code FROM axon.Project")
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+            .map(|rows| rows.into_iter().filter_map(|r| r.into_iter().next()).collect())
+            .unwrap_or_default();
+
+        let mut repares: Vec<String> = Vec::new();
         for identity in identities {
-            if !identity.project_path.is_dir() {
+            if !identity.project_path.is_dir() || deja_presents.contains(&identity.code) {
                 continue;
             }
             let root_path = identity.project_path.to_string_lossy().to_string();
             let name = identity.name.clone().unwrap_or_default();
             match self.ensure_project_fk_parent(&identity.code, &name, &root_path) {
-                Ok(()) => enrolled += 1,
+                Ok(()) => repares.push(identity.code.clone()),
                 Err(e) => tracing::warn!(
                     project_code = %identity.code,
                     error = %e,
@@ -684,7 +699,25 @@ impl GraphStore {
                 ),
             }
         }
-        enrolled
+
+        // REQ-AXO-902626 / REQ-AXO-902630 — SIGNALER, ne pas réparer en silence.
+        //
+        // Une réconciliation muette est le défaut meme que REQ-AXO-902630 décrit :
+        // effacer le symptôme sans que personne n'apprenne qu'il y a eu un défaut.
+        // Un trou ici signifie qu'un chemin a écrit le registre SANS passer par
+        // `sync_project_registry_entry` — c'est-à-dire que l'invariant a été violé
+        // en amont, et cela doit se voir. Zéro trou est le cas NORMAL et reste muet.
+        if !repares.is_empty() {
+            tracing::warn!(
+                repaired_count = repares.len(),
+                project_codes = %repares.join(","),
+                "REQ-AXO-902626: INVARIANT VIOLE — des codes du registre n'avaient pas \
+                 leur parent axon.Project et viennent d'etre reparés. Un chemin a ecrit \
+                 soll.ProjectCodeRegistry sans passer par sync_project_registry_entry ; \
+                 le trouver, la reparation ne suffit pas."
+            );
+        }
+        repares.len()
     }
 
     /// REQ-AXO-143 — persist a project's session pointer (file|url|soll_node|none).
