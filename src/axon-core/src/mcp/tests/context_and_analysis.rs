@@ -3237,12 +3237,23 @@ fn test_retrieve_context_routes_breakage_question_to_impact_and_packages_neighbo
         .get("structural_neighbors")
         .and_then(|value| value.as_array())
         .expect("expected structural neighbors");
+    // Le message doit DISTINGUER les deux façons d'arriver à une bande vide, sinon
+    // il ne dit rien : « le graphe n'a rien trouvé » et « la borne de budget l'a
+    // retirée » se lisent tous les deux `[]`. `graph_neighbors_selected` tranche
+    // avant la coupe, `omitted_bands` nomme ce que la coupe a pris.
     assert!(
         structural_neighbors
             .iter()
             .any(|row| row.to_string().contains("consumer_a")),
-        "{:?}",
-        structural_neighbors
+        "structural_neighbors = {structural_neighbors:?}\n\
+         graph_neighbors_selected = {:?}\n\
+         omitted_bands = {:?}\n\
+         token_budget_estimate = {:?}",
+        packet
+            .get("retrieval_diagnostics")
+            .and_then(|d| d.get("graph_neighbors_selected")),
+        packet.get("omitted_bands"),
+        packet.get("token_budget_estimate"),
     );
     assert!(
         packet

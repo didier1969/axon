@@ -9795,7 +9795,14 @@ fn test_axon_commit_work_enforces_guideline() {
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
-    assert!(content_good.contains("Validation passed"));
+    // REQ-AXO-902624 (friction MRG 431) — le dry-run ne dit PLUS « Validation
+    // passed » : il disait ça sur un `devenv.nix` qui ne s'évaluait plus. La phrase
+    // nue est désormais INTERDITE sur ce chemin (garde à `:9974`) ; « Validation
+    // passed » reste le libellé du VRAI commit (workflow_project.rs:842).
+    assert!(
+        content_good.contains("Conformité SOLL : OK"),
+        "{content_good}"
+    );
 
     // 3. Modular MCP tests must also satisfy the legacy `tests.rs` rule.
     let req_modular_test = serde_json::json!({
@@ -10044,7 +10051,8 @@ fn test_axon_commit_work_recognizes_inline_cfg_test_in_modified_rs_file() {
             .unwrap_or(false),
         "inline #[cfg(test)] must satisfy the TDD gate without a sibling _tests.rs file: {content}"
     );
-    assert!(content.contains("Validation passed"), "{content}");
+    // REQ-AXO-902624 — libellé dry-run, cf. `:9974` qui interdit l'ancien.
+    assert!(content.contains("Conformité SOLL : OK"), "{content}");
 }
 
 #[test]
@@ -15011,7 +15019,14 @@ fn test_axon_commit_work_blocks_deliverable_symbol_never_wired_to_production() {
         Some(true),
         "untagged orphan + prod-wired deliverable must NOT block: {clean:?}"
     );
-    assert!(clean["content"][0]["text"].as_str().unwrap_or("").contains("Validation passed"));
+    // REQ-AXO-902624 — libellé dry-run, cf. `:9974` qui interdit l'ancien.
+    assert!(
+        clean["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Conformité SOLL : OK"),
+        "{clean:?}"
+    );
 }
 
 // REQ-AXO-902192 S3 — an explicit `role='entry'` tag (a legitimately declared

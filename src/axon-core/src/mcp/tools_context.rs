@@ -904,13 +904,13 @@ impl McpServer {
             "excluded_because": excluded_because,
             "token_budget_estimate": {
                 "requested_budget": token_budget,
-                "estimated_tokens": estimate_tokens(&[
-                    &answer_sketch,
-                    &serde_json::to_string(&direct_evidence).unwrap_or_default(),
-                    &serde_json::to_string(&supporting_chunks).unwrap_or_default(),
-                    &serde_json::to_string(&structural_neighbors).unwrap_or_default(),
-                    &serde_json::to_string(&relevant_soll_entities).unwrap_or_default(),
-                ]),
+                // REQ-AXO-902596 (corrigé s142) — `estimated_tokens` est écrit plus
+                // bas, par `poids_du_contenu`, LA MÊME fonction qui borne. Le
+                // calculer ici sur cinq bandes choisies à la main, quand la borne en
+                // pesait une autre grandeur, posait côte à côte deux nombres
+                // d'échelles différentes : `estimated_tokens: 399` et
+                // `rendered_tokens: 788` sur un paquet dont la coupe n'avait RIEN
+                // ajouté. Une seule définition, un seul barème (GUI-PRO-013).
             },
             "retrieval_diagnostics": {
                 "symbol_candidates_considered": diagnostics.symbol_candidates_considered,
@@ -958,16 +958,29 @@ impl McpServer {
         // (REQ-AXO-902409). `answer_sketch`, `direct_evidence` et
         // `explicit_soll_anchors` ne sont JAMAIS coupés : ce sont la réponse et les
         // ancres que l'appelant a explicitement nommées.
-        let bandes_omises = Self::borner_paquet_au_budget(&mut packet, token_budget);
+        //
+        // ⚠ CORRECTION s142 — ce que la borne PÈSE. Voir `poids_du_contenu` : elle
+        // pesait le paquet ENTIER, machinerie comprise, alors que `token_budget`
+        // a toujours désigné le CONTENU partout ailleurs.
+        let contenu_avant = Self::poids_du_contenu(&packet);
+        let bandes_omises = Self::borner_paquet_au_budget(
+            &mut packet,
+            token_budget,
+            Self::bande_porteuse_de_la_route(route),
+        );
+        // Recalculé APRÈS la coupe, sur la MÊME grandeur qu'avant : sans ça,
+        // `estimated_tokens` et `rendered_tokens` ne se comparent pas, et
+        // `within_budget` ne veut rien dire.
+        let contenu_rendu = Self::poids_du_contenu(&packet);
         if let Some(obj) = packet.as_object_mut() {
-            // `estimated_tokens` était calculé AVANT la coupe : le laisser tel quel
-            // ferait annoncer un poids que l'enveloppe ne porte plus. Il est
-            // recalculé sur ce qui part réellement.
-            let rendu = estimate_tokens(&[&serde_json::to_string(&obj).unwrap_or_default()]);
             if let Some(estimate) = obj.get_mut("token_budget_estimate") {
                 if let Some(e) = estimate.as_object_mut() {
-                    e.insert("rendered_tokens".to_string(), json!(rendu));
-                    e.insert("within_budget".to_string(), json!(token_budget == 0 || rendu <= token_budget));
+                    e.insert("estimated_tokens".to_string(), json!(contenu_avant));
+                    e.insert("rendered_tokens".to_string(), json!(contenu_rendu));
+                    e.insert(
+                        "within_budget".to_string(),
+                        json!(token_budget == 0 || contenu_rendu <= token_budget),
+                    );
                 }
             }
             if !bandes_omises.is_empty() {
@@ -3088,25 +3101,21 @@ impl McpServer {
     pub(crate) fn borner_paquet_au_budget(
         packet: &mut Value,
         token_budget: usize,
+        bande_porteuse: Option<&str>,
     ) -> Vec<Value> {
-        /// Bandes coupables, de la moins prioritaire à la plus.
-        const BANDES: [&str; 5] = [
-            "structural_neighbors",
-            "supporting_docs",
-            "supporting_code_context",
-            "supporting_guidelines",
-            "supporting_chunks",
-        ];
-        let poids = |v: &Value| -> usize {
+        let poids_bande = |v: &Value| -> usize {
             estimate_tokens(&[&serde_json::to_string(v).unwrap_or_default()])
         };
         let mut omises: Vec<Value> = Vec::new();
-        if token_budget == 0 || poids(packet) <= token_budget {
+        if token_budget == 0 || Self::poids_du_contenu(packet) <= token_budget {
             return omises;
         }
-        for bande in BANDES {
-            if poids(packet) <= token_budget {
+        for bande in Self::BANDES_COUPABLES {
+            if Self::poids_du_contenu(packet) <= token_budget {
                 break;
+            }
+            if Some(bande) == bande_porteuse {
+                continue;
             }
             let Some(obj) = packet.as_object_mut() else { break };
             let Some(valeur) = obj.get(bande) else { continue };
@@ -3114,7 +3123,7 @@ impl McpServer {
             if compte == 0 {
                 continue;
             }
-            let cout = poids(valeur);
+            let cout = poids_bande(valeur);
             obj.insert(bande.to_string(), json!([]));
             omises.push(json!({
                 "band": bande,
@@ -3123,6 +3132,113 @@ impl McpServer {
             }));
         }
         omises
+    }
+
+    /// REQ-AXO-902596 — la bande qui PORTE la réponse de cette route, et qui rejoint
+    /// donc le noyau jamais coupé.
+    ///
+    /// ## Le cas qui l'établit, mesuré le 2026-09-06
+    ///
+    /// Question `impact` : « qu'est-ce qui casse si `parse_batch` change ? ». Le
+    /// graphe avait trouvé les 5 appelants (`graph_neighbors_selected: 5`), et la
+    /// coupe les a retirés EN PREMIER — 258 jetons — parce que l'ordre statique les
+    /// classe « périphériques ». Elle a ensuite dû retirer `supporting_code_context`
+    /// (889 jetons) pour tenir, alors que ce second retrait suffisait À LUI SEUL :
+    /// 1 747 − 889 = 858 sous un budget de 1 200. Les cinq appelants ont donc été
+    /// sacrifiés pour rien, et la réponse rendue était le CONTEXTE de la réponse,
+    /// sans la réponse.
+    ///
+    /// ## Le principe, appliqué correctement
+    ///
+    /// L'ordre « du plus périphérique au plus central » est le bon principe. Le
+    /// défaut est qu'il était STATIQUE alors que la centralité dépend de la
+    /// question : sur une route structurelle, les voisins NE SONT PAS périphériques,
+    /// ils sont la réponse. Même raison que pour `direct_evidence`.
+    ///
+    /// `ExactLookup`, `Hybrid` et `SollHybrid` ne portent leur réponse dans aucune
+    /// bande coupable — elle est dans `direct_evidence` et `relevant_soll_entities`,
+    /// tous deux déjà hors de portée de la coupe. Rendre `None` est donc un fait,
+    /// pas une lacune : cette table ne s'agrandit que sur une mesure.
+    fn bande_porteuse_de_la_route(route: RetrievalRoute) -> Option<&'static str> {
+        match route {
+            RetrievalRoute::Impact | RetrievalRoute::Wiring => Some("structural_neighbors"),
+            RetrievalRoute::ExactLookup | RetrievalRoute::Hybrid | RetrievalRoute::SollHybrid => {
+                None
+            }
+        }
+    }
+
+    /// Bandes coupables, de la moins prioritaire à la plus.
+    pub(crate) const BANDES_COUPABLES: [&str; 5] = [
+        "structural_neighbors",
+        "supporting_docs",
+        "supporting_code_context",
+        "supporting_guidelines",
+        "supporting_chunks",
+    ];
+
+    /// REQ-AXO-902596 — le poids que `token_budget` borne : le CONTENU du paquet,
+    /// jamais l'enveloppe entière.
+    ///
+    /// ## Le défaut que cette fonction corrige
+    ///
+    /// La première version de la borne pesait `serde_json::to_string(packet)` —
+    /// donc `retrieval_diagnostics`, `retrieval_timings_ms`, `retrieval_policy`,
+    /// `why_these_items`, `rationale_quality`, `evidence_states`, `confidence`,
+    /// `excluded_because`. Sur une réponse ORDINAIRE cette machinerie pèse ~400
+    /// jetons. Sous un budget de 900 elle en mangeait 88 %, et la coupe vidait
+    /// TOUTES les bandes de contenu pour tenir un plafond que le contenu — 399
+    /// jetons — n'avait jamais franchi. Mesuré le 2026-09-06 sur trois tests
+    /// clients : `token_budget_estimate` annonçait lui-même la contradiction,
+    /// `estimated_tokens: 399` contre `rendered_tokens: 788`.
+    ///
+    /// ## Pourquoi le contenu, et pas l'enveloppe
+    ///
+    /// `token_budget` a toujours désigné le contenu, partout ailleurs et AVANT
+    /// cette borne : la sélection des chunks le lit ainsi (`consumed_tokens +
+    /// estimated > token_budget / 2`) et `estimated_tokens` le comptait ainsi.
+    /// Peser l'enveloppe était donc un changement de contrat silencieux — celui
+    /// qui a rougi la porte pendant vingt-deux commits.
+    ///
+    /// Et c'est aussi la seule lecture défendable : l'appelant ne demande pas la
+    /// machinerie et ne peut pas la refuser. La lui facturer lui vend un budget
+    /// qu'il ne dépense pas, puis lui retire ce qu'il était venu chercher.
+    ///
+    /// ## Ce qui est pesé
+    ///
+    /// Le noyau jamais coupé (`answer_sketch`, `direct_evidence`,
+    /// `explicit_soll_anchors`, `relevant_soll_entities`) plus les cinq bandes
+    /// coupables. Cette liste est LA référence des trois nombres de
+    /// `token_budget_estimate` : les compter autrement les rendrait incomparables.
+    pub(crate) fn poids_du_contenu(packet: &Value) -> usize {
+        const NOYAU: [&str; 4] = [
+            "answer_sketch",
+            "direct_evidence",
+            "explicit_soll_anchors",
+            "relevant_soll_entities",
+        ];
+        let Some(obj) = packet.as_object() else {
+            return estimate_tokens(&[&serde_json::to_string(packet).unwrap_or_default()]);
+        };
+        let morceaux: Vec<String> = NOYAU
+            .iter()
+            .chain(Self::BANDES_COUPABLES.iter())
+            .filter_map(|cle| obj.get(*cle))
+            .map(|valeur| {
+                // Une chaîne est pesée telle qu'elle sera lue, sans ses guillemets
+                // JSON — c'est ainsi que `answer_sketch` était compté avant.
+                valeur
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| serde_json::to_string(valeur).unwrap_or_default())
+            })
+            .collect();
+        estimate_tokens(
+            &morceaux
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn render_evidence_packet(&self, packet: &Value, route: RetrievalRoute) -> String {

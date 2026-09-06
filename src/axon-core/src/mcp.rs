@@ -1014,6 +1014,15 @@ impl McpServer {
             // fermée, réintroduite par le correctif qui rendait `sql` plus bavard.
             // Attrapée par `test_sql_tool_is_read_only_rejects_mutations`.
             "row_count",
+            // REQ-AXO-902621 — la régression que le commentaire ci-dessus ANNONÇAIT,
+            // survenue quatre heures plus tard : `7ab37eb9` a ajouté ces deux clés
+            // pour dire QUELLE troncature a eu lieu, sans les déclarer ici. `sql` a
+            // donc reperdu son miroir, et tout client qui ne lit que
+            // `structuredContent` a reperdu sa charge utile. Ce sont deux verdicts
+            // sur la RESTITUTION, pas les lignes elles-mêmes — les lignes sont dans
+            // `content`. Attrapée par `test_sql_tool_is_read_only_rejects_mutations`.
+            "rows_rendered",
+            "truncated",
             // REQ-AXO-902583 — même raison : nommer un paramètre avalé est de la
             // guidance sur l'APPEL, jamais la charge utile de la réponse.
             "ignored_parameters",

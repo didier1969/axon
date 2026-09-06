@@ -940,10 +940,72 @@ impl McpServer {
                     .collect(),
             )
         };
+        // Les listes sont calculées UNE fois : le texte doit nommer exactement ce que
+        // `data` porte, sinon les deux divergent au premier changement de bornage.
+        let modules = borner("modules");
+        let interfaces = borner("interfaces");
+        let contracts = borner("contracts");
+        let flows = borner("flows");
+        let boundaries = borner("boundaries");
+        let owners = borner("owners");
+
+        // REQ-AXO-902409 — « N éléments stockés ⇒ N éléments RENDUS dans le texte ».
+        //
+        // Le texte de cet outil n'a jamais porté que des COMPTES. Or le client
+        // Claude Code n'expose que `content[0].text` : une liste qui ne vit que dans
+        // `data.*` est INVISIBLE au lecteur, et la description de l'outil promet
+        // pourtant de l'énumérer. Un compte ne se branche sur aucune action de
+        // suivi — `why symbol=<nom>` et `path` ont besoin du NOM.
+        //
+        // Les comptes restent au-dessus et restent EXACTS ; `brief` échantillonne les
+        // listes et le dit déjà par `omitted_in_brief`. Nommer l'échantillon ne
+        // ment donc pas : il nomme ce qui est effectivement rendu.
+        let nommer = |titre: &str, liste: &Value| -> String {
+            let noms: Vec<String> = liste
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_object)
+                        .filter_map(|item| {
+                            ["name", "path", "id", "symbol", "file_path"]
+                                .iter()
+                                .find_map(|cle| item.get(*cle).and_then(Value::as_str))
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    // `flows` porte une PAIRE, jamais un nom seul :
+                                    // l'omettre laisserait la seule liste qui décrit
+                                    // un mouvement hors du texte.
+                                    let de = item.get("from_symbol")?.as_str()?;
+                                    let vers = item.get("to_symbol")?.as_str()?;
+                                    Some(format!("{de} → {vers}"))
+                                })
+                        })
+                        .filter(|nom| !nom.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if noms.is_empty() {
+                return String::new();
+            }
+            format!("**{titre}:** {}\n", noms.join(" · "))
+        };
+        let listes_nommees: String = [
+            ("Modules", &modules),
+            ("Interfaces", &interfaces),
+            ("Contracts", &contracts),
+            ("Flows", &flows),
+            ("Boundaries", &boundaries),
+            ("Owners", &owners),
+        ]
+        .iter()
+        .map(|(titre, liste)| nommer(titre, liste))
+        .collect();
+
         let evidence = format!(
             "**Project:** `{}`\n\
 **Modules / Interfaces / Contracts / Flows:** {} / {} / {} / {}\n\
-**Boundary violations:** {}\n",
+**Boundary violations:** {}\n{}",
             project_code,
             conception
                 .get("module_count")
@@ -961,7 +1023,8 @@ impl McpServer {
                 .get("flow_count")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0),
-            boundary_violations.len()
+            boundary_violations.len(),
+            listes_nommees
         );
         let report = format!(
             "## 🧱 Conception View\n\n{}",
@@ -1006,15 +1069,15 @@ impl McpServer {
                 "project_code": project_code,
                 "mode": mode,
                 "module_count": conception.get("module_count").cloned().unwrap_or_else(|| json!(0)),
-                "modules": borner("modules"),
+                "modules": modules,
                 "interface_count": conception.get("interface_count").cloned().unwrap_or_else(|| json!(0)),
-                "interfaces": borner("interfaces"),
+                "interfaces": interfaces,
                 "contract_count": conception.get("contract_count").cloned().unwrap_or_else(|| json!(0)),
-                "contracts": borner("contracts"),
+                "contracts": contracts,
                 "flow_count": conception.get("flow_count").cloned().unwrap_or_else(|| json!(0)),
-                "flows": borner("flows"),
-                "boundaries": borner("boundaries"),
-                "owners": borner("owners"),
+                "flows": flows,
+                "boundaries": boundaries,
+                "owners": owners,
                 "suspected_boundary_violation_count": boundary_violations.len(),
                 "suspected_boundary_violations": boundary_violations,
                 "transitions": transitions,
