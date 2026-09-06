@@ -117,8 +117,11 @@ mod tests {
         // Le contrôle mutant l'a prouvé : sans ce DISABLE, la garde passe AVEC
         // ET SANS le pont (pratique 2169). Une garde qui ne peut pas rougir ne
         // prouve rien.
-        store
-            .execute("ALTER TABLE ist.IndexedFile DISABLE TRIGGER trg_test_autoseed_indexedfile")
+        // REQ-AXO-902630 — opt-out NOMMÉ, les sept triggers d'un coup. La forme
+        // recopiée (`ALTER TABLE ist.IndexedFile DISABLE TRIGGER ...`) ne
+        // couvrait qu'une table : une garde qui écrit dans `Symbol` serait
+        // restée aveugle pour la même raison, sans que rien ne le dise.
+        crate::test_support::test_db::neutraliser_autoseed_des_parents_fk(&store)
             .expect("neutraliser l'auto-seed du harnais");
 
         store
@@ -268,4 +271,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn l_opt_out_retire_la_bequille_sur_les_sept_tables() {
+        // REQ-AXO-902630 — la béquille du harnais couvre SEPT tables ; l'opt-out
+        // doit les couvrir toutes.
+        //
+        // La forme recopiée d'avant ne désactivait que `trg_test_autoseed_
+        // indexedfile`. Une garde qui écrit dans `Symbol`, `Edge`, `Chunk` ou
+        // une table de projection restait donc aveuglée EXACTEMENT comme la
+        // garde 2 l'était — et passait avec et sans le correctif, sans que
+        // rien ne le dise.
+        //
+        // On interroge `pg_trigger` plutôt que de tenter une insertion par
+        // table : le verdict ne dépend alors d'aucun schéma de colonnes, et il
+        // reste juste quand une huitième table rejoint la liste.
+        let store = crate::tests::test_helpers::create_test_db().expect("db de test");
+
+        let actifs_avant = store
+            .query_count(
+                "SELECT count(*) FROM pg_trigger \
+                 WHERE tgname LIKE 'trg_test_autoseed%' AND NOT tgisinternal AND tgenabled <> 'D'",
+            )
+            .expect("lire pg_trigger");
+        assert_eq!(
+            actifs_avant, 7,
+            "le harnais installe SEPT auto-seeds ; si ce nombre change, l'opt-out \
+             doit changer avec lui — c'est le but de cette garde"
+        );
+
+        crate::test_support::test_db::neutraliser_autoseed_des_parents_fk(&store)
+            .expect("neutraliser l'auto-seed");
+
+        let actifs_apres = store
+            .query_count(
+                "SELECT count(*) FROM pg_trigger \
+                 WHERE tgname LIKE 'trg_test_autoseed%' AND NOT tgisinternal AND tgenabled <> 'D'",
+            )
+            .expect("lire pg_trigger");
+        assert_eq!(
+            actifs_apres, 0,
+            "après l'opt-out, AUCUNE table ne doit encore fabriquer ses parents FK"
+        );
+    }
 }

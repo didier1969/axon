@@ -792,6 +792,41 @@ ON CONFLICT (project_code) DO NOTHING;\n";
 /// This is the root-cause fix for the whole class of `Writer Error: INSERT
 /// INTO ist.* ... FK` test failures: a trigger covers every insert site —
 /// present and future — with zero per-test boilerplate.
+/// REQ-AXO-902630 — RETIRER la béquille du harnais, nommément, pour une garde
+/// qui veut prouver que la PRODUCTION crée le parent FK.
+///
+/// `apply_test_autoseed_triggers` ci-dessous fabrique `axon.Project` à chaque
+/// insertion IST. Ce qui a été installé comme correctif racine d'une classe
+/// d'échecs de TEST rend invisible la classe de défauts de PRODUCTION
+/// correspondante : `c72cd227` a retiré le seul écrivain de `axon.Project` en
+/// production, la suite est restée verte par construction, et sept locataires
+/// ont perdu 100 % de leurs lots IST pendant neuf jours (`REQ-AXO-902626`).
+///
+/// Une garde qui exerce un chemin d'écriture IST doit donc pouvoir dire « pas
+/// de béquille ici ». Sans elle, elle passe AVEC ET SANS le correctif — mesuré
+/// au contrôle mutant, pratique 2169.
+///
+/// Les SEPT triggers d'un coup : le premier appelant n'en désactivait qu'un
+/// (`IndexedFile`), et une garde qui écrit dans `Symbol` serait restée aveugle
+/// pour la même raison, sans que rien ne le dise.
+pub(crate) fn neutraliser_autoseed_des_parents_fk(
+    store: &crate::graph::GraphStore,
+) -> anyhow::Result<()> {
+    const TABLES: &[(&str, &str)] = &[
+        ("ist.IndexedFile", "trg_test_autoseed_indexedfile"),
+        ("ist.Symbol", "trg_test_autoseed_symbol"),
+        ("ist.Edge", "trg_test_autoseed_edge"),
+        ("ist.Chunk", "trg_test_autoseed_chunk"),
+        ("ist.GraphProjectionState", "trg_test_autoseed_gps"),
+        ("ist.GraphEmbedding", "trg_test_autoseed_gembed"),
+        ("ist.GraphProjection", "trg_test_autoseed_gproj"),
+    ];
+    for (table, trigger) in TABLES {
+        store.execute(&format!("ALTER TABLE {table} DISABLE TRIGGER {trigger}"))?;
+    }
+    Ok(())
+}
+
 fn apply_test_autoseed_triggers(pg_port: &str, dbname: &str) {
     const SQL: &str = "\
 CREATE OR REPLACE FUNCTION ist.test_autoseed_project() RETURNS TRIGGER AS $$\n\
