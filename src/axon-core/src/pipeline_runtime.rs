@@ -230,6 +230,14 @@ fn spawn_indexer_liveness_heartbeat(
                 ready_queue_chunks: vector_metrics.ready_queue_chunks_current as i64,
                 persist_queue_depth: vector_metrics.persist_queue_depth_current as i64,
                 a3_consecutive_failures: a3_health.consecutive_failures as i64,
+                // REQ-AXO-902630 — le seuil est appliqué ICI, chez le
+                // propriétaire du stage : le snapshot porte la carte entière,
+                // A3 et B3 n'ont pas le même seuil.
+                a3_failing_tenants: crate::pipeline::stage_health::render_failing_tenants(
+                    &a3_health.systemically_failing_tenants(
+                        crate::pipeline::stage_health::A3_SYSTEMIC_FAILURE_THRESHOLD,
+                    ),
+                ),
                 a3_last_error: a3_health.last_error.map(|error| error.message),
                 pg_pool_evictions_total: crate::postgres::native::pool_connection_evictions_total()
                     as i64,

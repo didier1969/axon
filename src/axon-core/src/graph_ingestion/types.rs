@@ -200,6 +200,10 @@ pub struct IndexerRuntimeTruthRecord {
     pub ready_queue_chunks: i64,
     pub persist_queue_depth: i64,
     pub a3_consecutive_failures: i64,
+    /// REQ-AXO-902630 — JSON `[["MRG",12]]` des tenants au-dessus du seuil A3.
+    /// `None` quand personne n'échoue. Répond à « QUEL tenant », que le
+    /// compteur global ci-dessus ne peut pas porter.
+    pub a3_failing_tenants: Option<String>,
     pub a3_last_error: Option<String>,
     pub pg_pool_evictions_total: i64,
     /// REQ-AXO-902597 — boot-contract and vector-lane admission truth observed

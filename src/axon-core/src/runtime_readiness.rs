@@ -312,6 +312,51 @@ pub fn ist_writer_degradation_note(reports: &[SubsystemReport]) -> Option<String
         })
 }
 
+/// REQ-AXO-902630 — l'état de l'écrivain IST déduit de la santé d'A3, en
+/// fonction PURE pour qu'une garde puisse l'exercer sans runtime.
+///
+/// Deux façons d'être dégradé, pas une :
+///
+/// 1. `consecutive >= threshold` — le flux ENTIER est bloqué. C'est le seul
+///    cas que la surface savait voir jusqu'ici.
+/// 2. `failing_tenants` non vide — UN tenant est bloqué pendant que les autres
+///    passent. Le compteur global ne peut pas l'atteindre : `record_success`
+///    le remet à zéro dès qu'un autre tenant réussit. Mesuré le 2026-09-06 :
+///    MRG refusé sur `indexedfile_project_code_fkey` pendant que AXO / KKI /
+///    FSF s'indexaient — `status` restait vert (REQ-AXO-902626).
+///
+/// La raison NOMME les tenants : `REQ-AXO-902627` reproche justement à cette
+/// surface de crier `degraded` sans dire de qui elle parle.
+pub fn a3_writer_state(
+    consecutive: i64,
+    threshold: i64,
+    last_error: Option<&str>,
+    failing_tenants: &[(String, u64)],
+) -> SubsystemState {
+    if consecutive >= threshold {
+        return SubsystemState::Degraded {
+            reason: format!(
+                "A3 persistence failed {consecutive} consecutive batches: {}",
+                last_error.unwrap_or("unknown error")
+            ),
+        };
+    }
+    if failing_tenants.is_empty() {
+        return SubsystemState::Ready;
+    }
+    let rendu = failing_tenants
+        .iter()
+        .map(|(code, count)| format!("{code} ({count} lots)"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    SubsystemState::Degraded {
+        reason: format!(
+            "A3 persistence blocked for tenant(s) {rendu} while others succeed —              the global counter cannot see this. Check each code has its              axon.Project FK parent (project_registry_lookup, then restart the              indexer to reconcile). Last error: {}",
+            last_error.unwrap_or("unknown error")
+        ),
+    }
+}
+
 pub fn snapshot_runtime_readiness() -> (RuntimeReadiness, Vec<SubsystemReport>) {
     let reports = snapshot_subsystem_reports();
     let readiness = RuntimeReadiness::roll_up(&reports);
@@ -394,5 +439,55 @@ mod ist_writer_degradation_tests {
         // Registre froid : ne rien savoir n'est pas savoir que c'est cassé.
         assert!(ist_writer_degradation_note(&[]).is_none());
         assert!(ist_writer_degradation_note(&[rapport("brain_mcp", SubsystemState::Ready)]).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // REQ-AXO-902630 — la décision, exercée sans runtime.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn un_tenant_isole_degrade_l_ecrivain_et_est_nomme() {
+        let etat = super::a3_writer_state(
+            0, // le compteur global est à zéro : les autres tenants passent
+            3,
+            Some("23503 insert or update on table \"indexedfile\" violates foreign key"),
+            &[("MRG".to_string(), 12), ("NXA".to_string(), 5)],
+        );
+        let SubsystemState::Degraded { reason } = etat else {
+            panic!("un tenant à 12 lots refusés n'est pas un écrivain sain : {etat:?}");
+        };
+        assert!(reason.contains("MRG"), "le remède commence par le NOM : {reason}");
+        assert!(reason.contains("NXA"), "{reason}");
+        assert!(
+            reason.contains("axon.Project"),
+            "REQ-AXO-902627 — nommer le coupable ET le remède : {reason}"
+        );
+    }
+
+    #[test]
+    fn sans_tenant_en_echec_l_ecrivain_est_pret() {
+        assert!(matches!(
+            super::a3_writer_state(0, 3, None, &[]),
+            SubsystemState::Ready
+        ));
+        assert!(
+            matches!(
+                super::a3_writer_state(2, 3, Some("hoquet"), &[]),
+                SubsystemState::Ready
+            ),
+            "sous le seuil et sans tenant dénoncé, rien à signaler"
+        );
+    }
+
+    #[test]
+    fn la_panne_globale_garde_son_message_d_avant() {
+        // Non-régression du seul cas que la surface savait voir.
+        let SubsystemState::Degraded { reason } =
+            super::a3_writer_state(7, 3, Some("disk full"), &[])
+        else {
+            panic!("7 >= 3 doit rester dégradé");
+        };
+        assert!(reason.contains("7 consecutive batches"), "{reason}");
+        assert!(reason.contains("disk full"), "{reason}");
     }
 }

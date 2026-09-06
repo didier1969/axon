@@ -249,7 +249,7 @@ pub fn spawn_a3_batched_worker(
 
                 match join_result {
                     Ok(Ok(chunk_metas_per_file)) if chunk_metas_per_file.len() == group_len => {
-                        super::stage_health::a3_health().record_success();
+                        super::stage_health::a3_health().record_success_for(&pc_str);
                         let chunks_total: usize =
                             chunk_metas_per_file.iter().map(|v| v.len()).sum();
                         info!(
@@ -316,7 +316,8 @@ pub fn spawn_a3_batched_worker(
                         for _ in 0..group_len {
                             metrics.record_error();
                         }
-                        super::stage_health::a3_health().record_failure(
+                        super::stage_health::a3_health().record_failure_for(
+                            &pc_str,
                             "A3 returned a mismatched per-file receipt count",
                             Utc::now().timestamp_millis(),
                         );
@@ -326,8 +327,11 @@ pub fn spawn_a3_batched_worker(
                         for _ in 0..group_len {
                             metrics.record_error();
                         }
-                        super::stage_health::a3_health()
-                            .record_failure(format!("{err:#}"), Utc::now().timestamp_millis());
+                        super::stage_health::a3_health().record_failure_for(
+                            &pc_str,
+                            format!("{err:#}"),
+                            Utc::now().timestamp_millis(),
+                        );
                     }
                     Err(join_err) => {
                         warn!(
@@ -338,7 +342,8 @@ pub fn spawn_a3_batched_worker(
                         for _ in 0..group_len {
                             metrics.record_error();
                         }
-                        super::stage_health::a3_health().record_failure(
+                        super::stage_health::a3_health().record_failure_for(
+                            &pc_str,
                             format!("A3 blocking task failed: {join_err}"),
                             Utc::now().timestamp_millis(),
                         );

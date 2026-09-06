@@ -16,6 +16,7 @@
 //! message signature so a 7000×-repeated error is one record with a count, not
 //! a log flood.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -38,6 +39,22 @@ pub struct StageHealth {
     total_failures: AtomicU64,
     total_successes: AtomicU64,
     last_error: Mutex<Option<StageErrorRecord>>,
+    /// REQ-AXO-902630 — échecs consécutifs PAR TENANT, à côté du compteur
+    /// global, jamais à sa place.
+    ///
+    /// `consecutive_failures` est un compteur unique que `record_success` remet
+    /// à zéro : le succès de N'IMPORTE quel tenant efface l'échec de tous les
+    /// autres. Un tenant dont 100 % des lots sont refusés, entrelacé avec des
+    /// tenants sains, ne franchit donc JAMAIS le seuil systémique — la surface
+    /// reste verte pendant que le tenant est mort. Mesuré le 2026-09-06 sur
+    /// `REQ-AXO-902626` : MRG refusé sur `indexedfile_project_code_fkey`
+    /// pendant que AXO / KKI / FSF s'indexaient normalement.
+    ///
+    /// Cette carte répond à « QUEL tenant », que le compteur global ne peut pas
+    /// porter. Le compteur global et `is_systemically_failing` sont laissés
+    /// INTACTS : ils pilotent le freinage du drain amont, qui n'est pas en
+    /// cause ici (REQ-AXO-902402 est encore ouvert dessus).
+    per_tenant_consecutive: Mutex<BTreeMap<String, u64>>,
 }
 
 impl StageHealth {
@@ -74,6 +91,50 @@ impl StageHealth {
         self.total_successes.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// REQ-AXO-902630 — même chose que [`Self::record_failure`], en retenant
+    /// AUSSI quel tenant a échoué. Le compteur global est mis à jour à
+    /// l'identique : ce chemin n'enlève rien, il ajoute la granularité.
+    pub fn record_failure_for(
+        &self,
+        project_code: &str,
+        message: impl Into<String>,
+        now_ms: i64,
+    ) -> u64 {
+        if let Ok(mut guard) = self.per_tenant_consecutive.lock() {
+            let entry = guard.entry(project_code.to_string()).or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
+        self.record_failure(message, now_ms)
+    }
+
+    /// REQ-AXO-902630 — succès d'UN tenant : efface le compteur de CE tenant,
+    /// et lui seul. Le compteur global est remis à zéro comme avant, parce que
+    /// le freinage du drain raisonne sur le flux entier.
+    pub fn record_success_for(&self, project_code: &str) {
+        if let Ok(mut guard) = self.per_tenant_consecutive.lock() {
+            guard.remove(project_code);
+        }
+        self.record_success();
+    }
+
+    /// REQ-AXO-902630 — les tenants dont les échecs consécutifs atteignent
+    /// `threshold`, du plus atteint au moins atteint. Vide = personne.
+    pub fn systemically_failing_tenants(&self, threshold: u64) -> Vec<(String, u64)> {
+        let mut rows: Vec<(String, u64)> = self
+            .per_tenant_consecutive
+            .lock()
+            .map(|guard| {
+                guard
+                    .iter()
+                    .filter(|(_, count)| **count >= threshold)
+                    .map(|(code, count)| (code.clone(), *count))
+                    .collect()
+            })
+            .unwrap_or_default();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        rows
+    }
+
     pub fn consecutive_failures(&self) -> u64 {
         self.consecutive_failures.load(Ordering::Relaxed)
     }
@@ -97,6 +158,14 @@ impl StageHealth {
         self.last_error.lock().ok().and_then(|g| g.clone())
     }
 
+    /// REQ-AXO-902630 — instantané de la carte par tenant, non filtré.
+    pub fn per_tenant_consecutive(&self) -> Vec<(String, u64)> {
+        self.per_tenant_consecutive
+            .lock()
+            .map(|guard| guard.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .unwrap_or_default()
+    }
+
     /// REQ-AXO-902047 slice 1b — flat, owned snapshot of the health counters
     /// for cross-process publication (the indexer captures this on every
     /// heartbeat tick and UPSERTs it so the brain's `embedding_status` reads
@@ -107,6 +176,9 @@ impl StageHealth {
             total_failures: self.total_failures(),
             total_successes: self.total_successes(),
             last_error: self.last_error(),
+            // REQ-AXO-902630 — la carte ENTIÈRE, non filtrée : le seuil n'est
+            // pas le même pour A3 (3) et B3 (8), il appartient au lecteur.
+            per_tenant_consecutive: self.per_tenant_consecutive(),
         }
     }
 }
@@ -120,6 +192,8 @@ pub struct StageHealthSnapshot {
     pub total_failures: u64,
     pub total_successes: u64,
     pub last_error: Option<StageErrorRecord>,
+    /// REQ-AXO-902630 — échecs consécutifs par tenant, non filtrés par seuil.
+    pub per_tenant_consecutive: Vec<(String, u64)>,
 }
 
 impl StageHealthSnapshot {
@@ -127,6 +201,20 @@ impl StageHealthSnapshot {
     /// verdict the drain uses to back off, surfaced to readers as DEGRADED.
     pub fn is_systemically_failing(&self, threshold: u64) -> bool {
         self.consecutive_failures >= threshold
+    }
+
+    /// REQ-AXO-902630 — les tenants au-dessus du seuil, du plus atteint au
+    /// moins atteint. C'est la question que `is_systemically_failing` ne peut
+    /// pas poser : un tenant mort masqué par des tenants sains.
+    pub fn systemically_failing_tenants(&self, threshold: u64) -> Vec<(String, u64)> {
+        let mut rows: Vec<(String, u64)> = self
+            .per_tenant_consecutive
+            .iter()
+            .filter(|(_, count)| *count >= threshold)
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        rows
     }
 
     /// Error rate over the lifetime of the process: failures / (failures +
@@ -147,6 +235,26 @@ impl StageHealthSnapshot {
 /// hemorrhage quickly.
 pub const B3_SYSTEMIC_FAILURE_THRESHOLD: u64 = 8;
 pub const A3_SYSTEMIC_FAILURE_THRESHOLD: u64 = 3;
+
+/// REQ-AXO-902630 — rendre les tenants en échec pour la colonne
+/// `axon.indexer_runtime_truth.a3_failing_tenants`. `None` quand la liste est
+/// vide : une colonne NULL dit « personne », une chaîne vide dirait « une
+/// valeur qu'on n'a pas su écrire ».
+pub fn render_failing_tenants(rows: &[(String, u64)]) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    serde_json::to_string(rows).ok()
+}
+
+/// REQ-AXO-902630 — lecture de la colonne. JSON, pas de découpe de chaîne
+/// maison : un tenant ne peut pas contenir de virgule, mais s'en remettre à
+/// cette hypothèse est exactement la classe de bug de la pratique 2177.
+pub fn parse_failing_tenants(raw: Option<&str>) -> Vec<(String, u64)> {
+    raw.filter(|text| !text.trim().is_empty())
+        .and_then(|text| serde_json::from_str::<Vec<(String, u64)>>(text).ok())
+        .unwrap_or_default()
+}
 
 static A3_HEALTH: OnceLock<StageHealth> = OnceLock::new();
 static B3_HEALTH: OnceLock<StageHealth> = OnceLock::new();
@@ -228,6 +336,7 @@ mod tests {
             total_failures: 3,
             total_successes: 1,
             last_error: None,
+            per_tenant_consecutive: Vec::new(),
         };
         assert!(snap.is_systemically_failing(B3_SYSTEMIC_FAILURE_THRESHOLD));
         assert_eq!(snap.error_rate(), 0.75);
@@ -245,5 +354,98 @@ mod tests {
         }
         h.record_failure("e", 99);
         assert!(h.is_systemically_failing(B3_SYSTEMIC_FAILURE_THRESHOLD));
+    }
+
+    // ------------------------------------------------------------------
+    // REQ-AXO-902630 — un tenant mort masqué par des tenants sains.
+    // Scénario verbatim du 2026-09-06 : MRG refusé sur
+    // `indexedfile_project_code_fkey`, AXO / KKI / FSF sains.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn un_tenant_mort_reste_visible_quand_les_autres_reussissent() {
+        let h = StageHealth::default();
+        // Entrelacement réel : MRG échoue, un tenant sain réussit, et ainsi de
+        // suite. Le compteur GLOBAL est remis à zéro à chaque succès.
+        for i in 0..10 {
+            h.record_failure_for("MRG", "23503 foreign key violation", i);
+            h.record_success_for("AXO");
+        }
+        assert_eq!(
+            h.consecutive_failures(),
+            0,
+            "le compteur global est remis à zéro par le tenant sain — c'est \
+             exactement pour cela qu'il ne peut pas voir MRG"
+        );
+        assert!(
+            !h.is_systemically_failing(A3_SYSTEMIC_FAILURE_THRESHOLD),
+            "la surface d'AVANT reste verte : le défaut est bien celui-là"
+        );
+        assert_eq!(
+            h.systemically_failing_tenants(A3_SYSTEMIC_FAILURE_THRESHOLD),
+            vec![("MRG".to_string(), 10)],
+            "la carte par tenant doit, elle, voir MRG"
+        );
+    }
+
+    #[test]
+    fn le_succes_d_un_tenant_n_efface_que_son_propre_compteur() {
+        let h = StageHealth::default();
+        for i in 0..4 {
+            h.record_failure_for("MRG", "fk", i);
+            h.record_failure_for("NXA", "fk", i);
+        }
+        h.record_success_for("MRG");
+        assert_eq!(
+            h.systemically_failing_tenants(A3_SYSTEMIC_FAILURE_THRESHOLD),
+            vec![("NXA".to_string(), 4)],
+            "MRG guéri sort de la liste, NXA y reste"
+        );
+    }
+
+    #[test]
+    fn sous_le_seuil_aucun_tenant_n_est_denonce() {
+        let h = StageHealth::default();
+        h.record_failure_for("MRG", "fk", 1);
+        h.record_failure_for("MRG", "fk", 2);
+        assert!(
+            h.systemically_failing_tenants(A3_SYSTEMIC_FAILURE_THRESHOLD)
+                .is_empty(),
+            "2 < 3 : un hoquet n'est pas une panne"
+        );
+    }
+
+    #[test]
+    fn le_freinage_du_drain_n_est_pas_touche() {
+        // Non-régression : `record_failure_for` doit alimenter le compteur
+        // global EXACTEMENT comme `record_failure`. Le backoff amont
+        // (REQ-AXO-902402 encore ouvert) ne doit rien voir de ce changement.
+        let temoin = StageHealth::default();
+        let sujet = StageHealth::default();
+        for i in 0..A3_SYSTEMIC_FAILURE_THRESHOLD {
+            temoin.record_failure("e", i as i64);
+            sujet.record_failure_for("MRG", "e", i as i64);
+        }
+        assert_eq!(sujet.consecutive_failures(), temoin.consecutive_failures());
+        assert_eq!(sujet.total_failures(), temoin.total_failures());
+        assert_eq!(
+            sujet.is_systemically_failing(A3_SYSTEMIC_FAILURE_THRESHOLD),
+            temoin.is_systemically_failing(A3_SYSTEMIC_FAILURE_THRESHOLD)
+        );
+    }
+
+    #[test]
+    fn le_transport_json_fait_l_aller_retour() {
+        let rows = vec![("MRG".to_string(), 12u64), ("NXA".to_string(), 5u64)];
+        let rendu = render_failing_tenants(&rows).expect("une liste non vide se rend");
+        assert_eq!(parse_failing_tenants(Some(&rendu)), rows);
+        // Vide = NULL en colonne, pas une chaîne vide.
+        assert!(render_failing_tenants(&[]).is_none());
+        assert!(parse_failing_tenants(None).is_empty());
+        assert!(parse_failing_tenants(Some("")).is_empty());
+        assert!(
+            parse_failing_tenants(Some("pas du json")).is_empty(),
+            "une colonne illisible ne doit pas paniquer, seulement se taire"
+        );
     }
 }

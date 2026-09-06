@@ -289,6 +289,11 @@ CREATE TABLE IF NOT EXISTS axon.indexer_runtime_truth (
     persist_queue_depth         BIGINT NOT NULL DEFAULT 0, -- queued VectorPersistOutbox rows
     a3_consecutive_failures     BIGINT NOT NULL DEFAULT 0,
     a3_last_error               TEXT,
+    -- REQ-AXO-902630 : QUELS tenants echouent. `a3_consecutive_failures` est
+    -- un compteur global qu'un succes de n'importe quel tenant remet a zero :
+    -- il ne peut pas voir un tenant mort masque par des tenants sains.
+    -- JSON : [["MRG",12],["NXA",5]], NULL quand personne n'echoue.
+    a3_failing_tenants          TEXT,
     pg_pool_evictions_total     BIGINT NOT NULL DEFAULT 0,
     -- REQ-AXO-902597: owner-observed semantic-lane admission truth. These
     -- fields distinguish an idle lane from a lane disabled by boot contract.
@@ -317,6 +322,8 @@ ALTER TABLE axon.indexer_runtime_truth
     ADD COLUMN IF NOT EXISTS a3_consecutive_failures BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE axon.indexer_runtime_truth
     ADD COLUMN IF NOT EXISTS a3_last_error           TEXT;
+ALTER TABLE axon.indexer_runtime_truth
+    ADD COLUMN IF NOT EXISTS a3_failing_tenants      TEXT;
 ALTER TABLE axon.indexer_runtime_truth
     ADD COLUMN IF NOT EXISTS pg_pool_evictions_total BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE axon.indexer_runtime_truth

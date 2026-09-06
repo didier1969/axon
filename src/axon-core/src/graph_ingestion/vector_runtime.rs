@@ -287,7 +287,8 @@ impl GraphStore {
                     a3_consecutive_failures, a3_last_error, pg_pool_evictions_total, \
                     runtime_mode, semantic_workers_enabled, vector_workers_configured, \
                     vector_workers_started_total, vector_workers_active_current, \
-                    vector_worker_admission_reason, allowed_gpu_workers \
+                    vector_worker_admission_reason, allowed_gpu_workers, \
+                    a3_failing_tenants \
              FROM {table_ref} \
              WHERE process_role = '{}' \
              LIMIT 1",
@@ -341,6 +342,9 @@ impl GraphStore {
             vector_worker_admission_reason: opt_str(row.get(18))
                 .unwrap_or_else(|| "unknown".to_string()),
             allowed_gpu_workers: row.get(19).and_then(parse_i64_field).unwrap_or_default(),
+            // REQ-AXO-902630 — ajoutée EN FIN de liste : aucun index existant
+            // ne bouge.
+            a3_failing_tenants: opt_str(row.get(20)),
         }))
     }
 
@@ -459,8 +463,8 @@ fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> St
           a3_consecutive_failures, a3_last_error, pg_pool_evictions_total, \
           runtime_mode, semantic_workers_enabled, vector_workers_configured, \
           vector_workers_started_total, vector_workers_active_current, \
-          vector_worker_admission_reason, allowed_gpu_workers) \
-         VALUES ('{}', {}, {}, {:.6}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}', {}, {}, {}, {}, '{}', {}) \
+          vector_worker_admission_reason, allowed_gpu_workers, a3_failing_tenants) \
+         VALUES ('{}', {}, {}, {:.6}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}', {}, {}, {}, {}, '{}', {}, {}) \
          ON CONFLICT (process_role) DO UPDATE SET \
             heartbeat_ms = EXCLUDED.heartbeat_ms, \
             graph_workers_active = EXCLUDED.graph_workers_active, \
@@ -480,7 +484,8 @@ fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> St
             vector_workers_started_total = EXCLUDED.vector_workers_started_total, \
             vector_workers_active_current = EXCLUDED.vector_workers_active_current, \
             vector_worker_admission_reason = EXCLUDED.vector_worker_admission_reason, \
-            allowed_gpu_workers = EXCLUDED.allowed_gpu_workers",
+            allowed_gpu_workers = EXCLUDED.allowed_gpu_workers, \
+            a3_failing_tenants = EXCLUDED.a3_failing_tenants",
         GraphStore::escape_sql(&row.process_role),
         row.heartbeat_ms,
         row.graph_workers_active,
@@ -501,6 +506,8 @@ fn build_indexer_runtime_truth_upsert_sql(row: &IndexerRuntimeTruthRecord) -> St
         row.vector_workers_active_current,
         GraphStore::escape_sql(&row.vector_worker_admission_reason),
         row.allowed_gpu_workers,
+        // REQ-AXO-902630 — dernier argument, comme la colonne est la dernière.
+        opt_text_sql(&row.a3_failing_tenants),
     )
 }
 
@@ -669,6 +676,7 @@ mod tests {
                 consecutive_failures: 9,
                 total_failures: 9,
                 total_successes: 100,
+                per_tenant_consecutive: Vec::new(),
                 last_error: Some(StageErrorRecord {
                     message: "missing chunk number 0 for toast value (XX001)".to_string(),
                     count: 9,
@@ -749,6 +757,7 @@ mod tests {
             persist_queue_depth: 9,
             a3_consecutive_failures: 3,
             a3_last_error: Some("23503 foreign key violation".to_string()),
+            a3_failing_tenants: Some(r#"[["MRG",12]]"#.to_string()),
             pg_pool_evictions_total: 2,
             runtime_mode: "indexer_full".to_string(),
             semantic_workers_enabled: true,
@@ -781,6 +790,8 @@ mod tests {
             "vector_workers_active_current",
             "vector_worker_admission_reason",
             "allowed_gpu_workers",
+            // REQ-AXO-902630 — la colonne qui porte QUELS tenants echouent.
+            "a3_failing_tenants",
         ] {
             assert!(
                 sql.contains(&format!("{col} = EXCLUDED.{col}")),
@@ -809,6 +820,68 @@ mod tests {
         };
         let idle_sql = super::build_indexer_runtime_truth_upsert_sql(&idle);
         assert!(idle_sql.contains("NULL"), "{idle_sql}");
+    }
+
+    #[test]
+    fn la_row_de_verite_fait_l_aller_retour_en_base() {
+        // REQ-AXO-902630 — le TRANSPORT, pas le codec.
+        //
+        // `latest_indexer_runtime_truth` lit ses champs par POSITION
+        // (`row.get(20)` pour `a3_failing_tenants`). Une divergence entre
+        // l'ordre du SELECT et cet index rend le champ vide EN SILENCE : le
+        // signal ne s'allume jamais, et c'est exactement la classe de panne
+        // muette que cette tranche corrige. Aucun test n'exerçait cet
+        // aller-retour — le seul défaut de transport de la tranche
+        // (« 21 positional arguments … but there are 20 ») a été attrapé par
+        // le compilateur, pas par une garde.
+        use crate::graph_ingestion::IndexerRuntimeTruthRecord;
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let ecrit = IndexerRuntimeTruthRecord {
+            process_role: "indexer".to_string(),
+            heartbeat_ms: 1_700_000_009_000,
+            graph_workers_active: 4,
+            chunk_embeddings_per_second: 11.25,
+            in_flight_count: 1,
+            oldest_in_flight_path: Some("/repo/src/a.rs".to_string()),
+            oldest_in_flight_stage: Some("A3".to_string()),
+            oldest_in_flight_age_ms: 77,
+            ready_queue_chunks: 8,
+            persist_queue_depth: 2,
+            a3_consecutive_failures: 0,
+            a3_last_error: Some("23503 foreign key violation".to_string()),
+            a3_failing_tenants: Some(r#"[["MRG",12]]"#.to_string()),
+            pg_pool_evictions_total: 1,
+            runtime_mode: "indexer_full".to_string(),
+            semantic_workers_enabled: true,
+            vector_workers_configured: 2,
+            vector_workers_started_total: 2,
+            vector_workers_active_current: 1,
+            vector_worker_admission_reason: "semantic_workers_enabled".to_string(),
+            allowed_gpu_workers: 3,
+        };
+        store.record_indexer_runtime_truth(&ecrit).unwrap();
+        let relu = store
+            .latest_indexer_runtime_truth("indexer")
+            .unwrap()
+            .expect("la row vient d'être écrite");
+
+        assert_eq!(
+            relu.a3_failing_tenants.as_deref(),
+            Some(r#"[["MRG",12]]"#),
+            "le tenant en échec doit traverser PG, pas seulement le codec JSON"
+        );
+        assert_eq!(
+            crate::pipeline::stage_health::parse_failing_tenants(
+                relu.a3_failing_tenants.as_deref()
+            ),
+            vec![("MRG".to_string(), 12u64)]
+        );
+        // Les colonnes VOISINES, pour qu'un décalage d'index se voie : une
+        // lecture décalée rendrait un champ juste et son voisin faux.
+        assert_eq!(relu.allowed_gpu_workers, 3);
+        assert_eq!(relu.vector_worker_admission_reason, "semantic_workers_enabled");
+        assert_eq!(relu.a3_consecutive_failures, 0);
+        assert_eq!(relu.a3_last_error.as_deref(), Some("23503 foreign key violation"));
     }
 
     #[test]

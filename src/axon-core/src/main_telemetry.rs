@@ -107,20 +107,20 @@ pub(crate) fn spawn_runtime_telemetry(
                             snapshot.chunk_embeddings_per_second = truth.chunk_embeddings_per_second;
                             snapshot.ready_queue_chunks_current =
                                 truth.ready_queue_chunks.max(0) as u64;
-                            let writer_state = if truth.a3_consecutive_failures
-                                >= axon_core::pipeline::stage_health::A3_SYSTEMIC_FAILURE_THRESHOLD
-                                    as i64
-                            {
-                                axon_core::runtime_readiness::SubsystemState::Degraded {
-                                    reason: format!(
-                                        "A3 persistence failed {} consecutive batches: {}",
-                                        truth.a3_consecutive_failures,
-                                        truth.a3_last_error.as_deref().unwrap_or("unknown error")
-                                    ),
-                                }
-                            } else {
-                                axon_core::runtime_readiness::SubsystemState::Ready
-                            };
+                            // REQ-AXO-902630 — la décision vit dans une
+                            // fonction pure, exerçable par une garde ; ici il
+                            // ne reste que le câblage.
+                            let failing_tenants =
+                                axon_core::pipeline::stage_health::parse_failing_tenants(
+                                    truth.a3_failing_tenants.as_deref(),
+                                );
+                            let writer_state = axon_core::runtime_readiness::a3_writer_state(
+                                truth.a3_consecutive_failures,
+                                axon_core::pipeline::stage_health::A3_SYSTEMIC_FAILURE_THRESHOLD
+                                    as i64,
+                                truth.a3_last_error.as_deref(),
+                                &failing_tenants,
+                            );
                             axon_core::runtime_readiness::report_subsystem_state(
                                 axon_core::runtime_readiness::Subsystem::IstWriter,
                                 writer_state,
