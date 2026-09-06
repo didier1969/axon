@@ -67,21 +67,45 @@ impl IstSnapshotCache {
         self.inner.load().get(project_code).cloned()
     }
 
+    /// REQ-AXO-902625 — `rcu`, jamais `load` puis `store`.
+    ///
+    /// Le motif précédent — lire, cloner la carte ENTIÈRE, muter, écraser — perd
+    /// les écritures concurrentes, et il les perd même sur des `project_code`
+    /// DISJOINTS : ce n'est pas une collision de clé, c'est le `store` final qui
+    /// remplace toute la carte, y compris les entrées qu'un voisin vient d'y
+    /// mettre. Un *lost update* classique.
+    ///
+    /// Ce que ça cassait, mesuré : `cargo test --lib -- tools_context` rendait
+    /// 28/1 avec un test PERDANT qui changeait d'un run à l'autre, chacun vert en
+    /// isolation. Le partenaire de course n'était pas entre les tests RAM : c'est
+    /// `ensure_ram_snapshot_warm` (tools_ist_snapshot.rs), déclenché par les 13
+    /// tests qui construisent un `McpServer`. Et c'est AUSSI une course de
+    /// production — `warm_all_ist_snapshots_at_boot` publie N projets pendant que
+    /// des appels MCP publient en parallèle, donc un projet peut disparaître du
+    /// cache en service.
+    ///
+    /// `rcu` boucle jusqu'à ce que le compare-and-swap réussisse : la closure est
+    /// `FnMut` et peut être REJOUÉE, d'où les clones à chaque tentative.
     pub fn publish(&self, project_code: String, snapshot: Arc<IstGraph>) {
-        let current = self.inner.load();
-        let mut next: HashMap<String, Arc<IstGraph>> = (**current).clone();
-        next.insert(project_code, snapshot);
-        self.inner.store(Arc::new(next));
+        self.inner.rcu(|current| {
+            let mut next: HashMap<String, Arc<IstGraph>> = (**current).clone();
+            next.insert(project_code.clone(), Arc::clone(&snapshot));
+            next
+        });
     }
 
+    /// Voir `publish` — même défaut, même remède.
+    ///
+    /// L'ancien court-circuit « absent ⇒ ne rien faire » a disparu : il lisait la
+    /// carte HORS du compare-and-swap, donc il pouvait décider sur un état périmé.
+    /// Le prix est un clone quand il n'y a rien à retirer ; `evict` n'est pas un
+    /// chemin chaud, et un raccourci qui rouvre la course ne vaut pas ce clone.
     pub fn evict(&self, project_code: &str) {
-        let current = self.inner.load();
-        if !current.contains_key(project_code) {
-            return;
-        }
-        let mut next: HashMap<String, Arc<IstGraph>> = (**current).clone();
-        next.remove(project_code);
-        self.inner.store(Arc::new(next));
+        self.inner.rcu(|current| {
+            let mut next: HashMap<String, Arc<IstGraph>> = (**current).clone();
+            next.remove(project_code);
+            next
+        });
     }
 
     pub fn project_codes(&self) -> Vec<String> {
@@ -204,5 +228,139 @@ mod tests {
         assert!(cache.begin_rebuild("OPT"));
         assert!(!cache.finish_rebuild("AXO"));
         assert!(!cache.finish_rebuild("OPT"));
+    }
+
+    // -----------------------------------------------------------------------------
+    // REQ-AXO-902625 — la course, et le MUTANT qui prouve qu'elle était réelle.
+    // -----------------------------------------------------------------------------
+
+    /// Deux écrivains sur des projets DISJOINTS doivent tous les deux survivre.
+    ///
+    /// C'est le cœur du défaut : on n'écrasait pas une clé partagée, on écrasait la
+    /// CARTE. Le test lance assez d'écrivains et de tours pour que l'entrelacement
+    /// se produise — un seul aller-retour ne reproduirait rien de fiable.
+    #[test]
+    fn deux_projets_DISJOINTS_publies_en_parallele_survivent_tous_les_deux() {
+        use std::sync::Barrier;
+
+        const ECRIVAINS: usize = 8;
+        const TOURS: usize = 40;
+
+        for _ in 0..TOURS {
+            let cache = Arc::new(IstSnapshotCache::new());
+            // La barrière fait partir tout le monde en même temps : sans elle, les
+            // threads se sérialisent d'eux-mêmes et le test ne prouve rien.
+            let depart = Arc::new(Barrier::new(ECRIVAINS));
+            let mut mains = Vec::new();
+
+            for n in 0..ECRIVAINS {
+                let cache = Arc::clone(&cache);
+                let depart = Arc::clone(&depart);
+                mains.push(std::thread::spawn(move || {
+                    depart.wait();
+                    cache.publish(format!("P{n}"), empty_snapshot());
+                }));
+            }
+            for main in mains {
+                main.join().expect("un écrivain a paniqué");
+            }
+
+            let survivants = cache.project_codes().len();
+            assert_eq!(
+                survivants, ECRIVAINS,
+                "{survivants} projet(s) sur {ECRIVAINS} ont survécu : une publication a été \
+                 écrasée par une autre portant pourtant une clé DIFFÉRENTE"
+            );
+        }
+    }
+
+    /// `evict` ne doit pas emporter les voisins non plus.
+    #[test]
+    fn une_eviction_concurrente_n_emporte_pas_les_projets_voisins() {
+        use std::sync::Barrier;
+
+        for _ in 0..40 {
+            let cache = Arc::new(IstSnapshotCache::new());
+            cache.publish("GARDE".to_string(), empty_snapshot());
+            cache.publish("JETE".to_string(), empty_snapshot());
+
+            let depart = Arc::new(Barrier::new(2));
+            let (c1, d1) = (Arc::clone(&cache), Arc::clone(&depart));
+            let jeteur = std::thread::spawn(move || {
+                d1.wait();
+                c1.evict("JETE");
+            });
+            let (c2, d2) = (Arc::clone(&cache), Arc::clone(&depart));
+            let poseur = std::thread::spawn(move || {
+                d2.wait();
+                c2.publish("NEUF".to_string(), empty_snapshot());
+            });
+            jeteur.join().expect("jeteur");
+            poseur.join().expect("poseur");
+
+            assert!(cache.get("GARDE").is_some(), "un projet intact a disparu");
+            assert!(cache.get("NEUF").is_some(), "la publication concurrente a été perdue");
+            assert!(cache.get("JETE").is_none(), "l'éviction n'a pas eu lieu");
+        }
+    }
+
+    /// LE MUTANT — l'ANCIEN code, rejoué à l'identique sur la MÊME fixture.
+    ///
+    /// Un test d'absence doit fabriquer lui-même ce qu'il interdit (pratique 2169).
+    /// Si `load`-cloner-muter-`store` ne perdait PAS de clé ici, les deux tests
+    /// ci-dessus passeraient aussi bien sans le correctif et ne prouveraient rien.
+    #[test]
+    fn MUTANT_l_ancien_load_puis_store_perd_bien_une_ecriture() {
+        use std::sync::Barrier;
+
+        // L'ancien corps de `publish`, mot pour mot, sur la même structure.
+        fn publish_ancien(
+            inner: &ArcSwap<HashMap<String, Arc<IstGraph>>>,
+            project_code: String,
+            snapshot: Arc<IstGraph>,
+        ) {
+            let current = inner.load();
+            let mut next: HashMap<String, Arc<IstGraph>> = (**current).clone();
+            // Fenêtre explicite entre la lecture et l'écriture. Elle ne CRÉE pas le
+            // défaut — elle le rend déterministe au lieu de dépendre de la chance de
+            // l'ordonnanceur, ce qui est la seule façon d'en faire un test.
+            std::thread::yield_now();
+            next.insert(project_code, snapshot);
+            inner.store(Arc::new(next));
+        }
+
+        const ECRIVAINS: usize = 8;
+        let mut perte_observee = false;
+
+        for _ in 0..200 {
+            let inner: Arc<ArcSwap<HashMap<String, Arc<IstGraph>>>> =
+                Arc::new(ArcSwap::new(Arc::new(HashMap::new())));
+            let depart = Arc::new(Barrier::new(ECRIVAINS));
+            let mut mains = Vec::new();
+
+            for n in 0..ECRIVAINS {
+                let inner = Arc::clone(&inner);
+                let depart = Arc::clone(&depart);
+                mains.push(std::thread::spawn(move || {
+                    depart.wait();
+                    publish_ancien(&inner, format!("P{n}"), empty_snapshot());
+                }));
+            }
+            for main in mains {
+                main.join().expect("écrivain");
+            }
+
+            if inner.load().len() < ECRIVAINS {
+                perte_observee = true;
+                break;
+            }
+        }
+
+        assert!(
+            perte_observee,
+            "l'ancien `load` puis `store` n'a perdu AUCUNE écriture en 200 tours × \
+             {ECRIVAINS} écrivains : la fixture ne reproduit pas la course, et les tests \
+             de non-régression ci-dessus ne prouvent donc rien"
+        );
     }
 }

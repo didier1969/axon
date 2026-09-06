@@ -113,7 +113,12 @@ fn contains_file_path_resolves_from_ram_snapshot_both_directions() {
     };
     use crate::ist_snapshot::{evict_process_snapshot, publish_process_snapshot};
 
-    let code = "TCF"; // test-contains-file ; single-threaded --lib run, evicted below.
+    // REQ-AXO-902625 — ce commentaire disait « single-threaded --lib run ». C'était
+    // FAUX : `cargo test` exécute en parallèle par défaut, et le cache d'instantanés
+    // IST est un singleton de PROCESSUS. La vraie garantie est ailleurs : les
+    // écritures du cache sont linéarisables (`ArcSwap::rcu`, ist_snapshot/cache.rs),
+    // et ce code de projet n'appartient qu'à ce test.
+    let code = "TCF"; // test-contains-file ; évincé plus bas.
     let symbol_id = "TCF::widget.rs::render".to_string();
     let file_path = "src/widget.rs".to_string();
 
@@ -341,7 +346,8 @@ fn soll_and_ist_ram_mirrors_are_coresident_for_one_project() {
 fn resolve_scoped_symbol_uses_ist_ram() {
     use crate::ist_snapshot::snapshot::{IstGraph, NodeFlags, NodeKind, NodeRecord};
     use crate::ist_snapshot::{evict_process_snapshot, publish_process_snapshot};
-    let code = "TSR"; // test-symbol-resolve ; single-threaded --lib run, evicted below.
+    // Même correction qu'en TCF — voir REQ-AXO-902625.
+    let code = "TSR"; // test-symbol-resolve ; évincé plus bas.
     let symbol_id = "TSR::widget.rs::render".to_string();
     evict_process_snapshot(code);
     publish_process_snapshot(
@@ -425,6 +431,8 @@ fn resolve_scoped_symbol_uses_ist_ram() {
 fn fuse_returns_governing_intent_and_impact_from_ram() {
     use crate::ist_snapshot::snapshot::{IstGraph, NodeFlags, NodeKind, NodeRecord};
     use crate::ist_snapshot::{evict_process_snapshot, publish_process_snapshot};
+    // Portait la même hypothèse que TCF/TSR, sans commentaire pour la trahir — la
+    // croyance était plus large que sa trace écrite (REQ-AXO-902625).
     let code = "TFU";
     let symbol_id = "TFU::widget.rs::render".to_string();
     evict_process_snapshot(code);
