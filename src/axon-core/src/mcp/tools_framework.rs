@@ -640,6 +640,32 @@ impl McpServer {
 
         // Gate 2 — climb-the-chain: a milestone whose every TARGETS child is
         // terminal must itself be closed in the SAME session.
+        //
+        // REQ-AXO-902577 — the child predicate is POSITIVE, and that is the fix.
+        // It used to be `st IN ('current','planned')`, so EVERY other status counted
+        // as finished — `deferred` included. BKS orders its milestone queue with
+        // `deferred` (no MIL→MIL edge exists to do it), and the gate punished exactly
+        // the projects that order their queue: 5 live milestones flagged, with
+        // "status=delivered on each" as the remediation. Applying it would have
+        // falsified the record. `shared.rs::is_terminal_requirement_status` already
+        // says it in its docstring — "`deferred` is deliberately NOT terminal" — the
+        // gate simply never asked. `blocked` joins it: same family, same owed work
+        // (`inference.rs::is_blocked_status`).
+        //
+        // Why POSITIVE and not "everything except a terminal list": the column holds
+        // statuses OUTSIDE the canonical vocabulary — `accepted` (MIL-NTO-001 carries
+        // 5 such children), `active`, `completed`, and the empty string. An exhaustive
+        // terminal list would turn `accepted` into an open status and invent a false
+        // negative where the gate is right today. Four active-or-parked values, and
+        // every historical status falls on the "finished" side.
+        //
+        // REQ-AXO-902567 — and the population must EXIST. With the LEFT JOIN a
+        // milestone carrying no TARGETS edge at all yields one row with `st IS NULL`,
+        // so the count is 0 and the milestone was declared ready-to-close BY VACUITY.
+        // MIL-APS-047 hit exactly that: 0 TARGETS children, 18 real ones wired as
+        // `BLOCKED_BY`, one of them still `planned`. Nothing was measured, and the
+        // answer was "close it". That case now leaves this gate and gets its own
+        // verdict below — a different diagnosis deserves a different remediation.
         let stale_mil = rows_of(&format!(
             "WITH c AS (SELECT e.source_id AS mil, n.status AS st FROM soll.Edge e \
                         JOIN soll.Node n ON n.id = e.target_id \
@@ -648,7 +674,9 @@ impl McpServer {
              SELECT m.id FROM soll.Node m LEFT JOIN c ON c.mil = m.id \
              WHERE m.type = 'Milestone' AND m.project_code = '{project_code}' \
                AND m.status NOT IN ('delivered','completed','superseded','rejected','deferred','archived') \
-             GROUP BY m.id HAVING count(*) FILTER (WHERE st IN ('current','planned')) = 0 LIMIT 50"
+             GROUP BY m.id \
+             HAVING count(*) FILTER (WHERE st IS NOT NULL) > 0 \
+                AND count(*) FILTER (WHERE st IN ('current','planned','blocked','deferred')) = 0 LIMIT 50"
         ));
         let n_mil = stale_mil.len();
         if n_mil > 0 {
@@ -669,6 +697,52 @@ impl McpServer {
             "remediation": if n_mil > 0 { "soll_manager update status=delivered on each, or justify in the body" } else { "" }
         }));
 
+        // Gate 2b — REQ-AXO-902567: the THIRD verdict. "Every child is terminal" and
+        // "there is no child to look at" are not the same fact, and they do not share
+        // a remediation. A milestone with no TARGETS edge has not been measured; what
+        // is probably missing is the ATTACHMENT, not the closure. The offender line
+        // names the non-TARGETS edges it does carry, because that is what points at
+        // the repair (MIL-APS-047: 18 `BLOCKED_BY`, accepted by soll_manager, invisible
+        // to every gate).
+        let unmeasured_mil = rows_of(&format!(
+            "WITH t AS (SELECT DISTINCT e.source_id AS mil FROM soll.Edge e \
+                        WHERE e.relation_type = 'TARGETS' AND e.source_id LIKE 'MIL-%' \
+                          AND e.project_code = '{project_code}'), \
+                  o AS (SELECT e.source_id AS mil, count(*) AS n FROM soll.Edge e \
+                        WHERE e.source_id LIKE 'MIL-%' AND e.relation_type <> 'TARGETS' \
+                          AND e.target_id LIKE 'REQ-%' AND e.project_code = '{project_code}' \
+                        GROUP BY e.source_id) \
+             SELECT m.id, coalesce(o.n, 0) FROM soll.Node m \
+               LEFT JOIN t ON t.mil = m.id LEFT JOIN o ON o.mil = m.id \
+             WHERE m.type = 'Milestone' AND m.project_code = '{project_code}' \
+               AND m.status NOT IN ('delivered','completed','superseded','rejected','deferred','archived') \
+               AND t.mil IS NULL LIMIT 50"
+        ));
+        let n_unmeasured = unmeasured_mil.len();
+        if n_unmeasured > 0 {
+            warns += 1;
+        }
+        checks.push(json!({
+            "check": "milestone_without_targets",
+            "status": if n_unmeasured == 0 { "pass" } else { "warn" },
+            "detail": format!(
+                "{n_unmeasured} open milestone(s) carry NO `TARGETS` child — nothing could be measured about their completion"
+            ),
+            "offenders": unmeasured_mil
+                .iter()
+                .map(|r| {
+                    let id = r.first().and_then(Value::as_str).unwrap_or("?");
+                    // The gateway renders every cell as a STRING; `to_string()` on the
+                    // Value would keep the JSON quotes and print `"18"` in the offender.
+                    let others = r.get(1).and_then(Value::as_str).unwrap_or("0");
+                    Value::from(format!("{id} (non-TARGETS REQ edges: {others})"))
+                })
+                .collect::<Vec<_>>(),
+            "remediation": if n_unmeasured > 0 {
+                "soll_manager action=link source_id=<MIL> relation_type=TARGETS target_id=<REQ> — \
+                 or say in the milestone body why it carries none. Do NOT close it: nothing was measured."
+            } else { "" }
+        }));
         // Gate 3 — REQ-AXO-902358 (Originator VPC, inbox msg 10522): the COUVERTURE
         // half of Step 3, previously the ONLY one of the three still hand-typed. Every
         // OPEN requirement must hang off a milestone via `MIL --TARGETS--> REQ`; an

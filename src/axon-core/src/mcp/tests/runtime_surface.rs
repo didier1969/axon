@@ -2077,6 +2077,28 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
     exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-004', 'Requirement', 'HND', 'covered open req', 'x', 'planned', '{}')");
     exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HND-901', 'Milestone', 'HND', 'live mil', 'x', 'current', '{}')");
     exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('MIL-HND-901', 'REQ-HND-004', 'TARGETS', 'HND')");
+    // REQ-AXO-902577 — les trois verdicts du gate 2, sur la MEME fixture. Un garde qui
+    // ne peut rendre qu'un seul verdict ne prouve rien (critere 3 du noeud).
+    // (a) enfant `deferred` : travail differe, DONC du travail du -> le jalon reste ouvert.
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-005', 'Requirement', 'HND', 'deferred child', 'x', 'deferred', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HND-902', 'Milestone', 'HND', 'mil with deferred child', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('MIL-HND-902', 'REQ-HND-005', 'TARGETS', 'HND')");
+    // (b) enfant `delivered` : le gate garde son pouvoir de detection.
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-006', 'Requirement', 'HND', 'delivered child', 'x', 'delivered', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HND-903', 'Milestone', 'HND', 'mil ready to close', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('MIL-HND-903', 'REQ-HND-006', 'TARGETS', 'HND')");
+    // (c) enfant `accepted` — HORS du vocabulaire canonique, present en base (MIL-NTO-001
+    // en porte 5). Un predicat ecrit comme « tout sauf une liste terminale » en ferait un
+    // statut OUVERT et perdrait ce signal : non-regression.
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-007', 'Requirement', 'HND', 'accepted child', 'x', 'accepted', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HND-904', 'Milestone', 'HND', 'mil with accepted child', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('MIL-HND-904', 'REQ-HND-007', 'TARGETS', 'HND')");
+    // REQ-AXO-902567 — (d) AUCUNE arete TARGETS, mais un enfant reel cable autrement
+    // (la forme exacte de MIL-APS-047 : 18 `BLOCKED_BY`). Rien n'a pu etre mesure : ce
+    // jalon appartient au TROISIEME verdict, pas a `milestone_reconciliation`.
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-008', 'Requirement', 'HND', 'child wired by BLOCKED_BY', 'x', 'planned', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HND-905', 'Milestone', 'HND', 'mil without TARGETS', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('MIL-HND-905', 'REQ-HND-008', 'BLOCKED_BY', 'HND')");
 
     let result = server
         .axon_handoff_check(&json!({ "project_code": "HND" }))
@@ -2113,6 +2135,55 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
         !mil_offenders.contains(&"MIL-HND-900".to_string()),
         "a REJECTED milestone is a deliberate decision — greening a gate must never \
          push the operator to falsify it; got {mil_offenders:?}"
+    );
+
+    // REQ-AXO-902577 — les trois verdicts, epingles ensemble.
+    assert!(
+        !mil_offenders.contains(&"MIL-HND-902".to_string()),
+        "un enfant `deferred` est du travail DU, pas du travail fait : le jalon ne doit pas \
+         etre propose a la cloture ; got {mil_offenders:?}"
+    );
+    assert!(
+        mil_offenders.contains(&"MIL-HND-903".to_string()),
+        "un jalon dont tous les enfants TARGETS sont `delivered` doit TOUJOURS etre signale — \
+         sans ce verdict-la le gate ne detecte plus rien ; got {mil_offenders:?}"
+    );
+    assert!(
+        mil_offenders.contains(&"MIL-HND-904".to_string()),
+        "`accepted` est hors du vocabulaire canonique mais bel et bien terminal (MIL-NTO-001 \
+         en porte 5) : un predicat ecrit par la negative perdrait ce signal ; got {mil_offenders:?}"
+    );
+    assert!(
+        !mil_offenders.contains(&"MIL-HND-905".to_string()),
+        "un jalon SANS aucune arete TARGETS n'a rien de mesure : il ne doit pas etre propose \
+         a la cloture par vacuite (REQ-AXO-902567) ; got {mil_offenders:?}"
+    );
+
+    // REQ-AXO-902567 — le TROISIEME verdict, avec sa propre remediation.
+    let unmeasured = find("milestone_without_targets");
+    let unmeasured_offenders: Vec<String> = unmeasured["offenders"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    assert!(
+        unmeasured_offenders.iter().any(|o| o.starts_with("MIL-HND-905")),
+        "un jalon ouvert sans arete TARGETS doit apparaitre dans son propre verdict ; got \
+         {unmeasured_offenders:?}"
+    );
+    assert!(
+        unmeasured_offenders.iter().any(|o| o.contains("MIL-HND-905 (non-TARGETS REQ edges: 1)")),
+        "l'offender doit NOMMER les aretes non-TARGETS deja presentes — c'est ce qui oriente la \
+         reparation (MIL-APS-047 en portait 18) ; got {unmeasured_offenders:?}"
+    );
+    assert!(
+        !unmeasured_offenders.iter().any(|o| o.starts_with("MIL-HND-901")),
+        "un jalon QUI PORTE une arete TARGETS ne doit jamais tomber dans ce verdict ; got \
+         {unmeasured_offenders:?}"
+    );
+    assert_eq!(
+        unmeasured["status"].as_str(),
+        Some("warn"),
+        "le troisieme verdict doit pouvoir ROUGIR — une branche verte a jamais ne prouve rien"
     );
 
     // REQ-AXO-902358 — Gate 3: the couverture check that used to be PASS-invisible.

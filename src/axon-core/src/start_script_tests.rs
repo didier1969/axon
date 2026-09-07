@@ -218,9 +218,16 @@ axon_start_missing_roles() {
     done
 }
 "#;
+    let refus_trop_tard = verdict_de_la_completion(trop_tard).expect_err(
+        "consulter la presence APRES avoir demarre ne protege rien : le duplicata est deja parti",
+    );
+    // Verifier CE QUI mord, pas QUE ca morde (pratique gouvernee 2322) : sans cet
+    // assert, un mutant refuse pour une AUTRE raison (fonction absente, demarrage
+    // absent) laisserait la branche d'ORDRE jamais exercee.
     assert!(
-        verdict_de_la_completion(trop_tard).is_err(),
-        "consulter la presence APRES avoir demarre ne protege rien : le duplicata est deja parti"
+        refus_trop_tard.contains("APRES"),
+        "le refus doit porter sur l'ORDRE des deux appels, pas sur l'absence de l'un d'eux ; \
+         motif rendu : {refus_trop_tard}"
     );
 
     let conforme = r#"
