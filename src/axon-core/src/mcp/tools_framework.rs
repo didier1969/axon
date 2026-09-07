@@ -704,14 +704,25 @@ impl McpServer {
         // names the non-TARGETS edges it does carry, because that is what points at
         // the repair (MIL-APS-047: 18 `BLOCKED_BY`, accepted by soll_manager, invisible
         // to every gate).
+        //
+        // BOTH DIRECTIONS are counted, and that is not symmetry for its own sake:
+        // `soll_relation_schema` admits `MIL --TARGETS--> REQ` one way and
+        // `REQ --BLOCKED_BY--> MIL` the OTHER way. A milestone wired the legal
+        // `BLOCKED_BY` way would otherwise be reported as carrying zero edges — the
+        // hint would point at nothing precisely where it is most needed.
         let unmeasured_mil = rows_of(&format!(
             "WITH t AS (SELECT DISTINCT e.source_id AS mil FROM soll.Edge e \
                         WHERE e.relation_type = 'TARGETS' AND e.source_id LIKE 'MIL-%' \
                           AND e.project_code = '{project_code}'), \
-                  o AS (SELECT e.source_id AS mil, count(*) AS n FROM soll.Edge e \
-                        WHERE e.source_id LIKE 'MIL-%' AND e.relation_type <> 'TARGETS' \
-                          AND e.target_id LIKE 'REQ-%' AND e.project_code = '{project_code}' \
-                        GROUP BY e.source_id) \
+                  o AS (SELECT mil, count(*) AS n FROM ( \
+                          SELECT e.source_id AS mil FROM soll.Edge e \
+                            WHERE e.source_id LIKE 'MIL-%' AND e.target_id LIKE 'REQ-%' \
+                              AND e.relation_type <> 'TARGETS' AND e.project_code = '{project_code}' \
+                          UNION ALL \
+                          SELECT e.target_id AS mil FROM soll.Edge e \
+                            WHERE e.target_id LIKE 'MIL-%' AND e.source_id LIKE 'REQ-%' \
+                              AND e.relation_type <> 'TARGETS' AND e.project_code = '{project_code}') u \
+                        GROUP BY mil) \
              SELECT m.id, coalesce(o.n, 0) FROM soll.Node m \
                LEFT JOIN t ON t.mil = m.id LEFT JOIN o ON o.mil = m.id \
              WHERE m.type = 'Milestone' AND m.project_code = '{project_code}' \

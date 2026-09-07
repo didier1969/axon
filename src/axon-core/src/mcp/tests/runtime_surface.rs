@@ -2099,6 +2099,12 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
     exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-008', 'Requirement', 'HND', 'child wired by BLOCKED_BY', 'x', 'planned', '{}')");
     exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HND-905', 'Milestone', 'HND', 'mil without TARGETS', 'x', 'current', '{}')");
     exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('MIL-HND-905', 'REQ-HND-008', 'BLOCKED_BY', 'HND')");
+    // Et la MEME situation cablee dans le sens LEGAL : `soll_relation_schema` admet
+    // `REQ --BLOCKED_BY--> MIL`. Un jalon rattache ainsi porte de vrais enfants ;
+    // ne compter qu'un seul sens ferait dire « 0 arete » a l'indice qui doit orienter.
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-HND-009', 'Requirement', 'HND', 'child wired the legal way', 'x', 'planned', '{}')");
+    exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-HND-906', 'Milestone', 'HND', 'mil wired REQ -> MIL', 'x', 'current', '{}')");
+    exec("INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) VALUES ('REQ-HND-009', 'MIL-HND-906', 'BLOCKED_BY', 'HND')");
 
     let result = server
         .axon_handoff_check(&json!({ "project_code": "HND" }))
@@ -2174,6 +2180,11 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
         unmeasured_offenders.iter().any(|o| o.contains("MIL-HND-905 (non-TARGETS REQ edges: 1)")),
         "l'offender doit NOMMER les aretes non-TARGETS deja presentes — c'est ce qui oriente la \
          reparation (MIL-APS-047 en portait 18) ; got {unmeasured_offenders:?}"
+    );
+    assert!(
+        unmeasured_offenders.iter().any(|o| o.contains("MIL-HND-906 (non-TARGETS REQ edges: 1)")),
+        "l'arete legale `REQ --BLOCKED_BY--> MIL` doit compter elle aussi : ne regarder qu'un \
+         seul sens ferait dire « 0 arete » la ou il y en a ; got {unmeasured_offenders:?}"
     );
     assert!(
         !unmeasured_offenders.iter().any(|o| o.starts_with("MIL-HND-901")),
