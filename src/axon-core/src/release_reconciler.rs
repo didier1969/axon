@@ -78,6 +78,18 @@ pub struct ReleaseFacts {
     pub attempt_phase: Option<String>,
     pub attempt_last_event_detail: Option<String>,
     pub attempt_journal_path: Option<String>,
+    /// REQ-AXO-902628 — la preuve de complétion LUE DANS LE JOURNAL, jamais
+    /// déduite du statut.
+    ///
+    /// Sans ce champ, la porte ne pouvait juger que sur la MARQUE que l'écrivain
+    /// corrigé inscrit dans `last_event_detail` — donc sur rien du tout pour les
+    /// 84 journaux déjà archivés, écrits avant lui. Un promote réellement complet
+    /// y ressortait `unknown` : le faux négatif symétrique du faux positif que ce
+    /// REQ ferme, et une porte qui se trompe dans les deux sens n'informe plus.
+    ///
+    /// La lecture vit ICI, dans la collecte de faits, pour que `evaluate_attempt_gate`
+    /// reste un prédicat PUR — testable sans écrire un fichier.
+    pub attempt_completion_evidence: Option<String>,
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -161,6 +173,14 @@ impl ReleaseFacts {
         let attempt_phase = champ_attempt("phase");
         let attempt_last_event_detail = champ_attempt("last_event_detail");
         let attempt_journal_path = champ_attempt("journal_path");
+        // REQ-AXO-902628 — juger le journal, pas la projection qui le résume.
+        // Le chemin est déjà là ; il n'était simplement jamais ouvert.
+        let attempt_completion_evidence = attempt_journal_path.as_deref().map(|chemin| {
+            match std::fs::read_to_string(chemin) {
+                Ok(contenu) => preuve_de_completion(&contenu),
+                Err(erreur) => format!("{PREFIXE_JOURNAL_ILLISIBLE} ({chemin}) — {erreur}"),
+            }
+        });
         ReleaseFacts {
             live_build_id,
             manifest_build_id,
@@ -180,6 +200,7 @@ impl ReleaseFacts {
             attempt_phase,
             attempt_last_event_detail,
             attempt_journal_path,
+            attempt_completion_evidence,
         }
     }
 
@@ -494,25 +515,39 @@ pub fn attempt_next_action(f: &ReleaseFacts) -> Option<String> {
     // `attempt-current.status` vaut « running », et le script relit `promote_status`
     // en boucle. Y voir un problème ferait basculer le promote en redémarrage
     // complet, en plein vol.
-    if f.attempt_status.as_deref() != Some("failed") {
+    // REQ-AXO-902628 — `incomplete` compte AUSSI. Le conseil de reprise etait
+    // supprime pour tout ce qui n'etait pas `failed` : un promote tue en plein
+    // build sortait `completed`, donc silence total. C'est la moitie symetrique
+    // du gate ci-dessus — corriger l'un sans l'autre laisserait l'operateur sans
+    // verdict ET sans conseil.
+    let statut_actionnable = matches!(f.attempt_status.as_deref(), Some("failed") | Some("incomplete"));
+    if !statut_actionnable {
         return None;
     }
     let id = f.attempt_id.as_deref().unwrap_or("<unknown>");
     let phase_echec = f.attempt_phase.as_deref().unwrap_or("<unknown>");
     let detail = f.attempt_last_event_detail.as_deref().unwrap_or("<none>");
     let journal = f.attempt_journal_path.as_deref().unwrap_or("<none>");
+    // REQ-AXO-902628 — dire le bon mot. « FAILED » sur une tentative `incomplete`
+    // serait faux dans l'autre sens : rien n'a echoue, le script est mort sans le
+    // dire. Un verdict faux reste un verdict faux, meme quand il alarme.
+    let verdict = if f.attempt_status.as_deref() == Some("incomplete") {
+        "exited INCOMPLETE (nothing proves the cutover finished)"
+    } else {
+        "FAILED"
+    };
     let meme_tentative = f.attempt_id.is_some() && f.attempt_id == f.release_attempt_id;
     if meme_tentative {
         Some(format!(
             "the live manifest WAS produced by attempt {id}, and that same attempt then \
-             FAILED at phase={phase_echec} ({detail}). Do not read this as a complete \
+             {verdict} at phase={phase_echec} ({detail}). Do not read this as a complete \
              release: a later step failed after the manifest was finalised. Read the \
              journal: `tail -5 {journal}`."
         ))
     } else {
         Some(format!(
             "the release is coherent (running == manifest), BUT the most recent recorded \
-             promote attempt {id} FAILED at phase={phase_echec} ({detail}); the live \
+             promote attempt {id} {verdict} at phase={phase_echec} ({detail}); the live \
              manifest was produced by a DIFFERENT attempt ({}). Nothing is down right now \
              — but the change you tried to ship is NOT live. Read the journal: \
              `tail -5 {journal}`.",
@@ -714,22 +749,210 @@ pub fn evaluate_supervisor_gates(s: &SupervisorFacts) -> Vec<Gate> {
 
 /// REQ-AXO-902585 — la porte qui rend visible ce que `attempt_next_action` explique.
 /// `running` → `Unknown`, jamais `Fail` : voir la note ci-dessus.
+/// REQ-AXO-902628 — la MARQUE de completion que `promote_live_safe.sh` inscrit
+/// desormais dans le detail de sa ligne terminale.
+///
+/// Elle n'est pas cosmetique : c'est ce qui distingue « ce promote a franchi le
+/// cutover » de « ce script s'est arrete proprement ». Les deux s'ecrivaient
+/// `completed`.
+pub(crate) const MARQUE_DE_COMPLETION: &str = "cutover_finalize passed";
+
+/// La dernière étape d'un promote canonique. Franchie ⇒ le cutover a eu lieu.
+pub(crate) const ETAPE_TERMINALE: &str = "cutover_finalize";
+/// Rendu d'une phase absente — le MÊME mot des deux côtés du jumelage.
+const PHASE_ABSENTE: &str = "<none>";
+/// Préfixe du seul « incomplete » qui ne juge RIEN : le journal n'a pas pu être lu.
+pub(crate) const PREFIXE_JOURNAL_ILLISIBLE: &str = "incomplete:journal unreadable";
+
+/// REQ-AXO-902628 — le juge de complétion, en Rust, jumeau de
+/// `scripts/release/promote_completion_evidence.py`.
+///
+/// POURQUOI DEUX IMPLÉMENTATIONS, dit franchement. L'écrivain
+/// (`promote_live_safe.sh`) est du shell et ne peut pas appeler du Rust ; la porte
+/// (`promote_status`) est du Rust et ne doit pas forker un `python3` par appel —
+/// `promote_live_safe.sh` relit `promote_status` EN BOUCLE pendant le cutover, et
+/// REQ-AXO-902589 vient de payer le prix d'une latence périodique sur cette surface
+/// exacte.
+///
+/// La dette est assumée, pas subie : `release_scripts_tests.rs` joue les MÊMES
+/// journaux réels à travers les deux chemins et exige le même texte, caractère pour
+/// caractère. Sans cette garde croisée les deux dériveraient, et la surface
+/// rementirait — autrement.
+///
+/// Deux conditions, et AUCUNE constante de compte à maintenir : le nœud annonçait
+/// « sept étapes », le vrai nombre est QUINZE, et quatorze pour un promote
+/// légitimement raccourci (`--skip-build` n'émet pas de `run_step`).
+/// 1. toute étape DÉMARRÉE porte son `step_completed` — une étape restée ouverte
+///    est une mort en plein vol ;
+/// 2. `cutover_finalize` figure parmi les étapes terminées.
+pub fn preuve_de_completion(journal: &str) -> String {
+    let mut demarrees: Vec<String> = Vec::new();
+    let mut terminees: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for ligne in journal.lines() {
+        let ligne = ligne.trim();
+        if ligne.is_empty() {
+            continue;
+        }
+        // Une ligne illisible n'est PAS une preuve d'incomplétude : le journal est
+        // append-only + fsync, une troncature partielle reste possible sur une mort
+        // brutale. On l'ignore et on juge sur le reste.
+        let Ok(evenement) = serde_json::from_str::<Value>(ligne) else {
+            continue;
+        };
+        let phase = evenement
+            .get("phase")
+            .and_then(Value::as_str)
+            .unwrap_or(PHASE_ABSENTE)
+            .to_string();
+        match evenement.get("event").and_then(Value::as_str) {
+            Some("step_started") => demarrees.push(phase),
+            Some("step_completed") => {
+                terminees.insert(phase);
+            }
+            _ => {}
+        }
+    }
+    let orphelines: Vec<&str> = demarrees
+        .iter()
+        .filter(|etape| !terminees.contains(etape.as_str()))
+        .map(String::as_str)
+        .collect();
+    if !orphelines.is_empty() {
+        return format!(
+            "incomplete:step(s) started but never completed: {} ({} step(s) done)",
+            orphelines.join(", "),
+            terminees.len()
+        );
+    }
+    if !terminees.contains(ETAPE_TERMINALE) {
+        let dernier = demarrees.last().map(String::as_str).unwrap_or(PHASE_ABSENTE);
+        return format!(
+            "incomplete:{ETAPE_TERMINALE} never completed — {} step(s) done, last started `{dernier}`",
+            terminees.len()
+        );
+    }
+    format!("complete:{} steps, {MARQUE_DE_COMPLETION}", terminees.len())
+}
+
+/// Ce que le JOURNAL rend sur une tentative — en trois états, jamais deux.
+///
+/// `Indisponible` n'est pas `Incomplete` : « je n'ai pas pu lire » et « le promote
+/// est mort en vol » sont deux faits différents, et les confondre rendrait
+/// `unknown` sur un promote sain dont le journal a simplement été archivé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreuveJournal {
+    Complete,
+    Incomplete,
+    Indisponible,
+}
+
+pub fn lire_preuve_journal(preuve: Option<&str>) -> PreuveJournal {
+    match preuve {
+        Some(p) if p.starts_with("complete:") => PreuveJournal::Complete,
+        Some(p) if p.starts_with(PREFIXE_JOURNAL_ILLISIBLE) => PreuveJournal::Indisponible,
+        Some(_) => PreuveJournal::Incomplete,
+        None => PreuveJournal::Indisponible,
+    }
+}
+
+/// REQ-AXO-902628 — un statut terminal `completed` prouve-t-il quelque chose ?
+///
+/// Pris en ENTREE plutot que lu sur le disque, pour que les deux verdicts soient
+/// atteignables sans fabriquer une projection.
+pub fn completion_est_prouvee(statut: Option<&str>, detail: Option<&str>) -> bool {
+    statut == Some("completed") && detail.is_some_and(|d| d.contains(MARQUE_DE_COMPLETION))
+}
+
 pub fn evaluate_attempt_gate(f: &ReleaseFacts) -> Gate {
+    // REQ-AXO-902628 — `completed` n'est PLUS une preuve à lui seul.
+    //
+    // Mesure du 2026-09-07 sur les 84 journaux archivés : SEPT portent
+    // `completed` sans avoir franchi le cutover, dont CINQ sans une seule étape
+    // terminée. Cette porte les rendait tous `pass`. Une session qui lit
+    // `promote_status` y voyait un promote réussi là où le script avait été tué
+    // en plein build — le mode d'échec de `CPT-AXO-025` branche 1, produit par
+    // notre propre surface.
+    //
+    // DEUX TÉMOINS, indépendants, aucun déduit de l'autre :
+    //  1. le JOURNAL, rejugé à chaque appel (`attempt_completion_evidence`) —
+    //     c'est lui qui rend le verdict RÉTROACTIF sur les 84 journaux déjà
+    //     archivés, écrits bien avant l'écrivain corrigé ;
+    //  2. la MARQUE inscrite par l'écrivain dans le détail terminal — elle reste
+    //     le seul témoin quand le journal n'est plus lisible (archivé, purgé).
+    //
+    // Le journal prime quand il parle : c'est la source, la marque n'en est que
+    // le résumé. Et `unknown` n'est délibérément PAS rouge — `promote_live_safe.sh`
+    // escalade en redémarrage complet du brain sur un gate rouge inattendu, ce
+    // qu'une projection muette ne justifie pas.
+    let id = f.attempt_id.as_deref().unwrap_or("<unknown>");
+    let detail = f.attempt_last_event_detail.as_deref().unwrap_or("<none>");
+    let journal = f.attempt_journal_path.as_deref().unwrap_or("<none>");
     match f.attempt_status.as_deref() {
-        Some("completed") => Gate::pass(
+        Some("completed") => match lire_preuve_journal(f.attempt_completion_evidence.as_deref()) {
+            PreuveJournal::Complete => Gate::pass(
+                "last_promote_attempt",
+                format!(
+                    "attempt {id} completed — {detail} (journal: {})",
+                    f.attempt_completion_evidence.as_deref().unwrap_or("<none>")
+                ),
+            ),
+            // Le journal existe et il DÉMENT la projection. C'est le cas mesuré,
+            // et le dire est tout l'objet du REQ.
+            PreuveJournal::Incomplete => Gate::unknown(
+                "last_promote_attempt",
+                format!(
+                    "attempt {id} is recorded `completed`, but its own journal does NOT \
+                     prove the cutover finished — {}. A promote killed mid-build records \
+                     exactly this. Read it: `tail -5 {journal}`.",
+                    f.attempt_completion_evidence.as_deref().unwrap_or("<none>")
+                ),
+            ),
+            // Journal illisible ou absent : il reste la marque, écrite par
+            // l'écrivain au moment où il tenait le journal complet sous les yeux.
+            PreuveJournal::Indisponible => {
+                if completion_est_prouvee(
+                    f.attempt_status.as_deref(),
+                    f.attempt_last_event_detail.as_deref(),
+                ) {
+                    Gate::pass(
+                        "last_promote_attempt",
+                        format!(
+                            "attempt {id} completed — {detail} (journal unreadable: the \
+                             `{MARQUE_DE_COMPLETION}` mark is the only witness left)"
+                        ),
+                    )
+                } else {
+                    Gate::unknown(
+                        "last_promote_attempt",
+                        format!(
+                            "attempt {id} is recorded `completed`, but NOTHING proves the \
+                             cutover finished: its journal could not be read ({}) and the \
+                             detail carries no `{MARQUE_DE_COMPLETION}` mark (detail: \
+                             {detail}). Read the journal before trusting it: \
+                             `tail -5 {journal}`.",
+                            f.attempt_completion_evidence
+                                .as_deref()
+                                .unwrap_or("no journal path in the projection")
+                        ),
+                    )
+                }
+            }
+        },
+        // REQ-AXO-902628 — le statut que l'ecrivain pose quand il sort a rc=0
+        // sans pouvoir prouver la completion. Ni `pass` (rien n'est prouve), ni
+        // `fail` (rien ne dit qu'un service est a terre).
+        Some("incomplete") => Gate::unknown(
             "last_promote_attempt",
             format!(
-                "attempt {} completed",
-                f.attempt_id.as_deref().unwrap_or("<unknown>")
+                "attempt {id} exited cleanly but INCOMPLETE — {detail}. Nothing was \
+                 necessarily promoted. Read the journal: `tail -5 {journal}`."
             ),
         ),
         Some("failed") => Gate::fail(
             "last_promote_attempt",
             format!(
-                "attempt {} FAILED at phase={} — {}",
-                f.attempt_id.as_deref().unwrap_or("<unknown>"),
-                f.attempt_phase.as_deref().unwrap_or("<unknown>"),
-                f.attempt_last_event_detail.as_deref().unwrap_or("<none>")
+                "attempt {id} FAILED at phase={} — {detail}",
+                f.attempt_phase.as_deref().unwrap_or("<unknown>")
             ),
         ),
         Some("running") => Gate::unknown(
@@ -1551,6 +1774,255 @@ mod tests {
             "et pointer le journal, pour ne pas le chercher à la main : {action}"
         );
         assert!(evaluate_attempt_gate(&f).is_red());
+    }
+
+    /// REQ-AXO-902628 — LE test du défaut mesuré : un promote tué en plein build
+    /// se journalise `completed` / `rc=0`, et cette porte le rendait `pass`.
+    ///
+    /// Cas réel, verbatim : `20260906T135356Z-873834-0b5c9f57af94.jsonl`, une
+    /// seule étape démarrée sur quinze, aucune terminée, `lease_released final
+    /// completed "promotion process exited with rc=0"`. Rien n'avait été promu.
+    /// Sept journaux sur les 84 archivés portent cette signature.
+    #[test]
+    fn un_completed_SANS_preuve_de_cutover_n_est_plus_un_succes() {
+        let mut f = facts("v1", Some("v1"), false);
+        f.attempt_id = Some("20260906T135356Z-873834-0b5c9f57af94".to_string());
+        f.attempt_status = Some("completed".to_string());
+        f.attempt_last_event_detail = Some("promotion process exited with rc=0".to_string());
+        f.attempt_journal_path = Some("/tmp/attempts/tue.jsonl".to_string());
+
+        let gate = evaluate_attempt_gate(&f);
+        assert!(
+            !gate.passes(),
+            "un `completed` sans marque de cutover ne prouve RIEN : {gate:?}"
+        );
+        assert!(
+            !gate.is_red(),
+            "et il n'est pas rouge non plus — un rouge inattendu fait escalader \
+             `promote_live_safe.sh` en redémarrage complet du brain : {gate:?}"
+        );
+        assert!(
+            gate.detail.contains("20260906T135356Z"),
+            "le verdict doit NOMMER la tentative : {}",
+            gate.detail
+        );
+        assert!(
+            gate.detail.contains("/tmp/attempts/tue.jsonl"),
+            "et pointer le journal, sinon on le cherche à la main : {}",
+            gate.detail
+        );
+    }
+
+    /// L'autre moitié : un `completed` qui PORTE la preuve reste vert. Sans ce
+    /// test, rendre la porte muette suffirait à faire passer le précédent — et
+    /// on aurait échangé un faux positif contre un faux négatif.
+    #[test]
+    fn un_completed_AVEC_la_preuve_de_cutover_reste_vert() {
+        let mut f = facts("v1", Some("v1"), false);
+        f.attempt_id = Some("20260907T095139Z-657299-2508214063a9".to_string());
+        f.attempt_status = Some("completed".to_string());
+        f.attempt_last_event_detail = Some(
+            "promotion process exited with rc=0; complete:15 steps, cutover_finalize passed"
+                .to_string(),
+        );
+        let gate = evaluate_attempt_gate(&f);
+        assert!(gate.passes(), "la preuve est là, la porte doit passer : {gate:?}");
+        assert_eq!(attempt_next_action(&f), None, "rien à conseiller sur un succès prouvé");
+    }
+
+    /// REQ-AXO-902628 — le statut que l'écrivain pose désormais quand il sort
+    /// proprement sans pouvoir prouver la complétion.
+    #[test]
+    fn un_attempt_incomplete_est_dit_ET_conseille() {
+        let mut f = facts("v1", Some("v1"), false);
+        f.release_attempt_id = Some("attempt-QUI-A-PROMU".to_string());
+        f.attempt_id = Some("attempt-TUE".to_string());
+        f.attempt_status = Some("incomplete".to_string());
+        f.attempt_phase = Some("build".to_string());
+        f.attempt_last_event_detail =
+            Some("step(s) started but never completed: build (0 step(s) done)".to_string());
+        f.attempt_journal_path = Some("/tmp/attempts/tue.jsonl".to_string());
+
+        let gate = evaluate_attempt_gate(&f);
+        assert!(!gate.passes() && !gate.is_red(), "ni preuve, ni alarme : {gate:?}");
+        assert!(
+            gate.detail.contains("INCOMPLETE"),
+            "le mot doit y être, l'opérateur lit le texte : {}",
+            gate.detail
+        );
+
+        // La moitié symétrique : le conseil de reprise était supprimé pour tout
+        // ce qui n'était pas `failed`. Corriger la porte sans le conseil aurait
+        // laissé l'opérateur sans verdict ET sans geste.
+        let action = attempt_next_action(&f).expect("un incomplet doit être conseillé");
+        assert!(action.contains("attempt-TUE"), "{action}");
+        assert!(
+            action.contains("INCOMPLETE") && !action.contains("FAILED"),
+            "dire `FAILED` sur un incomplet serait un verdict faux dans l'autre \
+             sens — rien n'a échoué, le script est mort sans le dire : {action}"
+        );
+    }
+
+    /// La règle de preuve, sur ses deux moitiés, prise en entrée directe.
+    #[test]
+    #[allow(non_snake_case)]
+    fn MUTANT_la_preuve_de_completion_exige_le_statut_ET_la_marque() {
+        const MARQUE: &str = "complete:15 steps, cutover_finalize passed";
+        assert!(completion_est_prouvee(Some("completed"), Some(MARQUE)));
+        // Le statut seul ne suffit pas — c'est le défaut d'origine.
+        assert!(!completion_est_prouvee(Some("completed"), Some("exited with rc=0")));
+        assert!(!completion_est_prouvee(Some("completed"), None));
+        // La marque seule ne suffit pas non plus : un `failed` qui aurait franchi
+        // le cutover puis échoué après reste un échec.
+        assert!(!completion_est_prouvee(Some("failed"), Some(MARQUE)));
+        assert!(!completion_est_prouvee(Some("incomplete"), Some(MARQUE)));
+        assert!(!completion_est_prouvee(None, Some(MARQUE)));
+    }
+
+    /// REQ-AXO-902628 — le verdict doit être RÉTROACTIF, et sans ce test il ne
+    /// l'était pas.
+    ///
+    /// Cas RÉEL au moment de l'écriture : `attempt-current.json` porte
+    /// `status: completed` / `last_event_detail: "promotion process exited with
+    /// rc=0"` — projection écrite AVANT l'écrivain corrigé, donc sans la marque.
+    /// Le promote, lui, est bel et bien complet (15 étapes, cutover franchi).
+    /// Juger sur la seule marque rendait `unknown` sur un promote sain : le faux
+    /// négatif symétrique du faux positif que ce REQ ferme. Une porte qui se
+    /// trompe dans les DEUX sens n'informe plus personne.
+    ///
+    /// La correction : la collecte OUVRE le journal dont elle avait déjà le
+    /// chemin. Les 84 journaux archivés sont jugés sur leur contenu, pas sur le
+    /// résumé qu'une ancienne version du script en avait fait.
+    #[test]
+    fn le_gate_relit_le_JOURNAL_donc_le_verdict_est_RETROACTIF() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!(
+            "axon-902628-retro-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let journal = dir.join("complet.jsonl");
+        let mut lignes = String::new();
+        for etape in ["build", "qualify", "cutover_finalize"] {
+            lignes.push_str(&format!(
+                "{{\"event\":\"step_started\",\"phase\":\"{etape}\"}}\n\
+                 {{\"event\":\"step_completed\",\"phase\":\"{etape}\"}}\n"
+            ));
+        }
+        fs::write(&journal, &lignes).unwrap();
+        fs::write(
+            dir.join("attempt-current.json"),
+            format!(
+                r#"{{"release_attempt_id":"20260907T095139Z-657299-2508214063a9","status":"completed","phase":"final","last_event_detail":"promotion process exited with rc=0","journal_path":"{}"}}"#,
+                journal.display()
+            ),
+        )
+        .unwrap();
+
+        let f = ReleaseFacts::collect(&dir, "v1".to_string());
+        assert!(
+            f.attempt_completion_evidence
+                .as_deref()
+                .is_some_and(|p| p.starts_with("complete:")),
+            "la collecte doit LIRE le journal : {:?}",
+            f.attempt_completion_evidence
+        );
+        let gate = evaluate_attempt_gate(&f);
+        assert!(
+            gate.passes(),
+            "le journal prouve le cutover, la porte doit passer même sans la \
+             marque dans la projection : {gate:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// L'autre moitié, et elle est indispensable : sans elle, une collecte qui
+    /// écrirait « complete: » sur tout ferait passer le test précédent seule.
+    #[test]
+    fn un_journal_qui_DEMENT_la_projection_rend_unknown() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!(
+            "axon-902628-dement-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let journal = dir.join("tue.jsonl");
+        // Le cas mesuré : une étape démarrée sur quinze, aucune terminée.
+        fs::write(&journal, "{\"event\":\"step_started\",\"phase\":\"build\"}\n").unwrap();
+        fs::write(
+            dir.join("attempt-current.json"),
+            format!(
+                r#"{{"release_attempt_id":"20260906T135356Z-873834-0b5c9f57af94","status":"completed","phase":"final","last_event_detail":"promotion process exited with rc=0","journal_path":"{}"}}"#,
+                journal.display()
+            ),
+        )
+        .unwrap();
+
+        let f = ReleaseFacts::collect(&dir, "v1".to_string());
+        let gate = evaluate_attempt_gate(&f);
+        assert!(!gate.passes(), "le journal DÉMENT la projection : {gate:?}");
+        assert!(
+            !gate.is_red(),
+            "et il n'est pas rouge — un rouge inattendu fait escalader \
+             `promote_live_safe.sh` en redémarrage complet du brain : {gate:?}"
+        );
+        assert!(
+            gate.detail.contains("build"),
+            "l'étape restée ouverte doit être NOMMÉE : {}",
+            gate.detail
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Le juge Rust lui-même, sur ses deux moitiés. Le prédicat n'a AUCUNE
+    /// constante de compte : c'est ce qui lui permet d'accepter un promote
+    /// légitimement raccourci (14 étapes) sans accepter un promote mort.
+    #[test]
+    #[allow(non_snake_case)]
+    fn MUTANT_le_juge_Rust_refuse_les_deux_moities() {
+        let complet = "{\"event\":\"step_started\",\"phase\":\"cutover_finalize\"}\n\
+                       {\"event\":\"step_completed\",\"phase\":\"cutover_finalize\"}\n";
+        assert!(preuve_de_completion(complet).starts_with("complete:"));
+        // Moitié 1 — une étape ouverte.
+        let orpheline = format!("{complet}{{\"event\":\"step_started\",\"phase\":\"post\"}}\n");
+        let v = preuve_de_completion(&orpheline);
+        assert!(v.starts_with("incomplete:") && v.contains("post"), "{v}");
+        // Moitié 2 — tout fermé, mais le cutover jamais atteint.
+        let sans_cutover = "{\"event\":\"step_started\",\"phase\":\"build\"}\n\
+                            {\"event\":\"step_completed\",\"phase\":\"build\"}\n";
+        let v = preuve_de_completion(sans_cutover);
+        assert!(v.starts_with("incomplete:") && v.contains("cutover_finalize"), "{v}");
+        // Une ligne illisible n'est pas une preuve d'incomplétude.
+        assert!(preuve_de_completion(&format!("pas du json\n{complet}")).starts_with("complete:"));
+        // Et jamais muet.
+        assert!(preuve_de_completion("").starts_with("incomplete:"));
+    }
+
+    /// `Indisponible` n'est pas `Incomplete` — confondre les deux rendrait
+    /// `unknown` sur un promote sain dont le journal a simplement été archivé.
+    #[test]
+    fn un_journal_ILLISIBLE_laisse_la_marque_temoigner() {
+        let mut f = facts("v1", Some("v1"), false);
+        f.attempt_id = Some("attempt-archivé".to_string());
+        f.attempt_status = Some("completed".to_string());
+        f.attempt_journal_path = Some("/ce/chemin/n/existe/pas.jsonl".to_string());
+        f.attempt_completion_evidence =
+            Some(format!("{PREFIXE_JOURNAL_ILLISIBLE} (/ce/chemin/n/existe/pas.jsonl) — nope"));
+
+        // Sans la marque : rien ne prouve, donc `unknown`.
+        f.attempt_last_event_detail = Some("promotion process exited with rc=0".to_string());
+        let gate = evaluate_attempt_gate(&f);
+        assert!(!gate.passes() && !gate.is_red(), "{gate:?}");
+
+        // Avec la marque : le témoin restant suffit.
+        f.attempt_last_event_detail = Some(format!(
+            "promotion process exited with rc=0; complete:15 steps, {MARQUE_DE_COMPLETION}"
+        ));
+        assert!(evaluate_attempt_gate(&f).passes());
     }
 
     /// Un promote EN COURS n'est pas un échec. Cette distinction n'est pas

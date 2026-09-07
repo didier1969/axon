@@ -474,6 +474,46 @@ _report_mcp_outage() {
 # exits non-zero but the brain IS back). Fires only if (a) the pre-notice went out and
 # (b) the live brain answers /readyz — so we never claim "back" while it is still down.
 BROADCAST_PREFLIGHT_SENT=0
+# REQ-AXO-902628 — LA PREUVE DE COMPLETION, lue dans le journal que ce script
+# vient d'ecrire lui-meme.
+#
+# Deux conditions, et AUCUNE constante a maintenir :
+#
+#   1. toute etape DEMARREE porte son `step_completed` — une etape restee
+#      ouverte est une mort en plein vol ;
+#   2. `cutover_finalize` figure parmi les etapes terminees — c'est la derniere,
+#      et c'est deja le predicat que `promote_history_estimate.py` utilise depuis
+#      REQ-AXO-902543 : les deux surfaces jugent enfin sur le meme fait.
+#
+# Un compte en dur a ete ECARTE apres mesure. Le noeud annoncait « sept
+# `step_completed` » ; le vrai nombre est QUINZE (verifie sur cinq promotes
+# complets, sur les 16 sites d'appel de `run_step` et sur 40 commits d'historique
+# du script : 10 -> 11 -> 13 -> 15 -> 16). Un verdict code sur 7 aurait ete faux
+# des son ecriture. Et 15 lui-meme serait faux pour un promote legitimement
+# raccourci : trois journaux archives portent 14 etapes, sans orpheline et avec
+# le cutover franchi — `--skip-build` n'emet pas de `run_step`. Le predicat
+# ci-dessus les accepte, un compte en dur les aurait accuses.
+#
+# Le predicat lui-meme vit dans `scripts/release/promote_completion_evidence.py`,
+# a dessein : une garde Rust l'exerce ainsi DANS la porte `GUI-AXO-1034`, alors
+# que les `tests/shell/*.sh` ne tournent dans aucun runner.
+#
+# Rend `complete:<n> steps` ou `incomplete:<raison>` — jamais vide, jamais muet.
+promote_attempt_completion_evidence() {
+  local journal="${AXON_PROMOTE_JOURNAL_PATH:-}"
+  local juge="$ROOT_DIR/scripts/release/promote_completion_evidence.py"
+  if [[ -z "$journal" ]]; then
+    echo "incomplete:AXON_PROMOTE_JOURNAL_PATH unset — completion cannot be proven"
+    return 0
+  fi
+  if [[ ! -x "$juge" && ! -r "$juge" ]]; then
+    echo "incomplete:completion judge missing at ${juge} — completion cannot be proven"
+    return 0
+  fi
+  python3 "$juge" "$journal" 2>/dev/null || \
+    echo "incomplete:completion judge failed on ${journal}"
+}
+
 on_promote_exit() {
   local rc=$?
   # Cleanup must run even if an observability/broadcast helper fails while the process is
@@ -539,8 +579,27 @@ on_promote_exit() {
       --args '{}' --format text >> "$PROMOTE_LOG" 2>&1 || true
   fi
   _cleanup_frozen_worktree "$rc"
-  if [[ "$rc" -eq 0 ]]; then
-    axon_promote_lease_release completed "promotion process exited with rc=0"
+  # REQ-AXO-902628 — le verdict se lit sur ce qui a ete OBSERVE, pas sur $?.
+  #
+  # Mesure du 2026-09-07 sur les 84 journaux archives : SEPT portaient
+  # `status: completed` sans avoir franchi le cutover, dont CINQ sans une seule
+  # etape terminee. Le plus recent (20260906T135356Z) a ete tue pendant l'etape
+  # `build` et s'est journalise « exited with rc=0 ». `$rc` est POSITIONNEL — il
+  # capture la derniere commande terminee avant l'entree dans le trap, pas
+  # l'etat de la promotion. Quand le shell meurt DANS une etape, `run_step`
+  # n'emet pas son `step_failed` et ne rend pas la main : rien ne corrige $?.
+  #
+  # Troisieme instrument du promote faux dans la direction flatteuse, apres le
+  # compteur de coupure et l'estimateur d'historique (REQ-AXO-902543). Les deux
+  # premiers ont ete corriges cote LECTEUR ; tant que la SOURCE ment, chaque
+  # nouveau lecteur doit reapprendre a s'en mefier.
+  local preuve_detail
+  preuve_detail="$(promote_attempt_completion_evidence)"
+  if [[ "$rc" -eq 0 && "$preuve_detail" == complete:* ]]; then
+    axon_promote_lease_release completed "promotion process exited with rc=0; ${preuve_detail}"
+  elif [[ "$rc" -eq 0 ]]; then
+    axon_promote_lease_release incomplete \
+      "promotion process exited with rc=0 but the journal does NOT prove completion; ${preuve_detail}"
   else
     axon_promote_lease_release failed "promotion process exited with rc=${rc}; reconcile before retry"
   fi
