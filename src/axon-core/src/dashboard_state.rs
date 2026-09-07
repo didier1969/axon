@@ -18,8 +18,10 @@
 //!       counts, batch sizes, NOTIFY channel, coldstart cadence) written
 //!       by `runtime_config::write_indexer_config_snapshot` at indexer
 //!       startup.
-//! * `graph_store.latest_lifecycle_heartbeat("indexer")` — PG-backed
-//!   lifecycle phase/wake/sleep counts.
+//! * le battement de vie de l'indexeur (`latest_lifecycle_heartbeat("indexer")`,
+//!   PG) — phase / wake / sleep. REQ-AXO-902589 : il est REÇU de
+//!   `main_telemetry`, qui l'a déjà lu en tête de tick ; ce module ne le relit
+//!   plus. Il le relisait, et un commentaire affirmait le contraire.
 //! * In-memory snapshot from `main_telemetry` 1 Hz tick — live rates,
 //!   queues, scheduler, embedder identity, runtime mode.
 
@@ -54,9 +56,10 @@ pub(crate) fn publish_dashboard_state(state: Value) {
 /// Live in-memory metrics passed from `main_telemetry` 1 Hz tick.
 /// Grouped in a struct so the call site is readable instead of dragging
 /// 30 positional args. PG-backed fields (totals, per_project,
-/// runtime_config, lifecycle) and filesystem counters are sourced
-/// inside `compose_publish_and_emit` directly — no need to pipe them
-/// through main_telemetry.
+/// runtime_config) and filesystem counters are sourced inside
+/// `compose_publish_and_emit` directly — no need to pipe them through
+/// main_telemetry. Le bloc `lifecycle` fait exception depuis
+/// REQ-AXO-902589 : son battement est passé, pour ne pas être relu.
 pub(crate) struct LiveMetrics<'a> {
     pub ts_ms: u64,
     pub build_id: &'a str,
@@ -167,20 +170,28 @@ pub(crate) fn read_dashboard_state_full(store: &Arc<GraphStore>) -> Value {
 /// Compute the lifecycle block. Prefers the PG-backed indexer
 /// heartbeat row (fresh ≤30 s) ; falls back to the brain's local
 /// embedder lifecycle singleton when no fresh heartbeat exists.
-fn compose_lifecycle_block(store: &Arc<GraphStore>) -> Value {
-    const HEARTBEAT_FRESHNESS_MS: i64 = 30_000;
+///
+/// REQ-AXO-902589 — le battement est REÇU, il n'est plus RELU.
+///
+/// `main_telemetry.rs:245` affirmait « no second PG round-trip per tick ».
+/// C'était faux : cette fonction refaisait `latest_lifecycle_heartbeat("indexer")`
+/// dans le MÊME tick, portant le vrai compte à QUATRE allers-retours PG par
+/// seconde en brain_only, pas trois. Un commentaire faux dans la direction
+/// rassurante, sur le jalon même qui combat les surfaces qui mentent.
+///
+/// La correction ne repose PAS sur la discipline : le paramètre `store` a été
+/// retiré, donc la requête ne peut plus être refaite ici par inadvertance.
+/// L'appelant filtre déjà à 30 s (`PEER_HEARTBEAT_FRESH_MS`), le même seuil
+/// qu'appliquait cette fonction — le comportement est inchangé.
+fn compose_lifecycle_block(
+    indexer_heartbeat: Option<&crate::graph_ingestion::EmbedderLifecycleHeartbeatRecord>,
+) -> Value {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0);
 
-    let indexer_hb = store
-        .latest_lifecycle_heartbeat("indexer")
-        .ok()
-        .flatten()
-        .filter(|row| (now_ms - row.heartbeat_ms).max(0) <= HEARTBEAT_FRESHNESS_MS);
-
-    if let Some(row) = indexer_hb {
+    if let Some(row) = indexer_heartbeat {
         let age_ms = (now_ms - row.heartbeat_ms).max(0);
         json!({
             "phase": row.phase,
@@ -365,10 +376,14 @@ pub(crate) fn compose_dashboard_state_v1(
 pub(crate) fn compose_publish_and_emit(
     store: &Arc<GraphStore>,
     results_tx: &broadcast::Sender<String>,
+    // REQ-AXO-902589 — le battement déjà lu en tête de tick, PASSÉ plutôt que relu.
+    // Placé avant `live` pour rester lisible : le champ suivant est un littéral de
+    // trente lignes.
+    indexer_heartbeat: Option<&crate::graph_ingestion::EmbedderLifecycleHeartbeatRecord>,
     live: LiveMetrics<'_>,
 ) {
     let pg_state = read_dashboard_state_full(store);
-    let lifecycle = compose_lifecycle_block(store);
+    let lifecycle = compose_lifecycle_block(indexer_heartbeat);
 
     let state = compose_dashboard_state_v1(&live, pg_state, lifecycle);
 
@@ -390,6 +405,69 @@ mod tests {
     // the contract between `runtime_mode + pending + init_error` and
     // the surfaced `pipeline_status` + `blocked_reason`. Drift here
     // surfaces immediately to the operator via dashboard banner.
+
+    /// REQ-AXO-902589 — un battement FRAIS passé par l'appelant est utilisé tel quel.
+    fn battement(heartbeat_ms: i64) -> crate::graph_ingestion::EmbedderLifecycleHeartbeatRecord {
+        crate::graph_ingestion::EmbedderLifecycleHeartbeatRecord {
+            process_role: "indexer".to_string(),
+            phase: "Ready".to_string(),
+            last_used_ms: heartbeat_ms,
+            wake_count: 7,
+            sleep_count: 3,
+            pending_count: 0,
+            heartbeat_ms,
+            compute: Some("GPU".to_string()),
+            compute_source: Some("nvidia_smi".to_string()),
+            build_id: Some("v-test".to_string()),
+            b3_consecutive_failures: 0,
+            b3_total_failures: 0,
+            b3_total_successes: 0,
+            b3_last_error: None,
+            b3_last_error_count: 0,
+            b3_last_error_last_seen_ms: 0,
+            b2_window_observed: 0,
+            b2_window_cpu_fallbacks: 0,
+            b2_gpu_batch_cap: 0,
+            b2_resizes: 0,
+            b2_gpu_batches_total: 0,
+            b2_cpu_batches_total: 0,
+            b2_session_recycles: 0,
+        }
+    }
+
+    /// REQ-AXO-902589 — le bloc `lifecycle` ne va plus CHERCHER le battement, il le
+    /// REÇOIT. Le sens de `None` a donc changé : il voulait dire « la requête a
+    /// échoué ou la ligne est périmée », il veut dire « l'appelant ne m'a rien
+    /// passé ». Aucune garde n'exerçait ce chemin — déplacer une sémantique sans
+    /// garde, c'est la perdre au premier refactor.
+    #[test]
+    fn sans_battement_le_bloc_lifecycle_tombe_sur_le_singleton_LOCAL() {
+        let bloc = compose_lifecycle_block(None);
+        assert_eq!(bloc["source"], "brain_local_singleton");
+        assert!(
+            bloc["heartbeat_age_ms"].is_null(),
+            "sans battement, l'âge n'est pas 0 — il est INCONNU : {bloc}"
+        );
+    }
+
+    /// L'autre moitié : avec un battement, c'est LUI qui parle. Sans ce test, un
+    /// bloc qui ignorerait toujours son paramètre passerait le précédent tout seul.
+    #[test]
+    fn avec_un_battement_c_est_l_INDEXEUR_qui_parle() {
+        let maintenant = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0);
+        let row = battement(maintenant);
+        let bloc = compose_lifecycle_block(Some(&row));
+        assert_eq!(bloc["source"], "indexer_heartbeat");
+        assert_eq!(bloc["phase"], "Ready");
+        assert_eq!(bloc["wake_count"], 7);
+        assert!(
+            bloc["heartbeat_age_ms"].as_i64().unwrap_or(-1) >= 0,
+            "l'âge doit être calculé et positif : {bloc}"
+        );
+    }
 
     #[test]
     fn pipeline_status_reports_blocked_when_brain_only_and_pending_gt_zero() {

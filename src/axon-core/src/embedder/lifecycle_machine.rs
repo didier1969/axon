@@ -222,16 +222,49 @@ impl LifecycleHeartbeatSnapshot {
 /// Decoupled from `spawn_idle_watchdog` so the writer cadence + the
 /// sleep threshold can be tuned independently (REQ-AXO-91572 option
 /// B). `tick` typical 5 s.
-pub fn spawn_lifecycle_heartbeat_publisher<F>(tick: Duration, mut publish: F)
+///
+/// REQ-AXO-902589 — `publish` part sur le POOL BLOQUANT, et ce n'est pas un
+/// raffinement.
+///
+/// Le publieur réel fait un UPSERT PostgreSQL SYNCHRONE (`EmbedderLifecycleHeartbeat`).
+/// Appelé tel quel dans une tâche `tokio::spawn`, il immobilise un worker du
+/// scheduler à chaque tick — le motif exact, mesuré, qui bloquait 1,7 % des appels
+/// MCP du brain pendant 0,6 à 1,6 s. C'était le SEUL cas restant de ce motif dans le
+/// dépôt : il vit côté INDEXEUR, que le brain n'atteint pas, ce qui explique que la
+/// mesure du brain ne l'ait jamais vu. L'indexeur sert lui aussi une surface HTTP.
+///
+/// Le publieur est déplacé DANS la tâche bloquante puis récupéré : il est `FnMut`,
+/// donc il doit survivre d'un tick à l'autre. Une panique du publieur arrête la
+/// boucle et le DIT — un battement vivant sans publieur serait un mensonge de plus.
+pub fn spawn_lifecycle_heartbeat_publisher<F>(tick: Duration, publish: F)
 where
     F: FnMut(LifecycleHeartbeatSnapshot) + Send + 'static,
 {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tick);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut publish = publish;
         loop {
             interval.tick().await;
-            publish(LifecycleHeartbeatSnapshot::capture());
+            // `capture()` ne lit que des atomiques et l'environnement : il reste ici.
+            let snapshot = LifecycleHeartbeatSnapshot::capture();
+            match tokio::task::spawn_blocking(move || {
+                publish(snapshot);
+                publish
+            })
+            .await
+            {
+                Ok(rendu) => publish = rendu,
+                Err(erreur) => {
+                    tracing::error!(
+                        target: "axon::embedder::lifecycle",
+                        error = %erreur,
+                        "le publieur de battement a paniqué — la boucle s'arrête au lieu \
+                         de battre à vide"
+                    );
+                    break;
+                }
+            }
         }
     });
 }
@@ -310,6 +343,61 @@ mod tests {
         assert!(
             !l.should_drop(Duration::from_secs(20), now),
             "fresh activity must reset the idle clock"
+        );
+    }
+
+    /// REQ-AXO-902589 — le publieur de battement ne doit PAS immobiliser le
+    /// runtime, et cette fonction-ci est exerçable pour de vrai.
+    ///
+    /// `main_telemetry_blocking_tests.rs` déclare son propre trou : il démontre le
+    /// MOTIF sur un corps synthétique, parce que `spawn_runtime_telemetry` n'est pas
+    /// instanciable sans base. Ici le publieur est INJECTÉ — le correctif se prouve
+    /// donc sur la fonction réelle, pas sur son analogie.
+    ///
+    /// CE QUI EST MESURÉ, et la première version le mesurait mal : le temps que met
+    /// la tâche PRINCIPALE à revenir. Mesurer « quand une tâche voisine est-elle
+    /// ordonnancée » ne falsifiait RIEN — l'ordonnanceur mono-thread la servait avant
+    /// le publieur, et le test passait aussi bien sur le code défectueux. Un
+    /// `yield_now` donne d'abord la main au publieur ; ensuite, un `sleep(50 ms)` de
+    /// la tâche principale ne peut pas se terminer tant que le thread du runtime est
+    /// occupé par un UPSERT synchrone.
+    #[test]
+    fn le_publieur_de_battement_ne_bloque_PAS_la_surface() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        use std::time::Instant;
+
+        const PUBLICATION_MS: u64 = 200;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        // Contrôle POSITIF : sans lui, un publieur qui ne tournerait jamais ferait
+        // passer ce test tout seul — l'assertion ne prouverait rien.
+        let appels = StdArc::new(AtomicUsize::new(0));
+        let compteur = StdArc::clone(&appels);
+        let observe = rt.block_on(async move {
+            let t0 = Instant::now();
+            spawn_lifecycle_heartbeat_publisher(Duration::from_millis(1), move |_snapshot| {
+                compteur.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(PUBLICATION_MS));
+            });
+            // Donne la main au publieur AVANT de mesurer : sans ça, la tâche
+            // principale mesurerait son propre tour, pas l'occupation du thread.
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            t0.elapsed().as_millis()
+        });
+
+        assert!(
+            appels.load(Ordering::SeqCst) > 0,
+            "le publieur n'a JAMAIS été appelé — le test ne mesure rien"
+        );
+        assert!(
+            observe < 150,
+            "la tâche principale n'est revenue qu'après {observe} ms : l'UPSERT du \
+             battement est resté sur le runtime qui sert la surface HTTP de \
+             l'indexeur (attendu ~50 ms, soit le seul sleep demandé)"
         );
     }
 

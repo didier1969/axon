@@ -34,6 +34,43 @@ fn freshness_state_for_feed(runtime_truth_feed: &axon_core::bridge::RuntimeTruth
 /// runtime-truth pairing signal and the dashboard Pipeline-B compute verdict.
 const PEER_HEARTBEAT_FRESH_MS: i64 = 30_000;
 
+/// REQ-AXO-902589 (d) — la DURÉE du tick de télémétrie, enfin mesurée.
+///
+/// Le trou était déclaré par le test lui-même (`main_telemetry_blocking_tests.rs:13` :
+/// « ils ne couvrent PAS `spawn_runtime_telemetry` »). Et il n'existait AUCUNE
+/// instrumentation de durée dans cette boucle : si la queue périodique revenait,
+/// rien ne le dirait — il faudrait re-jouer 1 400 appels HTTP pour s'en apercevoir.
+///
+/// Deux nombres suffisent : le tick courant, et le pire depuis le démarrage. Le pire
+/// est indispensable — une queue qui frappe une seconde sur cent est invisible sur
+/// le dernier tick, et c'est exactement le régime mesuré (1,7 % des appels).
+static TELEMETRY_TICK_PIRE_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Enregistre la durée d'un tick et DIT quand elle dépasse sa propre période.
+///
+/// Rend `true` quand elle a averti — c'est ce qui rend le seuil falsifiable sans
+/// lire un log. Un tick qui dure plus que sa période ne « prend pas du retard » :
+/// il occupe le pool sans discontinuer, et le prochain part déjà en dette.
+pub(crate) fn enregistrer_duree_de_tick(duree: Duration, periode: Duration) -> bool {
+    use std::sync::atomic::Ordering;
+    let ms = duree.as_millis().min(u64::MAX as u128) as u64;
+    let pire_avant = TELEMETRY_TICK_PIRE_MS.fetch_max(ms, Ordering::Relaxed);
+    let pire = pire_avant.max(ms);
+    if duree < periode {
+        return false;
+    }
+    warn!(
+        target: "axon::telemetry::tick",
+        tick_ms = ms,
+        pire_ms = pire,
+        periode_ms = periode.as_millis() as u64,
+        "le tick de télémétrie a dépassé sa période — la queue périodique de \
+         REQ-AXO-902589 est de retour, ou une lecture PG s'est allongée"
+    );
+    true
+}
+
 pub(crate) fn spawn_runtime_telemetry(
     store: Arc<GraphStore>,
     queue: Arc<QueueStore>,
@@ -67,6 +104,9 @@ pub(crate) fn spawn_runtime_telemetry(
             let queue = Arc::clone(&queue);
             let results_tx = results_tx.clone();
             if tokio::task::spawn_blocking(move || {
+                // REQ-AXO-902589 (d) — on mesure ce tick. Sans ça, le retour de la
+                // queue ne se verrait qu'en rejouant 1 400 appels HTTP.
+                let tick_commence = std::time::Instant::now();
                 let mut snapshot = main_background::runtime_telemetry_snapshot(&store, &queue);
                 let runtime_mode = AxonRuntimeMode::from_env();
                 // REQ-AXO-901854 — pairing + runtime truth sourced from the
@@ -244,6 +284,14 @@ pub(crate) fn spawn_runtime_telemetry(
                 // dashboard-side (architectural invariants).
                 // Reuse the peer heartbeat already fetched at the top of the tick
                 // (REQ-AXO-901854) — no second PG round-trip per tick.
+                //
+                // REQ-AXO-902589 — cette phrase était FAUSSE jusqu'ici, et dans la
+                // direction rassurante : `dashboard_state::compose_lifecycle_block`
+                // refaisait `latest_lifecycle_heartbeat("indexer")` plus bas dans le
+                // MÊME tick. Le vrai compte était de QUATRE allers-retours PG par
+                // seconde en brain_only, pas trois. Le battement lui est désormais
+                // PASSÉ (son paramètre `store` a été retiré : la requête ne peut plus
+                // y être refaite par inadvertance), et la phrase est vraie.
                 let dashboard_heartbeat = indexer_peer_hb.as_ref();
                 let dashboard_compute = dashboard_heartbeat
                     .as_ref()
@@ -272,6 +320,7 @@ pub(crate) fn spawn_runtime_telemetry(
                 crate::dashboard_state::compose_publish_and_emit(
                     &store,
                     &results_tx,
+                    dashboard_heartbeat,
                     crate::dashboard_state::LiveMetrics {
                         ts_ms: dashboard_ts_ms,
                         build_id: &dashboard_build_id,
@@ -305,6 +354,7 @@ pub(crate) fn spawn_runtime_telemetry(
                         indexer_paired,
                     },
                 );
+                enregistrer_duree_de_tick(tick_commence.elapsed(), Duration::from_secs(1));
             })
             .await
             .is_err()
@@ -554,3 +604,49 @@ mod main_telemetry_beam_alarm_tests;
 #[cfg(test)]
 #[path = "main_telemetry_blocking_tests.rs"]
 mod main_telemetry_blocking_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REQ-AXO-902589 (d) — le seuil, sur ses DEUX moitiés.
+    ///
+    /// Sans la moitié négative, un instrument qui avertirait TOUJOURS passerait
+    /// pour correct et noierait l'opérateur — un avertissement permanent ne dit
+    /// rien de plus qu'un silence permanent.
+    #[test]
+    fn un_tick_plus_long_que_sa_periode_est_DIT_et_un_tick_court_ne_l_est_pas() {
+        let periode = Duration::from_millis(1000);
+        assert!(
+            !enregistrer_duree_de_tick(Duration::from_millis(12), periode),
+            "un tick de 12 ms sur une période de 1 s est NORMAL"
+        );
+        assert!(
+            enregistrer_duree_de_tick(Duration::from_millis(1400), periode),
+            "un tick de 1,4 s sur une période de 1 s doit être dit — c'est la \
+             signature mesurée de REQ-AXO-902589"
+        );
+        // La frontière, prise exactement : « dépasse sa période » inclut l'égalité,
+        // parce qu'un tick qui consomme toute sa période ne laisse rien au suivant.
+        assert!(enregistrer_duree_de_tick(periode, periode));
+    }
+
+    /// Le PIRE est retenu, sinon une queue qui frappe une seconde sur cent est
+    /// invisible — et c'est précisément le régime mesuré (1,7 % des appels).
+    #[test]
+    fn le_pire_tick_ne_REDESCEND_pas() {
+        use std::sync::atomic::Ordering;
+        let periode = Duration::from_millis(1000);
+        enregistrer_duree_de_tick(Duration::from_millis(1700), periode);
+        let apres_pic = TELEMETRY_TICK_PIRE_MS.load(Ordering::Relaxed);
+        assert!(apres_pic >= 1700, "pire={apres_pic}");
+        enregistrer_duree_de_tick(Duration::from_millis(3), periode);
+        // `>=` et non `==` : le compteur est PROCESS-GLOBAL, un test voisin peut
+        // légitimement l'avoir fait monter entre les deux lectures. La propriété
+        // testée est qu'il ne DESCEND pas, et elle se dit ainsi sans course.
+        assert!(
+            TELEMETRY_TICK_PIRE_MS.load(Ordering::Relaxed) >= apres_pic,
+            "un tick court NE DOIT PAS effacer le pic observé"
+        );
+    }
+}
