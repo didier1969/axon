@@ -52,6 +52,7 @@ Corps via `soll_get(id=…)` — ne pas recopier :
 | `GUI-AXO-1037` | `promote_live_safe.sh` est le seul chemin vers `bin/` |
 | `GUI-AXO-1038` | Politique de données : SOLL jamais supprimée |
 | `GUI-AXO-1039` | Jamais de `pkill` large |
+| `GUI-AXO-1040` | Le push se demande à CHAQUE fois — une porte verte n'autorise rien |
 
 ## Arrêts
 
