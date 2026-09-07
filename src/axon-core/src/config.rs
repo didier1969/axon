@@ -120,8 +120,24 @@ fn default_supported_extensions() -> Vec<String> {
     ]
 }
 
+/// REQ-AXO-902638 — ARBITRÉ PAR L'OPÉRATEUR le 2026-09-07 : les trois segments
+/// que `blocked_subtree_hint_segments` portait sans jamais les appliquer sont
+/// ADMIS dans la seule liste d'exclusion vivante.
+///
+/// L'arithmétique de la décision, mesurée sur `ist.indexedfile` avant qu'elle
+/// soit prise : `_bmad` 608 fichiers indexés, `_bmad-output` 10, `pg_wal` 0 — les
+/// segments WAL n'ayant pas d'extension, le filtre d'extension les écartait déjà.
+/// Les 618 lignes partent d'un tenant tiers (OptiPlanner) à la prochaine purge.
+///
+/// Réversible dans les deux sens : retirer un segment d'ici le fait revenir au
+/// `rescan_project` suivant. Rien n'est détruit.
 fn default_ignored_directory_segments() -> Vec<String> {
-    vec![".fastembed_cache".to_string()]
+    vec![
+        ".fastembed_cache".to_string(),
+        "pg_wal".to_string(),
+        "_bmad".to_string(),
+        "_bmad-output".to_string(),
+    ]
 }
 
 // REQ-AXO-902634 — `default_blocked_subtree_hint_segments`,
@@ -132,13 +148,12 @@ fn default_ignored_directory_segments() -> Vec<String> {
 // `record_subtree_hint`, n'a jamais existe comme fonction.
 //
 // Les TROIS segments que la liste portait en plus de
-// `ignored_directory_segments` — `pg_wal`, `_bmad`, `_bmad-output` — restent en
-// attente d'arbitrage operateur : les admettre retire 618 fichiers de l'index
-// d'un tenant tiers (mesure du 2026-09-07 sur `ist.indexedfile`). Ne pas les
-// reintroduire ici : la seule liste d'exclusion dure est
-// `ignored_directory_segments`, et la garde
+// `ignored_directory_segments` — `pg_wal`, `_bmad`, `_bmad-output` — ont ete
+// ARBITRES le 2026-09-07 (REQ-AXO-902638) : l'operateur les ADMET, et ils vivent
+// desormais dans `default_ignored_directory_segments` ci-dessus, seule liste
+// d'exclusion dure. La garde
 // `la_politique_d_exclusion_de_repertoires_n_a_qu_une_liste_et_aucun_champ_orphelin`
-// le tient.
+// tient l'invariant : une seule liste, aucun champ orphelin.
 
 fn default_soft_excluded_directory_segments_allowlist() -> Vec<String> {
     Vec::new()
@@ -223,7 +238,14 @@ mod tests {
 
     #[test]
     fn default_ignored_directory_segments_excludes_fastembed_cache() {
-        assert_eq!(default_ignored_directory_segments(), vec![".fastembed_cache"]);
+        // REQ-AXO-902638 — les trois segments arbitres le 2026-09-07 s'ajoutent au
+        // cache d'embeddings. L'egalite EXACTE est voulue : elle fait rougir tout
+        // ajout ou retrait silencieux, y compris une reintroduction de la liste
+        // morte que `REQ-AXO-902634` a enterree.
+        assert_eq!(
+            default_ignored_directory_segments(),
+            vec![".fastembed_cache", "pg_wal", "_bmad", "_bmad-output"]
+        );
     }
 
     #[test]

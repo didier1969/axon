@@ -1273,6 +1273,16 @@ mod tests {
         let parsed: crate::config::Config = toml::from_str("[indexing]\n").unwrap();
         let ignored = &parsed.indexing.ignored_directory_segments;
         assert!(ignored.iter().any(|segment| segment == ".fastembed_cache"));
+        // REQ-AXO-902638 — arbitrage operateur du 2026-09-07 : les trois segments
+        // que la liste morte de `REQ-AXO-902634` portait sans jamais les appliquer
+        // sont ADMIS. Verifie ici sur la config PARSEE, pas seulement sur le
+        // fournisseur de defaut : c'est ce chemin-la que le scanner emprunte.
+        for admis in ["pg_wal", "_bmad", "_bmad-output"] {
+            assert!(
+                ignored.iter().any(|segment| segment == admis),
+                "`{admis}` a ete admis par l'operateur et doit atteindre la config parsee"
+            );
+        }
         assert!(!ignored.iter().any(|segment| segment == "vendor"));
         assert!(!ignored.iter().any(|segment| segment == "build"));
         assert!(!ignored.iter().any(|segment| segment == "dist"));
