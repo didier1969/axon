@@ -409,8 +409,10 @@ pub fn current_runtime_tuning_snapshot() -> RuntimeTuningSnapshot {
     runtime_tuning_snapshot(bootstrap_runtime_tuning_state_from_env).0
 }
 
+/// REQ-AXO-902641 — visible au crate : `mcp/tests/runtime_surface.rs` lit lui
+/// aussi la politique et heritait le meme instantane.
 #[cfg(test)]
-fn refresh_runtime_tuning_snapshot_from_env() -> RuntimeTuningSnapshot {
+pub(crate) fn refresh_runtime_tuning_snapshot_from_env() -> RuntimeTuningSnapshot {
     crate::runtime_tuning::reset_runtime_tuning_snapshot(bootstrap_runtime_tuning_state_from_env())
 }
 

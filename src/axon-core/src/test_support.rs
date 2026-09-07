@@ -140,6 +140,13 @@ impl Drop for EnvVarGuard {
 #[path = "test_support_tests.rs"]
 mod test_support_tests;
 
+// REQ-AXO-902640 — gardes sur les soumissions Nexus des scripts de livraison.
+// Accrochees ici pour la meme raison que ci-dessus : elles doivent tourner dans
+// `cargo test --lib`, donc dans la porte.
+#[cfg(test)]
+#[path = "release_scripts_tests.rs"]
+mod release_scripts_tests;
+
 #[cfg(test)]
 pub mod test_db;
 

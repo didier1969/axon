@@ -1067,11 +1067,20 @@ test_targets_compile_step() {
     echo "❌ Targeted test qualification requires Nexus and its release runner." >&2
     return 1
   fi
+  # REQ-AXO-902640 — MEME defaut que REQ-AXO-902629, sur le site que ce REQ-la
+  # a manque : `--class` est MORT depuis REQ-VPC-290 et c'est lui qui portait le
+  # dimensionnement CPU. Sans `--cpus`, le courtier appliquait son defaut de
+  # transition (6G / 4 coeurs) pendant que cargo lancait ses threads — sans une
+  # erreur, sans une ligne de log, seulement une compilation qui rampe. Corriger
+  # une instance et laisser l'autre, c'est ce qui a produit deux fois le meme
+  # incident : GUI-PRO-108, fix de CLASSE. La garde
+  # `toute_soumission_nexus_declare_memoire_ET_cpus` fait desormais rougir toute
+  # soumission qui omet l'une des deux. Norme du depot : GUI-AXO-1034.
   if ! "$nexus_job_bin" run \
       --project AXON \
-      --class medium \
       --priority interactive \
-      --memory 6G \
+      --memory 12G \
+      --cpus 12 \
       --gpu-mib 0 \
       --timeout 45m \
       -- "$runner" test-lib "$source_root/src/axon-core"; then

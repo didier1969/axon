@@ -127,6 +127,10 @@ fn test_semantic_policy_runs_when_system_is_healthy() {
     let _guard_sg = lock_service_guard();
     crate::service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
+    // REQ-AXO-902641 — etablir les deux caches PROCESSUS que les resets ci-dessus ne
+    // couvrent pas (note complete sur `test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog`).
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
     crate::service_guard::record_vector_ready_queue_depth(8);
     crate::service_guard::record_vector_prepare_inflight_depth(2);
     crate::service_guard::record_vector_ready_queue_chunks(512);
@@ -143,6 +147,19 @@ fn test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog() {
     let _guard_sg = lock_service_guard();
     crate::service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
+    // REQ-AXO-902641 — la politique lit QUATRE etats PROCESSUS-globaux ; les deux
+    // resets ci-dessus n'en couvrent que deux. `RUNTIME_TUNING_SNAPSHOT` et le
+    // controleur de lot vectoriel sont des caches remplis par le PREMIER test du
+    // processus qui les touche, puis herites par tous les suivants. Sans ces deux
+    // etablissements, `configured_target_ready_chunks()` vaut ce qu'un voisin y a
+    // laisse : la chaine est `vector_ready_queue_depth` x `chunk_batch_size` ->
+    // `target_ready_chunks` -> `cadence_underfed` -> reason `gpu_cadence_underfed`
+    // -> profil `gpu_cadence_refill`, au lieu de celui qu'on assert ici. Symptome
+    // mesure le 2026-09-07 : vert 3/3 en isolation, rouge 2/5 en suite complete,
+    // sur du code que le lot n'avait pas touche. Meme remede que REQ-AXO-902414,
+    // deja employe plus bas dans ce fichier.
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
     crate::service_guard::record_vector_ready_queue_depth(8);
     crate::service_guard::record_vector_prepare_inflight_depth(2);
     crate::service_guard::record_vector_ready_queue_chunks(512);
@@ -153,14 +170,93 @@ fn test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog() {
     assert_eq!(policy.idle_sleep, Duration::from_millis(40));
 }
 
+/// REQ-AXO-902641 — LA REPRODUCTION, deterministe, du flake qui a coute deux
+/// suites completes.
+///
+/// Le symptome : `test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog`
+/// rendait `gpu_cadence_refill` au lieu d'`aggressive_drain`. Vert 3/3 en isolation,
+/// rouge 2/5 en suite complete, sur du code que personne n'avait touche.
+///
+/// La cause n'etait NI un verrou manquant NI une regression : le test prenait bien
+/// ses deux verrous et reinitialisait bien `service_guard` et le scheduler. Il lisait
+/// QUATRE etats PROCESSUS-globaux et n'en etablissait que deux. Le troisieme,
+/// `RUNTIME_TUNING_SNAPSHOT`, est un cache `get_or_insert` : le PREMIER test du
+/// processus qui le touche fixe la valeur pour tous les suivants, et le bootstrap
+/// des suivants est calcule puis jete sans un mot (REQ-AXO-902414 / REQ-AXO-902415).
+///
+/// Ce test-ci joue le MEME appel deux fois, avec les MEMES compteurs, et ne change
+/// que l'instantane. Les deux moities sont necessaires : la premiere seule ne
+/// prouverait pas la cause, la seconde seule ne prouverait pas que le remede tient.
+#[test]
+fn un_reglage_laisse_par_un_VOISIN_bascule_la_politique_sans_un_mot() {
+    let _guard = lock_env_guard();
+    let _guard_sg = lock_service_guard();
+
+    let compteurs = || {
+        crate::service_guard::record_vector_ready_queue_depth(8);
+        crate::service_guard::record_vector_prepare_inflight_depth(2);
+        crate::service_guard::record_vector_ready_queue_chunks(512);
+        crate::service_guard::record_vector_prepare_inflight_chunks(128);
+    };
+
+    // --- Moitie 1 : l'instantane ETABLI depuis notre environnement.
+    crate::service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
+    compteurs();
+    assert_eq!(
+        semantic_policy(2_000, ServicePressure::Healthy).profile,
+        "aggressive_drain",
+        "avec l'instantane etabli ici, le meme appel doit rendre le profil attendu"
+    );
+
+    // --- Moitie 2 : MEME appel, MEMES compteurs, un instantane laisse par un voisin.
+    //
+    // Le re-reset du scheduler n'est pas cosmetique : la lecture ci-dessus a ecrit
+    // `entered_at_ms`, et `hold_active` gele l'etat pendant
+    // UTILITY_FIRST_SCHEDULER_HOLD_WINDOW_MS. Sans lui, la seconde assertion lirait
+    // un etat gele et CE test deviendrait a son tour flaky.
+    crate::service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    crate::runtime_tuning::reset_runtime_tuning_snapshot(crate::runtime_tuning::RuntimeTuningState {
+        // 64 x 48 = 3 072 chunks reclames, contre 512 + 128 = 640 fournis :
+        // `cadence_underfed` bascule, et la raison devient `gpu_cadence_underfed`.
+        vector_ready_queue_depth: 64,
+        chunk_batch_size: 48,
+        ..super::bootstrap_runtime_tuning_state()
+    });
+    compteurs();
+    assert_eq!(
+        semantic_policy(2_000, ServicePressure::Healthy).profile,
+        "gpu_cadence_refill",
+        "un reglage laisse par un voisin doit suffire a basculer le verdict — c'est \
+         exactement ce qui est arrive, et rien ne le disait"
+    );
+
+    // Rendre le processus dans l'etat ou on l'a trouve.
+    crate::service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
+}
+
 #[test]
 fn test_graph_projection_allowed_under_queue_pressure_when_service_is_healthy() {
     // REQ-AXO-902274 — le scheduler est PROCESS-GLOBAL : le réinitialiser sans le
     // verrou écrase l'état qu'un test `semantic_policy` vient de construire, deux
     // lignes plus haut dans sa propre exécution. C'est ce test-ci qui corrompait
     // l'autre, d'où un échec qui semblait venir de code non modifié.
+    // REQ-AXO-902641 — les deux etablissements ci-dessous LISENT l'environnement du
+    // processus : sans ce verrou-ci, ils captent les variables qu'un voisin est en
+    // train de poser. Ordre env -> service_guard, uniforme dans tout le crate.
+    let _guard = lock_env_guard();
     let _guard_sg = lock_service_guard();
     reset_utility_first_scheduler_for_tests();
+    // REQ-AXO-902641 — etablir les deux caches PROCESSUS que les resets ci-dessus ne
+    // couvrent pas (note complete sur `test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog`).
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
     assert!(graph_projection_allowed(
         2_000,
         ServicePressure::Healthy,
@@ -171,6 +267,17 @@ fn test_graph_projection_allowed_under_queue_pressure_when_service_is_healthy() 
 
 #[test]
 fn test_graph_projection_disallowed_when_service_is_not_healthy() {
+    // REQ-AXO-902641 — ce test lisait la politique sans prendre un seul verrou et
+    // sans etablir un seul des quatre etats PROCESSUS-globaux dont elle depend. Il
+    // etait vert par chance : ses trois pressions non-Healthy court-circuitent la
+    // cadence. Le laisser ainsi, c'est garder ouvert le trou que ce REQ ferme —
+    // et c'est LUI qui lisait pendant qu'un voisin reinitialisait.
+    let _guard = lock_env_guard();
+    let _guard_sg = lock_service_guard();
+    crate::service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
     assert!(!graph_projection_allowed(
         100,
         ServicePressure::Recovering,
@@ -194,8 +301,16 @@ fn test_graph_projection_disallowed_when_service_is_not_healthy() {
 #[test]
 fn test_graph_projection_ignores_large_vector_backlog_on_cpu_only_hosts() {
     // REQ-AXO-902274 — même scheduler global, même verrou (voir la note ci-dessus).
+    // REQ-AXO-902641 — les deux etablissements ci-dessous LISENT l'environnement du
+    // processus : sans ce verrou-ci, ils captent les variables qu'un voisin est en
+    // train de poser. Ordre env -> service_guard, uniforme dans tout le crate.
+    let _guard = lock_env_guard();
     let _guard_sg = lock_service_guard();
     reset_utility_first_scheduler_for_tests();
+    // REQ-AXO-902641 — etablir les deux caches PROCESSUS que les resets ci-dessus ne
+    // couvrent pas (note complete sur `test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog`).
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
     assert!(graph_projection_allowed(
         100,
         ServicePressure::Healthy,
@@ -210,6 +325,10 @@ fn test_semantic_policy_pauses_when_live_service_is_critical() {
     let _guard_sg = lock_service_guard();
     crate::service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
+    // REQ-AXO-902641 — etablir les deux caches PROCESSUS que les resets ci-dessus ne
+    // couvrent pas (note complete sur `test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog`).
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
     let policy = semantic_policy(100, ServicePressure::Critical);
     assert!(policy.pause);
     assert_eq!(policy.sleep, Duration::from_secs(2));
@@ -221,6 +340,10 @@ fn test_semantic_policy_throttles_without_pausing_when_service_is_degraded() {
     let _guard_sg = lock_service_guard();
     crate::service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
+    // REQ-AXO-902641 — etablir les deux caches PROCESSUS que les resets ci-dessus ne
+    // couvrent pas (note complete sur `test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog`).
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
     crate::service_guard::record_vector_ready_queue_depth(4);
     crate::service_guard::record_vector_prepare_inflight_depth(2);
     crate::service_guard::record_vector_ready_queue_chunks(512);
@@ -236,6 +359,10 @@ fn test_semantic_policy_stays_throttled_while_service_recovers() {
     let _guard_sg = lock_service_guard();
     crate::service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
+    // REQ-AXO-902641 — etablir les deux caches PROCESSUS que les resets ci-dessus ne
+    // couvrent pas (note complete sur `test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog`).
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
     crate::service_guard::record_vector_ready_queue_depth(4);
     crate::service_guard::record_vector_prepare_inflight_depth(2);
     crate::service_guard::record_vector_ready_queue_chunks(512);
@@ -491,6 +618,10 @@ fn test_semantic_policy_pauses_while_interactive_priority_is_active() {
     let _guard_sg = lock_service_guard();
     crate::service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
+    // REQ-AXO-902641 — etablir les deux caches PROCESSUS que les resets ci-dessus ne
+    // couvrent pas (note complete sur `test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog`).
+    super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
     crate::service_guard::mcp_request_started();
     let policy = semantic_policy(100, ServicePressure::Healthy);
     crate::service_guard::mcp_request_finished();
@@ -510,6 +641,10 @@ fn test_semantic_policy_respects_runtime_tuning_scale_pct() {
         std::env::set_var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT", "200");
     }
     super::refresh_runtime_tuning_snapshot_from_env();
+    // REQ-AXO-902641 — le controleur de lot vectoriel est le QUATRIEME cache
+    // processus ; l'etablissement du reglage seul ne suffit pas, c'est lui qui
+    // porte `target_files_per_cycle` et `target_embed_batch_chunks`.
+    super::refresh_vector_batch_controller_from_env();
     crate::service_guard::record_vector_ready_queue_depth(8);
     crate::service_guard::record_vector_prepare_inflight_depth(2);
     crate::service_guard::record_vector_ready_queue_chunks(512);
@@ -524,6 +659,7 @@ fn test_semantic_policy_respects_runtime_tuning_scale_pct() {
         std::env::remove_var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT");
     }
     super::refresh_runtime_tuning_snapshot_from_env();
+    super::refresh_vector_batch_controller_from_env();
 }
 
 #[test]

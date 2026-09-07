@@ -764,3 +764,160 @@ fn no_test_sets_a_runtime_tuning_env_var_without_establishing_the_snapshot() {
         offenders.join("\n  ")
     );
 }
+
+// ---------------------------------------------------------------------------
+// REQ-AXO-902641 — la politique de drain se lit dans QUATRE caches PROCESSUS,
+// et les deux resets usuels n'en couvrent que deux.
+//
+// La garde du dessus (`no_test_sets_a_runtime_tuning_env_var_without_...`)
+// declare elle-meme son trou : « elle ne detecte PAS un test qui LIRAIT
+// l'instantane sans poser aucune variable — celui-la herite aussi, mais rien
+// dans sa source ne le trahit statiquement ». C'etait faux sur un point : cela
+// SE trahit, par l'appel a un lecteur de politique. Cette garde-ci ferme le
+// trou par ce bout-la, et elle a rendu DIX contrevenants au premier passage,
+// dont celui qui a coute deux suites completes.
+// ---------------------------------------------------------------------------
+
+/// Appeler l'un de ces lecteurs, c'est lire `RUNTIME_TUNING_SNAPSHOT` ET le
+/// controleur de lot vectoriel — la chaine passe par
+/// `configured_target_ready_chunks` puis `cadence_underfed`.
+const LECTEURS_DE_POLITIQUE: &[&str] = &[
+    "semantic_policy(",
+    "semantic_policy_with_graph(",
+    "graph_projection_allowed(",
+    "current_utility_first_scheduler_diagnostics(",
+    "configured_target_ready_chunks(",
+];
+
+/// Etablir l'instantane de reglage runtime, dans l'une ou l'autre de ses formes.
+const ETABLIT_LE_REGLAGE: &[&str] = &[
+    "refresh_runtime_tuning_snapshot_from_env",
+    "reset_runtime_tuning_snapshot",
+];
+
+/// Etablir le controleur de lot vectoriel.
+const ETABLIT_LE_CONTROLEUR: &[&str] = &[
+    "refresh_vector_batch_controller_from_env",
+    "reset_vector_batch_controller_for_tests",
+];
+
+/// La regle, prise en ENTREE des sources plutot que du disque : c'est ce qui
+/// rend les deux verdicts atteignables a volonte. Une garde dont l'entree ne
+/// peut pas etre substituee n'observe que la branche que le depot lui laisse.
+fn tests_lisant_une_politique_sans_etablir_les_caches(sources: &[(String, String)]) -> Vec<String> {
+    let mut manquants = Vec::new();
+    for (path, text) in sources {
+        let lines: Vec<&str> = text.lines().collect();
+        let regions = test_regions(&lines, is_test_file(path));
+        if regions.is_empty() {
+            continue;
+        }
+        for (name, start, end, inside_impl) in fn_blocks(&lines) {
+            if inside_impl {
+                continue;
+            }
+            if !regions
+                .iter()
+                .any(|(debut, fin)| *debut <= start && start <= *fin)
+            {
+                continue;
+            }
+            let body = lines[start..=end].join("\n");
+            if !LECTEURS_DE_POLITIQUE.iter().any(|l| body.contains(l)) {
+                continue;
+            }
+            let mut absents: Vec<&str> = Vec::new();
+            if !ETABLIT_LE_REGLAGE.iter().any(|e| body.contains(e)) {
+                absents.push("l'instantane de reglage runtime");
+            }
+            if !ETABLIT_LE_CONTROLEUR.iter().any(|e| body.contains(e)) {
+                absents.push("le controleur de lot vectoriel");
+            }
+            if absents.is_empty() {
+                continue;
+            }
+            manquants.push(format!("{path}::{name} — n'etablit pas {}", absents.join(" ni ")));
+        }
+    }
+    manquants
+}
+
+/// Le remede, sorti du corps du test A DESSEIN.
+///
+/// Ecrit en ligne, il faisait rougir `no_test_touches_global_service_state_...` :
+/// cette garde-la lit les CORPS de fonction et ce texte cite les deux resets. Un
+/// message d'aide accuse comme une mutation — le meme genre de confusion que la
+/// garde des soumissions Nexus a eu avec `local nexus_job_bin runner`. Une
+/// constante de module n'est pas un corps de fonction, et le message reste entier.
+const REMEDE_POLITIQUE: &str = "ces tests lisent la politique de drain sans etablir les caches \
+     PROCESSUS dont elle depend (REQ-AXO-902641).\n\
+     Mecanisme : `RUNTIME_TUNING_SNAPSHOT` et le controleur de lot vectoriel sont \
+     remplis par le PREMIER test du processus qui les touche, puis herites. Les deux \
+     resets usuels (celui de `service_guard`, celui du scheduler utility-first) ne \
+     les couvrent NI l'un NI l'autre. Ton test lit donc `vector_ready_queue_depth` x \
+     `chunk_batch_size` laisses par un voisin, `cadence_underfed` bascule, et le \
+     profil rendu est `gpu_cadence_refill` au lieu du tien. Vert en isolation, rouge \
+     en suite, sur du code que personne n'a touche.\n\
+     Geste : sous tes verrous (env PUIS service_guard), apres ces deux resets, \
+     appelle `refresh_runtime_tuning_snapshot_from_env()` et \
+     `refresh_vector_batch_controller_from_env()`.";
+
+#[test]
+fn aucun_test_ne_lit_une_politique_sans_etablir_les_caches_dont_elle_depend() {
+    let offenders = tests_lisant_une_politique_sans_etablir_les_caches(&crate_sources());
+    assert!(
+        offenders.is_empty(),
+        "{REMEDE_POLITIQUE}\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// La garde sait dire NON, et elle sait dire OUI — sur chacune de ses DEUX
+/// moities separement. Une garde qui n'exigerait qu'un seul des deux
+/// etablissements laisserait passer exactement le defaut d'origine : le test
+/// fautif reinitialisait bien deux etats sur quatre.
+#[test]
+fn MUTANT_la_garde_de_politique_exige_les_DEUX_etablissements() {
+    let entete = "#[cfg(test)]\nmod t {\n";
+    let pied = "}\n";
+    let corps = |etablissements: &str| {
+        format!(
+            "{entete}    #[test]\n    fn essai() {{\n{etablissements}        \
+             let p = semantic_policy(2_000, Healthy);\n        assert!(p.pause);\n    }}\n{pied}"
+        )
+    };
+    let reglage = "        refresh_runtime_tuning_snapshot_from_env();\n";
+    let controleur = "        refresh_vector_batch_controller_from_env();\n";
+
+    let verdict = |texte: String| {
+        tests_lisant_une_politique_sans_etablir_les_caches(&[("f.rs".to_string(), texte)])
+    };
+
+    // Aucun des deux : rouge, et les DEUX manques sont nommes.
+    let rien = verdict(corps(""));
+    assert_eq!(rien.len(), 1, "{rien:?}");
+    assert!(rien[0].contains("reglage runtime"), "{rien:?}");
+    assert!(rien[0].contains("controleur de lot"), "{rien:?}");
+
+    // Le reglage seul : toujours rouge, et SEUL le controleur est reproche.
+    let sans_controleur = verdict(corps(reglage));
+    assert_eq!(sans_controleur.len(), 1, "{sans_controleur:?}");
+    assert!(!sans_controleur[0].contains("reglage runtime"), "{sans_controleur:?}");
+    assert!(sans_controleur[0].contains("controleur de lot"), "{sans_controleur:?}");
+
+    // Le controleur seul : toujours rouge, et SEUL le reglage est reproche.
+    let sans_reglage = verdict(corps(controleur));
+    assert_eq!(sans_reglage.len(), 1, "{sans_reglage:?}");
+    assert!(sans_reglage[0].contains("reglage runtime"), "{sans_reglage:?}");
+    assert!(!sans_reglage[0].contains("controleur de lot"), "{sans_reglage:?}");
+
+    // Les deux : vert.
+    assert!(
+        verdict(corps(&format!("{reglage}{controleur}"))).is_empty(),
+        "un test qui etablit les deux caches ne doit rien se voir reprocher"
+    );
+
+    // Et un test qui ne LIT aucune politique n'est pas concerne, meme nu.
+    let hors_sujet = format!("{entete}    #[test]\n    fn essai() {{\n        assert!(true);\n    }}\n{pied}");
+    assert!(verdict(hors_sujet).is_empty());
+}

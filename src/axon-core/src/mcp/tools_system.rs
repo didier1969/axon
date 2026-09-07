@@ -1809,6 +1809,49 @@ impl McpServer {
         const ETA_MS_PER_FILE: usize = 30;
         let projection_eta_ms = files_scheduled.saturating_mul(ETA_MS_PER_FILE);
 
+        // Step 6 — REQ-AXO-902639 : DIRE quelle configuration a decide de ce
+        // compte, et depuis quand.
+        //
+        // Le 2026-09-07, cet outil a rendu CINQ fois `enrolled: 1243` apres un
+        // promote verifie, sans un mot, parce que la configuration en vigueur
+        // n'etait pas celle du disque. Rien dans cette reponse ne permettait de
+        // le voir : ni le compte, ni le statut, ni l'identite du binaire. Le
+        // signal qui manquait est celui-ci — le fichier a bouge APRES sa
+        // lecture — et il vaut d'etre dans le TEXTE, que l'operateur lit, pas
+        // seulement dans les donnees.
+        let provenance = crate::config::config_provenance();
+        let config_source = provenance.source.label();
+        let config_overriding_keys: Vec<String> = provenance
+            .overriding_keys
+            .iter()
+            .map(|cle| match &cle.scalar {
+                Some(valeur) => format!("{} ({valeur})", cle.key),
+                None => format!(
+                    "{} (+{} / -{})",
+                    cle.key,
+                    cle.added.len(),
+                    cle.removed.len()
+                ),
+            })
+            .collect();
+        let config_overriding_display = if config_overriding_keys.is_empty() {
+            "aucune — les defauts compiles s'appliquent".to_string()
+        } else {
+            format!(
+                "{} — ces cles REMPLACENT le defaut compile, elles ne le completent pas",
+                config_overriding_keys.join(", ")
+            )
+        };
+        let config_staleness = crate::config::config_staleness();
+        let config_staleness_line = match &config_staleness {
+            Some(perime) => format!(
+                "\n\n⚠️ **La configuration en vigueur n'est PAS celle du disque.**                  `{}` a ete modifie {} ms APRES sa lecture par ce processus. Ce                  compte a ete produit avec l'ANCIENNE. La configuration est lue                  une seule fois par processus : redemarrer le role concerne                  (`./scripts/axon-live restart --indexer-graph`) est ce qui                  l'applique — un `rescan_project` de plus rendra le meme                  chiffre.",
+                perime.path,
+                perime.age_ms()
+            ),
+            None => String::new(),
+        };
+
         let report = format!(
             "### Rescan Project\n\n\
              **project_code:** `{project_code}`\n\
@@ -1818,7 +1861,11 @@ impl McpServer {
              **projection_eta_ms:** {projection_eta_ms}\n\
              **invalidated_rows:** {invalidated_rows_display}\n\
              **cache_invalidation:** {cache_invalidation}\n\
-             **notify_outcome:** {notify_outcome}\n\n\
+             **notify_outcome:** {notify_outcome}\n\
+             **config_source:** `{config_source}`\n\
+             **config_loaded_at_unix_ms:** {config_loaded_at}\n\
+             **config_overriding_keys:** {config_overriding_display}\
+             {config_staleness_line}\n\n\
              The subtree is enrolled SYNCHRONOUSLY into `ist.IndexedFile` \
              (status='discovered') by this call ; the DBQ-A claim feeder \
              (REQ-AXO-901897) drains those rows into pipeline A. \
@@ -1829,6 +1876,7 @@ impl McpServer {
              it via `./scripts/axon-{{live,dev}} start --indexer-graph` and the \
              next boot will replay IndexedFile from PG before scanning.",
             project_path_display = project_path,
+            config_loaded_at = provenance.loaded_at_unix_ms,
             invalidated_rows_display = invalidated_rows
                 .map(|count| count.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
@@ -1844,6 +1892,13 @@ impl McpServer {
             "invalidated_rows": invalidated_rows,
             "cache_invalidation": cache_invalidation,
             "notify_outcome": notify_outcome,
+            "config_provenance": {
+                "source": config_source,
+                "loaded_at_unix_ms": provenance.loaded_at_unix_ms,
+                "overriding_keys": config_overriding_keys,
+                "stale": config_staleness.is_some(),
+                "stale_by_ms": config_staleness.as_ref().map(|p| p.age_ms()),
+            },
         });
         Some(json!({
             "content": [{ "type": "text", "text": report }],

@@ -3453,6 +3453,13 @@ fn test_graph_backlog_blocks_vector_priority_until_graph_ready_advances() {
     let _sg_guard = crate::service_guard::lock_for_tests();
     service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
+    // REQ-AXO-902641 — les deux resets ci-dessus ne couvrent que DEUX des quatre
+    // etats PROCESSUS-globaux que lit `current_utility_first_scheduler_diagnostics`.
+    // `RUNTIME_TUNING_SNAPSHOT` et le controleur de lot sont des caches remplis par
+    // le PREMIER test du processus qui les touche : `configured_target_ready_chunks()`
+    // valait donc ce qu'un voisin y avait laisse. Meme remede que REQ-AXO-902414.
+    crate::embedder::refresh_runtime_tuning_snapshot_from_env();
+    crate::embedder::refresh_vector_batch_controller_from_env();
 
     service_guard::record_vector_ready_queue_depth(0);
     service_guard::record_vector_prepare_inflight_depth(0);

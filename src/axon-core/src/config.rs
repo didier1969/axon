@@ -25,8 +25,171 @@ pub struct IndexingConfig {
     pub ignore_reconcile_dry_run: bool,
 }
 
-pub static CONFIG: Lazy<Config> = Lazy::new(|| {
-    load_config().unwrap_or_else(|_| Config {
+// ---------------------------------------------------------------------------
+// REQ-AXO-902639 — DIRE quelle configuration d'indexation est en vigueur, et
+// depuis quand.
+//
+// Le 2026-09-07, apres un promote verifie (`build_identity: match`,
+// `truth_status: canonical`), CINQ `rescan_project full=true` ont rendu le meme
+// `enrolled: 1243` — le compte d'AVANT le correctif — sans un mot. Le binaire
+// servi etait bien le neuf. Ce qui ne l'etait pas, c'etait la configuration :
+// `.axon/capabilities.toml` declarait `ignored_directory_segments`, cette cle
+// REMPLACE le `#[serde(default = "...")]` compile (elle ne fusionne pas), et le
+// `Lazy` avait ete force au demarrage du processus, donc l'edition du fichier
+// n'existait pas encore pour lui. Deux autorites muettes empilees. Il a fallu
+// un redemarrage pour voir `enrolled: 625` — delta 618, exactement l'attendu.
+//
+// CE QUE CE BLOC FAIT, ET CE QU'IL NE FAIT PAS. Il ne recharge rien a chaud et
+// ne fusionne rien : ce sont deux autres decisions. Il dit seulement, a qui
+// demande, d'ou vient la configuration en vigueur, a quel instant elle a ete
+// lue, quelles cles surchargent le defaut compile, et si le fichier a bouge
+// DEPUIS. C'est ce dernier signal qui aurait economise les cinq rescans.
+// ---------------------------------------------------------------------------
+
+/// D'ou vient la configuration en vigueur.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Le fichier lu, chemin absolu tel que resolu par la remontee des parents.
+    File(String),
+    /// Aucun `.axon/capabilities.toml` trouve : les defauts compiles.
+    CompiledDefaults,
+}
+
+impl ConfigSource {
+    pub fn label(&self) -> String {
+        match self {
+            ConfigSource::File(chemin) => chemin.clone(),
+            ConfigSource::CompiledDefaults => "<defauts compiles>".to_string(),
+        }
+    }
+}
+
+/// Une cle DECLAREE dans le fichier, donc qui remplace le defaut compile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigKeyOverride {
+    pub key: String,
+    /// Presents dans le fichier, absents du defaut compile.
+    pub added: Vec<String>,
+    /// Presents dans le defaut compile, absents du fichier — LE piege : une
+    /// cle declaree remplace, elle ne complete pas.
+    pub removed: Vec<String>,
+    /// Pour une cle qui n'est pas une liste : sa valeur, rendue en texte.
+    pub scalar: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigProvenance {
+    pub source: ConfigSource,
+    pub loaded_at_unix_ms: u64,
+    pub overriding_keys: Vec<ConfigKeyOverride>,
+}
+
+/// Le fichier a change APRES la lecture : ce qui tourne n'est plus ce qui est
+/// ecrit sur le disque.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigStaleness {
+    pub path: String,
+    pub modified_at_unix_ms: u64,
+    pub loaded_at_unix_ms: u64,
+}
+
+impl ConfigStaleness {
+    pub fn age_ms(&self) -> u64 {
+        self.modified_at_unix_ms
+            .saturating_sub(self.loaded_at_unix_ms)
+    }
+}
+
+fn maintenant_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// La regle de peremption, prise en ENTREE plutot qu'au disque : c'est ce qui
+/// rend ses DEUX verdicts atteignables sans toucher un fichier.
+pub fn staleness_from(
+    path: &str,
+    modified_at_unix_ms: u64,
+    loaded_at_unix_ms: u64,
+) -> Option<ConfigStaleness> {
+    if modified_at_unix_ms <= loaded_at_unix_ms {
+        return None;
+    }
+    Some(ConfigStaleness {
+        path: path.to_string(),
+        modified_at_unix_ms,
+        loaded_at_unix_ms,
+    })
+}
+
+/// Les cles DECLAREES dans `[indexing]`, comparees au defaut compile.
+///
+/// Serde ne peut pas repondre a cette question : `#[serde(default = "...")]`
+/// rend une valeur identique que la cle ait ete ecrite ou omise. Il faut relire
+/// le TOML en `toml::Value` pour savoir laquelle etait PRESENTE.
+pub fn overriding_keys(indexing: &toml::value::Table) -> Vec<ConfigKeyOverride> {
+    let listes: [(&str, Vec<String>); 3] = [
+        ("supported_extensions", default_supported_extensions()),
+        (
+            "ignored_directory_segments",
+            default_ignored_directory_segments(),
+        ),
+        (
+            "soft_excluded_directory_segments_allowlist",
+            default_soft_excluded_directory_segments_allowlist(),
+        ),
+    ];
+    let mut out = Vec::new();
+    for (cle, defaut) in listes {
+        let Some(valeur) = indexing.get(cle) else {
+            continue;
+        };
+        let Some(tableau) = valeur.as_array() else {
+            continue;
+        };
+        let declares: Vec<String> = tableau
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        out.push(ConfigKeyOverride {
+            key: cle.to_string(),
+            added: declares
+                .iter()
+                .filter(|d| !defaut.contains(d))
+                .cloned()
+                .collect(),
+            removed: defaut
+                .iter()
+                .filter(|d| !declares.contains(d))
+                .cloned()
+                .collect(),
+            scalar: None,
+        });
+    }
+    for cle in [
+        "use_git_global_ignore",
+        "legacy_axonignore_additive",
+        "ignore_reconcile_enabled",
+        "ignore_reconcile_dry_run",
+    ] {
+        let Some(valeur) = indexing.get(cle) else {
+            continue;
+        };
+        out.push(ConfigKeyOverride {
+            key: cle.to_string(),
+            added: Vec::new(),
+            removed: Vec::new(),
+            scalar: Some(valeur.to_string()),
+        });
+    }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    out
+}
+
+fn config_par_defaut() -> Config {
+    Config {
         indexing: IndexingConfig {
             supported_extensions: default_supported_extensions(),
             ignored_directory_segments: default_ignored_directory_segments(),
@@ -37,8 +200,53 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| {
             ignore_reconcile_enabled: default_ignore_reconcile_enabled(),
             ignore_reconcile_dry_run: default_ignore_reconcile_dry_run(),
         },
-    })
+    }
+}
+
+static CONFIG_PROVENANCE: std::sync::OnceLock<ConfigProvenance> = std::sync::OnceLock::new();
+
+pub static CONFIG: Lazy<Config> = Lazy::new(|| {
+    let (config, provenance) = load_config().unwrap_or_else(|_| {
+        (
+            config_par_defaut(),
+            ConfigProvenance {
+                source: ConfigSource::CompiledDefaults,
+                loaded_at_unix_ms: maintenant_unix_ms(),
+                overriding_keys: Vec::new(),
+            },
+        )
+    });
+    let _ = CONFIG_PROVENANCE.set(provenance);
+    config
 });
+
+/// La provenance de la configuration EN VIGUEUR.
+///
+/// Force le `Lazy` : sans cela, un appelant qui demande la provenance avant tout
+/// autre lecteur recevrait « pas encore chargee » et croirait a un defaut.
+pub fn config_provenance() -> &'static ConfigProvenance {
+    Lazy::force(&CONFIG);
+    CONFIG_PROVENANCE.get().expect(
+        "le Lazy vient d'etre force : la provenance est posee dans le meme bloc que la config",
+    )
+}
+
+/// Le fichier lu a-t-il change depuis ? `None` quand il n'a pas bouge, quand la
+/// source est le defaut compile, ou quand le fichier a disparu.
+pub fn config_staleness() -> Option<ConfigStaleness> {
+    let provenance = config_provenance();
+    let ConfigSource::File(chemin) = &provenance.source else {
+        return None;
+    };
+    let modifie = std::fs::metadata(chemin)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    staleness_from(chemin, modifie, provenance.loaded_at_unix_ms)
+}
 
 /// REQ-AXO-902632 — la racine du parc, resolue a UN endroit. Le defaut en dur
 /// vient de `runtime_boot`, ou il etait ecrit ; il n'est pas invente ici.
@@ -175,15 +383,29 @@ fn default_ignore_reconcile_dry_run() -> bool {
     true
 }
 
-fn load_config() -> anyhow::Result<Config> {
+fn load_config() -> anyhow::Result<(Config, ConfigProvenance)> {
     // Try to find .axon/capabilities.toml in current or parent dirs
     let mut path = std::env::current_dir()?;
     loop {
         let config_path = path.join(".axon").join("capabilities.toml");
         if config_path.exists() {
-            let content = fs::read_to_string(config_path)?;
+            let content = fs::read_to_string(&config_path)?;
             let config: Config = toml::from_str(&content)?;
-            return Ok(config);
+            // REQ-AXO-902639 — second parcours, en `toml::Value` : serde a deja
+            // remplace les cles absentes par leur defaut, il ne peut plus dire
+            // lesquelles etaient ECRITES. C'est cette question-la qui manquait.
+            let brut: toml::Value = toml::from_str(&content)?;
+            let declarees = brut
+                .get("indexing")
+                .and_then(|v| v.as_table())
+                .map(overriding_keys)
+                .unwrap_or_default();
+            let provenance = ConfigProvenance {
+                source: ConfigSource::File(config_path.to_string_lossy().to_string()),
+                loaded_at_unix_ms: maintenant_unix_ms(),
+                overriding_keys: declarees,
+            };
+            return Ok((config, provenance));
         }
         if !path.pop() {
             break;
@@ -365,4 +587,104 @@ mod tests {
              sinon la cle est decorative et l'operateur reglera dans le vide"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // REQ-AXO-902639 — la provenance et la peremption, sur des entrees
+    // substituables : les DEUX verdicts doivent etre atteignables sans toucher
+    // un fichier ni dependre de l'etat du poste.
+    // -----------------------------------------------------------------------
+
+    fn table(toml_source: &str) -> toml::value::Table {
+        toml::from_str::<toml::Value>(toml_source)
+            .expect("TOML de test")
+            .get("indexing")
+            .and_then(|v| v.as_table())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn une_cle_ABSENTE_du_fichier_ne_surcharge_rien() {
+        let declarees = overriding_keys(&table("[indexing]\n"));
+        assert!(
+            declarees.is_empty(),
+            "un fichier qui ne declare rien ne surcharge rien : {declarees:?}"
+        );
+    }
+
+    #[test]
+    fn une_cle_PRESENTE_est_signalee_meme_quand_elle_recopie_le_defaut() {
+        // Le piege exact du 2026-09-07 : la cle recopiait le defaut PLUS trois
+        // segments, et rien ne disait qu'elle remplacait le defaut compile.
+        // Une cle presente doit se voir, meme identique — c'est elle qui decide.
+        let declarees = overriding_keys(&table(
+            "[indexing]\nignored_directory_segments = [\".fastembed_cache\"]\n",
+        ));
+        assert_eq!(declarees.len(), 1, "{declarees:?}");
+        assert_eq!(declarees[0].key, "ignored_directory_segments");
+        assert!(declarees[0].added.is_empty(), "{declarees:?}");
+        // ... et ce qu'elle FAIT DISPARAITRE est nomme : c'est le sens du mot
+        // « remplace ». Le defaut compile en porte quatre depuis REQ-AXO-902638.
+        assert_eq!(
+            declarees[0].removed,
+            vec!["pg_wal", "_bmad", "_bmad-output"],
+            "{declarees:?}"
+        );
+    }
+
+    #[test]
+    fn une_cle_qui_AJOUTE_et_une_cle_qui_RETIRE_se_distinguent() {
+        let declarees = overriding_keys(&table(
+            "[indexing]\nignored_directory_segments = [\".fastembed_cache\", \"pg_wal\", \
+             \"_bmad\", \"_bmad-output\", \"node_modules\"]\n",
+        ));
+        assert_eq!(declarees.len(), 1, "{declarees:?}");
+        assert_eq!(declarees[0].added, vec!["node_modules"], "{declarees:?}");
+        assert!(declarees[0].removed.is_empty(), "{declarees:?}");
+    }
+
+    #[test]
+    fn une_cle_scalaire_declaree_est_rendue_avec_sa_valeur() {
+        let declarees = overriding_keys(&table("[indexing]\nuse_git_global_ignore = false\n"));
+        assert_eq!(declarees.len(), 1, "{declarees:?}");
+        assert_eq!(declarees[0].key, "use_git_global_ignore");
+        assert_eq!(declarees[0].scalar.as_deref(), Some("false"), "{declarees:?}");
+    }
+
+    #[test]
+    fn la_peremption_dit_OUI_quand_le_fichier_a_bouge_APRES_la_lecture() {
+        let verdict = staleness_from("/x/.axon/capabilities.toml", 2_000, 1_000)
+            .expect("un fichier modifie apres la lecture DOIT etre signale");
+        assert_eq!(verdict.path, "/x/.axon/capabilities.toml");
+        assert_eq!(verdict.age_ms(), 1_000);
+    }
+
+    #[test]
+    fn la_peremption_dit_NON_quand_le_fichier_n_a_pas_bouge() {
+        // Les deux moities comptent. Une garde qui crierait toujours serait
+        // ignoree en une semaine, et le signal du 2026-09-07 serait reperdu.
+        assert!(staleness_from("/x", 1_000, 1_000).is_none(), "mtime == loaded");
+        assert!(staleness_from("/x", 999, 1_000).is_none(), "mtime < loaded");
+    }
+
+    #[test]
+    fn la_provenance_en_vigueur_est_toujours_repondue() {
+        // Elle force le `Lazy` : la question ne peut pas rendre « pas encore
+        // chargee », qui se lirait comme « les defauts s'appliquent ».
+        let provenance = config_provenance();
+        assert!(
+            provenance.loaded_at_unix_ms > 0,
+            "l'instant du chargement doit etre conserve : {provenance:?}"
+        );
+        match &provenance.source {
+            ConfigSource::File(chemin) => assert!(
+                chemin.ends_with("capabilities.toml"),
+                "la source nommee doit etre le fichier LU : {chemin}"
+            ),
+            ConfigSource::CompiledDefaults => {
+                assert!(provenance.overriding_keys.is_empty())
+            }
+        }
+    }
+
 }
