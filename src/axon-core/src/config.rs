@@ -13,14 +13,8 @@ pub struct IndexingConfig {
     pub supported_extensions: Vec<String>,
     #[serde(default = "default_ignored_directory_segments")]
     pub ignored_directory_segments: Vec<String>,
-    #[serde(default = "default_blocked_subtree_hint_segments")]
-    pub blocked_subtree_hint_segments: Vec<String>,
     #[serde(default = "default_soft_excluded_directory_segments_allowlist")]
     pub soft_excluded_directory_segments_allowlist: Vec<String>,
-    #[serde(default = "default_subtree_hint_cooldown_ms")]
-    pub subtree_hint_cooldown_ms: u64,
-    #[serde(default = "default_subtree_hint_retry_budget")]
-    pub subtree_hint_retry_budget: u64,
     #[serde(default = "default_use_git_global_ignore")]
     pub use_git_global_ignore: bool,
     #[serde(default = "default_legacy_axonignore_additive")]
@@ -36,11 +30,8 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| {
         indexing: IndexingConfig {
             supported_extensions: default_supported_extensions(),
             ignored_directory_segments: default_ignored_directory_segments(),
-            blocked_subtree_hint_segments: default_blocked_subtree_hint_segments(),
             soft_excluded_directory_segments_allowlist:
                 default_soft_excluded_directory_segments_allowlist(),
-            subtree_hint_cooldown_ms: default_subtree_hint_cooldown_ms(),
-            subtree_hint_retry_budget: default_subtree_hint_retry_budget(),
             use_git_global_ignore: default_use_git_global_ignore(),
             legacy_axonignore_additive: default_legacy_axonignore_additive(),
             ignore_reconcile_enabled: default_ignore_reconcile_enabled(),
@@ -133,24 +124,24 @@ fn default_ignored_directory_segments() -> Vec<String> {
     vec![".fastembed_cache".to_string()]
 }
 
-fn default_blocked_subtree_hint_segments() -> Vec<String> {
-    vec![
-        "_bmad".to_string(),
-        "_bmad-output".to_string(),
-        "pg_wal".to_string(),
-    ]
-}
+// REQ-AXO-902634 — `default_blocked_subtree_hint_segments`,
+// `default_subtree_hint_cooldown_ms` et `default_subtree_hint_retry_budget` ont
+// ete RETIREES le 2026-09-07. Elles parametraient un tampon de hints de
+// sous-arbre que `REQ-AXO-901893` a arrache (`pg_notify` -> listener ->
+// ingress_buffer, « both ripped ») et dont le consommateur promis,
+// `record_subtree_hint`, n'a jamais existe comme fonction.
+//
+// Les TROIS segments que la liste portait en plus de
+// `ignored_directory_segments` — `pg_wal`, `_bmad`, `_bmad-output` — restent en
+// attente d'arbitrage operateur : les admettre retire 618 fichiers de l'index
+// d'un tenant tiers (mesure du 2026-09-07 sur `ist.indexedfile`). Ne pas les
+// reintroduire ici : la seule liste d'exclusion dure est
+// `ignored_directory_segments`, et la garde
+// `la_politique_d_exclusion_de_repertoires_n_a_qu_une_liste_et_aucun_champ_orphelin`
+// le tient.
 
 fn default_soft_excluded_directory_segments_allowlist() -> Vec<String> {
     Vec::new()
-}
-
-fn default_subtree_hint_cooldown_ms() -> u64 {
-    15_000
-}
-
-fn default_subtree_hint_retry_budget() -> u64 {
-    3
 }
 
 fn default_use_git_global_ignore() -> bool {
@@ -236,25 +227,8 @@ mod tests {
     }
 
     #[test]
-    fn default_blocked_subtree_hint_segments_excludes_pg_wal() {
-        let segments = default_blocked_subtree_hint_segments();
-        assert!(segments.contains(&"pg_wal".to_string()));
-        assert!(segments.contains(&"_bmad".to_string()));
-    }
-
-    #[test]
     fn default_soft_excluded_directory_segments_allowlist_is_empty() {
         assert!(default_soft_excluded_directory_segments_allowlist().is_empty());
-    }
-
-    #[test]
-    fn default_subtree_hint_cooldown_ms_is_15_seconds() {
-        assert_eq!(default_subtree_hint_cooldown_ms(), 15_000);
-    }
-
-    #[test]
-    fn default_subtree_hint_retry_budget_is_3() {
-        assert_eq!(default_subtree_hint_retry_budget(), 3);
     }
 
     #[test]
@@ -275,5 +249,98 @@ mod tests {
     #[test]
     fn default_ignore_reconcile_dry_run_is_true() {
         assert!(default_ignore_reconcile_dry_run());
+    }
+
+    /// REQ-AXO-902634 — la politique d'exclusion de repertoires n'a qu'UNE
+    /// liste, et aucun champ de `IndexingConfig` ne survit sans lecteur.
+    ///
+    /// La destructuration est EXHAUSTIVE (pas de `..`) : ajouter un champ a
+    /// `IndexingConfig` casse la COMPILATION de cette garde tant que l'auteur
+    /// ne l'a pas nomme ici, donc tant qu'il n'a pas dit qui le lit. C'est le
+    /// seul point du crate ou l'oubli est mecaniquement impossible.
+    ///
+    /// Le defaut qu'elle interdit a coute : `blocked_subtree_hint_segments`
+    /// portait TROIS segments de plus que `ignored_directory_segments`
+    /// (`_bmad`, `_bmad-output`, `pg_wal`) et avait bien un lecteur — mais un
+    /// lecteur qu'aucun chemin de production n'atteignait. Deux listes pour
+    /// une seule verite, exactement la forme de `supported_extensions`
+    /// (REQ-AXO-902636). Mesure du 2026-09-07 : 618 fichiers `_bmad` indexes
+    /// pendant que la cle censee les exclure etait tenue pour active.
+    ///
+    /// La garde ne se contente pas de compter les champs : elle PROUVE que
+    /// `ignored_directory_segments` change le verdict de l'autorite vivante
+    /// (`classify_path`, celle que le walker consulte via
+    /// `scanner::is_noise_directory`). Une garde qui compare une constante a
+    /// elle-meme est morte-nee.
+    #[test]
+    fn la_politique_d_exclusion_de_repertoires_n_a_qu_une_liste_et_aucun_champ_orphelin() {
+        use crate::indexing_policy::{classify_path, PathDisposition};
+        use std::path::Path;
+
+        let config = IndexingConfig {
+            supported_extensions: default_supported_extensions(),
+            ignored_directory_segments: default_ignored_directory_segments(),
+            soft_excluded_directory_segments_allowlist:
+                default_soft_excluded_directory_segments_allowlist(),
+            use_git_global_ignore: default_use_git_global_ignore(),
+            legacy_axonignore_additive: default_legacy_axonignore_additive(),
+            ignore_reconcile_enabled: default_ignore_reconcile_enabled(),
+            ignore_reconcile_dry_run: default_ignore_reconcile_dry_run(),
+        };
+
+        // Chaque champ est nomme avec le lecteur de PRODUCTION qui le consulte.
+        // Un champ sans lecteur nommable n'a rien a faire ici.
+        let IndexingConfig {
+            // `Scanner::should_process_path` — filtre d'extension.
+            supported_extensions: _,
+            // `indexing_policy::classify_path` — l'autorite que le walker
+            // consulte a la descente via `scanner::is_noise_directory`.
+            ignored_directory_segments: _,
+            // `indexing_policy::classify_internal` — reouverture d'une
+            // exclusion douce.
+            soft_excluded_directory_segments_allowlist: _,
+            // `Scanner::build_walker_from`.
+            use_git_global_ignore: _,
+            // `Scanner::is_ignored_by_legacy_axonignore`.
+            legacy_axonignore_additive: _,
+            // Reconciliation des regles d'ignore (`scanner::reconcile_*`).
+            ignore_reconcile_enabled: _,
+            ignore_reconcile_dry_run: _,
+        } = &config;
+
+        // UNE seule liste d'exclusion dure. Une deuxieme rouvrirait la porte
+        // au defaut : deux tables qui ne se confrontent jamais.
+        let root = Path::new("/w");
+        let cible = Path::new("/w/proj/segment_temoin/fichier");
+        assert!(
+            matches!(
+                classify_path(root, cible, &config, &[]),
+                PathDisposition::Allow
+            ),
+            "le temoin doit passer AVANT qu'on l'exclue, sinon la mesure suivante ne prouve rien"
+        );
+
+        let mut config_exclu = IndexingConfig {
+            supported_extensions: config.supported_extensions.clone(),
+            ignored_directory_segments: config.ignored_directory_segments.clone(),
+            soft_excluded_directory_segments_allowlist: config
+                .soft_excluded_directory_segments_allowlist
+                .clone(),
+            use_git_global_ignore: config.use_git_global_ignore,
+            legacy_axonignore_additive: config.legacy_axonignore_additive,
+            ignore_reconcile_enabled: config.ignore_reconcile_enabled,
+            ignore_reconcile_dry_run: config.ignore_reconcile_dry_run,
+        };
+        config_exclu
+            .ignored_directory_segments
+            .push("segment_temoin".to_string());
+        assert!(
+            !matches!(
+                classify_path(root, cible, &config_exclu, &[]),
+                PathDisposition::Allow
+            ),
+            "`ignored_directory_segments` doit changer le verdict de `classify_path` — \
+             sinon la cle est decorative et l'operateur reglera dans le vide"
+        );
     }
 }

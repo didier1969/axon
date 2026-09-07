@@ -1624,7 +1624,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             // (REQ-AXO-901675) so no indexer restart is required.
             json!({
                 "name": "rescan_project",
-                "description": "[SYSTEM] REQ-AXO-901676 — force a delta or full re-scan of a project's source tree. Use after git pull massif / backup restore / inotify drop / watcher crash. Returns `{status, files_scheduled, projection_eta_ms, project_code, mode}` in <500 ms ; triggers the indexer's existing subtree-scan plumbing (NOTIFY axon_registry_changed → record_subtree_hint). `full=false` (default) keeps IndexedFile content_hash cache so only diffs are re-parsed ; `full=true` wipes IndexedFile rows for the project so every file is forced through A1/A2/A3 + B1/B2/B3 again.",
+                "description": "[SYSTEM] REQ-AXO-901676 — force a delta or full re-scan of a project's source tree. Use after git pull massif / backup restore / inotify drop / watcher crash. Returns `{status, files_scheduled, projection_eta_ms, project_code, mode}` in <500 ms ; enrols the subtree SYNCHRONOUSLY into `ist.IndexedFile` (status='discovered'), which the DBQ-A claim feeder drains into pipeline A (REQ-AXO-901893). REQ-AXO-902634 — this description previously promised a `NOTIFY axon_registry_changed → record_subtree_hint` hop: that trajectory was ripped and `record_subtree_hint` never existed. `full=false` (default) keeps IndexedFile content_hash cache so only diffs are re-parsed ; `full=true` wipes IndexedFile rows for the project so every file is forced through A1/A2/A3 + B1/B2/B3 again.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

@@ -68,23 +68,12 @@ pub fn classify_path(
     )
 }
 
-pub fn classify_subtree_hint_path(
-    root: &Path,
-    path: &Path,
-    config: &IndexingConfig,
-    supported_ecosystems: &[EcosystemId],
-) -> PathDisposition {
-    let mut additional_hard_excludes = config.ignored_directory_segments.clone();
-    additional_hard_excludes.extend(config.blocked_subtree_hint_segments.iter().cloned());
-
-    classify_internal(
-        root,
-        path,
-        config,
-        supported_ecosystems,
-        &additional_hard_excludes,
-    )
-}
+// REQ-AXO-902634 — `classify_subtree_hint_path` a ete RETIREE le 2026-09-07.
+// Elle superposait `blocked_subtree_hint_segments` a `ignored_directory_segments`
+// pour un tampon de hints de sous-arbre qui n'a jamais eu de consommateur :
+// `REQ-AXO-901893` a arrache le trajet `pg_notify` -> listener -> ingress_buffer,
+// et `record_subtree_hint` n'existait que dans deux descriptions d'outil.
+// `classify_path` est desormais LA seule porte de classification de chemin.
 
 struct DirectoryRule {
     ecosystem: EcosystemId,
@@ -762,9 +751,7 @@ fn rule_applies(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        classify_path, classify_subtree_hint_path, ArtifactClass, EcosystemId, PathDisposition,
-    };
+    use super::{classify_path, ArtifactClass, EcosystemId, PathDisposition};
     use crate::config::IndexingConfig;
     use crate::parser::supported_parser_ecosystems;
     use std::path::Path;
@@ -773,10 +760,7 @@ mod tests {
         IndexingConfig {
             supported_extensions: vec!["rs".to_string(), "ts".to_string(), "py".to_string()],
             ignored_directory_segments: vec![],
-            blocked_subtree_hint_segments: vec![],
             soft_excluded_directory_segments_allowlist: vec![],
-            subtree_hint_cooldown_ms: 15_000,
-            subtree_hint_retry_budget: 3,
             use_git_global_ignore: false,
             legacy_axonignore_additive: true,
             ignore_reconcile_enabled: true,
@@ -1007,63 +991,31 @@ mod tests {
         );
     }
 
+    /// REQ-AXO-902634 — la meme couverture qu'avant, portee sur l'AUTORITE
+    /// VIVANTE. Ces assertions passaient par `classify_subtree_hint_path`,
+    /// qu'aucun chemin de production n'atteignait : elles prouvaient une regle
+    /// correcte derriere une porte fermee.
     #[test]
-    fn test_indexing_policy_subtree_hint_uses_additional_blocked_segments() {
+    fn un_segment_declare_en_config_est_exclu_par_classify_path() {
         let mut config = test_config();
-        config.blocked_subtree_hint_segments = vec!["pg_wal".to_string()];
+        config.ignored_directory_segments = vec!["pg_wal".to_string(), "_bmad-output".to_string()];
         let ecosystems = supported_parser_ecosystems();
         let root = Path::new("/workspace");
 
-        assert_eq!(
-            classify_subtree_hint_path(
-                root,
-                Path::new("/workspace/proj/runtime/pg_wal"),
-                &config,
-                ecosystems,
-            ),
-            PathDisposition::HardExcluded {
-                ecosystem: EcosystemId::General,
-                class: ArtifactClass::ToolingState,
-                rule_id: "config_hard_exclude_segment",
-            }
-        );
-    }
-
-    #[test]
-    fn test_indexing_policy_subtree_hint_blocks_bmad_generated_scopes() {
-        let mut config = test_config();
-        config.blocked_subtree_hint_segments =
-            vec!["_bmad".to_string(), "_bmad-output".to_string()];
-        let ecosystems = supported_parser_ecosystems();
-        let root = Path::new("/workspace");
-
-        assert_eq!(
-            classify_subtree_hint_path(
-                root,
-                Path::new("/workspace/proj/_bmad-output/planning-artifacts"),
-                &config,
-                ecosystems,
-            ),
-            PathDisposition::HardExcluded {
-                ecosystem: EcosystemId::General,
-                class: ArtifactClass::ToolingState,
-                rule_id: "config_hard_exclude_segment",
-            }
-        );
-
-        assert_eq!(
-            classify_subtree_hint_path(
-                root,
-                Path::new("/workspace/proj/_bmad/_config"),
-                &config,
-                ecosystems,
-            ),
-            PathDisposition::HardExcluded {
-                ecosystem: EcosystemId::General,
-                class: ArtifactClass::ToolingState,
-                rule_id: "config_hard_exclude_segment",
-            }
-        );
+        for cible in [
+            "/workspace/proj/runtime/pg_wal",
+            "/workspace/proj/_bmad-output/planning-artifacts",
+        ] {
+            assert_eq!(
+                classify_path(root, Path::new(cible), &config, ecosystems),
+                PathDisposition::HardExcluded {
+                    ecosystem: EcosystemId::General,
+                    class: ArtifactClass::ToolingState,
+                    rule_id: "config_hard_exclude_segment",
+                },
+                "{cible} doit tomber sur la regle de segment declaree en config"
+            );
+        }
     }
 
     #[test]
@@ -1178,7 +1130,7 @@ mod tests {
         let root = Path::new("/workspace");
 
         assert_eq!(
-            classify_subtree_hint_path(
+            classify_path(
                 root,
                 Path::new("/workspace/proj/C:\\Users\\dstad\\.claude\\plugins\\marketplaces\\claude-plugins-official"),
                 &config,

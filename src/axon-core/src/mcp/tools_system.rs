@@ -1819,12 +1819,15 @@ impl McpServer {
              **invalidated_rows:** {invalidated_rows_display}\n\
              **cache_invalidation:** {cache_invalidation}\n\
              **notify_outcome:** {notify_outcome}\n\n\
-             Re-scan triggered via `axon_registry_changed` NOTIFY ; \
-             the indexer's `record_subtree_hint` consumer (REQ-AXO-901675) \
-             will pick the work up asynchronously. If the indexer is not \
-             running, start it via `./scripts/axon-{{live,dev}} start \
-             --indexer-graph` and the next boot will replay IndexedFile from \
-             PG before scanning.",
+             The subtree is enrolled SYNCHRONOUSLY into `ist.IndexedFile` \
+             (status='discovered') by this call ; the DBQ-A claim feeder \
+             (REQ-AXO-901897) drains those rows into pipeline A. \
+             REQ-AXO-902634 — the previous wording promised an asynchronous \
+             `axon_registry_changed` NOTIFY -> `record_subtree_hint` consumer : \
+             that hop was ripped by REQ-AXO-901893 and `record_subtree_hint` \
+             never existed as a function. If the indexer is not running, start \
+             it via `./scripts/axon-{{live,dev}} start --indexer-graph` and the \
+             next boot will replay IndexedFile from PG before scanning.",
             project_path_display = project_path,
             invalidated_rows_display = invalidated_rows
                 .map(|count| count.to_string())

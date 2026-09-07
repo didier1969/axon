@@ -1,5 +1,5 @@
 use crate::graph::GraphStore;
-use crate::indexing_policy::{classify_path, classify_subtree_hint_path, PathDisposition};
+use crate::indexing_policy::{classify_path, PathDisposition};
 use crate::parser::supported_parser_ecosystems;
 use crate::service_guard;
 use anyhow::Result;
@@ -223,15 +223,13 @@ impl Scanner {
         true
     }
 
-    pub fn should_buffer_subtree_hint(&self, path: &Path) -> bool {
-        if !path.is_dir() {
-            return false;
-        }
-        if !self.should_descend_into_directory(path) {
-            return false;
-        }
-        !self.path_has_blocked_subtree_hint_segment(path)
-    }
+    // REQ-AXO-902634 — `should_buffer_subtree_hint` a ete RETIREE le 2026-09-07.
+    // Elle decidait s'il fallait bufferiser un hint de sous-arbre pour un
+    // evenement de repertoire ; ses SEULS appelants etaient deux tests. Le
+    // consommateur cible, `record_subtree_hint`, n'a jamais existe, et
+    // `REQ-AXO-901893` a remplace tout le trajet par l'enrolement direct dans
+    // `ist.IndexedFile`. Le pruning de repertoires vit desormais a un seul
+    // endroit : `build_walker_from` -> `is_noise_directory` -> `classify_path`.
 
     pub fn project_code_for_path(&self, graph: &GraphStore, path: &Path) -> Result<String> {
         self.extract_project_code(graph, path)
@@ -510,13 +508,6 @@ impl Scanner {
         self.path_has_ignored_directory_noise_with_config(path, &crate::config::CONFIG.indexing)
     }
 
-    fn path_has_blocked_subtree_hint_segment(&self, path: &Path) -> bool {
-        self.path_has_blocked_subtree_hint_segment_with_config(
-            path,
-            &crate::config::CONFIG.indexing,
-        )
-    }
-
     fn path_has_ignored_directory_noise_with_config(
         &self,
         path: &Path,
@@ -524,17 +515,6 @@ impl Scanner {
     ) -> bool {
         !matches!(
             classify_path(&self.root, path, config, supported_parser_ecosystems()),
-            PathDisposition::Allow
-        )
-    }
-
-    fn path_has_blocked_subtree_hint_segment_with_config(
-        &self,
-        path: &Path,
-        config: &crate::config::IndexingConfig,
-    ) -> bool {
-        !matches!(
-            classify_subtree_hint_path(&self.root, path, config, supported_parser_ecosystems()),
             PathDisposition::Allow
         )
     }
@@ -912,7 +892,7 @@ fn discovery_policy(
 
 #[cfg(test)]
 mod tests {
-    use super::{discovery_policy, Scanner};
+    use super::{discovery_policy, is_noise_directory, Scanner};
     use crate::config::IndexingConfig;
     use crate::service_guard;
     use std::path::Path;
@@ -928,10 +908,7 @@ mod tests {
                 "rb".to_string(),
             ],
             ignored_directory_segments: vec![],
-            blocked_subtree_hint_segments: vec![],
             soft_excluded_directory_segments_allowlist: vec![],
-            subtree_hint_cooldown_ms: 15_000,
-            subtree_hint_retry_budget: 3,
             use_git_global_ignore: false,
             legacy_axonignore_additive: true,
             ignore_reconcile_enabled: true,
@@ -1200,11 +1177,16 @@ mod tests {
         }
     }
 
+    /// REQ-AXO-902634 — meme intention qu'avant, portee sur l'AUTORITE QUI
+    /// DECIDE. Ces trois chemins etaient interroges via
+    /// `should_buffer_subtree_hint`, dont aucun appelant de production
+    /// n'existait : le test etait vert et le repertoire etait parcouru quand
+    /// meme. `is_noise_directory` est le predicat que `build_walker_from`
+    /// consulte reellement a la descente.
     #[test]
-    fn test_blocked_subtree_hint_segments_reject_build_like_directory_events() {
+    fn le_walker_ne_descend_pas_dans_les_repertoires_de_build() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
 
         for relative in [
             Path::new("prj/_build"),
@@ -1214,8 +1196,8 @@ mod tests {
             let path = root.join(relative);
             std::fs::create_dir_all(&path).unwrap();
             assert!(
-                !scanner.should_buffer_subtree_hint(path.as_path()),
-                "Le watcher ne doit pas créer de subtree_hint pour {:?}",
+                is_noise_directory(root, path.as_path()),
+                "Le walker ne doit pas descendre dans {:?}",
                 relative
             );
         }
@@ -1241,8 +1223,8 @@ mod tests {
                 relative
             );
             assert!(
-                !scanner.should_buffer_subtree_hint(path.as_path()),
-                "Le watcher ne doit pas bufferiser {:?} comme subtree_hint",
+                is_noise_directory(root, path.as_path()),
+                "Le walker doit pruner {:?} a la descente",
                 relative
             );
         }
@@ -1271,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_soft_excluded_vendor_can_be_reopened_for_scanner_and_subtree_hints() {
+    fn test_soft_excluded_vendor_can_be_reopened_for_scanner() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
@@ -1280,25 +1262,17 @@ mod tests {
         std::fs::create_dir_all(&vendor).unwrap();
 
         assert!(scanner.path_has_ignored_directory_noise_with_config(vendor.as_path(), &config));
-        assert!(
-            scanner.path_has_blocked_subtree_hint_segment_with_config(vendor.as_path(), &config)
-        );
 
         config.soft_excluded_directory_segments_allowlist = vec!["vendor".to_string()];
 
         assert!(!scanner.path_has_ignored_directory_noise_with_config(vendor.as_path(), &config));
-        assert!(
-            !scanner.path_has_blocked_subtree_hint_segment_with_config(vendor.as_path(), &config)
-        );
     }
 
     #[test]
     fn test_default_config_exposes_ignored_directory_segments() {
         let parsed: crate::config::Config = toml::from_str("[indexing]\n").unwrap();
         let ignored = &parsed.indexing.ignored_directory_segments;
-        let blocked_hints = &parsed.indexing.blocked_subtree_hint_segments;
         assert!(ignored.iter().any(|segment| segment == ".fastembed_cache"));
-        assert!(blocked_hints.iter().any(|segment| segment == "pg_wal"));
         assert!(!ignored.iter().any(|segment| segment == "vendor"));
         assert!(!ignored.iter().any(|segment| segment == "build"));
         assert!(!ignored.iter().any(|segment| segment == "dist"));
@@ -1306,8 +1280,6 @@ mod tests {
             .indexing
             .soft_excluded_directory_segments_allowlist
             .is_empty());
-        assert!(parsed.indexing.subtree_hint_cooldown_ms >= 1);
-        assert!(parsed.indexing.subtree_hint_retry_budget >= 1);
     }
 
     /// REQ-AXO-901893 — a `<repo>/.git/info/exclude` rule file is rooted at the
