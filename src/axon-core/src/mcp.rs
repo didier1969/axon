@@ -2138,6 +2138,40 @@ impl McpServer {
     /// but `soll_manager` WRITES. Getting the action wrong is not a lost round-trip,
     /// it is an unintended write into a preserve-always graph. Moving a field does
     /// not change the nature of the operation; guessing the action does.
+    /// REQ-AXO-902583 (s146) — l'appelant a-t-il ÉCRIT ce paramètre, à un chemin ou
+    /// à l'autre ?
+    ///
+    /// Deux pièges, et le second n'existait pas avant les chemins imbriqués :
+    ///
+    /// 1. `original_arguments.get("data.section")` rend TOUJOURS `None` — une clé
+    ///    plate ne résout pas un chemin. Le filtre aurait avalé en silence tout
+    ///    paramètre imbriqué, et `soll_manager` — premier gisement de la surface —
+    ///    serait resté muet sans qu'aucun test ne rougisse.
+    /// 2. `with_hoisted_soll_data` (REQ-AXO-902303) DÉPLACE un champ écrit au
+    ///    premier niveau vers `data`. Un `soll_manager(action="update", section=…)`
+    ///    arrive donc au verdict sous le nom `data.section` alors que l'appel
+    ///    d'origine porte `section`. Un champ hoisté n'est pas un champ injecté par
+    ///    le serveur : c'est bien l'appelant qui l'a écrit, et c'est même le cas où
+    ///    il a le plus besoin qu'on lui dise que sa valeur n'a servi à rien.
+    ///
+    /// La feuille n'est cherchée qu'au PREMIER niveau, seul endroit d'où le
+    /// hoisting déplace — pas partout, ce qui ferait accuser un homonyme.
+    fn caller_actually_wrote(original_arguments: &Value, chemin: &str) -> bool {
+        let ecrit = |valeur: Option<&Value>| valeur.is_some_and(|v| !v.is_null());
+        if ecrit(crate::mcp::tool_contracts::valeur_au_chemin(
+            original_arguments,
+            chemin,
+        )) {
+            return true;
+        }
+        match chemin.split_once('.') {
+            Some((_, feuille)) if !feuille.contains('.') => {
+                ecrit(original_arguments.get(feuille))
+            }
+            _ => false,
+        }
+    }
+
     fn with_hoisted_soll_data<'a>(
         normalized_name: &str,
         arguments: &'a Value,
@@ -2341,11 +2375,7 @@ impl McpServer {
         let inert_parameters: Vec<_> =
             crate::mcp::tool_contracts::inert_parameters_for_call(normalized_name, &normalised)
                 .into_iter()
-                .filter(|inert| {
-                    original_arguments
-                        .get(inert.name.as_str())
-                        .is_some_and(|value| !value.is_null())
-                })
+                .filter(|inert| Self::caller_actually_wrote(original_arguments, &inert.name))
                 .collect();
         let arguments = &normalised;
         let result = match normalized_name {

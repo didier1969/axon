@@ -4703,12 +4703,18 @@ fn toute_disposition_declaree_couvre_exactement_le_schema_de_son_outil() {
             })
             .unwrap_or_else(|| panic!("`{nom}` est déclaré mais absent du catalogue"));
 
-        let mut du_schema: Vec<String> = entree["inputSchema"]["properties"]
-            .as_object()
-            .unwrap_or_else(|| panic!("`{nom}` n'expose pas de propriétés"))
-            .keys()
-            .cloned()
-            .collect();
+        // REQ-AXO-902583 (s146) — les CHEMINS, feuilles comprises, et non les seules
+        // clés de premier niveau. `soll_manager` n'en a que trois (`action`,
+        // `entity`, `data`) alors que toute sa conditionnalité vit sous `data` : la
+        // version plate de ce contrôle validait une table structurellement incapable
+        // de signaler quoi que ce soit.
+        let proprietes = entree["inputSchema"]["properties"].clone();
+        assert!(
+            proprietes.is_object(),
+            "`{nom}` n'expose pas de propriétés"
+        );
+        let mut du_schema =
+            crate::mcp::tool_contracts::chemins_de_proprietes_du_schema(&proprietes);
         du_schema.sort();
 
         // Lu par la RÉSOLUTION, pas depuis la table directement : le contrôle doit
@@ -4732,6 +4738,59 @@ fn toute_disposition_declaree_couvre_exactement_le_schema_de_son_outil() {
             panic!("`{nom}` — {ecart}");
         }
     }
+}
+
+/// REQ-AXO-902583 (s146) — le verdict juge `data.section`, l'appel d'origine porte
+/// `section` : sans repli sur la feuille, le signal se perd EXACTEMENT là où il
+/// sert le plus.
+///
+/// `with_hoisted_soll_data` (REQ-AXO-902303) déplace un champ écrit au premier
+/// niveau vers `data`. Un appelant qui écrit `soll_manager(action="update",
+/// section=…)` s'est déjà trompé une fois de place ; lui taire que sa valeur n'a
+/// servi à rien le ferait se tromper une seconde. Un champ hoisté n'est pas un
+/// champ injecté par le serveur.
+#[test]
+fn un_champ_HOISTE_reste_attribue_a_l_appelant() {
+    use crate::mcp::McpServer;
+
+    // Écrit à la racine, jugé sous `data.` — la moitié que le repli sauve.
+    assert!(
+        McpServer::caller_actually_wrote(
+            &json!({ "action": "update", "entity": "requirement", "section": "x" }),
+            "data.section"
+        ),
+        "un champ hoisté vient de l'appelant : le taire perd le seul signal qui \
+         l'intéresse"
+    );
+
+    // Écrit au bon endroit — le cas ordinaire, qui doit continuer de passer.
+    assert!(McpServer::caller_actually_wrote(
+        &json!({ "action": "update", "data": { "section": "x" } }),
+        "data.section"
+    ));
+
+    // MOITIÉ NÉGATIVE — sans elle, un repli qui rendrait toujours `true` ferait
+    // accuser l'appelant d'un champ qu'il n'a jamais écrit.
+    assert!(
+        !McpServer::caller_actually_wrote(
+            &json!({ "action": "update", "entity": "requirement" }),
+            "data.section"
+        ),
+        "un champ absent des DEUX places ne doit jamais être reproché"
+    );
+    assert!(
+        !McpServer::caller_actually_wrote(
+            &json!({ "action": "update", "data": { "section": null } }),
+            "data.section"
+        ),
+        "`null` n'est pas une valeur écrite"
+    );
+    // Et le repli ne remonte QUE d'un cran : le hoisting ne déplace rien de plus
+    // profond, donc un homonyme à deux niveaux ne doit pas être attrapé.
+    assert!(!McpServer::caller_actually_wrote(
+        &json!({ "section": "x" }),
+        "data.sous.section"
+    ));
 }
 
 /// TIER 3, moitié POSITIVE — la condition tient, donc RIEN n'est signalé.

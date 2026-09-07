@@ -1088,22 +1088,61 @@ pub(crate) enum ParameterCondition {
         field: &'static str,
         values: &'static [&'static str],
     },
+    /// REQ-AXO-902583 (s146) — `<field>` vaut l'une des valeurs listées.
+    ///
+    /// La forme POSITIVE multi-valeurs, que les trois précédentes ne savent pas
+    /// dire. `data.source_id` est effectif sous `link` **ou** `unlink` ; l'écrire
+    /// `FieldNotOneOf { action, [create, update, append_section] }` serait
+    /// équivalent AUJOURD'HUI et faux DEMAIN : une action ajoutée au schéma se
+    /// lirait aussitôt comme « effectif », sans qu'aucun test ne rougisse. Un
+    /// défaut qui naît muet est exactement ce que ce REQ combat.
+    FieldOneOf {
+        field: &'static str,
+        values: &'static [&'static str],
+    },
+}
+
+/// Résout un CHEMIN pointé (`data.section`) dans les arguments d'un appel.
+///
+/// REQ-AXO-902583 (s146). Les paramètres d'un outil ne vivent pas tous au premier
+/// niveau : toute la conditionnalité de `soll_manager` est sous `data`. Un segment
+/// unique se comporte exactement comme l'ancien `args.get(...)`, donc les quatre
+/// outils déjà déclarés ne changent pas de comportement.
+///
+/// ⚠ La profondeur du PARAMÈTRE et celle de sa CONDITION sont indépendantes :
+/// `data.attach_to` est conditionné par `action`, qui est au premier niveau. Ce
+/// résolveur sert les deux côtés, mais chacun déclare SON chemin — supposer que la
+/// condition vit au même niveau que le champ rendrait la table fausse dès le
+/// premier cas imbriqué.
+pub(crate) fn valeur_au_chemin<'a>(args: &'a Value, chemin: &str) -> Option<&'a Value> {
+    let mut courant = args;
+    for segment in chemin.split('.') {
+        courant = courant.get(segment)?;
+    }
+    Some(courant)
 }
 
 impl ParameterCondition {
     /// Rend `true` quand la condition TIENT — donc quand le paramètre est effectif.
     pub(crate) fn holds(&self, args: &Value) -> bool {
         match self {
-            Self::FieldEquals { field, value } => args
-                .get(field)
+            Self::FieldEquals { field, value } => valeur_au_chemin(args, field)
                 .is_some_and(|found| scalar_reads_as(found, value)),
-            Self::FieldUnset { field } => match args.get(field) {
+            Self::FieldUnset { field } => match valeur_au_chemin(args, field) {
                 None | Some(Value::Null) | Some(Value::Bool(false)) => true,
                 Some(_) => false,
             },
-            Self::FieldNotOneOf { field, values } => match args.get(field) {
+            Self::FieldNotOneOf { field, values } => match valeur_au_chemin(args, field) {
                 None | Some(Value::Null) => true,
                 Some(found) => !values.iter().any(|v| scalar_reads_as(found, v)),
+            },
+            // Polarité INVERSE de la précédente, et sur l'absence aussi : un champ
+            // absent ne vaut aucune des valeurs listées, donc la condition NE tient
+            // PAS. C'est ce qui rend `data.section` inerte sous un `action` manquant
+            // plutôt qu'effectif par défaut.
+            Self::FieldOneOf { field, values } => match valeur_au_chemin(args, field) {
+                None | Some(Value::Null) => false,
+                Some(found) => values.iter().any(|v| scalar_reads_as(found, v)),
             },
         }
     }
@@ -1113,7 +1152,7 @@ impl ParameterCondition {
     /// et se fait ignorer.
     pub(crate) fn why_it_failed(&self, args: &Value) -> String {
         match self {
-            Self::FieldEquals { field, value } => match args.get(field) {
+            Self::FieldEquals { field, value } => match valeur_au_chemin(args, field) {
                 None | Some(Value::Null) => {
                     format!("`{field}` n'est pas fourni, alors qu'il doit valoir `{value}`")
                 }
@@ -1124,19 +1163,45 @@ impl ParameterCondition {
             },
             Self::FieldUnset { field } => format!(
                 "`{field}` est posé (`{}`), et il prend le pas",
-                args.get(field).map(compact_scalar).unwrap_or_default()
+                valeur_au_chemin(args, field)
+                    .map(compact_scalar)
+                    .unwrap_or_default()
             ),
             Self::FieldNotOneOf { field, values } => format!(
                 "`{field}` vaut `{}`, ce qui désactive ce paramètre (valeurs neutralisantes : {})",
-                args.get(field).map(compact_scalar).unwrap_or_default(),
+                valeur_au_chemin(args, field)
+                    .map(compact_scalar)
+                    .unwrap_or_default(),
                 values
                     .iter()
                     .map(|v| format!("`{v}`"))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Self::FieldOneOf { field, values } => match valeur_au_chemin(args, field) {
+                None | Some(Value::Null) => format!(
+                    "`{field}` n'est pas fourni, alors que ce paramètre n'a d'effet que sous {}",
+                    liste_backquotee(values)
+                ),
+                Some(found) => format!(
+                    "`{field}` vaut `{}`, alors que ce paramètre n'a d'effet que sous {}",
+                    compact_scalar(found),
+                    liste_backquotee(values)
+                ),
+            },
         }
     }
+}
+
+/// `` `a` ``, `` `b` `` ou `` `c` `` — le rendu d'une liste de valeurs dans un
+/// message d'erreur. Sorti en fonction pour que `FieldOneOf` et `FieldNotOneOf`
+/// ne divergent pas de forme sur le même fait.
+fn liste_backquotee(values: &[&str]) -> String {
+    values
+        .iter()
+        .map(|v| format!("`{v}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Compare une valeur JSON à une valeur attendue donnée sous forme textuelle.
@@ -1291,6 +1356,204 @@ const SOLL_WORK_PLAN_DISPOSITIONS: &[ParameterDeclaration] = &[
     },
 ];
 
+/// `soll_manager` — REQ-AXO-902583, troisième vague (20 399 appels mesurés, le
+/// premier gisement de la surface).
+///
+/// ⚠ BASE DE LA DÉCLARATION, dite parce qu'elle n'est PAS celle des trois outils
+/// précédents. `soll_get`, `inspect`, `retrieve_context` ont été déclarés après un
+/// différentiel LIVE — deux appels ne différant que par le champ, tailles et sha
+/// comparés. `soll_manager` MUTE la SOLL : le même différentiel demanderait
+/// d'écrire deux fois pour mesurer une fois. La base est donc la LECTURE, deux
+/// sources qui se confrontent : le validateur de dispatch
+/// (`soll_manager_conditional_clauses`, plus haut dans ce fichier) et le handler
+/// (`tools_soll/manager.rs`), branche par branche. Aucune ligne ci-dessous ne
+/// vient d'une supposition sur le nom du champ.
+///
+/// Ce que la lecture a établi, et qui ne se devine pas :
+///
+/// * `entity` est REQUIS par le schéma et n'apparaît NULLE PART dans les branches
+///   `link` / `unlink` (vérifié sur les deux corps entiers) : la cible y est
+///   déduite des ids. Son remède n'est donc pas « retirez-le » — il n'est pas
+///   retirable — mais « ne cherchez pas de ce côté ».
+/// * `data.description` est le REPLI de `data.section` sous `append_section`
+///   (`manager.rs`, `data.get("section").or_else(|| data.get("description"))`),
+///   ce qui le rend effectif sous trois actions et non deux.
+/// * `data.id` sous `create` a bel et bien un effet — refus quand l'id existe,
+///   abandon annoncé sinon (REQ-AXO-902321). Un effet de refus reste un effet.
+/// * `priority`, `tags`, `acceptance_criteria` passent par
+///   `apply_metadata_routed_fields`, appelée depuis `create` et `update` seulement.
+const SOLL_MANAGER_DISPOSITIONS: &[ParameterDeclaration] = &[
+    ParameterDeclaration {
+        name: "action",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "entity",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update", "append_section"],
+            },
+            remedy: "rien à corriger de ce côté — `entity` est requis par le schéma, mais \
+                     `link`/`unlink` déduisent les deux extrémités des ids : si l'arête ne \
+                     part pas comme prévu, la cause est dans `relation_type` ou dans les ids",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.project_code",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldEquals {
+                field: "action",
+                value: "create",
+            },
+            remedy: "hors `create`, le projet est déduit du préfixe de l'id visé — le poser \
+                     ici ne le déplace pas",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.attach_to",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldEquals {
+                field: "action",
+                value: "create",
+            },
+            remedy: "pour rattacher un nœud DÉJÀ créé, utilisez `action=\"link\"` avec \
+                     `source_id`/`target_id` — `attach_to` n'est lu qu'à la création",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.relation_type",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "link", "unlink"],
+            },
+            remedy: "un `update` ne touche aucune arête : passez par `link`/`unlink` pour \
+                     changer une relation",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.id",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update", "append_section"],
+            },
+            remedy: "`link`/`unlink` désignent leurs deux extrémités par `source_id` et \
+                     `target_id` — `data.id` n'y a pas de rôle",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.source_id",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["link", "unlink"],
+            },
+            remedy: "pour agir sur un nœud, utilisez `data.id` avec `update` — `source_id` \
+                     ne désigne qu'une extrémité d'arête",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.target_id",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["link", "unlink"],
+            },
+            remedy: "à la création, le parent se nomme `attach_to`, pas `target_id`",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.title",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update"],
+            },
+            remedy: "renommer un nœud est un `update` à part entière — aucune autre action \
+                     ne lit le titre",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.description",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update", "append_section"],
+            },
+            remedy: "sous `append_section`, `description` sert de repli à `section` ; \
+                     ailleurs qu'à la création, la mise à jour ou l'ajout, le corps n'est \
+                     pas touché",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.section",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldEquals {
+                field: "action",
+                value: "append_section",
+            },
+            remedy: "pour REMPLACER un corps, utilisez `action=\"update\"` avec \
+                     `description` ; `section` n'AJOUTE que sous `append_section`",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.section_title",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldEquals {
+                field: "action",
+                value: "append_section",
+            },
+            remedy: "le titre de section n'existe que pour l'ajout — ailleurs, écrivez-le \
+                     dans `description`",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.status",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update"],
+            },
+            remedy: "changer un statut est un `update` — aucune autre action ne le lit",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.priority",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update"],
+            },
+            remedy: "les champs routés en métadonnées ne sont appliqués que par `create` et \
+                     `update`",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.tags",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update"],
+            },
+            remedy: "les champs routés en métadonnées ne sont appliqués que par `create` et \
+                     `update`",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.acceptance_criteria",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update"],
+            },
+            remedy: "les champs routés en métadonnées ne sont appliqués que par `create` et \
+                     `update`",
+        },
+    },
+];
+
 /// Ce qu'on sait des paramètres d'un outil — et ce qu'on ne sait PAS encore.
 ///
 /// REQ-AXO-902583. `unexamined` n'est pas une variante de `ParameterDisposition`,
@@ -1336,6 +1599,10 @@ pub(crate) const DECLARED_DISPOSITIONS: &[(&str, ToolDispositions)] = &[
         },
     ),
     (
+        "soll_manager",
+        ToolDispositions { declared: SOLL_MANAGER_DISPOSITIONS, unexamined: &[] },
+    ),
+    (
         "soll_work_plan",
         ToolDispositions {
             declared: SOLL_WORK_PLAN_DISPOSITIONS,
@@ -1353,6 +1620,43 @@ pub(crate) const DECLARED_DISPOSITIONS: &[(&str, ToolDispositions)] = &[
         },
     ),
 ];
+
+/// Les CHEMINS de paramètres qu'un schéma servi expose, feuilles comprises.
+///
+/// REQ-AXO-902583 (s146). L'invariant de couverture ne comparait que les clés de
+/// PREMIER NIVEAU, et le test de plancher le disait à voix haute. Sur
+/// `soll_manager`, ce premier niveau ne porte que `action`, `entity`, `data` —
+/// tous trois honorés — pendant que sa conditionnalité entière vit sous `data`.
+/// L'invariant validait donc une table qui ne pouvait rien signaler, et le
+/// gisement n°1 de la surface restait inatteignable sans que rien ne rougisse.
+///
+/// Un objet qui porte des sous-propriétés est REMPLACÉ par ses feuilles, jamais
+/// doublé par elles : déclarer `data` en plus de `data.section` ferait compter
+/// deux fois un même fait, et `Honoured` sur un conteneur n'affirme rien
+/// d'éprouvable.
+///
+/// On ne descend PAS dans `items` : un élément de liste n'est pas un paramètre
+/// nommé, et l'appelant ne peut pas le poser seul. Aucun cas mesuré ne le
+/// demande — la règle du fichier vaut ici aussi.
+pub(crate) fn chemins_de_proprietes_du_schema(properties: &Value) -> Vec<String> {
+    let mut chemins = Vec::new();
+    let Some(objet) = properties.as_object() else {
+        return chemins;
+    };
+    for (nom, sous_schema) in objet {
+        let feuilles = sous_schema
+            .get("properties")
+            .map(chemins_de_proprietes_du_schema)
+            .unwrap_or_default();
+        if feuilles.is_empty() {
+            chemins.push(nom.clone());
+        } else {
+            chemins.extend(feuilles.into_iter().map(|f| format!("{nom}.{f}")));
+        }
+    }
+    chemins.sort();
+    chemins
+}
 
 /// L'écart entre ce qu'un outil SERT et ce que la table en dit — `None` quand la
 /// table couvre exactement le schéma.
@@ -1437,8 +1741,7 @@ pub(crate) fn inert_parameters_for_call(tool: &str, args: &Value) -> Vec<InertPa
             };
             // Seul un paramètre RÉELLEMENT fourni peut être resté sans effet.
             // Un paramètre absent n'a rien à se voir reprocher.
-            args.get(declaration.name)
-                .filter(|value| !value.is_null())?;
+            valeur_au_chemin(args, declaration.name).filter(|value| !value.is_null())?;
             if condition.holds(args) {
                 return None;
             }

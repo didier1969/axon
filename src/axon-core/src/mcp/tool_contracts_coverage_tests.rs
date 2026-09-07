@@ -36,7 +36,7 @@ use serde_json::Value;
 /// Plancher de couverture — le nombre d'outils portant des dispositions
 /// déclarées. Il MONTE, jamais l'inverse : baisser ce chiffre pour faire passer
 /// un test serait retirer un contrat servi à des locataires.
-const PLANCHER_OUTILS_INSTRUMENTES: usize = 4;
+const PLANCHER_OUTILS_INSTRUMENTES: usize = 5;
 
 /// Second plancher — le nombre de paramètres RÉELLEMENT examinés.
 ///
@@ -44,7 +44,11 @@ const PLANCHER_OUTILS_INSTRUMENTES: usize = 4;
 /// déclaré entièrement non examiné ajoute 1 au compte d'outils et 0 à l'honnêteté.
 /// Les deux planchers doivent donc vivre ensemble, et celui-ci est le seul qui
 /// mesure du travail de lecture.
-const PLANCHER_PARAMETRES_EXAMINES: usize = 13;
+/// s146 : 13 → 29. Les 16 ajoutés sont les paramètres de `soll_manager`
+/// (`action`, `entity`, et les 14 champs de `data`), tous LUS branche par branche
+/// dans `tools_soll/manager.rs` — aucun n'est passé en `unexamined` pour faire
+/// monter le chiffre.
+const PLANCHER_PARAMETRES_EXAMINES: usize = 29;
 
 /// Les paramètres dont un handler a été lu, tous outils confondus.
 fn parametres_examines() -> usize {
@@ -100,11 +104,13 @@ fn proprietes_par_outil() -> Vec<(String, Vec<String>)> {
     };
     for outil in outils {
         let Some(nom) = outil.get("name").and_then(Value::as_str) else { continue };
+        // REQ-AXO-902583 (s146) — CHEMINS (`data.section`), pas clés plates : la
+        // table déclare désormais des paramètres imbriqués, et les confronter à une
+        // liste de premier niveau les ferait tous passer pour des fantômes.
         let props = outil
             .get("inputSchema")
             .and_then(|s| s.get("properties"))
-            .and_then(Value::as_object)
-            .map(|m| m.keys().cloned().collect::<Vec<_>>())
+            .map(crate::mcp::tool_contracts::chemins_de_proprietes_du_schema)
             .unwrap_or_default();
         out.push((nom.to_string(), props));
     }
@@ -117,7 +123,12 @@ fn chaque_propriete_du_schema_est_LUE_quelque_part() {
     let mut jamais_lues: Vec<String> = Vec::new();
     for (outil, props) in proprietes_par_outil() {
         for prop in props {
-            if !sources.contains(&format!("\"{prop}\"")) {
+            // REQ-AXO-902583 (s146) — le scanner cherche le NOM du champ, pas son
+            // chemin : le code lit `data.get("section")`, jamais le littéral
+            // `"data.section"`. Prendre le chemin entier ferait rougir la garde sur
+            // chaque paramètre imbriqué, pour une raison qui n'est pas la sienne.
+            let feuille = prop.rsplit('.').next().unwrap_or(prop.as_str());
+            if !sources.contains(&format!("\"{feuille}\"")) {
                 jamais_lues.push(format!("{outil}.{prop}"));
             }
         }
@@ -195,8 +206,9 @@ fn la_couverture_des_dispositions_ne_REGRESSE_pas() {
         "REQ-AXO-902583 — dispositions déclarées : {instrumentes} outil(s) sur {total} · \
          {examines} paramètre(s) examiné(s), {non_examines} encore non lu(s). Les outils \
          absents rendent une liste vide, ce qui signifie « je ne sais pas », jamais « rien \
-         à signaler ». Les objets imbriqués ne sont PAS descendus : l'invariant ne compare \
-         que les clés de premier niveau."
+         à signaler ». REQ-AXO-902583 (s146) — les objets imbriqués SONT désormais descendus \
+         (`data.section`) : l'invariant compare des chemins de feuilles, pas les seules clés \
+         de premier niveau. Les listes (`items`) ne le sont pas."
     );
     // Et l'invariant qui rend ce chiffre lisible : aucun outil n'est déclaré deux fois.
     let mut noms: Vec<&str> = DECLARED_DISPOSITIONS.iter().map(|(n, _)| *n).collect();
@@ -364,5 +376,213 @@ fn MUTANT_un_outil_entierement_unexamined_ne_compte_pas_comme_examine() {
             &vitrine
         ),
         None
+    );
+}
+
+// ---------------------------------------------------------------------------------
+// REQ-AXO-902583 (s146) — LA DESCENTE dans les objets imbriqués.
+//
+// L'invariant ne comparait que les clés de premier niveau, et il le disait. Sur
+// `soll_manager` — 20 399 appels, premier gisement de la surface — ce premier
+// niveau ne porte que `action`, `entity` et `data`, tous honorés : le contrôle
+// validait donc une table structurellement incapable de signaler quoi que ce soit.
+//
+// Une récursion qui ne sait pas dire NON est le même défaut un étage plus bas :
+// les deux mutants ci-dessous la font rougir sur ses DEUX moitiés, `manquants`
+// et `fantômes`.
+// ---------------------------------------------------------------------------------
+
+/// Le schéma de démonstration : un scalaire au premier niveau, un objet qui porte
+/// deux feuilles. C'est la forme exacte de `soll_manager`.
+fn schema_imbrique_de_demonstration() -> Value {
+    serde_json::json!({
+        "action": { "type": "string" },
+        "data": {
+            "type": "object",
+            "properties": {
+                "section": { "type": "string" },
+                "id":      { "type": "string" }
+            }
+        }
+    })
+}
+
+#[test]
+fn la_descente_rend_les_FEUILLES_et_jamais_le_conteneur() {
+    use crate::mcp::tool_contracts::chemins_de_proprietes_du_schema;
+
+    let chemins = chemins_de_proprietes_du_schema(&schema_imbrique_de_demonstration());
+    assert_eq!(
+        chemins,
+        vec!["action".to_string(), "data.id".to_string(), "data.section".to_string()],
+        "un objet porteur de sous-propriétés est REMPLACÉ par ses feuilles, pas doublé \
+         par elles : compter `data` en plus de `data.section` compterait deux fois le \
+         même fait, et `Honoured` sur un conteneur n'affirme rien d'éprouvable"
+    );
+}
+
+#[test]
+fn MUTANT_la_descente_sait_dire_NON_sur_ses_DEUX_moities() {
+    use crate::mcp::tool_contracts::{chemins_de_proprietes_du_schema, ecart_de_couverture,
+                                     ParameterDeclaration, ParameterDisposition,
+                                     ToolDispositions};
+
+    let schema = chemins_de_proprietes_du_schema(&schema_imbrique_de_demonstration());
+
+    // MOITIÉ 1 — un champ imbriqué SERVI mais absent de la table. Sans la descente,
+    // ce cas passait au vert : `data` était couvert, donc tout `data.*` l'était.
+    const SANS_LA_FEUILLE: &[ParameterDeclaration] = &[
+        ParameterDeclaration { name: "action", disposition: ParameterDisposition::Honoured },
+        ParameterDeclaration { name: "data.id", disposition: ParameterDisposition::Honoured },
+    ];
+    let trouee = ToolDispositions { declared: SANS_LA_FEUILLE, unexamined: &[] };
+    let ecart = ecart_de_couverture(&schema, &trouee)
+        .expect("une feuille servie et non déclarée DOIT être refusée");
+    assert!(
+        ecart.contains("data.section"),
+        "l'écart doit NOMMER la feuille manquante, pas son conteneur : {ecart}"
+    );
+
+    // MOITIÉ 2 — un champ imbriqué DÉCLARÉ qui n'est plus servi. C'est la dérive
+    // inverse, et elle est tout aussi silencieuse : la table décrit un paramètre
+    // que plus personne ne peut poser.
+    const AVEC_UN_FANTOME: &[ParameterDeclaration] = &[
+        ParameterDeclaration { name: "action", disposition: ParameterDisposition::Honoured },
+        ParameterDeclaration { name: "data.id", disposition: ParameterDisposition::Honoured },
+        ParameterDeclaration { name: "data.section", disposition: ParameterDisposition::Honoured },
+        ParameterDeclaration { name: "data.disparu", disposition: ParameterDisposition::Honoured },
+    ];
+    let fantome = ToolDispositions { declared: AVEC_UN_FANTOME, unexamined: &[] };
+    let ecart = ecart_de_couverture(&schema, &fantome)
+        .expect("une feuille déclarée et plus servie DOIT être refusée");
+    assert!(
+        ecart.contains("data.disparu"),
+        "l'écart doit NOMMER la feuille fantôme : {ecart}"
+    );
+
+    // Et la table exacte passe — sinon le contrôle crie toujours et ne dit rien.
+    const EXACTE: &[ParameterDeclaration] = &[
+        ParameterDeclaration { name: "action", disposition: ParameterDisposition::Honoured },
+        ParameterDeclaration { name: "data.id", disposition: ParameterDisposition::Honoured },
+        ParameterDeclaration { name: "data.section", disposition: ParameterDisposition::Honoured },
+    ];
+    assert_eq!(
+        ecart_de_couverture(&schema, &ToolDispositions { declared: EXACTE, unexamined: &[] }),
+        None
+    );
+}
+
+// ---------------------------------------------------------------------------------
+// REQ-AXO-902583 (s146) — le COMPORTEMENT de `soll_manager`, les deux moitiés.
+//
+// Un contrôle qui crie toujours ne dit rien : chaque cas négatif est apparié à son
+// positif sur le MÊME champ.
+// ---------------------------------------------------------------------------------
+
+#[test]
+fn soll_manager_signale_un_champ_imbrique_sans_effet_sous_cette_action() {
+    let inertes = inert_parameters_for_call(
+        "soll_manager",
+        &serde_json::json!({
+            "action": "update",
+            "entity": "requirement",
+            "data": { "id": "REQ-AXO-1", "section": "un ajout", "section_title": "Titre" }
+        }),
+    );
+    let noms: Vec<&str> = inertes.iter().map(|i| i.name.as_str()).collect();
+    assert!(
+        noms.contains(&"data.section") && noms.contains(&"data.section_title"),
+        "`section` et `section_title` ne sont lus que par `append_section` : {noms:?}"
+    );
+    assert!(
+        !noms.contains(&"data.id"),
+        "`data.id` EST lu par `update` — le signaler enverrait corriger ce qui marche : {noms:?}"
+    );
+    let section = inertes.iter().find(|i| i.name == "data.section").expect("présent");
+    assert!(
+        section.reason.contains("update"),
+        "la raison doit nommer la valeur REÇUE, pas décrire une généralité : {}",
+        section.reason
+    );
+    assert!(
+        !section.remedy.to_lowercase().contains("orthograph"),
+        "le remède de l'inertie ne doit JAMAIS renvoyer à l'orthographe — c'est la \
+         remédiation de l'AUTRE cause : {}",
+        section.remedy
+    );
+}
+
+#[test]
+fn soll_manager_ne_signale_RIEN_quand_l_action_lit_le_champ() {
+    let inertes = inert_parameters_for_call(
+        "soll_manager",
+        &serde_json::json!({
+            "action": "append_section",
+            "entity": "requirement",
+            "data": { "id": "REQ-AXO-1", "section": "un ajout", "section_title": "Titre" }
+        }),
+    );
+    assert!(
+        inertes.is_empty(),
+        "sous `append_section`, les trois champs sont lus : {inertes:?}"
+    );
+
+    // La moitié POSITIVE de `FieldOneOf` sur ses DEUX valeurs — sinon rien ne
+    // distingue la variante multi-valeurs d'un `FieldEquals` sur la première.
+    for action in ["link", "unlink"] {
+        let inertes = inert_parameters_for_call(
+            "soll_manager",
+            &serde_json::json!({
+                "action": action,
+                "entity": "requirement",
+                "data": { "source_id": "A", "target_id": "B", "relation_type": "BELONGS_TO" }
+            }),
+        );
+        let noms: Vec<&str> = inertes.iter().map(|i| i.name.as_str()).collect();
+        assert!(
+            !noms.contains(&"data.source_id") && !noms.contains(&"data.target_id"),
+            "`{action}` lit les deux extrémités : {noms:?}"
+        );
+        // …et `entity`, lui, n'est lu par AUCUNE des deux branches : c'est la
+        // mesure qui l'établit, la lecture des deux corps entiers.
+        assert!(
+            noms.contains(&"entity"),
+            "`entity` est requis par le schéma et n'apparaît nulle part dans `{action}` : \
+             le taire laisserait chercher la panne du mauvais côté : {noms:?}"
+        );
+    }
+}
+
+#[test]
+fn MUTANT_FieldOneOf_ne_se_laisse_PAS_ecrire_comme_une_negation() {
+    use crate::mcp::tool_contracts::ParameterCondition;
+
+    let positive = ParameterCondition::FieldOneOf {
+        field: "action",
+        values: &["link", "unlink"],
+    };
+    let negative = ParameterCondition::FieldNotOneOf {
+        field: "action",
+        values: &["create", "update", "append_section"],
+    };
+
+    // Sur les actions D'AUJOURD'HUI, les deux formes sont indiscernables.
+    for action in ["create", "update", "append_section", "link", "unlink"] {
+        let args = serde_json::json!({ "action": action });
+        assert_eq!(
+            positive.holds(&args),
+            negative.holds(&args),
+            "les deux formes coïncident sur les actions existantes (`{action}`)"
+        );
+    }
+
+    // Sur une action FUTURE, elles divergent — et c'est tout l'enjeu : la forme
+    // négative la déclarerait « effectif » sans qu'aucun test ne rougisse.
+    let demain = serde_json::json!({ "action": "une_action_ajoutee_demain" });
+    assert!(!positive.holds(&demain), "la forme positive reste muette sur l'inconnu");
+    assert!(
+        negative.holds(&demain),
+        "la forme négative accueille l'inconnu comme effectif — c'est le défaut \
+         qu'on refuse d'écrire, et ce test est ce qui empêche de l'écrire par inadvertance"
     );
 }
