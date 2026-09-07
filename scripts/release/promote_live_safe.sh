@@ -1135,15 +1135,16 @@ test_targets_compile_step() {
   # incident : GUI-PRO-108, fix de CLASSE. La garde
   # `toute_soumission_nexus_declare_memoire_ET_cpus` fait desormais rougir toute
   # soumission qui omet l'une des deux. Norme du depot : GUI-AXO-1034.
-  # Meme surcharge d'operateur qu'a l'etape 1 (`scripts/setup.sh`) : le DEFAUT
-  # reste 12, `AXON_PROMOTE_CPUS` ne l'abaisse que pour UN promote sur une machine
-  # partagee. La garde `toute_soumission_nexus_declare_memoire_ET_cpus` reste
-  # satisfaite : `--cpus` est DECLARE, c'est sa valeur qui est arbitrable.
+  # Meme defaut qu'a l'etape 1 (`scripts/setup.sh`) : QUATRE coeurs, decision
+  # operateur du 2026-09-07 sur une machine partagee. `AXON_PROMOTE_CPUS=12` est
+  # la sortie de secours pour un cache froid, pas la norme. La garde
+  # `toute_soumission_nexus_declare_memoire_ET_cpus` reste satisfaite : `--cpus`
+  # est DECLARE, c'est sa valeur qui est arbitrable.
   if ! "$nexus_job_bin" run \
       --project AXON \
       --priority interactive \
       --memory 12G \
-      --cpus "${AXON_PROMOTE_CPUS:-12}" \
+      --cpus "${AXON_PROMOTE_CPUS:-4}" \
       --gpu-mib 0 \
       --timeout 45m \
       -- "$runner" test-lib "$source_root/src/axon-core"; then

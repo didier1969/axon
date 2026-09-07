@@ -206,13 +206,17 @@ if [[ "${AXON_REQUIRE_NEXUS_ADMISSION:-0}" == "1" ]] && ! axon_inside_nexus_batc
     # $CARGO_JOBS (14) threads. Mesuré le 2026-09-06 : build complet sur cache
     # froid à 4 cœurs = timeout à 3600 s (rc=124), trois promotes perdus.
     # GUI-AXO-1034 fixe la norme du dépôt : --memory 12G --cpus 12.
-    # Le DÉFAUT reste 12 — c'est la norme `GUI-AXO-1034`, et elle est mesurée.
-    # `AXON_PROMOTE_CPUS` ne l'assouplit que pour UN promote, quand l'opérateur
-    # arbitre la contention d'une machine partagée : demander 12 cœurs sur un hôte
-    # qui n'en a que 6 de libres fait attendre le promote en file, puis mourir.
-    # ⚠ Ne le baisser QUE sur un cache chaud : le timeout à 3600 s mesuré le
-    # 2026-09-06 (trois promotes perdus) était un build à 4 cœurs sur cache FROID.
-    AXON_PROMOTE_CPUS="${AXON_PROMOTE_CPUS:-12}"
+    # DÉFAUT : 4 cœurs — décision opérateur du 2026-09-07, « je ne veux plus que
+    # tu prennes tout le CPU ». La machine est PARTAGÉE : d'autres outils en
+    # développement y tournent, et un build à 12 cœurs les affame.
+    #
+    # ⚠ RISQUE CONNU ET MESURÉ, assumé par cette décision : un build complet sur
+    # cache FROID à 4 cœurs a atteint le timeout de 3600 s le 2026-09-06 (rc=124,
+    # trois promotes perdus). Sur cache chaud — le cas ordinaire, le worktree figé
+    # garde son target — 4 cœurs passent sans peine.
+    # Si un promote meurt en timeout de build : `AXON_PROMOTE_CPUS=12`, une fois,
+    # en connaissance de cause. C'est la sortie de secours, pas la norme.
+    AXON_PROMOTE_CPUS="${AXON_PROMOTE_CPUS:-4}"
     echo "🛡️  Waiting for Nexus admission (12G / ${AXON_PROMOTE_CPUS} cpus déclarés, thermal + memory gates)..."
     if ! "$NEXUS_JOB_BIN" run \
             --project AXON \
