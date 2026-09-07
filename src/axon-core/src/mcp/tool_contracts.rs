@@ -1381,7 +1381,18 @@ const SOLL_WORK_PLAN_DISPOSITIONS: &[ParameterDeclaration] = &[
 /// * `data.id` sous `create` a bel et bien un effet — refus quand l'id existe,
 ///   abandon annoncé sinon (REQ-AXO-902321). Un effet de refus reste un effet.
 /// * `priority`, `tags`, `acceptance_criteria` passent par
-///   `apply_metadata_routed_fields`, appelée depuis `create` et `update` seulement.
+///   `apply_metadata_routed_fields`, appelée depuis `create` et `update`.
+/// * ⚠ `append_section` n'est pas une branche autonome : elle RE-DISPATCHE vers
+///   `update` avec le `data` de l'appelant, dont elle n'a retiré que `section` et
+///   `section_title` (`manager.rs`, `merged`). Tout ce que la branche `update` lit
+///   — `title`, `status`, et les champs routés en métadonnées — traverse donc et
+///   s'applique. Les déclarer effectifs sous `create`/`update` seulement aurait
+///   rendu un verdict `inert` FAUX : pire que le silence, puisqu'il envoie
+///   réparer un appel qui a marché.
+///
+/// Cette délégation est le genre de fait qu'un différentiel live aurait montré et
+/// qu'une lecture de surface manque. Elle est écrite ici pour que la prochaine
+/// table imbriquée commence par chercher les re-dispatches.
 const SOLL_MANAGER_DISPOSITIONS: &[ParameterDeclaration] = &[
     ParameterDeclaration {
         name: "action",
@@ -1469,7 +1480,7 @@ const SOLL_MANAGER_DISPOSITIONS: &[ParameterDeclaration] = &[
         disposition: ParameterDisposition::Conditional {
             condition: ParameterCondition::FieldOneOf {
                 field: "action",
-                values: &["create", "update"],
+                values: &["create", "update", "append_section"],
             },
             remedy: "renommer un nœud est un `update` à part entière — aucune autre action \
                      ne lit le titre",
@@ -1514,7 +1525,7 @@ const SOLL_MANAGER_DISPOSITIONS: &[ParameterDeclaration] = &[
         disposition: ParameterDisposition::Conditional {
             condition: ParameterCondition::FieldOneOf {
                 field: "action",
-                values: &["create", "update"],
+                values: &["create", "update", "append_section"],
             },
             remedy: "changer un statut est un `update` — aucune autre action ne le lit",
         },
@@ -1524,7 +1535,7 @@ const SOLL_MANAGER_DISPOSITIONS: &[ParameterDeclaration] = &[
         disposition: ParameterDisposition::Conditional {
             condition: ParameterCondition::FieldOneOf {
                 field: "action",
-                values: &["create", "update"],
+                values: &["create", "update", "append_section"],
             },
             remedy: "les champs routés en métadonnées ne sont appliqués que par `create` et \
                      `update`",
@@ -1535,7 +1546,7 @@ const SOLL_MANAGER_DISPOSITIONS: &[ParameterDeclaration] = &[
         disposition: ParameterDisposition::Conditional {
             condition: ParameterCondition::FieldOneOf {
                 field: "action",
-                values: &["create", "update"],
+                values: &["create", "update", "append_section"],
             },
             remedy: "les champs routés en métadonnées ne sont appliqués que par `create` et \
                      `update`",
@@ -1546,7 +1557,7 @@ const SOLL_MANAGER_DISPOSITIONS: &[ParameterDeclaration] = &[
         disposition: ParameterDisposition::Conditional {
             condition: ParameterCondition::FieldOneOf {
                 field: "action",
-                values: &["create", "update"],
+                values: &["create", "update", "append_section"],
             },
             remedy: "les champs routés en métadonnées ne sont appliqués que par `create` et \
                      `update`",

@@ -553,6 +553,58 @@ fn soll_manager_ne_signale_RIEN_quand_l_action_lit_le_champ() {
     }
 }
 
+/// Un verdict `inert` FAUX est pire que le silence : il envoie réparer un appel
+/// qui a marché.
+///
+/// `append_section` n'est pas une branche autonome — elle re-dispatche vers
+/// `update` avec le `data` de l'appelant, moins `section`/`section_title`. Tout ce
+/// que `update` lit traverse donc et s'applique. Sans ce test, la table lisait la
+/// branche visible et manquait la délégation.
+#[test]
+fn append_section_DELEGUE_a_update_et_ce_qu_update_lit_reste_effectif() {
+    let inertes = inert_parameters_for_call(
+        "soll_manager",
+        &serde_json::json!({
+            "action": "append_section",
+            "entity": "requirement",
+            "data": {
+                "id": "REQ-AXO-1",
+                "section": "un ajout",
+                "status": "current",
+                "title": "un titre",
+                "priority": "P1",
+                "tags": ["a"],
+                "acceptance_criteria": ["c"]
+            }
+        }),
+    );
+    assert!(
+        inertes.is_empty(),
+        "`append_section` re-dispatche vers `update` : tout ce que `update` lit \
+         s'applique. Les déclarer inertes enverrait réparer un appel qui a marché : \
+         {inertes:?}"
+    );
+
+    // MOITIÉ NÉGATIVE — la délégation ne rend PAS tout effectif. `attach_to` et
+    // `project_code` ne sont lus que par `create`, que le re-dispatch n'emprunte
+    // jamais. Sans ce contrôle, « tout passe sous append_section » serait la
+    // sur-correction symétrique.
+    let inertes = inert_parameters_for_call(
+        "soll_manager",
+        &serde_json::json!({
+            "action": "append_section",
+            "entity": "requirement",
+            "data": { "id": "REQ-AXO-1", "section": "x", "attach_to": "PIL-AXO-001",
+                      "project_code": "AXO" }
+        }),
+    );
+    let noms: Vec<&str> = inertes.iter().map(|i| i.name.as_str()).collect();
+    assert!(
+        noms.contains(&"data.attach_to") && noms.contains(&"data.project_code"),
+        "le re-dispatch va vers `update`, jamais vers `create` : {noms:?}"
+    );
+}
+
 #[test]
 fn MUTANT_FieldOneOf_ne_se_laisse_PAS_ecrire_comme_une_negation() {
     use crate::mcp::tool_contracts::ParameterCondition;
