@@ -590,6 +590,111 @@ axon_restart_role_verified() {
     done
 }
 
+# _axon_role_process_alive <project_root> <instance_kind> <process> — 0 quand un
+# processus de CE role tourne reellement, scope au depot et a l'instance. Le motif
+# porte un chemin de binaire ABSOLU et `_axon_filter_pids_running_exe` ne garde que
+# les PID dont l'executable est ce binaire (REQ-AXO-902359) : ni le script appelant
+# ni un `sha256sum` du chemin ne peuvent etre comptes comme un runtime.
+_axon_role_process_alive() {
+    local project_root="${1:?project root required}" instance_kind="${2:?}" proc="${3:?}"
+    local bin_pat pids
+    case "$instance_kind" in
+        live) bin_pat="${project_root}/bin/${proc}( |\$)" ;;
+        *)    bin_pat="${project_root}/.axon[^ ]*/cargo-target/[^ ]*/${proc}( |\$)" ;;
+    esac
+    pids="$(pgrep -f "$bin_pat" 2>/dev/null || true)"
+    [[ -n "$pids" ]] || return 1
+    # shellcheck disable=SC2086
+    pids="$(_axon_filter_pids_running_exe "$bin_pat" $pids)"
+    [[ -n "$pids" ]]
+}
+
+# axon_start_missing_roles <project_root> <instance_kind> <budget_s> <process...>
+#
+# REQ-AXO-902538 / REQ-AXO-902542 / REQ-AXO-902545 — un brain SAIN n'est pas une
+# instance saine. `start --indexer-graph` voyait le port du brain occupe, imprimait
+# « already serving. Stop first. » et sortait 0 SANS demarrer l'indexeur, pendant que
+# `status` continuait de prescrire cette commande exacte comme remede. Trois locataires
+# l'ont signale independamment (OPV 2026-08-27, APS 2026-08-28, OPV 2026-08-28).
+#
+# Trois etats, pas deux — et c'est la LECON payee au premier essai reel. Le premier jet
+# ne connaissait que « sert » / « ne sert pas », et sur un indexeur live qui tournait,
+# vectorisait a 3,9 GiB, mais n'exposait plus son /readyz, il a envoye un start : le
+# duplicata a pris le verrou d'ecrivain IST et a SIGTERM le vivant (« IST writer
+# takeover »), puis le superviseur a boucle. Un endpoint muet n'est PAS une preuve
+# d'absence.
+#
+#   sert son /readyz          -> laisse STRICTEMENT tranquille
+#   ne sert pas MAIS vit      -> ATTENDRE, jamais demarrer : un duplicata TUE le vivant
+#   ne sert pas ET absent     -> demarrer via le superviseur, puis VERIFIER
+#
+# Rend 0 seulement quand tous les roles demandes servent ; sinon 1, en nommant le remede
+# effectif. Jamais 0 sur un no-op : c'est le defaut que cette fonction ferme.
+axon_start_missing_roles() {
+    local project_root="${1:?project root required}"
+    local instance_kind="${2:?instance kind required}"
+    local budget_s="${3:?budget required}"
+    shift 3
+    local pc_port proc deadline
+    local absents=() presents_muets=() failed=()
+
+    for proc in "$@"; do
+        if _axon_role_serving "$instance_kind" "$proc"; then
+            _axon_sup_log "[join] ${proc} sert deja son propre /readyz — laisse intact"
+        elif _axon_role_process_alive "$project_root" "$instance_kind" "$proc"; then
+            presents_muets+=("$proc")
+        else
+            absents+=("$proc")
+        fi
+    done
+
+    # Les presents-muets se traitent d'abord et SANS start : demarrer un duplicata
+    # ferait un takeover du verrou d'ecrivain et tuerait le processus qui travaille.
+    if (( ${#presents_muets[@]} > 0 )); then
+        _axon_sup_log "[join] ${presents_muets[*]} tournent mais ne servent pas encore — attente (aucun start : un duplicata tuerait le vivant)"
+        deadline=$(( SECONDS + budget_s ))
+        for proc in "${presents_muets[@]}"; do
+            while ! _axon_role_serving "$instance_kind" "$proc"; do
+                if (( SECONDS >= deadline )); then
+                    _axon_sup_warn "[join] ${proc} tourne toujours sans servir apres ${budget_s}s — NE PAS le doubler. Diagnostiquer d'abord (log du role), puis : ./scripts/axon --instance ${instance_kind} stop --hard puis start."
+                    failed+=("$proc")
+                    break
+                fi
+                if ! _axon_role_process_alive "$project_root" "$instance_kind" "$proc"; then
+                    _axon_sup_log "[join] ${proc} a disparu pendant l'attente — il redevient un role ABSENT"
+                    absents+=("$proc")
+                    break
+                fi
+                sleep 5
+            done
+        done
+    fi
+
+    if (( ${#absents[@]} == 0 )); then
+        (( ${#failed[@]} == 0 )) && return 0
+        return 1
+    fi
+
+    pc_port="$(axon_pc_port_for_instance "$instance_kind")"
+    if ! axon_supervisor_healthy "$pc_port"; then
+        _axon_sup_warn "[join] ${absents[*]} ne servent pas, et AUCUN superviseur sur :${pc_port} — une instance partielle ne se repare pas en place. Faire : ./scripts/axon --instance ${instance_kind} stop --hard, puis relancer le start."
+        return 1
+    fi
+
+    for proc in "${absents[@]}"; do
+        _axon_sup_log "[join] ${proc} est ABSENT alors qu'un autre role est sain — demarrage via le superviseur sur :${pc_port}"
+        if ! axon_restart_role_verified "$instance_kind" "$proc" "$budget_s"; then
+            failed+=("$proc")
+        fi
+    done
+
+    if (( ${#failed[@]} > 0 )); then
+        _axon_sup_warn "[join] toujours pas servi apres ${budget_s}s : ${failed[*]} — remede : curl -X POST http://127.0.0.1:${pc_port}/process/start/${failed[0]} , ou ./scripts/axon --instance ${instance_kind} stop --hard puis start."
+        return 1
+    fi
+    return 0
+}
+
 # axon_reap_supervisor_tree — reap the process-compose supervisor for this
 # instance + its repo-scoped runtime children, then verify the canonical brain
 # port is freed (retry/escalate to SIGKILL if still bound). Best-effort but

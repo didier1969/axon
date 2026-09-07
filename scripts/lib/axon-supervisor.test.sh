@@ -353,5 +353,78 @@ assert_orch 'exhausted + saturated window → crash-loop guard, no restart, rc 1
 R4="$SELF_HEAL_WORK/root_failrestart"; mkdir -p "$R4/.axon"
 assert_orch 'exhausted + restart fails → recorded (counts vs window), rc 1' 1 1 1 "$R4" exhausted 1 10000
 
+# ---------------------------------------------------------------------------
+# axon_start_missing_roles — REQ-AXO-902538 / REQ-AXO-902542 / REQ-AXO-902545
+#
+# Deux defauts sont gardes ici, et le second a ete paye en production.
+#
+# 1. Le defaut d'origine : `start --indexer-graph` voyait le brain sain, imprimait
+#    « already serving. Stop first. » et sortait 0 SANS demarrer l'indexeur. Cas
+#    « SANS superviseur » : sur le code d'origine il rendait 0.
+# 2. Le defaut du PREMIER CORRECTIF, mesure sur le runtime live le 2026-09-07 :
+#    un indexeur qui TOURNAIT et vectorisait a 3,9 GiB, mais dont le /readyz etait
+#    muet, a ete lu comme « absent ». Le start a cree un duplicata, qui a pris le
+#    verrou d'ecrivain IST et a SIGTERM le vivant. Cas « present mais muet » :
+#    aucun start ne doit partir.
+#
+# Les cinq I/O sont bouchonnees : la decision seule est testee.
+
+START_CALLS=""
+
+_axon_role_serving() {           # $1 instance, $2 process
+    [[ " $SERVING_ROLES " == *" $2 "* ]]
+}
+_axon_role_process_alive() {     # $1 project_root, $2 instance, $3 process
+    [[ " $ALIVE_ROLES " == *" $3 "* ]]
+}
+axon_supervisor_healthy() { [[ "$SUPERVISOR_UP" == "1" ]]; }
+axon_pc_port_for_instance() { printf '8080\n'; }
+axon_restart_role_verified() {   # $1 instance, $2 process, $3 budget
+    START_CALLS="${START_CALLS}$2 "
+    [[ " $RESTART_FAILS " != *" $2 "* ]]
+}
+
+assert_join() {
+    local desc="$1" expected_rc="$2" expected_calls="$3"
+    SERVING_ROLES="$4" ALIVE_ROLES="$5" SUPERVISOR_UP="$6" RESTART_FAILS="$7"
+    shift 7
+    START_CALLS=""
+    local rc=0
+    axon_start_missing_roles /repo live 1 "$@" >/dev/null 2>&1 || rc=$?
+    local calls="${START_CALLS% }"
+    if [[ "$rc" == "$expected_rc" && "$calls" == "$expected_calls" ]]; then
+        printf '  PASS  %s\n' "$desc"; PASS=$(( PASS + 1 ))
+    else
+        printf '  FAIL  %s  (rc %s attendu %s ; starts [%s] attendu [%s])\n' \
+            "$desc" "$rc" "$expected_rc" "$calls" "$expected_calls"; FAIL=$(( FAIL + 1 ))
+    fi
+}
+
+printf '\naxon_start_missing_roles — REQ-AXO-902538/902542/902545\n'
+
+assert_join 'tous les roles servent → rc 0, AUCUN redemarrage' \
+    0 '' 'axon-brain axon-indexer' 'axon-brain axon-indexer' 1 '' axon-brain axon-indexer
+
+assert_join 'brain sain + indexeur ABSENT → demarre le SEUL indexeur, brain intact' \
+    0 'axon-indexer' 'axon-brain' 'axon-brain' 1 '' axon-brain axon-indexer
+
+assert_join 'le demarrage de l indexeur echoue → rc 1, pas un succes silencieux' \
+    1 'axon-indexer' 'axon-brain' 'axon-brain' 1 'axon-indexer' axon-brain axon-indexer
+
+# LE cas d'origine. Sur le code d'avant, ce scenario rendait 0 apres n'avoir rien fait.
+assert_join 'indexeur absent SANS superviseur → rc 1 et AUCUN start tente' \
+    1 '' 'axon-brain' 'axon-brain' 0 '' axon-brain axon-indexer
+
+# LE cas paye en production. Un /readyz muet n'est PAS une absence : doubler le role
+# fait un takeover du verrou d ecrivain IST et TUE le processus qui travaille.
+assert_join 'indexeur VIVANT mais /readyz muet → rc 1 et AUCUN start (jamais de duplicata)' \
+    1 '' 'axon-brain' 'axon-brain axon-indexer' 1 '' axon-brain axon-indexer
+
+assert_join 'brain_only : le brain sert → rc 0, rien a faire' \
+    0 '' 'axon-brain' 'axon-brain' 1 '' axon-brain
+
+assert_join 'brain_only : le brain est absent → il est demarre' \
+    0 'axon-brain' '' '' 1 '' axon-brain
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

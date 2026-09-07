@@ -225,8 +225,30 @@ fi
 # reap the repo-scoped orphan by PID and proceed.
 if ! axon_port_is_free "$AXON_BRAIN_PORT"; then
     if axon_brain_healthy "$AXON_BRAIN_PORT"; then
-        echo "ℹ️  Healthy Axon already serving on :$AXON_BRAIN_PORT. Stop first."
-        exit 0
+        # REQ-AXO-902538 / REQ-AXO-902542 / REQ-AXO-902545 — un brain sain n'est pas
+        # une INSTANCE saine. Ce bloc sortait 0 en disant « Stop first. » sans rien
+        # demarrer : `start --indexer-graph` etait donc inexecutable dans l'etat
+        # brain-only qu'il pretendait corriger, et `status` le prescrivait quand meme.
+        # On compare desormais les roles DEMANDES par le mode a ceux qui servent, et on
+        # demarre les manquants a cote du brain sain, sans y toucher.
+        _requested_processes=()
+        if ! mapfile -t _requested_processes < <(axon_start_processes "$AXON_INSTANCE_KIND" "$RUNTIME_MODE"); then
+            _requested_processes=()
+        fi
+        if (( ${#_requested_processes[@]} == 0 )); then
+            echo "❌ Unknown runtime mode '$RUNTIME_MODE': cannot tell which roles this start owns." >&2
+            exit 2
+        fi
+        if axon_start_missing_roles \
+                "$PROJECT_ROOT" \
+                "$AXON_INSTANCE_KIND" \
+                "${AXON_JOIN_ROLE_BUDGET_S:-180}" \
+                "${_requested_processes[@]}"; then
+            echo "ℹ️  Axon already serving on :$AXON_BRAIN_PORT — every role of mode $RUNTIME_MODE is up (${_requested_processes[*]})."
+            exit 0
+        fi
+        echo "❌ Mode $RUNTIME_MODE incomplete beside the healthy brain on :$AXON_BRAIN_PORT (wanted: ${_requested_processes[*]}). See the remedy above." >&2
+        exit 1
     fi
     echo "⚠️  Port :$AXON_BRAIN_PORT held by a stale Axon orphan (not serving /readyz). Reclaiming..."
     _early_pc_bin="$(command -v process-compose 2>/dev/null || true)"

@@ -147,6 +147,12 @@ mod test_support_tests;
 #[path = "release_scripts_tests.rs"]
 mod release_scripts_tests;
 
+// REQ-AXO-902538/902542/902545 — garde sur le cablage du « deja en train de
+// servir » de scripts/start.sh. Meme raison d'etre ici : tourner dans la porte.
+#[cfg(test)]
+#[path = "start_script_tests.rs"]
+mod start_script_tests;
+
 #[cfg(test)]
 pub mod test_db;
 
