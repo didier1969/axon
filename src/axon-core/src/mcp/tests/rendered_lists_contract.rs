@@ -406,7 +406,37 @@ fn value_for_required_parameter(parameter: &str) -> Option<Value> {
         "tool" => Value::from("help"),
         "symbols" => json!(["fonction_contrat_1"]),
         "sql" => Value::from("SELECT 1"),
-        "uri" => Value::from("src/contrat1.rs"),
+        // REQ-AXO-902409 tranche 3 — mesure du 2026-09-07 : le balayage exerçait
+        // 11 outils, 14 restaient « sans arguments » AVEC leur raison imprimée.
+        // Six noms manquaient ou portaient une valeur qu'aucun handler n'accepte.
+        //
+        // `uri` visait `src/contrat1.rs`, qui n'existe QUE dans l'IST semé — pas
+        // sur le disque. `fs_read` lit le disque : il rendait
+        // « file does not exist » et sortait du balayage comme « sans arguments »,
+        // ce qui se lisait comme un manque de valeur alors que la valeur était
+        // fournie et fausse. Un fichier réel du dépôt lève l'ambiguïté.
+        "uri" => Value::from("Cargo.toml"),
+        "diff_paths" => json!(["Cargo.toml"]),
+        "diff_content" => Value::from(
+            "--- a/src/contrat1.rs\n+++ b/src/contrat1.rs\n@@ -1 +1 @@\n-fn a() {}\n+fn b() {}\n",
+        ),
+        "job_id" => Value::from("rlc-job-inexistant"),
+        "source_layer" => Value::from("mcp"),
+        "target_layer" => Value::from("graph"),
+        // ⛔ DÉLIBÉRÉMENT ABSENTS, et c'est un choix, pas un oubli :
+        //
+        // `tool` (requis par `batch`) est déjà traduit plus haut par `"help"`,
+        // mais `batch` DISPATCHE vers d'autres outils. Lui donner de quoi
+        // s'exécuter ferait exécuter, dans un balayage de LECTURE, un appel dont
+        // la cible dépend de ses arguments. Le balayage ne doit rien écrire :
+        // `batch` reste non exercé, et c'est la bonne réponse.
+        //
+        // `id` est déjà traduit par `REQ-RLC-001`, ce qui convient à `soll_get` et
+        // à `soll_children` mais jamais à `prompt_template_get`, qui attend un
+        // `PRT-*`. Une traduction par NOM ne peut pas servir deux vocabulaires
+        // d'identifiants à la fois — et la corriger par nom d'OUTIL rouvrirait la
+        // dérive que ce module interdit. `prompt_template_get` reste non exercé,
+        // dit tel quel plutôt que forcé.
         _ => return None,
     })
 }
