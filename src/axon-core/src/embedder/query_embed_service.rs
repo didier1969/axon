@@ -144,7 +144,15 @@ fn supervise(requests: Receiver<QueryEmbeddingRequest>) {
             continue;
         }
 
-        let result = dispatch_with_one_retry(&mut worker, request.texts);
+        if Instant::now() >= request.deadline {
+            tracing::warn!("query embedding request expired in queue before dispatch; skipping inference");
+            let _ = request.reply.send(Err(anyhow!(
+                "MCP real-time embedding request expired in queue. Use structural search."
+            )));
+            continue;
+        }
+
+        let result = dispatch_with_one_retry(&mut worker, request.texts, request.deadline);
         let _ = request.reply.send(result);
     }
 
@@ -156,7 +164,13 @@ fn supervise(requests: Receiver<QueryEmbeddingRequest>) {
 fn dispatch_with_one_retry(
     worker: &mut Option<WorkerConnection>,
     texts: Vec<String>,
+    deadline: Instant,
 ) -> anyhow::Result<Vec<Vec<f32>>> {
+    if Instant::now() >= deadline {
+        return Err(anyhow!(
+            "MCP real-time embedding request expired before worker dispatch. Use structural search."
+        ));
+    }
     if texts.len() > MAX_TEXTS_PER_REQUEST {
         return Err(anyhow!(
             "query embedding request contains {} texts; maximum is {}",
@@ -166,6 +180,12 @@ fn dispatch_with_one_retry(
     }
     let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     for attempt in 0..=1 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow!(
+                "MCP real-time embedding timed out before attempt {attempt}. Use structural search."
+            ));
+        }
         if worker.is_none() {
             match start_worker() {
                 Ok(started) => {
@@ -187,6 +207,16 @@ fn dispatch_with_one_retry(
             }
         }
         let active = worker.as_mut().expect("worker ensured");
+        let attempt_remaining = deadline.saturating_duration_since(Instant::now());
+        if attempt_remaining.is_zero() {
+            return Err(anyhow!(
+                "MCP real-time embedding timed out before write. Use structural search."
+            ));
+        }
+        let socket_timeout = attempt_remaining.min(Duration::from_secs(15));
+        let _ = active.stream.set_read_timeout(Some(socket_timeout));
+        let _ = active.stream.set_write_timeout(Some(socket_timeout));
+
         let round_trip = (|| {
             write_frame(
                 &mut active.stream,
@@ -221,7 +251,7 @@ fn dispatch_with_one_retry(
                 );
                 return Ok(value);
             }
-            Err(error) if attempt == 0 => {
+            Err(error) if attempt == 0 && Instant::now() < deadline => {
                 tracing::warn!("query embedding worker disconnected; restarting once: {error:#}");
                 if let Some(stale) = worker.take() {
                     stale.shutdown();

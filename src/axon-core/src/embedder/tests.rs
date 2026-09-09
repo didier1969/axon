@@ -1946,6 +1946,7 @@ fn test_request_query_embedding_rejects_full_queue_without_waiting_for_a_consume
     tx.send(QueryEmbeddingRequest {
         texts: vec!["already queued".into()],
         reply,
+        deadline: std::time::Instant::now() + Duration::from_secs(15),
     }).unwrap();
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
     let caller = std::thread::spawn(move || {
@@ -1960,6 +1961,28 @@ fn test_request_query_embedding_rejects_full_queue_without_waiting_for_a_consume
         .expect_err("saturation is not a successful embedding");
     assert!(error.to_string().contains("saturated"), "{error:#}");
     assert_eq!(retained.texts, vec!["already queued"]);
+}
+
+#[test]
+fn test_query_embedding_expired_request_in_queue_rejected() {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+    let past_deadline = std::time::Instant::now() - Duration::from_secs(5);
+    tx.send(QueryEmbeddingRequest {
+        texts: vec!["stale query".into()],
+        reply: reply_tx,
+        deadline: past_deadline,
+    }).unwrap();
+
+    let request = rx.recv().unwrap();
+    assert!(std::time::Instant::now() >= request.deadline);
+    if std::time::Instant::now() >= request.deadline {
+        let _ = request.reply.send(Err(anyhow::anyhow!(
+            "MCP real-time embedding request expired in queue. Use structural search."
+        )));
+    }
+    let err = reply_rx.recv().unwrap().unwrap_err();
+    assert!(err.to_string().contains("expired"));
 }
 
 /// REQ-AXO-902576 — critère d'acceptation : « un crash à l'init GPU produit une

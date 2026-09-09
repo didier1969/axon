@@ -26,7 +26,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokenizers::{Encoding, Tokenizer};
 use tracing::{error, info};
 
@@ -118,8 +118,9 @@ pub struct EmbeddingLaneConfig {
 // sender so synchronous MCP queries can reuse the already-loaded model safely.
 
 pub(super) struct QueryEmbeddingRequest {
-    texts: Vec<String>,
-    reply: Sender<anyhow::Result<Vec<Vec<f32>>>>,
+    pub(super) texts: Vec<String>,
+    pub(super) reply: Sender<anyhow::Result<Vec<Vec<f32>>>>,
+    pub(super) deadline: Instant,
 }
 
 static QUERY_EMBEDDING_SENDER: OnceLock<Mutex<Option<Sender<QueryEmbeddingRequest>>>> =
@@ -198,6 +199,7 @@ pub(crate) fn set_query_embed_provider_override(value: &str) -> Result<&'static 
         let _ = sender.try_send(QueryEmbeddingRequest {
             texts: Vec::new(),
             reply: reply_tx,
+            deadline: Instant::now() + Duration::from_secs(30),
         });
     }
     Ok(label)
@@ -1447,6 +1449,12 @@ fn current_query_embedding_sender() -> Option<Sender<QueryEmbeddingRequest>> {
 }
 
 fn serve_query_embedding_request(model: &mut TextEmbedding, request: QueryEmbeddingRequest) {
+    if Instant::now() >= request.deadline {
+        let _ = request.reply.send(Err(anyhow::anyhow!(
+            "MCP real-time embedding timed out. Use structural search."
+        )));
+        return;
+    }
     // REQ-AXO-901984 — empty texts = a reload-trigger control request (provider
     // toggle): the model rebuild already happened in the loop's gen-check, so
     // just reply empty without an embed call.
@@ -1463,6 +1471,7 @@ fn request_query_embedding(
     texts: Vec<String>,
 ) -> anyhow::Result<Vec<Vec<f32>>> {
     let (reply_tx, reply_rx) = bounded(1);
+    let deadline = Instant::now() + QUERY_EMBED_TIMEOUT;
     // REQ-AXO-902547: the response deadline cannot protect a blocking send
     // into a full channel. Reject saturation at admission; do not accumulate
     // waiting MCP callers outside the supposedly bounded worker queue.
@@ -1470,6 +1479,7 @@ fn request_query_embedding(
         .try_send(QueryEmbeddingRequest {
             texts,
             reply: reply_tx,
+            deadline,
         })
         .map_err(|error| match error {
             crossbeam_channel::TrySendError::Full(_) => anyhow::anyhow!(

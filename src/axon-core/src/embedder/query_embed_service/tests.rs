@@ -49,14 +49,23 @@ fn terminal_inference_failure_invalidates_ready_and_recovers() {
     {
         let _failure = EnvVarGuard::set("AXON_902547_FAKE_FAIL", "true");
         runtime_readiness::report_subsystem_state(Subsystem::Embedder, SubsystemState::Ready);
-        let error = dispatch_with_one_retry(&mut worker, vec!["fail inference".into()]).unwrap_err();
+        let error = dispatch_with_one_retry(
+            &mut worker,
+            vec!["fail inference".into()],
+            Instant::now() + Duration::from_secs(15),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("synthetic inference allocation failure"), "{error:#}");
         assert!(worker.is_none(), "both failed workers must be shut down");
         assert!(matches!(embedder_state(), SubsystemState::Failed { ref reason }
             if reason == "isolated_query_worker_inference_failed"),
             "successful handshakes must not mask terminal inference failure: {:?}", embedder_state());
     }
-    let recovered = dispatch_with_one_retry(&mut worker, vec!["recover".into()]);
+    let recovered = dispatch_with_one_retry(
+        &mut worker,
+        vec!["recover".into()],
+        Instant::now() + Duration::from_secs(15),
+    );
     let state = embedder_state();
     if let Some(active) = worker.take() { active.shutdown(); }
     assert_eq!(recovered.unwrap(), vec![vec![1.0]]);
@@ -74,7 +83,11 @@ fn successful_inference_refreshes_readiness_without_restarting_worker() {
     let pid = worker.as_ref().unwrap().child.id();
     runtime_readiness::report_subsystem_state(Subsystem::Embedder,
         SubsystemState::Failed { reason: "previous inference failure".into() });
-    let result = dispatch_with_one_retry(&mut worker, vec!["healthy existing connection".into()]);
+    let result = dispatch_with_one_retry(
+        &mut worker,
+        vec!["healthy existing connection".into()],
+        Instant::now() + Duration::from_secs(15),
+    );
     let state = embedder_state();
     let same_worker = worker.as_ref().map(|w| w.child.id()) == Some(pid);
     if let Some(active) = worker.take() { active.shutdown(); }
@@ -88,9 +101,34 @@ fn oversized_request_does_not_mark_a_healthy_service_failed() {
     if !enter_isolated_case("oversized_request_does_not_mark_a_healthy_service_failed") { return; }
     runtime_readiness::report_subsystem_state(Subsystem::Embedder, SubsystemState::Ready);
     let mut worker = None;
-    let error = dispatch_with_one_retry(&mut worker, vec![String::new(); MAX_TEXTS_PER_REQUEST + 1]).unwrap_err();
+    let error = dispatch_with_one_retry(
+        &mut worker,
+        vec![String::new(); MAX_TEXTS_PER_REQUEST + 1],
+        Instant::now() + Duration::from_secs(15),
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("maximum"));
     assert!(worker.is_none());
+    assert_eq!(embedder_state(), SubsystemState::Ready);
+}
+
+#[test]
+fn expired_request_in_queue_aborts_without_inference() {
+    if !enter_isolated_case("expired_request_in_queue_aborts_without_inference") { return; }
+    runtime_readiness::report_subsystem_state(Subsystem::Embedder, SubsystemState::Ready);
+    let mut worker = None;
+    let past_deadline = Instant::now() - Duration::from_millis(100);
+    let error = dispatch_with_one_retry(
+        &mut worker,
+        vec!["should never execute".into()],
+        past_deadline,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("expired") || error.to_string().contains("timed out"),
+        "error must explicitly report timeout/expiration, got: {error:#}"
+    );
+    assert!(worker.is_none(), "no worker connection should be opened for expired request");
     assert_eq!(embedder_state(), SubsystemState::Ready);
 }
 
