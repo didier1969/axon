@@ -212,7 +212,15 @@ fn dispatch_with_one_retry(
         })();
 
         match round_trip {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                // REQ-AXO-902547: refresh the observed state on inference,
+                // including successes on an already-running connection.
+                crate::runtime_readiness::report_subsystem_state(
+                    crate::runtime_readiness::Subsystem::Embedder,
+                    crate::runtime_readiness::SubsystemState::Ready,
+                );
+                return Ok(value);
+            }
             Err(error) if attempt == 0 => {
                 tracing::warn!("query embedding worker disconnected; restarting once: {error:#}");
                 if let Some(stale) = worker.take() {
@@ -220,6 +228,14 @@ fn dispatch_with_one_retry(
                 }
             }
             Err(error) => {
+                // A successful startup handshake does not prove inference
+                // availability. Invalidate it before potentially slow cleanup.
+                crate::runtime_readiness::report_subsystem_state(
+                    crate::runtime_readiness::Subsystem::Embedder,
+                    crate::runtime_readiness::SubsystemState::Failed {
+                        reason: "isolated_query_worker_inference_failed".to_string(),
+                    },
+                );
                 if let Some(stale) = worker.take() {
                     stale.shutdown();
                 }
@@ -626,6 +642,10 @@ fn is_timeout(error: &anyhow::Error) -> bool {
         })
     })
 }
+
+#[cfg(test)]
+#[path = "query_embed_service/tests.rs"]
+mod resilience_tests;
 
 #[cfg(test)]
 mod tests {

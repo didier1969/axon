@@ -1936,6 +1936,32 @@ fn test_request_query_embedding_returns_worker_disconnect_error() {
         .contains("MCP real-time embedding worker unavailable"));
 }
 
+// REQ-AXO-902547: a bounded channel must bound admission as well as storage.
+// Keep its receiver alive without draining it: the old blocking send cannot
+// reach the 15s response timeout at all. Always disconnect and join on failure.
+#[test]
+fn test_request_query_embedding_rejects_full_queue_without_waiting_for_a_consumer() {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let (reply, _) = crossbeam_channel::bounded(1);
+    tx.send(QueryEmbeddingRequest {
+        texts: vec!["already queued".into()],
+        reply,
+    }).unwrap();
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+    let caller = std::thread::spawn(move || {
+        let result = request_query_embedding(&tx, vec!["must not be queued".into()]);
+        done_tx.send(result).unwrap();
+    });
+    let observed = done_rx.recv_timeout(Duration::from_secs(2));
+    let retained = rx.try_recv().unwrap();
+    drop(rx);
+    caller.join().unwrap();
+    let error = observed.expect("full admission must fail before a consumer drains the queue")
+        .expect_err("saturation is not a successful embedding");
+    assert!(error.to_string().contains("saturated"), "{error:#}");
+    assert_eq!(retained.texts, vec!["already queued"]);
+}
+
 /// REQ-AXO-902576 — critère d'acceptation : « un crash à l'init GPU produit une
 /// trace nommant la dernière étape atteinte, et un journal de crash exploitable
 /// — pas un `exit=-1` muet ».

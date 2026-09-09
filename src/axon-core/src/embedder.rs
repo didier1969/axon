@@ -1463,13 +1463,21 @@ fn request_query_embedding(
     texts: Vec<String>,
 ) -> anyhow::Result<Vec<Vec<f32>>> {
     let (reply_tx, reply_rx) = bounded(1);
+    // REQ-AXO-902547: the response deadline cannot protect a blocking send
+    // into a full channel. Reject saturation at admission; do not accumulate
+    // waiting MCP callers outside the supposedly bounded worker queue.
     sender
-        .send(QueryEmbeddingRequest {
+        .try_send(QueryEmbeddingRequest {
             texts,
             reply: reply_tx,
         })
-        .map_err(|_| {
-            anyhow::anyhow!("MCP real-time embedding worker unavailable. Use structural search.")
+        .map_err(|error| match error {
+            crossbeam_channel::TrySendError::Full(_) => anyhow::anyhow!(
+                "MCP real-time embedding queue saturated. Use structural search."
+            ),
+            crossbeam_channel::TrySendError::Disconnected(_) => anyhow::anyhow!(
+                "MCP real-time embedding worker unavailable. Use structural search."
+            ),
         })?;
 
     match reply_rx.recv_timeout(QUERY_EMBED_TIMEOUT) {
