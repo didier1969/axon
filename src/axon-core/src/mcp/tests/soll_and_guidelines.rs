@@ -11849,6 +11849,170 @@ mod commit_is_bounded_to_the_declaration {
             .expect("axon_commit_work returned no result")
     }
 
+    // REQ-AXO-902571, APS/DOC: --only reads worktree metadata instead of the
+    // staged executable bit when core.filemode=false. Assert the actual tree.
+    fn assert_staged_mode_survives(include_content: bool) {
+        let server = create_test_server();
+        let dir = repo_with_two_committed_files();
+        let repo = dir.path();
+        git(repo, &["config", "core.filemode", "false"]);
+        git(repo, &["update-index", "--chmod=+x", "--", "declared.txt"]);
+        std::fs::write(repo.join("unrelated.txt"), "staged for later").unwrap();
+        git(repo, &["add", "--", "unrelated.txt"]);
+        git(repo, &["update-index", "--chmod=+x", "--", "unrelated.txt"]);
+        let excluded_before = git_stdout(repo, &["ls-files", "--stage", "--", "unrelated.txt"]);
+        let before = git_stdout(repo, &["rev-parse", "HEAD"]);
+        let paths = if include_content {
+            std::fs::write(repo.join("content.txt"), "a new file beside the mode-only change").unwrap();
+            json!(["declared.txt", "content.txt"])
+        } else {
+            json!(["declared.txt"])
+        };
+        let result = commit_via_tool(&server, repo, paths, "fix: preserve staged executable metadata");
+        let after = git_stdout(repo, &["rev-parse", "HEAD"]);
+        assert_ne!(before, after, "the mode-only change must create a commit: {result}");
+        let tree = git_stdout(repo, &["ls-tree", "HEAD", "--", "declared.txt"]);
+        assert!(tree.starts_with("100755 "), "the reported commit must contain the staged mode: {tree}; {result}");
+        assert_ne!(result["isError"], json!(true), "{result}");
+        assert_eq!(git_stdout(repo, &["config", "core.filemode"]).trim(), "false");
+        assert_eq!(git_stdout(repo, &["ls-files", "--stage", "--", "unrelated.txt"]), excluded_before,
+            "both the content AND mode of excluded staged work must survive");
+        assert_eq!(git_stdout(repo, &["diff", "--cached", "--name-only"]).trim(), "unrelated.txt");
+        let committed = git_stdout(repo, &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]);
+        assert!(committed.lines().any(|p| p == "declared.txt"));
+        assert!(!committed.lines().any(|p| p == "unrelated.txt"));
+        assert_eq!(committed.lines().count(), if include_content { 2 } else { 1 });
+        assert_eq!(result["data"]["commit_sha"], json!(after.trim()));
+        assert_eq!(result["data"]["committed_paths"], json!(committed.lines().collect::<Vec<_>>()));
+        assert_eq!(result["data"]["measurement"], json!("post_commit_diff_tree"));
+    }
+
+    #[test]
+    fn staged_executable_mode_alone_survives_with_filemode_false() {
+        assert_staged_mode_survives(false);
+    }
+
+    #[test]
+    fn staged_executable_mode_beside_content_survives_with_filemode_false() {
+        assert_staged_mode_survives(true);
+    }
+
+    #[test]
+    fn a_directory_declaration_preserves_spaces_newlines_and_unicode_paths() {
+        let server = create_test_server();
+        let dir = repo_with_two_committed_files();
+        let repo = dir.path();
+        let name = "sub/espace et\nété.txt";
+        std::fs::create_dir(repo.join("sub")).unwrap();
+        std::fs::write(repo.join(name), "new").unwrap();
+        std::fs::write(repo.join("unrelated.txt"), "later").unwrap();
+        git(repo, &["add", "--", "unrelated.txt"]);
+        let result = commit_via_tool(&server, repo, json!(["sub"]), "fix: commit a directory with unusual names");
+        assert_ne!(result["isError"], json!(true), "{result}");
+        assert_eq!(result["data"]["committed_paths"], json!([name]));
+        assert_eq!(git_stdout(repo, &["diff", "--cached", "--name-only"]).trim(), "unrelated.txt");
+    }
+
+    #[test]
+    fn an_initial_commit_preserves_unrelated_staged_and_unstaged_versions() {
+        let server = create_test_server();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "."]);
+        git(repo, &["config", "user.email", "t@t"]);
+        git(repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("declared.txt"), "initial").unwrap();
+        std::fs::write(repo.join("unrelated.txt"), "staged version").unwrap();
+        git(repo, &["add", "--", "unrelated.txt"]);
+        std::fs::write(repo.join("unrelated.txt"), "unstaged version").unwrap();
+        let result = commit_via_tool(&server, repo, json!(["declared.txt"]), "fix: initial bounded commit");
+        assert_ne!(result["isError"], json!(true), "{result}");
+        assert_eq!(result["data"]["committed_paths"], json!(["declared.txt"]));
+        assert_eq!(git_stdout(repo, &["show", ":unrelated.txt"]), "staged version");
+        assert_eq!(std::fs::read_to_string(repo.join("unrelated.txt")).unwrap(), "unstaged version");
+        assert_eq!(git_stdout(repo, &["ls-tree", "--name-only", "HEAD"]).trim(), "declared.txt");
+    }
+
+    #[test]
+    fn another_clients_index_lock_is_never_removed() {
+        let server = create_test_server();
+        let dir = repo_with_two_committed_files();
+        let repo = dir.path();
+        let before = git_stdout(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("declared.txt"), "new").unwrap();
+        std::fs::write(repo.join(".git/index.lock"), "another client's lock").unwrap();
+        let result = commit_via_tool(&server, repo, json!(["declared.txt"]), "fix: respect another index lock");
+        assert_eq!(result["isError"], json!(true), "{result}");
+        assert_eq!(git_stdout(repo, &["rev-parse", "HEAD"]), before);
+        assert_eq!(std::fs::read_to_string(repo.join(".git/index.lock")).unwrap(), "another client's lock");
+    }
+
+    #[cfg(unix)]
+    fn install_commit_hook(repo: &std::path::Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = repo.join(".git/hooks").join(name);
+        std::fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_pre_commit_hook_can_update_a_declared_blob_without_losing_other_staging() {
+        let server = create_test_server();
+        let dir = repo_with_two_committed_files();
+        let repo = dir.path();
+        std::fs::write(repo.join("declared.txt"), "requested").unwrap();
+        std::fs::write(repo.join("unrelated.txt"), "later").unwrap();
+        git(repo, &["add", "--", "unrelated.txt"]);
+        install_commit_hook(repo, "pre-commit", "printf hook-version > declared.txt\ngit add -- declared.txt");
+        let result = commit_via_tool(&server, repo, json!(["declared.txt"]), "fix: preserve formatting hooks");
+        assert_ne!(result["isError"], json!(true), "{result}");
+        assert_eq!(git_stdout(repo, &["show", "HEAD:declared.txt"]), "hook-version");
+        assert_eq!(git_stdout(repo, &["diff", "--cached", "--name-only"]).trim(), "unrelated.txt");
+        assert!(!repo.join(".git/index.lock").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_rejected_hook_keeps_staged_work_and_releases_only_our_lock() {
+        let server = create_test_server();
+        let dir = repo_with_two_committed_files();
+        let repo = dir.path();
+        let before = git_stdout(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("declared.txt"), "requested").unwrap();
+        install_commit_hook(repo, "pre-commit", "exit 37");
+        let result = commit_via_tool(&server, repo, json!(["declared.txt"]), "fix: respect hook refusal");
+        assert_eq!(result["isError"], json!(true), "{result}");
+        assert_eq!(git_stdout(repo, &["rev-parse", "HEAD"]), before);
+        assert_eq!(git_stdout(repo, &["show", ":declared.txt"]), "requested");
+        assert!(!repo.join(".git/index.lock").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn post_commit_staged_work_is_retained_not_discarded_or_certified() {
+        let server = create_test_server();
+        let dir = repo_with_two_committed_files();
+        let repo = dir.path();
+        let before = git_stdout(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("declared.txt"), "requested").unwrap();
+        std::fs::write(repo.join("unrelated.txt"), "user staged").unwrap();
+        git(repo, &["add", "--", "unrelated.txt"]);
+        install_commit_hook(repo, "post-commit", "printf hook-staged > unrelated.txt\ngit add -- unrelated.txt");
+        let result = commit_via_tool(&server, repo, json!(["declared.txt"]), "fix: preserve post-commit staging evidence");
+        assert_eq!(result["isError"], json!(true), "{result}");
+        assert_eq!(result["data"]["status"], json!("commit_state_unverified"));
+        assert_ne!(git_stdout(repo, &["rev-parse", "HEAD"]), before, "the error must not pretend no commit exists");
+        assert_eq!(git_stdout(repo, &["show", ":unrelated.txt"]), "user staged");
+        let retained = std::fs::read_dir(repo.join(".git")).unwrap().filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().starts_with("axon-commit-index-")).unwrap();
+        let out = std::process::Command::new("git").current_dir(repo)
+            .env("GIT_INDEX_FILE", retained.path()).args(["show", ":unrelated.txt"]).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "hook-staged");
+        assert!(!repo.join(".git/index.lock").exists());
+    }
+
     #[test]
     fn a_path_staged_before_the_call_stays_out_of_the_commit_and_stays_staged() {
         let server = create_test_server();

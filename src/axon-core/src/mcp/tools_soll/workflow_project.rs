@@ -181,6 +181,159 @@ fn git_output(
     cmd.args(args).output().ok()
 }
 
+fn commit_git_command(
+    project_dir: Option<&std::path::PathBuf>,
+    index: Option<&std::path::Path>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    if let Some(dir) = project_dir {
+        cmd.current_dir(dir);
+    }
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
+    cmd
+}
+
+fn commit_git_checked(
+    project_dir: Option<&std::path::PathBuf>,
+    index: Option<&std::path::Path>,
+    args: &[&str],
+) -> anyhow::Result<std::process::Output> {
+    let out = commit_git_command(project_dir, index).args(args).output()?;
+    anyhow::ensure!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    Ok(out)
+}
+
+fn commit_git_paths(
+    project_dir: Option<&std::path::PathBuf>,
+    args: &[&str],
+) -> anyhow::Result<Vec<String>> {
+    let out = commit_git_checked(project_dir, None, args)?;
+    out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty())
+        .map(|p| Ok(std::str::from_utf8(p)?.to_owned())).collect()
+}
+
+/// Own only the lock we successfully created. Git clients respect index.lock;
+/// never remove a pre-existing lock or replace another client's staged index.
+struct CommitIndexLock {
+    path: std::path::PathBuf,
+    owned: bool,
+}
+
+impl Drop for CommitIndexLock {
+    fn drop(&mut self) {
+        if self.owned {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+struct ScopedCommitResult {
+    output: std::process::Output,
+    committed: Vec<String>,
+    excluded: Vec<String>,
+    sha: Option<String>,
+}
+
+/// REQ-AXO-902571 / 902417 — commit the staged modes and blobs, not a second
+/// worktree read by `--only`. The native index stays locked while a scoped copy
+/// is committed. Synchronize only the paths actually committed; excluded staged
+/// work is copied byte-for-byte before that synchronization, never reset away.
+fn commit_scoped_index(
+    project_dir: Option<&std::path::PathBuf>,
+    declared: &[String],
+    message: &str,
+) -> anyhow::Result<ScopedCommitResult> {
+    let git_path = |name: &str| -> anyhow::Result<std::path::PathBuf> {
+        let out = commit_git_checked(project_dir, None,
+            &["rev-parse", "--path-format=absolute", "--git-path", name])?;
+        let raw = out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout);
+        Ok(std::path::PathBuf::from(std::str::from_utf8(raw)?))
+    };
+    // Preserve Git's native partial-operation refusal and its error taxonomy.
+    for state in ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] {
+        if git_path(state)?.exists() {
+            let (_, excluded) = McpServer::partition_staged_by_declaration(declared, project_dir)?;
+            let output = commit_git_command(project_dir, None)
+                .args(["commit", "--only", "-m", message, "--"]).args(declared).output()?;
+            anyhow::ensure!(!output.status.success(), "Unexpected partial commit during {state}; inspect HEAD before retrying");
+            return Ok(ScopedCommitResult { output, committed: vec![], excluded, sha: None });
+        }
+    }
+    let index = git_path("index")?;
+    let mut lock_name = index.as_os_str().to_owned();
+    lock_name.push(".lock");
+    let lock_path = std::path::PathBuf::from(lock_name);
+    std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path)?;
+    let mut lock = CommitIndexLock { path: lock_path, owned: true };
+    let (expected, excluded) = McpServer::partition_staged_by_declaration(declared, project_dir)?;
+    let temporary = tempfile::Builder::new().prefix("axon-commit-index-")
+        .tempfile_in(index.parent().ok_or_else(|| anyhow::anyhow!("index has no parent"))?)?;
+    std::fs::copy(&index, temporary.path())?;
+    let head = commit_git_command(project_dir, None)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"]).output()?;
+    let before = if head.status.success() {
+        Some(String::from_utf8(head.stdout)?.trim().to_owned())
+    } else {
+        anyhow::ensure!(head.status.code() == Some(1), "Cannot determine HEAD before commit");
+        None
+    };
+    if !excluded.is_empty() {
+        let mut prune = commit_git_command(project_dir, Some(temporary.path()));
+        // These are Git-reported FILE names, not caller-supplied pathspecs.
+        prune.env("GIT_LITERAL_PATHSPECS", "1");
+        if let Some(before) = before.as_deref() {
+            prune.args(["reset", "-q", before, "--"]);
+        } else {
+            // No HEAD yet: excluded entries are all new. Force removal ONLY
+            // from this disposable index, even when worktree and staged blobs
+            // differ. Neither the real index nor any worktree file is removed.
+            prune.args(["rm", "-r", "--cached", "--force", "--ignore-unmatch", "--"]);
+        }
+        let out = prune.args(&excluded).output()?;
+        anyhow::ensure!(out.status.success(), "Cannot isolate declared paths: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let output = commit_git_command(project_dir, Some(temporary.path()))
+        .args(["commit", "-m", message]).output()?;
+    if !output.status.success() {
+        return Ok(ScopedCommitResult { output, committed: vec![], excluded, sha: None });
+    }
+    let sha = String::from_utf8(commit_git_checked(project_dir, None,
+        &["rev-parse", "--verify", "HEAD"])?.stdout)?.trim().to_owned();
+    let parents = String::from_utf8(commit_git_checked(project_dir, None,
+        &["rev-list", "--parents", "-n", "1", &sha])?.stdout)?;
+    let actual_parents: Vec<_> = parents.split_whitespace().skip(1).collect();
+    anyhow::ensure!(actual_parents == before.as_deref().into_iter().collect::<Vec<_>>(),
+        "Commit {sha} has an unexpected parent; inspect concurrent HEAD changes before retrying");
+    let mut args = vec!["diff-tree", "--root", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", &sha];
+    let committed = commit_git_paths(project_dir, &args)?;
+    args.push("--");
+    args.extend(declared.iter().map(String::as_str));
+    let allowed = commit_git_paths(project_dir, &args)?;
+    // Hooks are not bypassed. If one changes the promised scope or stages new
+    // work after committing, retain its index for recovery, never discard it.
+    let after_tree = commit_git_checked(project_dir, Some(temporary.path()), &["write-tree"])?;
+    let committed_tree = commit_git_checked(project_dir, None, &["rev-parse", &format!("{sha}^{{tree}}")])?;
+    if committed != allowed || after_tree.stdout != committed_tree.stdout || expected.iter().any(|p| !committed.contains(p)) {
+        let retained = temporary.into_temp_path().keep()?;
+        anyhow::bail!("Commit {sha} exists but a hook changed its scope, omitted staged paths, or left new staged work. \
+            Retained index: {}. Inspect HEAD and this index before retrying; no success is certified", retained.display());
+    }
+    // The real index is still locked, and still includes every excluded change.
+    // Git updates modes, deleted entries and index extensions in our owned copy.
+    std::fs::copy(&index, &lock.path)?;
+    if !committed.is_empty() {
+        let out = commit_git_command(project_dir, Some(&lock.path))
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .args(["reset", "-q", &sha, "--"]).args(&committed).output()?;
+        anyhow::ensure!(out.status.success(), "Commit {sha} exists, but index synchronization failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    std::fs::rename(&lock.path, &index)?;
+    lock.owned = false;
+    Ok(ScopedCommitResult { output, committed, excluded, sha: Some(sha) })
+}
+
 /// REQ-AXO-902624 / REQ-AXO-902619 — les trois régimes du bundle d'ouverture.
 ///
 /// Mesuré le 2026-09-05 : le `data` seul du bundle rend **103 315 caractères**, et
@@ -316,30 +469,19 @@ impl McpServer {
     pub(crate) fn partition_staged_by_declaration(
         declared: &[String],
         project_dir: Option<&std::path::PathBuf>,
-    ) -> (Vec<String>, Vec<String>) {
-        let git = |args: &[&str]| -> std::collections::BTreeSet<String> {
-            git_output(project_dir, args)
-                .filter(|o| o.status.success())
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .map(str::trim)
-                        .filter(|l| !l.is_empty())
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-
-        let all_staged = git(&["diff", "--cached", "--name-only"]);
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+        let all_staged: std::collections::BTreeSet<_> =
+            commit_git_paths(project_dir, &["diff", "--cached", "--name-only", "--no-renames", "-z"])?
+                .into_iter().collect();
         if all_staged.is_empty() {
-            return (Vec::new(), Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
-        let mut covering = vec!["diff", "--cached", "--name-only", "--"];
+        let mut covering = vec!["diff", "--cached", "--name-only", "--no-renames", "-z", "--"];
         covering.extend(declared.iter().map(String::as_str));
-        let covered = git(&covering);
+        let covered: std::collections::BTreeSet<_> =
+            commit_git_paths(project_dir, &covering)?.into_iter().collect();
         let outside = all_staged.difference(&covered).cloned().collect();
-        (covered.into_iter().collect(), outside)
+        Ok((covered.into_iter().collect(), outside))
     }
 
     pub(crate) fn axon_commit_work(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
@@ -763,23 +905,8 @@ impl McpServer {
             .filter_map(serde_json::Value::as_str)
             .map(str::to_string)
             .collect();
-        let (will_commit, excluded) =
-            Self::partition_staged_by_declaration(&declared, resolved_project_path.as_ref());
-
-        let mut commit_cmd = std::process::Command::new("git");
-        if let Some(dir) = resolved_project_path.as_ref() {
-            commit_cmd.current_dir(dir);
-        }
-        // `--only` is implied by giving pathspecs; it is spelled out because the
-        // whole point of this call is that the commit is BOUNDED.
-        commit_cmd.arg("commit").arg("--only").arg("-m").arg(message).arg("--");
-        for path in &declared {
-            commit_cmd.arg(path);
-        }
-        let commit_out = commit_cmd.output();
-
-        match commit_out {
-            Ok(output) => {
+        match commit_scoped_index(resolved_project_path.as_ref(), &declared, message) {
+            Ok(ScopedCommitResult { output, committed, excluded, sha }) => {
                 if !output.status.success() {
                     return Some(Self::commit_failure_response(&output, &declared, &excluded));
                 }
@@ -794,10 +921,11 @@ impl McpServer {
                     // themselves — and that is precisely how a 401-line deletion
                     // rode along unnoticed.
                     s.push_str(&format!(
-                        "\nCommitted ({} path(s), measured against the index — NOT a \
-                         restatement of `diff_paths`): {}\n",
-                        will_commit.len(),
-                        will_commit
+                        "\nCommitted ({} path(s), verified against commit {} — NOT a \
+                         pre-commit index estimate): {}\n",
+                        committed.len(),
+                        sha.as_deref().unwrap_or("unavailable"),
+                        committed
                             .iter()
                             .map(|p| format!("`{p}`"))
                             .collect::<Vec<_>>()
@@ -839,17 +967,34 @@ impl McpServer {
                     s
                 };
                 Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Validation passed.\n\n{}", status) }]
+                    "content": [{ "type": "text", "text": format!("Validation passed.\n\n{}", status) }],
+                    "data": {
+                        "status": "committed",
+                        "commit_sha": sha,
+                        "committed_paths": committed,
+                        "excluded_staged_paths": excluded,
+                        "measurement": "post_commit_diff_tree"
+                    }
                 }))
             }
-            Err(e) => Some(project_workflow_error(
-                "git_environment",
-                None,
-                &["axon_pre_flight_check", "status"],
-                format!("Git commit failed: {}", e),
-                "git commit invocation failed; verify the git binary is on PATH and the repo is in a valid state, then retry `axon_pre_flight_check`",
-                Some(&e.to_string()),
-            )),
+            Err(e) => Some(serde_json::json!({
+                "isError": true,
+                "content": [{"type": "text", "text": format!(
+                    "Bounded commit could not be certified: {e}. Inspect HEAD and the index before retrying; a commit may already exist."
+                )}],
+                "data": {
+                    "status": "commit_state_unverified",
+                    "operator_guidance": {
+                        "problem_class": "bounded_commit_unverified",
+                        "hint": "inspect HEAD, staged changes and any retained index named above; never blindly retry a possibly completed commit"
+                    },
+                    "next_action": {
+                        "kind": "inspect_git_before_retry",
+                        "tool": "axon_pre_flight_check",
+                        "when": "after_checking_head_and_index"
+                    }
+                }
+            })),
         }
     }
 
@@ -897,12 +1042,11 @@ impl McpServer {
             (
                 "declared_paths_carry_no_change",
                 format!(
-                    "None of the {} declared path(s) differ from HEAD, so there is nothing to \
-                     commit. This used to succeed by committing whatever else was staged.",
+                    "Git created no commit for the {} declared path(s). This does not prove \
+                     that the staged index is unchanged: inspect its modes and any commit hooks.",
                     declared.len()
                 ),
-                "check `git status` — the change you meant to commit is either already \
-                 committed, or lives in a path absent from `diff_paths`",
+                "check `git diff --cached --raw` and commit hooks before concluding that there is no staged change",
             )
         } else {
             (
@@ -4353,7 +4497,7 @@ mod commit_req_id_tests {
             git(dir.path(), &["add", "-A", "."]);
 
             let (covered, outside) =
-                McpServer::partition_staged_by_declaration(&["sub".to_string()], Some(&owned));
+                McpServer::partition_staged_by_declaration(&["sub".to_string()], Some(&owned)).unwrap();
 
             assert_eq!(
                 covered,
