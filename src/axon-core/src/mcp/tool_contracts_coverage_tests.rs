@@ -38,7 +38,8 @@ use serde_json::Value;
 /// un test serait retirer un contrat servi à des locataires.
 /// s149 : 5 → 8. Ajout de `sql`, `query`, `status` dont les handlers ont été
 /// intégralement vérifiés.
-const PLANCHER_OUTILS_INSTRUMENTES: usize = 8;
+/// s150 (REQ-AXO-902583) : 8 → 10. Ajout de `axon_commit_work` et `axon_pre_flight_check`.
+const PLANCHER_OUTILS_INSTRUMENTES: usize = 10;
 
 /// Second plancher — le nombre de paramètres RÉELLEMENT examinés.
 ///
@@ -52,7 +53,8 @@ const PLANCHER_OUTILS_INSTRUMENTES: usize = 8;
 /// monter le chiffre.
 /// s149 : 29 → 35. Ajout de 6 paramètres (sql: 1, query: 4, status: 1), tous
 /// honorés sans condition.
-const PLANCHER_PARAMETRES_EXAMINES: usize = 35;
+/// s150 (REQ-AXO-902583) : 35 → 43. Ajout de 8 paramètres (axon_commit_work: 5, axon_pre_flight_check: 3).
+const PLANCHER_PARAMETRES_EXAMINES: usize = 43;
 
 /// Les paramètres dont un handler a été lu, tous outils confondus.
 fn parametres_examines() -> usize {

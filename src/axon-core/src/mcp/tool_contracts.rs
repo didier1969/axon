@@ -1598,6 +1598,44 @@ pub(crate) const STATUS_DISPOSITIONS: &[ParameterDeclaration] = &[
     },
 ];
 
+pub(crate) const AXON_COMMIT_WORK_DISPOSITIONS: &[ParameterDeclaration] = &[
+    ParameterDeclaration {
+        name: "diff_paths",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "dry_run",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "message",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "project_code",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "project_path",
+        disposition: ParameterDisposition::Honoured,
+    },
+];
+
+pub(crate) const AXON_PRE_FLIGHT_CHECK_DISPOSITIONS: &[ParameterDeclaration] = &[
+    ParameterDeclaration {
+        name: "diff_paths",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "incremental",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "message",
+        disposition: ParameterDisposition::Honoured,
+    },
+];
+
 /// Ce qu'on sait des paramètres d'un outil — et ce qu'on ne sait PAS encore.
 ///
 /// REQ-AXO-902583. `unexamined` n'est pas une variante de `ParameterDisposition`,
@@ -1674,6 +1712,14 @@ pub(crate) const DECLARED_DISPOSITIONS: &[(&str, ToolDispositions)] = &[
     (
         "status",
         ToolDispositions { declared: STATUS_DISPOSITIONS, unexamined: &[] },
+    ),
+    (
+        "axon_commit_work",
+        ToolDispositions { declared: AXON_COMMIT_WORK_DISPOSITIONS, unexamined: &[] },
+    ),
+    (
+        "axon_pre_flight_check",
+        ToolDispositions { declared: AXON_PRE_FLIGHT_CHECK_DISPOSITIONS, unexamined: &[] },
     ),
 ];
 
