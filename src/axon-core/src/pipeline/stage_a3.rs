@@ -546,13 +546,22 @@ mod tests {
     #[tokio::test]
     async fn load_all_indexed_files_hydrates_only_content_hash_rows() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let _ = store.execute("DELETE FROM ist.Chunk WHERE file_path LIKE '/tmp/hyd/%'");
+        let _ = store.execute("DELETE FROM ist.IndexedFile WHERE path LIKE '/tmp/hyd/%'");
         store
             .execute(
                 "INSERT INTO ist.IndexedFile \
-                    (path, project_code, content_hash, last_seen_ms, status) VALUES \
-                    ('/tmp/hyd/done_a.rs','AXO','hA',1,'indexed'), \
-                    ('/tmp/hyd/done_b.rs','AXO','hB',1,'skipped'), \
-                    ('/tmp/hyd/pending.rs','AXO','hPending',1,'discovered');",
+                    (path, project_code, content_hash, last_seen_ms, status, skip_reason) VALUES \
+                    ('/tmp/hyd/done_a.rs','AXO','hA',1,'indexed',NULL), \
+                    ('/tmp/hyd/done_b.rs','AXO','hB',1,'skipped','minified'), \
+                    ('/tmp/hyd/pending.rs','AXO','hPending',1,'discovered',NULL);",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO ist.Chunk \
+                    (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) VALUES \
+                    ('c_hyd_a','symbol','s_hyd_a','AXO','/tmp/hyd/done_a.rs','fn','content','chash_hyd_a',1,10,1,1,'1/1');",
             )
             .unwrap();
 
@@ -576,8 +585,68 @@ mod tests {
             "empty content_hash (not yet A-DONE) must NOT hydrate (else should_index=false → stranded)"
         );
 
+        let _ = store.execute("DELETE FROM ist.Chunk WHERE file_path LIKE '/tmp/hyd/%'");
         let _ = store.execute("DELETE FROM ist.IndexedFile WHERE path LIKE '/tmp/hyd/%'");
     }
+
+    /// REQ-AXO-902512 — boot hydration must only populate IndexedFileCache for rows that
+    /// are ACTUALLY covered (chunk exists in ist.Chunk OR terminal policy skip like minified/empty).
+    /// A chunkless row or a transient parse_timeout MUST NOT hydrate, else it is permanently
+    /// skipped by L1/L2 and never retried.
+    #[tokio::test]
+    async fn load_all_indexed_files_skips_chunkless_and_timeout_files_902512() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        let _ = store.execute("DELETE FROM ist.Chunk WHERE file_path LIKE '/tmp/hyd902512/%'");
+        let _ = store.execute("DELETE FROM ist.IndexedFile WHERE path LIKE '/tmp/hyd902512/%'");
+
+        store
+            .execute(
+                "INSERT INTO ist.IndexedFile \
+                    (path, project_code, content_hash, last_seen_ms, status, skip_reason) VALUES \
+                    ('/tmp/hyd902512/chunked.rs','AXO','hChunked',1,'indexed',NULL), \
+                    ('/tmp/hyd902512/chunkless.rs','AXO','hChunkless',1,'indexed',NULL), \
+                    ('/tmp/hyd902512/policy_skip.rs','AXO','hPolicy',1,'skipped','minified'), \
+                    ('/tmp/hyd902512/timeout_skip.rs','AXO','hTimeout',1,'skipped','parse_timeout');",
+            )
+            .unwrap();
+
+        // Seed a chunk for chunked.rs only
+        store
+            .execute(
+                "INSERT INTO ist.Chunk \
+                    (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) VALUES \
+                    ('c1','symbol','s1','AXO','/tmp/hyd902512/chunked.rs','fn','content','chash',1,10,1,1,'1/1');",
+            )
+            .unwrap();
+
+        let loaded = store.load_all_indexed_files().unwrap();
+        let hydrated: std::collections::HashSet<String> = loaded
+            .into_iter()
+            .map(|(p, _, _, _, _)| p)
+            .filter(|p: &String| p.starts_with("/tmp/hyd902512/"))
+            .collect();
+
+        assert!(
+            hydrated.contains("/tmp/hyd902512/chunked.rs"),
+            "file with chunks MUST hydrate"
+        );
+        assert!(
+            hydrated.contains("/tmp/hyd902512/policy_skip.rs"),
+            "file with terminal policy skip MUST hydrate"
+        );
+        assert!(
+            !hydrated.contains("/tmp/hyd902512/chunkless.rs"),
+            "chunkless enrolled file MUST NOT hydrate into dedup cache (REQ-AXO-902512)"
+        );
+        assert!(
+            !hydrated.contains("/tmp/hyd902512/timeout_skip.rs"),
+            "parse_timeout file MUST NOT hydrate into dedup cache (REQ-AXO-902512)"
+        );
+
+        let _ = store.execute("DELETE FROM ist.Chunk WHERE file_path LIKE '/tmp/hyd902512/%'");
+        let _ = store.execute("DELETE FROM ist.IndexedFile WHERE path LIKE '/tmp/hyd902512/%'");
+    }
+
 
     #[tokio::test]
     async fn a3_enroll_persists_symbol_and_chunk_rows() {

@@ -178,15 +178,16 @@ impl IndexedFileCache {
     /// data and cannot rebuild it is worse than one that refuses.
     ///
     /// `prefix` is matched on the raw key (an absolute path). Callers pass a directory
-    /// WITHOUT a trailing separator; the separator is added here so that purging
-    /// `/home/x/proj` cannot also purge `/home/x/proj-other`.
+    /// or exact file WITHOUT a trailing separator; exact paths match directly, while directory
+    /// prefixes append a trailing separator so that purging `/home/x/proj` cannot also purge
+    /// `/home/x/proj-other`.
     pub fn forget_prefix(&self, prefix: &str) -> usize {
-        let mut needle = prefix.trim_end_matches('/').to_string();
-        needle.push('/');
+        let raw = prefix.trim_end_matches('/');
+        let needle = format!("{raw}/");
         let map = self.inner.load();
         let doomed: Vec<String> = map
             .iter()
-            .filter(|item| item.key().starts_with(&needle))
+            .filter(|item| item.key() == raw || item.key().starts_with(&needle))
             .map(|item| item.key().clone())
             .collect();
         for key in &doomed {
@@ -467,4 +468,29 @@ mod tests {
         let b = super::walk_wake_signal();
         assert!(std::sync::Arc::ptr_eq(&a, &b), "signal must be process-wide, not per-call");
     }
+
+    /// REQ-AXO-902512 — forget_prefix must accept an exact file path as well as a directory
+    /// prefix, so targeted recovery can invalidate an exact chunkless file without evicting
+    /// its healthy neighbours.
+    #[test]
+    fn forget_prefix_forgets_exact_file_path_without_bleeding_902512() {
+        let cache = IndexedFileCache::from_iter([
+            ("/home/u/proj/a.rs".to_string(), entry("ha", 1, 100, 10)),
+            ("/home/u/proj/b.rs".to_string(), entry("hb", 1, 200, 20)),
+        ]);
+        assert_eq!(
+            cache.forget_prefix("/home/u/proj/a.rs"),
+            1,
+            "exact file must be forgotten"
+        );
+        assert!(
+            cache.should_read("/home/u/proj/a.rs", 100, 10),
+            "a.rs purged from cache"
+        );
+        assert!(
+            !cache.should_read("/home/u/proj/b.rs", 200, 20),
+            "b.rs must remain cached"
+        );
+    }
 }
+

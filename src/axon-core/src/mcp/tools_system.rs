@@ -1783,7 +1783,7 @@ impl McpServer {
         let (cache_invalidation, invalidated_rows) = if full {
             self.rescan_wipe_indexed_files(&project_code, &project_path)
         } else {
-            ("skipped (delta mode)".to_string(), Some(0))
+            self.rescan_reconcile_delta_chunkless_files(&project_code, &project_path)
         };
 
         // Step 3 — enumerate files on disk to compute
@@ -2001,6 +2001,65 @@ impl McpServer {
                      the re-index (REQ-AXO-902262)"
                 ),
                 invalidated_rows,
+            ),
+        }
+    }
+
+    /// REQ-AXO-902512 — in delta mode, reconcile enrolled files that have NO chunks
+    /// in ist.Chunk and no terminal policy skip ('binary', 'empty', 'generated', 'minified', 'oversized').
+    ///
+    /// The defect this closes (REQ-AXO-902512):
+    /// Files discovered or previously registered whose chunking never completed or timed out
+    /// retain a valid content_hash in ist.IndexedFile. Under delta mode, the scanner skipped
+    /// them as "unchanged" and the indexer dedup cache filtered them out of A1/A2.
+    ///
+    /// This helper drops their IndexedFile rows and emits a targeted cache-invalidation NOTIFY
+    /// for each chunkless path (or project root if large), waking the reconciliation walk so
+    /// they are re-read and parsed without destroying healthy chunks.
+    fn rescan_reconcile_delta_chunkless_files(
+        &self,
+        project_code: &str,
+        project_path: &str,
+    ) -> (String, Option<usize>) {
+        let reconciled_paths = match self
+            .graph_store
+            .reconcile_chunkless_indexed_files(Some(project_code), None)
+        {
+            Ok(paths) => paths,
+            Err(err) => return (format!("delta_reconcile_failed: {err}"), None),
+        };
+
+        if reconciled_paths.is_empty() {
+            return (
+                "skipped (delta mode — all enrolled files have chunks or policy skips)".to_string(),
+                Some(0),
+            );
+        }
+
+        let count = reconciled_paths.len();
+        // If 1..=32 paths, notify each exact path (newline-separated) so only chunkless files
+        // are evicted from the in-RAM dedup cache; if >32 paths, notify the project_path prefix.
+        let notify_payload = if count <= 32 {
+            reconciled_paths.join("\n")
+        } else {
+            project_path.to_string()
+        };
+        let escaped_payload = notify_payload.replace('\'', "''");
+        let notify_sql = format!(
+            "SELECT pg_notify('{}', '{}')",
+            crate::pipeline::cache_invalidate_listener::LISTEN_CHANNEL,
+            escaped_payload
+        );
+        match self.graph_store.execute_raw_sql_gateway(&notify_sql) {
+            Ok(_) => (
+                format!("delta mode — invalidated {count} chunkless file(s) for re-index (REQ-AXO-902512)"),
+                Some(count),
+            ),
+            Err(err) => (
+                format!(
+                    "delta mode: invalidated {count} chunkless file(s) in PG BUT cache-invalidate NOTIFY failed ({err})"
+                ),
+                Some(count),
             ),
         }
     }

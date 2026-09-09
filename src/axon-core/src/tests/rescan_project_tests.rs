@@ -335,4 +335,140 @@ mod tests {
         }
         out
     }
+
+    /// REQ-AXO-902512 — rescan_project in delta mode (full=false) must detect files enrolled in
+    /// ist.IndexedFile that have NO chunks in ist.Chunk (and no terminal policy skip like minified/empty),
+    /// invalidate their cache/hash, and re-enrol them as status='discovered'.
+    #[test]
+    fn rescan_project_delta_reconciles_enrolled_files_without_chunks_902512() {
+        let store = Arc::new(create_test_db().expect("create test db"));
+        let server = McpServer::new(store.clone());
+
+        let (root, files) = make_temp_project("delta_rec", 3);
+        let scope = unique_test_scope("rpdr");
+        let code = three_char_code_from_scope(&scope);
+        let project_path = root.to_string_lossy().to_string();
+        store
+            .sync_project_registry_entry(
+                &code,
+                Some("rescan-delta-chunkless-fixture"),
+                Some(&project_path),
+            )
+            .expect("register project");
+
+        let safe_code = code.replace('\'', "''");
+        store
+            .execute_raw_sql_gateway(&format!(
+                "INSERT INTO axon.Project (code) VALUES ('{}') ON CONFLICT (code) DO NOTHING",
+                safe_code
+            ))
+            .expect("seed axon.Project parent");
+
+        let now_ms: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        // Seed 3 IndexedFile rows:
+        // files[0]: has a chunk in ist.Chunk (healthy)
+        // files[1]: 0 chunk in ist.Chunk (chunkless hole, e.g. KKI scenario)
+        // files[2]: 0 chunk in ist.Chunk, status='skipped', skip_reason='parse_timeout' (transient failure)
+        for (i, f) in files.iter().enumerate() {
+            let escaped = f.replace('\'', "''");
+            let md = std::fs::metadata(f).expect("file metadata");
+            let mtime_sec = md
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let mtime_ms = mtime_sec * 1000;
+            let size_bytes = md.len() as i64;
+            let (status, reason) = if i == 2 {
+                ("skipped", "'parse_timeout'")
+            } else {
+                ("indexed", "NULL")
+            };
+            store
+                .execute_raw_sql_gateway(&format!(
+                    "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms, status, skip_reason, mtime_ms, size_bytes) \
+                     VALUES ('{}', '{}', 'hash-{}', {}, '{}', {}, {}, {}) \
+                     ON CONFLICT (path) DO UPDATE SET content_hash = EXCLUDED.content_hash, status = EXCLUDED.status, skip_reason = EXCLUDED.skip_reason, mtime_ms = EXCLUDED.mtime_ms, size_bytes = EXCLUDED.size_bytes",
+                    escaped, safe_code, i, now_ms, status, reason, mtime_ms, size_bytes
+                ))
+                .expect("seed IndexedFile row");
+        }
+
+        // Seed a chunk only for files[0]
+        let escaped_f0 = files[0].replace('\'', "''");
+        store
+            .execute_raw_sql_gateway(&format!(
+                "INSERT INTO ist.Chunk \
+                 (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line, chunk_part_index, chunk_part_count, chunk_path) VALUES \
+                 ('c0','symbol','s0','{}','{}','fn','content','chash0',1,10,1,1,'1/1')",
+                safe_code, escaped_f0
+            ))
+            .expect("seed chunk for files[0]");
+
+        let args = serde_json::json!({ "project_code": code, "full": false });
+        let envelope = server
+            .axon_rescan_project(&args)
+            .expect("rescan_project must return Some envelope");
+        let payload = parse_structured(&envelope);
+
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("ok")
+        );
+        assert_eq!(
+            payload.get("mode").and_then(|v| v.as_str()),
+            Some("delta")
+        );
+
+        // Invalidation in delta mode MUST report the 2 uncovered files
+        let invalidated = payload
+            .get("invalidated_rows")
+            .and_then(|v| v.as_u64())
+            .expect("invalidated_rows must be present in payload");
+        assert_eq!(
+            invalidated, 2,
+            "delta mode must invalidate the 2 chunkless files"
+        );
+
+        let cache_inv = payload
+            .get("cache_invalidation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            cache_inv.contains("delta") && cache_inv.contains("2"),
+            "cache_invalidation must describe delta invalidation of 2 files: {cache_inv}"
+        );
+
+        // Post-condition:
+        // files[0] has its content_hash intact ('hash-0')
+        let f0_intact = read_count_where(
+            &store,
+            &project_path,
+            &format!("content_hash = 'hash-0' AND path = '{}'", escaped_f0),
+        );
+        assert_eq!(f0_intact, 1, "files[0] with chunk must remain untouched");
+
+        // files[1] and files[2] have been re-enrolled with status='discovered' and empty content_hash
+        let discovered_count = read_count_where(
+            &store,
+            &project_path,
+            &format!("status = 'discovered' AND project_code = '{}'", safe_code),
+        );
+        assert_eq!(
+            discovered_count, 2,
+            "both chunkless files must be re-enrolled as discovered"
+        );
+
+        let _ = store.execute_raw_sql_gateway(&format!(
+            "DELETE FROM ist.Chunk WHERE file_path LIKE '{}/%'",
+            project_path.replace('\'', "''")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
+

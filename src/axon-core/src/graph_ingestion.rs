@@ -883,15 +883,19 @@ impl GraphStore {
     /// `IndexedFile` for hydrating the dedup cache at boot. mtime/size feed the
     /// level-1 (no-read) I/O pre-filter; content_hash the level-2 parse skip.
     pub fn load_all_indexed_files(&self) -> Result<Vec<(String, String, i64, i64, u64)>> {
-        // PIL-AXO-007 (REQ-AXO-901916) — the dedup cache hydrates from rows that
-        // carry a real content_hash AND a terminal A3 status. Scanner-created
-        // `discovered` rows must never suppress replay merely because they carry
-        // metadata; that was the APS completeness gap.
-        // A not-yet-indexed file is simply absent → should_read/should_index
-        // return true → it gets read + parsed.
+        // PIL-AXO-007 (REQ-AXO-901916) + REQ-AXO-902512 — the dedup cache hydrates from rows that
+        // carry a real content_hash AND are ACTUALLY covered: either possessing chunks in
+        // ist.Chunk, or subject to a terminal policy skip ('binary', 'empty', 'generated',
+        // 'minified', 'oversized').
+        // A chunkless row (whether never parsed, failed, or timed out under load) is absent
+        // from the cache → should_read / should_index return true → reconciliation reads and
+        // parses it instead of skipping it forever.
         let raw = self.query_json_writer(
-            "SELECT path, content_hash, last_seen_ms, mtime_ms, size_bytes FROM IndexedFile \
-             WHERE content_hash <> '' AND status IN ('indexed','skipped')",
+            "SELECT f.path, f.content_hash, f.last_seen_ms, f.mtime_ms, f.size_bytes FROM IndexedFile f \
+             WHERE f.content_hash <> '' AND ( \
+                 (f.status = 'skipped' AND f.skip_reason IN ('binary','empty','generated','minified','oversized')) \
+                 OR (f.status = 'indexed' AND EXISTS (SELECT 1 FROM ist.Chunk c WHERE c.file_path = f.path)) \
+             )",
         )?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         Ok(rows
@@ -905,6 +909,63 @@ impl GraphStore {
                 Some((path, hash, ts, mtime, size))
             })
             .collect())
+    }
+
+    /// REQ-AXO-902512 — reconcile enrolled files that have NO chunks in ist.Chunk and
+    /// are not covered by a terminal policy skip ('binary', 'empty', 'generated', 'minified', 'oversized').
+    ///
+    /// Drops their rows from ist.IndexedFile and purges them from the in-RAM dedup cache
+    /// so the next scanner/reconciliation walk re-reads and parses them. Returns the list
+    /// of reconciled paths.
+    pub fn reconcile_chunkless_indexed_files(
+        &self,
+        project_code_opt: Option<&str>,
+        path_prefix_opt: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let mut filters = vec![
+            "(f.skip_reason IS NULL OR f.skip_reason NOT IN ('binary','empty','generated','minified','oversized'))".to_string(),
+            "NOT EXISTS (SELECT 1 FROM ist.Chunk c WHERE c.file_path = f.path)".to_string(),
+        ];
+        if let Some(pc) = project_code_opt {
+            let safe_code = pc.replace('\'', "''");
+            filters.push(format!("f.project_code = '{safe_code}'"));
+        }
+        if let Some(prefix) = path_prefix_opt {
+            let safe_prefix = prefix.replace('\'', "''");
+            filters.push(format!("f.path LIKE '{safe_prefix}%'"));
+        }
+        let where_clause = filters.join(" AND ");
+        let select_sql = format!(
+            "SELECT f.path FROM ist.IndexedFile f WHERE {where_clause}"
+        );
+        let raw = self.query_json_writer(&select_sql)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let paths: Vec<String> = rows.into_iter().filter_map(|r| r.into_iter().next()).collect();
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Delete from ist.IndexedFile in batches of 500 to avoid excessive SQL length
+        for chunk in paths.chunks(500) {
+            let in_list = chunk
+                .iter()
+                .map(|p| format!("'{}'", p.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let delete_sql = format!(
+                "DELETE FROM ist.IndexedFile WHERE path IN ({in_list})"
+            );
+            self.execute_raw_sql_gateway(&delete_sql)?;
+        }
+
+        // Evict from in-RAM cache if running in indexer process
+        if let Some(cache) = crate::pipeline::IndexedFileCache::global() {
+            for path in &paths {
+                cache.forget(path);
+            }
+        }
+
+        Ok(paths)
     }
 
     // REQ-AXO-902260 — `pipeline_a_discovered_stock` DELETED here. It counted

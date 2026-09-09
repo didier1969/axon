@@ -606,6 +606,25 @@ pub fn spawn_pipeline_indexer(
             loop {
                 let walk_start_ms = chrono::Utc::now().timestamp_millis();
                 let started = std::time::Instant::now();
+
+                // REQ-AXO-902512 — proactive catch-up: detect enrolled files that have 0 chunks
+                // in ist.Chunk (and no terminal policy skip). Evict them from the in-RAM dedup
+                // cache and drop their IndexedFile row so this walk's push will re-read and parse them.
+                let store_chunkless = store_for_walk.clone();
+                let prefix_chunkless = root_prefix.clone();
+                let chunkless_reconciled = tokio::task::spawn_blocking(move || {
+                    store_chunkless.reconcile_chunkless_indexed_files(None, Some(&prefix_chunkless))
+                })
+                .await;
+                if let Ok(Ok(ref reconciled)) = chunkless_reconciled {
+                    if !reconciled.is_empty() {
+                        info!(
+                            "pipeline: reconciliation walk auto-recovered {} chunkless file(s) for re-parse (REQ-AXO-902512)",
+                            reconciled.len()
+                        );
+                    }
+                }
+
                 let scanner = scanner_for_walk.clone();
                 let files = tokio::task::spawn_blocking(move || scanner.enumerate_files())
                     .await

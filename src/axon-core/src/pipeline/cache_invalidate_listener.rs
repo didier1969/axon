@@ -48,8 +48,8 @@ const BACKOFF_MAX_MS: u64 = 30_000;
 /// notification must not be able to blank the whole dedup cache and trigger a full
 /// re-index of every project on the host.
 pub fn apply_invalidate_payload(payload: &str) -> Option<usize> {
-    let prefix = payload.trim();
-    if prefix.is_empty() || prefix == "/" {
+    let payload = payload.trim();
+    if payload.is_empty() || payload == "/" {
         warn!(
             payload = %payload,
             "ist_cache_invalidate: refusing an empty/root prefix — that would re-index every project"
@@ -57,12 +57,18 @@ pub fn apply_invalidate_payload(payload: &str) -> Option<usize> {
         return None;
     }
     let cache = IndexedFileCache::global()?;
-    let forgotten = cache.forget_prefix(prefix);
+    let mut total_forgotten = 0;
+    for line in payload.lines() {
+        let prefix = line.trim();
+        if !prefix.is_empty() && prefix != "/" {
+            total_forgotten += cache.forget_prefix(prefix);
+        }
+    }
     // REQ-AXO-902268 — purging only makes the files ELIGIBLE to be re-read; the re-read
     // happens on the reconciliation walk. Wake it now instead of waiting out its period
     // (900 s default), which used to leave the project at zero coverage for up to 15 min.
     crate::pipeline::indexed_file_cache::walk_wake_signal().notify_one();
-    Some(forgotten)
+    Some(total_forgotten)
 }
 
 /// Supervised listener. Returns immediately, then reconnects forever on error.
