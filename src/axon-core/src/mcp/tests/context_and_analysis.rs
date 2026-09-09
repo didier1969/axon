@@ -7034,3 +7034,190 @@ fn orphan_clusters_mcp_expose_un_statut_non_concluant_sous_la_majorite() {
 
     crate::ist_snapshot::evict_process_snapshot(project);
 }
+
+#[test]
+fn test_python_hyphenated_importlib_dynamic_coverage_resolution_and_modal_unknown() {
+    // REQ-AXO-902582 — `tests_for` and `change_safety` must resolve dynamic importlib
+    // aliases for hyphenated files, avoiding false negatives; undecidable coverage
+    // yields unknown, never unsafe.
+    use crate::parser::python::PythonParser;
+    use crate::parser::Parser;
+    use crate::pipeline::types::ParsedFile;
+    use std::path::PathBuf;
+
+    let _guard = env_lock();
+    let server = create_test_server();
+    let project = "AXO";
+    let p = PythonParser::new();
+
+    let prod_path = "scripts/nexus-admission.py";
+    let prod_code = "def classify_pressure(pressure):\n    return pressure > 50\n\ndef calculate_score(val):\n    return val * 2\n";
+    let prod_extract = p.parse(prod_code);
+    if prod_extract.symbols.is_empty() {
+        eprintln!("python grammar unavailable, skipping");
+        return;
+    }
+
+    let test_path = "tests/nexus-admission-test.py";
+    let test_code = r#"
+import importlib.util
+from pathlib import Path
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "nexus-admission.py"
+SPEC = importlib.util.spec_from_file_location("nexus_admission", MODULE_PATH)
+NA = importlib.util.module_from_spec(SPEC)
+
+def test_classify_pressure():
+    assert NA.classify_pressure(75) is True
+
+def test_undecidable_dynamic():
+    unresolved_handle.calculate_score(42)
+"#;
+    let test_extract = p.parse(test_code);
+
+    let other_path = "scripts/other-admission.py";
+    let other_code = "def calculate_score(val):\n    return val * 3\n";
+    let other_extract = p.parse(other_code);
+
+    let parsed_files = vec![
+        ParsedFile {
+            path: PathBuf::from(prod_path),
+            project_code: crate::pipeline::ProjectCode::parse(project).unwrap(),
+            content: prod_code.to_string(),
+            content_hash: "hash_prod".to_string(),
+            mtime_ms: 1000,
+            size_bytes: prod_code.len() as u64,
+            skip_reason: None,
+            symbols: prod_extract.symbols,
+            relations: prod_extract.relations,
+            security_findings: Vec::new(),
+        },
+        ParsedFile {
+            path: PathBuf::from(other_path),
+            project_code: crate::pipeline::ProjectCode::parse(project).unwrap(),
+            content: other_code.to_string(),
+            content_hash: "hash_other".to_string(),
+            mtime_ms: 1500,
+            size_bytes: other_code.len() as u64,
+            skip_reason: None,
+            symbols: other_extract.symbols,
+            relations: other_extract.relations,
+            security_findings: Vec::new(),
+        },
+        ParsedFile {
+            path: PathBuf::from(test_path),
+            project_code: crate::pipeline::ProjectCode::parse(project).unwrap(),
+            content: test_code.to_string(),
+            content_hash: "hash_test".to_string(),
+            mtime_ms: 2000,
+            size_bytes: test_code.len() as u64,
+            skip_reason: None,
+            symbols: test_extract.symbols,
+            relations: test_extract.relations,
+            security_findings: Vec::new(),
+        },
+    ];
+
+    server
+        .graph_store
+        .upsert_graph_batch(&parsed_files, project)
+        .expect("upsert_graph_batch");
+
+    crate::ist_snapshot::evict_process_snapshot(project);
+    assert!(server.ensure_ram_snapshot_warm(project));
+
+    let call = |name: &str, arguments: Value, id: i64| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": name, "arguments": arguments })),
+                id: Some(json!(id)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    // 1. tests_for on classify_pressure must resolve test_classify_pressure
+    let tests_for_res = call(
+        "tests_for",
+        json!({ "project_code": project, "symbol": "classify_pressure" }),
+        90258201,
+    );
+    let tests = tests_for_res["data"]["tests"]
+        .as_array()
+        .expect("tests array");
+    assert!(
+        !tests.is_empty(),
+        "Expected tests_for to find test_classify_pressure, got: {:?}",
+        tests_for_res
+    );
+    let test_str = serde_json::to_string(&tests).unwrap();
+    assert!(
+        test_str.contains("test_classify_pressure"),
+        "Expected test_classify_pressure in test set: {}",
+        test_str
+    );
+
+    // 2. change_safety on classify_pressure must NOT be unsafe
+    let safety_res = call(
+        "change_safety",
+        json!({
+            "project_code": project,
+            "target": "classify_pressure",
+            "target_type": "symbol"
+        }),
+        90258202,
+    );
+    let safety = safety_res["data"]["change_safety"].as_str().unwrap_or("");
+    assert_eq!(
+        safety, "safe",
+        "change_safety on covered symbol must be safe, got: {:?}",
+        safety_res
+    );
+
+    // 3. REQ-AXO-902582: undecidable dynamic caller in test yields unknown (never unsafe)
+    let undecidable_tests_for = call(
+        "tests_for",
+        json!({ "project_code": project, "symbol": "calculate_score" }),
+        90258203,
+    );
+    assert_eq!(
+        undecidable_tests_for["data"]["status"].as_str(),
+        Some("unknown"),
+        "tests_for status must be unknown for undecidable dynamic coverage: {:?}",
+        undecidable_tests_for
+    );
+    assert!(
+        undecidable_tests_for["data"]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("unresolved dynamic callers"),
+        "tests_for reason must mention unresolved dynamic callers: {:?}",
+        undecidable_tests_for
+    );
+
+    let undecidable_safety = call(
+        "change_safety",
+        json!({
+            "project_code": project,
+            "target": "calculate_score",
+            "target_type": "symbol"
+        }),
+        90258204,
+    );
+    let safety_val = undecidable_safety["data"]["change_safety"].as_str().unwrap_or("");
+    assert_ne!(
+        safety_val, "unsafe",
+        "change_safety must NEVER be unsafe on undecidable test coverage: {:?}",
+        undecidable_safety
+    );
+    assert_eq!(
+        safety_val, "unknown",
+        "change_safety must be unknown on undecidable test coverage: {:?}",
+        undecidable_safety
+    );
+
+    crate::ist_snapshot::evict_process_snapshot(project);
+}

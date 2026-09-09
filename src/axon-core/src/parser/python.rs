@@ -80,6 +80,17 @@ impl PythonParser {
         None
     }
 
+    fn find_last_child_by_type<'a>(&self, node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+        let mut cursor = node.walk();
+        let mut last = None;
+        for child in node.children(&mut cursor) {
+            if child.kind() == kind {
+                last = Some(child);
+            }
+        }
+        last
+    }
+
     fn extract_class<'a>(
         &self,
         node: Node<'a>,
@@ -290,14 +301,44 @@ impl PythonParser {
             .or_else(|| self.find_child_by_type(node, "attribute"));
 
         if let Some(n) = func_node {
-            let call_name = n.utf8_text(source).unwrap_or("").to_string();
+            if n.kind() == "attribute" {
+                let attr_node = n
+                    .child_by_field_name("attribute")
+                    .or_else(|| self.find_last_child_by_type(n, "identifier"));
+                let obj_node = n
+                    .child_by_field_name("object")
+                    .or_else(|| n.child(0));
 
-            result.relations.push(Relation {
-                from: scope.to_string(),
-                to: call_name,
-                rel_type: "calls".to_string(),
-                properties: HashMap::new(),
-            });
+                let callee_name = attr_node
+                    .and_then(|a| a.utf8_text(source).ok())
+                    .unwrap_or("")
+                    .to_string();
+                let receiver = obj_node
+                    .and_then(|o| o.utf8_text(source).ok())
+                    .unwrap_or("")
+                    .to_string();
+
+                if !callee_name.is_empty() {
+                    let mut props = HashMap::new();
+                    if !receiver.is_empty() {
+                        props.insert("receiver".to_string(), receiver);
+                    }
+                    result.relations.push(Relation {
+                        from: scope.to_string(),
+                        to: callee_name,
+                        rel_type: "calls".to_string(),
+                        properties: props,
+                    });
+                }
+            } else {
+                let call_name = n.utf8_text(source).unwrap_or("").to_string();
+                result.relations.push(Relation {
+                    from: scope.to_string(),
+                    to: call_name,
+                    rel_type: "calls".to_string(),
+                    properties: HashMap::new(),
+                });
+            }
         }
 
         if let Some(args) = self.find_child_by_type(node, "argument_list") {
@@ -309,17 +350,215 @@ impl PythonParser {
     }
 
     fn extract_import<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {
+        let from_module = node
+            .child_by_field_name("module_name")
+            .and_then(|m| m.utf8_text(source).ok())
+            .map(|s| s.trim().to_string());
+
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if child.kind() == "dotted_name" || child.kind() == "aliased_import" {
-                let import_name = child.utf8_text(source).unwrap_or("").to_string();
+            match child.kind() {
+                "aliased_import" => {
+                    let name = child
+                        .child_by_field_name("name")
+                        .and_then(|n| n.utf8_text(source).ok())
+                        .map(str::trim);
+                    let alias = child
+                        .child_by_field_name("alias")
+                        .and_then(|a| a.utf8_text(source).ok())
+                        .map(str::trim);
 
-                result.relations.push(Relation {
-                    from: "module".to_string(),
-                    to: import_name,
-                    rel_type: "imports".to_string(),
-                    properties: HashMap::new(),
-                });
+                    if let (Some(orig), Some(al)) = (name, alias) {
+                        let module = from_module.clone().unwrap_or_else(|| orig.to_string());
+                        let mut props = HashMap::new();
+                        props.insert("module".to_string(), module);
+                        props.insert("alias".to_string(), al.to_string());
+                        props.insert("original".to_string(), orig.to_string());
+
+                        result.relations.push(Relation {
+                            from: "module".to_string(),
+                            to: al.to_string(),
+                            rel_type: "imports".to_string(),
+                            properties: props,
+                        });
+                    }
+                }
+                "dotted_name" => {
+                    if let Ok(import_name) = child.utf8_text(source) {
+                        let import_name = import_name.trim();
+                        if let Some(ref fm) = from_module {
+                            if fm == import_name {
+                                continue;
+                            }
+                        }
+                        let mut props = HashMap::new();
+                        let module = from_module
+                            .clone()
+                            .unwrap_or_else(|| import_name.to_string());
+                        props.insert("module".to_string(), module);
+
+                        result.relations.push(Relation {
+                            from: "module".to_string(),
+                            to: import_name.to_string(),
+                            rel_type: "imports".to_string(),
+                            properties: props,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// REQ-AXO-902582 — extract dynamic imports from importlib / module_from_spec
+    fn extract_dynamic_imports<'a>(
+        &self,
+        root: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+    ) {
+        fn collect_strings<'b>(node: Node<'b>, source: &[u8], out: &mut Vec<String>) {
+            if node.kind() == "string" {
+                if let Ok(text) = node.utf8_text(source) {
+                    let clean = text
+                        .trim()
+                        .trim_start_matches(|c| c == 'r' || c == 'b' || c == 'u' || c == 'f')
+                        .trim_matches(|c| c == '"' || c == '\'');
+                    out.push(clean.to_string());
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_strings(child, source, out);
+            }
+        }
+
+        let mut path_vars: HashMap<String, String> = HashMap::new();
+        let mut spec_vars: HashMap<String, String> = HashMap::new();
+        let mut assignments: Vec<(String, Node<'a>)> = Vec::new();
+
+        let mut queue = vec![root];
+        while let Some(current) = queue.pop() {
+            if current.kind() == "assignment" {
+                let left = current
+                    .child_by_field_name("left")
+                    .or_else(|| current.child(0));
+                let right = current
+                    .child_by_field_name("right")
+                    .or_else(|| {
+                        let mut cursor = current.walk();
+                        current.children(&mut cursor).last()
+                    });
+                if let (Some(l), Some(r)) = (left, right) {
+                    if let Ok(left_name) = l.utf8_text(source) {
+                        assignments.push((left_name.trim().to_string(), r));
+                    }
+                }
+            }
+            let mut cursor = current.walk();
+            for child in current.children(&mut cursor) {
+                queue.push(child);
+            }
+        }
+
+        // Phase 1: identify path variables and spec_from_file_location
+        for (var_name, right_node) in &assignments {
+            let right_text = right_node.utf8_text(source).unwrap_or("");
+            let mut strings = Vec::new();
+            collect_strings(*right_node, source, &mut strings);
+
+            for s in &strings {
+                if s.ends_with(".py") {
+                    let file_name = std::path::Path::new(s)
+                        .file_name()
+                        .and_then(|os| os.to_str())
+                        .unwrap_or(s);
+                    path_vars.insert(var_name.clone(), file_name.to_string());
+                }
+            }
+
+            if right_text.contains("spec_from_file_location") {
+                let mut target_module = String::new();
+                let mut file_hint = String::new();
+
+                for s in &strings {
+                    if s.ends_with(".py") {
+                        file_hint = s.clone();
+                    } else if target_module.is_empty() {
+                        target_module = s.clone();
+                    }
+                }
+
+                if file_hint.is_empty() {
+                    for (pv, fname) in &path_vars {
+                        if right_text.contains(pv) {
+                            file_hint = fname.clone();
+                            break;
+                        }
+                    }
+                }
+
+                let final_target = if !file_hint.is_empty() {
+                    let clean = std::path::Path::new(&file_hint)
+                        .file_name()
+                        .and_then(|os| os.to_str())
+                        .unwrap_or(&file_hint);
+                    clean.strip_suffix(".py").unwrap_or(clean).to_string()
+                } else {
+                    target_module
+                };
+
+                if !final_target.is_empty() {
+                    spec_vars.insert(var_name.clone(), final_target);
+                }
+            }
+        }
+
+        // Phase 2: identify module_from_spec or import_module
+        for (var_name, right_node) in &assignments {
+            let right_text = right_node.utf8_text(source).unwrap_or("");
+
+            if right_text.contains("module_from_spec") {
+                let mut target = None;
+                for (spec_var, mod_target) in &spec_vars {
+                    if right_text.contains(spec_var) {
+                        target = Some(mod_target.clone());
+                        break;
+                    }
+                }
+                if target.is_none() && spec_vars.len() == 1 {
+                    target = spec_vars.values().next().cloned();
+                }
+
+                if let Some(target_module) = target {
+                    let mut props = HashMap::new();
+                    props.insert("module".to_string(), target_module.clone());
+                    props.insert("alias".to_string(), var_name.clone());
+                    props.insert("dynamic".to_string(), "true".to_string());
+
+                    result.relations.push(Relation {
+                        from: "module".to_string(),
+                        to: var_name.clone(),
+                        rel_type: "imports".to_string(),
+                        properties: props,
+                    });
+                }
+            } else if right_text.contains("import_module") {
+                let mut strings = Vec::new();
+                collect_strings(*right_node, source, &mut strings);
+                if let Some(mod_target) = strings.first() {
+                    let mut props = HashMap::new();
+                    props.insert("module".to_string(), mod_target.clone());
+                    props.insert("alias".to_string(), var_name.clone());
+                    props.insert("dynamic".to_string(), "true".to_string());
+
+                    result.relations.push(Relation {
+                        from: "module".to_string(),
+                        to: var_name.clone(),
+                        rel_type: "imports".to_string(),
+                        properties: props,
+                    });
+                }
             }
         }
     }
@@ -334,7 +573,10 @@ impl Parser for PythonParser {
         };
 
         if let Some(tree) = parse_with_wasm_safe("python", self.wasm_bytes, content) {
-            self.walk(tree.root_node(), content.as_bytes(), &mut result, "");
+            let root = tree.root_node();
+            let source = content.as_bytes();
+            self.extract_dynamic_imports(root, source, &mut result);
+            self.walk(root, source, &mut result, "");
         }
 
         result
@@ -424,6 +666,60 @@ mod tests {
         assert_eq!(
             outer.properties.get("cyclomatic_complexity").map(String::as_str),
             Some("2")
+        );
+    }
+
+    #[test]
+    fn python_importlib_dynamic_loading_and_aliased_calls_are_extracted() {
+        // REQ-AXO-902582 — test importlib alias resolution and dynamic call extraction
+        let p = parser();
+        let code = r#"
+import importlib.util
+from pathlib import Path
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "nexus-admission.py"
+SPEC = importlib.util.spec_from_file_location("nexus_admission", MODULE_PATH)
+NA = importlib.util.module_from_spec(SPEC)
+
+def test_classify():
+    NA.classify_pressure(100)
+"#;
+        let result = p.parse(code);
+        if result.symbols.is_empty() {
+            eprintln!("python wasm grammar unavailable, skipping");
+            return;
+        }
+
+        // Must extract imports relation linking alias NA to nexus-admission or nexus_admission
+        let na_import = result
+            .relations
+            .iter()
+            .find(|r| r.rel_type == "imports" && r.to == "NA");
+        assert!(
+            na_import.is_some(),
+            "Expected imports relation for alias NA, got relations: {:?}",
+            result.relations
+        );
+        let import_props = &na_import.unwrap().properties;
+        assert!(
+            import_props.get("module").is_some(),
+            "Expected module property in NA import: {:?}",
+            import_props
+        );
+
+        // Must extract call from test_classify to classify_pressure with receiver NA
+        let call_rel = result
+            .relations
+            .iter()
+            .find(|r| r.rel_type == "calls" && r.to == "classify_pressure");
+        assert!(
+            call_rel.is_some(),
+            "Expected calls relation to classify_pressure, got relations: {:?}",
+            result.relations
+        );
+        assert_eq!(
+            call_rel.unwrap().properties.get("receiver").map(String::as_str),
+            Some("NA")
         );
     }
 }

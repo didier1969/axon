@@ -327,9 +327,22 @@ impl GraphStore {
         let file_stem = format!("{last_segment}.");
         let dir_segment = format!("/{last_segment}/");
         let mod_scope = format!("::{last_segment}::");
+        // REQ-AXO-902582 — support hyphenated module filenames in Python/Rust/Nix
+        let alt_segment = if last_segment.contains('_') {
+            last_segment.replace('_', "-")
+        } else {
+            last_segment.replace('-', "_")
+        };
+        let alt_file_stem = format!("{alt_segment}.");
+        let alt_dir_segment = format!("/{alt_segment}/");
+        let alt_mod_scope = format!("::{alt_segment}::");
+
         candidate_id.contains(&file_stem)
             || candidate_id.contains(&dir_segment)
             || candidate_id.contains(&mod_scope)
+            || candidate_id.contains(&alt_file_stem)
+            || candidate_id.contains(&alt_dir_segment)
+            || candidate_id.contains(&alt_mod_scope)
     }
 
     /// REQ-AXO-902456 — le receveur d'un appel désigne-t-il du code du projet ?
@@ -1478,16 +1491,20 @@ impl GraphStore {
                 // always co-located with their file).
                 let target_id = match table {
                     "CALLS" | "CALLS_NIF" => {
-                        let receiver = relation
+                        let raw_receiver = relation
                             .properties
                             .get("receiver")
-                            .map(String::as_str)
+                            .map(String::as_str);
+                        // REQ-AXO-902582 — resolve alias receivers (e.g. NA -> nexus-admission)
+                        let resolved_receiver = raw_receiver
+                            .and_then(|r| file_imports.get(r).map(String::as_str))
+                            .or(raw_receiver)
                             .or_else(|| file_imports.get(&relation.to).map(String::as_str));
                         Self::resolve_call_target_id_with_receiver(
                             project_code,
                             &path_str,
                             &relation.to,
-                            receiver,
+                            resolved_receiver,
                             &call_target_index,
                         )
                     }

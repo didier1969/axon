@@ -19,14 +19,24 @@ pub(super) fn summarize_change_safety(
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
 
+    let undecidable = coverage_signals
+        .get("undecidable_reason")
+        .and_then(Value::as_str);
+
     let mut reasoning = Vec::new();
     match tested {
         Some(true) => reasoning.push("target has direct test coverage".to_string()),
         Some(false) => reasoning.push("target lacks direct test coverage".to_string()),
-        None => reasoning.push(
-            "test coverage is unknown because the target is outside the current IST snapshot"
-                .to_string(),
-        ),
+        None => {
+            if let Some(reason) = undecidable {
+                reasoning.push(format!("test coverage is unknown: {reason}"));
+            } else {
+                reasoning.push(
+                    "test coverage is unknown because the target is outside the current IST snapshot"
+                        .to_string(),
+                );
+            }
+        }
     }
     if traceability_links > 0 {
         reasoning.push(format!(
@@ -43,10 +53,17 @@ pub(super) fn summarize_change_safety(
     }
 
     let guardrails = if tested.is_none() {
-        vec![
-            "do not infer missing coverage from an unindexed target".to_string(),
-            "refresh the project index, then rerun change_safety".to_string(),
-        ]
+        if undecidable.is_some() {
+            vec![
+                "do not treat undecidable coverage as unsafe; inspect dynamic loaders first".to_string(),
+                "establish explicit symbol traceability or targeted tests before mutation".to_string(),
+            ]
+        } else {
+            vec![
+                "do not infer missing coverage from an unindexed target".to_string(),
+                "refresh the project index, then rerun change_safety".to_string(),
+            ]
+        }
     } else if tested == Some(true) {
         vec![
             "run focused tests before and after change".to_string(),
@@ -65,7 +82,11 @@ pub(super) fn summarize_change_safety(
     };
 
     let safety = if tested.is_none() {
-        "unknown_unindexed"
+        if undecidable.is_some() {
+            "unknown"
+        } else {
+            "unknown_unindexed"
+        }
     } else if tested == Some(true) {
         "safe"
     } else if traceability_links > 0 || validation_nodes > 0 || verifies_edges > 0 {
@@ -96,6 +117,9 @@ pub(super) fn change_safety_operator_guidance(
     validation_signals: &Value,
 ) -> Value {
     let tested = coverage_signals.get("tested").and_then(Value::as_bool);
+    let undecidable = coverage_signals
+        .get("undecidable_reason")
+        .and_then(Value::as_str);
     let traceability_links = traceability_signals
         .get("traceability_links")
         .and_then(|value| value.as_u64())
@@ -111,11 +135,19 @@ pub(super) fn change_safety_operator_guidance(
 
     let mut blocking_factors = Vec::<Value>::new();
     if tested.is_none() {
-        blocking_factors.push(json!({
-            "factor": "target_unindexed_workspace_file",
-            "severity": "high",
-            "recommended_action": "run rescan_project, then rerun change_safety; coverage is unknown, not false"
-        }));
+        if let Some(reason) = undecidable {
+            blocking_factors.push(json!({
+                "factor": "undecidable_test_coverage",
+                "severity": "medium",
+                "recommended_action": format!("inspect dynamic loaders or establish explicit symbol traceability; {reason}")
+            }));
+        } else {
+            blocking_factors.push(json!({
+                "factor": "target_unindexed_workspace_file",
+                "severity": "high",
+                "recommended_action": "run rescan_project, then rerun change_safety; coverage is unknown, not false"
+            }));
+        }
     } else if tested == Some(false) {
         blocking_factors.push(json!({
             "factor": "missing_direct_test_coverage",
@@ -148,10 +180,12 @@ pub(super) fn change_safety_operator_guidance(
         "safe" => "safe_for_direct_mutation",
         "caution" if traceability_links > 0 => "safe_for_guarded_mutation",
         "caution" => "prefer_small_guarded_mutation",
+        "unknown" => "safe_for_guarded_mutation",
         _ => "defer_or_prepare_evidence_first",
     };
     let recommended_next_step = match change_safety {
         "safe" => "proceed_with_mutation_after_impact_check",
+        "unknown" => "inspect_dynamic_loaders_or_link_traceability_then_reassess",
         "unknown_unindexed" => "rescan_project_then_reassess",
         "caution" if tested != Some(true) => "add_targeted_tests_then_reassess",
         "caution" if traceability_links == 0 => "link_traceability_then_reassess",

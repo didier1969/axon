@@ -1261,16 +1261,29 @@ impl McpServer {
                 // historical "RAM doesn't carry tested" claim was stale); resolved
                 // via the canonical symbol id (conservative `false` when the symbol
                 // can't be resolved / the snapshot is cold). No PG `Symbol` count.
-                let tested = if unindexed_observability.is_some() {
-                    Value::Null
+                let (tested, undecidable_reason) = if unindexed_observability.is_some() {
+                    (Value::Null, None)
                 } else {
-                    json!(resolved_symbol_id
-                        .as_deref()
-                        .filter(|_| self.ensure_ram_snapshot_warm(project_code))
+                    let warm = self.ensure_ram_snapshot_warm(project_code);
+                    let id_opt = resolved_symbol_id.as_deref().filter(|_| warm);
+                    let view = crate::ist_snapshot::process_view();
+                    let is_covered = id_opt
                         .and_then(|id| {
-                            crate::ist_snapshot::process_view().node_tested(project_code, id)
+                            Some(view.node_tested(project_code, id)? || view.node_covered(project_code, id)?)
                         })
-                        .unwrap_or(false))
+                        .unwrap_or(false);
+
+                    if is_covered {
+                        (json!(true), None)
+                    } else if let Some(id) = id_opt {
+                        if let Some(reason) = view.undecidable_test_coverage_reason(project_code, id) {
+                            (Value::Null, Some(reason))
+                        } else {
+                            (json!(false), None)
+                        }
+                    } else {
+                        (json!(false), None)
+                    }
                 };
                 // Traceability link count from the SOLL RAM snapshot, matching the
                 // legacy `artifact_type='Symbol' AND artifact_ref IN (name,id)`.
@@ -1291,6 +1304,7 @@ impl McpServer {
                     .unwrap_or(0);
                 json!({
                     "tested": tested,
+                    "undecidable_reason": undecidable_reason,
                     "traceability_links": traceability_links,
                     "validation_nodes": 0,
                     "verifies_edges": 0,
@@ -1300,7 +1314,8 @@ impl McpServer {
             _ => self.symbol_validation_signals(project_code, target),
         };
         let coverage_signals = json!({
-            "tested": validation_signals.get("tested").cloned().unwrap_or_else(|| json!(false))
+            "tested": validation_signals.get("tested").cloned().unwrap_or(Value::Null),
+            "undecidable_reason": validation_signals.get("undecidable_reason").cloned()
         });
         let traceability_signals = json!({
             "traceability_links": validation_signals
@@ -1320,8 +1335,11 @@ impl McpServer {
             &traceability_signals,
             &validation_signals,
         );
-        let (safe_to_act, needs_human_confirmation) =
-            (change_safety == "safe", change_safety != "safe");
+        let (safe_to_act, needs_human_confirmation) = match change_safety {
+            "unknown" => (false, false),
+            "safe" => (true, false),
+            _ => (false, true),
+        };
 
         let evidence = format!(
             "{}**Target:** `{}` ({})\n\

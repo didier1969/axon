@@ -1657,6 +1657,22 @@ impl McpServer {
             }));
         }
         let tests = self.tests_exercising(&project, &symbol_id, radius);
+        if tests.is_empty() {
+            let view = crate::ist_snapshot::process_view();
+            if let Some(reason) = view.undecidable_test_coverage_reason(&project, &symbol_id) {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("`tests_for`: coverage for {symbol_id} is unknown ({reason}).") }],
+                    "data": {
+                        "status": "unknown",
+                        "symbol": symbol_id,
+                        "tests": [],
+                        "reason": reason,
+                        "surfaces_used": ["graph_ram"],
+                        "follow_up_tools": ["inspect", "rescan_project"]
+                    }
+                }));
+            }
+        }
         Some(json!({
             "content": [{ "type": "text", "text": format!("{} test(s) exercise {symbol_id}", tests.len()) }],
             "data": {

@@ -1108,6 +1108,36 @@ impl IstGraph {
             + attr_bytes
             + projects_bytes
     }
+
+    /// REQ-AXO-902582 — returns true if there is an unresolved phantom node whose
+    /// short name (or id suffix) matches `name` and is called by a test node (`tested() == true`).
+    pub fn has_phantom_caller_from_test(&self, name: &str) -> bool {
+        let calls = RelationType::Calls as u8;
+        let calls_nif = RelationType::CallsNif as u8;
+        for (i, &kind) in self.kinds.iter().enumerate() {
+            if kind == NodeKind::Other as u8 && !NodeFlags(self.flags[i]).tested() {
+                let id = &self.ids[i];
+                let node_name = &self.names[i];
+                let matches = node_name == name
+                    || id.ends_with(&format!("::{name}"))
+                    || id.ends_with(&format!(".{name}"));
+                if matches {
+                    let start = self.rev_offsets[i] as usize;
+                    let end = self.rev_offsets[i + 1] as usize;
+                    for slot in start..end {
+                        let rel = self.rev_rel[slot];
+                        if rel == calls || rel == calls_nif {
+                            let src = self.rev_sources[slot] as usize;
+                            if NodeFlags(self.flags[src]).tested() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 fn build_csr(

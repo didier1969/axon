@@ -24,7 +24,7 @@ impl IstGraphView {
         Self { cache }
     }
 
-    fn try_snapshot(&self, project: &str) -> Option<Arc<IstGraph>> {
+    pub(crate) fn try_snapshot(&self, project: &str) -> Option<Arc<IstGraph>> {
         // REQ-AXO-901952 — RAM is unconditional ; the only gate is cache
         // presence. A cold cache returns None → caller surfaces a loud
         // degraded error.
@@ -142,6 +142,36 @@ impl IstGraphView {
         let idx = snap.index_of(symbol_id)?;
         let (_, _, flags) = snap.node_meta(idx);
         Some(flags.tested())
+    }
+
+    /// REQ-AXO-902582 — check if symbol is covered (reachable from a test) or is an oracle itself
+    pub fn node_covered(&self, project: &str, symbol_id: &str) -> Option<bool> {
+        let snap = self.try_snapshot(project)?;
+        let idx = snap.index_of(symbol_id)?;
+        let (_, _, flags) = snap.node_meta(idx);
+        Some(flags.covered() || flags.tested())
+    }
+
+    /// REQ-AXO-902582 — returns named reason if test coverage is undecidable
+    /// (e.g. unresolved dynamic call from test suite matching this symbol name).
+    pub fn undecidable_test_coverage_reason(
+        &self,
+        project: &str,
+        symbol_id: &str,
+    ) -> Option<String> {
+        let snap = self.try_snapshot(project)?;
+        let idx = snap.index_of(symbol_id)?;
+        let (_, _, flags) = snap.node_meta(idx);
+        let name = snap.name_of(idx);
+        if flags.tested() || flags.covered() {
+            return None;
+        }
+        if snap.has_phantom_caller_from_test(name) {
+            return Some(format!(
+                "unresolved dynamic callers from test suite for '{name}'"
+            ));
+        }
+        None
     }
 
     /// REQ-AXO-901970 — canonical ids whose short name matches `name`, owned
