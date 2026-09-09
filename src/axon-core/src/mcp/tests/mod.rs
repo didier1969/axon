@@ -429,3 +429,5 @@ mod mailbox_reactivity;
 mod rendered_lists_contract;
 mod runtime_surface;
 mod soll_and_guidelines;
+/// REQ-AXO-902595 — critères d'acceptation satisfaits vs déclarés.
+mod soll_criteria_satisfaction;

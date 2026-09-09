@@ -120,8 +120,9 @@ impl McpServer {
             ),
         };
         let text = format!(
-            "Requirement verification: done={}, partial={}, missing={}\n\nTop gaps:\n{}{}{}{}",
+            "Requirement verification: done={}, criteria_declared={}, partial={}, missing={}\n\nTop gaps:\n{}{}{}{}",
             summary.done,
+            summary.criteria_declared,
             summary.partial,
             summary.missing,
             if top_gaps.is_empty() {
@@ -162,20 +163,22 @@ impl McpServer {
             return Some(json!({
                 "content": [{"type":"text","text": format!(
                     "Requirement verification ({project_code}) — mode=brief\n\
-                     done={} · partial={} · missing={} · total={}\n\nTop gaps:\n{}{}\n\n\
+                     done={} · criteria_declared={} · partial={} · missing={} · total={}\n\nTop gaps:\n{}{}\n\n\
                      _↳ réponse compacte par défaut ; passez `mode=\"verbose\"` \
                      pour demander explicitement les listes détaillées._",
-                    summary.done, summary.partial, summary.missing, summary.entries.len(),
+                    summary.done, summary.criteria_declared, summary.partial, summary.missing, summary.entries.len(),
                     top_gaps_text, next_to_close
                 )}],
                 "data": {
                     "project_code": project_code,
                     "mode": "brief",
                     "done": summary.done,
+                    "criteria_declared": summary.criteria_declared,
                     "partial": summary.partial,
                     "missing": summary.missing,
                     "summary": {
                         "done": summary.done,
+                        "criteria_declared": summary.criteria_declared,
                         "partial": summary.partial,
                         "missing": summary.missing,
                         "total": summary.entries.len()
@@ -260,7 +263,8 @@ impl McpServer {
             "warning_dimensions": [
                 requirement_dimension_descriptor("broken_file_evidence")
             ],
-            "done_rule": "EITHER status is `completed` or `delivered` (terminal — done by definition, REQ-AXO-136) OR (status is `current`|`accepted` AND acceptance criteria exist AND supporting evidence exists AND no broken file evidence)",
+            "done_rule": "EITHER status is `completed` or `delivered` (terminal — done by definition, REQ-AXO-136) OR (status is `current`|`accepted` AND all acceptance criteria are verified/satisfied AND supporting evidence exists AND no broken file evidence)",
+            "criteria_declared_rule": "status is `current`|`accepted` AND supporting evidence exists AND acceptance criteria are declared but not yet verified/satisfied (REQ-AXO-902595)",
             "partial_rule": "some required dimensions exist but not all required dimensions are satisfied",
             "missing_rule": "required dimensions are mostly absent or requirement status is not yet operationally accepted"
         });
@@ -269,10 +273,12 @@ impl McpServer {
             "data": {
                 "project_code": project_code,
                 "done": summary.done,
+                "criteria_declared": summary.criteria_declared,
                 "partial": summary.partial,
                 "missing": summary.missing,
                 "summary": {
                     "done": summary.done,
+                    "criteria_declared": summary.criteria_declared,
                     "partial": summary.partial,
                     "missing": summary.missing,
                     "total": summary.entries.len()

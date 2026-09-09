@@ -276,6 +276,11 @@ pub(super) fn score_node(
                 reasons.push("requirement missing".to_string());
                 validation_gates.push("define acceptance criteria and evidence".to_string());
             }
+            "criteria_declared" => {
+                proof_gap_score += 10;
+                reasons.push("criteria declared but not verified".to_string());
+                validation_gates.push("verify acceptance criteria or deliver requirement".to_string());
+            }
             "partial" => {
                 proof_gap_score += 8;
                 reasons.push("requirement partial".to_string());

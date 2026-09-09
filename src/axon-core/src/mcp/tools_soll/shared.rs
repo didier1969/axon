@@ -85,6 +85,7 @@ pub(crate) struct SollDerivedDocsRefreshSummary {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RequirementCoverageSummary {
     pub(super) done: usize,
+    pub(super) criteria_declared: usize,
     pub(super) partial: usize,
     pub(super) missing: usize,
     pub(super) entries: Vec<RequirementCoverageEntry>,
@@ -343,6 +344,23 @@ pub(super) fn resume_criteres(criteres: &[CritereAcceptation]) -> Option<String>
     Some(ligne)
 }
 
+/// REQ-AXO-902595 — vérifie si TOUS les critères d'acceptation déclarés sont formellement satisfaits.
+///
+/// Un critère sous forme chaîne historique (`EtatCritere::NonDeclare`) ou sous forme
+/// explicite `unmet` (`EtatCritere::NonTenu`) n'est PAS satisfait.
+/// Seuls `EtatCritere::Tenu` ou `EtatCritere::Ecarte` avec raison valide sont satisfaits.
+pub(super) fn are_all_criteria_satisfied(criteria: &str) -> bool {
+    let parsed = parse_acceptance_criteria(criteria);
+    if parsed.is_empty() {
+        return false;
+    }
+    parsed.iter().all(|c| match &c.etat {
+        EtatCritere::Tenu => true,
+        EtatCritere::Ecarte { raison, .. } => !raison.trim().is_empty(),
+        EtatCritere::NonDeclare | EtatCritere::NonTenu => false,
+    })
+}
+
 pub(super) fn requirement_state_from(
     status: &str,
     criteria: &str,
@@ -363,7 +381,13 @@ pub(super) fn requirement_state_from(
         && has_criteria
         && matches!(status, "current" | "accepted")
     {
-        "done"
+        // REQ-AXO-902595 — la présence textuelle de critères ne suffit plus à déclarer `done`.
+        // Si les critères sont écrits mais non vérifiés, l'état est `criteria_declared`.
+        if are_all_criteria_satisfied(criteria) {
+            "done"
+        } else {
+            "criteria_declared"
+        }
     } else if evidence_count > 0 || has_criteria || broken_file_evidence_count > 0 {
         "partial"
     } else {
@@ -501,6 +525,9 @@ pub(super) fn requirement_state_reason(state: &str, missing_dimensions: &[String
     match state {
         "done" => format!(
             "Requirement is complete, but operator attention is still required for: {canonical}."
+        ),
+        "criteria_declared" => format!(
+            "Requirement has acceptance criteria declared and supporting evidence, but criteria are not yet verified/satisfied: {canonical}."
         ),
         "partial" => format!(
             "Requirement is partially complete because coverage is still missing for: {canonical}."

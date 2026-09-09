@@ -278,6 +278,7 @@ impl McpServer {
 
             match state {
                 "done" => summary.done += 1,
+                "criteria_declared" => summary.criteria_declared += 1,
                 "partial" => summary.partial += 1,
                 _ => summary.missing += 1,
             }
