@@ -401,6 +401,47 @@ fn test_mcp_call_telemetry_client_attribution_and_discipline_ratios_902555() {
 }
 
 #[test]
+fn test_ski_pro_skills_surpass_file_copies_902553() {
+    // REQ-AXO-902553 — 4 SKI-PRO-* nodes must be at least as rich and deep as the
+    // file copies they replace (no information loss in the governed SOLL memory).
+    let server = create_test_server();
+
+    let thresholds = [
+        ("SKI-PRO-1001", 3192, "Problem Statement"),
+        ("SKI-PRO-1002", 3710, "First slice = tracer-bullet"),
+        ("SKI-PRO-1003", 5084, "Phase 1 — Main-Thread MCP Discovery"),
+        ("SKI-PRO-1005", 7000, "10 Ways to construct one"),
+    ];
+
+    for (skill_id, min_bytes, key_content) in thresholds {
+        let resp = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_get",
+                    "arguments": { "id": skill_id }
+                })),
+                id: Some(json!(902553)),
+            })
+            .expect("soll_get response")
+            .result
+            .expect("soll_get result");
+
+        let text = resp["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.len() >= min_bytes,
+            "{skill_id} description length ({}) must be >= archived file copy threshold ({min_bytes})",
+            text.len()
+        );
+        assert!(
+            text.contains(key_content),
+            "{skill_id} must contain key architectural content: '{key_content}'"
+        );
+    }
+}
+
+#[test]
 fn test_sql_tool_is_read_only_rejects_mutations() {
     // REQ-AXO-901966 — the `sql` tool must refuse writes (contract = read-only);
     // it runs on the writer-capable pool, so the guard is load-bearing.

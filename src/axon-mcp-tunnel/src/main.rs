@@ -50,6 +50,7 @@ const HEAVY_TOOLS: &[&str] = &[
     "soll_generate_docs",
     "rescan_project",
     "audit",
+    "soll_validate",
 ];
 
 /// Extract the invoked tool name from an MCP JSON-RPC payload, i.e. the
@@ -267,7 +268,7 @@ mod tests {
 
     #[test]
     fn heavy_batch_tool_gets_heavy_timeout() {
-        for name in ["soll_apply_plan", "axon_apply_guidelines", "audit"] {
+        for name in ["soll_apply_plan", "axon_apply_guidelines", "audit", "soll_validate"] {
             let payload = json!({"method": "tools/call", "params": {"name": name}});
             assert_eq!(
                 timeout_for_payload(&payload, secs(60), secs(180)),
