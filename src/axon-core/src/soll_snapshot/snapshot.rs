@@ -26,6 +26,76 @@ pub struct SnapshotNode {
     pub metadata_raw: String,
 }
 
+/// REQ-AXO-902573 — Reason why an intent node is legitimately exempt from having a direct code trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeExemptionReason {
+    /// Explicitly marked in metadata (e.g. `code_exempt: true`, `exempt: true`, `exemption_reason`, or exempt `role`).
+    ExplicitMetadata,
+    /// Terminal status closed without delivery (rejected, cancelled, wont_do, obsolete, superseded).
+    TerminalClosedWithoutDelivery,
+    /// Architectural concept or methodology decision (documentation of rationale, not AST implementation).
+    DocumentationConceptOrDecision,
+}
+
+impl CodeExemptionReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExplicitMetadata => "explicit_metadata",
+            Self::TerminalClosedWithoutDelivery => "terminal_closed_without_delivery",
+            Self::DocumentationConceptOrDecision => "documentation_concept_or_decision",
+        }
+    }
+}
+
+impl SnapshotNode {
+    /// REQ-AXO-902573 — Determine if this node is legitimately exempt from carrying a direct code trace.
+    pub fn code_exemption_reason(&self) -> Option<CodeExemptionReason> {
+        // 1. Explicit metadata exemption
+        if !self.metadata_raw.is_empty() && self.metadata_raw != "{}" {
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&self.metadata_raw) {
+                let is_explicit = meta.get("code_exempt").and_then(|v| v.as_bool()).unwrap_or(false)
+                    || meta.get("exempt").and_then(|v| v.as_bool()).unwrap_or(false)
+                    || meta.get("exemption_reason").map_or(false, |v| !v.is_null())
+                    || meta.get("role").and_then(|v| v.as_str()).map_or(false, |r| {
+                        matches!(
+                            r,
+                            "exempt"
+                                | "concept_only"
+                                | "abstract"
+                                | "methodology"
+                                | "documentation"
+                                | "process"
+                                | "human_only"
+                        )
+                    });
+                if is_explicit {
+                    return Some(CodeExemptionReason::ExplicitMetadata);
+                }
+            }
+        }
+
+        // 2. Terminal status closed without delivery
+        if matches!(
+            self.status.as_str(),
+            "rejected" | "cancelled" | "wont_do" | "obsolete" | "superseded"
+        ) {
+            return Some(CodeExemptionReason::TerminalClosedWithoutDelivery);
+        }
+
+        // 3. Documentation / architecture concepts and decisions
+        if matches!(self.entity_type.as_str(), "Concept" | "Decision") {
+            return Some(CodeExemptionReason::DocumentationConceptOrDecision);
+        }
+
+        None
+    }
+
+    pub fn is_code_exempt(&self) -> bool {
+        self.code_exemption_reason().is_some()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SnapshotEdge {
     pub source_id: String,
@@ -531,5 +601,80 @@ mod tests {
         assert_eq!(snap.node_ids_of_type("Requirement").len(), 0);
         assert_eq!(snap.traceability_count_for("decision", "DEC-AXO-001"), 0);
         assert_eq!(snap.project_code, "AXO");
+    }
+
+    #[test]
+    fn snapshot_node_identifies_legitimate_code_exemption_reasons() {
+        use super::CodeExemptionReason;
+
+        let node = |entity_type: &str, status: &str, metadata: &str| SnapshotNode {
+            id: "ID".into(),
+            description: "desc".into(),
+            entity_type: entity_type.into(),
+            title: "title".into(),
+            status: status.into(),
+            metadata_raw: metadata.into(),
+        };
+
+        // 1. Explicit metadata exemptions
+        let explicit_bool = node("Requirement", "current", r#"{"code_exempt": true}"#);
+        assert_eq!(
+            explicit_bool.code_exemption_reason(),
+            Some(CodeExemptionReason::ExplicitMetadata)
+        );
+        assert!(explicit_bool.is_code_exempt());
+
+        let explicit_exempt_bool = node("Requirement", "current", r#"{"exempt": true}"#);
+        assert_eq!(
+            explicit_exempt_bool.code_exemption_reason(),
+            Some(CodeExemptionReason::ExplicitMetadata)
+        );
+
+        let explicit_reason = node("Requirement", "current", r#"{"exemption_reason": "No compiled artifact"}"#);
+        assert_eq!(
+            explicit_reason.code_exemption_reason(),
+            Some(CodeExemptionReason::ExplicitMetadata)
+        );
+
+        let explicit_role = node("Requirement", "current", r#"{"role": "concept_only"}"#);
+        assert_eq!(
+            explicit_role.code_exemption_reason(),
+            Some(CodeExemptionReason::ExplicitMetadata)
+        );
+
+        let deliverable_role = node("Requirement", "current", r#"{"role": "deliverable"}"#);
+        assert_eq!(deliverable_role.code_exemption_reason(), None);
+
+        // 2. Terminal closed without delivery
+        for terminal_status in ["rejected", "cancelled", "wont_do", "obsolete", "superseded"] {
+            let n = node("Requirement", terminal_status, "{}");
+            assert_eq!(
+                n.code_exemption_reason(),
+                Some(CodeExemptionReason::TerminalClosedWithoutDelivery),
+                "status={terminal_status} must be recognized as terminal closed without delivery"
+            );
+        }
+
+        // Deferred is NOT terminal without delivery (work still owed)
+        let deferred = node("Requirement", "deferred", "{}");
+        assert_eq!(deferred.code_exemption_reason(), None);
+
+        // Current / planned / delivered requirements require code traces unless explicitly exempt
+        assert_eq!(node("Requirement", "current", "{}").code_exemption_reason(), None);
+        assert_eq!(node("Requirement", "planned", "{}").code_exemption_reason(), None);
+        assert_eq!(node("Requirement", "delivered", "{}").code_exemption_reason(), None);
+
+        // 3. Documentation Concept / Decision
+        let concept = node("Concept", "current", "{}");
+        assert_eq!(
+            concept.code_exemption_reason(),
+            Some(CodeExemptionReason::DocumentationConceptOrDecision)
+        );
+
+        let decision = node("Decision", "current", "{}");
+        assert_eq!(
+            decision.code_exemption_reason(),
+            Some(CodeExemptionReason::DocumentationConceptOrDecision)
+        );
     }
 }

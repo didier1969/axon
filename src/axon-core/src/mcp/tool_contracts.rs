@@ -251,6 +251,12 @@ pub(crate) struct SollManagerData {
     /// undeclared extra property. e.g. ["test X green", "metric Y < Z"].
     #[serde(default)]
     pub acceptance_criteria: Option<Vec<String>>,
+    /// REQ-AXO-902573 — declare node as legitimately code-exempt (metadata-routed).
+    #[serde(default)]
+    pub code_exempt: Option<bool>,
+    /// REQ-AXO-902573 — reason for code exemption (metadata-routed).
+    #[serde(default)]
+    pub exemption_reason: Option<String>,
 }
 
 /// `soll_manager` — create / update / link / unlink intent entities.

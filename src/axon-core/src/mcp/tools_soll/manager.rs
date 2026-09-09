@@ -78,6 +78,9 @@ fn apply_metadata_routed_fields(data: &serde_json::Value, meta: &mut serde_json:
         "method",
         "result",
         "tags",
+        "code_exempt",
+        "exempt",
+        "exemption_reason",
     ];
     for key in METADATA_ROUTED_FIELDS {
         if let Some(value) = data.get(*key) {
@@ -641,7 +644,10 @@ impl McpServer {
                                     "evidence_refs",
                                     "context",
                                     "goal",
-                                    "result"
+                                    "result",
+                                    "code_exempt",
+                                    "exempt",
+                                    "exemption_reason"
                                 ],
                                 "hint": "remove the id field and retry; server returns the allocated canonical id in the response",
                                 "follow_up_tools": ["soll_manager"],
@@ -1735,7 +1741,7 @@ impl McpServer {
                             // pire qu'un rapport muet.
                             let champs_envoyes: Vec<&str> = {
                                 let mut v: Vec<&str> = ["title", "description", "status",
-                                    "priority", "tags", "acceptance_criteria", "metadata"]
+                                    "priority", "tags", "acceptance_criteria", "code_exempt", "exempt", "exemption_reason", "metadata"]
                                     .into_iter()
                                     .filter(|c| data.get(*c).is_some())
                                     .collect();
@@ -1744,7 +1750,7 @@ impl McpServer {
                                 // l'a touché.
                                 if !v.contains(&"metadata")
                                     && v.iter().any(|c| {
-                                        matches!(*c, "priority" | "tags" | "acceptance_criteria")
+                                        matches!(*c, "priority" | "tags" | "acceptance_criteria" | "code_exempt" | "exempt" | "exemption_reason")
                                     })
                                 {
                                     v.push("metadata");
@@ -2530,6 +2536,20 @@ mod tests {
         // canonical columns + unknown keys must NOT be folded into metadata
         assert!(meta.get("title").is_none());
         assert!(meta.get("not_a_routed_field").is_none());
+    }
+
+    #[test]
+    fn metadata_routed_includes_code_exemption_fields() {
+        let data = json!({
+            "code_exempt": true,
+            "exempt": true,
+            "exemption_reason": "High-level architecture concept"
+        });
+        let mut meta = json!({});
+        apply_metadata_routed_fields(&data, &mut meta);
+        assert_eq!(meta["code_exempt"], json!(true));
+        assert_eq!(meta["exempt"], json!(true));
+        assert_eq!(meta["exemption_reason"], json!("High-level architecture concept"));
     }
 
     #[test]

@@ -152,19 +152,114 @@ fn is_test_id(id: &str) -> bool {
     FRAG.iter().any(|f| id.contains(f))
 }
 
-fn orphan_intent_over_snapshot(snap: &crate::soll_snapshot::SollSnapshot) -> (usize, usize) {
-    let mut orphan = 0usize;
-    let mut total = 0usize;
+/// REQ-AXO-902573 — Honest intent alignment metrics distinguishing legitimate non-code intent.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IntentAlignmentMetrics {
+    /// Raw count of governed nodes with zero code traceability
+    pub raw_orphans: usize,
+    /// Raw total count of governed nodes (Requirement, Decision, Concept, Validation)
+    pub raw_total: usize,
+    /// Count of unlinked intent nodes that are legitimately exempt from having a code trace
+    pub exempt_orphans: usize,
+    /// Honest count of actionable orphans (raw_orphans - exempt_orphans)
+    pub honest_orphans: usize,
+    /// Honest denominator: nodes genuinely expected to have code traces (raw_total - exempt_orphans)
+    pub honest_total: usize,
+    /// Breakdown: Concept or Decision documentation nodes legitimately without code
+    pub exempt_doc_count: usize,
+    /// Breakdown: Terminal status nodes closed without delivery (rejected, cancelled, wont_do, obsolete, superseded)
+    pub exempt_terminal_count: usize,
+    /// Breakdown: Explicit metadata exemptions (code_exempt: true, exempt: true, exemption_reason, exempt role)
+    pub exempt_explicit_count: usize,
+    /// Honest alignment score: 1.0 - (honest_orphans / honest_total)
+    pub honest_score: f64,
+    /// Raw alignment score: 1.0 - (raw_orphans / raw_total)
+    pub raw_score: f64,
+    /// Delta = honest_score - raw_score (the gap published)
+    pub delta: f64,
+}
+
+impl Default for IntentAlignmentMetrics {
+    fn default() -> Self {
+        Self {
+            raw_orphans: 0,
+            raw_total: 0,
+            exempt_orphans: 0,
+            honest_orphans: 0,
+            honest_total: 0,
+            exempt_doc_count: 0,
+            exempt_terminal_count: 0,
+            exempt_explicit_count: 0,
+            honest_score: 1.0,
+            raw_score: 1.0,
+            delta: 0.0,
+        }
+    }
+}
+
+fn orphan_intent_over_snapshot(snap: &crate::soll_snapshot::SollSnapshot) -> IntentAlignmentMetrics {
+    use crate::soll_snapshot::CodeExemptionReason;
+
+    let mut raw_orphans = 0usize;
+    let mut raw_total = 0usize;
+    let mut exempt_orphans = 0usize;
+    let mut exempt_doc_count = 0usize;
+    let mut exempt_terminal_count = 0usize;
+    let mut exempt_explicit_count = 0usize;
+
     for ty in ["Requirement", "Decision", "Concept", "Validation"] {
         let lower = ty.to_ascii_lowercase();
         for id in snap.node_ids_of_type(ty) {
-            total += 1;
+            raw_total += 1;
             if snap.traceability_count_for(&lower, id) == 0 {
-                orphan += 1;
+                raw_orphans += 1;
+                if let Some(node) = snap.nodes.get(id) {
+                    if let Some(reason) = node.code_exemption_reason() {
+                        exempt_orphans += 1;
+                        match reason {
+                            CodeExemptionReason::DocumentationConceptOrDecision => {
+                                exempt_doc_count += 1;
+                            }
+                            CodeExemptionReason::TerminalClosedWithoutDelivery => {
+                                exempt_terminal_count += 1;
+                            }
+                            CodeExemptionReason::ExplicitMetadata => {
+                                exempt_explicit_count += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    (orphan, total)
+
+    let honest_orphans = raw_orphans.saturating_sub(exempt_orphans);
+    let honest_total = raw_total.saturating_sub(exempt_orphans);
+    let raw_score = if raw_total == 0 {
+        1.0
+    } else {
+        1.0 - (raw_orphans as f64 / raw_total as f64)
+    };
+    let honest_score = if honest_total == 0 {
+        1.0
+    } else {
+        1.0 - (honest_orphans as f64 / honest_total as f64)
+    };
+    let delta = honest_score - raw_score;
+
+    IntentAlignmentMetrics {
+        raw_orphans,
+        raw_total,
+        exempt_orphans,
+        honest_orphans,
+        honest_total,
+        exempt_doc_count,
+        exempt_terminal_count,
+        exempt_explicit_count,
+        honest_score,
+        raw_score,
+        delta,
+    }
 }
 
 /// REQ-AXO-902186 — the raw structural measurements behind the 5 SHI sub-scores,
@@ -185,6 +280,8 @@ struct ShiRawMetrics {
     d_count: usize,
     orphan_intent: usize,
     total_intent: usize,
+    /// REQ-AXO-902573 — honest intent alignment metrics & delta
+    intent: IntentAlignmentMetrics,
     /// REQ-AXO-902185 — near-duplicate (semantic clone) pairs, RAM-native via
     /// `SIMILAR_TO` edges persisted out-of-band by `reconcile_duplication_edges`
     /// (pgvector HNSW scan, never inline — see that fn's docs for why). Reading
@@ -213,8 +310,7 @@ struct ShiRawMetrics {
 
 fn compute_shi_raw_metrics(
     snapshot: &IstGraph,
-    orphan_intent: usize,
-    total_intent: usize,
+    intent: IntentAlignmentMetrics,
 ) -> ShiRawMetrics {
     let total_nodes = snapshot.node_count();
     let sccs = structural_sccs(snapshot);
@@ -404,8 +500,9 @@ fn compute_shi_raw_metrics(
         mod_d,
         mean_distance,
         d_count,
-        orphan_intent,
-        total_intent,
+        orphan_intent: intent.raw_orphans,
+        total_intent: intent.raw_total,
+        intent,
         clone_pairs,
         total_testable_symbols,
         mean_public_ratio,
@@ -419,11 +516,6 @@ fn compute_shi_raw_metrics(
 
 fn build_sub_scores(raw: &ShiRawMetrics) -> Vec<SubScore> {
     let nodes_in_cycles: usize = raw.sccs.iter().map(|c| c.len()).sum();
-    let orphan_intent_frac = if raw.total_intent == 0 {
-        0.0
-    } else {
-        raw.orphan_intent as f64 / raw.total_intent as f64
-    };
     vec![
         SubScore::new(
             "acyclicity",
@@ -487,13 +579,36 @@ fn build_sub_scores(raw: &ShiRawMetrics) -> Vec<SubScore> {
         ),
         SubScore::new(
             "intent_alignment",
-            1.0 - orphan_intent_frac,
+            raw.intent.honest_score,
             1.0,
             0.85,
-            format!(
-                "{}/{} governed SOLL node(s) orphaned — no code trace",
-                raw.orphan_intent, raw.total_intent
-            ),
+            if raw.intent.exempt_orphans > 0 {
+                format!(
+                    "{}/{} actionable intent node(s) orphaned — no code trace (honest: {:.3}, raw: {}/{} -> {:.3}, Δ={:+.3}; {} legitimately exempt: {} doc, {} terminal, {} explicit)",
+                    raw.intent.honest_orphans,
+                    raw.intent.honest_total,
+                    raw.intent.honest_score,
+                    raw.intent.raw_orphans,
+                    raw.intent.raw_total,
+                    raw.intent.raw_score,
+                    raw.intent.delta,
+                    raw.intent.exempt_orphans,
+                    raw.intent.exempt_doc_count,
+                    raw.intent.exempt_terminal_count,
+                    raw.intent.exempt_explicit_count,
+                )
+            } else {
+                format!(
+                    "{}/{} governed SOLL node(s) orphaned — no code trace (honest: {:.3}, raw: {}/{} -> {:.3}, Δ={:+.3}; 0 exempt)",
+                    raw.intent.honest_orphans,
+                    raw.intent.honest_total,
+                    raw.intent.honest_score,
+                    raw.intent.raw_orphans,
+                    raw.intent.raw_total,
+                    raw.intent.raw_score,
+                    raw.intent.delta,
+                )
+            },
         ),
         SubScore::new(
             "duplication",
@@ -749,12 +864,12 @@ impl McpServer {
         // REQ-AXO-902186 — raw metrics extracted via the SHARED helper (also used by
         // `structural_health_worklist` for its per-candidate "what if" deltas), so the
         // index and the worklist can never silently diverge on the same baseline.
-        let (orphan_intent, total_intent) = self
+        let intent = self
             .soll_cache()
             .snapshot(&project)
             .map(|snap| orphan_intent_over_snapshot(&snap))
-            .unwrap_or((0, 0));
-        let raw = compute_shi_raw_metrics(&snapshot, orphan_intent, total_intent);
+            .unwrap_or_default();
+        let raw = compute_shi_raw_metrics(&snapshot, intent);
         let d_count = raw.d_count;
         let index = StructuralHealthIndex::compute(build_sub_scores(&raw));
 
@@ -890,8 +1005,17 @@ impl McpServer {
                 "edge_count": snapshot.edge_count(),
                 "dimensions_wired": 9,
                 "coupled_modules": d_count,
-                "orphan_intent": orphan_intent,
-                "total_intent_nodes": total_intent,
+                "orphan_intent": raw.orphan_intent,
+                "total_intent_nodes": raw.total_intent,
+                "honest_orphan_intent": raw.intent.honest_orphans,
+                "honest_total_intent": raw.intent.honest_total,
+                "exempt_intent_nodes": raw.intent.exempt_orphans,
+                "intent_alignment_delta": raw.intent.delta,
+                "exempt_intent_breakdown": {
+                    "documentation": raw.intent.exempt_doc_count,
+                    "terminal_closed": raw.intent.exempt_terminal_count,
+                    "explicit_metadata": raw.intent.exempt_explicit_count,
+                },
                 "snapshot_id": build_id,
                 "delta_vs_previous": delta_vs_previous,
                 "history_depth": previous_snapshots.len() + 1,
@@ -1216,12 +1340,12 @@ impl McpServer {
         let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(15).clamp(1, 200) as usize;
         let total_nodes = snapshot.node_count();
 
-        let (orphan_intent, total_intent) = self
+        let intent = self
             .soll_cache()
             .snapshot(&project)
             .map(|snap| orphan_intent_over_snapshot(&snap))
-            .unwrap_or((0, 0));
-        let raw = compute_shi_raw_metrics(&snapshot, orphan_intent, total_intent);
+            .unwrap_or_default();
+        let raw = compute_shi_raw_metrics(&snapshot, intent);
         let base_scores = build_sub_scores(&raw);
         let base_aggregate = geometric_aggregate(&base_scores);
 
@@ -2078,7 +2202,7 @@ mod structural_health_helpers_tests {
                 RelationType::SimilarTo,
             ),
         ];
-        let raw = super::compute_shi_raw_metrics(&IstGraph::build(nodes, edges), 0, 0);
+        let raw = super::compute_shi_raw_metrics(&IstGraph::build(nodes, edges), super::IntentAlignmentMetrics::default());
         let keys: Vec<&str> = raw.mod_d.keys().map(String::as_str).collect();
         // Real cross-module dependency survives on BOTH endpoints.
         assert!(raw.mod_d.contains_key("AXO::src::a.rs"), "caller module present: {keys:?}");
@@ -2102,6 +2226,7 @@ mod structural_health_helpers_tests {
             d_count: 0,
             orphan_intent: 0,
             total_intent: 0,
+            intent: super::IntentAlignmentMetrics::default(),
             clone_pairs: 0,
             total_testable_symbols,
             mean_public_ratio: 0.0,
@@ -2164,7 +2289,7 @@ mod structural_health_helpers_tests {
         for (id, ty) in [
             ("REQ-1", "Requirement"), // traced
             ("REQ-2", "Requirement"), // orphan
-            ("DEC-1", "Decision"),    // orphan
+            ("DEC-1", "Decision"),    // orphan (doc exempt)
             ("CPT-1", "Concept"),     // traced
             ("VAL-1", "Validation"),  // orphan
             ("PIL-1", "Pillar"),      // NOT a governed type — ignored even if orphan
@@ -2176,7 +2301,103 @@ mod structural_health_helpers_tests {
 
         let snap = SollSnapshot::build("AXO", 1, nodes, Vec::new(), traceability);
         // total = 2 Req + 1 Dec + 1 Concept + 1 Validation = 5 (Pillar excluded);
-        // orphan = REQ-2 + DEC-1 + VAL-1 = 3.
-        assert_eq!(super::orphan_intent_over_snapshot(&snap), (3, 5));
+        // raw orphan = REQ-2 + DEC-1 + VAL-1 = 3.
+        let metrics = super::orphan_intent_over_snapshot(&snap);
+        assert_eq!((metrics.raw_orphans, metrics.raw_total), (3, 5));
+        assert_eq!(metrics.exempt_orphans, 1); // DEC-1 is documentation exempt
+        assert_eq!(metrics.exempt_doc_count, 1);
+        assert_eq!((metrics.honest_orphans, metrics.honest_total), (2, 4));
+        assert!((metrics.raw_score - 0.40).abs() < 1e-9);
+        assert!((metrics.honest_score - 0.50).abs() < 1e-9);
+        assert!((metrics.delta - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn honest_intent_alignment_distinguishes_legitimate_noncode_intent_and_publishes_delta() {
+        use crate::soll_snapshot::{SnapshotNode, SnapshotTraceability, SollSnapshot};
+        use std::collections::HashMap;
+
+        let node = |id: &str, ty: &str, status: &str, meta: &str| SnapshotNode {
+            id: id.to_string(),
+            entity_type: ty.to_string(),
+            title: String::new(),
+            status: status.to_string(),
+            metadata_raw: meta.to_string(),
+            description: String::new(),
+        };
+        let trace = |ty: &str, entity: &str| SnapshotTraceability {
+            id: format!("t-{entity}"),
+            soll_entity_type: ty.to_string(),
+            soll_entity_id: entity.to_string(),
+            artifact_type: "Symbol".to_string(),
+            artifact_ref: "AXO::x::y.rs::f".to_string(),
+            artifact_status: "current".to_string(),
+            role: None,
+        };
+
+        let mut nodes: HashMap<String, SnapshotNode> = HashMap::new();
+        // 1. Traced requirement (not orphan)
+        nodes.insert("REQ-1".into(), node("REQ-1", "Requirement", "current", "{}"));
+        // 2. Actionable orphan requirement (current, no trace, no exemption)
+        nodes.insert("REQ-2".into(), node("REQ-2", "Requirement", "current", "{}"));
+        // 3. Rejected requirement (terminal closed without delivery -> legitimate exemption)
+        nodes.insert("REQ-3".into(), node("REQ-3", "Requirement", "rejected", "{}"));
+        // 4. Superseded requirement (terminal closed without delivery -> legitimate exemption)
+        nodes.insert("REQ-4".into(), node("REQ-4", "Requirement", "superseded", "{}"));
+        // 5. Explicitly exempt requirement via metadata code_exempt
+        nodes.insert("REQ-5".into(), node("REQ-5", "Requirement", "current", r#"{"code_exempt": true}"#));
+        // 6. Explicitly exempt requirement via role=concept_only
+        nodes.insert("REQ-6".into(), node("REQ-6", "Requirement", "current", r#"{"role": "concept_only"}"#));
+        // 7. Decision without code trace -> legitimate exemption (documentation)
+        nodes.insert("DEC-1".into(), node("DEC-1", "Decision", "current", "{}"));
+        // 8. Decision WITH code trace -> traced (not orphan)
+        nodes.insert("DEC-2".into(), node("DEC-2", "Decision", "current", "{}"));
+        // 9. Concept without code trace -> legitimate exemption (documentation)
+        nodes.insert("CPT-1".into(), node("CPT-1", "Concept", "current", "{}"));
+        // 10. Actionable orphan validation (planned, no trace)
+        nodes.insert("VAL-1".into(), node("VAL-1", "Validation", "planned", "{}"));
+
+        // Only REQ-1 and DEC-2 have code traces
+        let traceability = vec![trace("Requirement", "REQ-1"), trace("Decision", "DEC-2")];
+
+        let snap = SollSnapshot::build("AXO", 1, nodes, Vec::new(), traceability);
+        let m = super::orphan_intent_over_snapshot(&snap);
+
+        // Governed total: 10
+        assert_eq!(m.raw_total, 10);
+        // Traced: REQ-1, DEC-2 (2) -> raw orphans: 8
+        assert_eq!(m.raw_orphans, 8);
+        // Raw score: 1 - 8/10 = 0.20
+        assert!((m.raw_score - 0.20).abs() < 1e-9);
+
+        // Exempt breakdown:
+        // - Terminal closed: REQ-3, REQ-4 (2)
+        assert_eq!(m.exempt_terminal_count, 2);
+        // - Explicit metadata: REQ-5, REQ-6 (2)
+        assert_eq!(m.exempt_explicit_count, 2);
+        // - Documentation: DEC-1, CPT-1 (2)
+        assert_eq!(m.exempt_doc_count, 2);
+        // Total exempt: 6
+        assert_eq!(m.exempt_orphans, 6);
+
+        // Actionable honest orphans: REQ-2, VAL-1 (2)
+        assert_eq!(m.honest_orphans, 2);
+        // Honest denominator: 10 - 6 = 4
+        assert_eq!(m.honest_total, 4);
+        // Honest score: 1 - 2/4 = 0.50
+        assert!((m.honest_score - 0.50).abs() < 1e-9);
+        // Delta: 0.50 - 0.20 = +0.30
+        assert!((m.delta - 0.30).abs() < 1e-9);
+
+        // Verify sub_scores formatting
+        let raw = super::compute_shi_raw_metrics(&super::IstGraph::build(vec![], vec![]), m);
+        let scores = super::build_sub_scores(&raw);
+        let intent_sub = scores.iter().find(|s| s.name == "intent_alignment").expect("intent_alignment present");
+        assert!((intent_sub.value - 0.50).abs() < 1e-9);
+        assert!(intent_sub.detail.contains("2/4 actionable intent node(s) orphaned"));
+        assert!(intent_sub.detail.contains("honest: 0.500"));
+        assert!(intent_sub.detail.contains("raw: 8/10 -> 0.200"));
+        assert!(intent_sub.detail.contains("Δ=+0.300"));
+        assert!(intent_sub.detail.contains("6 legitimately exempt"));
     }
 }
