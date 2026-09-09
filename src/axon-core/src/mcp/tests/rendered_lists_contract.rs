@@ -87,14 +87,16 @@ const DIAGNOSTIC_ARRAYS: &[&str] = &[
 /// Limite assumée : la promesse est détectée par mots-clés dans la prose du
 /// catalogue. Un outil qui promet d'énumérer sans employer ces mots échappe à la
 /// garde — c'est un faux négatif connu, préférable au faux positif qui pousse à
-/// affaiblir la règle jusqu'à ce qu'elle ne morde plus.
-fn unrendered_item_arrays(response: &Value, promises_enumeration: bool) -> Vec<String> {
-    let text = response["content"][0]["text"].as_str().unwrap_or_default();
-    let Some(data) = response.get("data").and_then(Value::as_object) else {
-        return Vec::new();
-    };
+struct IdentifiableItemArray<'a> {
+    path: String,
+    items: &'a [Value],
+    identifiers: Vec<String>,
+}
 
-    let mut violations = Vec::new();
+fn collect_identifiable_arrays<'a>(
+    data: &'a serde_json::Map<String, Value>,
+) -> Vec<IdentifiableItemArray<'a>> {
+    let mut result = Vec::new();
     for (key, value) in data {
         if DIAGNOSTIC_ARRAYS.contains(&key.as_str()) {
             continue;
@@ -102,7 +104,6 @@ fn unrendered_item_arrays(response: &Value, promises_enumeration: bool) -> Vec<S
         let Some(items) = value.as_array().filter(|a| !a.is_empty()) else {
             continue;
         };
-        // Les identifiants portés par les objets du tableau.
         let identifiers: Vec<String> = items
             .iter()
             .filter_map(Value::as_object)
@@ -114,9 +115,65 @@ fn unrendered_item_arrays(response: &Value, promises_enumeration: bool) -> Vec<S
             })
             .filter(|id| !id.is_empty())
             .collect();
-        if identifiers.is_empty() {
-            continue; // tableau de scalaires ou d'objets anonymes : hors périmètre
+        if !identifiers.is_empty() {
+            result.push(IdentifiableItemArray {
+                path: format!("data.{key}"),
+                items: items.as_slice(),
+                identifiers,
+            });
+        } else {
+            // Sous-tableaux d'items dans des conteneurs/sections (ex: data.sections[].offenders dans debt_digest)
+            for (idx, elem) in items.iter().filter_map(Value::as_object).enumerate() {
+                let section_label = elem
+                    .get("key")
+                    .or_else(|| elem.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                for (sub_key, sub_val) in elem {
+                    if DIAGNOSTIC_ARRAYS.contains(&sub_key.as_str()) {
+                        continue;
+                    }
+                    if let Some(sub_items) = sub_val.as_array().filter(|a| !a.is_empty()) {
+                        let sub_identifiers: Vec<String> = sub_items
+                            .iter()
+                            .filter_map(Value::as_object)
+                            .filter_map(|sub_item| {
+                                IDENTIFYING_KEYS
+                                    .iter()
+                                    .find_map(|k| sub_item.get(*k).and_then(Value::as_str))
+                                    .map(str::to_string)
+                            })
+                            .filter(|id| !id.is_empty())
+                            .collect();
+                        if !sub_identifiers.is_empty() {
+                            let label = if !section_label.is_empty() {
+                                format!("data.{key}[{section_label}].{sub_key}")
+                            } else {
+                                format!("data.{key}[{idx}].{sub_key}")
+                            };
+                            result.push(IdentifiableItemArray {
+                                path: label,
+                                items: sub_items.as_slice(),
+                                identifiers: sub_identifiers,
+                            });
+                        }
+                    }
+                }
+            }
         }
+    }
+    result
+}
+
+/// affaiblir la règle jusqu'à ce qu'elle ne morde plus.
+fn unrendered_item_arrays(response: &Value, promises_enumeration: bool) -> Vec<String> {
+    let text = response["content"][0]["text"].as_str().unwrap_or_default();
+    let Some(data) = response.get("data").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut violations = Vec::new();
+    for array in collect_identifiable_arrays(data) {
         // Un outil a le droit d'ABRÉGER : `ist_centrality_pagerank` rend
         // `contrat1.rs::fonction_contrat_1` là où `data.results[].id` porte
         // `RLC::src::contrat1.rs::fonction_contrat_1` (REQ-AXO-902201, délibéré
@@ -128,7 +185,7 @@ fn unrendered_item_arrays(response: &Value, promises_enumeration: bool) -> Vec<S
         // et la garde deviendrait vacueuse, ce qui est exactement le piège
         // documenté dans REQ-AXO-902409 (« nommés OU comptés » l'avait neutralisée).
         const MIN_SEGMENT_LEN: usize = 4;
-        let named = identifiers.iter().any(|id| {
+        let named = array.identifiers.iter().any(|id| {
             if text.contains(id.as_str()) {
                 return true;
             }
@@ -137,14 +194,15 @@ fn unrendered_item_arrays(response: &Value, promises_enumeration: bool) -> Vec<S
                 .filter(|segment| segment.len() >= MIN_SEGMENT_LEN)
                 .is_some_and(|segment| text.contains(segment))
         });
-        let counted = text.contains(&items.len().to_string());
+        let counted = text.contains(&array.items.len().to_string());
         let satisfied = if promises_enumeration { named } else { named || counted };
         if !satisfied {
             violations.push(format!(
-                "data.{key} porte {} élément(s) identifiable(s) — dont `{}` — et le \
+                "{} porte {} élément(s) identifiable(s) — dont `{}` — et le \
                  texte n'en nomme AUCUN{}",
-                identifiers.len(),
-                identifiers[0],
+                array.path,
+                array.identifiers.len(),
+                array.identifiers[0],
                 if promises_enumeration {
                     " alors que la description de l'outil promet de les ÉNUMÉRER"
                 } else {
@@ -604,18 +662,7 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
         let has_items = result
             .get("data")
             .and_then(Value::as_object)
-            .map(|data| {
-                data.iter().any(|(k, v)| {
-                    !DIAGNOSTIC_ARRAYS.contains(&k.as_str())
-                        && v.as_array().is_some_and(|a| {
-                            a.iter().filter_map(Value::as_object).any(|item| {
-                                IDENTIFYING_KEYS.iter().any(|key| {
-                                    item.get(*key).and_then(Value::as_str).is_some_and(|s| !s.is_empty())
-                                })
-                            })
-                        })
-                })
-            })
+            .map(|data| !collect_identifiable_arrays(data).is_empty())
             .unwrap_or(false);
         if has_items {
             exercised.push(tool.clone());
@@ -698,7 +745,7 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
     );
 
     assert!(
-        exercised.len() >= 10,
+        exercised.len() >= 12,
         "balayage vacuous — seulement {} outil(s) ont rendu des items exploitables \
          ({exercised:?}). Un test qui n'exerce rien passe au vert en ne mesurant \
          rien : c'est la classe de défaut que ce module combat (REQ-AXO-902384). \
