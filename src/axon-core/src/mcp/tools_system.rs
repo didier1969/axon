@@ -1758,7 +1758,32 @@ impl McpServer {
             }
         };
         let full = args.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
-        let mode_label = if full { "full" } else { "delta" };
+
+        let paths_arg = match args.get("paths") {
+            Some(Value::Null) | None => None,
+            Some(Value::Array(arr)) => {
+                let mut parsed = Vec::with_capacity(arr.len());
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        parsed.push(s.to_string());
+                    } else {
+                        return Some(rescan_error_envelope(
+                            &project_code,
+                            "invalid_argument",
+                            "argument `paths` must be an array of strings",
+                        ));
+                    }
+                }
+                Some(parsed)
+            }
+            Some(_) => {
+                return Some(rescan_error_envelope(
+                    &project_code,
+                    "invalid_argument",
+                    "argument `paths` must be an array of strings",
+                ));
+            }
+        };
 
         // Step 1 — resolve project_path via soll.ProjectCodeRegistry.
         // Inline (instead of touching workflow_project.rs) so the file
@@ -1775,31 +1800,58 @@ impl McpServer {
             )),
         };
 
-        // Step 2 — when full=true, wipe IndexedFile rows under the
-        // project_path so the scanner cannot skip files via cached
-        // content_hash. Best-effort : a failure here is logged in the
-        // returned envelope's `cache_invalidation` field but does not
-        // abort the rescan trigger (degraded path still beats nothing).
-        let (cache_invalidation, invalidated_rows) = if full {
-            self.rescan_wipe_indexed_files(&project_code, &project_path)
-        } else {
-            self.rescan_reconcile_delta_chunkless_files(&project_code, &project_path)
+        // REQ-AXO-902613: Validate targeted paths if supplied (fail-closed, bounded, under project root).
+        let targeted_paths = match paths_arg {
+            Some(ref raw) => {
+                match validate_and_resolve_targeted_paths(&project_code, &project_path, raw) {
+                    Ok(validated) => Some((raw.len(), validated)),
+                    Err(err_envelope) => return Some(err_envelope),
+                }
+            }
+            None => None,
         };
 
-        // Step 3 — enumerate files on disk to compute
-        // `files_scheduled` for the caller. The scanner applies the
-        // same .gitignore / .axonignore / supported-extension filters
-        // the indexer would, so the count matches what will actually
-        // be queued by A1.
-        let files_scheduled = self.rescan_enumerate_file_count(&project_path, &project_code);
+        let is_targeted = targeted_paths.is_some();
+        let mode_label = if is_targeted {
+            "targeted"
+        } else if full {
+            "full"
+        } else {
+            "delta"
+        };
 
-        // Step 4 — REQ-AXO-901893 (LEGACY FEED PURGE): enrol the subtree
-        // directly into the durable work queue. A scanner walk UPSERTs every
-        // eligible file into ist.IndexedFile with status='discovered'; the DBQ-A
-        // claim feeder (REQ-AXO-901897) drains those rows into pipeline A by
-        // construction. This replaces the old pg_notify('axon_registry_changed')
-        // → registry_notify_listener → ingress_buffer hop (both ripped).
-        let notify_outcome = self.rescan_emit_subtree_notify(&project_code, &project_path, full);
+        // Step 2 — when targeted, wipe ONLY the specified files in ist.IndexedFile
+        // and notify the RAM dedup cache specifically for these paths (REQ-AXO-902613).
+        // When full=true, wipe all IndexedFile rows under the project_path.
+        // Otherwise, reconcile chunkless delta files (REQ-AXO-902512).
+        let (cache_invalidation, invalidated_rows) =
+            if let Some((_, ref unique_paths)) = targeted_paths {
+                self.rescan_wipe_targeted_indexed_files(&project_code, unique_paths)
+            } else if full {
+                self.rescan_wipe_indexed_files(&project_code, &project_path)
+            } else {
+                self.rescan_reconcile_delta_chunkless_files(&project_code, &project_path)
+            };
+
+        // Step 3 — compute `files_scheduled` for the caller.
+        // In targeted mode, this is strictly the count of unique targeted files scheduled.
+        // In full/delta mode, the scanner enumerates files on disk applying all ignore filters.
+        let files_scheduled = if let Some((_, ref unique_paths)) = targeted_paths {
+            unique_paths.len()
+        } else {
+            self.rescan_enumerate_file_count(&project_path, &project_code)
+        };
+
+        // Step 4 — enrol the files into the durable work queue.
+        // In targeted mode (REQ-AXO-902613), synchronously enrol ONLY the targeted files
+        // into ist.IndexedFile with status='discovered' and content_hash='', leaving the rest
+        // of the project strictly untouched.
+        // In full/delta mode, walk the subtree.
+        let notify_outcome = if let Some((_, ref unique_paths)) = targeted_paths {
+            self.rescan_enrol_targeted_files(&project_code, &project_path, unique_paths)
+        } else {
+            self.rescan_emit_subtree_notify(&project_code, &project_path, full)
+        };
 
         // Step 5 — projection ETA. Heuristic : ~30 ms/file end-to-end
         // through A1+A2+A3 (CPU graph + chunks) ; B1/B2/B3 (GPU embed)
@@ -1811,14 +1863,6 @@ impl McpServer {
 
         // Step 6 — REQ-AXO-902639 : DIRE quelle configuration a decide de ce
         // compte, et depuis quand.
-        //
-        // Le 2026-09-07, cet outil a rendu CINQ fois `enrolled: 1243` apres un
-        // promote verifie, sans un mot, parce que la configuration en vigueur
-        // n'etait pas celle du disque. Rien dans cette reponse ne permettait de
-        // le voir : ni le compte, ni le statut, ni l'identite du binaire. Le
-        // signal qui manquait est celui-ci — le fichier a bouge APRES sa
-        // lecture — et il vaut d'etre dans le TEXTE, que l'operateur lit, pas
-        // seulement dans les donnees.
         let provenance = crate::config::config_provenance();
         let config_source = provenance.source.label();
         let config_overriding_keys: Vec<String> = provenance
@@ -1852,11 +1896,18 @@ impl McpServer {
             None => String::new(),
         };
 
+        let paths_targeted_line = if let Some((count, _)) = targeted_paths {
+            format!("**paths_targeted:** {count}\n")
+        } else {
+            String::new()
+        };
+
         let report = format!(
             "### Rescan Project\n\n\
              **project_code:** `{project_code}`\n\
              **project_path:** `{project_path_display}`\n\
              **mode:** {mode_label} (full={full})\n\
+             {paths_targeted_line}\
              **files_scheduled:** {files_scheduled}\n\
              **projection_eta_ms:** {projection_eta_ms}\n\
              **invalidated_rows:** {invalidated_rows_display}\n\
@@ -1881,7 +1932,7 @@ impl McpServer {
                 .map(|count| count.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
         );
-        let structured = json!({
+        let mut structured = json!({
             "status": "ok",
             "project_code": project_code,
             "project_path": project_path,
@@ -1900,6 +1951,12 @@ impl McpServer {
                 "stale_by_ms": config_staleness.as_ref().map(|p| p.age_ms()),
             },
         });
+        if let Some((count, ref unique_paths)) = targeted_paths {
+            if let Some(obj) = structured.as_object_mut() {
+                obj.insert("paths_targeted".to_string(), json!(count));
+                obj.insert("targeted_paths".to_string(), json!(unique_paths));
+            }
+        }
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "structuredContent": structured,
@@ -2128,6 +2185,142 @@ impl McpServer {
         format!("enrolled:{enrolled}")
     }
 
+    /// REQ-AXO-902613 — Wipe only the specified files owned by `project_code`
+    /// from `ist.IndexedFile` and notify the indexer's RAM cache (`IndexedFileCache`)
+    /// specifically for these paths. All other files in the project remain strictly untouched.
+    fn rescan_wipe_targeted_indexed_files(
+        &self,
+        project_code: &str,
+        paths: &[String],
+    ) -> (String, Option<usize>) {
+        let escaped_code = project_code.replace('\'', "''");
+        let in_list: Vec<String> = paths
+            .iter()
+            .map(|p| format!("'{}'", p.replace('\'', "''")))
+            .collect();
+        let sql = format!(
+            "WITH deleted AS (\
+                 DELETE FROM ist.IndexedFile \
+                 WHERE project_code = '{escaped_code}' \
+                   AND path IN ({}) \
+                 RETURNING 1\
+             ) SELECT count(*) FROM deleted",
+            in_list.join(", ")
+        );
+        let invalidated_rows = match self.graph_store.execute_raw_sql_gateway(&sql) {
+            Ok(raw) => serde_json::from_str::<Vec<Vec<Value>>>(&raw)
+                .ok()
+                .and_then(|rows| rows.first().and_then(|row| row.first()).cloned())
+                .and_then(|value| {
+                    value
+                        .as_u64()
+                        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+                })
+                .map(|count| count as usize),
+            Err(err) => return (format!("targeted_wipe_failed: {err}"), None),
+        };
+
+        // Notify indexer RAM cache specifically for targeted paths (chunks of 32 to stay within pg_notify 8000-byte bound)
+        let mut notify_err = None;
+        for chunk in paths.chunks(32) {
+            let payload = chunk.join("\n");
+            let escaped_payload = payload.replace('\'', "''");
+            let notify_sql = format!(
+                "SELECT pg_notify('{}', '{}')",
+                crate::pipeline::cache_invalidate_listener::LISTEN_CHANNEL,
+                escaped_payload
+            );
+            if let Err(err) = self.graph_store.execute_raw_sql_gateway(&notify_sql) {
+                notify_err = Some(err);
+                break;
+            }
+        }
+
+        match notify_err {
+            None => (
+                format!(
+                    "targeted mode — invalidated {} file(s) in PG + indexer dedup-cache (REQ-AXO-902613)",
+                    paths.len()
+                ),
+                invalidated_rows,
+            ),
+            Some(err) => (
+                format!(
+                    "targeted mode: invalidated {} file(s) in PG BUT cache-invalidate NOTIFY failed ({err})",
+                    paths.len()
+                ),
+                invalidated_rows,
+            ),
+        }
+    }
+
+    /// REQ-AXO-902613 — Enrol strictly the targeted files into `ist.IndexedFile`
+    /// with status='discovered' and content_hash='', so DBQ-A / pipeline A re-parses
+    /// and re-indexes them without touching the rest of the project.
+    fn rescan_enrol_targeted_files(
+        &self,
+        project_code: &str,
+        project_path: &str,
+        paths: &[String],
+    ) -> String {
+        let watch_root = crate::config::watch_root_dir();
+        let subtree = std::path::PathBuf::from(project_path);
+        if let Some(verdict) =
+            crate::scanner::refus_d_enrolement(&watch_root, &subtree, project_code)
+        {
+            return format!(
+                "refused:{verdict} — {project_path} is excluded from the watch root \
+                 ({watch_root}); enrolling it would write IndexedFile rows the \
+                 reconciliation walk never parses and the stale purge erases. \
+                 Lift the exclusion in the watch root's .axonignore/.axoninclude/.gitignore first."
+            );
+        }
+
+        if paths.is_empty() {
+            return "enrolled:0".to_string();
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let safe_code = project_code.replace('\'', "''");
+        let mut values = Vec::with_capacity(paths.len());
+        for path in paths {
+            let safe_path = path.replace('\'', "''");
+            let metadata = std::fs::metadata(path);
+            let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+            let mtime_ms = metadata
+                .as_ref()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            values.push(format!(
+                "('{safe_path}', '{safe_code}', '', {now_ms}, 'discovered', {now_ms}, {mtime_ms}, {size}, 0, NULL)"
+            ));
+        }
+
+        let sql = format!(
+            "INSERT INTO ist.IndexedFile \
+                 (path, project_code, content_hash, last_seen_ms, status, discovered_ms, mtime_ms, size_bytes, retry_count, last_attempt_ms) \
+             VALUES {} \
+             ON CONFLICT (path) DO UPDATE SET \
+                 project_code  = EXCLUDED.project_code, \
+                 content_hash  = '', \
+                 status        = 'discovered', \
+                 discovered_ms = EXCLUDED.discovered_ms, \
+                 last_seen_ms  = EXCLUDED.last_seen_ms, \
+                 mtime_ms      = EXCLUDED.mtime_ms, \
+                 size_bytes    = EXCLUDED.size_bytes, \
+                 retry_count   = 0",
+            values.join(", ")
+        );
+
+        match self.graph_store.execute_raw_sql_gateway(&sql) {
+            Ok(_) => format!("enrolled:{}", paths.len()),
+            Err(err) => format!("enrol_failed:{err}"),
+        }
+    }
+
     /// REQ-AXO-165 (+ absorbs REQ-AXO-161 writer-lock / build-info drift) —
     /// read-only filesystem health for an instance: the IST/SOLL writer locks
     /// (ORPHAN detection — a lock whose owner pid is dead blocks the next writer)
@@ -2300,6 +2493,140 @@ fn rescan_error_envelope(project_code: &str, code: &str, message: &str) -> Value
         },
         "isError": true,
     })
+}
+
+const MAX_TARGETED_PATHS: usize = 128;
+
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(p) => out.push(Component::Prefix(p)),
+            Component::RootDir => out.push(Component::RootDir),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(c) => out.push(c),
+        }
+    }
+    out
+}
+
+fn validate_and_resolve_targeted_paths(
+    project_code: &str,
+    project_path: &str,
+    raw_paths: &[String],
+) -> Result<Vec<String>, Value> {
+    if raw_paths.is_empty() {
+        return Err(rescan_error_envelope(
+            project_code,
+            "empty_paths",
+            "argument `paths` cannot be empty when supplied",
+        ));
+    }
+    if raw_paths.len() > MAX_TARGETED_PATHS {
+        return Err(rescan_error_envelope(
+            project_code,
+            "too_many_paths",
+            &format!(
+                "argument `paths` count ({}) exceeds maximum allowed limit of {}",
+                raw_paths.len(),
+                MAX_TARGETED_PATHS
+            ),
+        ));
+    }
+
+    let canonical_root = match std::fs::canonicalize(project_path) {
+        Ok(p) => p,
+        Err(err) => {
+            return Err(rescan_error_envelope(
+                project_code,
+                "project_path_invalid",
+                &format!("project root `{project_path}` cannot be resolved: {err}"),
+            ));
+        }
+    };
+    let root_path = std::path::Path::new(project_path);
+
+    let mut unique_paths = Vec::with_capacity(raw_paths.len());
+
+    for p_str in raw_paths {
+        let p_trimmed = p_str.trim();
+        if p_trimmed.is_empty() {
+            return Err(rescan_error_envelope(
+                project_code,
+                "invalid_path",
+                "argument `paths` contains an empty path string",
+            ));
+        }
+
+        let p_path = std::path::Path::new(p_trimmed);
+        let candidate = if p_path.is_relative() {
+            canonical_root.join(p_path)
+        } else {
+            p_path.to_path_buf()
+        };
+
+        // Syntactic path normalization to detect path traversal without depending on disk
+        let normalized = normalize_path(&candidate);
+        let is_inside = (normalized.starts_with(&canonical_root) && normalized != canonical_root)
+            || (normalized.starts_with(root_path) && normalized != root_path);
+        if !is_inside {
+            return Err(rescan_error_envelope(
+                project_code,
+                "path_outside_project",
+                &format!("path `{p_trimmed}` is outside project root `{project_path}`"),
+            ));
+        }
+
+        // Disk existence check
+        if !candidate.exists() {
+            return Err(rescan_error_envelope(
+                project_code,
+                "path_not_found",
+                &format!("target path does not exist on disk: `{p_trimmed}`"),
+            ));
+        }
+
+        // Canonicalize to resolve symlinks and ensure real physical location is strictly within project
+        let canonical_candidate = match std::fs::canonicalize(&candidate) {
+            Ok(c) => c,
+            Err(err) => {
+                return Err(rescan_error_envelope(
+                    project_code,
+                    "invalid_path",
+                    &format!("cannot resolve path `{p_trimmed}`: {err}"),
+                ));
+            }
+        };
+
+        if !canonical_candidate.starts_with(&canonical_root)
+            || canonical_candidate == canonical_root
+        {
+            return Err(rescan_error_envelope(
+                project_code,
+                "path_outside_project",
+                &format!("path `{p_trimmed}` resolves outside project root `{project_path}`"),
+            ));
+        }
+
+        if !canonical_candidate.is_file() {
+            return Err(rescan_error_envelope(
+                project_code,
+                "invalid_path",
+                &format!("path `{p_trimmed}` is not a regular file"),
+            ));
+        }
+
+        let resolved_str = canonical_candidate.to_string_lossy().to_string();
+        if !unique_paths.contains(&resolved_str) {
+            unique_paths.push(resolved_str);
+        }
+    }
+
+    Ok(unique_paths)
 }
 
 #[cfg(test)]

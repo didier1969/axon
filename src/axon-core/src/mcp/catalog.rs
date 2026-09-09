@@ -1630,7 +1630,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Must be present in soll.projectcoderegistry." },
-                        "full": { "type": "boolean", "description": "When true, wipes IndexedFile rows under the project_path so the next scanner pass re-parses + re-embeds every file regardless of cached content_hash. Default false (delta scan only re-touches files whose hash changed)." }
+                        "full": { "type": "boolean", "description": "When true, wipes IndexedFile rows under the project_path so the next scanner pass re-parses + re-embeds every file regardless of cached content_hash. Default false (delta scan only re-touches files whose hash changed)." },
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional bounded list of file paths under the registered project root (max 128) for targeted re-indexing (REQ-AXO-902613). When supplied, only these files are invalidated and re-enrolled without touching the rest of the project."
+                        }
                     },
                     "required": ["project_code"]
                 }

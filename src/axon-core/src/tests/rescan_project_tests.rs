@@ -470,5 +470,467 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // =========================================================================
+    // REQ-AXO-902613 — Targeted re-indexing by path
+    // =========================================================================
+
+    #[test]
+    fn rescan_project_targeted_paths_invalidates_only_specified_files_902613() {
+        let store = Arc::new(create_test_db().expect("create test db"));
+        let server = McpServer::new(store.clone());
+
+        let (root, files) = make_temp_project("targeted", 3);
+        let scope = unique_test_scope("rpt");
+        let code = three_char_code_from_scope(&scope);
+        let project_path = root.to_string_lossy().to_string();
+        store
+            .sync_project_registry_entry(
+                &code,
+                Some("rescan-targeted-fixture"),
+                Some(&project_path),
+            )
+            .expect("register project");
+
+        let safe_code = code.replace('\'', "''");
+        store
+            .execute_raw_sql_gateway(&format!(
+                "INSERT INTO axon.Project (code) VALUES ('{}') ON CONFLICT (code) DO NOTHING",
+                safe_code
+            ))
+            .expect("seed axon.Project parent");
+
+        let now_ms: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        // Seed 3 IndexedFile rows with stale-hash
+        for (idx, f) in files.iter().enumerate() {
+            let escaped = f.replace('\'', "''");
+            let md = std::fs::metadata(f).expect("file metadata");
+            let mtime_ms = md
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let size_bytes = md.len() as i64;
+            store
+                .execute_raw_sql_gateway(&format!(
+                    "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms, status, mtime_ms, size_bytes) \
+                     VALUES ('{}', '{}', 'stale-hash-{}', {}, 'indexed', {}, {}) \
+                     ON CONFLICT (path) DO UPDATE SET content_hash = EXCLUDED.content_hash, status = EXCLUDED.status",
+                    escaped, safe_code, idx, now_ms, mtime_ms, size_bytes
+                ))
+                .expect("seed IndexedFile row");
+        }
+
+        // Also seed a foreign tenant file under the same prefix
+        let foreign_scope = unique_test_scope("rpt-foreign");
+        let foreign_code = three_char_code_from_scope(&foreign_scope);
+        let safe_foreign_code = foreign_code.replace('\'', "''");
+        let foreign_path = root.join("foreign-tenant.rs");
+        std::fs::write(&foreign_path, "// foreign fixture\n").expect("write foreign fixture");
+        let escaped_foreign_path = foreign_path.to_string_lossy().replace('\'', "''");
+        store
+            .execute_raw_sql_gateway(&format!(
+                "INSERT INTO axon.Project (code) VALUES ('{}') ON CONFLICT (code) DO NOTHING",
+                safe_foreign_code
+            ))
+            .expect("seed foreign axon.Project parent");
+        store
+            .execute_raw_sql_gateway(&format!(
+                "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms, status) \
+                 VALUES ('{}', '{}', 'foreign-stale-hash', {}, 'indexed')",
+                escaped_foreign_path, safe_foreign_code, now_ms
+            ))
+            .expect("seed foreign IndexedFile row");
+
+        // Target ONLY files[0] and files[1]
+        let targeted_paths = vec![files[0].clone(), files[1].clone()];
+        let args = serde_json::json!({
+            "project_code": code,
+            "paths": targeted_paths,
+        });
+
+        let envelope = server
+            .axon_rescan_project(&args)
+            .expect("rescan_project must return Some envelope");
+        let payload = parse_structured(&envelope);
+
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("ok"),
+            "envelope: {envelope}"
+        );
+        assert_eq!(
+            payload.get("mode").and_then(|v| v.as_str()),
+            Some("targeted"),
+            "mode must be targeted"
+        );
+        assert_eq!(
+            payload.get("paths_targeted").and_then(|v| v.as_u64()),
+            Some(2),
+            "paths_targeted must match input paths length"
+        );
+        assert_eq!(
+            payload.get("files_scheduled").and_then(|v| v.as_u64()),
+            Some(2),
+            "files_scheduled must match scheduled count"
+        );
+
+        // Verification of targeted invalidation & enrolment:
+        // files[0] and files[1] must have content_hash cleared and status = 'discovered'
+        let escaped_f0 = files[0].replace('\'', "''");
+        let escaped_f1 = files[1].replace('\'', "''");
+        let escaped_f2 = files[2].replace('\'', "''");
+
+        let f0_status = store
+            .execute_raw_sql_gateway(&format!(
+                "SELECT status, content_hash FROM ist.IndexedFile WHERE path = '{escaped_f0}'"
+            ))
+            .expect("read f0");
+        assert!(
+            f0_status.contains("discovered") && !f0_status.contains("stale-hash-0"),
+            "f0 must be discovered with cleared hash: {f0_status}"
+        );
+
+        let f1_status = store
+            .execute_raw_sql_gateway(&format!(
+                "SELECT status, content_hash FROM ist.IndexedFile WHERE path = '{escaped_f1}'"
+            ))
+            .expect("read f1");
+        assert!(
+            f1_status.contains("discovered") && !f1_status.contains("stale-hash-1"),
+            "f1 must be discovered with cleared hash: {f1_status}"
+        );
+
+        // files[2] must remain COMPLETELY UNTOUCHED: status='indexed', content_hash='stale-hash-2'
+        let f2_status = store
+            .execute_raw_sql_gateway(&format!(
+                "SELECT status, content_hash FROM ist.IndexedFile WHERE path = '{escaped_f2}'"
+            ))
+            .expect("read f2");
+        assert!(
+            f2_status.contains("indexed") && f2_status.contains("stale-hash-2"),
+            "f2 must be untouched: {f2_status}"
+        );
+
+        // Foreign tenant row must remain COMPLETELY UNTOUCHED
+        let foreign_status = store
+            .execute_raw_sql_gateway(&format!(
+                "SELECT status, content_hash FROM ist.IndexedFile WHERE path = '{escaped_foreign_path}'"
+            ))
+            .expect("read foreign");
+        assert!(
+            foreign_status.contains("foreign-stale-hash"),
+            "foreign file must be untouched: {foreign_status}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rescan_project_targeted_relative_paths_resolves_and_invalidates_902613() {
+        let store = Arc::new(create_test_db().expect("create test db"));
+        let server = McpServer::new(store.clone());
+
+        let (root, files) = make_temp_project("targeted_rel", 2);
+        let scope = unique_test_scope("rpr");
+        let code = three_char_code_from_scope(&scope);
+        let project_path = root.to_string_lossy().to_string();
+        store
+            .sync_project_registry_entry(
+                &code,
+                Some("rescan-targeted-rel-fixture"),
+                Some(&project_path),
+            )
+            .expect("register project");
+
+        let safe_code = code.replace('\'', "''");
+        store
+            .execute_raw_sql_gateway(&format!(
+                "INSERT INTO axon.Project (code) VALUES ('{}') ON CONFLICT (code) DO NOTHING",
+                safe_code
+            ))
+            .expect("seed axon.Project parent");
+
+        for (idx, f) in files.iter().enumerate() {
+            let escaped = f.replace('\'', "''");
+            store
+                .execute_raw_sql_gateway(&format!(
+                    "INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms, status) \
+                     VALUES ('{}', '{}', 'stale-hash-{}', 1000, 'indexed')",
+                    escaped, safe_code, idx
+                ))
+                .expect("seed IndexedFile row");
+        }
+
+        // Relative path: "file_0.rs"
+        let args = serde_json::json!({
+            "project_code": code,
+            "paths": ["file_0.rs"],
+        });
+
+        let envelope = server
+            .axon_rescan_project(&args)
+            .expect("rescan_project must return Some envelope");
+        let payload = parse_structured(&envelope);
+
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("ok")
+        );
+        assert_eq!(
+            payload.get("mode").and_then(|v| v.as_str()),
+            Some("targeted")
+        );
+        assert_eq!(
+            payload.get("paths_targeted").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            payload.get("files_scheduled").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+
+        let escaped_f0 = files[0].replace('\'', "''");
+        let escaped_f1 = files[1].replace('\'', "''");
+
+        let f0_status = store
+            .execute_raw_sql_gateway(&format!(
+                "SELECT status, content_hash FROM ist.IndexedFile WHERE path = '{escaped_f0}'"
+            ))
+            .expect("read f0");
+        assert!(f0_status.contains("discovered") && !f0_status.contains("stale-hash-0"));
+
+        let f1_status = store
+            .execute_raw_sql_gateway(&format!(
+                "SELECT status, content_hash FROM ist.IndexedFile WHERE path = '{escaped_f1}'"
+            ))
+            .expect("read f1");
+        assert!(f1_status.contains("indexed") && f1_status.contains("stale-hash-1"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rescan_project_targeted_path_outside_project_returns_structured_error_902613() {
+        let store = Arc::new(create_test_db().expect("create test db"));
+        let server = McpServer::new(store.clone());
+
+        let (root, _files) = make_temp_project("targeted_out", 1);
+        let scope = unique_test_scope("rpo");
+        let code = three_char_code_from_scope(&scope);
+        let project_path = root.to_string_lossy().to_string();
+        store
+            .sync_project_registry_entry(
+                &code,
+                Some("rescan-targeted-out-fixture"),
+                Some(&project_path),
+            )
+            .expect("register project");
+
+        let args = serde_json::json!({
+            "project_code": code,
+            "paths": ["/etc/passwd"],
+        });
+
+        let envelope = server
+            .axon_rescan_project(&args)
+            .expect("rescan_project must return Some envelope");
+
+        assert_eq!(
+            envelope.get("isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "envelope: {envelope}"
+        );
+        let payload = parse_structured(&envelope);
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("error")
+        );
+        assert_eq!(
+            payload.get("code").and_then(|v| v.as_str()),
+            Some("path_outside_project")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rescan_project_targeted_path_traversal_returns_structured_error_902613() {
+        let store = Arc::new(create_test_db().expect("create test db"));
+        let server = McpServer::new(store.clone());
+
+        let (root, _files) = make_temp_project("targeted_trav", 1);
+        let scope = unique_test_scope("rptr");
+        let code = three_char_code_from_scope(&scope);
+        let project_path = root.to_string_lossy().to_string();
+        store
+            .sync_project_registry_entry(
+                &code,
+                Some("rescan-targeted-trav-fixture"),
+                Some(&project_path),
+            )
+            .expect("register project");
+
+        let args = serde_json::json!({
+            "project_code": code,
+            "paths": ["../../outside.rs"],
+        });
+
+        let envelope = server
+            .axon_rescan_project(&args)
+            .expect("rescan_project must return Some envelope");
+
+        assert_eq!(
+            envelope.get("isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "envelope: {envelope}"
+        );
+        let payload = parse_structured(&envelope);
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("error")
+        );
+        assert_eq!(
+            payload.get("code").and_then(|v| v.as_str()),
+            Some("path_outside_project")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rescan_project_targeted_exceeding_max_paths_returns_error_902613() {
+        let store = Arc::new(create_test_db().expect("create test db"));
+        let server = McpServer::new(store.clone());
+
+        let (root, _files) = make_temp_project("targeted_max", 1);
+        let scope = unique_test_scope("rpex");
+        let code = three_char_code_from_scope(&scope);
+        let project_path = root.to_string_lossy().to_string();
+        store
+            .sync_project_registry_entry(
+                &code,
+                Some("rescan-targeted-max-fixture"),
+                Some(&project_path),
+            )
+            .expect("register project");
+
+        let excessive_paths: Vec<String> = (0..129).map(|i| format!("file_{i}.rs")).collect();
+        let args = serde_json::json!({
+            "project_code": code,
+            "paths": excessive_paths,
+        });
+
+        let envelope = server
+            .axon_rescan_project(&args)
+            .expect("rescan_project must return Some envelope");
+
+        assert_eq!(
+            envelope.get("isError").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let payload = parse_structured(&envelope);
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("error")
+        );
+        assert_eq!(
+            payload.get("code").and_then(|v| v.as_str()),
+            Some("too_many_paths")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rescan_project_targeted_empty_paths_returns_error_902613() {
+        let store = Arc::new(create_test_db().expect("create test db"));
+        let server = McpServer::new(store.clone());
+
+        let (root, _files) = make_temp_project("targeted_empty", 1);
+        let scope = unique_test_scope("rpem");
+        let code = three_char_code_from_scope(&scope);
+        let project_path = root.to_string_lossy().to_string();
+        store
+            .sync_project_registry_entry(
+                &code,
+                Some("rescan-targeted-empty-fixture"),
+                Some(&project_path),
+            )
+            .expect("register project");
+
+        let args = serde_json::json!({
+            "project_code": code,
+            "paths": [],
+        });
+
+        let envelope = server
+            .axon_rescan_project(&args)
+            .expect("rescan_project must return Some envelope");
+
+        assert_eq!(
+            envelope.get("isError").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let payload = parse_structured(&envelope);
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("error")
+        );
+        assert_eq!(
+            payload.get("code").and_then(|v| v.as_str()),
+            Some("empty_paths")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rescan_project_targeted_path_not_found_returns_error_902613() {
+        let store = Arc::new(create_test_db().expect("create test db"));
+        let server = McpServer::new(store.clone());
+
+        let (root, _files) = make_temp_project("targeted_nf", 1);
+        let scope = unique_test_scope("rpnf");
+        let code = three_char_code_from_scope(&scope);
+        let project_path = root.to_string_lossy().to_string();
+        store
+            .sync_project_registry_entry(
+                &code,
+                Some("rescan-targeted-nf-fixture"),
+                Some(&project_path),
+            )
+            .expect("register project");
+
+        let args = serde_json::json!({
+            "project_code": code,
+            "paths": ["does_not_exist.rs"],
+        });
+
+        let envelope = server
+            .axon_rescan_project(&args)
+            .expect("rescan_project must return Some envelope");
+
+        assert_eq!(
+            envelope.get("isError").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let payload = parse_structured(&envelope);
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("error")
+        );
+        assert_eq!(
+            payload.get("code").and_then(|v| v.as_str()),
+            Some("path_not_found")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
