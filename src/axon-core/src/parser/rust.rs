@@ -625,6 +625,72 @@ impl RustParser {
         }
     }
 
+    fn extract_call_target<'a>(
+        &self,
+        target_node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        current_function: &str,
+    ) {
+        match target_node.kind() {
+            "identifier" => {
+                let name = target_node.utf8_text(source).unwrap_or("").to_string();
+                result.relations.push(Relation {
+                    from: current_function.to_string(),
+                    to: name,
+                    rel_type: "calls".to_string(),
+                    properties: HashMap::new(),
+                });
+            }
+            "field_expression" => {
+                if let Some(field_id) = self.find_child_by_type(target_node, "field_identifier") {
+                    let name = field_id.utf8_text(source).unwrap_or("").to_string();
+                    let receiver = if target_node.child_count() > 0 {
+                        if let Some(obj) = target_node.child(0) {
+                            obj.utf8_text(source).unwrap_or("").to_string()
+                        } else {
+                            "".to_string()
+                        }
+                    } else {
+                        "".to_string()
+                    };
+                    let mut props = HashMap::new();
+                    if !receiver.is_empty() {
+                        props.insert("receiver".to_string(), receiver);
+                    }
+                    result.relations.push(Relation {
+                        from: current_function.to_string(),
+                        to: name,
+                        rel_type: "calls".to_string(),
+                        properties: props,
+                    });
+                }
+            }
+            "scoped_identifier" => {
+                let full = target_node.utf8_text(source).unwrap_or("").to_string();
+                let parts: Vec<&str> = full.split("::").collect();
+                if let Some(&name) = parts.last() {
+                    let receiver = if parts.len() > 1 {
+                        parts[..parts.len() - 1].join("::")
+                    } else {
+                        "".to_string()
+                    };
+                    let mut props = HashMap::new();
+                    if !receiver.is_empty() {
+                        props.insert("receiver".to_string(), receiver);
+                    }
+                    result.relations.push(Relation {
+                        from: current_function.to_string(),
+                        to: name.to_string(),
+                        rel_type: "calls".to_string(),
+                        properties: props,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn extract_call_expression<'a>(
         &self,
         node: Node<'a>,
@@ -636,67 +702,24 @@ impl RustParser {
             return;
         }
         if let Some(func_node) = node.child(0) {
-            match func_node.kind() {
-                "identifier" => {
-                    let name = func_node.utf8_text(source).unwrap_or("").to_string();
-                    result.relations.push(Relation {
-                        from: current_function.to_string(),
-                        to: name,
-                        rel_type: "calls".to_string(),
-                        properties: HashMap::new(),
-                    });
-                }
-                "field_expression" => {
-                    if let Some(field_id) = self.find_child_by_type(func_node, "field_identifier") {
-                        let name = field_id.utf8_text(source).unwrap_or("").to_string();
-                        let receiver = if func_node.child_count() > 0 {
-                            if let Some(obj) = func_node.child(0) {
-                                obj.utf8_text(source).unwrap_or("").to_string()
-                            } else {
-                                "".to_string()
-                            }
-                        } else {
-                            "".to_string()
-                        };
-                        let mut props = HashMap::new();
-                        if !receiver.is_empty() {
-                            props.insert("receiver".to_string(), receiver);
-                        }
-                        result.relations.push(Relation {
-                            from: current_function.to_string(),
-                            to: name,
-                            rel_type: "calls".to_string(),
-                            properties: props,
-                        });
-                    }
+            let target = if func_node.kind() == "generic_function" {
+                self.walk_for_calls(func_node, source, result, false, current_function);
+                func_node
+                    .child_by_field_name("function")
+                    .or_else(|| (func_node.child_count() > 0).then(|| func_node.child(0).unwrap()))
+            } else {
+                if func_node.kind() == "field_expression" {
                     // REQ-AXO-902195 — the receiver may itself be a call (`foo(...).bar()`).
                     // The walk_for_calls(skip_first=true) below drops child(0) (this whole
                     // field_expression), losing the inner call. Walk the receiver here to
                     // recover it (skip_first=false; the field_identifier is not a call node).
                     self.walk_for_calls(func_node, source, result, false, current_function);
                 }
-                "scoped_identifier" => {
-                    let full = func_node.utf8_text(source).unwrap_or("").to_string();
-                    let parts: Vec<&str> = full.split("::").collect();
-                    if let Some(&name) = parts.last() {
-                        let receiver = if parts.len() > 1 {
-                            parts[..parts.len() - 1].join("::")
-                        } else {
-                            "".to_string()
-                        };
-                        let mut props = HashMap::new();
-                        if !receiver.is_empty() {
-                            props.insert("receiver".to_string(), receiver);
-                        }
-                        result.relations.push(Relation {
-                            from: current_function.to_string(),
-                            to: name.to_string(),
-                            rel_type: "calls".to_string(),
-                            properties: props,
-                        });
-                    }
-                }
-                _ => {}
+                Some(func_node)
+            };
+
+            if let Some(target_node) = target {
+                self.extract_call_target(target_node, source, result, current_function);
             }
         }
 
@@ -959,6 +982,48 @@ mod tests {
         assert!(
             targets.contains(&"unwrap"),
             "chained `unwrap` also captured, got {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn call_inside_closure_in_filter_map_is_extracted() {
+        let p = parser();
+        let code = r#"
+            pub fn hierarchy_candidate_parent_ids() {
+                let mut parent_ids = outgoing
+                    .get(node_id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|edge| {
+                        let candidate = nodes_by_id.get(&edge.target_id)?;
+                        if hierarchy_relation_allowed(&candidate.entity_type, &node.entity_type) {
+                            Some(candidate.id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+            }
+        "#;
+        let result = p.parse(code);
+        let targets: Vec<&str> = calls(&result.relations)
+            .iter()
+            .map(|c| c.to.as_str())
+            .collect();
+        assert!(
+            targets.contains(&"hierarchy_relation_allowed"),
+            "hierarchy_relation_allowed MUST be extracted as callee, got {:?}",
+            targets
+        );
+        assert!(
+            targets.contains(&"collect"),
+            "collect method on iterator MUST be extracted, got {:?}",
+            targets
+        );
+        assert!(
+            targets.contains(&"filter_map"),
+            "filter_map method MUST be extracted, got {:?}",
             targets
         );
     }

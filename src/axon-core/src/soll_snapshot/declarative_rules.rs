@@ -924,6 +924,9 @@ fn evaluate_rule_with_facts(
 
 /// Évalue un lot en partageant un seul index de faits entre toutes les règles.
 pub fn evaluate_all(snapshot: &SollSnapshot, rules: &[SollRule]) -> Vec<SollRuleViolation> {
+    if rules.len() == 1 {
+        return evaluate_rule(snapshot, &rules[0]);
+    }
     let facts = node_facts(snapshot);
     rules
         .iter()

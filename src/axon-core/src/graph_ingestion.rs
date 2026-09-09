@@ -259,22 +259,77 @@ impl GraphStore {
         receiver: Option<&str>,
         name_index: &std::collections::HashMap<String, Vec<String>>,
     ) -> String {
-        // REQ-AXO-902423 — le court-circuit « nom qualifié » a été RETIRÉ.
-        //
-        // Il renvoyait un id local sans jamais consulter l'index des noms : un
-        // appel Elixir `MyApp.Mod.fun()` ne pouvait donc STRUCTURELLEMENT pas
-        // atteindre la définition `MyApp.Mod.fun`, même présente dans le même
-        // lot — et comme Elixir qualifie TOUS ses noms, aucun appel Elixir ne
-        // se résolvait jamais. L'index est désormais consulté pour tous les
-        // noms ; la prudence de REQ-AXO-902456 est intacte, puisque seule une
-        // définition UNIQUE résout et que le receveur externe est écarté avant.
-        if receiver.is_some_and(|r| !Self::receiver_is_internal(r)) {
+        let Some(ids) = name_index.get(callee_name) else {
             return Self::symbol_id(project_code, caller_path, callee_name);
+        };
+
+        if let Some(r) = receiver {
+            let r = r.trim();
+            if Self::receiver_is_internal(r) {
+                if ids.len() == 1 {
+                    return ids[0].clone();
+                }
+                // REQ-AXO-902635 — désambiguïsation d'homonymes via le receveur qualifié
+                let matches: Vec<&String> = ids
+                    .iter()
+                    .filter(|id| Self::candidate_matches_receiver(id, r, caller_path))
+                    .collect();
+                if matches.len() == 1 {
+                    return matches[0].clone();
+                }
+            } else {
+                // REQ-AXO-902635 — un receveur sans préfixe conventionnel (ex:
+                // `structural_invariants`) est interne s'il désigne un module du projet.
+                let matches: Vec<&String> = ids
+                    .iter()
+                    .filter(|id| Self::candidate_matches_receiver(id, r, caller_path))
+                    .collect();
+                if matches.len() == 1 {
+                    return matches[0].clone();
+                }
+                return Self::symbol_id(project_code, caller_path, callee_name);
+            }
+        } else {
+            if ids.len() == 1 {
+                return ids[0].clone();
+            }
+            // REQ-AXO-902635 — sans receveur, si un homonyme existe dans le fichier
+            // de l'appelant, l'appel local prévaut.
+            let local_matches: Vec<&String> = ids
+                .iter()
+                .filter(|id| id.contains(caller_path))
+                .collect();
+            if local_matches.len() == 1 {
+                return local_matches[0].clone();
+            }
         }
-        match name_index.get(callee_name) {
-            Some(ids) if ids.len() == 1 => ids[0].clone(),
-            _ => Self::symbol_id(project_code, caller_path, callee_name),
+
+        Self::symbol_id(project_code, caller_path, callee_name)
+    }
+
+    /// REQ-AXO-902635 — vérifie si un identifiant de symbole cible correspond
+    /// aux segments du receveur spécifié.
+    fn candidate_matches_receiver(candidate_id: &str, receiver: &str, caller_path: &str) -> bool {
+        let r = receiver.trim();
+        if matches!(r, "self" | "Self") || r.starts_with("self::") || r.starts_with("Self::") {
+            return candidate_id.contains(caller_path);
         }
+        let clean = r.strip_prefix("crate::").unwrap_or(r);
+        let segments: Vec<&str> = clean
+            .split("::")
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "crate" && *s != "self" && *s != "Self")
+            .collect();
+        if segments.is_empty() {
+            return false;
+        }
+        let last_segment = segments.last().unwrap();
+        let file_stem = format!("{last_segment}.");
+        let dir_segment = format!("/{last_segment}/");
+        let mod_scope = format!("::{last_segment}::");
+        candidate_id.contains(&file_stem)
+            || candidate_id.contains(&dir_segment)
+            || candidate_id.contains(&mod_scope)
     }
 
     /// REQ-AXO-902456 — le receveur d'un appel désigne-t-il du code du projet ?
@@ -1391,6 +1446,18 @@ impl GraphStore {
                 chunk_ids_emitted.push((file_chunk_id, file_content, chunk_hash));
             }
 
+            // REQ-AXO-902635 — indexer les imports du fichier pour résoudre les appels
+            // nus vers des fonctions importées (ex: `use crate::...::evaluate_all`).
+            let mut file_imports: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for relation in &parsed.relations {
+                if relation.rel_type == "imports" {
+                    if let Some(module) = relation.properties.get("module") {
+                        file_imports.insert(relation.to.clone(), module.clone());
+                    }
+                }
+            }
+
             for relation in &parsed.relations {
                 let Some(table) = Self::relation_table(&relation.rel_type) else {
                     continue;
@@ -1410,13 +1477,20 @@ impl GraphStore {
                 // edge kind keeps the file-local id (source/containment edges are
                 // always co-located with their file).
                 let target_id = match table {
-                    "CALLS" | "CALLS_NIF" => Self::resolve_call_target_id_with_receiver(
-                        project_code,
-                        &path_str,
-                        &relation.to,
-                        relation.properties.get("receiver").map(String::as_str),
-                        &call_target_index,
-                    ),
+                    "CALLS" | "CALLS_NIF" => {
+                        let receiver = relation
+                            .properties
+                            .get("receiver")
+                            .map(String::as_str)
+                            .or_else(|| file_imports.get(&relation.to).map(String::as_str));
+                        Self::resolve_call_target_id_with_receiver(
+                            project_code,
+                            &path_str,
+                            &relation.to,
+                            receiver,
+                            &call_target_index,
+                        )
+                    }
                     _ => Self::symbol_id(project_code, &path_str, &relation.to),
                 };
                 let row = RelationRow {
@@ -2465,6 +2539,77 @@ mod req_axo_140_call_resolution {
             resolved,
             GraphStore::symbol_id("PRJ", "prj/a.ex", "A.B.fun"),
             "deux definitions homonymes : on ne tranche pas"
+        );
+    }
+
+    /// REQ-AXO-902635 — un receveur qualifié ou un nom de module interne lève
+    /// l'ambiguïté sur les homonymes (`evaluate_all` présent dans
+    /// `structural_invariants.rs` et `declarative_rules.rs`).
+    #[test]
+    fn call_with_module_receiver_disambiguates_homonyms() {
+        let id_struct = GraphStore::symbol_id(
+            "AXO",
+            "axon-core/src/ist_snapshot/structural_invariants.rs",
+            "evaluate_all",
+        );
+        let id_decls = GraphStore::symbol_id(
+            "AXO",
+            "axon-core/src/soll_snapshot/declarative_rules.rs",
+            "evaluate_all",
+        );
+        let idx = index(&[
+            ("evaluate_all", &id_struct),
+            ("evaluate_all", &id_decls),
+        ]);
+
+        // Appel qualifié complet (ex: operations.rs ligne 399)
+        let resolved_decls = GraphStore::resolve_call_target_id_with_receiver(
+            "AXO",
+            "axon-core/src/mcp/tools_soll/operations.rs",
+            "evaluate_all",
+            Some("crate::soll_snapshot::declarative_rules"),
+            &idx,
+        );
+        assert_eq!(
+            resolved_decls, id_decls,
+            "le receveur `crate::soll_snapshot::declarative_rules` doit cibler declarative_rules.rs"
+        );
+
+        // Appel avec nom de module interne (ex: tools_governance.rs)
+        let resolved_struct = GraphStore::resolve_call_target_id_with_receiver(
+            "AXO",
+            "axon-core/src/mcp/tools_governance.rs",
+            "evaluate_all",
+            Some("structural_invariants"),
+            &idx,
+        );
+        assert_eq!(
+            resolved_struct, id_struct,
+            "le receveur `structural_invariants` doit cibler structural_invariants.rs"
+        );
+    }
+
+    /// REQ-AXO-902635 — un appel local sans receveur sur un homonyme présent
+    /// dans le fichier appelant doit cibler la définition locale.
+    #[test]
+    fn local_call_without_receiver_disambiguates_to_same_file() {
+        let id_local = GraphStore::symbol_id("PRJ", "prj/local.rs", "helper");
+        let id_other = GraphStore::symbol_id("PRJ", "prj/other.rs", "helper");
+        let idx = index(&[
+            ("helper", &id_local),
+            ("helper", &id_other),
+        ]);
+
+        let resolved = GraphStore::resolve_call_target_id_with_receiver(
+            "PRJ",
+            "prj/local.rs",
+            "helper",
+            None,
+            &idx,
+        );
+        assert_eq!(
+            resolved, id_local,
+            "un appel sans receveur dans le fichier définissant helper doit cibler sa définition locale"
         );
     }
 }
