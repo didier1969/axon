@@ -36,7 +36,9 @@ use serde_json::Value;
 /// Plancher de couverture — le nombre d'outils portant des dispositions
 /// déclarées. Il MONTE, jamais l'inverse : baisser ce chiffre pour faire passer
 /// un test serait retirer un contrat servi à des locataires.
-const PLANCHER_OUTILS_INSTRUMENTES: usize = 5;
+/// s149 : 5 → 8. Ajout de `sql`, `query`, `status` dont les handlers ont été
+/// intégralement vérifiés.
+const PLANCHER_OUTILS_INSTRUMENTES: usize = 8;
 
 /// Second plancher — le nombre de paramètres RÉELLEMENT examinés.
 ///
@@ -48,7 +50,9 @@ const PLANCHER_OUTILS_INSTRUMENTES: usize = 5;
 /// (`action`, `entity`, et les 14 champs de `data`), tous LUS branche par branche
 /// dans `tools_soll/manager.rs` — aucun n'est passé en `unexamined` pour faire
 /// monter le chiffre.
-const PLANCHER_PARAMETRES_EXAMINES: usize = 29;
+/// s149 : 29 → 35. Ajout de 6 paramètres (sql: 1, query: 4, status: 1), tous
+/// honorés sans condition.
+const PLANCHER_PARAMETRES_EXAMINES: usize = 35;
 
 /// Les paramètres dont un handler a été lu, tous outils confondus.
 fn parametres_examines() -> usize {
@@ -231,6 +235,16 @@ fn un_outil_NON_instrumente_repond_je_ne_sais_pas_et_non_rien_a_signaler() {
         parameter_dispositions("un_outil_qui_n_existe_pas").is_none(),
         "un outil inconnu doit rendre `None` — « je ne sais pas » — et non une liste vide"
     );
+}
+
+#[test]
+fn sql_query_status_portent_des_dispositions_declarees() {
+    for tool in ["sql", "query", "status"] {
+        assert!(
+            parameter_dispositions(tool).is_some(),
+            "l'outil `{tool}` doit porter des dispositions déclarées (REQ-AXO-902583)"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------

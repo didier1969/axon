@@ -5042,8 +5042,8 @@ fn un_parametre_conditionnel_dont_la_condition_tient_n_est_pas_signale() {
     // signaler » : les deux se lisent différemment et confondre les deux est le
     // défaut que ce REQ ferme.
     assert!(inert_parameters_for_call(
-        "query",
-        &json!({ "query": "f", "around": "foo" })
+        "diff",
+        &json!({ "left": "a", "right": "b" })
     )
     .is_empty());
 }

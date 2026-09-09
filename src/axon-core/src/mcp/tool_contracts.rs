@@ -1565,6 +1565,39 @@ const SOLL_MANAGER_DISPOSITIONS: &[ParameterDeclaration] = &[
     },
 ];
 
+pub(crate) const SQL_DISPOSITIONS: &[ParameterDeclaration] = &[
+    ParameterDeclaration {
+        name: "sql",
+        disposition: ParameterDisposition::Honoured,
+    },
+];
+
+pub(crate) const QUERY_DISPOSITIONS: &[ParameterDeclaration] = &[
+    ParameterDeclaration {
+        name: "mode",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "project",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "query",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "semantic",
+        disposition: ParameterDisposition::Honoured,
+    },
+];
+
+pub(crate) const STATUS_DISPOSITIONS: &[ParameterDeclaration] = &[
+    ParameterDeclaration {
+        name: "mode",
+        disposition: ParameterDisposition::Honoured,
+    },
+];
+
 /// Ce qu'on sait des paramètres d'un outil — et ce qu'on ne sait PAS encore.
 ///
 /// REQ-AXO-902583. `unexamined` n'est pas une variante de `ParameterDisposition`,
@@ -1629,6 +1662,18 @@ pub(crate) const DECLARED_DISPOSITIONS: &[(&str, ToolDispositions)] = &[
                 "top",
             ],
         },
+    ),
+    (
+        "sql",
+        ToolDispositions { declared: SQL_DISPOSITIONS, unexamined: &[] },
+    ),
+    (
+        "query",
+        ToolDispositions { declared: QUERY_DISPOSITIONS, unexamined: &[] },
+    ),
+    (
+        "status",
+        ToolDispositions { declared: STATUS_DISPOSITIONS, unexamined: &[] },
     ),
 ];
 
