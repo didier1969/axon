@@ -50,11 +50,35 @@ async fn handle_livez() -> Response {
 // /readyz — deps OK + accepting traffic. Pour le brain : la DB doit
 // répondre à un `SELECT 1`. On peut renvoyer 200+JSON {state:degraded,
 // reasons:[...]} pour graceful degradation, mais V1 = strict 200/503.
+//
+// REQ-AXO-902563: run the DB probe on an isolated OS thread with timeout,
+// NEVER routing through the global blocking thread pool where startup IST/SOLL
+// snapshot warming can starve readiness probes.
 async fn handle_readyz(Extension(server): Extension<Arc<McpServer>>) -> Response {
-    let probe = tokio::task::spawn_blocking(move || server.execute_raw_sql("SELECT 1")).await;
-    match probe {
-        Ok(Ok(_)) => (StatusCode::OK, Json(serde_json::json!({"state": "ready"}))).into_response(),
-        Ok(Err(e)) => (
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let probe_server = server.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("axon-readyz-probe".to_string())
+        .spawn(move || {
+            let res = probe_server.execute_raw_sql("SELECT 1");
+            let _ = tx.send(res);
+        });
+
+    if let Err(err) = spawn_result {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "state": "degraded",
+                "reasons": ["probe_spawn_failed"],
+                "error": err.to_string(),
+            })),
+        )
+            .into_response();
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(2), rx).await {
+        Ok(Ok(Ok(_))) => (StatusCode::OK, Json(serde_json::json!({"state": "ready"}))).into_response(),
+        Ok(Ok(Err(e))) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
                 "state": "degraded",
@@ -63,12 +87,21 @@ async fn handle_readyz(Extension(server): Extension<Arc<McpServer>>) -> Response
             })),
         )
             .into_response(),
-        Err(e) => (
+        Ok(Err(_)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
                 "state": "degraded",
                 "reasons": ["db_probe_task_panic"],
-                "error": format!("{:?}", e),
+                "error": "readiness probe thread dropped channel without response",
+            })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "state": "degraded",
+                "reasons": ["db_probe_timeout"],
+                "error": "timed out waiting for database readiness probe",
             })),
         )
             .into_response(),
@@ -238,8 +271,6 @@ fn classify_mcp_request(request: &JsonRpcRequest) -> McpRequestClass {
                 .map(crate::mcp::canonical_tool_name);
             if tool_name.is_some_and(is_observer_tool_name) {
                 McpRequestClass::Observer
-            } else if tool_name.is_some_and(is_runtime_command_proxy_tool_name) {
-                McpRequestClass::Control
             } else {
                 McpRequestClass::Control
             }
@@ -299,6 +330,7 @@ fn is_observer_tool_name(name: &str) -> bool {
     )
 }
 
+#[allow(dead_code)]
 fn is_runtime_command_proxy_tool_name(name: &str) -> bool {
     matches!(name, "resume_vectorization")
 }
@@ -328,6 +360,73 @@ async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible>>> 
 
     let stream = endpoint_event.chain(list_changed).chain(heartbeat);
     Sse::new(stream)
+}
+
+/// REQ-AXO-902563 — run brain MCP and health probes outside the application runtime.
+///
+/// Long-running startup routines (such as `warm_all_ist_snapshots_at_boot` warming
+/// IST snapshots across ~75 projects or SOLL snapshot warming) saturate Tokio's
+/// global blocking thread pool and can stall the async executor. Running axum
+/// on a dedicated OS thread with an independent multi-thread Tokio runtime makes
+/// probe serving (/livez, /readyz, /startupz) and MCP routes resilient to workload
+/// starvation, matching the indexer architecture established in commit 05fa97af.
+///
+/// The socket is bound immediately to the provided address to ensure immediate
+/// availability before any background warming starts.
+pub fn spawn_mcp_http_server(
+    mcp_server: Arc<McpServer>,
+    bind_addr: std::net::SocketAddr,
+) -> Result<std::net::SocketAddr, std::io::Error> {
+    let std_listener = std::net::TcpListener::bind(bind_addr)?;
+    std_listener.set_nonblocking(true)?;
+    let local_addr = std_listener.local_addr()?;
+
+    let thread = std::thread::Builder::new().name("axon-brain-http".to_string());
+    if let Err(error) = thread.spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("axon-brain-http-worker")
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(error) => {
+                tracing::warn!(%error, "Brain HTTP multi-thread runtime creation failed, falling back to current_thread");
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(err) => {
+                        tracing::error!(%err, "Brain HTTP runtime creation failed");
+                        return;
+                    }
+                }
+            }
+        };
+
+        runtime.block_on(async move {
+            let listener = match tokio::net::TcpListener::from_std(std_listener) {
+                Ok(l) => l,
+                Err(err) => {
+                    tracing::error!(%err, "Converting std TcpListener to tokio TcpListener failed");
+                    return;
+                }
+            };
+            tracing::info!("✅ SQL Gateway/MCP: Listening on http://{}", local_addr);
+            let app = app_router(mcp_server);
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::warn!(error = %e, addr = %local_addr, "Brain HTTP server exited with error");
+            }
+        });
+    }) {
+        tracing::error!(%error, "Brain HTTP thread creation failed");
+        return Err(std::io::Error::other(format!(
+            "Brain HTTP thread creation failed: {error}"
+        )));
+    }
+
+    Ok(local_addr)
 }
 
 #[cfg(test)]
@@ -605,5 +704,170 @@ mod tests {
         assert_eq!(service_guard::interactive_requests_in_flight(), 0);
         mcp_request_finished_with_class(McpRequestClass::Observer);
         assert_eq!(service_guard::interactive_requests_in_flight(), 0);
+    }
+
+    fn http_get_raw(addr: std::net::SocketAddr, path: &str) -> (String, String) {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(addr)
+            .unwrap_or_else(|err| panic!("TcpStream::connect to {addr} failed: {err}"));
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).unwrap();
+        let mut resp = String::new();
+        stream.read_to_string(&mut resp).unwrap();
+        let (head, body) = resp.split_once("\r\n\r\n").unwrap_or((&resp, ""));
+        (head.to_string(), body.to_string())
+    }
+
+    #[test]
+    fn dedicated_brain_http_runtime_answers_without_caller_runtime() {
+        use super::spawn_mcp_http_server;
+        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+
+        let store = Arc::new(
+            crate::tests::test_helpers::create_test_db()
+                .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_dedicated_http").unwrap()),
+        );
+        let mcp_server = Arc::new(McpServer::new(store));
+        let bound = spawn_mcp_http_server(mcp_server, ([127, 0, 0, 1], port).into())
+            .expect("spawn_mcp_http_server must succeed");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let (head, body) = loop {
+            match std::net::TcpStream::connect(bound) {
+                Ok(mut stream) => {
+                    use std::io::{Read, Write};
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                        .unwrap();
+                    stream
+                        .write_all(
+                            b"GET /livez HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                        )
+                        .unwrap();
+                    let mut resp = String::new();
+                    stream.read_to_string(&mut resp).unwrap();
+                    let (h, b) = resp.split_once("\r\n\r\n").unwrap_or((&resp, ""));
+                    break (h.to_string(), b.to_string());
+                }
+                Err(error) if std::time::Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("dedicated brain http runtime did not bind: {error}"),
+            }
+        };
+
+        assert!(head.starts_with("HTTP/1.1 200"), "head was {head}");
+        assert_eq!(body, "ok");
+    }
+
+    #[test]
+    fn health_probes_not_starved_during_heavy_blocking_warming_load() {
+        use super::spawn_mcp_http_server;
+        // REQ-AXO-902563: Test that /livez and /readyz answer promptly even when
+        // the caller runtime's global blocking thread pool is completely saturated
+        // with heavy startup tasks (e.g. warming IST/SOLL snapshots).
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+
+        let store = Arc::new(
+            crate::tests::test_helpers::create_test_db()
+                .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_warming_starve").unwrap()),
+        );
+        let mcp_server = Arc::new(McpServer::new(store));
+
+        let bound = spawn_mcp_http_server(mcp_server, ([127, 0, 0, 1], port).into())
+            .expect("spawn_mcp_http_server must succeed");
+
+        rt.block_on(async move {
+            // Saturate all 2 blocking threads of the application runtime with long-running jobs
+            let (unblock_tx, unblock_rx) = std::sync::mpsc::channel();
+            let unblock_rx = Arc::new(std::sync::Mutex::new(unblock_rx));
+            for _ in 0..2 {
+                let rx = unblock_rx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _ = rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(5));
+                });
+            }
+
+            // Give blocking threads a moment to pick up the tasks
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            // Interrogate /livez while blocking pool is 100% saturated
+            let t0 = std::time::Instant::now();
+            let (livez_head, livez_body) = http_get_raw(bound, "/livez");
+            let livez_duration = t0.elapsed();
+            assert!(
+                livez_head.starts_with("HTTP/1.1 200"),
+                "livez returned: {livez_head}"
+            );
+            assert_eq!(livez_body, "ok");
+            assert!(
+                livez_duration < std::time::Duration::from_millis(1500),
+                "livez took too long ({:?}) during warming load",
+                livez_duration
+            );
+
+            // Interrogate /readyz while blocking pool is 100% saturated
+            let t1 = std::time::Instant::now();
+            let (readyz_head, readyz_body) = http_get_raw(bound, "/readyz");
+            let readyz_duration = t1.elapsed();
+            assert!(
+                readyz_head.starts_with("HTTP/1.1 200"),
+                "readyz returned: {readyz_head} body: {readyz_body}"
+            );
+            let parsed_readyz: serde_json::Value =
+                serde_json::from_str(&readyz_body).expect("valid JSON body on readyz");
+            assert_eq!(parsed_readyz["state"], "ready");
+            assert!(
+                readyz_duration < std::time::Duration::from_millis(1500),
+                "readyz took too long ({:?}) during warming load",
+                readyz_duration
+            );
+
+            // Unblock the simulated warming tasks
+            let _ = unblock_tx.send(());
+            let _ = unblock_tx.send(());
+        });
+    }
+
+    #[test]
+    fn http_socket_bound_immediately_on_spawn() {
+        use super::spawn_mcp_http_server;
+        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+
+        let store = Arc::new(
+            crate::tests::test_helpers::create_test_db()
+                .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_immediate_bind").unwrap()),
+        );
+        let mcp_server = Arc::new(McpServer::new(store));
+
+        let bound = spawn_mcp_http_server(mcp_server, ([127, 0, 0, 1], port).into())
+            .expect("spawn_mcp_http_server should bind immediately");
+
+        // Connecting synchronously must succeed immediately without any retry loop
+        let stream = std::net::TcpStream::connect(bound);
+        assert!(
+            stream.is_ok(),
+            "TCP socket must accept connections immediately upon return from spawn"
+        );
     }
 }
