@@ -3259,7 +3259,9 @@ impl McpServer {
             return false;
         }
 
-        matches!(request.method.as_str(), "notifications/initialized")
+        // Accept any MCP notification (e.g. notifications/initialized, notifications/cancelled,
+        // notifications/progress) gracefully without error.
+        true
     }
 
     pub fn negotiate_protocol_version(request: &JsonRpcRequest) -> &'static str {
@@ -3295,6 +3297,7 @@ impl McpServer {
                 },
                 "serverInfo": { "name": mcp_server_identity_name(), "version": "2.2.0" }
             })),
+            "ping" => Some(json!({})),
             "tools/list" => {
                 let include_internal = request
                     .params

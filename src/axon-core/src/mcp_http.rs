@@ -159,31 +159,11 @@ async fn handle_mcp_post(
             .map(|s| s.to_string());
 
         let response = if payload.id.is_none() {
-            match tokio::task::spawn_blocking(move || server.handle_notification(payload)).await {
-                Ok(true) => {
-                    record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
-                    StatusCode::ACCEPTED.into_response()
-                }
-                Ok(false) => {
-                    record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "error": {
-                                "code": -32601,
-                                "message": "Unsupported notification"
-                            }
-                        })),
-                    )
-                        .into_response()
-                }
-                Err(e) => {
-                    record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
-                    tracing::error!("MCP Blocking Task Panicked: {:?}", e);
-                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                }
-            }
+            let _ = tokio::task::spawn_blocking(move || server.handle_notification(payload)).await;
+            record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
+            // Per JSON-RPC 2.0 (Section 4.1 & 4.2): The Server MUST NOT reply to a Notification.
+            // HTTP transport signals receipt via 202 Accepted with an empty body.
+            StatusCode::ACCEPTED.into_response()
         } else {
             // Offload C-FFI / DB work to a blocking thread pool safely
             // No more mcp_active_flag: Zero-Sleep MVCC architecture handles concurrency.

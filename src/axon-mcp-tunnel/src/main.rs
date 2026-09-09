@@ -105,15 +105,43 @@ fn main() {
                 }
 
                 let req_val: Result<Value, _> = serde_json::from_str(&req_str);
-                let request_id = req_val
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| v.get("id"))
-                    .cloned()
-                    .unwrap_or(json!(1));
-
                 match req_val {
                     Ok(json_payload) => {
+                        let is_notification = json_payload.get("id").is_none();
+                        let method = json_payload.get("method").and_then(Value::as_str);
+
+                        // 1. Keepalive ping (MCP spec 2024-11-05).
+                        // Standard MCP ping method requires an empty object result with caller's ID.
+                        if method == Some("ping") {
+                            if !is_notification {
+                                let ping_id = json_payload.get("id").cloned().unwrap_or(Value::Null);
+                                let ping_resp = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": ping_id,
+                                    "result": {}
+                                });
+                                let _ = stdout.write_all(format!("{}\n", ping_resp).as_bytes());
+                                let _ = stdout.flush();
+                            }
+                            continue;
+                        }
+
+                        // 2. Notifications handling (JSON-RPC 2.0 Section 4.1 & 4.2).
+                        // "The Server MUST NOT reply to a Notification".
+                        // Strict clients (e.g. Go MCP client in Gemini CLI) terminate connections
+                        // with "invalid request" if any unsolicited response frame is received.
+                        if is_notification {
+                            let mut request = client.post(&mcp_url).timeout(default_timeout);
+                            if let Some(cwd) = client_cwd.as_deref() {
+                                request = request.header("X-Axon-Client-Cwd", cwd);
+                            }
+                            // Fire-and-forget delivery to backend; never write anything to stdout.
+                            let _ = request.json(&json_payload).send();
+                            continue;
+                        }
+
+                        // 3. Regular Request (must always produce a response with matching ID).
+                        let request_id = json_payload.get("id").cloned().unwrap_or(Value::Null);
                         let timeout =
                             timeout_for_payload(&json_payload, default_timeout, heavy_timeout);
                         let mut request = client.post(&mcp_url).timeout(timeout);
@@ -121,16 +149,42 @@ fn main() {
                             // REQ-AXO-902286 — carry the caller's project directory.
                             request = request.header("X-Axon-Client-Cwd", cwd);
                         }
+
                         match request.json(&json_payload).send() {
                             Ok(res) => {
+                                let status = res.status();
                                 if let Ok(res_text) = res.text() {
-                                    if res_text.trim() != "null" && !res_text.trim().is_empty() {
-                                        let formatted_res = if res_text.ends_with('\n') {
+                                    let trimmed = res_text.trim();
+                                    if status.is_success() && !trimmed.is_empty() && trimmed != "null" {
+                                        // Ensure the returned JSON-RPC payload carries the caller's request_id.
+                                        let formatted = if let Ok(mut parsed) = serde_json::from_str::<Value>(trimmed) {
+                                            if parsed.get("id").is_none() || parsed.get("id") == Some(&Value::Null) {
+                                                parsed["id"] = request_id.clone();
+                                            }
+                                            format!("{}\n", parsed)
+                                        } else if res_text.ends_with('\n') {
                                             res_text
                                         } else {
                                             format!("{}\n", res_text)
                                         };
-                                        let _ = stdout.write_all(formatted_res.as_bytes());
+                                        let _ = stdout.write_all(formatted.as_bytes());
+                                        let _ = stdout.flush();
+                                    } else {
+                                        // Non-2xx status or empty response for a request: MUST return JSON-RPC error with request_id
+                                        let error_msg = if !trimmed.is_empty() && trimmed != "null" {
+                                            trimmed.to_string()
+                                        } else {
+                                            format!("Axon Backend returned HTTP {}", status)
+                                        };
+                                        let error_resp = json!({
+                                            "jsonrpc": "2.0",
+                                            "id": request_id,
+                                            "error": {
+                                                "code": -32603,
+                                                "message": error_msg
+                                            }
+                                        });
+                                        let _ = stdout.write_all(format!("{}\n", error_resp).as_bytes());
                                         let _ = stdout.flush();
                                     }
                                 }
@@ -155,7 +209,7 @@ fn main() {
                         eprintln!("Invalid JSON received on stdin: {}", e);
                         let error_resp = json!({
                             "jsonrpc": "2.0",
-                            "id": request_id,
+                            "id": Value::Null,
                             "error": {
                                 "code": -32700,
                                 "message": format!("Parse error: {}", e)
@@ -221,5 +275,14 @@ mod tests {
             env_timeout("AXON_MCP_TUNNEL_TIMEOUT_SECS_UNSET_XYZ", 60),
             secs(60)
         );
+    }
+
+    #[test]
+    fn notification_detection_identifies_missing_id() {
+        let notif = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1}});
+        assert!(notif.get("id").is_none());
+
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+        assert!(req.get("id").is_some());
     }
 }
