@@ -582,14 +582,13 @@ fn schema_overview_lists_every_product_table_not_an_allow_list() {
 fn test_project_status_reports_delta_vs_previous_snapshot() {
     let _guard = env_lock();
     let history_dir = tempdir().unwrap();
-    unsafe {
-        std::env::set_var("AXON_RUNTIME_MODE", "indexer_full");
-        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
-        std::env::set_var(
-            "AXON_STRUCTURAL_HISTORY_DIR",
-            history_dir.path().to_string_lossy().to_string(),
-        );
-    }
+    // REQ-AXO-902593 — RAII Drop guard pour AXON_STRUCTURAL_HISTORY_DIR et variables d'env
+    let _history_guard = crate::test_support::EnvVarGuard::set(
+        "AXON_STRUCTURAL_HISTORY_DIR",
+        &history_dir.path().to_string_lossy(),
+    );
+    let _runtime_mode = crate::test_support::EnvVarGuard::set("AXON_RUNTIME_MODE", "indexer_full");
+    let _auto_ingestor = crate::test_support::EnvVarGuard::unset("AXON_ENABLE_AUTONOMOUS_INGESTOR");
     let server = create_test_server();
     server
         .graph_store
@@ -688,20 +687,15 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
         delta["orphan_code_count_delta"].as_i64().unwrap_or(0) >= 1,
         "delta must detect the added orphan: {delta:?}"
     );
-
-    unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
-        std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
-    }
 }
 
 #[test]
 fn test_snapshot_history_and_diff_persist_outside_soll() {
     let _env = env_lock();
     let history_dir = tempdir().unwrap();
-    std::env::set_var(
+    let _history_guard = crate::test_support::EnvVarGuard::set(
         "AXON_STRUCTURAL_HISTORY_DIR",
-        history_dir.path().to_string_lossy().to_string(),
+        &history_dir.path().to_string_lossy(),
     );
     let server = create_test_server();
     // REQ-AXO-901721 (Batch D) — per-test IST isolation: snapshot/diff over a
@@ -862,7 +856,6 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         diff["data"]["metric_delta"]["wrapper_count_delta"].as_i64(),
         Some(0)
     );
-    std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
 }
 
 #[test]
