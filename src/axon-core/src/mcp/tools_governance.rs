@@ -10,6 +10,121 @@ use crate::ist_snapshot::structural_invariants::{
 };
 use crate::ist_snapshot::RelationType;
 
+/// REQ-AXO-902643 — one database snapshot, shared by facts, causes and verdict.
+/// A skipped timeout is not a deliberate exclusion, and a documentary chunk
+/// does not need an AST symbol to make its file retrievable.
+#[derive(Debug, serde::Deserialize)]
+struct FileCoverageGroup {
+    status: String,
+    reason: String,
+    has_chunks: bool,
+    has_symbol_chunks: bool,
+    has_file_chunks: bool,
+    files: i64,
+    paths: Vec<String>,
+}
+
+impl FileCoverageGroup {
+    fn policy_excluded(&self) -> bool {
+        self.status == "skipped"
+            && matches!(self.reason.as_str(), "generated" | "binary" | "oversized" | "minified")
+    }
+
+    fn failed(&self) -> bool {
+        self.status == "parse_failed" || self.reason == "parse_timeout"
+    }
+
+    fn unqualified_skip(&self) -> bool {
+        self.status == "skipped" && !self.policy_excluded() && !self.failed()
+    }
+}
+
+#[derive(Debug)]
+struct FileCoverage(Vec<FileCoverageGroup>);
+
+impl FileCoverage {
+    fn decode(raw: &str) -> anyhow::Result<Self> {
+        let rows: Vec<Vec<String>> = serde_json::from_str(raw)?;
+        let cell = rows.first().and_then(|row| row.first())
+            .ok_or_else(|| anyhow::anyhow!("file coverage aggregate is missing"))?;
+        let groups: Vec<FileCoverageGroup> = serde_json::from_str(cell)?;
+        anyhow::ensure!(groups.iter().all(|g| g.files > 0 && g.paths.len() <= 5),
+            "invalid file coverage counts or sample bounds");
+        Ok(Self(groups))
+    }
+
+    fn count(&self, predicate: impl Fn(&FileCoverageGroup) -> bool) -> i64 {
+        self.0.iter().filter(|g| predicate(g)).map(|g| g.files).sum()
+    }
+
+    fn causes(&self) -> Vec<(&'static str, String, &'static str)> {
+        let mut causes = Vec::new();
+        let failed = self.count(FileCoverageGroup::failed);
+        if failed > 0 {
+            causes.push(("persisted_parse_failure", format!(
+                "{failed} file(s) retain a parsing failure (including parse_timeout); \
+                 a preserved hash and an empty queue do not prove successful extraction"
+            ), "inspect the named paths and their skip_reason; first confirm the affected files belong to the intended indexing scope; \
+                only then qualify a bounded recovery with an available control path, \
+                never infer a need for a full rescan or an automatic retry loop"));
+        }
+        let unknown = self.count(FileCoverageGroup::unqualified_skip);
+        if unknown > 0 {
+            causes.push(("unqualified_skip_reason", format!(
+                "{unknown} skipped file(s) have an unclassified reason; completeness is unproven"
+            ), "inspect the named reasons and source files before treating them as intentional exclusions"));
+        }
+        causes
+    }
+
+    fn reason_lines(&self, errors_only: bool) -> String {
+        let groups: Vec<_> = self.0.iter().filter(|g| {
+            if errors_only { g.failed() } else { g.status == "skipped" || g.failed() }
+        }).collect();
+        if groups.is_empty() {
+            return if errors_only { "* no persisted parsing failure in this snapshot" }
+                else { "* no persisted skip reason in this snapshot" }.to_string();
+        }
+        let mut lines = groups.iter().take(12).map(|g| {
+            let classification = if g.failed() { "parsing failure" }
+                else if g.policy_excluded() { "policy exclusion, not parsed" }
+                else { "unqualified reason" };
+            let paths = g.paths.iter().map(|p| p.chars().take(240).collect::<String>())
+                .collect::<Vec<_>>().join(", ");
+            format!("* `{}`: {} ({classification}); paths {}/{} (each capped at 240 chars): {paths}",
+                g.reason.chars().take(80).collect::<String>(), g.files, g.paths.len(), g.files)
+        }).collect::<Vec<_>>();
+        if groups.len() > 12 {
+            lines.push(format!("* {} additional reason group(s) omitted", groups.len() - 12));
+        }
+        lines.join("\n")
+    }
+
+    fn verdict(&self, eligible: i64, parsables_ecartes: &[(String, u64)]) -> String {
+        let issues = self.causes();
+        if !issues.is_empty() {
+            return format!("⚠️ Extraction completeness NOT established: {}. See persisted reasons above.",
+                issues.iter().map(|(_, text, _)| text.as_str()).collect::<Vec<_>>().join("; "));
+        }
+        let enrolled = self.count(|_| true);
+        let base = indexing_verdict(
+            eligible, enrolled,
+            self.count(|g| g.status == "discovered"),
+            self.count(|g| g.status == "discovered" && !g.has_chunks),
+            self.count(|g| !g.policy_excluded() && g.has_chunks),
+            self.count(|g| !g.policy_excluded() && !g.has_chunks),
+            parsables_ecartes,
+        );
+        let excluded = self.count(FileCoverageGroup::policy_excluded);
+        if excluded > 0 && base.starts_with('✅') {
+            format!("ℹ️ {}/{enrolled} enrolled files have retrievable chunks; {excluded} policy-excluded file(s) \
+                are accounted for, NOT certified as parsed. See their reasons above.", self.count(|g| g.has_chunks))
+        } else {
+            base
+        }
+    }
+}
+
 /// REQ-AXO-902280 (feedback #44, LLL) + REQ-AXO-902389 (APS inbox 11933) — the
 /// eligible↔indexed↔parsed verdict.
 ///
@@ -277,14 +392,42 @@ impl McpServer {
         ))
     }
 
+    fn read_file_coverage(&self, project: &str) -> anyhow::Result<FileCoverage> {
+        // One MVCC snapshot for counts AND bounded samples. A chunk belonging to
+        // another tenant must never make this tenant's path appear covered.
+        let raw = self.graph_store.query_json_param(
+            "WITH facts AS (\
+                SELECT f.path, f.project_code, f.status, COALESCE(f.skip_reason, 'unknown') AS reason, \
+                EXISTS (SELECT 1 FROM ist.chunk c WHERE c.project_code=f.project_code AND c.file_path=f.path) AS has_chunks, \
+                EXISTS (SELECT 1 FROM ist.chunk c WHERE c.project_code=f.project_code AND c.file_path=f.path AND c.source_type='symbol') AS has_symbol_chunks, \
+                EXISTS (SELECT 1 FROM ist.chunk c WHERE c.project_code=f.project_code AND c.file_path=f.path AND c.source_type='file') AS has_file_chunks \
+                FROM ist.indexedfile f WHERE (? = '*' OR f.project_code = ?)\
+             ), ranked AS (\
+                SELECT *, row_number() OVER (PARTITION BY status, reason, has_chunks, has_symbol_chunks, has_file_chunks \
+                    ORDER BY project_code, path) AS sample_rank FROM facts\
+             ), grouped AS (\
+                SELECT status, reason, has_chunks, has_symbol_chunks, has_file_chunks, count(*) AS files, \
+                    jsonb_agg(project_code || ':' || path ORDER BY project_code, path) FILTER (WHERE sample_rank <= 5) AS paths \
+                FROM ranked GROUP BY status, reason, has_chunks, has_symbol_chunks, has_file_chunks\
+             ) SELECT COALESCE(jsonb_agg(to_jsonb(grouped) ORDER BY status, reason, has_chunks, has_symbol_chunks, has_file_chunks), '[]'::jsonb)::text FROM grouped",
+            &json!([project, project]),
+        )?;
+        FileCoverage::decode(&raw)
+    }
+
     pub(crate) fn indexing_diagnosis_markdown(&self, project: &str) -> String {
-        // Canonical projection (REQ-AXO-901865): diagnose_indexing reads the
-        // SAME ist.project_telemetry view as the dashboard + embedding_status,
-        // so its file/symbol counts reconcile exactly (byte-for-byte). Coverage
-        // is REAL — `known` = files_chunked (enrolled files with >=1 chunk).
-        // IndexedFile DOES carry project_code ; the old "no project_code by
-        // design" note and the status pending/indexing machine were retired
-        // (REQ-AXO-289 / REQ-AXO-901860), so those concepts collapse to 0.
+        let coverage = match self.read_file_coverage(project) {
+            Ok(coverage) => coverage,
+            Err(error) => return format!(
+                "### 🔎 Day-1 Indexing Diagnosis ({project})\n\n\
+                 **Status:** inconclusive_file_coverage_unavailable\n\n\
+                 File counts, extraction completeness and persisted reasons could not be read. \
+                 This is NOT zero files or zero errors. Verify database availability and retry.\n\n{}",
+                error.to_string().chars().take(300).collect::<String>()
+            ),
+        };
+        // File coverage comes from one canonical IndexedFile/Chunk snapshot.
+        // Other telemetry (symbols, graph, semantic workers) remains independent.
         let where_project = if project == "*" {
             String::new()
         } else {
@@ -295,31 +438,18 @@ impl McpServer {
         // → json_to_i64 fails → silent 0. file_count_for_project already got
         // this fix; diagnose's three SUM()s had been missed (returned `known
         // files: 0` despite a populated IndexedFile).
-        let known = self.sql_scalar(&format!(
-            "SELECT COALESCE(SUM(files_chunked), 0)::BIGINT FROM axon.project_telemetry{}",
-            where_project
-        ));
+        let known = coverage.count(|g| g.has_chunks);
         let global_known = self
             .sql_scalar("SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM axon.project_telemetry");
-        // REQ-AXO-902254 — the DENOMINATOR. Everything above counts files that HAVE
-        // chunks, and `completed` is literally `known`, so the two can never disagree and
-        // the tool structurally cannot see an under-indexed project. Real incident (LLL,
-        // 2026-07-26): 25 of 434 files chunked — 5.8% — and the verdict was
-        // `no_blocker_detected`, which closed the investigation. `files_total` is the
-        // enrolled count from the SAME view, so the gap costs one extra scalar.
-        let enrolled = self.sql_scalar(&format!(
-            "SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM axon.project_telemetry{}",
-            where_project
-        ));
+        // REQ-AXO-902254/902643 — count the denominator, not just the files with
+        // chunks; use the same snapshot as the skip reasons and bottom verdict.
+        let enrolled = coverage.count(|_| true);
         let coverage_gap = (enrolled - known).max(0);
         let coverage_pct = if enrolled > 0 {
             (known as f64) * 100.0 / (enrolled as f64)
         } else {
             0.0
         };
-        let pending = 0i64;
-        let indexing = 0i64;
-        let completed = known;
         let symbols = self.sql_scalar(&format!(
             "SELECT COALESCE(SUM(symbols), 0)::BIGINT FROM axon.project_telemetry{}",
             where_project
@@ -333,11 +463,10 @@ impl McpServer {
             "SELECT count(*) FROM ist.Edge e JOIN Symbol s ON e.source_id = s.id WHERE e.relation_type = 'CALLS_NIF' AND {}",
             Self::project_filter(project, "s.project_code")
         ));
-        // REQ-AXO-901653 slice-5c — `status_reason` + `last_error_reason`
-        // were public.File columns ; pipeline doesn't carry equivalent
-        // diagnostic data (failures are logged via tracing, not row state).
-        let top_reasons: Vec<Vec<Value>> = Vec::new();
-        let top_errors: Vec<Vec<Value>> = Vec::new();
+        // REQ-AXO-902643 — skip_reason IS persisted by A1/A2. Empty fabricated
+        // lists hid parse_timeout while the bottom of the report certified parsing.
+        let reason_lines = coverage.reason_lines(false);
+        let error_lines = coverage.reason_lines(true);
 
         // REQ-AXO-902597 — `embed_status='pending'` is pipeline B's durable
         // queue. Compare it with OWNER-published indexer truth; the responding
@@ -356,13 +485,13 @@ impl McpServer {
         // vocabulary so the LLM gets a single actionable next step
         // instead of the historical generic "scope_mismatch" message.
         // Each cause is (machine_id, human_explanation, remediation).
-        let mut causes: Vec<(&'static str, String, &'static str)> = Vec::new();
+        let mut causes = coverage.causes();
         let runtime_mode = std::env::var("AXON_RUNTIME_MODE").unwrap_or_default();
         let watch_root_set = std::env::var("AXON_WATCH_DIR")
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false);
 
-        if known == 0 {
+        if enrolled == 0 {
             if !watch_root_set {
                 causes.push((
                     "watch_root_unconfigured",
@@ -401,14 +530,6 @@ impl McpServer {
                 ));
             }
         }
-        if known > 0 && completed == 0 && (pending + indexing) > 0 {
-            causes.push((
-                "ingestion_not_completed",
-                "files in pending/indexing; pipeline possibly blocked or still running".to_string(),
-                "wait one or two indexer cycles, then re-run diagnose_indexing; if still stuck, \
-                 inspect `last_error_reason` and `status_reason` columns",
-            ));
-        }
         // REQ-AXO-902275 — cause `file_too_large_for_budget` SUPPRIMÉE. Elle était morte
         // deux fois : sa condition était `if 0 > 0` depuis REQ-AXO-901653 slice-5c (le
         // statut `oversized_for_current_budget` était une enum `public.File`, et la
@@ -420,16 +541,21 @@ impl McpServer {
         // Un conseil produit qui ne peut pas fonctionner est du même ordre que le
         // `POST /process/start` inerte de REQ-AXO-902271 : l'opérateur suit l'indication,
         // elle ne marche pas, et il en déduit que le diagnostic ment.
-        if known > 0 && symbols == 0 {
+        if known > 0 && symbols == 0 && coverage.count(|g| g.has_file_chunks && !g.has_symbol_chunks) < known {
             causes.push((
                 "parser_extraction_gap",
                 "files known but 0 symbols extracted (unsupported language or parse failure)"
                     .to_string(),
                 "verify tree-sitter grammar coverage for the file extensions; inspect \
-                 `last_error_reason` for parser-side failures",
+                 persisted `skip_reason` for parser-side failures",
             ));
         }
-        if let Some(cause) = Self::chunk_coverage_cause(known, enrolled) {
+        // Classified failures already have a targeted remediation. Do not also
+        // suggest a generic restart for the same hash-preserved timeout.
+        if let Some(cause) = Self::chunk_coverage_cause(
+            coverage.count(|g| !g.policy_excluded() && !g.failed() && !g.unqualified_skip() && g.has_chunks),
+            coverage.count(|g| !g.policy_excluded() && !g.failed() && !g.unqualified_skip()),
+        ) {
             causes.push(cause);
         }
         if let Some(truth) = indexer_truth.as_ref() {
@@ -467,40 +593,6 @@ impl McpServer {
             ));
         }
 
-        let reason_lines = if top_reasons.is_empty() {
-            "* no dominant reason".to_string()
-        } else {
-            top_reasons
-                .iter()
-                .filter_map(|row| {
-                    let reason = row.first()?.as_str()?;
-                    let count = row
-                        .get(1)?
-                        .as_i64()
-                        .or_else(|| row.get(1)?.as_u64().map(|v| v as i64))?;
-                    Some(format!("* `{}`: {}", reason, count))
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-
-        let error_lines = if top_errors.is_empty() {
-            "* no parser/commit error reported in `last_error_reason`".to_string()
-        } else {
-            top_errors
-                .iter()
-                .filter_map(|row| {
-                    let reason = row.first()?.as_str()?;
-                    let count = row
-                        .get(1)?
-                        .as_i64()
-                        .or_else(|| row.get(1)?.as_u64().map(|v| v as i64))?;
-                    Some(format!("* `{}`: {}", reason, count))
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-
         let cause_lines = causes
             .iter()
             .map(|(id, explain, remediation)| format_diagnose_cause_line(id, explain, remediation))
@@ -511,7 +603,17 @@ impl McpServer {
         // so an LLM can assert "all relevant source is indexed" without a second
         // round-trip. Scoped projects only (a global "*" walk over every watch
         // root would blow the gateway budget).
-        let scope_section = self.scope_explanation_section(project);
+        let scope_section = self.scope_explanation_section(project, &coverage);
+        let population_section = format!(
+            "* files with symbol chunks: {}\n* documentary-only files: {}\n\
+             * policy-excluded files: {} (accounted for, NOT parsed)\n\
+             * persisted parsing failures: {}\n* unqualified skips: {}\n",
+            coverage.count(|g| g.has_symbol_chunks),
+            coverage.count(|g| g.has_file_chunks && !g.has_symbol_chunks),
+            coverage.count(FileCoverageGroup::policy_excluded),
+            coverage.count(FileCoverageGroup::failed),
+            coverage.count(FileCoverageGroup::unqualified_skip),
+        );
 
         // REQ-AXO-902260 (Q2) — the chunk time window. `ist.Chunk` carried NO
         // temporal column at all, and that absence is exactly why Q2 has stayed
@@ -552,9 +654,8 @@ impl McpServer {
              **Scope facts**\n\
              * enrolled files: {}\n\
              * files WITH chunks (retrievable): {} — coverage {:.1}%, gap {}\n\
-             * completed files: {}\n\
-             * pending: {}\n\
-             * indexing: {}\n\
+             {population_section}\
+             * pipeline A queue/inflight: not measured by this file snapshot\n\
              * symbols: {}\n\
              * calls (direct): {}\n\
              * calls (nif): {}\n\n\
@@ -570,19 +671,16 @@ impl McpServer {
              **Remediation hints**\n\
              * validate project code and scope (`project_code`) used in calls\n\
              * check watch root and ignored paths\n\
-             * inspect parser support and `last_error_reason`\n\
+             * inspect parser support and persisted `skip_reason`; an unknown reason is not an intentional exclusion\n\
              * if symbols > 0 but calls = 0, run bridge refinement and inspect FFI boundaries\n\
-             * if coverage stays below 100% across two reconciliation sweeps, the walk is not running: check the indexer is alive and the Watchman daemon is reachable\n\
-             * ⚠️ `rescan_project full=true` wipes chunks AND IndexedFile rows, but the RAM dedup cache is hydrated once at boot — without an indexer restart right after, every file is skipped as unchanged and the chunks are never rebuilt (REQ-AXO-902260, observed on LLL: 434/434 → 2/438)\
+             * a stable coverage gap alone does not prove a stalled walk: first distinguish policy exclusions, parsing failures and files awaiting extraction\n\
+             * ⚠️ `rescan_project full=true` is a project-wide recovery: it invalidates the project's IndexedFile rows and notifies the indexer's RAM cache, waking reconciliation (REQ-AXO-902262/902268). It does not provide an exact-file retry; do not use it merely because a file lacks symbols, and do not prescribe a restart without evidence of a runtime failure.\
              {}",
             project,
             enrolled,
             known,
             coverage_pct,
             coverage_gap,
-            completed,
-            pending,
-            indexing,
             symbols,
             calls_direct,
             calls_nif,
@@ -647,7 +745,7 @@ impl McpServer {
     /// `*` (global) or an unregistered project_code — the diagnosis is still
     /// useful without it, and a global walk over every watch root is too costly
     /// for the synchronous gateway budget.
-    fn scope_explanation_section(&self, project: &str) -> String {
+    fn scope_explanation_section(&self, project: &str, coverage: &FileCoverage) -> String {
         if project == "*" {
             return String::new();
         }
@@ -668,64 +766,14 @@ impl McpServer {
             return String::new();
         };
 
-        let indexed = self.sql_scalar(&format!(
-            "SELECT COALESCE(SUM(files_total), 0)::BIGINT FROM axon.project_telemetry WHERE project_code = '{}'",
-            escaped
-        ));
-
-        // REQ-AXO-902280 (feedback #44) — a `discovered` row is ENROLLED (IndexedFile row
-        // present) but NOT PARSED (no symbols extracted). `indexed` above counts the row, so
-        // gap==0 does NOT prove the source is searchable; a stuck `discovered` backlog hides
-        // behind "✅ all indexed". Count it so the verdict can distinguish indexed from parsed.
-        let discovered = self.sql_scalar(&format!(
-            "SELECT COUNT(*)::BIGINT FROM ist.indexedfile WHERE project_code = '{}' AND status = 'discovered'",
-            escaped
-        ));
+        let indexed = coverage.count(|_| true);
+        let discovered = coverage.count(|g| g.status == "discovered");
 
         let breakdown = crate::scanner::Scanner::new(&project_path, project).scope_breakdown();
         let eligible = breakdown.eligible as i64;
         let gap = eligible - indexed;
 
-        // REQ-AXO-902389 — the discriminator: enrolled files with NOTHING extracted.
-        // `status='discovered'` alone flags stale bookkeeping as a stall.
-        let discovered_without_chunks = self.sql_scalar(&format!(
-            // `ist.chunk` anchors to the file by PATH (`file_path`), not by a row id.
-            "SELECT COUNT(*)::BIGINT FROM ist.indexedfile f \
-             WHERE f.project_code = '{}' AND f.status = 'discovered' \
-               AND NOT EXISTS (SELECT 1 FROM ist.chunk c WHERE c.file_path = f.path)",
-            escaped
-        ));
-
-        // REQ-AXO-902599 — la couverture par CHUNKS, indépendante du statut de la
-        // ligne : c'est la seule preuve de récupérabilité, et le verdict la reçoit
-        // désormais au lieu de la déduire d'un compte de lignes.
-        //
-        // `status <> 'skipped'` dans les DEUX comptes : un fichier écarté à dessein
-        // (lock-file, note de travail, module vide) n'a pas de chunks et n'en aura
-        // jamais. Le compter serait un rouge permanent — mesuré le 2026-09-05 : 8
-        // fichiers sur AXO, 8 sur KKI, 2 sur NEX, tous `skipped`, aucun autre.
-        let files_with_chunks = self.sql_scalar(&format!(
-            "SELECT COUNT(*)::BIGINT FROM ist.indexedfile f \
-             WHERE f.project_code = '{}' AND f.status <> 'skipped' \
-               AND EXISTS (SELECT 1 FROM ist.chunk c WHERE c.file_path = f.path)",
-            escaped
-        ));
-        let files_without_chunks = self.sql_scalar(&format!(
-            "SELECT COUNT(*)::BIGINT FROM ist.indexedfile f \
-             WHERE f.project_code = '{}' AND f.status <> 'skipped' \
-               AND NOT EXISTS (SELECT 1 FROM ist.chunk c WHERE c.file_path = f.path)",
-            escaped
-        ));
-
-        let verdict = indexing_verdict(
-            eligible,
-            indexed,
-            discovered,
-            discovered_without_chunks,
-            files_with_chunks,
-            files_without_chunks,
-            &breakdown.parsable_but_excluded,
-        );
+        let verdict = coverage.verdict(eligible, &breakdown.parsable_but_excluded);
 
         let reason_lines = if breakdown.excluded_by_reason.is_empty() {
             "* (none — every walked file is eligible)".to_string()
@@ -742,7 +790,7 @@ impl McpServer {
             "\n\n### Scope explanation (REQ-AXO-901932 F2 — eligible↔indexed reconciliation)\n\
              * eligible (would be indexed): {eligible}\n\
              * indexed (ist.IndexedFile rows present): {indexed}\n\
-             * discovered (row present but symbols NOT yet parsed): {discovered}\n\
+             * rows carrying discovered status (not proof of missing chunks): {discovered}\n\
              * gap (eligible − indexed): {gap}\n\
              * files walked (build/dependency/VCS dirs pruned at descent): {walked}\n\n\
              **Excluded files by reason** (out-of-ecosystem = data/CSV/JSON/binary/docs):\n{reason_lines}\n\n\
@@ -2235,6 +2283,56 @@ fn format_chunk_time_window(oldest: i64, newest: i64, unknown: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn coverage_group(files: i64, status: &str, reason: &str, symbol: bool, document: bool) -> FileCoverageGroup {
+        FileCoverageGroup {
+            status: status.into(), reason: reason.into(), files,
+            has_chunks: symbol || document, has_symbol_chunks: symbol,
+            has_file_chunks: document, paths: vec!["PGT:/fixture".into()],
+        }
+    }
+
+    #[test]
+    fn diagnose_indexing_verdict_does_not_hide_failed_or_unknown_skips() {
+        let mut coverage = FileCoverage(vec![
+            coverage_group(881, "indexed", "unknown", true, false),
+            coverage_group(61, "indexed", "unknown", false, true),
+            coverage_group(2, "skipped", "parse_timeout", false, false),
+            coverage_group(1, "skipped", "generated", false, false),
+        ]);
+        assert_eq!(coverage.count(|_| true), 945);
+        let verdict = coverage.verdict(945, &[]);
+        assert!(verdict.contains("parse_timeout") && verdict.contains("2 file(s)"), "{verdict}");
+        assert!(!verdict.contains('✅') && !verdict.contains("indexed AND parsed"));
+        coverage.0[2].reason = "generated".into();
+        let verdict = coverage.verdict(945, &[]);
+        assert!(coverage.causes().is_empty(), "generated is not a failure");
+        assert!(verdict.contains("942/945") && verdict.contains("3 policy-excluded"), "{verdict}");
+        assert!(!verdict.contains("indexed AND parsed"), "excluded is not parsed: {verdict}");
+        coverage.0[2].reason = "future_reason".into();
+        assert!(coverage.verdict(945, &[]).contains("unclassified reason"));
+    }
+
+    #[test]
+    fn diagnose_indexing_empty_or_malformed_aggregate_is_not_zero() {
+        assert!(FileCoverage::decode("[]").is_err());
+        assert!(FileCoverage::decode("[[null]]").is_err());
+        assert!(FileCoverage::decode("[[\"not-json\"]]").is_err());
+        let empty = FileCoverage::decode("[[\"[]\"]]").unwrap();
+        assert_eq!(empty.count(|_| true), 0);
+    }
+
+    #[test]
+    fn diagnose_indexing_known_policy_reasons_are_not_failed_parsing() {
+        for reason in ["generated", "binary", "oversized", "minified"] {
+            let coverage = FileCoverage(vec![coverage_group(1, "skipped", reason, false, false)]);
+            assert_eq!(coverage.count(FileCoverageGroup::policy_excluded), 1);
+            assert!(coverage.causes().is_empty());
+            assert!(!coverage.verdict(1, &[]).contains("indexed AND parsed"));
+        }
+        let failed = coverage_group(1, "parse_failed", "parser_error", false, false);
+        assert!(failed.failed() && !failed.policy_excluded());
+    }
 
     // --- REQ-AXO-902254 chunk-coverage grading -----------------------------------
     // The tool used to be structurally unable to report an under-indexed project:

@@ -1,5 +1,137 @@
 use super::*;
 
+/// REQ-AXO-902643 — reproduce the measured 881/61/2/1 file populations through
+/// the public tool, not just a formatter. All writes belong to the disposable DB.
+#[test]
+fn diagnose_indexing_distinguishes_documentary_files_and_failed_skips() {
+    let server = create_test_server();
+    server.graph_store.execute(
+        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status, skip_reason) \
+         SELECT '/coverage/' || n || '.rs', 'PGT', 1, 'indexed', NULL \
+         FROM generate_series(1,942) n"
+    ).unwrap();
+    server.graph_store.execute(
+        "INSERT INTO ist.chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash) \
+         SELECT 'coverage-' || n, CASE WHEN n <= 881 THEN 'symbol' ELSE 'file' END, \
+         'source-' || n, 'PGT', '/coverage/' || n || '.rs', \
+         CASE WHEN n <= 881 THEN 'body' ELSE 'file_context' END, 'content', 'hash' \
+         FROM generate_series(1,942) n"
+    ).unwrap();
+    server.graph_store.execute(
+        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status, skip_reason) VALUES \
+         ('/coverage/progress.md', 'PGT', 1, 'skipped', 'parse_timeout'), \
+         ('/coverage/task_plan.md', 'PGT', 1, 'skipped', 'parse_timeout'), \
+         ('/coverage/package-lock.json', 'PGT', 1, 'skipped', 'generated')"
+    ).unwrap();
+    let report = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        method: "tools/call".into(),
+        params: Some(json!({"name": "diagnose_indexing", "arguments": {"project": "PGT"}})),
+        id: Some(json!(902643)),
+    }).unwrap().result.unwrap();
+    let text = report["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("parse_timeout"), "persisted failure disappeared: {text}");
+    assert!(text.contains("progress.md") && text.contains("task_plan.md"), "name affected paths: {text}");
+    assert!(text.contains("documentary-only files: 61"), "documents are not missing symbols: {text}");
+    assert!(text.contains("files with symbol chunks: 881"), "separate the populations: {text}");
+    assert!(text.contains("pipeline A queue/inflight: not measured"), "file presence is not runtime activity: {text}");
+    assert!(!text.contains("* pending: 0") && !text.contains("* indexing: 0"), "do not invent activity counters: {text}");
+    assert!(!text.contains("no_blocker_detected"), "timeouts cannot certify health: {text}");
+    assert!(!text.contains("every eligible source file is indexed AND parsed"));
+    let recovery_contract = [
+        ("scope before retry", text.contains("confirm the affected files belong to the intended indexing scope")),
+        ("current cache invalidation", text.contains("invalidates the project's IndexedFile rows and notifies the indexer's RAM cache")),
+        ("no mandatory restart", !text.contains("without an indexer restart right after")),
+        ("current persisted reason", !text.contains("last_error_reason")),
+        ("no exact-file API invented", text.contains("does not provide an exact-file retry")),
+    ];
+    let broken = recovery_contract.iter().filter(|(_, satisfied)| !satisfied)
+        .map(|(name, _)| *name).collect::<Vec<_>>();
+    assert!(broken.is_empty(), "unsafe or obsolete recovery guidance {broken:?}: {text}");
+
+    // Counterfactual: an intentional exclusion must not retain the failure verdict.
+    server.graph_store.execute(
+        "UPDATE ist.indexedfile SET skip_reason='generated' \
+         WHERE project_code='PGT' AND skip_reason='parse_timeout'"
+    ).unwrap();
+    let report = server.axon_diagnose_indexing(&json!({"project": "PGT"})).unwrap();
+    let text = report["content"][0]["text"].as_str().unwrap();
+    assert!(!text.contains("**persisted_parse_failure**"), "generated is not a parse failure: {text}");
+    assert!(text.contains("policy-excluded files: 3"), "exclusions must remain visible: {text}");
+}
+
+#[test]
+fn diagnose_indexing_documentary_only_is_not_a_parser_failure() {
+    let server = create_test_server();
+    server.graph_store.execute(
+        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status, skip_reason) VALUES \
+         ('/docs/settings.json', 'PGT', 1, 'indexed', NULL), \
+         ('/docs/package-lock.json', 'PGT', 1, 'skipped', 'generated')"
+    ).unwrap();
+    server.graph_store.execute(
+        "INSERT INTO ist.chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash) \
+         VALUES ('doc-only', 'file', '/docs/settings.json', 'PGT', '/docs/settings.json', 'file_context', '{}', 'hash')"
+    ).unwrap();
+    let report = server.axon_diagnose_indexing(&json!({"project": "PGT"})).unwrap();
+    let text = report["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("documentary-only files: 1"), "{text}");
+    assert!(text.contains("policy-excluded files: 1"), "{text}");
+    assert!(!text.contains("parser_extraction_gap"), "no AST symbol is required for a document: {text}");
+    assert!(!text.contains("chunk_coverage_partial_gap"), "generated is not missing work: {text}");
+    // The fixture's documentary chunk still awaits an embedding. Removing a
+    // false parser alarm must NOT hide that independent, legitimate problem.
+    assert!(text.contains("indexer_runtime_truth_unavailable"), "retain the semantic-lane warning: {text}");
+    server.graph_store.execute("DELETE FROM ist.chunk WHERE id='doc-only'").unwrap();
+    server.graph_store.execute("DELETE FROM ist.indexedfile WHERE path='/docs/settings.json'").unwrap();
+    let report = server.axon_diagnose_indexing(&json!({"project": "PGT"})).unwrap();
+    let text = report["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("no_blocker_detected"), "a generated-only population is not an indexing failure: {text}");
+}
+
+#[test]
+fn diagnose_indexing_scopes_coverage_and_bounds_failure_paths() {
+    let server = create_test_server();
+    server.graph_store.execute(
+        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status) \
+         VALUES ('/shared/path.rs', 'PGT', 1, 'indexed')"
+    ).unwrap();
+    // A stale chunk from another tenant must not cover PGT's same path.
+    server.graph_store.execute(
+        "INSERT INTO ist.chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash) \
+         VALUES ('foreign-coverage', 'file', '/shared/path.rs', 'PJB', '/shared/path.rs', 'file_context', 'foreign', 'hash')"
+    ).unwrap();
+    server.graph_store.execute(
+        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status, skip_reason) \
+         SELECT '/timeout/path-' || n || '.md', 'PGT', 1, 'skipped', 'parse_timeout' FROM generate_series(1,7) n"
+    ).unwrap();
+    server.graph_store.execute(
+        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status, skip_reason) \
+         VALUES ('/unknown.md', 'PGT', 1, 'skipped', 'future_reason')"
+    ).unwrap();
+    let report = server.axon_diagnose_indexing(&json!({"project": "PGT"})).unwrap();
+    let text = report["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("files WITH chunks (retrievable): 0"), "another tenant must not cover PGT: {text}");
+    assert!(text.contains("`parse_timeout`: 7"), "{text}");
+    assert!(text.contains("paths 5/7"), "sample must disclose its bound: {text}");
+    assert!(!text.contains("path-6.md") && !text.contains("path-7.md"), "sample must stay bounded: {text}");
+    assert!(text.contains("unqualified_skip_reason") && text.contains("future_reason"), "{text}");
+    assert!(!text.contains("no_blocker_detected"), "unknown is not healthy: {text}");
+}
+
+#[test]
+fn diagnose_indexing_unavailable_coverage_does_not_invent_zeroes() {
+    let server = create_test_server();
+    // Reversible fault injection in this test's disposable clone only.
+    server.graph_store.execute(
+        "ALTER TABLE ist.indexedfile RENAME COLUMN skip_reason TO unavailable_skip_reason"
+    ).unwrap();
+    let report = server.axon_diagnose_indexing(&json!({"project": "PGT"})).unwrap();
+    let text = report["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("inconclusive_file_coverage_unavailable"), "{text}");
+    assert!(!text.contains("enrolled files: 0"), "unavailable is not empty: {text}");
+    assert!(!text.contains("no_blocker_detected"), "{text}");
+}
+
 /// REQ-AXO-902325 — `run_query_count` must decode the WHOLE numeric family, not just
 /// `int8`.
 ///
