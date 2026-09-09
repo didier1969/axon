@@ -232,6 +232,29 @@ impl McpServer {
         "apply_guidelines",
     ];
 
+    /// REQ-AXO-902560 / REQ-AXO-902583 / REQ-AXO-902621 — clés de guidance MCP
+    /// internes n'appartenant à aucune charge utile métier.
+    pub(crate) const GUIDANCE_ONLY_KEYS: &[&str] = &[
+        "next_action",
+        "canonical_sources",
+        "next",
+        "next_call_hint",
+        "status",
+        "operator_guidance",
+        "follow_up_tools",
+        "derived_docs_refresh",
+        "parameter_repair",
+        "fallback_guidance",
+        "row_count",
+        "rows_rendered",
+        "truncated",
+        "ignored_parameters",
+        "call_count",
+        "failed_count",
+        "failed_calls",
+        "parameter_dispositions",
+    ];
+
     pub fn new(graph_store: Arc<GraphStore>) -> Self {
         let soll_cache = SollSnapshotCache::new(graph_store.clone());
         Self {
@@ -752,7 +775,7 @@ impl McpServer {
         GuidanceOutcome::none()
     }
 
-    fn attach_default_tool_guidance(
+    pub(crate) fn attach_default_tool_guidance(
         &self,
         normalized_name: &str,
         arguments: &Value,
@@ -783,6 +806,18 @@ impl McpServer {
             return response;
         };
 
+        // REQ-AXO-902560 (Critère 1) — vérification préalable de charge utile dans content.
+        let has_useful_content = object
+            .get("content")
+            .and_then(Value::as_array)
+            .map_or(false, |items| {
+                items.iter().any(|item| {
+                    item.get("text")
+                        .and_then(Value::as_str)
+                        .map_or(false, |t| !t.trim().is_empty())
+                })
+            });
+
         let data = object
             .entry("data".to_string())
             .or_insert_with(|| Value::Object(serde_json::Map::new()));
@@ -810,6 +845,43 @@ impl McpServer {
         data_object
             .entry("canonical_sources".to_string())
             .or_insert_with(Self::canonical_sources_snapshot);
+
+        // REQ-AXO-902560 (Critère 1) — conversion générique des enveloppes vides en `status: degraded`.
+        // Toute réponse `status: ok` dont le champ de charge utile attendu est vide ou absent
+        // (aucun texte utile dans `content` ET `data` vide ou restreint aux clés de `GUIDANCE_ONLY_KEYS`)
+        // est convertie en `status: degraded` nommant la surface défaillante dans l'assemblage d'enveloppe.
+        let payload_free = data_object
+            .keys()
+            .all(|key| Self::GUIDANCE_ONLY_KEYS.contains(&key.as_str()));
+        let current_status = data_object
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("ok");
+
+        let empty_payload_notice = if !is_error
+            && (current_status == "ok" || current_status.is_empty())
+            && !has_useful_content
+            && payload_free
+        {
+            data_object.insert("status".to_string(), json!("degraded"));
+            data_object.insert("degraded_surface".to_string(), json!(normalized_name));
+            match data_object.get_mut("surfaces_degraded") {
+                Some(Value::Array(arr)) => {
+                    let val = json!(normalized_name);
+                    if !arr.contains(&val) {
+                        arr.push(val);
+                    }
+                }
+                _ => {
+                    data_object.insert("surfaces_degraded".to_string(), json!([normalized_name]));
+                }
+            }
+            let notice = format!("status: degraded — surface `{normalized_name}` returned an empty payload");
+            data_object.insert("rendered_text".to_string(), json!(notice));
+            Some(notice)
+        } else {
+            None
+        };
 
         let status = data_object
             .get("status")
@@ -994,6 +1066,20 @@ impl McpServer {
             }
         } // end attach_full (REQ-AXO-901947 terse-default gate)
 
+        if let Some(ref notice) = empty_payload_notice {
+            object.insert(
+                "content".to_string(),
+                json!([{ "type": "text", "text": notice }]),
+            );
+            if let Some(structured_object) =
+                object.get_mut("structuredContent").and_then(Value::as_object_mut)
+            {
+                if structured_object.get("status").and_then(Value::as_str) == Some("ok") {
+                    structured_object.insert("status".to_string(), json!("degraded"));
+                }
+            }
+        }
+
         // REQ-AXO-902560 — the SYMMETRIC half of REQ-AXO-902517 below, and the
         // one that was missing. 902517 mirrors `data` into `structuredContent`
         // for clients that read only the protocol field. But a tool whose whole
@@ -1018,50 +1104,6 @@ impl McpServer {
         // it holds belongs to the guidance stub. A tool with a rich `data` is
         // already reaching the client, and duplicating its text would inflate
         // every response for nothing.
-        const GUIDANCE_ONLY_KEYS: &[&str] = &[
-            "next_action",
-            "canonical_sources",
-            "next",
-            "next_call_hint",
-            "status",
-            "operator_guidance",
-            "follow_up_tools",
-            "derived_docs_refresh",
-            "parameter_repair",
-            "fallback_guidance",
-            // REQ-AXO-902583 — un COMPTE est de la guidance, pas une charge utile :
-            // la charge utile, ce sont les lignes, et elles sont dans `content`.
-            // Sans cette entrée, un outil qui se met à compter ses résultats PERD
-            // son miroir et redevient invisible aux clients qui ne lisent que
-            // `structuredContent` — la régression exacte que REQ-AXO-902560 avait
-            // fermée, réintroduite par le correctif qui rendait `sql` plus bavard.
-            // Attrapée par `test_sql_tool_is_read_only_rejects_mutations`.
-            "row_count",
-            // REQ-AXO-902621 — la régression que le commentaire ci-dessus ANNONÇAIT,
-            // survenue quatre heures plus tard : `7ab37eb9` a ajouté ces deux clés
-            // pour dire QUELLE troncature a eu lieu, sans les déclarer ici. `sql` a
-            // donc reperdu son miroir, et tout client qui ne lit que
-            // `structuredContent` a reperdu sa charge utile. Ce sont deux verdicts
-            // sur la RESTITUTION, pas les lignes elles-mêmes — les lignes sont dans
-            // `content`. Attrapée par `test_sql_tool_is_read_only_rejects_mutations`.
-            "rows_rendered",
-            "truncated",
-            // REQ-AXO-902583 — même raison : nommer un paramètre avalé est de la
-            // guidance sur l'APPEL, jamais la charge utile de la réponse.
-            "ignored_parameters",
-            // REQ-AXO-902583 — les comptes de `batch`. `results` en revanche N'Y EST
-            // PAS, et ne doit jamais y entrer : c'est la charge utile, et l'y mettre
-            // ferait écrire le lot une troisième fois.
-            "call_count",
-            "failed_count",
-            "failed_calls",
-            // REQ-AXO-902583 (P4) — nommer un paramètre valide mais SANS EFFET est
-            // de la guidance sur l'APPEL, exactement comme `ignored_parameters`.
-            // L'omettre ici rendrait `soll_get` et `inspect` muets aux clients qui
-            // ne lisent que `structuredContent`, dès qu'un appelant pose un
-            // paramètre conditionnel — la régression de REQ-AXO-902560, une fois de plus.
-            "parameter_dispositions",
-        ];
         let rendered_text = object
             .get("content")
             .and_then(|content| content.as_array())
@@ -1074,7 +1116,7 @@ impl McpServer {
             if let Some(data_object) = object.get_mut("data").and_then(Value::as_object_mut) {
                 let payload_free = data_object
                     .keys()
-                    .all(|key| GUIDANCE_ONLY_KEYS.contains(&key.as_str()));
+                    .all(|key| Self::GUIDANCE_ONLY_KEYS.contains(&key.as_str()));
                 if payload_free {
                     data_object.insert("rendered_text".to_string(), json!(text));
                 }

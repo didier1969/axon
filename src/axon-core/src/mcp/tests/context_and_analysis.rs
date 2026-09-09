@@ -7306,3 +7306,181 @@ fn test_data_catalog_action_read_reports_ist_persistence_without_sql_902487() {
         desc
     );
 }
+
+/// REQ-AXO-902560 (Critère 1) — Toute réponse `status: ok` dont la charge utile
+/// est vide ou absente (aucun texte utile dans `content` ET `data` vide ou
+/// restreint aux clés de `GUIDANCE_ONLY_KEYS`) est convertie en `status: degraded`
+/// nommant la surface défaillante dans l'assemblage d'enveloppe.
+#[test]
+fn test_req_axo_902560_generic_envelope_converts_empty_payload_ok_to_degraded() {
+    let server = create_test_server();
+
+    // Cas 1 : Réponse avec content vide et data portant status: ok (aucun payload)
+    let empty_envelope_1 = json!({
+        "content": [],
+        "data": { "status": "ok" }
+    });
+    let result_1 = server.attach_default_tool_guidance("surface_vide_1", &json!({}), empty_envelope_1);
+    assert_eq!(
+        result_1["data"]["status"].as_str(),
+        Some("degraded"),
+        "Cas 1 : status doit être converti en degraded : {result_1:?}"
+    );
+    assert_eq!(
+        result_1["structuredContent"]["status"].as_str(),
+        Some("degraded"),
+        "Cas 1 : structuredContent.status doit être degraded : {result_1:?}"
+    );
+    let degraded_surfaces_1: Vec<&str> = result_1["data"]["surfaces_degraded"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(
+        degraded_surfaces_1.contains(&"surface_vide_1"),
+        "Cas 1 : surfaces_degraded doit nommer la surface défaillante : {result_1:?}"
+    );
+    let text_1 = result_1["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text_1.contains("status: degraded") && text_1.contains("surface_vide_1"),
+        "Cas 1 : content doit porter le message nommant la surface : {text_1}"
+    );
+    assert_eq!(
+        result_1["data"]["rendered_text"].as_str(),
+        Some(text_1),
+        "Cas 1 : data.rendered_text doit miroiter le message d'enveloppe"
+    );
+
+    // Cas 2 : Réponse avec content en espaces blancs et data vide ({})
+    let empty_envelope_2 = json!({
+        "content": [{ "type": "text", "text": "   \n\t  " }],
+        "data": {}
+    });
+    let result_2 = server.attach_default_tool_guidance("surface_vide_2", &json!({}), empty_envelope_2);
+    assert_eq!(
+        result_2["data"]["status"].as_str(),
+        Some("degraded"),
+        "Cas 2 : status doit être converti en degraded"
+    );
+    let degraded_surfaces_2: Vec<&str> = result_2["data"]["surfaces_degraded"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(degraded_surfaces_2.contains(&"surface_vide_2"));
+
+    // Cas 3 (Contrôle positif A) : Réponse avec texte utile dans content
+    let ok_with_content = json!({
+        "content": [{ "type": "text", "text": "Charge utile réelle" }],
+        "data": { "status": "ok" }
+    });
+    let result_3 = server.attach_default_tool_guidance("surface_saine_3", &json!({}), ok_with_content);
+    assert_eq!(
+        result_3["data"]["status"].as_str(),
+        Some("ok"),
+        "Cas 3 : une charge utile présente dans content reste status: ok"
+    );
+
+    // Cas 4 (Contrôle positif B) : Réponse avec charge utile dans data
+    let ok_with_data = json!({
+        "content": [],
+        "data": { "status": "ok", "custom_results": [1, 2, 3] }
+    });
+    let result_4 = server.attach_default_tool_guidance("surface_saine_4", &json!({}), ok_with_data);
+    assert_eq!(
+        result_4["data"]["status"].as_str(),
+        Some("ok"),
+        "Cas 4 : une charge utile présente dans data reste status: ok"
+    );
+
+    // Cas 5 (Contrôle d'erreur) : Réponse en erreur (isError = true)
+    let error_envelope = json!({
+        "isError": true,
+        "content": [],
+        "data": { "status": "failed" }
+    });
+    let result_5 = server.attach_default_tool_guidance("surface_erreur_5", &json!({}), error_envelope);
+    assert_eq!(result_5["isError"].as_bool(), Some(true));
+    assert_ne!(
+        result_5["data"]["status"].as_str(),
+        Some("degraded"),
+        "Cas 5 : une vraie erreur n'est pas transformée en degraded"
+    );
+}
+
+/// REQ-AXO-902560 (Critère 4) — `inspect mode=source` rend le corps du symbole,
+/// ou dit explicitement pourquoi il ne le peut pas (chunks absents dans `ist.Chunk`,
+/// contention, etc.) dans le texte rendu (`out`), au lieu de laisser la section muette.
+#[test]
+fn test_req_axo_902560_inspect_mode_source_explains_missing_source() {
+    let _guard = env_lock();
+    let _sg_guard = crate::service_guard::lock_for_tests();
+    crate::service_guard::reset_for_tests();
+
+    use crate::test_support::ist_fixtures::{CallFixture, IstSeed, SymbolFixture};
+
+    const SYM: &str = "INSP::missing_chunks.rs::orphan_fn";
+
+    // Symbol semé dans l'IST mais SANS aucun chunk dans ist.chunk
+    let seed = IstSeed::new()
+        .symbol(SymbolFixture::new(SYM, "orphan_fn", "function", "INSP"))
+        .symbol(SymbolFixture::new("INSP::caller.rs::caller_fn", "caller_fn", "function", "INSP"))
+        .call(CallFixture::canonical("INSP::caller.rs::caller_fn", SYM, "INSP"));
+
+    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(seed).unwrap();
+
+    // 1. Appel normal : chunks absents
+    let resp = harness
+        .server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "inspect",
+                "arguments": { "symbol": "orphan_fn", "project": "INSP", "mode": "source" }
+            })),
+            id: Some(json!(9025604)),
+        })
+        .unwrap()
+        .result
+        .expect("inspect result");
+
+    let text = resp["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("Source body unavailable") || text.contains("Lossy source reconstruction withheld"),
+        "La section source ne doit PAS être muette : {text}"
+    );
+    assert!(
+        text.contains("chunks_absent_in_ist_chunk"),
+        "La raison chunks_absent_in_ist_chunk doit être explicitée dans le texte : {text}"
+    );
+    assert!(
+        text.contains("Callers"),
+        "Les appelants doivent toujours être rendus même sans source : {text}"
+    );
+
+    // 2. Avec backend pressure active
+    {
+        crate::service_guard::record_latency(crate::service_guard::ServiceKind::Sql, 1_700);
+
+        let resp_pressure = harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "inspect",
+                    "arguments": { "symbol": "orphan_fn", "project": "INSP", "mode": "source" }
+                })),
+                id: Some(json!(9025605)),
+            })
+            .unwrap()
+            .result
+            .expect("inspect result with pressure");
+
+        let text_pressure = resp_pressure["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text_pressure.contains("backend_pressure_active"),
+            "Le texte rendu doit expliciter backend_pressure_active : {text_pressure}"
+        );
+    }
+}
+
