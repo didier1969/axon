@@ -228,9 +228,47 @@ impl McpServer {
         );
     }
 
+    /// REQ-AXO-902555 — Canonicalize client identifiers for telemetry rollup.
+    /// e.g. "claude-code" -> "claude_code", "codex-test" -> "codex", "gemini-cli" -> "gemini".
+    pub(crate) fn canonical_client_name(raw: &str) -> String {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("claude") {
+            "claude_code".to_string()
+        } else if lower.starts_with("codex") {
+            "codex".to_string()
+        } else if lower.starts_with("gemini") {
+            "gemini".to_string()
+        } else if lower.starts_with("antigravity") {
+            "antigravity".to_string()
+        } else {
+            lower
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+                .collect()
+        }
+    }
+
+    /// REQ-AXO-902555 — Resolve client attribution: arguments -> data -> transport guard -> env var.
+    pub(crate) fn resolve_mcp_client(arguments: &Value, data: Option<&Value>) -> String {
+        let raw = arguments
+            .get("client")
+            .or_else(|| arguments.get("_client"))
+            .and_then(Value::as_str)
+            .or_else(|| data.and_then(|d| d.get("client")).and_then(Value::as_str))
+            .map(|s| s.to_string())
+            .or_else(crate::mcp::request_client_name)
+            .or_else(|| std::env::var("AXON_CLIENT_NAME").ok())
+            .unwrap_or_default();
+        Self::canonical_client_name(&raw)
+    }
+
     /// REQ-AXO-901961 — best-effort per-call telemetry, called for EVERY tool
     /// response at the dispatch chokepoint (S1). Upserts ONE time-bucketed
-    /// aggregate row per (tool, project, ok/error, hour) — signature-only, never
+    /// aggregate row per (tool, project, client, ok/error, hour) — signature-only, never
     /// argument content (PIL-AXO-9003). Bounded by construction (the rollup IS
     /// the table). Failure-tolerant: a telemetry write must never affect the
     /// tool response (`let _`). Average latency derives from latency_sum_ms /
@@ -271,6 +309,7 @@ impl McpServer {
             .and_then(|d| d.get("project_code"))
             .and_then(Value::as_str)
             .unwrap_or("");
+        let client = Self::resolve_mcp_client(arguments, data);
         let build_id =
             std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
         let lm = latency_ms.max(0);
@@ -280,9 +319,9 @@ impl McpServer {
         let rq = payload_bytes(arguments);
         let rs = payload_bytes(response);
         let _ = self.graph_store.execute_param(
-            "INSERT INTO axon.mcp_call_stat (tool, project_code, status, bucket_hour, call_count, latency_sum_ms, latency_max_ms, contract_version, response_bytes_sum, response_bytes_max, request_bytes_sum)
-             VALUES (?, ?, ?, date_trunc('hour', now()), 1, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (tool, project_code, status, bucket_hour)
+            "INSERT INTO axon.mcp_call_stat (tool, project_code, client, status, bucket_hour, call_count, latency_sum_ms, latency_max_ms, contract_version, response_bytes_sum, response_bytes_max, request_bytes_sum)
+             VALUES (?, ?, ?, ?, date_trunc('hour', now()), 1, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (tool, project_code, client, status, bucket_hour)
              DO UPDATE SET call_count = axon.mcp_call_stat.call_count + 1,
                            latency_sum_ms = axon.mcp_call_stat.latency_sum_ms + EXCLUDED.latency_sum_ms,
                            latency_max_ms = greatest(axon.mcp_call_stat.latency_max_ms, EXCLUDED.latency_max_ms),
@@ -290,7 +329,7 @@ impl McpServer {
                            response_bytes_max = greatest(axon.mcp_call_stat.response_bytes_max, EXCLUDED.response_bytes_max),
                            request_bytes_sum = axon.mcp_call_stat.request_bytes_sum + EXCLUDED.request_bytes_sum,
                            contract_version = EXCLUDED.contract_version",
-            &json!([tool, project_code, status, lm, lm, build_id, rs, rs, rq]),
+            &json!([tool, project_code, client, status, lm, lm, build_id, rs, rs, rq]),
         );
     }
 
@@ -1081,6 +1120,11 @@ impl McpServer {
             &json!([MCP_CALL_STAT_RETENTION_DAYS]),
         );
         let project_code = args.get("project_code").and_then(Value::as_str).unwrap_or("");
+        let client_filter = args
+            .get("client")
+            .and_then(Value::as_str)
+            .map(Self::canonical_client_name)
+            .unwrap_or_default();
         let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(20).max(1);
         let window_hours = args
             .get("window_hours")
@@ -1120,10 +1164,11 @@ impl McpServer {
                  FROM axon.mcp_call_stat
                  WHERE bucket_hour > now() - make_interval(hours => ?)
                    AND (? = '' OR project_code = ?)
+                   AND (? = '' OR client = ?)
                  GROUP BY tool
                  ORDER BY {order_clause}
                  LIMIT ?"),
-                &json!([window_hours, project_code, project_code, limit]),
+                &json!([window_hours, project_code, project_code, client_filter, client_filter, limit]),
             )
             .ok()
             .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
@@ -1179,14 +1224,126 @@ impl McpServer {
             })
             .collect();
 
+        // REQ-AXO-902555 — client discipline breakdown and ratios per delivered commit (axon_commit_work).
+        let client_summary_rows = self
+            .graph_store
+            .query_json_param(
+                "SELECT COALESCE(NULLIF(client, ''), 'unknown') AS client_name,
+                        sum(call_count)::bigint AS total_calls,
+                        COALESCE(sum(call_count) FILTER (WHERE tool='axon_commit_work' AND status='ok'), 0)::bigint AS commits
+                 FROM axon.mcp_call_stat
+                 WHERE bucket_hour > now() - make_interval(hours => ?)
+                   AND (? = '' OR project_code = ?)
+                   AND (? = '' OR client = ?)
+                 GROUP BY client_name
+                 ORDER BY total_calls DESC",
+                &json!([window_hours, project_code, project_code, client_filter, client_filter]),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+            .unwrap_or_default();
+
+        let client_tool_rows = self
+            .graph_store
+            .query_json_param(
+                "SELECT COALESCE(NULLIF(client, ''), 'unknown') AS client_name,
+                        tool,
+                        sum(call_count)::bigint AS calls
+                 FROM axon.mcp_call_stat
+                 WHERE bucket_hour > now() - make_interval(hours => ?)
+                   AND (? = '' OR project_code = ?)
+                   AND (? = '' OR client = ?)
+                 GROUP BY client_name, tool
+                 ORDER BY client_name, calls DESC",
+                &json!([window_hours, project_code, project_code, client_filter, client_filter]),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+            .unwrap_or_default();
+
+        let mut client_tools_map: std::collections::HashMap<String, std::collections::BTreeMap<String, i64>> =
+            std::collections::HashMap::new();
+        for r in &client_tool_rows {
+            let c_name = cell(r, 0);
+            let tool_name = cell(r, 1);
+            let c_calls = to_i(&cell(r, 2));
+            client_tools_map.entry(c_name).or_default().insert(tool_name, c_calls);
+        }
+
+        let mut discipline_by_client: Vec<Value> = Vec::new();
+        let mut discipline_lines = String::new();
+
+        for r in &client_summary_rows {
+            let c_name = cell(r, 0);
+            let c_calls = to_i(&cell(r, 1));
+            let c_commits = to_i(&cell(r, 2));
+            let calls_per_commit = if c_commits > 0 {
+                ((c_calls as f64) / (c_commits as f64) * 100.0).round() / 100.0
+            } else {
+                0.0
+            };
+
+            let tool_map = client_tools_map.remove(&c_name).unwrap_or_default();
+            let mut tool_ratios: serde_json::Map<String, Value> = serde_json::Map::new();
+            let mut top_ratios_str = Vec::new();
+
+            for (t_name, t_calls) in &tool_map {
+                if t_name == "axon_commit_work" {
+                    continue;
+                }
+                let ratio = if c_commits > 0 {
+                    (((*t_calls as f64) / (c_commits as f64)) * 100.0).round() / 100.0
+                } else {
+                    0.0
+                };
+                tool_ratios.insert(t_name.clone(), json!(ratio));
+                if c_commits > 0 && top_ratios_str.len() < 4 {
+                    top_ratios_str.push(format!("{}: {:.1}", t_name, ratio));
+                }
+            }
+
+            discipline_lines.push_str(&format!(
+                "| {} | {} | {} | {:.1} | {} |\n",
+                c_name,
+                c_commits,
+                c_calls,
+                calls_per_commit,
+                if c_commits == 0 { "(0 commits — ratio n/a)".to_string() } else { top_ratios_str.join(" · ") }
+            ));
+
+            discipline_by_client.push(json!({
+                "client": c_name,
+                "commits": c_commits,
+                "total_calls": c_calls,
+                "calls_per_commit": calls_per_commit,
+                "tool_ratios": tool_ratios,
+            }));
+        }
+
         let overall_err_pct = if total_calls > 0 {
             (total_errors as f64) * 100.0 / (total_calls as f64)
         } else {
             0.0
         };
+
+        let mut scope_suffix = String::new();
+        if !project_code.is_empty() {
+            scope_suffix.push_str(&format!(", project {project_code}"));
+        }
+        if !client_filter.is_empty() {
+            scope_suffix.push_str(&format!(", client {client_filter}"));
+        }
+
+        let discipline_section = if !discipline_by_client.is_empty() {
+            format!(
+                "\n\n### 🎯 Methodological Discipline by Client (per `axon_commit_work`)\n\n| client | commits | total calls | calls / commit | key tool ratios (calls / commit) |\n|---|---|---|---|---|\n{discipline_lines}"
+            )
+        } else {
+            String::new()
+        };
+
         let report = format!(
-            "## 📊 MCP Telemetry (last {window_hours}h{})\n\n**Total calls:** {total_calls} · **errors:** {total_errors} ({overall_err_pct:.1}%) · **payload:** {:.1} MiB{}\n\n| tool | calls | errors | avg ms | max ms | resp KiB | req KiB | resp max B |\n|---|---|---|---|---|---|---|---|\n{lines}\n_Signature-only (tool + ok/error + project) — sizes are measured, argument CONTENT never is. Sorted by {}. PG-native rollup._",
-            if project_code.is_empty() { String::new() } else { format!(", project {project_code}") },
+            "## 📊 MCP Telemetry (last {window_hours}h{scope_suffix})\n\n**Total calls:** {total_calls} · **errors:** {total_errors} ({overall_err_pct:.1}%) · **payload:** {:.1} MiB{}\n\n| tool | calls | errors | avg ms | max ms | resp KiB | req KiB | resp max B |\n|---|---|---|---|---|---|---|---|\n{lines}{discipline_section}\n_Signature-only (tool + ok/error + project + client) — sizes are measured, argument CONTENT never is. Sorted by {}. PG-native rollup._",
             total_bytes as f64 / 1_048_576.0,
             if sort_by_bytes { " · sorted by weight" } else { "" },
             if sort_by_bytes { "payload weight" } else { "call volume" },
@@ -1198,7 +1355,7 @@ impl McpServer {
                 "mcp usage + latency analytics assembled",
                 "scope:mcp_surface",
                 &report,
-                &["filter by project_code, or widen window_hours, to drill down"],
+                &["filter by project_code or client, or widen window_hours, to drill down"],
                 "high",
             )}],
             "data": {
@@ -1206,6 +1363,7 @@ impl McpServer {
                 "total_calls": total_calls,
                 "total_errors": total_errors,
                 "window_hours": window_hours,
+                "discipline_by_client": discipline_by_client,
                 "privacy": "signature-only — no argument content is ever stored",
             }
         }))

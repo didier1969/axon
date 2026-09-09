@@ -157,6 +157,30 @@ async fn handle_mcp_post(
             .get("x-axon-client-cwd")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        // REQ-AXO-902555 — client attribution. Carried via header or extracted from payload.
+        let client_name = headers
+            .get("x-axon-client-name")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                if payload.method == "initialize" {
+                    payload
+                        .params
+                        .as_ref()
+                        .and_then(|p| p.get("clientInfo"))
+                        .and_then(|ci| ci.get("name"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                headers
+                    .get("user-agent")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+            });
 
         let response = if payload.id.is_none() {
             let _ = tokio::task::spawn_blocking(move || server.handle_notification(payload)).await;
@@ -170,8 +194,10 @@ async fn handle_mcp_post(
             // REQ-AXO-902286 — install the client cwd for the duration of this one
             // synchronous dispatch; the RAII guard clears it (even on panic) before the
             // blocking thread is reused.
+            // REQ-AXO-902555 — install the client identity guard symmetrically.
             match tokio::task::spawn_blocking(move || {
                 let _client_cwd_guard = crate::mcp::ClientCwdGuard::install(client_cwd);
+                let _client_name_guard = crate::mcp::ClientNameGuard::install(client_name);
                 server.handle_request(payload)
             })
             .await

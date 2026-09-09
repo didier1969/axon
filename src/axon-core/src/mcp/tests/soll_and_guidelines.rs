@@ -291,6 +291,116 @@ fn test_mcp_call_stat_retention_prunes_stale_buckets_on_telemetry_report() {
 }
 
 #[test]
+fn test_mcp_call_telemetry_client_attribution_and_discipline_ratios_902555() {
+    // REQ-AXO-902555 — client attribution in mcp_call_stat and discipline ratios
+    // per committed unit of work (axon_commit_work).
+    let server = create_test_server();
+    let proj = "TLMCLIENT902555";
+    let tool = "soll_query_context";
+
+    // 1. Claude performs 4 queries and 1 commit.
+    {
+        let _guard = crate::mcp::ClientNameGuard::install(Some("claude-code".to_string()));
+        for _ in 0..4 {
+            let ok = json!({ "data": { "project_code": proj } });
+            let args = json!({ "x": 1 });
+            server.record_mcp_call(tool, &args, &ok, 10);
+        }
+        let commit_ok = json!({ "data": { "project_code": proj } });
+        let commit_args = json!({});
+        server.record_mcp_call("axon_commit_work", &commit_args, &commit_ok, 50);
+    }
+
+    // 2. Codex performs 2 queries and 2 commits on the same project/hour.
+    {
+        let _guard = crate::mcp::ClientNameGuard::install(Some("codex".to_string()));
+        for _ in 0..2 {
+            let ok = json!({ "data": { "project_code": proj } });
+            let args = json!({ "x": 2 });
+            server.record_mcp_call(tool, &args, &ok, 15);
+        }
+        for _ in 0..2 {
+            let commit_ok = json!({ "data": { "project_code": proj } });
+            let commit_args = json!({});
+            server.record_mcp_call("axon_commit_work", &commit_args, &commit_ok, 40);
+        }
+    }
+
+    // 3. Database verification: two separate rows for the same tool + project in the same bucket hour
+    let row_count = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT count(*) FROM axon.mcp_call_stat WHERE project_code='{proj}' AND tool='{tool}'"
+        ))
+        .unwrap();
+    assert_eq!(row_count, 2, "claude and codex must have distinct buckets in mcp_call_stat without PK collision");
+
+    let claude_calls = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT call_count FROM axon.mcp_call_stat WHERE project_code='{proj}' AND tool='{tool}' AND client='claude_code'"
+        ))
+        .unwrap();
+    assert_eq!(claude_calls, 4, "claude_code must record 4 calls for the tool");
+
+    let codex_calls = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT call_count FROM axon.mcp_call_stat WHERE project_code='{proj}' AND tool='{tool}' AND client='codex'"
+        ))
+        .unwrap();
+    assert_eq!(codex_calls, 2, "codex must record 2 calls for the tool");
+
+    // 4. mcp_telemetry_report with client filter: only claude_code
+    let report_claude = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_telemetry_report",
+                "arguments": { "project_code": proj, "client": "claude_code", "window_hours": 24 }
+            })),
+            id: Some(json!(9025551)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(report_claude["data"]["total_calls"].as_i64(), Some(5)); // 4 queries + 1 commit
+
+    // 5. Cross-client aggregate report: discipline & ratios per commit
+    let report_all = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_telemetry_report",
+                "arguments": { "project_code": proj, "window_hours": 24 }
+            })),
+            id: Some(json!(9025552)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let text_all = report_all["content"][0]["text"].as_str().unwrap_or("");
+    assert!(text_all.contains("claude_code"), "report must show claude_code discipline");
+    assert!(text_all.contains("codex"), "report must show codex discipline");
+
+    let discipline = report_all["data"]["discipline_by_client"].as_array().expect("discipline_by_client array");
+    assert_eq!(discipline.len(), 2, "must have discipline stats for both clients");
+
+    let claude_stat = discipline.iter().find(|c| c["client"] == "claude_code").expect("claude_code stats");
+    assert_eq!(claude_stat["commits"].as_i64(), Some(1));
+    assert_eq!(claude_stat["total_calls"].as_i64(), Some(5));
+    assert_eq!(claude_stat["tool_ratios"]["soll_query_context"].as_f64(), Some(4.0));
+
+    let codex_stat = discipline.iter().find(|c| c["client"] == "codex").expect("codex stats");
+    assert_eq!(codex_stat["commits"].as_i64(), Some(2));
+    assert_eq!(codex_stat["total_calls"].as_i64(), Some(4));
+    assert_eq!(codex_stat["tool_ratios"]["soll_query_context"].as_f64(), Some(1.0));
+}
+
+#[test]
 fn test_sql_tool_is_read_only_rejects_mutations() {
     // REQ-AXO-901966 — the `sql` tool must refuse writes (contract = read-only);
     // it runs on the writer-capable pool, so the guard is load-bearing.

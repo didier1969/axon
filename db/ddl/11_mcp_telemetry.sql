@@ -14,14 +14,39 @@ CREATE SCHEMA IF NOT EXISTS axon;
 CREATE TABLE IF NOT EXISTS axon.mcp_call_stat (
     tool             TEXT        NOT NULL,
     project_code     TEXT        NOT NULL DEFAULT '',
+    client           TEXT        NOT NULL DEFAULT '',
     status           TEXT        NOT NULL DEFAULT 'ok',   -- 'ok' | 'error'
     bucket_hour      TIMESTAMPTZ NOT NULL,
     call_count       BIGINT      NOT NULL DEFAULT 0,
     latency_sum_ms   BIGINT      NOT NULL DEFAULT 0,
     latency_max_ms   INTEGER     NOT NULL DEFAULT 0,
     contract_version TEXT        NOT NULL DEFAULT '',
-    PRIMARY KEY (tool, project_code, status, bucket_hour)
+    PRIMARY KEY (tool, project_code, client, status, bucket_hour)
 );
+
+-- REQ-AXO-902555 — client attribution column and primary key migration.
+ALTER TABLE axon.mcp_call_stat
+    ADD COLUMN IF NOT EXISTS client TEXT NOT NULL DEFAULT '';
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'mcp_call_stat_pkey'
+          AND conrelid = 'axon.mcp_call_stat'::regclass
+    ) THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_attribute a
+            JOIN pg_constraint c ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+            WHERE c.conname = 'mcp_call_stat_pkey'
+              AND c.conrelid = 'axon.mcp_call_stat'::regclass
+              AND a.attname = 'client'
+        ) THEN
+            ALTER TABLE axon.mcp_call_stat DROP CONSTRAINT mcp_call_stat_pkey;
+            ALTER TABLE axon.mcp_call_stat ADD CONSTRAINT mcp_call_stat_pkey PRIMARY KEY (tool, project_code, client, status, bucket_hour);
+        END IF;
+    END IF;
+END $$;
 
 -- REQ-AXO-902621 — le POIDS des appels, à côté de leur latence.
 --

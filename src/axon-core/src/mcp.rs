@@ -19,11 +19,18 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 thread_local! {
     static REQUEST_CLIENT_CWD: std::cell::RefCell<Option<String>> =
         std::cell::RefCell::new(None);
+    static REQUEST_CLIENT_NAME: std::cell::RefCell<Option<String>> =
+        std::cell::RefCell::new(None);
 }
 
 /// The client cwd carried by the current request, if the transport installed one.
 pub(crate) fn request_client_cwd() -> Option<String> {
     REQUEST_CLIENT_CWD.with(|c| c.borrow().clone())
+}
+
+/// REQ-AXO-902555 — The client identity carried by the current request, if the transport installed one.
+pub(crate) fn request_client_name() -> Option<String> {
+    REQUEST_CLIENT_NAME.with(|c| c.borrow().clone())
 }
 
 /// RAII guard that installs the per-request client cwd and clears it on drop.
@@ -41,6 +48,22 @@ impl ClientCwdGuard {
 impl Drop for ClientCwdGuard {
     fn drop(&mut self) {
         REQUEST_CLIENT_CWD.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+/// REQ-AXO-902555 — RAII guard that installs the per-request client identity and clears it on drop.
+pub(crate) struct ClientNameGuard;
+
+impl ClientNameGuard {
+    pub(crate) fn install(client_name: Option<String>) -> Self {
+        REQUEST_CLIENT_NAME.with(|c| *c.borrow_mut() = client_name);
+        ClientNameGuard
+    }
+}
+
+impl Drop for ClientNameGuard {
+    fn drop(&mut self) {
+        REQUEST_CLIENT_NAME.with(|c| *c.borrow_mut() = None);
     }
 }
 

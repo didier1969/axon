@@ -23,6 +23,21 @@ use std::time::Duration;
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const HEAVY_TIMEOUT_SECS: u64 = 180;
 
+/// REQ-AXO-902555 — Extract client identity from initialize request params.
+fn extract_client_name(payload: &Value) -> Option<String> {
+    if payload.get("method").and_then(Value::as_str) == Some("initialize") {
+        payload
+            .get("params")
+            .and_then(|p| p.get("clientInfo"))
+            .and_then(|ci| ci.get("name"))
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    }
+}
+
 /// Tools whose server-side work (batch SOLL writes, revision ops, full-project
 /// scans / doc generation) legitimately exceeds the default ceiling under load.
 const HEAVY_TOOLS: &[&str] = &[
@@ -93,6 +108,10 @@ fn main() {
         .ok()
         .map(|p| p.to_string_lossy().to_string())
         .filter(|s| !s.trim().is_empty());
+    // REQ-AXO-902555 — track caller client identity (e.g. claude-code, codex, gemini).
+    let mut client_name = env::var("AXON_CLIENT_NAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -109,6 +128,11 @@ fn main() {
                     Ok(json_payload) => {
                         let is_notification = json_payload.get("id").is_none();
                         let method = json_payload.get("method").and_then(Value::as_str);
+
+                        // REQ-AXO-902555 — capture client identity on initialize handshake.
+                        if let Some(extracted) = extract_client_name(&json_payload) {
+                            client_name = Some(extracted);
+                        }
 
                         // 1. Keepalive ping (MCP spec 2024-11-05).
                         // Standard MCP ping method requires an empty object result with caller's ID.
@@ -135,6 +159,9 @@ fn main() {
                             if let Some(cwd) = client_cwd.as_deref() {
                                 request = request.header("X-Axon-Client-Cwd", cwd);
                             }
+                            if let Some(client) = client_name.as_deref() {
+                                request = request.header("X-Axon-Client-Name", client);
+                            }
                             // Fire-and-forget delivery to backend; never write anything to stdout.
                             let _ = request.json(&json_payload).send();
                             continue;
@@ -148,6 +175,10 @@ fn main() {
                         if let Some(cwd) = client_cwd.as_deref() {
                             // REQ-AXO-902286 — carry the caller's project directory.
                             request = request.header("X-Axon-Client-Cwd", cwd);
+                        }
+                        if let Some(client) = client_name.as_deref() {
+                            // REQ-AXO-902555 — carry the caller's client identity.
+                            request = request.header("X-Axon-Client-Name", client);
                         }
 
                         match request.json(&json_payload).send() {
@@ -284,5 +315,36 @@ mod tests {
 
         let req = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
         assert!(req.get("id").is_some());
+    }
+
+    #[test]
+    fn extract_client_name_finds_name_in_initialize_handshake() {
+        let init_payload = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "claude-code",
+                    "version": "1.0.0"
+                }
+            }
+        });
+        assert_eq!(
+            extract_client_name(&init_payload),
+            Some("claude-code".to_string())
+        );
+
+        let non_init = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "query"
+            }
+        });
+        assert_eq!(extract_client_name(&non_init), None);
     }
 }
