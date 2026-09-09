@@ -717,7 +717,10 @@ mod tests {
     async fn pipeline_a_clean_skips_unparseable_extension_without_error() {
         // REQ-AXO-901885 — a file whose extension has no parser is NOT an error:
         // A2 emits a valid zero-symbol ParsedFile so A3 writes the IndexedFile
-        // marker (zero chunks) and the scanner stops re-queueing it. Erroring
+        // marker and the scanner stops re-queueing it. Non-empty admitted files
+        // retain a documentary file_context chunk (REQ-AXO-902393/902402), even
+        // without an AST symbol: skipping extraction is not discarding content.
+        // Erroring
         // here was the root of the unbounded re-parse loop REQ-AXO-901885 fixed,
         // and the Memory Shield (REQ-AXO-901895) relies on the same non-error
         // zero-symbol skip path. (Was: pipeline_a_records_error_metrics_on_
@@ -733,16 +736,66 @@ mod tests {
             a3: 1,
         };
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let handles = spawn_pipeline_a(
+        let mut handles = spawn_pipeline_a(
             counts,
             PipelineChannelCaps::default(),
-            store,
+            store.clone(),
             super::super::const_resolver("AXO"),
         );
 
         handles.input_tx.send(admitted(path.clone())).await.unwrap();
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // REQ-AXO-901885 / REQ-AXO-902217 — this is a completion contract,
+        // not a 500 ms performance assertion. A3 records its metrics before
+        // sending the receipt, after the marker transaction has committed.
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(LIVENESS_TIMEOUT_SECS),
+            handles.output_rx.recv(),
+        )
+        .await
+        .expect("the zero-symbol file must eventually be enrolled")
+        .expect("A3 must acknowledge the clean skip, not silently drop the file");
+        assert_eq!(receipt.path, path.to_string_lossy());
+        assert_eq!(receipt.symbols_count, 0);
+        assert_eq!(
+            receipt.chunk_ids.len(),
+            1,
+            "a non-empty file without symbols retains one documentary chunk"
+        );
+        let chunks: serde_json::Value = serde_json::from_str(
+            &store
+                .query_json_param(
+                    "SELECT id, source_type, source_id, kind FROM Chunk WHERE file_path = ?",
+                    &serde_json::json!([path.to_string_lossy()]),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            chunks,
+            serde_json::json!([[
+                receipt.chunk_ids[0],
+                "file",
+                path.to_string_lossy(),
+                "file_context"
+            ]]),
+            "the receipt must name a persisted file chunk, not an invented symbol"
+        );
+
+        let marker: serde_json::Value = serde_json::from_str(
+            &store
+                .query_json_param(
+                    "SELECT content_hash FROM IndexedFile WHERE path = ?",
+                    &serde_json::json!([path.to_string_lossy()]),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            marker,
+            serde_json::json!([[receipt.content_hash]]),
+            "a clean skip must persist its hash, otherwise it will be re-queued"
+        );
 
         let snap_a1 = handles.metrics_a1.snapshot();
         let snap_a2 = handles.metrics_a2.snapshot();
@@ -765,7 +818,7 @@ mod tests {
         );
         assert_eq!(
             snap_a3.items_out_total, 1,
-            "A3 enrolls the zero-symbol file (marker write, zero chunks)",
+            "A3 enrolls the zero-symbol file (marker and documentary chunk)",
         );
         assert_eq!(snap_a3.errors_total, 0, "A3 marker write is not an error");
     }
