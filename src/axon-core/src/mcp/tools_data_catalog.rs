@@ -286,14 +286,48 @@ impl McpServer {
             summary.artifacts.len().min(10)
         };
 
+        // REQ-AXO-902487 (DGD feedback #267) — surface IST persistence status
+        // directly without forcing agents to query SQL ist.dataartifact.
+        let ist_count = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.dataartifact WHERE project_code = '{}'",
+                sql_str(&project_code)
+            ))
+            .unwrap_or(0);
+
+        let last_indexed_ms = if ist_count > 0 {
+            self.graph_store
+                .query_single_i64_writer(&format!(
+                    "SELECT max(discovered_ms) FROM ist.dataartifact WHERE project_code = '{}'",
+                    sql_str(&project_code)
+                ))
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
+        let ist_status_line = if ist_count > 0 {
+            if let Some(ms) = last_indexed_ms {
+                format!("- IST persistence: **indexed** ({ist_count} artifact(s) in `ist.dataartifact`, last indexed at ms {ms})")
+            } else {
+                format!("- IST persistence: **indexed** ({ist_count} artifact(s) in `ist.dataartifact`)")
+            }
+        } else {
+            "- IST persistence: **not indexed** (0 artifacts in `ist.dataartifact`; run `data_catalog action=\"index\"` to persist into IST)".to_string()
+        };
+
         let report = format!(
             "## Data catalog — project {project_code}\n\n\
-             Source: `{}`\n\n\
+             Source: `{}`\n\
+             {}\n\n\
              - Artifacts: **{}**  (kinds: {})\n\
              - Total rows: {}\n\
              - Total bytes: {}\n\
              - Manifests: {}/{} present — {}\n{}",
             catalog_path.display(),
+            ist_status_line,
             summary.total_artifacts,
             if by_kind_text.is_empty() { "—".to_string() } else { by_kind_text },
             summary.total_rows,
@@ -339,6 +373,9 @@ impl McpServer {
             "structuredContent": {
                 "project_code": project_code,
                 "catalog_path": catalog_path.display().to_string(),
+                "ist_indexed": ist_count > 0,
+                "ist_persisted_count": ist_count,
+                "ist_last_indexed_ms": last_indexed_ms,
                 "total_artifacts": summary.total_artifacts,
                 "total_rows": summary.total_rows,
                 "total_bytes": summary.total_bytes,

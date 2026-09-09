@@ -7214,3 +7214,95 @@ def test_undecidable_dynamic():
 
     crate::ist_snapshot::evict_process_snapshot(project);
 }
+
+#[test]
+fn test_data_catalog_action_read_reports_ist_persistence_without_sql_902487() {
+    // REQ-AXO-902487 (DGD feedback #267):
+    // 1. data_catalog action=read must surface IST persistence status (ist_indexed, ist_persisted_count)
+    //    directly without forcing agents to hand-craft SQL queries on ist.dataartifact.
+    // 2. The PostgreSQL table is lowercase `ist.dataartifact`. Tool descriptions must never cite
+    //    unquotable CamelCase `ist.DataArtifact`.
+    let server = create_test_server();
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path();
+    let project_code = "DGD";
+
+    server
+        .graph_store
+        .sync_project_registry_entry(project_code, Some("dgd-test"), Some(project_dir.to_str().unwrap()))
+        .unwrap();
+
+    let data_dir = project_dir.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let catalog_content = r#"{
+        "artifacts": {
+            "lake_alpha.csv": {"name": "lake_alpha.csv", "kind": "lake", "bytes": 1024, "rows": 100, "manifest": "m1"},
+            "lake_beta.csv": {"name": "lake_beta.csv", "kind": "lake", "bytes": 2048, "rows": 200, "manifest": "m2"}
+        }
+    }"#;
+    std::fs::write(data_dir.join("CATALOG.json"), catalog_content).unwrap();
+
+    let call = |args: Value| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": "data_catalog", "arguments": args })),
+                id: Some(json!(902487)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    // Before indexing: action=read must report ist_indexed=false and ist_persisted_count=0
+    let read_before = call(json!({ "project_code": project_code, "action": "read" }));
+    assert_ne!(read_before["isError"].as_bool(), Some(true), "{read_before:?}");
+    let data_before = &read_before["structuredContent"];
+    assert_eq!(data_before["ist_indexed"].as_bool(), Some(false), "Must report ist_indexed=false before indexing: {read_before:?}");
+    assert_eq!(data_before["ist_persisted_count"].as_i64(), Some(0));
+    let text_before = read_before["content"][0]["text"].as_str().unwrap_or("");
+    assert!(text_before.contains("not indexed"), "Text must surface not indexed status: {text_before}");
+    assert!(text_before.contains("ist.dataartifact"), "Text must cite lowercase ist.dataartifact: {text_before}");
+
+    // Index the catalog
+    let index_res = call(json!({ "project_code": project_code, "action": "index" }));
+    assert_ne!(index_res["isError"].as_bool(), Some(true), "{index_res:?}");
+    assert_eq!(index_res["structuredContent"]["artifacts_upserted"].as_i64(), Some(2));
+
+    // After indexing: action=read must report ist_indexed=true and ist_persisted_count=2
+    let read_after = call(json!({ "project_code": project_code, "action": "read" }));
+    let data_after = &read_after["structuredContent"];
+    assert_eq!(data_after["ist_indexed"].as_bool(), Some(true), "Must report ist_indexed=true after indexing: {read_after:?}");
+    assert_eq!(data_after["ist_persisted_count"].as_i64(), Some(2));
+    let text_after = read_after["content"][0]["text"].as_str().unwrap_or("");
+    assert!(text_after.contains("indexed"), "Text must surface indexed status: {text_after}");
+
+    // REQ-AXO-902487 invariant: tool catalog description must cite lowercase table name `ist.dataartifact`
+    let tools_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/list".to_string(),
+            params: None,
+            id: Some(json!(9024870)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let tools = tools_resp["tools"].as_array().expect("tools array");
+    let data_cat_tool = tools
+        .iter()
+        .find(|t| t["name"].as_str() == Some("data_catalog"))
+        .expect("data_catalog tool");
+    let desc = data_cat_tool["description"].as_str().unwrap_or("");
+    assert!(
+        desc.contains("ist.dataartifact"),
+        "Catalog description must use lowercase table name `ist.dataartifact`: {}",
+        desc
+    );
+    assert!(
+        !desc.contains("ist.DataArtifact"),
+        "Catalog description must NOT use CamelCase `ist.DataArtifact`: {}",
+        desc
+    );
+}

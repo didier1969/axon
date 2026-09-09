@@ -106,7 +106,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_manager",
-                "description": "[SOLL] Create/update/append_section/link/unlink intent entities. Server assigns canonical IDs. Requires: action, entity, data. MIL-AXO-020: `id` is DB-allocated for action=create — supplying `data.id` or `reserved_id` is rejected with `id_field_forbidden`. Vision creation forbidden outside `axon_init_project`. REQ-AXO-902161: action=append_section appends `data.section` (optionally under `## data.section_title`) to an existing node body WITHOUT re-sending the full description — token-efficient update, same audit/status-validation as action=update; requires data.id + data.section. REQ-AXO-91592: action=unlink removes one SOLL edge with audit (soll.Revision + soll.RevisionChange) — symmetric to action=link.",
+                "description": "[SOLL] Create/update/append_section/link/unlink intent entities. Server assigns canonical IDs. Requires: action, entity, data. MIL-AXO-020: `id` is DB-allocated for action=create — supplying `data.id` or `reserved_id` is rejected with `id_field_forbidden`. Vision creation forbidden outside `axon_init_project`. REQ-AXO-902161: action=append_section appends `data.section` (optionally under `## data.section_title`) to an existing node body WITHOUT re-sending the full description — token-efficient update, same audit/status-validation as action=update; requires data.id + data.section. REQ-AXO-91592: action=unlink removes one SOLL edge with audit (soll.revision + soll.revisionchange) — symmetric to action=link.",
                 // REQ-AXO-901949 — inputSchema derived from
                 // tool_contracts::SollManagerInput (single source); the override
                 // pass injects it post-build. The per-action field-routing
@@ -547,12 +547,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "data_catalog",
-                "description": "[DATA] REQ-AXO-902017 — inventory of a DATA-CENTRIC project's data artifacts (CSV lakes, fixtures, manifests) from its normalized pivot catalog `data/CATALOG.json`. `action=read` (default) answers 'how many assets, what kinds, how many rows, which lack a manifest' in one call instead of a shell dredge (ls/head/wc). `action=index` PERSISTS the catalog into the IST: each artifact becomes a `data_artifact` node (kind) + an ist.DataArtifact metadata row so it joins the structural graph (and code symbols gain READS_ARTIFACT edges). CSV column names are read from data/<name> when present. REQ-AXO-902486 — `mode=\"brief\"` is the DEFAULT: it lists at most 10 artifacts (the summary counters still cover the whole catalog, and the answer says how many are not listed); pass `mode=\"verbose\"` for the full inventory. It used to return every artifact with nine fields each — 15 000 tokens for 5 useful lines, more than the `wc -l` it replaces.",
+                "description": "[DATA] REQ-AXO-902017 — inventory of a DATA-CENTRIC project's data artifacts (CSV lakes, fixtures, manifests) from its normalized pivot catalog `data/CATALOG.json`. `action=read` (default) answers 'how many assets, what kinds, how many rows, which lack a manifest' and reports IST persistence status (`ist_indexed`, `ist_persisted_count`) without requiring SQL queries (REQ-AXO-902487). `action=index` PERSISTS the catalog into the IST: each artifact becomes a `data_artifact` node (kind) + an `ist.dataartifact` metadata row so it joins the structural graph (and code symbols gain READS_ARTIFACT edges). CSV column names are read from data/<name> when present. REQ-AXO-902486 — `mode=\"brief\"` is the DEFAULT: it lists at most 10 artifacts (the summary counters still cover the whole catalog, and the answer says how many are not listed); pass `mode=\"verbose\"` for the full inventory. It used to return every artifact with nine fields each — 15 000 tokens for 5 useful lines, more than the `wc -l` it replaces.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Canonical project code (e.g. OPV). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
-                        "action": { "type": "string", "enum": ["read", "index"], "description": "read (default) = summarize on demand; index = persist artifacts into the IST (ist.Symbol kind='data_artifact' + ist.DataArtifact)." },
+                        "action": { "type": "string", "enum": ["read", "index"], "description": "read (default) = summarize on demand and report IST persistence (`ist_indexed`, `ist_persisted_count`); index = persist artifacts into the IST (ist.Symbol kind='data_artifact' + `ist.dataartifact` table)." },
                         "catalog_path": { "type": "string", "description": "Optional override for the catalog location (absolute, or relative to the project root). Default: data/CATALOG.json." },
                         "mode": { "type": "string", "enum": ["brief", "verbose"], "description": "REQ-AXO-902486 — brief (DEFAULT) lists at most 10 artifacts; the counters above them always cover the WHOLE catalog, and the answer states how many were not listed. verbose lists every artifact. Nothing is ever truncated silently." }
                     },
@@ -768,7 +768,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_id_registry",
-                "description": "[SOLL] Returns the per-type `soll.Registry` allocation counters and the NEXT canonical id each `soll_manager(create)` would assign, so an id can be referenced in a doc/memo before it is allocated (REQ-AXO-901618). `next_id` is a lower bound (allocate_node_id gap-skips).",
+                "description": "[SOLL] Returns the per-type `soll.registry` allocation counters and the NEXT canonical id each `soll_manager(create)` would assign, so an id can be referenced in a doc/memo before it is allocated (REQ-AXO-901618). `next_id` is a lower bound (allocate_node_id gap-skips).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1229,7 +1229,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_children",
-                "description": "[SOLL] REQ-AXO-902249 — traverse SOLL edges from one node: `direction=children` (default, nodes attached below — e.g. an umbrella's REFINES children) or `parents`. Optional `relation_type` filter (REFINES / BELONGS_TO / TARGETS / ...). Use this instead of hand-writing a JOIN on soll.Edge + soll.Node.",
+                "description": "[SOLL] REQ-AXO-902249 — traverse SOLL edges from one node: `direction=children` (default, nodes attached below — e.g. an umbrella's REFINES children) or `parents`. Optional `relation_type` filter (REFINES / BELONGS_TO / TARGETS / ...). Use this instead of hand-writing a JOIN on soll.edge + soll.node.",
                 "inputSchema": { "$comment": "derived from tool_contracts::SollChildrenInput — injected post-build" }
             },
             {
@@ -1625,11 +1625,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             // (REQ-AXO-901675) so no indexer restart is required.
             json!({
                 "name": "rescan_project",
-                "description": "[SYSTEM] REQ-AXO-901676 — force a delta or full re-scan of a project's source tree. Use after git pull massif / backup restore / inotify drop / watcher crash. Returns `{status, files_scheduled, projection_eta_ms, project_code, mode}` in <500 ms ; enrols the subtree SYNCHRONOUSLY into `ist.IndexedFile` (status='discovered'), which the DBQ-A claim feeder drains into pipeline A (REQ-AXO-901893). REQ-AXO-902634 — this description previously promised a `NOTIFY axon_registry_changed → record_subtree_hint` hop: that trajectory was ripped and `record_subtree_hint` never existed. `full=false` (default) keeps IndexedFile content_hash cache so only diffs are re-parsed ; `full=true` wipes IndexedFile rows for the project so every file is forced through A1/A2/A3 + B1/B2/B3 again.",
+                "description": "[SYSTEM] REQ-AXO-901676 — force a delta or full re-scan of a project's source tree. Use after git pull massif / backup restore / inotify drop / watcher crash. Returns `{status, files_scheduled, projection_eta_ms, project_code, mode}` in <500 ms ; enrols the subtree SYNCHRONOUSLY into `ist.indexedfile` (status='discovered'), which the DBQ-A claim feeder drains into pipeline A (REQ-AXO-901893). REQ-AXO-902634 — this description previously promised a `NOTIFY axon_registry_changed → record_subtree_hint` hop: that trajectory was ripped and `record_subtree_hint` never existed. `full=false` (default) keeps IndexedFile content_hash cache so only diffs are re-parsed ; `full=true` wipes IndexedFile rows for the project so every file is forced through A1/A2/A3 + B1/B2/B3 again.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Must be present in soll.ProjectCodeRegistry." },
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Must be present in soll.projectcoderegistry." },
                         "full": { "type": "boolean", "description": "When true, wipes IndexedFile rows under the project_path so the next scanner pass re-parses + re-embeds every file regardless of cached content_hash. Default false (delta scan only re-touches files whose hash changed)." }
                     },
                     "required": ["project_code"]
