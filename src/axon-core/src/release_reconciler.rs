@@ -22,8 +22,12 @@ use serde_json::Value;
 pub struct ReleaseFacts {
     /// `AXON_BUILD_ID` of the process serving this call (the running brain).
     pub live_build_id: String,
+    /// REQ-AXO-902620 — Provenance of `live_build_id` ("env:AXON_BUILD_ID", "binary:.axon_build_id", "absent", or test override).
+    pub live_build_source: String,
     /// `runtime_version.build_id` recorded in `current.json` (the promoted truth).
     pub manifest_build_id: Option<String>,
+    /// REQ-AXO-902620 — Provenance of `manifest_build_id` ("current.json" or "absent").
+    pub manifest_source: &'static str,
     /// `state` field of `current.json` (e.g. "promoted").
     pub manifest_state: Option<String>,
     /// REQ-AXO-902585 — `promotion_gates.core_qualification.status` du manifeste qui
@@ -115,6 +119,28 @@ impl ReleaseFacts {
         let current = read_json(&release_dir.join("current.json"));
         let pending = read_json(&release_dir.join("pending.json"));
         let manifest_build_id = current.as_ref().and_then(extract_build_id);
+        let manifest_source = if current.is_some() && manifest_build_id.is_some() {
+            "current.json"
+        } else {
+            "absent"
+        };
+        // REQ-AXO-902620 — manifest_runtime_match lit l'identité du processus vivant
+        // (AXON_BUILD_ID de son environnement ou empreinte du binaire sur disque),
+        // pas seulement la constante compilée.
+        let (live_build_id, live_build_source) = if !live_build_id.is_empty() && live_build_id != "unknown" {
+            (live_build_id, "env:AXON_BUILD_ID".to_string())
+        } else if let Some(env_id) = std::env::var("AXON_BUILD_ID").ok().filter(|s| !s.is_empty() && s != "unknown") {
+            (env_id, "env:AXON_BUILD_ID".to_string())
+        } else {
+            let compiled = crate::build_identity::compiled_build_id();
+            if !compiled.is_empty() && compiled != "unknown" {
+                (compiled.to_string(), "binary:.axon_build_id".to_string())
+            } else if !live_build_id.is_empty() {
+                (live_build_id, "unknown".to_string())
+            } else {
+                ("".to_string(), "absent".to_string())
+            }
+        };
         let manifest_state = current
             .as_ref()
             .and_then(|c| c.get("state"))
@@ -195,7 +221,9 @@ impl ReleaseFacts {
         let live_cutover_scopes_count = live_scopes.len();
         ReleaseFacts {
             live_build_id,
+            live_build_source,
             manifest_build_id,
+            manifest_source,
             manifest_state,
             core_qualification_status,
             core_qualification_evidence,
@@ -216,6 +244,14 @@ impl ReleaseFacts {
             live_cutover_scopes_count,
             orphaned_cutover_scopes,
         }
+    }
+
+    /// REQ-AXO-902620 — une transition/redémarrage légitime est en cours (staging en vol,
+    /// promote running, ou scope cutover actif).
+    pub fn is_transient_transition(&self) -> bool {
+        self.pending_present
+            || self.attempt_status.as_deref() == Some("running")
+            || self.live_cutover_scopes_count > 0
     }
 
     /// The live topology runs a separate indexer process that must be alive.
@@ -526,7 +562,39 @@ impl Gate {
 /// Evaluate the release gates. These are the T1 predicates; T2 re-expresses them in
 /// Ascent without changing their meaning.
 pub fn evaluate_gates(f: &ReleaseFacts) -> Vec<Gate> {
-    let manifest_match = f.manifest_build_id.as_deref() == Some(f.live_build_id.as_str());
+    let manifest_match = match (f.manifest_build_id.as_deref(), f.live_build_id.as_str()) {
+        (Some(m), l) if !l.is_empty() && l != "unknown" => m == l,
+        _ => false,
+    };
+    let running_disp = if f.live_build_id.is_empty() { "<none>" } else { &f.live_build_id };
+    let running_src = if f.live_build_source.is_empty() { "absent" } else { &f.live_build_source };
+    let manifest_disp = f.manifest_build_id.as_deref().unwrap_or("<none>");
+    let manifest_src = if f.manifest_source.is_empty() { "absent" } else { f.manifest_source };
+
+    let manifest_gate = if f.manifest_build_id.is_none() || f.live_build_id.is_empty() || f.live_build_id == "unknown" {
+        Gate::unknown(
+            "manifest_runtime_match",
+            format!("running={running_disp} (source={running_src}) manifest={manifest_disp} (source={manifest_src}) — non mesurable"),
+        )
+    } else if manifest_match {
+        Gate::pass(
+            "manifest_runtime_match",
+            format!("running={running_disp} (source={running_src}) manifest={manifest_disp} (source={manifest_src})"),
+        )
+    } else if f.is_transient_transition() {
+        // REQ-AXO-902620 — une divergence pouvant venir d'un redémarrage légitime en cours
+        // sort en Unknown et non en Fail, pour ne pas couper le brain sur un transitoire.
+        Gate::unknown(
+            "manifest_runtime_match",
+            format!("running={running_disp} (source={running_src}) manifest={manifest_disp} (source={manifest_src}) — transition/redémarrage en cours"),
+        )
+    } else {
+        // REQ-AXO-902620 — état observé du 2026-09-04 : divergence franche hors transition.
+        Gate::fail(
+            "manifest_runtime_match",
+            format!("running={running_disp} (source={running_src}) manifest={manifest_disp} (source={manifest_src})"),
+        )
+    };
     let source = f.qualification_source;
     let evidence = f.core_qualification_evidence.as_deref().unwrap_or("<none>");
     let qualification = Gate {
@@ -549,15 +617,7 @@ pub fn evaluate_gates(f: &ReleaseFacts) -> Vec<Gate> {
         },
     };
     vec![
-        Gate::binary(
-            "manifest_runtime_match",
-            manifest_match,
-            format!(
-                "running={} manifest={}",
-                f.live_build_id,
-                f.manifest_build_id.as_deref().unwrap_or("<none>")
-            ),
-        ),
+        manifest_gate,
         Gate::binary(
             "no_stale_pending",
             !f.pending_present,
@@ -1694,7 +1754,9 @@ mod tests {
     fn facts(live: &str, manifest: Option<&str>, pending: bool) -> ReleaseFacts {
         ReleaseFacts {
             live_build_id: live.to_string(),
+            live_build_source: "test".to_string(),
             manifest_build_id: manifest.map(str::to_string),
+            manifest_source: if manifest.is_some() { "current.json" } else { "absent" },
             manifest_state: Some("promoted".to_string()),
             core_qualification_status: Some("passed".to_string()),
             core_qualification_evidence: Some("exit_code=0".to_string()),
@@ -1814,6 +1876,104 @@ mod tests {
         assert!(next_action(&f).unwrap().contains("resume"));
     }
 
+    // --- REQ-AXO-902620: manifest_runtime_match et identité de runtime -----------------
+
+    #[test]
+    fn manifest_runtime_match_nominal_pass_with_sources() {
+        // En cas d'égalité nominale, la porte passe et nomme les valeurs et sources.
+        let f = facts("v0.8.0-1716-g1b97e118", Some("v0.8.0-1716-g1b97e118"), false);
+        let gates = evaluate_gates(&f);
+        let gate = gates
+            .iter()
+            .find(|g| g.name == "manifest_runtime_match")
+            .expect("manifest_runtime_match gate present");
+        assert_eq!(gate.status, GateStatus::Pass);
+        assert!(gate.passes());
+        assert!(!gate.is_red());
+        assert!(gate.detail.contains("running=v0.8.0-1716-g1b97e118"));
+        assert!(gate.detail.contains("manifest=v0.8.0-1716-g1b97e118"));
+        assert!(gate.detail.contains("source="));
+    }
+
+    #[test]
+    fn manifest_runtime_match_observed_2026_09_04_incident_is_fail_never_match() {
+        // REQ-AXO-902620 critère 2 : sur l'état observé du 2026-09-04
+        // (brain à v0.8.0-1633-g771dfe74, manifeste à v0.8.0-1716-g1b97e118)
+        // la porte rend Fail ou Unknown, JAMAIS match.
+        // Hors transition (aucun promote en vol) : le verdict est Fail.
+        let mut f = facts("v0.8.0-1633-g771dfe74", Some("v0.8.0-1716-g1b97e118"), false);
+        f.live_build_source = "env:AXON_BUILD_ID".to_string();
+        f.manifest_source = "current.json";
+        let gates = evaluate_gates(&f);
+        let gate = gates
+            .iter()
+            .find(|g| g.name == "manifest_runtime_match")
+            .expect("manifest_runtime_match gate present");
+        assert_eq!(gate.status, GateStatus::Fail);
+        assert!(!gate.passes());
+        assert!(gate.is_red());
+        // REQ-AXO-902620 critère 3 : le verdict nomme les deux valeurs comparées et leur source.
+        assert_eq!(
+            gate.detail,
+            "running=v0.8.0-1633-g771dfe74 (source=env:AXON_BUILD_ID) manifest=v0.8.0-1716-g1b97e118 (source=current.json)"
+        );
+    }
+
+    #[test]
+    fn manifest_runtime_match_transient_divergence_is_unknown_not_fail() {
+        // REQ-AXO-902620 critère 4 : une divergence pouvant venir d'un redémarrage légitime
+        // en cours sort en Unknown et non en Fail, pour ne pas couper le brain sur un transitoire.
+        // Cas A : staging pending.json présent.
+        let f_staged = facts("v0.8.0-1633-g771dfe74", Some("v0.8.0-1716-g1b97e118"), true);
+        let gates_staged = evaluate_gates(&f_staged);
+        let gate_staged = gates_staged
+            .iter()
+            .find(|g| g.name == "manifest_runtime_match")
+            .expect("gate present");
+        assert_eq!(gate_staged.status, GateStatus::Unknown);
+        assert!(!gate_staged.passes());
+        assert!(!gate_staged.is_red(), "Un transitoire ne doit PAS être rouge");
+        assert!(gate_staged.detail.contains("transition/redémarrage en cours"));
+
+        // Cas B : attempt_status == "running".
+        let mut f_running = facts("v0.8.0-1633-g771dfe74", Some("v0.8.0-1716-g1b97e118"), false);
+        f_running.attempt_status = Some("running".to_string());
+        let gates_running = evaluate_gates(&f_running);
+        let gate_running = gates_running
+            .iter()
+            .find(|g| g.name == "manifest_runtime_match")
+            .expect("gate present");
+        assert_eq!(gate_running.status, GateStatus::Unknown);
+        assert!(!gate_running.passes());
+        assert!(!gate_running.is_red());
+
+        // Cas C : cutover scope actif.
+        let mut f_cutover = facts("v0.8.0-1633-g771dfe74", Some("v0.8.0-1716-g1b97e118"), false);
+        f_cutover.live_cutover_scopes_count = 1;
+        let gates_cutover = evaluate_gates(&f_cutover);
+        let gate_cutover = gates_cutover
+            .iter()
+            .find(|g| g.name == "manifest_runtime_match")
+            .expect("gate present");
+        assert_eq!(gate_cutover.status, GateStatus::Unknown);
+        assert!(!gate_cutover.passes());
+        assert!(!gate_cutover.is_red());
+    }
+
+    #[test]
+    fn manifest_runtime_match_unmeasurable_is_unknown() {
+        let f = facts("", None, false);
+        let gates = evaluate_gates(&f);
+        let gate = gates
+            .iter()
+            .find(|g| g.name == "manifest_runtime_match")
+            .expect("gate present");
+        assert_eq!(gate.status, GateStatus::Unknown);
+        assert!(!gate.passes());
+        assert!(!gate.is_red());
+        assert!(gate.detail.contains("non mesurable"));
+    }
+
     #[test]
     fn release_facts_collect_reads_current_and_pending() {
         // REQ-AXO-902190 — cover ReleaseFacts::collect, a top untested HUB surfaced by
@@ -1878,6 +2038,8 @@ mod tests {
         fs::create_dir_all(&empty).unwrap();
         let f3 = ReleaseFacts::collect(&empty, "v-x".to_string());
         assert_eq!(f3.manifest_build_id, None);
+        assert_eq!(f3.manifest_source, "absent");
+        assert_eq!(f3.live_build_source, "env:AXON_BUILD_ID");
         assert!(!f3.indexer_expected());
 
         let _ = fs::remove_dir_all(&dir);

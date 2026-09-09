@@ -1023,11 +1023,15 @@ mod requirement_state_tests {
     }
 
     /// Active statuses still need evidence + criteria + zero broken
-    /// file evidence to be "done"; otherwise they degrade to partial.
+    /// file evidence to be "done"; otherwise they degrade to partial (or criteria_declared).
     #[test]
     fn active_statuses_need_full_coverage_to_be_done() {
+        let satisfied_criteria = r#"[{"criterion": "AC1: foo", "state": "met"}]"#;
         for status in ["current", "accepted"] {
-            assert_eq!(requirement_state_from(status, "AC1: foo", 1, 0), "done");
+            // Critères satisfaits + evidence → done.
+            assert_eq!(requirement_state_from(status, satisfied_criteria, 1, 0), "done");
+            // Critères déclarés mais non vérifiés + evidence → criteria_declared (REQ-AXO-902595).
+            assert_eq!(requirement_state_from(status, "AC1: foo", 1, 0), "criteria_declared");
             // Missing evidence → partial, not done.
             assert_eq!(requirement_state_from(status, "AC1: foo", 0, 0), "partial");
             // Broken file evidence → partial.

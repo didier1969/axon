@@ -169,6 +169,29 @@ fn identity_match_for(compiled: &str, declared: &str) -> IdentityMatch {
     }
 }
 
+/// REQ-AXO-902620 — Compare l'identité gravée, l'identité déclarée par l'environnement
+/// et l'identité du manifeste de release promu (si disponible).
+///
+/// Si un manifeste de release est présent et diffère de l'identité du processus vivant,
+/// le verdict est `Drift`, même si `compiled_build_id == declared`.
+pub fn identity_match_against_manifest(
+    compiled: &str,
+    declared: &str,
+    manifest: Option<&str>,
+) -> IdentityMatch {
+    let base = identity_match_for(compiled, declared);
+    if let Some(manifest) = manifest {
+        if !manifest.is_empty() && manifest != "unknown" {
+            if (base == IdentityMatch::Match || base == IdentityMatch::Unknown)
+                && (declared != manifest || (compiled != "unknown" && compiled != manifest))
+            {
+                return IdentityMatch::Drift;
+            }
+        }
+    }
+    base
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +234,32 @@ mod tests {
         // « non calculé » est un état de premier rang, distinct de « faux ».
         // Une déclaration vide ne prouve aucune dérive.
         assert_eq!(identity_match(""), IdentityMatch::Unknown);
+    }
+
+    #[test]
+    fn build_identity_does_not_match_when_living_process_carries_stale_build_id_req_902620() {
+        // REQ-AXO-902620 — État observé du 2026-09-04 :
+        // Le brain vivant tourne sur v0.8.0-1633-g771dfe74 (compilé et déclaré identiques)
+        // Mais le manifeste promu sur disque est v0.8.0-1716-g1b97e118.
+        // build_identity ne doit pas rendre Match, mais Drift.
+        let living_build_id = "v0.8.0-1633-g771dfe74";
+        let manifest_build_id = "v0.8.0-1716-g1b97e118";
+        assert_eq!(
+            identity_match_against_manifest(
+                living_build_id,
+                living_build_id,
+                Some(manifest_build_id)
+            ),
+            IdentityMatch::Drift
+        );
+    }
+
+    #[test]
+    fn build_identity_matches_when_all_match_req_902620() {
+        let build_id = "v0.8.0-1716-g1b97e118";
+        assert_eq!(
+            identity_match_against_manifest(build_id, build_id, Some(build_id)),
+            IdentityMatch::Match
+        );
     }
 }

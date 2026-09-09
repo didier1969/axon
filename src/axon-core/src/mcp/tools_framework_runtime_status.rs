@@ -472,7 +472,25 @@ impl McpServer {
         // `compiled_build_id` est gravé DANS ce binaire à la compilation : les deux
         // ensemble rendent la dérive lisible au lieu d'être un mystère opérationnel.
         let compiled_build_id = crate::build_identity::compiled_build_id();
-        let build_identity_state = crate::build_identity::identity_match(&build_id);
+        let manifest_build_id = {
+            let release_dir = std::env::current_dir()
+                .unwrap_or_default()
+                .join(".axon")
+                .join("live-release");
+            let current_path = release_dir.join("current.json");
+            std::fs::read_to_string(current_path).ok().and_then(|raw| {
+                let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
+                val.get("runtime_version")
+                    .and_then(|rv| rv.get("build_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+        };
+        let build_identity_state = crate::build_identity::identity_match_against_manifest(
+            compiled_build_id,
+            &build_id,
+            manifest_build_id.as_deref(),
+        );
         let install_generation =
             std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string());
         let async_allowlisted_tools = McpServer::ASYNC_JOB_TOOL_NAMES
