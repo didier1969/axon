@@ -216,7 +216,7 @@ impl McpServer {
             .collect();
 
         let text = format!(
-            "### 🚦 promote_status\n\nphase=**{}** — running={} manifest={}{}\nfailed_gates: {}\nnext_action: {}",
+            "### 🚦 promote_status\n\nphase=**{}** — running={} manifest={}{}{}\nfailed_gates: {}\nnext_action: {}",
             ph,
             facts.live_build_id,
             facts.manifest_build_id.as_deref().unwrap_or("<none>"),
@@ -224,6 +224,11 @@ impl McpServer {
                 " · pending staging present"
             } else {
                 ""
+            },
+            if facts.live_cutover_scopes_count > 0 {
+                format!(" · live_cutover_scopes={}", facts.live_cutover_scopes_count)
+            } else {
+                "".to_string()
             },
             if failed.is_empty() {
                 if unknown.is_empty() {
@@ -248,6 +253,8 @@ impl McpServer {
                     "live_build_id": facts.live_build_id,
                     "manifest_build_id": facts.manifest_build_id,
                     "manifest_state": facts.manifest_state,
+                    "live_cutover_scopes_count": facts.live_cutover_scopes_count,
+                    "orphaned_cutover_scopes": facts.orphaned_cutover_scopes,
                     "core_qualification_status": facts.core_qualification_status,
                     "core_qualification_evidence": facts.core_qualification_evidence,
                     "qualification_source": facts.qualification_source,

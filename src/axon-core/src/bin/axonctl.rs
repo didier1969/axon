@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 use axon_core::release_reconciler::{
     drive_cutover, evaluate_liveness_gates, evaluate_stop_gates, liveness_next_action,
-    liveness_phase, probe_listen_queue_depth, run_cutover_loop, stop_next_action, stop_phase,
-    CutoverIo, CutoverOutcome, CutoverVerdict, LivenessFacts, StopFacts,
+    liveness_phase, probe_listen_queue_depth, purge_orphaned_cutover_scopes, run_cutover_loop,
+    stop_next_action, stop_phase, CutoverIo, CutoverOutcome, CutoverVerdict, LivenessFacts,
+    StopFacts,
 };
 use serde::Serialize;
 use std::collections::{BTreeSet, VecDeque};
@@ -1231,6 +1232,7 @@ enum CutoverCommandPhase {
     RecordGate,
     Finalize,
     Rollback,
+    CleanupScopes,
 }
 
 struct CutoverArgs {
@@ -1272,6 +1274,7 @@ fn parse_cutover_args(remaining: &[String], project_root: &Path) -> Result<Cutov
                     .context("--poll-interval-ms must be a positive integer")?;
             }
             "--bin-dir" => bin_dir = it.next().map(PathBuf::from),
+            "--cleanup-scopes" => phase = CutoverCommandPhase::CleanupScopes,
             "--phase" => {
                 phase = match it.next().map(String::as_str) {
                     Some("full") => CutoverCommandPhase::Full,
@@ -1279,6 +1282,7 @@ fn parse_cutover_args(remaining: &[String], project_root: &Path) -> Result<Cutov
                     Some("record-gate") => CutoverCommandPhase::RecordGate,
                     Some("finalize") => CutoverCommandPhase::Finalize,
                     Some("rollback") => CutoverCommandPhase::Rollback,
+                    Some("cleanup-scopes") => CutoverCommandPhase::CleanupScopes,
                     Some(other) => return Err(anyhow!("unknown cutover phase: {other}")),
                     None => return Err(anyhow!("--phase requires a value")),
                 };
@@ -1389,9 +1393,17 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
         )
     };
 
+    // REQ-AXO-902591 — purger systématiquement les scopes cutover orphelins des sessions antérieures
+    if matches!(cargs.phase, CutoverCommandPhase::Full | CutoverCommandPhase::Prepare) {
+        let _ = purge_orphaned_cutover_scopes(Some(std::process::id()));
+    }
+
     let (ok, phase, detail): (bool, &str, Option<String>) = match cargs.phase {
         CutoverCommandPhase::Full => match drive_cutover(&mut io, probe, cargs.max_polls, wait) {
-            CutoverVerdict::Promoted => (true, "promoted", None),
+            CutoverVerdict::Promoted => {
+                let _ = purge_orphaned_cutover_scopes(Some(std::process::id()));
+                (true, "promoted", None)
+            }
             CutoverVerdict::RolledBack {
                 failed_step,
                 rollback_ok,
@@ -1462,6 +1474,7 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
         CutoverCommandPhase::Finalize => {
             verify_bin_matches_manifest(&release_dir.join("pending.json"), &io.bin_dir)?;
             cutover_finalize_prepared_files(&release_dir)?;
+            let _ = purge_orphaned_cutover_scopes(Some(std::process::id()));
             (true, "promoted", None)
         }
         CutoverCommandPhase::Rollback => match io.rollback() {
@@ -1474,6 +1487,14 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
                     Some("old release did not become ready before deadline".to_string()),
                 ),
             },
+        },
+        CutoverCommandPhase::CleanupScopes => match purge_orphaned_cutover_scopes(None) {
+            Ok(count) => (
+                true,
+                "scopes_cleaned",
+                Some(format!("purged {count} orphaned cutover scope(s)")),
+            ),
+            Err(e) => (false, "cleanup_failed", Some(e)),
         },
     };
 

@@ -90,6 +90,9 @@ pub struct ReleaseFacts {
     /// La lecture vit ICI, dans la collecte de faits, pour que `evaluate_attempt_gate`
     /// reste un prédicat PUR — testable sans écrire un fichier.
     pub attempt_completion_evidence: Option<String>,
+    /// REQ-AXO-902591 — scopes systemd `axon-live-cutover-*` vivants dans `nexus-core.slice`.
+    pub live_cutover_scopes_count: usize,
+    pub orphaned_cutover_scopes: Vec<String>,
 }
 
 fn read_json(path: &Path) -> Option<Value> {
@@ -181,6 +184,15 @@ impl ReleaseFacts {
                 Err(erreur) => format!("{PREFIXE_JOURNAL_ILLISIBLE} ({chemin}) — {erreur}"),
             }
         });
+        let live_scopes = probe_live_cutover_scopes();
+        let current_pid = std::process::id();
+        let is_alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+        let orphaned_cutover_scopes: Vec<String> =
+            filter_orphaned_scopes(&live_scopes, Some(current_pid), is_alive)
+                .into_iter()
+                .map(|s| s.name)
+                .collect();
+        let live_cutover_scopes_count = live_scopes.len();
         ReleaseFacts {
             live_build_id,
             manifest_build_id,
@@ -201,6 +213,8 @@ impl ReleaseFacts {
             attempt_last_event_detail,
             attempt_journal_path,
             attempt_completion_evidence,
+            live_cutover_scopes_count,
+            orphaned_cutover_scopes,
         }
     }
 
@@ -1307,6 +1321,128 @@ fn rolled_back<Io: CutoverIo>(
         rollback_ok,
         detail: Some(detail),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cutover scopes lifecycle (REQ-AXO-902591).
+//
+// Transient cutover scopes `axon-live-cutover-{pid}-{sequence}.scope` placed
+// into `nexus-core.slice` by `axonctl cutover` can outlive their cutover when
+// background children (like watchman) stay alive. These helpers allow probing
+// and purging orphaned scopes so they stop retaining memory in nexus-core.slice.
+// ---------------------------------------------------------------------------
+
+/// Informations extraites d'une unité de scope systemd de cutover `axon-live-cutover-{pid}-{sequence}.scope` (REQ-AXO-902591).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CutoverScopeInfo {
+    pub name: String,
+    pub creator_pid: u32,
+    pub sequence: u64,
+}
+
+/// Parse un nom d'unité cutover (avec ou sans `.scope`) au format `axon-live-cutover-{pid}-{seq}`.
+pub fn parse_cutover_scope_unit(unit_name: &str) -> Option<CutoverScopeInfo> {
+    let clean_name = unit_name.strip_suffix(".scope").unwrap_or(unit_name);
+    let rest = clean_name.strip_prefix("axon-live-cutover-")?;
+    let mut parts = rest.split('-');
+    let pid_str = parts.next()?;
+    let seq_str = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let creator_pid = pid_str.parse::<u32>().ok()?;
+    let sequence = seq_str.parse::<u64>().ok()?;
+    Some(CutoverScopeInfo {
+        name: unit_name.to_string(),
+        creator_pid,
+        sequence,
+    })
+}
+
+/// Extrait les unités de scope cutover depuis la sortie textuelle de `systemctl list-units`.
+pub fn parse_cutover_scopes_listing(listing: &str) -> Vec<CutoverScopeInfo> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let unit = line.split_whitespace().next()?;
+            parse_cutover_scope_unit(unit)
+        })
+        .collect()
+}
+
+/// Filtre les scopes de cutover orphelins :
+/// - soit leur créateur n'est plus vivant selon `pid_alive`,
+/// - soit un `current_pid` est spécifié et différent du créateur du scope (scope d'un promote antérieur).
+pub fn filter_orphaned_scopes<F>(
+    scopes: &[CutoverScopeInfo],
+    current_pid: Option<u32>,
+    pid_alive: F,
+) -> Vec<CutoverScopeInfo>
+where
+    F: Fn(u32) -> bool,
+{
+    scopes
+        .iter()
+        .filter(|scope| {
+            if !pid_alive(scope.creator_pid) {
+                return true;
+            }
+            if let Some(cur) = current_pid {
+                if scope.creator_pid != cur {
+                    return true;
+                }
+            }
+            false
+        })
+        .cloned()
+        .collect()
+}
+
+/// Interroge systemd (en mode user) pour lister les scopes cutover vivants.
+pub fn probe_live_cutover_scopes() -> Vec<CutoverScopeInfo> {
+    let output = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "list-units",
+            "--type=scope",
+            "--all",
+            "--no-legend",
+            "--plain",
+            "--full",
+            "axon-live-cutover-*.scope",
+        ])
+        .output()
+        .ok();
+    match output {
+        Some(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            parse_cutover_scopes_listing(&stdout)
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Purge les scopes de cutover orphelins :
+/// Exécute `systemctl --user stop <unit>` pour libérer la mémoire retenue dans `nexus-core.slice`.
+pub fn purge_orphaned_cutover_scopes(current_pid: Option<u32>) -> Result<usize, String> {
+    let scopes = probe_live_cutover_scopes();
+    let is_alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+    let orphans = filter_orphaned_scopes(&scopes, current_pid, is_alive);
+    if orphans.is_empty() {
+        return Ok(0);
+    }
+    let mut purged = 0;
+    for orphan in &orphans {
+        let res = std::process::Command::new("systemctl")
+            .args(["--user", "stop", &orphan.name])
+            .output();
+        if let Ok(out) = res {
+            if out.status.success() {
+                purged += 1;
+            }
+        }
+    }
+    Ok(purged)
 }
 
 // ---------------------------------------------------------------------------
@@ -2951,4 +3087,70 @@ mod tests {
             "une file saine doit passer verte"
         );
     }
+
+    /// REQ-AXO-902591 — parse_cutover_scope_unit extrait le pid créateur et le numéro de séquence
+    #[test]
+    fn parse_cutover_scope_unit_extrait_pid_et_sequence() {
+        let u1 = parse_cutover_scope_unit("axon-live-cutover-2589023-1.scope").expect("parse u1");
+        assert_eq!(u1.name, "axon-live-cutover-2589023-1.scope");
+        assert_eq!(u1.creator_pid, 2589023);
+        assert_eq!(u1.sequence, 1);
+
+        let u2 = parse_cutover_scope_unit("axon-live-cutover-42-7").expect("parse u2 sans suffixe");
+        assert_eq!(u2.name, "axon-live-cutover-42-7");
+        assert_eq!(u2.creator_pid, 42);
+        assert_eq!(u2.sequence, 7);
+
+        assert!(parse_cutover_scope_unit("unrelated-service.scope").is_none());
+        assert!(parse_cutover_scope_unit("axon-live.service").is_none());
+    }
+
+    /// REQ-AXO-902591 — parse_cutover_scopes_listing extrait toutes les unités cutover d'un listing systemctl
+    #[test]
+    fn parse_cutover_scopes_listing_extrait_toutes_les_unites() {
+        let fake_listing = "\
+axon-live-cutover-2589023-1.scope loaded active running [systemd-run] bash
+unrelated.scope                  loaded active running unrelated
+axon-live-cutover-314159-2.scope  loaded active running [systemd-run] bash
+";
+        let scopes = parse_cutover_scopes_listing(fake_listing);
+        assert_eq!(scopes.len(), 2);
+        assert_eq!(scopes[0].creator_pid, 2589023);
+        assert_eq!(scopes[1].creator_pid, 314159);
+    }
+
+    /// REQ-AXO-902591 — filter_orphaned_scopes discrimine les scopes dont l'orchestrateur est mort ou antérieur
+    #[test]
+    fn filter_orphaned_scopes_distingue_orphelins_et_courant() {
+        let scopes = vec![
+            CutoverScopeInfo {
+                name: "axon-live-cutover-100-1.scope".to_string(),
+                creator_pid: 100,
+                sequence: 1,
+            },
+            CutoverScopeInfo {
+                name: "axon-live-cutover-200-1.scope".to_string(),
+                creator_pid: 200,
+                sequence: 1,
+            },
+        ];
+
+        // PID 100 est mort, PID 200 est vivant
+        let is_alive = |pid: u32| pid == 200;
+
+        // Sans current_pid : seul 100 est orphelin (car mort)
+        let orphelins_sans_current = filter_orphaned_scopes(&scopes, None, is_alive);
+        assert_eq!(orphelins_sans_current.len(), 1);
+        assert_eq!(orphelins_sans_current[0].creator_pid, 100);
+
+        // Avec current_pid = Some(200) : 100 est orphelin (car PID != 200), 200 est préservé
+        let orphelins_avec_current = filter_orphaned_scopes(&scopes, Some(200), is_alive);
+        assert_eq!(orphelins_avec_current.len(), 1);
+        assert_eq!(orphelins_avec_current[0].creator_pid, 100);
+
+        // Avec current_pid = Some(300) : 100 ET 200 sont orphelins (car aucun n'est 300)
+        let orphelins_avec_nouveau = filter_orphaned_scopes(&scopes, Some(300), is_alive);
+        assert_eq!(orphelins_avec_nouveau.len(), 2);
+    }
 }
+

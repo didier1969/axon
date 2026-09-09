@@ -372,6 +372,20 @@ _cleanup_frozen_worktree() {
   PROMOTE_FROZEN_WORKTREE=""
 }
 
+_cleanup_cutover_scopes() {
+  # REQ-AXO-902591 — Purge des scopes cutover systemd axon-live-cutover-* orphelins.
+  # Les scopes transitoires survivant avec des processus (ex: watchman) retiennent
+  # de la mémoire dans nexus-core.slice.
+  if command -v systemctl >/dev/null 2>&1; then
+    local scopes
+    scopes=$(systemctl --user list-units --type=scope --all --no-legend --plain --full 'axon-live-cutover-*.scope' 2>/dev/null | awk '{print $1}' || true)
+    for s in $scopes; do
+      [[ -n "$s" ]] || continue
+      systemctl --user stop "$s" >/dev/null 2>&1 || true
+    done
+  fi
+}
+
 _start_mcp_sampler() {
   : > "$MCP_SAMPLE_FILE"
   (
@@ -579,6 +593,7 @@ on_promote_exit() {
       --args '{}' --format text >> "$PROMOTE_LOG" 2>&1 || true
   fi
   _cleanup_frozen_worktree "$rc"
+  _cleanup_cutover_scopes
   # REQ-AXO-902628 — le verdict se lit sur ce qui a ete OBSERVE, pas sur $?.
   #
   # Mesure du 2026-09-07 sur les 84 journaux archives : SEPT portaient
