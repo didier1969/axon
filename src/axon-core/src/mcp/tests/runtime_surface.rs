@@ -5370,3 +5370,56 @@ fn soll_verify_requirements_est_compact_par_defaut_et_verbose_est_explicitement_
     // L'opt-in verbose est explicite et ne se fait pas passer pour une réponse abrégée.
     assert!(verbose.pointer("/data/omitted_in_brief").is_none());
 }
+
+/// REQ-AXO-902556 — `practice_put` assainit le XML inliné et route les paramètres perdus
+/// (`dense`, `evidence`, `scope`) vers leurs colonnes respectives en base.
+#[test]
+fn practice_put_repare_inlining_xml_et_route_champs_perdus_902556() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    // Rejeu exact du scénario 1705/1706 : practice et dense pollués, evidence vide, scope absent à la racine
+    let payload = json!({
+        "context": "Contrôle de liveness superviseur",
+        "practice": "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.</practice>\n<parameter name=\"dense\">Rôle mort : lire la FIN des logs.</dense>\n<parameter name=\"evidence\">REQ-AXO-902556 preuve de réparation.</evidence>\n<parameter name=\"scope\">*",
+        "dense": "Rôle mort : lire la FIN des logs.</dense>\n<parameter name=\"evidence\">REQ-AXO-902556 preuve de réparation.",
+        "evidence": "",
+        "from": "AXO"
+    });
+
+    let res = server
+        .axon_practice_put(&payload)
+        .expect("practice_put répond");
+
+    assert_eq!(res.pointer("/data/status").and_then(Value::as_str), Some("ok"));
+    assert_eq!(res.pointer("/data/scope").and_then(Value::as_str), Some("*"));
+    assert_eq!(res.pointer("/data/encoding").and_then(Value::as_str), Some("dense"));
+    assert_eq!(res.pointer("/data/repaired").and_then(Value::as_bool), Some(true));
+
+    let id = res.pointer("/data/id").and_then(Value::as_i64).expect("id numérique");
+    assert!(id > 0);
+
+    // Vérification de la vérité physique en base via SQL
+    let check_sql = format!(
+        "SELECT scope, practice, dense, evidence FROM axon.practice WHERE id = {id};"
+    );
+    let rows_str = server.graph_store.query_json_writer(&check_sql).expect("query ok");
+    let rows: Vec<Vec<Value>> = serde_json::from_str(&rows_str).expect("parse json");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+
+    let db_scope = row[0].as_str().unwrap_or("");
+    let db_practice = row[1].as_str().unwrap_or("");
+    let db_dense = row[2].as_str().unwrap_or("");
+    let db_evidence = row[3].as_str().unwrap_or("");
+
+    assert_eq!(db_scope, "*", "le scope extrait doit être '*' et non retomber sur AXO");
+    assert_eq!(db_practice, "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.", "practice doit être débarrassé de tout balisage");
+    assert_eq!(db_dense, "Rôle mort : lire la FIN des logs.", "dense doit être débarrassé de tout balisage");
+    assert_eq!(db_evidence, "REQ-AXO-902556 preuve de réparation.", "evidence doit être restauré depuis les paramètres inlinés");
+
+    assert!(!db_practice.contains("</practice>"));
+    assert!(!db_practice.contains("<parameter"));
+    assert!(!db_dense.contains("</dense>"));
+    assert!(!db_dense.contains("<parameter"));
+}

@@ -5,6 +5,8 @@
 //! governance math is pure in [`crate::practice_memory`]; the DB ops + the internal
 //! gate call live here (same writer/reader split as `tools_mailbox`).
 
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde_json::{json, Value};
 
 use super::McpServer;
@@ -381,6 +383,276 @@ fn axis_recall_set(caller: &str) -> Vec<String> {
     v
 }
 
+/// REQ-AXO-902556 — LLM tool-use parameter delimiter regex.
+static PARAM_OPEN_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)<parameter\s+name=["']?([a-zA-Z0-9_]+)["']?\s*>"#).unwrap()
+});
+
+/// REQ-AXO-902556 — sanitized practice_put arguments after stripping injected XML
+/// and extracting misplaced parameter fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SanitizedPracticeArgs {
+    pub scope: Option<String>,
+    pub context: String,
+    pub practice: String,
+    pub dense: String,
+    pub evidence: String,
+    pub from: String,
+    pub perishability: String,
+    pub role: String,
+    pub model: String,
+    pub repaired: bool,
+    pub repairs: Vec<String>,
+}
+
+/// REQ-AXO-902556 — Extract inlined XML parameter delimiters (`</practice>`,
+/// `<parameter name="...">`, etc.) that some LLM callers inject into string argument
+/// fields when emitting tool calls.
+///
+/// Returns `(cleaned_self, extracted_params, stripped_tags)`.
+pub(crate) fn extract_inlined_mcp_params(
+    field_name: &str,
+    text: &str,
+) -> (String, Vec<(String, String)>, Vec<String>) {
+    let mut s = text.trim();
+    let mut stripped = Vec::new();
+
+    // 1. Détection et suppression d'un éventuel wrapper englobant au tout début
+    if let Some(caps) = PARAM_OPEN_RE.captures(s) {
+        if caps.get(0).unwrap().start() == 0 {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            if name.eq_ignore_ascii_case(field_name) {
+                let tag_len = caps.get(0).unwrap().end();
+                stripped.push(format!("leading <parameter name=\"{name}\">"));
+                s = s[tag_len..].trim_start();
+            }
+        }
+    }
+
+    // 2. Recherche du point de césure marquant la fin du champ propre
+    let close_tag = format!("</{}>", field_name.to_lowercase());
+    let pos_close = s.to_lowercase().find(&close_tag);
+    let pos_param = PARAM_OPEN_RE.find(s).map(|m| m.start());
+
+    let (cut_idx, rest_start) = match (pos_close, pos_param) {
+        (Some(c), Some(p)) => {
+            if c <= p {
+                stripped.push(format!("closing {close_tag}"));
+                (c, c + close_tag.len())
+            } else {
+                (p, p)
+            }
+        }
+        (Some(c), None) => {
+            stripped.push(format!("closing {close_tag}"));
+            (c, c + close_tag.len())
+        }
+        (None, Some(p)) => (p, p),
+        (None, None) => (s.len(), s.len()),
+    };
+
+    let mut cleaned = s[..cut_idx].trim().to_string();
+
+    // 3. Nettoyage de balises fermantes parasites résiduelles à la fin du corps propre
+    let closing_candidates = [
+        close_tag.clone(),
+        "</parameter>".to_string(),
+        "</practice>".to_string(),
+        "</dense>".to_string(),
+        "</evidence>".to_string(),
+        "</context>".to_string(),
+        "</scope>".to_string(),
+        "</from>".to_string(),
+        "</role>".to_string(),
+        "</model>".to_string(),
+    ];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for tag in &closing_candidates {
+            if cleaned.to_lowercase().ends_with(&tag.to_lowercase()) {
+                let new_len = cleaned.len() - tag.len();
+                cleaned = cleaned[..new_len].trim_end().to_string();
+                stripped.push(format!("trailing {tag}"));
+                changed = true;
+            }
+        }
+    }
+
+    // 4. Extraction des paramètres inlinés depuis `rest`
+    let rest = if rest_start < s.len() {
+        s[rest_start..].trim()
+    } else {
+        ""
+    };
+
+    let matches: Vec<regex::Match> = PARAM_OPEN_RE.find_iter(rest).collect();
+    let mut extracted = Vec::new();
+
+    for (i, m) in matches.iter().enumerate() {
+        let caps = PARAM_OPEN_RE.captures(m.as_str()).unwrap();
+        let param_name = caps.get(1).map(|c| c.as_str().to_lowercase()).unwrap_or_default();
+        let val_start = m.end();
+        let val_end = if i + 1 < matches.len() {
+            matches[i + 1].start()
+        } else {
+            rest.len()
+        };
+        let raw_val = &rest[val_start..val_end];
+        let mut val = raw_val.trim().to_string();
+
+        let mut val_changed = true;
+        while val_changed {
+            val_changed = false;
+            let val_close_candidates = [
+                format!("</{param_name}>"),
+                "</parameter>".to_string(),
+                "</practice>".to_string(),
+                "</dense>".to_string(),
+                "</evidence>".to_string(),
+                "</scope>".to_string(),
+                "</from>".to_string(),
+                "</role>".to_string(),
+                "</model>".to_string(),
+            ];
+            for tag in &val_close_candidates {
+                if val.to_lowercase().ends_with(&tag.to_lowercase()) {
+                    let new_len = val.len() - tag.len();
+                    val = val[..new_len].trim_end().to_string();
+                    val_changed = true;
+                }
+            }
+        }
+        if !param_name.is_empty() {
+            extracted.push((param_name, val));
+        }
+    }
+
+    (cleaned, extracted, stripped)
+}
+
+/// REQ-AXO-902556 — Assainit les arguments de `practice_put` : extrait les balises
+/// inlinées parasitaires, route les champs déplacés vers leur colonne dédiée et trace
+/// les réparations effectuées.
+pub(crate) fn sanitize_practice_put_args(args: &Value) -> SanitizedPracticeArgs {
+    let mut res = SanitizedPracticeArgs::default();
+    let mut repairs = Vec::new();
+
+    let raw_context = args.get("context").and_then(Value::as_str).unwrap_or("").trim();
+    let raw_practice = args.get("practice").and_then(Value::as_str).unwrap_or("").trim();
+    let raw_dense = args.get("dense").and_then(Value::as_str).unwrap_or("").trim();
+    let raw_evidence = args.get("evidence").and_then(Value::as_str).unwrap_or("").trim();
+    let raw_scope = args
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let raw_from = args.get("from").and_then(Value::as_str).unwrap_or("").trim();
+    let raw_perishability = args.get("perishability").and_then(Value::as_str).unwrap_or("").trim();
+    let raw_role = args.get("role").and_then(Value::as_str).unwrap_or("").trim();
+    let raw_model = args.get("model").and_then(Value::as_str).unwrap_or("").trim();
+
+    res.scope = raw_scope;
+    res.context = raw_context.to_string();
+    res.practice = raw_practice.to_string();
+    res.dense = raw_dense.to_string();
+    res.evidence = raw_evidence.to_string();
+    res.from = raw_from.to_string();
+    res.perishability = raw_perishability.to_string();
+    res.role = raw_role.to_string();
+    res.model = raw_model.to_string();
+
+    let fields_to_inspect = [
+        ("practice", raw_practice),
+        ("dense", raw_dense),
+        ("context", raw_context),
+        ("evidence", raw_evidence),
+    ];
+
+    for (field_name, text) in fields_to_inspect {
+        if text.is_empty() {
+            continue;
+        }
+        let (cleaned, inlined, stripped) = extract_inlined_mcp_params(field_name, text);
+        if cleaned != text {
+            match field_name {
+                "practice" => res.practice = cleaned,
+                "dense" => res.dense = cleaned,
+                "context" => res.context = cleaned,
+                "evidence" => res.evidence = cleaned,
+                _ => {}
+            }
+            for s in stripped {
+                repairs.push(format!("stripped {s} from `{field_name}`"));
+            }
+        }
+        for (k, v) in inlined {
+            repairs.push(format!("extracted parameter `{k}` from `{field_name}`"));
+            match k.as_str() {
+                "dense" => {
+                    if res.dense.is_empty()
+                        || res.dense.contains("<parameter")
+                        || res.dense.contains("</dense>")
+                    {
+                        res.dense = v;
+                    }
+                }
+                "evidence" => {
+                    if res.evidence.is_empty()
+                        || res.evidence.contains("<parameter")
+                        || res.evidence.contains("</evidence>")
+                    {
+                        res.evidence = v;
+                    }
+                }
+                "scope" => {
+                    if res.scope.is_none() {
+                        res.scope = Some(v);
+                    }
+                }
+                "from" => {
+                    if res.from.is_empty() {
+                        res.from = v;
+                    }
+                }
+                "perishability" => {
+                    if res.perishability.is_empty() {
+                        res.perishability = v;
+                    }
+                }
+                "role" => {
+                    if res.role.is_empty() {
+                        res.role = v;
+                    }
+                }
+                "model" => {
+                    if res.model.is_empty() {
+                        res.model = v;
+                    }
+                }
+                "context" => {
+                    if res.context.is_empty() {
+                        res.context = v;
+                    }
+                }
+                "practice" => {
+                    if res.practice.is_empty() {
+                        res.practice = v;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !repairs.is_empty() {
+        res.repaired = true;
+        res.repairs = repairs;
+    }
+
+    res
+}
+
 impl McpServer {
     /// REQ-AXO-902467 — DERNIER repli `"AXO"` assume de la surface MCP, et la
     /// raison est structurelle : cette fonction rend `String`, donc elle n'a
@@ -392,13 +664,17 @@ impl McpServer {
     /// `practice` mal scopee est recuperable (elle reste lisible, et le scope
     /// global `*` est de toute facon toujours inclus au recall), alors qu'une
     /// mauvaise ancre de projet contamine une session entiere.
-    fn resolve_practice_scope(&self, args: &Value) -> String {
-        args.get("scope")
-            .and_then(Value::as_str)
+    fn resolve_practice_scope_str(&self, explicit_scope: Option<&str>) -> String {
+        explicit_scope
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .filter(|s| !s.trim().is_empty())
             .or_else(|| self.auto_resolve_project_code_str())
             .unwrap_or_else(|| "AXO".to_string())
+    }
+
+    fn resolve_practice_scope(&self, args: &Value) -> String {
+        self.resolve_practice_scope_str(args.get("scope").and_then(Value::as_str))
     }
 
     /// REQ-AXO-902131 — store a governed best practice. WRITE-GATED: a practice that
@@ -407,12 +683,14 @@ impl McpServer {
     /// tick/prune loop corrects a bad practice over time, and a fresh scope has no
     /// base to contradict).
     pub(crate) fn axon_practice_put(&self, args: &Value) -> Option<Value> {
-        let scope = self.resolve_practice_scope(args);
-        let context = args.get("context").and_then(Value::as_str).unwrap_or("").trim();
-        let practice = args.get("practice").and_then(Value::as_str).unwrap_or("").trim();
-        let evidence = args.get("evidence").and_then(Value::as_str).unwrap_or("");
-        let source = args.get("from").and_then(Value::as_str).unwrap_or("");
-        let dense_arg = args.get("dense").and_then(Value::as_str).unwrap_or("");
+        // REQ-AXO-902556 — assainir les balises XML et router les paramètres inlinés.
+        let sanitized = sanitize_practice_put_args(args);
+        let scope = self.resolve_practice_scope_str(sanitized.scope.as_deref());
+        let context = sanitized.context.trim();
+        let practice = sanitized.practice.trim();
+        let evidence = sanitized.evidence.trim();
+        let source = sanitized.from.trim();
+        let dense_arg = sanitized.dense.trim();
         if context.is_empty() || practice.is_empty() {
             return Some(practice_err("context and practice are required", "input_invalid"));
         }
@@ -421,10 +699,10 @@ impl McpServer {
         // REQ-AXO-902141 — perishability class (durable by default: a best practice
         // is timeless, it must NOT be time-decayed).
         let perishability =
-            normalize_perishability(args.get("perishability").and_then(Value::as_str).unwrap_or(""));
+            normalize_perishability(&sanitized.perishability);
         // REQ-AXO-902149 — multi-agent partitioning axes (default '*' = shared/agnostic).
-        let role = normalize_axis_tag(args.get("role").and_then(Value::as_str).unwrap_or(""));
-        let model = normalize_axis_tag(args.get("model").and_then(Value::as_str).unwrap_or(""));
+        let role = normalize_axis_tag(&sanitized.role);
+        let model = normalize_axis_tag(&sanitized.model);
 
         // --- WRITE-GATE: reject a practice that contradicts the scope's base. ---
         let gate_args = json!({
@@ -574,11 +852,17 @@ impl McpServer {
             }
             _ => "",
         };
+        let repair_note = if sanitized.repaired {
+            format!(" · 🔧 repaired: [{}]", sanitized.repairs.join(", "))
+        } else {
+            String::new()
+        };
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "### 🧠 practice_put — {} · scope=`{scope}` · gate={gate_label}{gate_note} · embed={embed_state} · encoding={dense_state} · {perishability} · id={id}{}",
+                "### 🧠 practice_put — {} · scope=`{scope}` · gate={gate_label}{gate_note} · embed={embed_state} · encoding={dense_state} · {perishability} · id={id}{}{}",
                 if inserted {"stored"} else {"updated"},
-                dense_advisory.map(|a| format!(" · ⚠️ {a}")).unwrap_or_default()
+                dense_advisory.map(|a| format!(" · ⚠️ {a}")).unwrap_or_default(),
+                repair_note,
             )}],
             // REQ-AXO-902583 — signalé par DOC : « `practice_put` rend `inserted: false`
             // avec `gate: inconclusive` — et stocke quand même. Deux champs qui se
@@ -602,7 +886,9 @@ impl McpServer {
                      "persisted": true,
                      "write": if inserted {"stored"} else {"updated"},
                      "scope":scope,"gate":gate_label,"embed":embed_state,
-                     "encoding":dense_state,"dense_advisory":dense_advisory,"perishability":perishability}
+                     "encoding":dense_state,"dense_advisory":dense_advisory,"perishability":perishability,
+                     "repaired": sanitized.repaired,
+                     "repairs": sanitized.repairs}
         }))
     }
 
@@ -1118,11 +1404,11 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use super::{
-        axis_recall_set, consolidate_tier, covering_scopes, is_failure_mode,
-        is_imperative_directive, merge_provenance, normalize_axis_tag, normalize_perishability,
-        perishability_decays_by_time, practice_lane_for, practice_lane_note,
-        practice_selection_sql, provenance_count, render_practice_list, resolve_dense_form,
-        retirement_trail, PracticeLane,
+        axis_recall_set, consolidate_tier, covering_scopes, extract_inlined_mcp_params,
+        is_failure_mode, is_imperative_directive, merge_provenance, normalize_axis_tag,
+        normalize_perishability, perishability_decays_by_time, practice_lane_for,
+        practice_lane_note, practice_selection_sql, provenance_count, render_practice_list,
+        resolve_dense_form, retirement_trail, sanitize_practice_put_args, PracticeLane,
     };
     use serde_json::json;
 
@@ -1396,5 +1682,118 @@ mod tests {
     fn a_quote_in_the_question_is_escaped_in_the_lexical_lane() {
         let sql = practice_selection_sql("scope IN ('*')", PracticeLane::Lexical, None, "l'init", 5);
         assert!(sql.contains("l''init"), "l'apostrophe doit etre echappee, got {sql}");
+    }
+
+    // =========================================================================
+    // REQ-AXO-902556 — Assainissement XML et routage des paramètres inlinés
+    // =========================================================================
+
+    #[test]
+    fn test_extract_inlined_cas_1705() {
+        let raw_practice = "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.</practice>\n\
+<parameter name=\"dense\">Rôle mort : lire la FIN des logs.</dense>\n\
+<parameter name=\"evidence\">2026-08-29 session 130 AXO : diagnostic erroné.</evidence>\n\
+<parameter name=\"scope\">*";
+
+        let (cleaned, inlined, stripped) = extract_inlined_mcp_params("practice", raw_practice);
+        assert_eq!(cleaned, "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.");
+        assert!(!stripped.is_empty());
+        assert_eq!(inlined.len(), 3);
+        assert_eq!(inlined[0], ("dense".to_string(), "Rôle mort : lire la FIN des logs.".to_string()));
+        assert_eq!(inlined[1], ("evidence".to_string(), "2026-08-29 session 130 AXO : diagnostic erroné.".to_string()));
+        assert_eq!(inlined[2], ("scope".to_string(), "*".to_string()));
+    }
+
+    #[test]
+    fn test_extract_inlined_cas_1706() {
+        let raw_dense = "Rôle mort : lire la FIN des logs.</dense>\n\
+<parameter name=\"evidence\">2026-08-29 session 130 AXO : diagnostic erroné.";
+
+        let (cleaned, inlined, stripped) = extract_inlined_mcp_params("dense", raw_dense);
+        assert_eq!(cleaned, "Rôle mort : lire la FIN des logs.");
+        assert!(!stripped.is_empty());
+        assert_eq!(inlined.len(), 1);
+        assert_eq!(inlined[0], ("evidence".to_string(), "2026-08-29 session 130 AXO : diagnostic erroné.".to_string()));
+    }
+
+    #[test]
+    fn test_extract_inlined_cas_1249() {
+        let raw_practice = "Un contrôle appartient à la readiness SEULEMENT si retirer CE réplica aide.</practice>\n\
+<parameter name=\"dense\">Readiness : un contrôle n'y a sa place que si retirer CE réplica aide.";
+
+        let (cleaned, inlined, stripped) = extract_inlined_mcp_params("practice", raw_practice);
+        assert_eq!(cleaned, "Un contrôle appartient à la readiness SEULEMENT si retirer CE réplica aide.");
+        assert!(!stripped.is_empty());
+        assert_eq!(inlined.len(), 1);
+        assert_eq!(inlined[0], ("dense".to_string(), "Readiness : un contrôle n'y a sa place que si retirer CE réplica aide.".to_string()));
+    }
+
+    #[test]
+    fn test_extract_inlined_cas_1274() {
+        let raw_practice = "Garde qui compare deux compteurs = inatteignable.</practice>\n\
+<parameter name=\"dense\">Garde compare compteurs = inatteignable.</dense>\n\
+<parameter name=\"evidence\">OPV REQ-OPV-887 commits 40d6351e";
+
+        let (cleaned, inlined, stripped) = extract_inlined_mcp_params("practice", raw_practice);
+        assert_eq!(cleaned, "Garde qui compare deux compteurs = inatteignable.");
+        assert!(!stripped.is_empty());
+        assert_eq!(inlined.len(), 2);
+        assert_eq!(inlined[0], ("dense".to_string(), "Garde compare compteurs = inatteignable.".to_string()));
+        assert_eq!(inlined[1], ("evidence".to_string(), "OPV REQ-OPV-887 commits 40d6351e".to_string()));
+    }
+
+    #[test]
+    fn test_sanitize_practice_put_args_cas_1705_full() {
+        let raw_json = json!({
+            "context": "diagnostic crash-loop",
+            "practice": "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.</practice>\n<parameter name=\"dense\">Rôle mort : lire la FIN des logs.</dense>\n<parameter name=\"evidence\">2026-08-29 session 130 AXO : diagnostic erroné.</evidence>\n<parameter name=\"scope\">*",
+            "dense": "Rôle mort : lire la FIN des logs.</dense>\n<parameter name=\"evidence\">2026-08-29 session 130 AXO : diagnostic erroné.",
+            "evidence": "",
+            "from": "AXO"
+        });
+
+        let sanitized = sanitize_practice_put_args(&raw_json);
+        assert_eq!(sanitized.practice, "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.");
+        assert_eq!(sanitized.dense, "Rôle mort : lire la FIN des logs.");
+        assert_eq!(sanitized.evidence, "2026-08-29 session 130 AXO : diagnostic erroné.");
+        assert_eq!(sanitized.scope.as_deref(), Some("*"));
+        assert!(sanitized.repaired);
+        assert!(!sanitized.repairs.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_practice_put_args_clean_preserves_technical_code() {
+        let raw_json = json!({
+            "context": "conception Rust",
+            "practice": "Use Vec<T> and Option<T> with &Rc<..> for pure functions without allocation.",
+            "dense": "Use Vec<T> and Option<T> with &Rc<..>.",
+            "evidence": "commit ab12cd34",
+            "scope": "AXO"
+        });
+
+        let sanitized = sanitize_practice_put_args(&raw_json);
+        assert_eq!(sanitized.practice, "Use Vec<T> and Option<T> with &Rc<..> for pure functions without allocation.");
+        assert_eq!(sanitized.dense, "Use Vec<T> and Option<T> with &Rc<..>.");
+        assert_eq!(sanitized.evidence, "commit ab12cd34");
+        assert_eq!(sanitized.scope.as_deref(), Some("AXO"));
+        assert!(!sanitized.repaired);
+        assert!(sanitized.repairs.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_practice_put_args_trailing_delimiter_stripped() {
+        let raw_json = json!({
+            "context": "situation normale",
+            "practice": "Une pratique avec balise fermante orpheline</practice>",
+            "dense": "Dense propre</dense>",
+            "evidence": "commit 1234</evidence>",
+            "scope": "TST"
+        });
+
+        let sanitized = sanitize_practice_put_args(&raw_json);
+        assert_eq!(sanitized.practice, "Une pratique avec balise fermante orpheline");
+        assert_eq!(sanitized.dense, "Dense propre");
+        assert_eq!(sanitized.evidence, "commit 1234");
+        assert!(sanitized.repaired);
     }
 }
