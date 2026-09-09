@@ -16,7 +16,7 @@ use crate::release_reconciler::IstOwnershipFacts;
 use crate::release_reconciler::{
     attempt_next_action, evaluate_attempt_gate, evaluate_gates, evaluate_liveness_gates,
     evaluate_supervisor_gates, liveness_next_action, liveness_phase, next_action, phase,
-    LivenessFacts, ReleaseFacts, SupervisorFacts,
+    probe_listen_queue_depth, LivenessFacts, ReleaseFacts, SupervisorFacts,
 };
 use crate::supervisor_probe;
 
@@ -125,6 +125,11 @@ impl McpServer {
         } else {
             None
         };
+        let mcp_port = std::env::var("AXON_HYDRA_HTTP_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(44129);
+        let accept_queue_depth = probe_listen_queue_depth(mcp_port);
         let lf = LivenessFacts {
             brain_serving: self.execute_raw_sql("SELECT 1").is_ok(),
             indexer_expected: facts.indexer_expected(),
@@ -133,6 +138,7 @@ impl McpServer {
             indexer_source: live.source.to_string(),
             ist_ownership,
             supervised_pid,
+            accept_queue_depth,
         };
 
         let mut gates = evaluate_gates(&facts);
@@ -257,6 +263,8 @@ impl McpServer {
                         "indexer_ready": lf.indexer_ready,
                         "indexer_lifecycle": lf.indexer_lifecycle,
                         "indexer_source": lf.indexer_source,
+                        "accept_queue_depth": lf.accept_queue_depth,
+                        "accept_queue_healthy": lf.accept_queue_depth.map(|d| d <= crate::release_reconciler::ACCEPT_QUEUE_MAX_HEALTHY_DEPTH),
                         // REQ-AXO-902585 — quadri-état en CHAÎNE, jamais un booléen
                         // qui se lirait « false » quand la vérité est « je ne sais pas ».
                         "indexer_restart_loop": sup.restart_loop_label(),

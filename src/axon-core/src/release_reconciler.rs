@@ -248,6 +248,91 @@ pub struct LivenessFacts {
     pub ist_ownership: IstOwnershipFacts,
     /// REQ-AXO-902616 — le pid que le SUPERVISEUR suit, pour le recoupement.
     pub supervised_pid: Option<i64>,
+    /// REQ-AXO-902594 — profondeur de la file d'acceptation du port MCP/HTTP (:44129). None = non sondé.
+    pub accept_queue_depth: Option<usize>,
+}
+
+/// REQ-AXO-902594 — Seuil au-delà duquel la file d'acceptation est considérée saturée/anormale.
+pub const ACCEPT_QUEUE_MAX_HEALTHY_DEPTH: usize = 5;
+
+/// REQ-AXO-902594 — Extrait la profondeur de la file d'acceptation (Recv-Q)
+/// depuis le contenu de `/proc/net/tcp` ou `/proc/net/tcp6` pour un port donné.
+/// En état `0A` (TCP_LISTEN), la colonne rx_queue porte les connexions non acceptées.
+pub fn parse_listen_queue_depth(proc_net_tcp: &str, port: u16) -> Option<usize> {
+    let hex_port = format!("{:04X}", port);
+    for line in proc_net_tcp.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // format: sl local_address rem_address st tx_queue:rx_queue ...
+        // ex: 18: 00000000:AC61 00000000:0000 0A 00000000:00000000
+        if parts.len() >= 5 {
+            let local_addr = parts[1];
+            let state = parts[3];
+            if state == "0A" && local_addr.ends_with(&format!(":{hex_port}")) {
+                let queues = parts[4];
+                if let Some((_tx, rx)) = queues.split_once(':') {
+                    if let Ok(depth) = usize::from_str_radix(rx, 16) {
+                        return Some(depth);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// REQ-AXO-902594 — Sonde la profondeur de la file d'acceptation du socket d'écoute
+/// sur le port indiqué. Tente `/proc/net/tcp`, puis `/proc/net/tcp6`, puis fallback `ss -ltn`.
+pub fn probe_listen_queue_depth(port: u16) -> Option<usize> {
+    if let Ok(content) = std::fs::read_to_string("/proc/net/tcp") {
+        if let Some(depth) = parse_listen_queue_depth(&content, port) {
+            return Some(depth);
+        }
+    }
+    if let Ok(content) = std::fs::read_to_string("/proc/net/tcp6") {
+        if let Some(depth) = parse_listen_queue_depth(&content, port) {
+            return Some(depth);
+        }
+    }
+    if let Ok(output) = std::process::Command::new("ss").args(["-ltn"]).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let port_str = format!(":{port}");
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 && parts[0] == "LISTEN" && parts[3].ends_with(&port_str) {
+                    if let Ok(depth) = parts[1].parse::<usize>() {
+                        return Some(depth);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// REQ-AXO-902594 — Gate vérifiant que la file d'acceptation du brain n'est pas saturée.
+pub fn brain_accept_queue_gate(l: &LivenessFacts) -> Gate {
+    match l.accept_queue_depth {
+        Some(depth) if depth > ACCEPT_QUEUE_MAX_HEALTHY_DEPTH => Gate::binary(
+            "brain_accept_queue",
+            false,
+            format!(
+                "brain MCP accept queue saturated ({depth} > {ACCEPT_QUEUE_MAX_HEALTHY_DEPTH})"
+            ),
+        ),
+        Some(depth) => Gate::binary(
+            "brain_accept_queue",
+            true,
+            format!(
+                "brain MCP accept queue healthy ({depth} <= {ACCEPT_QUEUE_MAX_HEALTHY_DEPTH})"
+            ),
+        ),
+        None => Gate::binary(
+            "brain_accept_queue",
+            true,
+            "brain MCP accept queue not probed".to_string(),
+        ),
+    }
 }
 
 /// Evaluate the runtime liveness gates (pure predicates over `LivenessFacts`).
@@ -265,6 +350,7 @@ pub fn evaluate_liveness_gates(l: &LivenessFacts) -> Vec<Gate> {
             },
         ),
         indexer_alive_gate(l),
+        brain_accept_queue_gate(l),
     ]
 }
 
@@ -322,6 +408,8 @@ fn indexer_alive_gate(l: &LivenessFacts) -> Gate {
 pub fn liveness_phase(l: &LivenessFacts) -> Option<&'static str> {
     if !l.brain_serving {
         Some("brain_down")
+    } else if l.accept_queue_depth.is_some_and(|depth| depth > ACCEPT_QUEUE_MAX_HEALTHY_DEPTH) {
+        Some("brain_accept_queue_saturated")
     } else if l.indexer_expected && !l.indexer_ready {
         Some("indexer_down")
     } else {
@@ -337,6 +425,13 @@ pub fn liveness_next_action(l: &LivenessFacts) -> Option<String> {
             "brain process up but DB probe (SELECT 1) failed — check Postgres reachability, then restart the brain."
                 .to_string(),
         );
+    }
+    if let Some(depth) = l.accept_queue_depth {
+        if depth > ACCEPT_QUEUE_MAX_HEALTHY_DEPTH {
+            return Some(format!(
+                "brain MCP accept queue backlog saturated ({depth} > {ACCEPT_QUEUE_MAX_HEALTHY_DEPTH}) — new TCP connections not accepted. Restart the brain: `curl -X POST :8080/process/restart/axon-brain`."
+            ));
+        }
     }
     if l.indexer_expected && !l.indexer_ready {
         return Some(match l.indexer_lifecycle.as_str() {
@@ -1399,7 +1494,7 @@ mod tests {
         // Les deux listes du shell, recopiées ici — c'est la recopie que ce test
         // EXISTE pour surveiller. Toute divergence doit rougir plutôt que de dormir.
         const REPARABLE_PAR_INDEXEUR: &[&str] = &["indexer_alive", "indexer_process_stable"];
-        const EXIGE_REPRISE_COMPLETE: &[&str] = &["brain_serving"];
+        const EXIGE_REPRISE_COMPLETE: &[&str] = &["brain_serving", "brain_accept_queue"];
         const HORS_DISPONIBILITE: &[&str] = &[
             "last_promote_attempt",
             "qualification_passed",
@@ -2649,6 +2744,7 @@ mod tests {
             indexer_source: "pg_heartbeat".to_string(),
             ist_ownership: proprietaire_vivant(650_712),
             supervised_pid: Some(544_703),
+            ..Default::default()
         };
         let gate = evaluate_liveness_gates(&l)
             .into_iter()
@@ -2678,6 +2774,7 @@ mod tests {
             indexer_source: "pg_heartbeat".to_string(),
             ist_ownership: proprietaire_vivant(544_703),
             supervised_pid: Some(544_703),
+            ..Default::default()
         };
         assert!(evaluate_liveness_gates(&l).iter().all(|g| g.passes()));
     }
@@ -2777,6 +2874,81 @@ mod tests {
             gate.detail.contains("NOT probed"),
             "et l'absence de mesure est DITE : {}",
             gate.detail
+        );
+    }
+
+    /// REQ-AXO-902594 — parse_listen_queue_depth extrait la longueur hexadécimale du Recv-Q
+    #[test]
+    fn parse_listen_queue_depth_extrait_exactement_le_compte_hexadecimal() {
+        let fake_proc_net_tcp = "\
+  sl  local_address rem_address   st tx_queue:rx_queue tr tm->when retrnsmt   uid  timeout inode
+   1: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0 100 0 0 10 0
+  18: 00000000:AC61 00000000:0000 0A 00000000:0000001F 00:00000000 00000000  1000        0 32639875 1 0 100 0 0 10 0
+  85: 0100007F:AC61 0100007F:C31A 01 00000000:00000000 00:00000000 00000000  1000        0 69973244 1 0 20 4 28 10 -1";
+
+        // Port 44129 (0xAC61) en LISTEN avec rx_queue = 0x1F = 31 (le cas DOC !)
+        assert_eq!(parse_listen_queue_depth(fake_proc_net_tcp, 44129), Some(31));
+        // Port 22 (0x0016) en LISTEN avec rx_queue = 0
+        assert_eq!(parse_listen_queue_depth(fake_proc_net_tcp, 22), Some(0));
+        // Port absent
+        assert_eq!(parse_listen_queue_depth(fake_proc_net_tcp, 80), None);
+    }
+
+    /// REQ-AXO-902594 — contrôle positif obligatoire :
+    /// saturer volontairement la file fait rougir la sonde et l'évaluation de liveness.
+    #[test]
+    fn saturer_la_file_d_acceptation_fait_rougir_la_sonde_et_l_evaluation_de_liveness() {
+        // (1) File saturée (ex: 31 connexions en attente comme mesuré par DOC)
+        let l_saturated = LivenessFacts {
+            brain_serving: true,
+            indexer_expected: false,
+            indexer_ready: false,
+            accept_queue_depth: Some(31),
+            ..Default::default()
+        };
+        let gates_saturated = evaluate_liveness_gates(&l_saturated);
+        let accept_gate = gates_saturated
+            .iter()
+            .find(|g| g.name == "brain_accept_queue")
+            .expect("gate brain_accept_queue must exist");
+
+        assert!(
+            accept_gate.is_red(),
+            "une file d'acceptation saturée DOIT faire rougir le gate brain_accept_queue"
+        );
+        assert!(
+            accept_gate.detail.contains("saturated") && accept_gate.detail.contains("31"),
+            "le détail doit expliciter la saturation et le compte: {}",
+            accept_gate.detail
+        );
+        assert_eq!(
+            liveness_phase(&l_saturated),
+            Some("brain_accept_queue_saturated"),
+            "la phase de liveness doit refléter la saturation de la file d'acceptation"
+        );
+        let next_action = liveness_next_action(&l_saturated).expect("next action required");
+        assert!(
+            next_action.contains("accept queue backlog saturated")
+                && next_action.contains("restart/axon-brain"),
+            "l'action corrective doit ordonner le redémarrage du brain: {next_action}"
+        );
+
+        // (2) Contre-exemple obligatoire : file saine (ex: 0 ou 2)
+        let l_healthy = LivenessFacts {
+            brain_serving: true,
+            indexer_expected: false,
+            indexer_ready: false,
+            accept_queue_depth: Some(0),
+            ..Default::default()
+        };
+        let gates_healthy = evaluate_liveness_gates(&l_healthy);
+        let accept_gate_healthy = gates_healthy
+            .iter()
+            .find(|g| g.name == "brain_accept_queue")
+            .expect("gate brain_accept_queue must exist");
+        assert!(
+            accept_gate_healthy.passes(),
+            "une file saine doit passer verte"
         );
     }
 }

@@ -46,7 +46,7 @@ AXON_PROMOTE_INDEXER_ONLY_GATES=(indexer_alive indexer_process_stable)
 # indexeur ne peut PAS réparer : il faut la reprise complète. Le comportement est le
 # même qu'un nom inconnu ; la différence est qu'ici c'est un CHOIX écrit, vérifiable
 # par le test Rust, et non une ignorance qui tombe par défaut au bon endroit.
-AXON_PROMOTE_FULL_RESTART_GATES=(brain_serving)
+AXON_PROMOTE_FULL_RESTART_GATES=(brain_serving brain_accept_queue)
 
 # Gates qui ne décrivent PAS la disponibilité courante : aucun redémarrage ne les
 # répare, donc ils ne participent à AUCUNE décision de reprise. Ils restent rendus

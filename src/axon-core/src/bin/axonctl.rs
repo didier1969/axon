@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use axon_core::release_reconciler::{
     drive_cutover, evaluate_liveness_gates, evaluate_stop_gates, liveness_next_action,
-    liveness_phase, run_cutover_loop, stop_next_action, stop_phase, CutoverIo, CutoverOutcome,
-    CutoverVerdict, LivenessFacts, StopFacts,
+    liveness_phase, probe_listen_queue_depth, run_cutover_loop, stop_next_action, stop_phase,
+    CutoverIo, CutoverOutcome, CutoverVerdict, LivenessFacts, StopFacts,
 };
 use serde::Serialize;
 use std::collections::{BTreeSet, VecDeque};
@@ -357,7 +357,14 @@ fn require_config_any_role(args: &GlobalArgs) -> Result<InstanceConfig> {
 /// blocks the caller (curl -sf fails on 4xx/5xx; --max-time bounds the wait).
 fn http_ready(url: &str, timeout_s: u64) -> bool {
     Command::new("curl")
-        .args(["-sf", "--max-time", &timeout_s.to_string(), url])
+        .args([
+            "-sf",
+            "--max-time",
+            &timeout_s.to_string(),
+            "-H",
+            "Connection: close",
+            url,
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -432,10 +439,12 @@ fn cmd_liveness(config: InstanceConfig, json: bool) -> Result<()> {
     let indexer_expected = manifest_indexer_expected(&config);
     let brain_serving = http_ready(&brain_url, 3);
     let indexer_ready = http_ready(&indexer_url, 3);
+    let accept_queue_depth = probe_listen_queue_depth(config.hydra_http_port);
     let l = LivenessFacts {
         brain_serving,
         indexer_expected,
         indexer_ready,
+        accept_queue_depth,
         indexer_lifecycle: if indexer_ready {
             "healthy"
         } else {
