@@ -17,6 +17,37 @@ static IMPACT_CACHE: OnceLock<Mutex<ImpactCache>> = OnceLock::new();
 #[allow(dead_code)]
 const IMPACT_CACHE_TTL_MS: i64 = 60_000;
 
+/// REQ-AXO-902370 — un rayon d'impact calcule sur ZERO arete n'est pas une mesure.
+///
+/// « 1 components affected » sur un tableau VIDE se lit comme un verdict alors que c'est
+/// un aveu. APS l'a paye quatre fois dans une seule session de suppression de code mort :
+/// les quatre modules etaient bel et bien morts, mais RIEN dans la sortie ne permettait de
+/// le savoir — un module vivant atteint par le routeur Phoenix rend exactement la meme
+/// chose. Leurs mots : « la regle a produit un rituel, pas une decision ».
+///
+/// Le cas qui tranche, garde comme non-regression : `APS3D.Cluster.Registry` a un appelant
+/// DIRECT, dans un fichier de production, avec un `alias` en tete du meme fichier — et il ne
+/// resolvait pas non plus. Un zero d'arete n'est donc pas une mesure d'absence, meme hors
+/// dispatch.
+///
+/// Fonction PURE pour qu'une garde puisse la falsifier sans monter un snapshot IST.
+pub(crate) fn note_de_zero_arete(direct_edges: i64, nif_edges: i64) -> Option<String> {
+    if direct_edges + nif_edges > 0 {
+        return None;
+    }
+    Some(
+        "⛔ **ZERO ARETE MESUREE — ce n'est PAS la preuve d'une absence d'appelant.** \
+         Aucun appelant via `CALLS` ou `CALLS_NIF` n'a ete mesure dans le parcours demande. \
+         Des appels peuvent manquer : alias non resolus, dispatch dynamique (`apply/3`), \
+         chargements par `importlib`, callbacks, references XML/JSON/CSV ou decorateurs de \
+         framework. Ces lacunes sont des hypotheses a verifier en source primaire. \
+         `orphan_clusters` expose la part des symboles appelables indexes atteints depuis \
+         les racines connues ; ce taux ne prouve pas la completude du graphe ni le nombre \
+         de fichiers restant a indexer (REQ-AXO-902370).\n\n"
+            .to_string(),
+    )
+}
+
 impl McpServer {
     #[cfg(not(test))]
     fn impact_cache() -> &'static Mutex<ImpactCache> {
@@ -402,6 +433,9 @@ impl McpServer {
                     "**Coverage:** confidence={} (direct_calls={}, calls_nif={})\n\n",
                     confidence_label, direct_edges, nif_edges
                 ));
+                if let Some(aveu) = note_de_zero_arete(direct_edges, nif_edges) {
+                    evidence.push_str(&aveu);
+                }
                 evidence.push_str(&table);
                 if let Some(section) =
                     self.build_local_projection_section(symbol, &target_id, depth, project)
@@ -918,25 +952,40 @@ impl McpServer {
             .and_then(|code| {
                 process_view()
                     .count_edges_with_relation(&code, &[RelationType::Calls, RelationType::CallsNif])
-            })
-            .unwrap_or(0);
+            });
+        let Some(calls_count) = calls_count else {
+            return Some(Self::impact_ram_unavailable_error(
+                symbol,
+                project,
+                depth,
+                "The project call graph could not be measured; an unavailable snapshot is not an empty graph",
+            ));
+        };
         if calls_count > 0 {
+            let zero_edge_note = note_de_zero_arete(0, 0).unwrap_or_default();
             return Some(json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "## 💥 Cross-Cutting Impact Analysis: {}\n\n{}{}No impact computed at depth {}.",
+                        "## 💥 Cross-Cutting Impact Analysis: {}\n\n{}{}{}No impact computed at depth {}.",
                         symbol,
                         project_note.clone().unwrap_or_default(),
                         degraded_note.clone().unwrap_or_default(),
+                        zero_edge_note,
                         depth
                     )
                 }],
                 "data": {
+                    "status": "inconclusive_zero_edges",
                     "symbol": symbol,
                     "project": project,
                     "depth": depth,
                     "impact_available": false,
+                    "summary": {
+                        "confidence": "none",
+                        "direct_edges": 0,
+                        "calls_nif_edges": 0
+                    },
                     "operator_guidance": {
                         "actionable_now": false,
                         "blocking_factors": [{
@@ -967,39 +1016,47 @@ impl McpServer {
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "## 💥 Cross-Cutting Impact Analysis: {}\n\n{}{}Symbol exists, but the call graph is not yet available in this live database.\n\n{}\n\n**Status:** CALLS is empty; impact radius cannot yet be reliably computed.",
+                    "## 💥 Cross-Cutting Impact Analysis: {}\n\n{}{}{}Symbol exists; the project snapshot contains zero CALLS/CALLS_NIF edges. This does not establish that indexing is pending. Verify source references and extraction coverage.\n\n{}",
                     symbol,
                     project_note.unwrap_or_default(),
                     degraded_note.unwrap_or_default(),
+                    note_de_zero_arete(0, 0).unwrap_or_default(),
                     format_table_from_json(&symbol_res, &["Name", "Type", "Project"])
                 )
             }],
             "data": {
+                "status": "inconclusive_empty_call_graph",
                 "symbol": symbol,
                 "project": project,
                 "depth": depth,
                 "impact_available": false,
+                "summary": {
+                    "confidence": "none",
+                    "direct_edges": 0,
+                    "calls_nif_edges": 0,
+                    "project_call_edges": calls_count
+                },
                 "operator_guidance": {
                     "actionable_now": false,
                     "blocking_factors": [{
-                        "factor": "call_graph_not_available",
+                        "factor": "empty_call_graph",
                         "severity": "high",
-                        "recommended_action": "wait for live call-graph truth before relying on impact for risky mutation"
+                        "recommended_action": "verify source references and extraction coverage before inferring absence of callers"
                     }],
                     "remediation_actions": [
-                        "wait for live call-graph truth before relying on impact for risky mutation"
+                        "verify source references and extraction coverage before inferring absence of callers"
                     ],
                     "follow_up_tools": ["inspect", "query"],
                     "next_action": {
-                        "kind": "wait_for_call_graph_truth",
+                        "kind": "verify_source_and_extraction",
                         "tool": "inspect",
-                        "when": "after_indexing_progress"
+                        "when": "now"
                     }
                 },
                 "next_action": {
-                    "kind": "wait_for_call_graph_truth",
+                    "kind": "verify_source_and_extraction",
                     "tool": "inspect",
-                    "when": "after_indexing_progress"
+                    "when": "now"
                 }
             }
         }))

@@ -6778,3 +6778,259 @@ fn test_inspect_says_when_a_short_name_carries_more_than_one_definition() {
         "aucun fragment de la note ne doit fuir sur le cas non ambigu.\n---\n{unambiguous}"
     );
 }
+
+/// REQ-AXO-902370 — un outil qui sait qu'il ne voit pas doit le dire AVANT de donner
+/// des chiffres.
+///
+/// Trois locataires, trois ecosystemes (APS/Phoenix, OPV/Python, KKI/Java), la meme
+/// demande : « a 35,9 % de couverture, la bonne reponse n'est pas "212 amas", c'est
+/// "je ne peux pas repondre" ». Le seuil de precaution est 50 % ; son franchissement
+/// ne demontre pas la completude du graphe ni l'absence d'appelants reels.
+#[test]
+fn orphan_clusters_refuse_de_conclure_quand_la_majorite_du_depot_est_hors_de_portee() {
+    use crate::mcp::tools_ist_algorithms::{refus_de_conclure, COUVERTURE_CONCLUANTE};
+
+    // Le chiffre EXACT du rapport APS/OPV : 35,9 %.
+    let refus = refus_de_conclure(0.359, 2_100, 3_275, 12)
+        .expect("a 35,9 % de couverture, l'outil doit REFUSER de conclure");
+    assert!(
+        refus.contains("NON CONCLUANTE"),
+        "le refus doit se nommer, sinon il se lit comme un commentaire : {refus}"
+    );
+    assert!(
+        refus.contains("35.9"),
+        "le refus doit porter le CHIFFRE qui le motive — sans lui, le lecteur ne peut pas \
+         juger de quel cote de la frontiere il se trouve : {refus}"
+    );
+    assert!(
+        refus.contains("dispatch dynamique"),
+        "le refus doit nommer les causes possibles a verifier : {refus}"
+    );
+
+    // Au-dessus du seuil, le calcul du graphe reste rendu avec sa portee limitee.
+    assert!(
+        refus_de_conclure(0.752, 841, 3_395, 86).is_none(),
+        "a 75,2 % le garde de faible couverture ne s'applique pas"
+    );
+
+    // La frontiere elle-meme, des DEUX cotes — un seuil non epingle derive au premier
+    // refactor, et personne ne le voit.
+    assert!(
+        refus_de_conclure(COUVERTURE_CONCLUANTE, 1, 2, 1).is_none(),
+        "la borne du seuil de precaution est INCLUSIVE"
+    );
+    assert!(
+        refus_de_conclure(COUVERTURE_CONCLUANTE - 0.001, 1, 2, 1).is_some(),
+        "juste en dessous, elle ne porte plus — sans ce cas, un seuil a 0.0 passerait"
+    );
+}
+
+/// REQ-AXO-902370 — le zero d'arete de `impact` est un aveu, pas un verdict.
+///
+/// APS, session de suppression de code mort : quatre `impact` rendent « 1 components
+/// affected » avec un tableau VIDE. Les quatre modules etaient morts, mais un module
+/// vivant atteint par le routeur Phoenix rend EXACTEMENT la meme chose. Ce qui a
+/// reellement tranche : `grep`. « La regle a produit un rituel, pas une decision. »
+#[test]
+fn impact_avoue_quand_il_n_a_mesure_aucune_arete() {
+    use crate::mcp::tools_risk::note_de_zero_arete;
+
+    let aveu = note_de_zero_arete(0, 0).expect("un zero d'arete doit s'annoncer comme tel");
+    assert!(
+        aveu.contains("PAS la preuve d'une absence"),
+        "l'aveu doit dire ce qu'il n'est PAS : c'est la confusion exacte que le rapport \
+         d'APS decrit : {aveu}"
+    );
+    assert!(
+        aveu.contains("importlib") && aveu.contains("apply/3"),
+        "l'aveu doit nommer les familles d'indirection non couvertes — les trois locataires \
+         sont sur trois ecosystemes differents : {aveu}"
+    );
+
+    // Une seule arete suffit a faire du rayon une mesure : la note doit alors SE TAIRE.
+    // Sans ce cas, une note affichee en permanence serait du bruit, pas un signal.
+    assert!(
+        note_de_zero_arete(1, 0).is_none(),
+        "une arete directe mesuree : la note n'a plus lieu d'etre"
+    );
+    assert!(
+        note_de_zero_arete(0, 1).is_none(),
+        "une arete NIF est une arete mesuree elle aussi"
+    );
+}
+
+/// REQ-AXO-902370 — la garde doit porter sur la sortie MCP effectivement lue par le
+/// client. Le projet possede bien un graphe CALLS, mais `target` n'a aucun appelant :
+/// c'est exactement le cas qui retournait auparavant un tableau vide comme un verdict.
+#[test]
+fn impact_mcp_refuse_de_conclure_quand_la_cible_na_aucune_arete_mesuree() {
+    use crate::test_support::ist_fixtures::{
+        create_test_server_with_ist_seed, CallFixture, IstSeed, SymbolFixture,
+    };
+
+    let project = "ZER";
+    let root = "ZER::src/main.rs::run_main";
+    let wired = "ZER::src/lib.rs::wired";
+    let target = "ZER::src/lib.rs::target";
+    let harness = create_test_server_with_ist_seed(
+        IstSeed::new()
+            .symbol(SymbolFixture::new(root, "run_main", "function", project))
+            .symbol(SymbolFixture::new(wired, "wired", "function", project))
+            .symbol(SymbolFixture::new(target, "target", "function", project))
+            .call(CallFixture::canonical(root, wired, project)),
+    )
+    .unwrap();
+
+    let response = harness
+        .server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "impact",
+                "arguments": { "project": project, "symbol": target, "depth": 3 }
+            })),
+            id: Some(json!(90237001)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(
+        response["data"]["status"].as_str(),
+        Some("inconclusive_zero_edges"),
+        "{response:?}"
+    );
+    assert_eq!(response["data"]["impact_available"].as_bool(), Some(false));
+    assert_eq!(response["data"]["summary"]["direct_edges"], json!(0));
+    let rendered = response["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        rendered.contains("PAS la preuve d'une absence"),
+        "le contrat MCP doit porter l'aveu, pas seulement son helper : {rendered}"
+    );
+
+    crate::ist_snapshot::evict_process_snapshot(project);
+}
+
+/// REQ-AXO-902370 — meme preuve bout-en-bout pour `orphan_clusters`: sous 50 %, les
+/// amas restent visibles comme donnees mais les deux canaux retirent explicitement le verdict.
+#[test]
+fn orphan_clusters_mcp_expose_un_statut_non_concluant_sous_la_majorite() {
+    use crate::test_support::ist_fixtures::{
+        create_test_server_with_ist_seed, CallFixture, IstSeed, SymbolFixture,
+    };
+
+    let project = "TST";
+    let root = "TST::src/main.rs::run_main";
+    let dead_a = "TST::src/lib.rs::dead_a";
+    let dead_b = "TST::src/lib.rs::dead_b";
+    let harness = create_test_server_with_ist_seed(
+        IstSeed::new()
+            .symbol(SymbolFixture::new(root, "run_main", "function", project))
+            .symbol(SymbolFixture::new(dead_a, "dead_a", "function", project))
+            .symbol(SymbolFixture::new(dead_b, "dead_b", "function", project))
+            .call(CallFixture::canonical(dead_a, dead_b, project))
+            .call(CallFixture::canonical(dead_b, dead_a, project)),
+    )
+    .unwrap();
+    assert!(harness.server.ensure_ram_snapshot_warm(project));
+
+    let response = harness
+        .server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "orphan_clusters",
+                "arguments": { "project_code": project }
+            })),
+            id: Some(json!(90237002)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(
+        response["data"]["status"].as_str(),
+        Some("inconclusive_low_wiring_coverage"),
+        "{response:?}"
+    );
+    assert_eq!(response["data"]["conclusive"].as_bool(), Some(false));
+    assert_eq!(response["data"]["dead_code_proven"], json!(false));
+    assert_eq!(
+        response["data"]["conclusive_scope"],
+        json!("indexed_graph_reachability_only")
+    );
+    assert_eq!(response["data"]["conclusive_threshold"], json!(0.5));
+    assert_eq!(response["data"]["cluster_count"], json!(1));
+    let rendered = response["content"][0]["text"].as_str().unwrap_or("");
+    assert!(rendered.contains("MESURE NON CONCLUANTE"), "{rendered}");
+    assert!(!rendered.contains("dead cluster"), "{rendered}");
+
+    // A exactement 50 %, un cluster reste non atteint : le statut machine ne doit
+    // pas le rebaptiser « mort » au motif que le garde de faible couverture est leve.
+    let wired = "TST::src/lib.rs::wired";
+    crate::test_support::ist_fixtures::seed_ist(
+        &harness.store,
+        &IstSeed::new()
+            .symbol(SymbolFixture::new(wired, "wired", "function", project))
+            .call(CallFixture::canonical(root, wired, project)),
+    )
+    .unwrap();
+    crate::ist_snapshot::evict_process_snapshot(project);
+    assert!(harness.server.ensure_ram_snapshot_warm(project));
+    let boundary = harness
+        .server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "orphan_clusters",
+                "arguments": { "project_code": project }
+            })),
+            id: Some(json!(90237004)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(boundary["data"]["wiring_coverage"], json!(0.5));
+    assert_eq!(boundary["data"]["cluster_count"], json!(1));
+    assert_eq!(boundary["data"]["status"], json!("unreached_clusters_detected"));
+    assert_eq!(boundary["data"]["conclusive"], json!(true));
+    assert_eq!(boundary["data"]["dead_code_proven"], json!(false));
+    let rendered = boundary["content"][0]["text"].as_str().unwrap_or("");
+    assert!(rendered.contains("n'est pas une preuve de code mort"), "{rendered}");
+    assert!(!rendered.contains("dead cluster"), "{rendered}");
+
+    // Une vraie arete depuis la racine rend les quatre candidats atteints. Le canal
+    // machine peut conclure SUR LE GRAPHE, mais ne doit jamais certifier du code mort.
+    crate::test_support::ist_fixtures::seed_ist(
+        &harness.store,
+        &IstSeed::new().call(CallFixture::canonical(root, dead_a, project)),
+    )
+    .unwrap();
+    crate::ist_snapshot::evict_process_snapshot(project);
+    assert!(harness.server.ensure_ram_snapshot_warm(project));
+    let reached = harness
+        .server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "orphan_clusters",
+                "arguments": { "project_code": project }
+            })),
+            id: Some(json!(90237003)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(reached["data"]["wiring_coverage"], json!(1.0));
+    assert_eq!(reached["data"]["cluster_count"], json!(0));
+    assert_eq!(reached["data"]["conclusive"], json!(true));
+    assert_eq!(reached["data"]["dead_code_proven"], json!(false));
+    let rendered = reached["content"][0]["text"].as_str().unwrap_or("");
+    assert!(rendered.contains("n'est pas une preuve de code mort"), "{rendered}");
+
+    crate::ist_snapshot::evict_process_snapshot(project);
+}

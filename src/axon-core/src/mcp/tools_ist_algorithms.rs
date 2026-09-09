@@ -539,6 +539,47 @@ fn build_sub_scores(raw: &ShiRawMetrics) -> Vec<SubScore> {
     ]
 }
 
+/// REQ-AXO-902370 — sous quelle couverture `orphan_clusters` cesse-t-il de conclure.
+///
+/// Trois locataires, trois ecosystemes, la meme demande : « a 35,9 % de couverture, la
+/// bonne reponse n'est pas "212 amas", c'est "je ne peux pas repondre" ». Un outil qui
+/// sait qu'il ne voit pas doit le dire AVANT de donner des chiffres.
+///
+/// Seuil de precaution : moins de la moitie des candidats sont atteints. Ce choix
+/// n'est PAS une preuve statistique de completude ; au-dessus aussi, une arete
+/// manquante peut masquer un appelant reel. Le verdict ne porte que sur le graphe indexe.
+pub(crate) const COUVERTURE_CONCLUANTE: f64 = 0.50;
+
+/// REQ-AXO-902370 — le refus, en fonction PURE pour qu'une garde puisse le falsifier.
+///
+/// Rend `None` au-dessus du seuil de precaution, `Some(prefixe)` sinon. Les amas
+/// restent rendus dans les deux cas : les retenir punirait un lecteur qui sait ce qu'il
+/// lit. C'est le VERDICT qui est retire, pas la donnee.
+pub(crate) fn refus_de_conclure(
+    couverture: f64,
+    non_atteints: usize,
+    candidats: usize,
+    racines: usize,
+) -> Option<String> {
+    if couverture >= COUVERTURE_CONCLUANTE {
+        return None;
+    }
+    Some(format!(
+        "⛔ MESURE NON CONCLUANTE — {:.1}% de couverture : {} des {} symboles appelables ne \
+         sont atteints depuis AUCUNE des {} racines connues. Le seuil de 50% est une \
+         precaution, pas une preuve de completude au-dessus du seuil. Les amas \
+         ci-dessous sont rendus comme DONNEE, pas comme verdict — ne supprimer aucun symbole \
+         sur cette base. Les indirections invisibles au graphe `CALLS` (dispatch dynamique, \
+         alias de module, callback enregistre, reference par chaine depuis des donnees \
+         XML/JSON, decorateur invoque par un framework) sont des causes possibles a verifier. \
+         Declarer uniquement les points d'entree confirmes par `soll_attach_evidence role=entry`. ",
+        couverture * 100.0,
+        non_atteints,
+        candidats,
+        racines,
+    ))
+}
+
 impl McpServer {
     pub(crate) fn axon_ist_centrality_pagerank(&self, args: &Value) -> Option<Value> {
         let project = match self.ist_resolve_project(args, "ist_centrality_pagerank") {
@@ -1056,13 +1097,28 @@ impl McpServer {
             report.root_count,
             report.leaves.len()
         );
-        // REQ-AXO-902279 (feedback #46) — name the members of the largest dead cluster in
-        // the TEXT channel: "77 dead clusters" is unactionable until an LLM knows WHICH
-        // symbols are dead. Names are already in `data.clusters[].nodes`; this echoes a
+
+        // REQ-AXO-902370 — REFUSER de conclure quand la mesure ne porte plus.
+        // La decision vit dans `refus_de_conclure`, fonction PURE : une garde ne peut
+        // pas falsifier un seuil noye dans un `format!`.
+        let mesure_non_concluante = report.wiring_coverage() < COUVERTURE_CONCLUANTE;
+        let refus = refus_de_conclure(
+            report.wiring_coverage(),
+            report.unreached_count,
+            report.candidate_count,
+            report.root_count,
+        )
+        .unwrap_or_else(|| {
+            "Graphe indexe uniquement : un symbole non atteint n'est pas une preuve de code mort. "
+                .to_string()
+        });
+        // REQ-AXO-902279 (feedback #46) — name the largest unreached cluster in the
+        // TEXT channel so the caller can inspect the actual symbols, without claiming
+        // they are dead. Names are already in `data.clusters[].nodes`; this echoes a
         // bounded sample of the biggest (clusters are size-desc) with truncation disclosure.
         let cluster_phrase = match report.clusters.first() {
             Some(largest) => sample_identities(
-                &format!("largest dead cluster ({} symbols)", largest.len()),
+                &format!("largest unreached cluster ({} symbols)", largest.len()),
                 largest,
                 12,
             ),
@@ -1070,12 +1126,13 @@ impl McpServer {
         };
         let summary = if report.clusters.is_empty() {
             format!(
-                "orphan_clusters {} : 0 dead cluster(s) ({} unreached singleton(s) out of {} candidate(s)){}",
-                project, report.unreached_count, report.candidate_count, coverage_note
+                "{}orphan_clusters {} : 0 unreached cluster(s) ({} unreached singleton(s) out of {} candidate(s)){}",
+                refus, project, report.unreached_count, report.candidate_count, coverage_note
             )
         } else {
             format!(
-                "orphan_clusters {} : {} dead cluster(s), largest = {} symbols ({} total unreached out of {} candidate(s)){}{}",
+                "{}orphan_clusters {} : {} unreached cluster(s), largest = {} symbols ({} total unreached out of {} candidate(s)){}{}",
+                refus,
                 project,
                 report.clusters.len(),
                 report.clusters[0].len(),
@@ -1094,7 +1151,20 @@ impl McpServer {
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
             "data": {
-                "status": if report.clusters.is_empty() { "ok" } else { "dead_clusters_detected" },
+                // REQ-AXO-902370 — le canal machine porte la MEME reserve que le texte :
+                // un consommateur qui ne lit que `status` ne doit pas recevoir un verdict
+                // que la version lue par un humain refuse de rendre.
+                "status": if mesure_non_concluante {
+                    "inconclusive_low_wiring_coverage"
+                } else if report.clusters.is_empty() {
+                    "ok"
+                } else {
+                    "unreached_clusters_detected"
+                },
+                "conclusive": !mesure_non_concluante,
+                "conclusive_scope": "indexed_graph_reachability_only",
+                "dead_code_proven": false,
+                "conclusive_threshold": COUVERTURE_CONCLUANTE,
                 "project_code": project,
                 "candidate_count": report.candidate_count,
                 "root_count": report.root_count,

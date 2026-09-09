@@ -5940,13 +5940,17 @@ fn test_axon_impact_reports_missing_call_graph_truthfully() {
         .as_str()
         .unwrap();
 
-    assert!(impact_text.contains("call graph is not yet available"));
+    assert!(impact_text.contains("project snapshot contains zero CALLS/CALLS_NIF edges"));
+    assert!(impact_text.contains("PAS la preuve d'une absence"));
+    assert!(!impact_text.contains("call graph is not yet available"));
     assert!(impact_text.contains(&name));
     let data = impact_result.get("data").unwrap();
     assert_eq!(data["impact_available"].as_bool(), Some(false));
+    assert_eq!(data["status"], json!("inconclusive_empty_call_graph"));
+    assert_eq!(data["summary"]["project_call_edges"], json!(0));
     assert_eq!(
         data["next_action"]["kind"].as_str(),
-        Some("wait_for_call_graph_truth")
+        Some("verify_source_and_extraction")
     );
     assert_eq!(data["next_action"]["tool"].as_str(), Some("inspect"));
 }
