@@ -1723,6 +1723,32 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902510 — recherche un nœud SOLL session_pointer actif (status='current')
+    /// pour ce projet afin de refuser toute contradiction (effacement ou kind=none).
+    fn active_soll_session_pointer_node(&self, project_code: &str) -> Option<(String, String)> {
+        let normalized = project_code.trim().to_ascii_uppercase();
+        let rows_raw = self
+            .graph_store
+            .query_json_param(
+                "SELECT id, title FROM soll.Node \
+                 WHERE project_code = ? \
+                   AND status = 'current' \
+                   AND (metadata->>'kind' = 'session_pointer' OR metadata::text LIKE '%\"kind\":\"session_pointer\"%') \
+                 LIMIT 1",
+                &serde_json::json!([normalized]),
+            )
+            .ok()?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).ok()?;
+        let row = rows.first()?;
+        if row.len() >= 2 {
+            Some((row[0].clone(), row[1].clone()))
+        } else if let Some(id) = row.first() {
+            Some((id.clone(), String::new()))
+        } else {
+            None
+        }
+    }
+
     fn find_active_handoff(project_path: &str) -> Option<String> {
         let dir = std::path::Path::new(project_path)
             .join("docs")
@@ -3198,11 +3224,17 @@ impl McpServer {
             })]
         };
 
-        // REQ-AXO-143 — accept and persist an optional session_pointer arg
+        // REQ-AXO-143 / REQ-AXO-902510 — accept and persist an optional session_pointer arg
         // BEFORE building the kickoff bundle so the bundle reads back the
-        // freshly-stored value. See `validate_session_pointer` for the
-        // canonical shape `{kind: file|url|soll_node|none, value, label?}`.
+        // freshly-stored value.
+        // REQ-AXO-902510 :
+        // 1. Lire le `prior_pointer` AVANT toute mutation.
+        // 2. Si l'appel tente d'effacer le pointeur (null ou kind="none"), vérifier qu'aucun
+        //    nœud SOLL session_pointer n'est actif (status='current') pour refuser la contradiction.
+        // 3. Rendre la mutation explicite : traçabilité de prior_pointer dans `data` et message dans `response_text`.
+        let mut session_pointer_mutation_info: Option<(serde_json::Value, Option<serde_json::Value>)> = None;
         if let Some(pointer_arg) = args.get("session_pointer") {
+            let prior_pointer = self.graph_store.read_session_pointer(&project_code).ok().flatten();
             if !pointer_arg.is_null() {
                 let canonical = match Self::validate_session_pointer(pointer_arg) {
                     Ok(value) => value,
@@ -3217,6 +3249,24 @@ impl McpServer {
                         ));
                     }
                 };
+
+                // REQ-AXO-902510 — Contradiction guard : si kind="none", refuser si un nœud SOLL session_pointer actif existe
+                if canonical.get("kind").and_then(|v| v.as_str()) == Some("none") {
+                    if let Some((active_id, active_title)) = self.active_soll_session_pointer_node(&project_code) {
+                        return Some(project_workflow_error(
+                            "session_pointer",
+                            Some("none"),
+                            &["soll_get", "soll_manager", "re_anchor"],
+                            format!(
+                                "Contradiction detected: cannot set session_pointer to 'none' for project `{}` because active SOLL session_pointer node `{}` ('{}') has status='current' (REQ-AXO-902510). Retire or update the SOLL node before clearing the registry pointer.",
+                                project_code, active_id, active_title
+                            ),
+                            "Retire or update the SOLL session_pointer node via soll_manager before declaring kind=none",
+                            None,
+                        ));
+                    }
+                }
+
                 if let Err(e) = self
                     .graph_store
                     .write_session_pointer(&project_code, Some(&canonical))
@@ -3230,9 +3280,24 @@ impl McpServer {
                         Some(&e.to_string()),
                     ));
                 }
+                session_pointer_mutation_info = Some((canonical, prior_pointer));
             } else {
-                // Explicit null clears any prior pointer.
+                // REQ-AXO-902510 — Contradiction guard : si null (effacement), refuser si un nœud SOLL session_pointer actif existe
+                if let Some((active_id, active_title)) = self.active_soll_session_pointer_node(&project_code) {
+                    return Some(project_workflow_error(
+                        "session_pointer",
+                        Some("null"),
+                        &["soll_get", "soll_manager", "re_anchor"],
+                        format!(
+                            "Contradiction detected: cannot clear session_pointer for project `{}` because active SOLL session_pointer node `{}` ('{}') has status='current' (REQ-AXO-902510). Retire or update the SOLL node before clearing the registry pointer.",
+                            project_code, active_id, active_title
+                        ),
+                        "Retire or update the SOLL session_pointer node via soll_manager before clearing",
+                        None,
+                    ));
+                }
                 let _ = self.graph_store.write_session_pointer(&project_code, None);
+                session_pointer_mutation_info = Some((serde_json::Value::Null, prior_pointer));
             }
         }
 
@@ -3259,22 +3324,55 @@ impl McpServer {
             "\n\nKickoff bundle attached in `data.kickoff_bundle` (kickoff_prompt, methodology_summary, entry_points, session_pointer, derived_session_pointer, active_handoff, in_progress_requirements, wave_1_unblockers, recent_req_commits, recent_soll_writes, soll_skeleton, capabilities_map, session_toolset_hint). derived_session_pointer (REQ-AXO-902160) auto-orients a fresh session from git HEAD + in-progress REQs + recent REQ commits — no hand-write ; `.explicit` carries the operator-set session_pointer when present. {macro_clause}; session_toolset_hint is a ready ToolSearch select. Use it to onboard yourself or any future LLM session before doing project-specific work."
         ));
 
+        if let Some((ref current_sp, ref prior_sp)) = session_pointer_mutation_info {
+            let prior_str = prior_sp
+                .as_ref()
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "(none)".to_string());
+            if current_sp.is_null() || current_sp.get("kind").and_then(|v| v.as_str()) == Some("none") {
+                response_text.push_str(&format!(
+                    "\n\n⚠️  MUTATION: session_pointer was CLEARED (previous value: `{}`). (REQ-AXO-902510)",
+                    prior_str
+                ));
+            } else {
+                response_text.push_str(&format!(
+                    "\n\n⚠️  MUTATION: session_pointer was UPDATED from `{}` to `{}`. (REQ-AXO-902510)",
+                    prior_str, current_sp
+                ));
+            }
+        }
+
         // REQ-AXO-902172 — lead with the essential Continuation block INLINE so a client
         // reading content.text alone is oriented without cracking data.kickoff_bundle
         // (mcp_feedback #41). The rich bundle stays in `data` for programmatic use.
         let continuation = Self::render_continuation_block(&bundle);
         let response_text = format!("{continuation}\n---\n\n{response_text}");
 
+        let mut data_obj = serde_json::json!({
+            "project_code": project_code,
+            "project_name": project_name,
+            "project_path": project_path,
+            "path_exists_on_disk": path_exists_on_disk,
+            "warnings": warnings,
+            "kickoff_bundle": bundle
+        });
+        if let Some((current_sp, prior_sp)) = session_pointer_mutation_info {
+            data_obj["previous_session_pointer"] = prior_sp.clone().unwrap_or(serde_json::Value::Null);
+            let action = if current_sp.is_null() || current_sp.get("kind").and_then(|v| v.as_str()) == Some("none") {
+                "cleared"
+            } else {
+                "updated"
+            };
+            data_obj["session_pointer_mutation"] = serde_json::json!({
+                "action": action,
+                "previous": prior_sp,
+                "current": current_sp,
+            });
+        }
+
         Some(serde_json::json!({
             "content": [{ "type": "text", "text": response_text }],
-            "data": {
-                "project_code": project_code,
-                "project_name": project_name,
-                "project_path": project_path,
-                "path_exists_on_disk": path_exists_on_disk,
-                "warnings": warnings,
-                "kickoff_bundle": bundle
-            }
+            "data": data_obj
         }))
     }
 

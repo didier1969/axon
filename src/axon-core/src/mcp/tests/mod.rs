@@ -449,3 +449,5 @@ mod scope_completeness_tests;
 mod rescan_project_wipe_failure_tests;
 /// REQ-AXO-902508 — rafraîchissement à chaud du registre de projets dans l'indexeur sans redémarrage.
 mod registry_hot_reload_tests;
+/// REQ-AXO-902510 — non-silence de la mutation et garde anti-contradiction sur session_pointer.
+mod session_pointer_mutation_tests;
