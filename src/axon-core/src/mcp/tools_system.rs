@@ -186,8 +186,7 @@ impl McpServer {
         // An allow-list also fails silently forward: every schema added after it was
         // written is invisible until somebody notices. Excluding the two system schemas
         // inverts that — a new product schema shows up on its own.
-        const PRODUCT_SCHEMAS: &str =
-            "table_schema NOT IN ('pg_catalog', 'information_schema') \
+        const PRODUCT_SCHEMAS: &str = "table_schema NOT IN ('pg_catalog', 'information_schema') \
              AND table_schema NOT LIKE 'pg_toast%' AND table_schema NOT LIKE 'pg_temp%'";
         let tables = self
             .graph_store
@@ -274,10 +273,7 @@ impl McpServer {
     /// `provider=cpu|gpu|auto` flips it; the query worker rebuilds its model on
     /// the next request. Frees the GPU for Live (`cpu`) or re-grabs it (`gpu`).
     pub(crate) fn axon_embed_provider(&self, args: &Value) -> Option<Value> {
-        let action = args
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("get");
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("get");
         let current_override = crate::embedder::query_embed_provider_override_label();
         let worker_compute = crate::embedder::query_worker_compute_label().unwrap_or("unknown");
         if action == "set" {
@@ -343,7 +339,10 @@ impl McpServer {
             let row = rows.first()?;
             // The SQL gateway renders every column as a string (see
             // tools_system_debug::json_i64) — tolerate both shapes.
-            let enabled = row.first().map(|v| v == "true" || v == true).unwrap_or(false);
+            let enabled = row
+                .first()
+                .map(|v| v == "true" || v == true)
+                .unwrap_or(false);
             let seconds = row
                 .get(1)
                 .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse::<i64>().ok()))
@@ -370,7 +369,10 @@ impl McpServer {
                     } }
                 }));
             };
-            let seconds = args.get("seconds").and_then(|v| v.as_u64()).map(|s| s.max(1));
+            let seconds = args
+                .get("seconds")
+                .and_then(|v| v.as_u64())
+                .map(|s| s.max(1));
             let now_ms = chrono::Utc::now().timestamp_millis();
             // `seconds` omitted ⇒ keep the stored threshold (documented in the
             // input contract) rather than silently resetting it to the default.
@@ -391,7 +393,8 @@ impl McpServer {
             );
             return match self.graph_store.execute_raw_sql_gateway(&sql) {
                 Ok(_) => {
-                    let (_, stored_seconds, _) = read_row().unwrap_or((enabled, seconds_insert as i64, String::new()));
+                    let (_, stored_seconds, _) =
+                        read_row().unwrap_or((enabled, seconds_insert as i64, String::new()));
                     Some(json!({
                         "content": [{ "type": "text", "text": format!(
                             "GPU idle-drop {} (t_idle={} s). The indexer applies it within ~5 s via LISTEN embedder_control — no restart, no GPU teardown. Durable: survives restarts and reboots.",
@@ -1232,10 +1235,7 @@ impl McpServer {
     /// quand la borne n'a pas mordu ET quand elle a mordu sur une sortie qu'on n'a
     /// pas su découper. Ces deux `None` se distinguent par le troisième membre — un
     /// entier ne le pourrait pas, et `0` y voudrait dire deux choses opposées.
-    pub(crate) fn borner_lignes_sql(
-        resultat: &str,
-        seuil: usize,
-    ) -> (String, Option<usize>, bool) {
+    pub(crate) fn borner_lignes_sql(resultat: &str, seuil: usize) -> (String, Option<usize>, bool) {
         if resultat.chars().count() <= seuil {
             return (resultat.to_string(), None, false);
         }
@@ -1358,11 +1358,7 @@ impl McpServer {
                 // 0 ligne rend le statut `ok_empty`, prouve la planification de la requête
                 // en restituant ses colonnes typées, et n'accuse JAMAIS le schéma.
                 let row_count = table.row_count;
-                let status = if row_count == 0 {
-                    "ok_empty"
-                } else {
-                    "ok"
-                };
+                let status = if row_count == 0 { "ok_empty" } else { "ok" };
                 let texte = if row_count == 0 && ql.contains("match") {
                     format!(
                         "[]\n\nStatus: ok_empty — 0 ligne pour colonnes {:?}. La requête a bien tourné.\nHint: Cypher-style query detected. `sql` is read-only SQL over canonical tables; multi-hop CALLS traversal is NOT done in SQL (REQ-AXO-901952 retired the `ist.path` PG functions — graph traversal is RAM-only now). Use the structural tools `path`, `impact`, `bidi_trace` or `query` instead.",
@@ -1736,8 +1732,7 @@ impl McpServer {
         let echecs: Vec<String> = all_results
             .iter()
             .filter(|r| {
-                r.get("error").is_some()
-                    || r.pointer("/result/isError") == Some(&Value::Bool(true))
+                r.get("error").is_some() || r.pointer("/result/isError") == Some(&Value::Bool(true))
             })
             .filter_map(|r| r.get("name").and_then(Value::as_str).map(str::to_string))
             .collect();
@@ -1763,8 +1758,10 @@ impl McpServer {
             charge.insert("contexte_commun_du_lot".into(), commun);
             charge.insert(
                 "note".into(),
-                json!("ces champs étaient IDENTIQUES dans tous les résultats : \
-                       écrits une fois ici, retirés de chaque résultat. Rien n'est tronqué."),
+                json!(
+                    "ces champs étaient IDENTIQUES dans tous les résultats : \
+                       écrits une fois ici, retirés de chaque résultat. Rien n'est tronqué."
+                ),
             );
         }
         charge.insert("results".into(), json!(all_results));
@@ -1932,11 +1929,9 @@ impl McpServer {
         let project_name = self
             .derive_project_name_from_path(&project_path)
             .unwrap_or_else(|_| project_code.clone());
-        let _ = self.graph_store.ensure_project_fk_parent(
-            &project_code,
-            &project_name,
-            &project_path,
-        );
+        let _ =
+            self.graph_store
+                .ensure_project_fk_parent(&project_code, &project_name, &project_path);
 
         // REQ-AXO-902613: Validate targeted paths if supplied (fail-closed, bounded, under project root).
         let targeted_paths = match paths_arg {
@@ -2519,10 +2514,21 @@ impl McpServer {
     /// artifacts an operator can't read at a glance — exactly REQ-AXO-161's intent.
     pub(crate) fn axon_runtime_filesystem_health(&self, args: &Value) -> Option<Value> {
         use std::path::{Path, PathBuf};
-        let instance = args.get("instance").and_then(|v| v.as_str()).unwrap_or("live");
+        let instance = args
+            .get("instance")
+            .and_then(|v| v.as_str())
+            .unwrap_or("live");
         let role = args.get("role").and_then(|v| v.as_str()).unwrap_or("brain");
-        let instance_dir = if instance == "dev" { ".axon-dev" } else { ".axon" };
-        let binary = if role == "indexer" { "axon-indexer" } else { "axon-brain" };
+        let instance_dir = if instance == "dev" {
+            ".axon-dev"
+        } else {
+            ".axon"
+        };
+        let binary = if role == "indexer" {
+            "axon-indexer"
+        } else {
+            "axon-brain"
+        };
         let root = std::env::var("AXON_PROJECT_ROOT")
             .ok()
             .map(PathBuf::from)
@@ -2567,11 +2573,19 @@ impl McpServer {
                     }
                     None => {
                         issues += 1;
-                        (true, "unknown", "lock present but owner/pid not parseable".to_string())
+                        (
+                            true,
+                            "unknown",
+                            "lock present but owner/pid not parseable".to_string(),
+                        )
                     }
                 }
             } else {
-                (false, "absent", "no writer lock held (writer idle or not this instance)".to_string())
+                (
+                    false,
+                    "absent",
+                    "no writer lock held (writer idle or not this instance)".to_string(),
+                )
             };
             artifacts.push(json!({
                 "artifact": label, "path": lock.to_string_lossy(),
@@ -2592,12 +2606,20 @@ impl McpServer {
             );
             if stale {
                 issues += 1;
-                (true, "stale", "binary mtime newer than build-info — identity drift".to_string())
+                (
+                    true,
+                    "stale",
+                    "binary mtime newer than build-info — identity drift".to_string(),
+                )
             } else {
                 (true, "ok", "build-info current".to_string())
             }
         } else {
-            (false, "absent", format!("no bin/{binary}.build-info (dev binary lives in cargo-target)"))
+            (
+                false,
+                "absent",
+                format!("no bin/{binary}.build-info (dev binary lives in cargo-target)"),
+            )
         };
         artifacts.push(json!({
             "artifact": "build_info", "path": build_info.to_string_lossy(),
@@ -2623,7 +2645,9 @@ impl McpServer {
                     "  - **{}** ({}): {}\n    `{}`",
                     a.get("artifact").and_then(|v| v.as_str()).unwrap_or("?"),
                     a.get("status").and_then(|v| v.as_str()).unwrap_or("?"),
-                    a.get("detail").and_then(|v| v.as_str()).unwrap_or("(no detail)"),
+                    a.get("detail")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(no detail)"),
                     a.get("path").and_then(|v| v.as_str()).unwrap_or("?"),
                 )
             })
@@ -2680,7 +2704,10 @@ pub(crate) fn rescan_compute_overall_status(
 
 /// REQ-AXO-902491 — formate le message d'échec d'invalidation de cache en expliquant
 /// explicitement la conséquence et le remède pour l'appelant.
-pub(crate) fn rescan_format_cache_wipe_failure(prefix: &str, err: impl std::fmt::Display) -> String {
+pub(crate) fn rescan_format_cache_wipe_failure(
+    prefix: &str,
+    err: impl std::fmt::Display,
+) -> String {
     format!(
         "{prefix}: {err} — le cache n'a pas été effacé : l'indexeur considérera ces fichiers comme inchangés et ne les refera pas. Réessayez."
     )
@@ -2974,8 +3001,14 @@ mod facteur_commun_lot_tests {
                 "elle ne doit plus être répétée dans chaque résultat : {f}"
             );
             // Ce qui est PROPRE à l'appel reste : c'est la moitié utile.
-            assert!(f.get("topology_delta").is_some(), "topology_delta est par appel");
-            assert!(f.get("voir").is_some(), "le résultat doit dire où trouver le reste");
+            assert!(
+                f.get("topology_delta").is_some(),
+                "topology_delta est par appel"
+            );
+            assert!(
+                f.get("voir").is_some(),
+                "le résultat doit dire où trouver le reste"
+            );
         }
         // L'identité de chaque mutation survit intacte.
         assert_eq!(lot[1]["result"]["data"]["id"], json!("REQ-2"));

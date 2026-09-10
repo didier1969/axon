@@ -517,7 +517,11 @@ pub(crate) fn sweep_stale_test_databases(pg_port: &str) -> bool {
     // `drop_registered_test_dbs`.
     let own_live: Vec<String> = match registered_test_dbs().lock() {
         Ok(v) => v.iter().map(|(name, _)| name.clone()).collect(),
-        Err(poisoned) => poisoned.into_inner().iter().map(|(n, _)| n.clone()).collect(),
+        Err(poisoned) => poisoned
+            .into_inner()
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect(),
     };
     // L'exclusion vit dans le SQL, jamais en post-filtrage : filtrer après le
     // SELECT rouvrirait la course SELECT/DROP que cette requête évite.
@@ -1166,7 +1170,10 @@ mod tests {
         ) else {
             return;
         };
-        assert!(status.success(), "la fixture de fuite doit exister avant le sweep");
+        assert!(
+            status.success(),
+            "la fixture de fuite doit exister avant le sweep"
+        );
 
         let abouti = sweep_stale_test_databases(&port);
 

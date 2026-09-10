@@ -1167,7 +1167,9 @@ fn test_req_902652_project_registry_lookup_suggests_approximations() {
         .as_array()
         .expect("suggested_projects array");
     assert!(
-        suggested.iter().any(|p| p["project_code"] == "VPC" && p["project_name"] == "vps-control"),
+        suggested
+            .iter()
+            .any(|p| p["project_code"] == "VPC" && p["project_name"] == "vps-control"),
         "must suggest VPC / vps-control: {suggested:?}"
     );
     let text = result["content"][0]["text"].as_str().expect("text");
@@ -2660,7 +2662,10 @@ fn test_cpt_axo_90059_soll_and_ist_tools_auto_resolve_and_canonical_error() {
         Some("missing_project_code"),
         "unresolvable soll_work_plan must return missing_project_code status: {unres_plan}"
     );
-    assert_eq!(unres_plan.get("isError").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        unres_plan.get("isError").and_then(Value::as_bool),
+        Some(true)
+    );
 
     let unres_audit = server
         .axon_soll_acyclic_audit(&json!({}))
@@ -5967,32 +5972,41 @@ fn test_req_902515_parameters_outside_schema_detects_args_on_zero_param_tool() {
 }
 
 #[test]
-fn test_req_902515_schema_overview_with_unknown_arg_discloses_ignored_and_not_identical_to_bare_call() {
+fn test_req_902515_schema_overview_with_unknown_arg_discloses_ignored_and_not_identical_to_bare_call(
+) {
     let server = create_test_server();
 
     // 1. Appel nu (bare call)
-    let bare_resp = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "schema_overview",
-            "arguments": {}
-        })),
-        id: Some(json!(1)),
-    }).unwrap().result.unwrap();
+    let bare_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "schema_overview",
+                "arguments": {}
+            })),
+            id: Some(json!(1)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     assert!(bare_resp["data"].get("ignored_parameters").is_none());
 
     // 2. Appel avec argument inventé (ex: table="ist.symbol")
-    let with_arg_resp = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "schema_overview",
-            "arguments": { "table": "ist.symbol" }
-        })),
-        id: Some(json!(2)),
-    }).unwrap().result.unwrap();
+    let with_arg_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "schema_overview",
+                "arguments": { "table": "ist.symbol" }
+            })),
+            id: Some(json!(2)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     // Critère 3 : La réponse n'est PAS identique à l'appel nu (garde falsifiée)
     assert_ne!(bare_resp, with_arg_resp);
@@ -6026,7 +6040,10 @@ fn diagnose_indexing_non_enrolled_project_has_no_contradictions_and_reads_indexe
     ).unwrap();
 
     // S'assurer que le projet PGT_UNENROLLED n'existe pas dans axon.project
-    server.graph_store.execute("DELETE FROM axon.project WHERE code = 'PGT_UNENROLLED'").unwrap();
+    server
+        .graph_store
+        .execute("DELETE FROM axon.project WHERE code = 'PGT_UNENROLLED'")
+        .unwrap();
 
     let report = server
         .axon_diagnose_indexing(&json!({"project": "PGT_UNENROLLED"}))
@@ -6071,4 +6088,3 @@ fn indexing_verdict_zero_indexed_does_not_prescribe_waiting_cycle() {
         "verdict must be a blocker (⛔) when indexed == 0: {v}"
     );
 }
-

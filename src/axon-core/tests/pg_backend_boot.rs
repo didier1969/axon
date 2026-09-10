@@ -280,10 +280,7 @@ fn graphstore_boots_under_postgres_backend() {
             "SELECT count(*)::BIGINT FROM information_schema.schemata WHERE schema_name = 'axon'",
         )
         .expect("axon schema check");
-    assert_eq!(
-        runtime_schema_present, 1,
-        "axon schema should exist"
-    );
+    assert_eq!(runtime_schema_present, 1, "axon schema should exist");
     for table in [
         "VectorWorkerFault",
         "VectorLaneState",
@@ -296,10 +293,7 @@ fn graphstore_boots_under_postgres_backend() {
                  WHERE table_schema = 'axon' AND lower(table_name) = lower('{table}')",
             ))
             .unwrap_or_else(|e| panic!("table existence check for axon.{table}: {e:?}"));
-        assert_eq!(
-            exists, 1,
-            "axon.{table} should be present after bootstrap"
-        );
+        assert_eq!(exists, 1, "axon.{table} should be present after bootstrap");
     }
 
     // ── REQ-AXO-247 AC #4 + REQ-AXO-249 closure: end-to-end MCP workflow

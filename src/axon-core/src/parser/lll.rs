@@ -79,16 +79,18 @@ impl LllParser {
     /// recall change, not purely a de-duplication.
     fn drop_imported_symbols(mut result: ExtractionResult, parsed: &Path) -> ExtractionResult {
         let own = std::fs::canonicalize(parsed).unwrap_or_else(|_| parsed.to_path_buf());
-        result.symbols.retain(|s| match s.properties.get("source_file") {
-            Some(src) if !src.trim().is_empty() => {
-                let src_path = Path::new(src);
-                let src_canon =
-                    std::fs::canonicalize(src_path).unwrap_or_else(|_| src_path.to_path_buf());
-                src_canon == own
-            }
-            // No attribution available → keep (never lose a symbol to a missing field).
-            _ => true,
-        });
+        result
+            .symbols
+            .retain(|s| match s.properties.get("source_file") {
+                Some(src) if !src.trim().is_empty() => {
+                    let src_path = Path::new(src);
+                    let src_canon =
+                        std::fs::canonicalize(src_path).unwrap_or_else(|_| src_path.to_path_buf());
+                    src_canon == own
+                }
+                // No attribution available → keep (never lose a symbol to a missing field).
+                _ => true,
+            });
         result
     }
 
@@ -106,8 +108,9 @@ impl LllParser {
             .output();
         match output {
             Ok(out) if out.status.success() => {
-                match serde_json::from_str::<ExtractionResult>(&String::from_utf8_lossy(&out.stdout))
-                {
+                match serde_json::from_str::<ExtractionResult>(&String::from_utf8_lossy(
+                    &out.stdout,
+                )) {
                     // REQ-AXO-902259 — strip the flattened imports before they reach the
                     // indexer, which would attribute them to the consumer.
                     Ok(result) => Self::drop_imported_symbols(result, path),
@@ -120,7 +123,10 @@ impl LllParser {
             Ok(out) => {
                 // Non-zero exit: usually a check/load error (e.g. an unresolved
                 // import). Degrade to empty rather than fail indexing.
-                error!("lll export-ist failed: {}", String::from_utf8_lossy(&out.stderr));
+                error!(
+                    "lll export-ist failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
                 empty
             }
             Err(e) => {
@@ -153,7 +159,10 @@ impl Parser for LllParser {
             }
         };
         if let Err(e) = temp_file.write_all(content.as_bytes()) {
-            error!("Failed to write content to temp file for llmlang parser: {}", e);
+            error!(
+                "Failed to write content to temp file for llmlang parser: {}",
+                e
+            );
             return ExtractionResult::default();
         }
         self.run(temp_file.path())
@@ -187,7 +196,11 @@ mod tests {
             is_nif: false,
             is_unsafe: false,
             properties: source_file
-                .map(|f| [("source_file".to_string(), f.to_string())].into_iter().collect())
+                .map(|f| {
+                    [("source_file".to_string(), f.to_string())]
+                        .into_iter()
+                        .collect()
+                })
                 .unwrap_or_default(),
             embedding: None,
         }
@@ -202,12 +215,19 @@ mod tests {
         let result = LllParser::new().parse(src);
         if binary_present() {
             assert!(
-                result.symbols.iter().any(|s| s.name == "inc" && s.kind == "function"),
+                result
+                    .symbols
+                    .iter()
+                    .any(|s| s.name == "inc" && s.kind == "function"),
                 "inc must surface as a function symbol"
             );
             assert!(
                 result.symbols.iter().any(|s| {
-                    s.name == "inc" && s.properties.get("purity").map(|p| p == "pure").unwrap_or(false)
+                    s.name == "inc"
+                        && s.properties
+                            .get("purity")
+                            .map(|p| p == "pure")
+                            .unwrap_or(false)
                 }),
                 "inc must carry purity=pure"
             );
@@ -226,7 +246,10 @@ mod tests {
                 "inc must carry its ensures predicate TEXT (intention↔contract bridge)"
             );
             assert!(
-                result.relations.iter().any(|r| r.from == "twice" && r.to == "inc"),
+                result
+                    .relations
+                    .iter()
+                    .any(|r| r.from == "twice" && r.to == "inc"),
                 "twice→inc call edge must be captured"
             );
         } else {
@@ -242,10 +265,17 @@ mod tests {
         if !binary_present() {
             return;
         }
-        let dir = Builder::new().prefix("lll-idx-").tempdir().expect("tempdir");
+        let dir = Builder::new()
+            .prefix("lll-idx-")
+            .tempdir()
+            .expect("tempdir");
         let lib = dir.path().join("lib.lll");
         let main = dir.path().join("main.lll");
-        std::fs::write(&lib, "module Lib:\n\n  part inc(x: Int) -> Int:\n    yield x + 1\n").unwrap();
+        std::fs::write(
+            &lib,
+            "module Lib:\n\n  part inc(x: Int) -> Int:\n    yield x + 1\n",
+        )
+        .unwrap();
         std::fs::write(
             &main,
             "import \"lib.lll\"\n\nmodule Main:\n\n  part twice(x: Int) -> Int:\n    yield inc(inc(x))\n",
@@ -256,7 +286,10 @@ mod tests {
         // main.lll's own part is extracted, and the cross-file call resolves
         // (the workspace loaded, so `twice` type-checks and hashes).
         assert!(
-            result.symbols.iter().any(|s| s.name == "twice" && s.kind == "function"),
+            result
+                .symbols
+                .iter()
+                .any(|s| s.name == "twice" && s.kind == "function"),
             "twice must be extracted with imports resolved"
         );
         // REQ-AXO-902259 — but `inc` belongs to lib.lll and must NOT be attributed to
@@ -286,16 +319,26 @@ mod tests {
     /// extraction — data loss dressed up as de-duplication.
     #[test]
     fn missing_source_file_keeps_every_symbol() {
-        let dir = Builder::new().prefix("lll-keep-").tempdir().expect("tempdir");
+        let dir = Builder::new()
+            .prefix("lll-keep-")
+            .tempdir()
+            .expect("tempdir");
         let f = dir.path().join("a.lll");
         std::fs::write(&f, "x").unwrap();
         let mut result = ExtractionResult {
             project_code: None,
-            symbols: vec![sym("no_attribution", None), sym("blank_attribution", Some("   "))],
+            symbols: vec![
+                sym("no_attribution", None),
+                sym("blank_attribution", Some("   ")),
+            ],
             relations: Vec::new(),
         };
         result = LllParser::drop_imported_symbols(result, &f);
-        assert_eq!(result.symbols.len(), 2, "no/blank attribution must never drop a symbol");
+        assert_eq!(
+            result.symbols.len(),
+            2,
+            "no/blank attribution must never drop a symbol"
+        );
     }
 
     /// A symbol attributed to ANOTHER file is dropped even when neither path exists on

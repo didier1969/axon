@@ -416,14 +416,8 @@ mod tests {
             .expect("rescan_project must return Some envelope");
         let payload = parse_structured(&envelope);
 
-        assert_eq!(
-            payload.get("status").and_then(|v| v.as_str()),
-            Some("ok")
-        );
-        assert_eq!(
-            payload.get("mode").and_then(|v| v.as_str()),
-            Some("delta")
-        );
+        assert_eq!(payload.get("status").and_then(|v| v.as_str()), Some("ok"));
+        assert_eq!(payload.get("mode").and_then(|v| v.as_str()), Some("delta"));
 
         // Invalidation in delta mode MUST report the 2 uncovered files
         let invalidated = payload
@@ -678,10 +672,7 @@ mod tests {
             .expect("rescan_project must return Some envelope");
         let payload = parse_structured(&envelope);
 
-        assert_eq!(
-            payload.get("status").and_then(|v| v.as_str()),
-            Some("ok")
-        );
+        assert_eq!(payload.get("status").and_then(|v| v.as_str()), Some("ok"));
         assert_eq!(
             payload.get("mode").and_then(|v| v.as_str()),
             Some("targeted")
@@ -960,9 +951,15 @@ mod tests {
 
         // 2. Simuler la désynchronisation : supprimer le parent dans axon.Project
         // (comme c'était le cas pour DVM, SWT, MRG, OPO avant la réconciliation).
-        store.execute(&format!("DELETE FROM axon.Project WHERE code = '{code}'")).unwrap();
+        store
+            .execute(&format!("DELETE FROM axon.Project WHERE code = '{code}'"))
+            .unwrap();
 
-        let count_before = store.query_count(&format!("SELECT count(*) FROM axon.Project WHERE code = '{code}'")).unwrap();
+        let count_before = store
+            .query_count(&format!(
+                "SELECT count(*) FROM axon.Project WHERE code = '{code}'"
+            ))
+            .unwrap();
         assert_eq!(count_before, 0, "parent must be absent before rescan");
 
         // 3. Appeler axon_rescan_project
@@ -979,18 +976,35 @@ mod tests {
         assert_eq!(payload.get("status").and_then(|v| v.as_str()), Some("ok"));
 
         // Critère 1 : Le parent axon.Project DOIT avoir été restauré
-        let count_parent = store.query_count(&format!("SELECT count(*) FROM axon.Project WHERE code = '{code}'")).unwrap();
-        assert_eq!(count_parent, 1, "axon.Project parent row must be ensured by rescan_project");
+        let count_parent = store
+            .query_count(&format!(
+                "SELECT count(*) FROM axon.Project WHERE code = '{code}'"
+            ))
+            .unwrap();
+        assert_eq!(
+            count_parent, 1,
+            "axon.Project parent row must be ensured by rescan_project"
+        );
 
         // Critère 2 : Les fichiers doivent être réellement présents dans ist.IndexedFile
-        let indexed_count = store.query_count(&format!("SELECT count(*) FROM ist.IndexedFile WHERE project_code = '{code}'")).unwrap();
-        assert_eq!(indexed_count as usize, files.len(), "actual rows in ist.IndexedFile must match files count");
+        let indexed_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.IndexedFile WHERE project_code = '{code}'"
+            ))
+            .unwrap();
+        assert_eq!(
+            indexed_count as usize,
+            files.len(),
+            "actual rows in ist.IndexedFile must match files count"
+        );
 
         // Critère 3 : notify_outcome doit rapporter la vérité mesurée
-        let notify_outcome = payload.get("notify_outcome").and_then(|v| v.as_str()).unwrap();
+        let notify_outcome = payload
+            .get("notify_outcome")
+            .and_then(|v| v.as_str())
+            .unwrap();
         assert_eq!(notify_outcome, format!("enrolled:{}", files.len()));
 
         let _ = std::fs::remove_dir_all(&root);
     }
 }
-

@@ -510,7 +510,8 @@ pub(crate) fn conditional_missing_fields(
         };
         let matched = !cond.is_empty()
             && cond.iter().all(|(k, spec)| {
-                spec.get("const").is_some_and(|want| args.get(k) == Some(want))
+                spec.get("const")
+                    .is_some_and(|want| args.get(k) == Some(want))
             });
         if !matched {
             continue;
@@ -685,7 +686,11 @@ pub(crate) fn find_nearby_tables(
         }
     }
 
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.len().cmp(&b.1.len())).then_with(|| a.1.cmp(&b.1)));
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.len().cmp(&b.1.len()))
+            .then_with(|| a.1.cmp(&b.1))
+    });
     scored.dedup_by(|a, b| a.1 == b.1);
     if let Some(&(best_score, _)) = scored.first() {
         // Keep only candidates close to the best match to avoid noise
@@ -709,7 +714,7 @@ pub(crate) fn find_nearby_tables(
 /// folds unquoted identifiers to lower case per PostgreSQL standard folding rules.
 pub(crate) fn extract_sql_relations(sql: &str) -> Vec<(String, String)> {
     let Ok(re) = regex::Regex::new(
-        r#"(?i)\b(?:from|join)\s+(?:"([^"]+)"|([a-z_][a-z0-9_]*))\.(?:"([^"]+)"|([a-z_][a-z0-9_]*))"#
+        r#"(?i)\b(?:from|join)\s+(?:"([^"]+)"|([a-z_][a-z0-9_]*))\.(?:"([^"]+)"|([a-z_][a-z0-9_]*))"#,
     ) else {
         return Vec::new();
     };
@@ -873,7 +878,8 @@ pub(crate) fn parameter_form_from_schema(
     form.sort_by(|a, b| {
         let ar = a.get("required").and_then(Value::as_bool).unwrap_or(false);
         let br = b.get("required").and_then(Value::as_bool).unwrap_or(false);
-        br.cmp(&ar).then_with(|| field_form_name(a).cmp(field_form_name(b)))
+        br.cmp(&ar)
+            .then_with(|| field_form_name(a).cmp(field_form_name(b)))
     });
     form
 }
@@ -1005,9 +1011,8 @@ pub(crate) fn first_schema_mismatch(schema: &Value, arguments: &Value) -> Option
             continue;
         };
         let actual = type_name(value);
-        let compatible = expected == actual
-            || (expected == "number" && actual == "integer")
-            || value.is_null();
+        let compatible =
+            expected == actual || (expected == "number" && actual == "integer") || value.is_null();
         if !compatible {
             return Some((
                 key.clone(),
@@ -1309,8 +1314,9 @@ impl ParameterCondition {
     /// Rend `true` quand la condition TIENT — donc quand le paramètre est effectif.
     pub(crate) fn holds(&self, args: &Value) -> bool {
         match self {
-            Self::FieldEquals { field, value } => valeur_au_chemin(args, field)
-                .is_some_and(|found| scalar_reads_as(found, value)),
+            Self::FieldEquals { field, value } => {
+                valeur_au_chemin(args, field).is_some_and(|found| scalar_reads_as(found, value))
+            }
             Self::FieldUnset { field } => match valeur_au_chemin(args, field) {
                 None | Some(Value::Null) | Some(Value::Bool(false)) => true,
                 Some(_) => false,
@@ -1805,12 +1811,10 @@ const SOLL_MANAGER_DISPOSITIONS: &[ParameterDeclaration] = &[
     },
 ];
 
-pub(crate) const SQL_DISPOSITIONS: &[ParameterDeclaration] = &[
-    ParameterDeclaration {
-        name: "sql",
-        disposition: ParameterDisposition::Honoured,
-    },
-];
+pub(crate) const SQL_DISPOSITIONS: &[ParameterDeclaration] = &[ParameterDeclaration {
+    name: "sql",
+    disposition: ParameterDisposition::Honoured,
+}];
 
 pub(crate) const QUERY_DISPOSITIONS: &[ParameterDeclaration] = &[
     ParameterDeclaration {
@@ -1831,12 +1835,10 @@ pub(crate) const QUERY_DISPOSITIONS: &[ParameterDeclaration] = &[
     },
 ];
 
-pub(crate) const STATUS_DISPOSITIONS: &[ParameterDeclaration] = &[
-    ParameterDeclaration {
-        name: "mode",
-        disposition: ParameterDisposition::Honoured,
-    },
-];
+pub(crate) const STATUS_DISPOSITIONS: &[ParameterDeclaration] = &[ParameterDeclaration {
+    name: "mode",
+    disposition: ParameterDisposition::Honoured,
+}];
 
 pub(crate) const AXON_COMMIT_WORK_DISPOSITIONS: &[ParameterDeclaration] = &[
     ParameterDeclaration {
@@ -1931,11 +1933,17 @@ pub(crate) struct ToolDispositions {
 pub(crate) const DECLARED_DISPOSITIONS: &[(&str, ToolDispositions)] = &[
     (
         "soll_get",
-        ToolDispositions { declared: SOLL_GET_DISPOSITIONS, unexamined: &[] },
+        ToolDispositions {
+            declared: SOLL_GET_DISPOSITIONS,
+            unexamined: &[],
+        },
     ),
     (
         "inspect",
-        ToolDispositions { declared: INSPECT_DISPOSITIONS, unexamined: &[] },
+        ToolDispositions {
+            declared: INSPECT_DISPOSITIONS,
+            unexamined: &[],
+        },
     ),
     (
         "retrieve_context",
@@ -1954,7 +1962,10 @@ pub(crate) const DECLARED_DISPOSITIONS: &[(&str, ToolDispositions)] = &[
     ),
     (
         "soll_manager",
-        ToolDispositions { declared: SOLL_MANAGER_DISPOSITIONS, unexamined: &[] },
+        ToolDispositions {
+            declared: SOLL_MANAGER_DISPOSITIONS,
+            unexamined: &[],
+        },
     ),
     (
         "soll_work_plan",
@@ -1975,23 +1986,38 @@ pub(crate) const DECLARED_DISPOSITIONS: &[(&str, ToolDispositions)] = &[
     ),
     (
         "sql",
-        ToolDispositions { declared: SQL_DISPOSITIONS, unexamined: &[] },
+        ToolDispositions {
+            declared: SQL_DISPOSITIONS,
+            unexamined: &[],
+        },
     ),
     (
         "query",
-        ToolDispositions { declared: QUERY_DISPOSITIONS, unexamined: &[] },
+        ToolDispositions {
+            declared: QUERY_DISPOSITIONS,
+            unexamined: &[],
+        },
     ),
     (
         "status",
-        ToolDispositions { declared: STATUS_DISPOSITIONS, unexamined: &[] },
+        ToolDispositions {
+            declared: STATUS_DISPOSITIONS,
+            unexamined: &[],
+        },
     ),
     (
         "axon_commit_work",
-        ToolDispositions { declared: AXON_COMMIT_WORK_DISPOSITIONS, unexamined: &[] },
+        ToolDispositions {
+            declared: AXON_COMMIT_WORK_DISPOSITIONS,
+            unexamined: &[],
+        },
     ),
     (
         "axon_pre_flight_check",
-        ToolDispositions { declared: AXON_PRE_FLIGHT_CHECK_DISPOSITIONS, unexamined: &[] },
+        ToolDispositions {
+            declared: AXON_PRE_FLIGHT_CHECK_DISPOSITIONS,
+            unexamined: &[],
+        },
     ),
 ];
 
@@ -2210,8 +2236,12 @@ mod tests {
     fn soll_manager_exposes_append_section_action_and_fields() {
         // REQ-AXO-902161 — append_section is a first-class action with its own
         // token-efficient fields, and its per-action requiredness is enforced.
-        let rendered = serde_json::to_string(&derived_input_schema("soll_manager").unwrap()).unwrap();
-        assert!(rendered.contains("append_section"), "action enum must list append_section: {rendered}");
+        let rendered =
+            serde_json::to_string(&derived_input_schema("soll_manager").unwrap()).unwrap();
+        assert!(
+            rendered.contains("append_section"),
+            "action enum must list append_section: {rendered}"
+        );
         for field in ["section", "section_title"] {
             assert!(rendered.contains(field), "data schema must mention {field}");
         }
@@ -2239,7 +2269,9 @@ mod tests {
         for name in DERIVED_TOOLS {
             let rendered = serde_json::to_string(&derived_input_schema(name).unwrap()).unwrap();
             assert!(
-                !rendered.contains("$ref") && !rendered.contains("$defs") && !rendered.contains("definitions"),
+                !rendered.contains("$ref")
+                    && !rendered.contains("$defs")
+                    && !rendered.contains("definitions"),
                 "{name} schema must inline subschemas (no $ref/$defs): {rendered}"
             );
         }
@@ -2382,8 +2414,14 @@ mod tests {
             .into_iter()
             .map(|(p, _)| p)
             .collect();
-        assert!(paths.contains(&"data.attach_to".to_string()), "got {paths:?}");
-        assert!(paths.contains(&"data.relation_type".to_string()), "got {paths:?}");
+        assert!(
+            paths.contains(&"data.attach_to".to_string()),
+            "got {paths:?}"
+        );
+        assert!(
+            paths.contains(&"data.relation_type".to_string()),
+            "got {paths:?}"
+        );
 
         // A tool with no clauses (Null) contributes nothing.
         let sql_schema = derived_input_schema("sql").unwrap();
@@ -2712,8 +2750,14 @@ mod tests {
             }]
         });
         let text = render_pg_repair_text(&repair);
-        assert!(text.contains("soll.Node does not exist — did you mean soll.node?"), "got: {text}");
-        assert!(text.contains("PostgreSQL folds UNQUOTED identifiers"), "got: {text}");
+        assert!(
+            text.contains("soll.Node does not exist — did you mean soll.node?"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("PostgreSQL folds UNQUOTED identifiers"),
+            "got: {text}"
+        );
     }
 
     #[test]

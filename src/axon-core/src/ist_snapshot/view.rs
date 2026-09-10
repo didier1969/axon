@@ -304,7 +304,11 @@ impl IstGraphView {
     /// REQ-AXO-902409 — rend `(elements rendus, total avant troncature)`.
     /// `None` reste « instantane froid » : un appelant ne doit PAS pouvoir
     /// confondre « rien trouve » avec « rien cherche ».
-    pub fn feature_envy_candidates(&self, project: &str, limit: usize) -> Option<(Vec<String>, usize)> {
+    pub fn feature_envy_candidates(
+        &self,
+        project: &str,
+        limit: usize,
+    ) -> Option<(Vec<String>, usize)> {
         let snap = self.try_snapshot(project)?;
         Some(code_smells::feature_envy_candidates(&snap, project, limit))
     }
@@ -509,6 +513,8 @@ mod tests {
         // REQ-AXO-901952 — cold cache (no snapshot published) → None, so the
         // caller can surface a loud degraded error instead of a silent 0.
         let view = IstGraphView::new(Arc::new(IstSnapshotCache::new()));
-        assert!(view.forward_at_radius("AXO", "AXO::a", 1, 10, &[]).is_none());
+        assert!(view
+            .forward_at_radius("AXO", "AXO::a", 1, 10, &[])
+            .is_none());
     }
 }

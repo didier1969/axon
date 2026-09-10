@@ -266,8 +266,16 @@ fn closest_tool_names(requested: &str, limit: usize) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default();
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.len().cmp(&b.2.len())));
-    scored.into_iter().take(limit).map(|(_, _, name)| name).collect()
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.len().cmp(&b.2.len()))
+    });
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, name)| name)
+        .collect()
 }
 
 fn tool_help_response(tool_name: &str) -> Value {
@@ -417,7 +425,11 @@ fn example_value_for_schema(schema: &Value, field_name: &str) -> Value {
     {
         return value.clone();
     }
-    match schema.get("type").and_then(Value::as_str).unwrap_or("object") {
+    match schema
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("object")
+    {
         "object" => {
             let required = schema
                 .get("required")
@@ -427,7 +439,9 @@ fn example_value_for_schema(schema: &Value, field_name: &str) -> Value {
             let properties = schema.get("properties").and_then(Value::as_object);
             let mut object = serde_json::Map::new();
             for name in required.iter().filter_map(Value::as_str) {
-                let child = properties.and_then(|items| items.get(name)).unwrap_or(&Value::Null);
+                let child = properties
+                    .and_then(|items| items.get(name))
+                    .unwrap_or(&Value::Null);
                 object.insert(name.to_string(), example_value_for_schema(child, name));
             }
             Value::Object(object)
@@ -581,7 +595,10 @@ mod unknown_tool_tests {
         // Partial name — the common miss. Edit distance alone would rank
         // same-length neighbours above the tool actually asked for.
         let partial = tool_help_response("friction_report");
-        assert_eq!(partial["data"]["problem_class"].as_str(), Some("unknown_tool"));
+        assert_eq!(
+            partial["data"]["problem_class"].as_str(),
+            Some("unknown_tool")
+        );
         let suggestions: Vec<&str> = partial["data"]["parameter_repair"]["suggestions"]
             .as_array()
             .expect("suggestions array")
@@ -627,7 +644,10 @@ mod unknown_tool_tests {
     #[test]
     fn known_tool_still_answers_with_its_contract() {
         let known = tool_help_response("query");
-        assert_ne!(known["data"]["problem_class"].as_str(), Some("unknown_tool"));
+        assert_ne!(
+            known["data"]["problem_class"].as_str(),
+            Some("unknown_tool")
+        );
     }
 
     #[test]
@@ -638,7 +658,10 @@ mod unknown_tool_tests {
         let examples = help["data"]["usage_examples"]
             .as_array()
             .expect("usage_examples array");
-        assert!(!examples.is_empty(), "every public tool needs one JSON example");
+        assert!(
+            !examples.is_empty(),
+            "every public tool needs one JSON example"
+        );
         let text = help["content"][0]["text"].as_str().unwrap_or_default();
         assert!(text.contains("### Example"), "{text}");
         assert!(!text.contains("If async"), "{text}");

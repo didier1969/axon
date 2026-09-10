@@ -82,10 +82,11 @@ fn c5_commit_work_dry_run_rejects_broken_config_in_diff_paths() {
     let bad_json = tmp.path().join("bad_schema.json");
     fs::write(&bad_json, "{\ninvalid json here\n}").expect("write bad json");
 
-    let violations = crate::mcp::tools_soll::workflow::workflow_project::validate_diff_paths_config_syntax(
-        tmp.path(),
-        &["bad_schema.json".to_string()],
-    );
+    let violations =
+        crate::mcp::tools_soll::workflow::workflow_project::validate_diff_paths_config_syntax(
+            tmp.path(),
+            &["bad_schema.json".to_string()],
+        );
     assert_eq!(
         violations.len(),
         1,
@@ -126,7 +127,9 @@ fn c5_axon_commit_work_rejects_corrupted_config_file() {
         .unwrap();
 
     assert!(
-        res.get("isError").and_then(|v| v.as_bool()).unwrap_or(false),
+        res.get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         "axon_commit_work must reject corrupted config file"
     );
     let content = res.get("content").unwrap()[0]
@@ -168,7 +171,9 @@ fn c5_axon_pre_flight_check_rejects_corrupted_config_file() {
         .unwrap();
 
     assert!(
-        res.get("isError").and_then(|v| v.as_bool()).unwrap_or(false),
+        res.get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         "axon_pre_flight_check must reject corrupted config file"
     );
     let content = res.get("content").unwrap()[0]

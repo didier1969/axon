@@ -210,7 +210,6 @@ pub(crate) fn render_mustache_template(template: &str, params: &Value) -> Result
         .map_err(|e| format!("render error: {}", e))
 }
 
-
 /// REQ-AXO-902488 — la mention de provenance de `re_anchor`, en fonction PURE.
 ///
 /// Extraite parce que le cas qu'elle couvre — une resolution auto qui REUSSIT —
@@ -767,11 +766,7 @@ impl McpServer {
             None => {
                 let total = corps.chars().count();
                 let saut = total.saturating_sub(SEUIL_CHARS);
-                let octet = corps
-                    .char_indices()
-                    .nth(saut)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
+                let octet = corps.char_indices().nth(saut).map(|(i, _)| i).unwrap_or(0);
                 &corps[octet..]
             }
         };

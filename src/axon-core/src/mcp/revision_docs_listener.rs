@@ -219,7 +219,10 @@ mod tests {
         let _ = server.soll_cache().snapshot("AXO").expect("warm");
         let _ = server.soll_cache().snapshot("AXO").expect("ram hit");
         let (ram_before, pg_before) = server.soll_cache().read_stats();
-        assert!(ram_before >= 1, "second read should be a RAM hit: {ram_before}");
+        assert!(
+            ram_before >= 1,
+            "second read should be a RAM hit: {ram_before}"
+        );
 
         // Journal duty: invalidate every project touched by the revision burst.
         let mut projects = HashSet::new();

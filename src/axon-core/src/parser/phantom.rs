@@ -519,11 +519,8 @@ min_length = 10
 // REQ-AXO-345 — A2 in/out trace.
 // REQ-AXO-347 — defensive empty-file fast-path.
 "#;
-        let (symbols, relations) = engine.extract(
-            Path::new("src/pipeline/stage_a2.rs"),
-            content,
-            Some("AXO"),
-        );
+        let (symbols, relations) =
+            engine.extract(Path::new("src/pipeline/stage_a2.rs"), content, Some("AXO"));
 
         let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(

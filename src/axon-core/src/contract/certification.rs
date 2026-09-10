@@ -30,7 +30,10 @@ pub fn certify(
         return None;
     }
     let evidence_hash = sha256_hex(&format!("{}\u{1f}{}", evidence, code_state_hash));
-    Some(Certification { evidence_hash, code_state_hash: code_state_hash.to_string() })
+    Some(Certification {
+        evidence_hash,
+        code_state_hash: code_state_hash.to_string(),
+    })
 }
 
 impl Certification {

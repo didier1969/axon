@@ -623,7 +623,9 @@ class Batcher {
             .find(|s| s.name == "f")
             .expect("f symbol");
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("1")
         );
     }
@@ -652,7 +654,9 @@ function f(x) {
             .find(|s| s.name == "f")
             .expect("f symbol");
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("7"),
             "props: {:?}",
             f.properties
@@ -684,11 +688,17 @@ function outer(x) {
             .find(|s| s.name == "inner")
             .expect("inner symbol");
         assert_eq!(
-            outer.properties.get("cyclomatic_complexity").map(String::as_str),
+            outer
+                .properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("2")
         );
         assert_eq!(
-            inner.properties.get("cyclomatic_complexity").map(String::as_str),
+            inner
+                .properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("2")
         );
     }

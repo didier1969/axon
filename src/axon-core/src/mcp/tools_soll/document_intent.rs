@@ -515,12 +515,24 @@ mod document_intent_classifier_tests {
         // REQ-AXO-902081 — DEC→REQ is SOLVES; DEC→PIL has no policy (would be
         // rejected), so a Decision pointed at a Requirement must not default to
         // BELONGS_TO.
-        assert_eq!(default_relation_for_target("decision", "REQ-AXO-902081"), "SOLVES");
+        assert_eq!(
+            default_relation_for_target("decision", "REQ-AXO-902081"),
+            "SOLVES"
+        );
         // A Decision pointed at a Pillar keeps the (questionable) pillar default;
         // structural types are always BELONGS_TO regardless of target.
-        assert_eq!(default_relation_for_target("decision", "PIL-AXO-001"), "BELONGS_TO");
-        assert_eq!(default_relation_for_target("requirement", "REQ-AXO-1"), "BELONGS_TO");
-        assert_eq!(default_relation_for_target("concept", "PIL-AXO-001"), "BELONGS_TO");
+        assert_eq!(
+            default_relation_for_target("decision", "PIL-AXO-001"),
+            "BELONGS_TO"
+        );
+        assert_eq!(
+            default_relation_for_target("requirement", "REQ-AXO-1"),
+            "BELONGS_TO"
+        );
+        assert_eq!(
+            default_relation_for_target("concept", "PIL-AXO-001"),
+            "BELONGS_TO"
+        );
     }
 
     #[test]

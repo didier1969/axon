@@ -223,10 +223,7 @@ impl PythonParser {
                 );
             }
             let complexity = 1 + self.count_branches(body);
-            props.insert(
-                "cyclomatic_complexity".to_string(),
-                complexity.to_string(),
-            );
+            props.insert("cyclomatic_complexity".to_string(), complexity.to_string());
         }
 
         // --- UNSAFE DETECTION ---
@@ -305,9 +302,7 @@ impl PythonParser {
                 let attr_node = n
                     .child_by_field_name("attribute")
                     .or_else(|| self.find_last_child_by_type(n, "identifier"));
-                let obj_node = n
-                    .child_by_field_name("object")
-                    .or_else(|| n.child(0));
+                let obj_node = n.child_by_field_name("object").or_else(|| n.child(0));
 
                 let callee_name = attr_node
                     .and_then(|a| a.utf8_text(source).ok())
@@ -443,12 +438,10 @@ impl PythonParser {
                 let left = current
                     .child_by_field_name("left")
                     .or_else(|| current.child(0));
-                let right = current
-                    .child_by_field_name("right")
-                    .or_else(|| {
-                        let mut cursor = current.walk();
-                        current.children(&mut cursor).last()
-                    });
+                let right = current.child_by_field_name("right").or_else(|| {
+                    let mut cursor = current.walk();
+                    current.children(&mut cursor).last()
+                });
                 if let (Some(l), Some(r)) = (left, right) {
                     if let Ok(left_name) = l.utf8_text(source) {
                         assignments.push((left_name.trim().to_string(), r));
@@ -605,7 +598,9 @@ mod tests {
         }
         let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("1")
         );
     }
@@ -635,7 +630,9 @@ mod tests {
         }
         let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("6"),
             "props: {:?}",
             f.properties
@@ -664,7 +661,10 @@ mod tests {
         }
         let outer = result.symbols.iter().find(|s| s.name == "outer").unwrap();
         assert_eq!(
-            outer.properties.get("cyclomatic_complexity").map(String::as_str),
+            outer
+                .properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("2")
         );
     }
@@ -718,7 +718,11 @@ def test_classify():
             result.relations
         );
         assert_eq!(
-            call_rel.unwrap().properties.get("receiver").map(String::as_str),
+            call_rel
+                .unwrap()
+                .properties
+                .get("receiver")
+                .map(String::as_str),
             Some("NA")
         );
     }

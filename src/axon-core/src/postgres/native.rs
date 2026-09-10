@@ -218,7 +218,8 @@ impl NativePgCtx {
                         (cols, out)
                     };
                     let row_count = out.len();
-                    let rows_json = serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string());
+                    let rows_json =
+                        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string());
                     Ok(QueryTableOutput {
                         columns,
                         rows: out,
@@ -526,7 +527,9 @@ impl NativePgCtx {
             // Clé 64-bit déterministe dédiée au bootstrap DDL global ("AXON_DDL")
             const DDL_BOOTSTRAP_LOCK_ID: i64 = 4708573981792617548; // 0x41584f4e5f44444c
             if let Err(e) = conn
-                .batch_execute(&format!("SELECT pg_advisory_lock({DDL_BOOTSTRAP_LOCK_ID});"))
+                .batch_execute(&format!(
+                    "SELECT pg_advisory_lock({DDL_BOOTSTRAP_LOCK_ID});"
+                ))
                 .await
             {
                 tracing::warn!("native pg bootstrap: failed to acquire advisory lock: {e}");
@@ -564,10 +567,14 @@ impl NativePgCtx {
                         // Idempotence additionnelle de sécurité pour les courses éventuelles
                         // sur pg_class_relname_nsp_index
                         if e.as_db_error()
-                            .map(|db| db.code().code() == "23505" && db.message().contains("pg_class"))
+                            .map(|db| {
+                                db.code().code() == "23505" && db.message().contains("pg_class")
+                            })
                             .unwrap_or(false)
                         {
-                            tracing::warn!("concurrent index creation detected and tolerated: {detail}");
+                            tracing::warn!(
+                                "concurrent index creation detected and tolerated: {detail}"
+                            );
                             continue;
                         }
 
@@ -580,7 +587,9 @@ impl NativePgCtx {
 
             // Libère le verrou consultatif avant de restituer la connexion
             let _ = conn
-                .batch_execute(&format!("SELECT pg_advisory_unlock({DDL_BOOTSTRAP_LOCK_ID});"))
+                .batch_execute(&format!(
+                    "SELECT pg_advisory_unlock({DDL_BOOTSTRAP_LOCK_ID});"
+                ))
                 .await;
 
             if result.is_err() {

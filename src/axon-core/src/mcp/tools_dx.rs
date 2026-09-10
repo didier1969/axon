@@ -381,13 +381,11 @@ impl McpServer {
         let backlog_files = (total_files - completed_files).max(0);
         let pending_reasons: Vec<(String, i64)> = Vec::new();
 
-        let (excluded_source_files, excluded_extensions) = match self
-            .graph_store
-            .latest_project_scope_truth(project)
-        {
-            Ok(Some(record)) => (record.excluded_source_files, record.excluded_extensions),
-            _ => (0, String::new()),
-        };
+        let (excluded_source_files, excluded_extensions) =
+            match self.graph_store.latest_project_scope_truth(project) {
+                Ok(Some(record)) => (record.excluded_source_files, record.excluded_extensions),
+                _ => (0, String::new()),
+            };
 
         // REQ-AXO-902511 — count files enrolled in IndexedFile that have no chunks in Chunk.
         let files_with_chunks = self
@@ -919,7 +917,8 @@ impl McpServer {
                 .to_string(),
         );
 
-        let mut out = String::from("\n**What to do next** — do NOT re-run this query unchanged:\n\n");
+        let mut out =
+            String::from("\n**What to do next** — do NOT re-run this query unchanged:\n\n");
         for (i, step) in steps.iter().enumerate() {
             out.push_str(&format!("{}. {}\n", i + 1, step));
         }
@@ -1129,7 +1128,11 @@ impl McpServer {
             return Vec::new();
         }
         let view = process_view();
-        let rels = [RelationType::Calls, RelationType::CallsNif, RelationType::Contains];
+        let rels = [
+            RelationType::Calls,
+            RelationType::CallsNif,
+            RelationType::Contains,
+        ];
         let fanout = limit.max(1) * 8;
 
         let mut anchor_ids: Vec<String> = Vec::new();
@@ -1335,7 +1338,9 @@ impl McpServer {
                             "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                              FROM Symbol s {join}\
                              WHERE {} {} LIMIT {}",
-                            base_predicate, Self::symbol_search_order_by(), query_limit
+                            base_predicate,
+                            Self::symbol_search_order_by(),
+                            query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
                     )
@@ -1345,7 +1350,9 @@ impl McpServer {
                             "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                              FROM Symbol s {join}\
                              WHERE s.project_code = $proj AND ( {} ) {} LIMIT {}",
-                            base_predicate, Self::symbol_search_order_by(), query_limit
+                            base_predicate,
+                            Self::symbol_search_order_by(),
+                            query_limit
                         ),
                         Self::build_symbol_search_params(query_text, project),
                     )
@@ -1358,7 +1365,9 @@ impl McpServer {
                      FROM Symbol s {join}\
                      WHERE {} {} \
                      LIMIT {}",
-                    base_predicate, Self::symbol_search_order_by(), query_limit
+                    base_predicate,
+                    Self::symbol_search_order_by(),
+                    query_limit
                 ),
                 Self::build_symbol_search_params(query_text, project),
             )
@@ -1368,7 +1377,9 @@ impl McpServer {
                     "SELECT s.name, s.kind, COALESCE(ch.file_path, '') AS uri \
                      FROM Symbol s {join}\
                      WHERE s.project_code = $proj AND ( {} ) {} LIMIT {}",
-                    base_predicate, Self::symbol_search_order_by(), query_limit
+                    base_predicate,
+                    Self::symbol_search_order_by(),
+                    query_limit
                 ),
                 Self::build_symbol_search_params(query_text, project),
             )
@@ -1404,7 +1415,8 @@ impl McpServer {
                         .map(str::is_empty)
                         .unwrap_or(false);
                     if uri_empty {
-                        if let Some(name) = row.first().and_then(Value::as_str).map(str::to_string) {
+                        if let Some(name) = row.first().and_then(Value::as_str).map(str::to_string)
+                        {
                             let file = self.containing_file_by_name_ram(project, &name);
                             if !file.is_empty() {
                                 row[2] = json!(file);
@@ -1824,7 +1836,8 @@ impl McpServer {
                         .map(str::is_empty)
                         .unwrap_or(false);
                     if uri_empty {
-                        if let Some(name) = row.first().and_then(Value::as_str).map(str::to_string) {
+                        if let Some(name) = row.first().and_then(Value::as_str).map(str::to_string)
+                        {
                             let file = self.containing_file_by_name_ram(project, &name);
                             if !file.is_empty() {
                                 row[2] = json!(file.clone());
@@ -2185,9 +2198,7 @@ impl McpServer {
                         // Name the NEXT call, with its arguments filled in. A count
                         // of what is missing is a statement; the call is a way out.
                         let next = if window_end < total {
-                            format!(
-                                " — next: `inspect symbol=… mode=source offset={window_end}`"
-                            )
+                            format!(" — next: `inspect symbol=… mode=source offset={window_end}`")
                         } else {
                             String::new()
                         };
@@ -2839,17 +2850,19 @@ impl McpServer {
                 // hash-verified bounded file slice when possible; when exact
                 // proof is unavailable the response withholds the body.
                 if mode == Some("source") {
-                    evidence.push_str(&self.inspect_source_block(
-                        &symbol_id,
-                        &caller_ids,
-                        &callee_ids,
-                        args.get("around").and_then(Value::as_str),
-                        args.get("offset")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0)
-                            .min(usize::MAX as u64) as usize,
-                        backend_pressure,
-                    ));
+                    evidence.push_str(
+                        &self.inspect_source_block(
+                            &symbol_id,
+                            &caller_ids,
+                            &callee_ids,
+                            args.get("around").and_then(Value::as_str),
+                            args.get("offset")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0)
+                                .min(usize::MAX as u64) as usize,
+                            backend_pressure,
+                        ),
+                    );
                 }
                 let tested = rows
                     .first()
@@ -3461,8 +3474,14 @@ mod symbol_search_order_by_tests {
         let position = idx("position($normalized in lower(s.name))");
         let length = idx("length(s.name) ASC");
         assert!(exact < prefix, "an exact match must outrank a prefix match");
-        assert!(prefix < position, "a prefix match must outrank a mid-string match");
-        assert!(position < length, "match position must outrank mere shortness");
+        assert!(
+            prefix < position,
+            "a prefix match must outrank a mid-string match"
+        );
+        assert!(
+            position < length,
+            "match position must outrank mere shortness"
+        );
     }
 
     /// The pitfall the clause exists to avoid: `position()` returns 0 when the needle is
@@ -3487,13 +3506,22 @@ mod symbol_search_order_by_tests {
     #[test]
     fn ties_are_broken_deterministically() {
         let clause = McpServer::symbol_search_order_by();
-        assert!(clause.contains("s.name ASC"), "missing deterministic name tiebreak: {clause}");
-        assert!(clause.contains("uri ASC"), "missing deterministic uri tiebreak: {clause}");
+        assert!(
+            clause.contains("s.name ASC"),
+            "missing deterministic name tiebreak: {clause}"
+        );
+        assert!(
+            clause.contains("uri ASC"),
+            "missing deterministic uri tiebreak: {clause}"
+        );
         // `uri` is an output alias (COALESCE(ch.file_path,'') AS uri) — it must come last,
         // after every relevance key, or it would dominate the ranking.
         let uri = clause.find("uri ASC").unwrap();
         let name = clause.find("s.name ASC").unwrap();
-        assert!(name < uri, "uri is the LAST tiebreak, never a relevance key");
+        assert!(
+            name < uri,
+            "uri is the LAST tiebreak, never a relevance key"
+        );
     }
 
     /// Only the params the lexical arms actually bind may appear, or the query 500s at
@@ -3517,7 +3545,8 @@ mod parse_named_symbol_rows_tests {
 
     #[test]
     fn projects_name_kind_project_code() {
-        let raw = r#"[["compose_dashboard_state_v1","function","AXO"],["b3_health","function","AXO"]]"#;
+        let raw =
+            r#"[["compose_dashboard_state_v1","function","AXO"],["b3_health","function","AXO"]]"#;
         let out = parse_named_symbol_rows(raw);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["name"], "compose_dashboard_state_v1");

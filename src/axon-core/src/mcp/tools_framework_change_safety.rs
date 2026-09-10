@@ -55,8 +55,10 @@ pub(super) fn summarize_change_safety(
     let guardrails = if tested.is_none() {
         if undecidable.is_some() {
             vec![
-                "do not treat undecidable coverage as unsafe; inspect dynamic loaders first".to_string(),
-                "establish explicit symbol traceability or targeted tests before mutation".to_string(),
+                "do not treat undecidable coverage as unsafe; inspect dynamic loaders first"
+                    .to_string(),
+                "establish explicit symbol traceability or targeted tests before mutation"
+                    .to_string(),
             ]
         } else {
             vec![

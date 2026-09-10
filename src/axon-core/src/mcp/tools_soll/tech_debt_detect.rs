@@ -301,8 +301,12 @@ impl McpServer {
                 } else {
                     format!(
                         "- {key} ({}): {} remnant(s), +{} / -{} edge(s){}",
-                        s.get("migration_id").and_then(|v| v.as_str()).unwrap_or("?"),
-                        s.get("remnants_found").and_then(|v| v.as_u64()).unwrap_or(0),
+                        s.get("migration_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?"),
+                        s.get("remnants_found")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
                         s.get("edges_created").and_then(|v| v.as_u64()).unwrap_or(0),
                         s.get("edges_removed").and_then(|v| v.as_u64()).unwrap_or(0),
                         if s.get("baseline_set").and_then(|v| v.as_bool()) == Some(true) {
@@ -439,7 +443,11 @@ impl McpServer {
         rules
     }
 
-    fn find_tmg_by_detect_key(&self, project_code: &str, detect_key: &str) -> Option<(String, bool)> {
+    fn find_tmg_by_detect_key(
+        &self,
+        project_code: &str,
+        detect_key: &str,
+    ) -> Option<(String, bool)> {
         let sql = format!(
             "SELECT id, (metadata ? 'baseline_remnants') FROM soll.Node \
              WHERE type = 'TechnologyMigration' AND project_code = '{}' \
@@ -506,7 +514,11 @@ impl McpServer {
         };
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         rows.into_iter()
-            .filter_map(|r| r.into_iter().next().and_then(|v| v.as_str().map(str::to_string)))
+            .filter_map(|r| {
+                r.into_iter()
+                    .next()
+                    .and_then(|v| v.as_str().map(str::to_string))
+            })
             .collect()
     }
 
@@ -580,7 +592,11 @@ impl McpServer {
         };
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         rows.into_iter()
-            .filter_map(|r| r.into_iter().next().and_then(|v| v.as_str().map(str::to_string)))
+            .filter_map(|r| {
+                r.into_iter()
+                    .next()
+                    .and_then(|v| v.as_str().map(str::to_string))
+            })
             .collect()
     }
 
@@ -829,7 +845,13 @@ mod tests {
         let clause = code_kinds_in_clause();
         assert!(clause.contains("'function'") && clause.contains("'struct'"));
         // The doc/markup/comment kinds that caused false positives must be absent.
-        for excluded in ["'section'", "'element'", "'TODO'", "'config_key'", "'table'"] {
+        for excluded in [
+            "'section'",
+            "'element'",
+            "'TODO'",
+            "'config_key'",
+            "'table'",
+        ] {
             assert!(
                 !clause.contains(excluded),
                 "code-kind allowlist must exclude {excluded}"

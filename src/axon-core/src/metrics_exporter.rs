@@ -83,7 +83,11 @@ impl PrometheusMetricsSnapshot {
         let (indexer_alive, heartbeat_age_seconds) = match heartbeat.as_ref() {
             Some(h) => {
                 let age_ms = (now_ms - h.heartbeat_ms).max(0);
-                let alive = if age_ms <= HEARTBEAT_FRESHNESS_MS { 1 } else { 0 };
+                let alive = if age_ms <= HEARTBEAT_FRESHNESS_MS {
+                    1
+                } else {
+                    0
+                };
                 (alive, age_ms as f64 / 1000.0)
             }
             None => (0, -1.0),
@@ -230,7 +234,9 @@ impl PrometheusMetricsSnapshot {
     pub fn to_prometheus_text(&self) -> String {
         let mut out = String::with_capacity(4096);
 
-        out.push_str("# HELP axon_brain_up Indicates whether the axon brain service is operational.\n");
+        out.push_str(
+            "# HELP axon_brain_up Indicates whether the axon brain service is operational.\n",
+        );
         out.push_str("# TYPE axon_brain_up gauge\n");
         out.push_str(&format!("axon_brain_up {}\n\n", self.brain_up));
 
@@ -244,7 +250,10 @@ impl PrometheusMetricsSnapshot {
 
         out.push_str("# HELP axon_indexer_heartbeat_age_seconds Age of the latest indexer lifecycle heartbeat in seconds (-1 if absent).\n");
         out.push_str("# TYPE axon_indexer_heartbeat_age_seconds gauge\n");
-        out.push_str(&format!("axon_indexer_heartbeat_age_seconds {:.3}\n\n", self.indexer_heartbeat_age_seconds));
+        out.push_str(&format!(
+            "axon_indexer_heartbeat_age_seconds {:.3}\n\n",
+            self.indexer_heartbeat_age_seconds
+        ));
 
         out.push_str("# HELP axon_chunks_pending Total number of chunks pending embedding.\n");
         out.push_str("# TYPE axon_chunks_pending gauge\n");
@@ -252,7 +261,10 @@ impl PrometheusMetricsSnapshot {
 
         out.push_str("# HELP axon_chunks_embedded Total number of embedded chunks.\n");
         out.push_str("# TYPE axon_chunks_embedded gauge\n");
-        out.push_str(&format!("axon_chunks_embedded {}\n\n", self.chunks_embedded));
+        out.push_str(&format!(
+            "axon_chunks_embedded {}\n\n",
+            self.chunks_embedded
+        ));
 
         out.push_str("# HELP axon_chunks_total Total number of chunks across all projects.\n");
         out.push_str("# TYPE axon_chunks_total gauge\n");
@@ -275,60 +287,109 @@ impl PrometheusMetricsSnapshot {
         if self.b2_armed == 0 {
             out.push_str("axon_b2_cpu_fallback_ratio -1\n\n");
         } else {
-            out.push_str(&format!("axon_b2_cpu_fallback_ratio {:.4}\n\n", self.b2_cpu_fallback_ratio));
+            out.push_str(&format!(
+                "axon_b2_cpu_fallback_ratio {:.4}\n\n",
+                self.b2_cpu_fallback_ratio
+            ));
         }
 
-        out.push_str("# HELP axon_b2_window_observed Number of batches observed in B2 rolling window.\n");
+        out.push_str(
+            "# HELP axon_b2_window_observed Number of batches observed in B2 rolling window.\n",
+        );
         out.push_str("# TYPE axon_b2_window_observed gauge\n");
-        out.push_str(&format!("axon_b2_window_observed {}\n\n", self.b2_window_observed));
+        out.push_str(&format!(
+            "axon_b2_window_observed {}\n\n",
+            self.b2_window_observed
+        ));
 
         out.push_str("# HELP axon_b2_window_cpu_fallbacks Number of CPU fallback batches in B2 rolling window.\n");
         out.push_str("# TYPE axon_b2_window_cpu_fallbacks gauge\n");
-        out.push_str(&format!("axon_b2_window_cpu_fallbacks {}\n\n", self.b2_window_cpu_fallbacks));
+        out.push_str(&format!(
+            "axon_b2_window_cpu_fallbacks {}\n\n",
+            self.b2_window_cpu_fallbacks
+        ));
 
         out.push_str("# HELP axon_b2_session_recycles Number of ORT session recycles due to VRAM pressure.\n");
         out.push_str("# TYPE axon_b2_session_recycles gauge\n");
-        out.push_str(&format!("axon_b2_session_recycles {}\n\n", self.b2_session_recycles));
+        out.push_str(&format!(
+            "axon_b2_session_recycles {}\n\n",
+            self.b2_session_recycles
+        ));
 
         out.push_str("# HELP axon_b2_resizes Number of GPU batch size shrink resizes.\n");
         out.push_str("# TYPE axon_b2_resizes gauge\n");
         out.push_str(&format!("axon_b2_resizes {}\n\n", self.b2_resizes));
 
-        out.push_str("# HELP axon_b2_gpu_batch_cap Current cap on GPU batch size (0 if default).\n");
+        out.push_str(
+            "# HELP axon_b2_gpu_batch_cap Current cap on GPU batch size (0 if default).\n",
+        );
         out.push_str("# TYPE axon_b2_gpu_batch_cap gauge\n");
-        out.push_str(&format!("axon_b2_gpu_batch_cap {}\n\n", self.b2_gpu_batch_cap));
+        out.push_str(&format!(
+            "axon_b2_gpu_batch_cap {}\n\n",
+            self.b2_gpu_batch_cap
+        ));
 
-        out.push_str("# HELP axon_b2_degraded_threshold Degraded threshold for B2 CPU fallback ratio.\n");
+        out.push_str(
+            "# HELP axon_b2_degraded_threshold Degraded threshold for B2 CPU fallback ratio.\n",
+        );
         out.push_str("# TYPE axon_b2_degraded_threshold gauge\n");
-        out.push_str(&format!("axon_b2_degraded_threshold {:.2}\n\n", self.b2_degraded_threshold));
+        out.push_str(&format!(
+            "axon_b2_degraded_threshold {:.2}\n\n",
+            self.b2_degraded_threshold
+        ));
 
-        out.push_str("# HELP axon_b2_critical_threshold Critical threshold for B2 CPU fallback ratio.\n");
+        out.push_str(
+            "# HELP axon_b2_critical_threshold Critical threshold for B2 CPU fallback ratio.\n",
+        );
         out.push_str("# TYPE axon_b2_critical_threshold gauge\n");
-        out.push_str(&format!("axon_b2_critical_threshold {:.2}\n\n", self.b2_critical_threshold));
+        out.push_str(&format!(
+            "axon_b2_critical_threshold {:.2}\n\n",
+            self.b2_critical_threshold
+        ));
 
-        out.push_str("# HELP axon_b3_consecutive_failures Consecutive persist failures on stage B3.\n");
+        out.push_str(
+            "# HELP axon_b3_consecutive_failures Consecutive persist failures on stage B3.\n",
+        );
         out.push_str("# TYPE axon_b3_consecutive_failures gauge\n");
-        out.push_str(&format!("axon_b3_consecutive_failures {}\n\n", self.b3_consecutive_failures));
+        out.push_str(&format!(
+            "axon_b3_consecutive_failures {}\n\n",
+            self.b3_consecutive_failures
+        ));
 
         out.push_str("# HELP axon_b3_total_failures Total persist failures on stage B3.\n");
         out.push_str("# TYPE axon_b3_total_failures counter\n");
-        out.push_str(&format!("axon_b3_total_failures {}\n\n", self.b3_total_failures));
+        out.push_str(&format!(
+            "axon_b3_total_failures {}\n\n",
+            self.b3_total_failures
+        ));
 
         out.push_str("# HELP axon_b3_total_successes Total persist successes on stage B3.\n");
         out.push_str("# TYPE axon_b3_total_successes counter\n");
-        out.push_str(&format!("axon_b3_total_successes {}\n\n", self.b3_total_successes));
+        out.push_str(&format!(
+            "axon_b3_total_successes {}\n\n",
+            self.b3_total_successes
+        ));
 
         out.push_str("# HELP axon_b3_systemically_failing Systemic failure flag for stage B3 (1 if consecutive failures >= 3).\n");
         out.push_str("# TYPE axon_b3_systemically_failing gauge\n");
-        out.push_str(&format!("axon_b3_systemically_failing {}\n\n", self.b3_systemically_failing));
+        out.push_str(&format!(
+            "axon_b3_systemically_failing {}\n\n",
+            self.b3_systemically_failing
+        ));
 
         out.push_str("# HELP axon_indexed_files_total Total enrolled files in IndexedFile across all projects.\n");
         out.push_str("# TYPE axon_indexed_files_total gauge\n");
-        out.push_str(&format!("axon_indexed_files_total {}\n\n", self.indexed_files_total));
+        out.push_str(&format!(
+            "axon_indexed_files_total {}\n\n",
+            self.indexed_files_total
+        ));
 
         out.push_str("# HELP axon_indexed_files_chunked Total files with at least one chunk.\n");
         out.push_str("# TYPE axon_indexed_files_chunked gauge\n");
-        out.push_str(&format!("axon_indexed_files_chunked {}\n\n", self.indexed_files_chunked));
+        out.push_str(&format!(
+            "axon_indexed_files_chunked {}\n\n",
+            self.indexed_files_chunked
+        ));
 
         out.push_str("# HELP axon_symbols_total Total indexed symbols across all projects.\n");
         out.push_str("# TYPE axon_symbols_total gauge\n");
@@ -342,42 +403,60 @@ impl PrometheusMetricsSnapshot {
             out.push_str("# HELP axon_project_chunks_pending Pending chunks per project.\n");
             out.push_str("# TYPE axon_project_chunks_pending gauge\n");
             for p in &self.projects {
-                out.push_str(&format!("axon_project_chunks_pending{{project=\"{}\"}} {}\n", p.project_code, p.chunks_pending));
+                out.push_str(&format!(
+                    "axon_project_chunks_pending{{project=\"{}\"}} {}\n",
+                    p.project_code, p.chunks_pending
+                ));
             }
             out.push('\n');
 
             out.push_str("# HELP axon_project_chunks_embedded Embedded chunks per project.\n");
             out.push_str("# TYPE axon_project_chunks_embedded gauge\n");
             for p in &self.projects {
-                out.push_str(&format!("axon_project_chunks_embedded{{project=\"{}\"}} {}\n", p.project_code, p.chunks_embedded));
+                out.push_str(&format!(
+                    "axon_project_chunks_embedded{{project=\"{}\"}} {}\n",
+                    p.project_code, p.chunks_embedded
+                ));
             }
             out.push('\n');
 
             out.push_str("# HELP axon_project_chunks_total Total chunks per project.\n");
             out.push_str("# TYPE axon_project_chunks_total gauge\n");
             for p in &self.projects {
-                out.push_str(&format!("axon_project_chunks_total{{project=\"{}\"}} {}\n", p.project_code, p.chunks_total));
+                out.push_str(&format!(
+                    "axon_project_chunks_total{{project=\"{}\"}} {}\n",
+                    p.project_code, p.chunks_total
+                ));
             }
             out.push('\n');
 
             out.push_str("# HELP axon_project_coverage_pct Chunk embedding coverage percentage per project.\n");
             out.push_str("# TYPE axon_project_coverage_pct gauge\n");
             for p in &self.projects {
-                out.push_str(&format!("axon_project_coverage_pct{{project=\"{}\"}} {:.2}\n", p.project_code, p.coverage_pct));
+                out.push_str(&format!(
+                    "axon_project_coverage_pct{{project=\"{}\"}} {:.2}\n",
+                    p.project_code, p.coverage_pct
+                ));
             }
             out.push('\n');
 
             out.push_str("# HELP axon_project_files_total Total enrolled files per project.\n");
             out.push_str("# TYPE axon_project_files_total gauge\n");
             for p in &self.projects {
-                out.push_str(&format!("axon_project_files_total{{project=\"{}\"}} {}\n", p.project_code, p.files_total));
+                out.push_str(&format!(
+                    "axon_project_files_total{{project=\"{}\"}} {}\n",
+                    p.project_code, p.files_total
+                ));
             }
             out.push('\n');
 
             out.push_str("# HELP axon_project_files_chunked Chunked files per project.\n");
             out.push_str("# TYPE axon_project_files_chunked gauge\n");
             for p in &self.projects {
-                out.push_str(&format!("axon_project_files_chunked{{project=\"{}\"}} {}\n", p.project_code, p.files_chunked));
+                out.push_str(&format!(
+                    "axon_project_files_chunked{{project=\"{}\"}} {}\n",
+                    p.project_code, p.files_chunked
+                ));
             }
             out.push('\n');
         }

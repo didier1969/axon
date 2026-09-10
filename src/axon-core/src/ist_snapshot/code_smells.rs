@@ -151,7 +151,10 @@ impl DeclaredSymbolRefs {
         let mut par_feuille: HashMap<String, Vec<String>> = HashMap::new();
         for reference in refs {
             if let Some(feuille) = feuille_qualifiante(reference) {
-                par_feuille.entry(feuille).or_default().push(reference.clone());
+                par_feuille
+                    .entry(feuille)
+                    .or_default()
+                    .push(reference.clone());
             }
         }
         Self { par_feuille }
@@ -764,7 +767,12 @@ pub fn cross_file_call_flows(
 
 const DANGEROUS_NAMES: &[&str] = &["eval", "exec", "os.system", "subprocess.run", "unwrap"];
 const LOG_CALL_NAMES: &[&str] = &[
-    "println!", "dbg!", "console.log", "io.puts", "print", "printf",
+    "println!",
+    "dbg!",
+    "console.log",
+    "io.puts",
+    "print",
+    "printf",
 ];
 // REQ-AXO-902209 — "password"/"token" added to reconnect yaml.rs's
 // `properties["sensitive"]` intent (config keys named password/token/secret/
@@ -818,9 +826,7 @@ pub fn security_audit_paths(graph: &IstGraph, project: &str) -> Vec<(String, Str
             // indirect (2-hop): callers of the direct caller.
             for (src2, rel2) in graph.reverse_neighbors(src) {
                 let src2_file = file_map.get(&src2).map(String::as_str).unwrap_or("");
-                if rels(&rel2)
-                    && project_matches(graph, src2, project)
-                    && !is_test_path(src2_file)
+                if rels(&rel2) && project_matches(graph, src2, project) && !is_test_path(src2_file)
                 {
                     pairs.push((graph.name_of(src2).to_string(), dname.clone()));
                     if pairs.len() >= 100 {
@@ -1506,7 +1512,9 @@ pub fn wiring_orphans_among(
     let phantom_callers = phantom_dispatch_callers(graph);
     let mut out: Vec<WiringOrphan> = Vec::new();
     for id in candidate_ids {
-        let Some(idx) = graph.index_of(id) else { continue };
+        let Some(idx) = graph.index_of(id) else {
+            continue;
+        };
         if let Some(orphan) =
             wiring_classify_node(graph, idx, &index_declare, &file_map, &phantom_callers)
         {
@@ -1856,7 +1864,10 @@ mod tests {
         let declared: HashSet<String> = ["declared_hook".to_string()].into_iter().collect();
         let orphans = wiring_orphans(&g, "AXO", &declared, 10);
         let names: Vec<&str> = orphans.iter().map(|o| o.name.as_str()).collect();
-        assert!(!names.contains(&"prod_fn"), "prod_fn has a prod caller → wired");
+        assert!(
+            !names.contains(&"prod_fn"),
+            "prod_fn has a prod caller → wired"
+        );
         assert!(!names.contains(&"run_main"), "inferred entry skipped");
         assert!(!names.contains(&"a_test"), "a #[test] is not a deliverable");
         assert!(
@@ -1887,17 +1898,35 @@ mod tests {
     fn is_inferred_entry_path_scopes_elixir_framework_callbacks() {
         // REQ-AXO-902221 — language-agnostic cases match regardless of path.
         assert!(is_inferred_entry("run_main", ""));
-        assert!(is_inferred_entry("app::server::request_handler", "/p/src/server.rs"));
+        assert!(is_inferred_entry(
+            "app::server::request_handler",
+            "/p/src/server.rs"
+        ));
         assert!(is_inferred_entry("nif_load", "/p/src/native.rs"));
         // Elixir framework callbacks are entries ONLY inside an Elixir source
         // file, matched on the bare final segment of the dotted-qualified name.
-        assert!(is_inferred_entry("Nexus.Worker.handle_call", "/p/lib/worker.ex"));
-        assert!(is_inferred_entry("Nexus.Live.PageLive.mount", "/p/lib/page_live.ex"));
-        assert!(is_inferred_entry("Mix.Tasks.Seed.run", "/p/lib/mix/tasks/seed.exs"));
-        assert!(is_inferred_entry("Nexus.Api.Endpoint.call", "/p/lib/endpoint.ex"));
+        assert!(is_inferred_entry(
+            "Nexus.Worker.handle_call",
+            "/p/lib/worker.ex"
+        ));
+        assert!(is_inferred_entry(
+            "Nexus.Live.PageLive.mount",
+            "/p/lib/page_live.ex"
+        ));
+        assert!(is_inferred_entry(
+            "Mix.Tasks.Seed.run",
+            "/p/lib/mix/tasks/seed.exs"
+        ));
+        assert!(is_inferred_entry(
+            "Nexus.Api.Endpoint.call",
+            "/p/lib/endpoint.ex"
+        ));
         // ANTI-REGRESSION: the SAME names are NOT entries outside Elixir —
         // matching them globally would MASK real orphans in Rust/TS/Python.
-        assert!(!is_inferred_entry("app::widget::render", "/p/src/widget.rs"));
+        assert!(!is_inferred_entry(
+            "app::widget::render",
+            "/p/src/widget.rs"
+        ));
         assert!(!is_inferred_entry("app::config::init", "/p/src/config.rs"));
         assert!(!is_inferred_entry("jobs::worker::run", "/p/src/worker.rs"));
         // An Elixir file, but a name that is NOT a framework callback, stays a
@@ -2495,13 +2524,27 @@ mod tests {
         let edges = vec![
             edge("AXO::f.rs::pub_fn", "AXO::f.rs::mid", RelationType::Calls),
             edge("AXO::f.rs::mid", "AXO::f.rs::danger", RelationType::Calls),
-            edge("AXO::f.rs::pub_fn", "AXO::f.rs::unwrap", RelationType::Calls),
-            edge("AXO::f.rs::priv_root", "AXO::f.rs::danger", RelationType::Calls),
+            edge(
+                "AXO::f.rs::pub_fn",
+                "AXO::f.rs::unwrap",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::f.rs::priv_root",
+                "AXO::f.rs::danger",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let out = unsafe_exposure(&g, "AXO");
-        assert!(out.contains(&"pub_fn -> ... -> danger".to_string()), "{out:?}");
-        assert!(out.contains(&"pub_fn -> ... -> unwrap".to_string()), "{out:?}");
+        assert!(
+            out.contains(&"pub_fn -> ... -> danger".to_string()),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&"pub_fn -> ... -> unwrap".to_string()),
+            "{out:?}"
+        );
         // The private root never appears as an initial.
         assert!(!out.iter().any(|s| s.starts_with("priv_root")), "{out:?}");
     }
@@ -2548,7 +2591,11 @@ mod tests {
             func_flags("AXO::f.rs::pub_fn", true, false),
             func_flags("AXO::f.rs::new", false, false),
         ];
-        let edges = vec![edge("AXO::f.rs::pub_fn", "AXO::f.rs::new", RelationType::Calls)];
+        let edges = vec![edge(
+            "AXO::f.rs::pub_fn",
+            "AXO::f.rs::new",
+            RelationType::Calls,
+        )];
         let g = IstGraph::build(nodes, edges);
         let out = injection_risk_paths(&g, "AXO");
         assert!(out.is_empty(), "{out:?}");
@@ -2570,8 +2617,16 @@ mod tests {
             nodes.push(func_flags(&format!("AXO::f.rs::{n}"), false, false));
         }
         let mut edges = vec![
-            edge("AXO::f.rs::caller", "AXO::f.rs::deep_nif", RelationType::CallsNif),
-            edge("AXO::f.rs::caller2", "AXO::f.rs::shallow_nif", RelationType::CallsNif),
+            edge(
+                "AXO::f.rs::caller",
+                "AXO::f.rs::deep_nif",
+                RelationType::CallsNif,
+            ),
+            edge(
+                "AXO::f.rs::caller2",
+                "AXO::f.rs::shallow_nif",
+                RelationType::CallsNif,
+            ),
         ];
         let mut prev = "AXO::f.rs::deep_nif".to_string();
         for n in chain {
@@ -2582,7 +2637,8 @@ mod tests {
         let g = IstGraph::build(nodes, edges);
         let out = nif_blocking_risks(&g, "AXO");
         assert!(
-            out.iter().any(|s| s.starts_with("deep_nif (profondeur: 7)")),
+            out.iter()
+                .any(|s| s.starts_with("deep_nif (profondeur: 7)")),
             "deep nif must be flagged at depth 7: {out:?}"
         );
         assert!(
@@ -2635,7 +2691,11 @@ mod tests {
         ];
         let edges = vec![
             edge("src/svc.rs", "src/svc.rs::Service", RelationType::Contains),
-            edge("src/svc.rs", "src/svc.rs::ServiceImpl", RelationType::Contains),
+            edge(
+                "src/svc.rs",
+                "src/svc.rs::ServiceImpl",
+                RelationType::Contains,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         assert_eq!(
@@ -2653,14 +2713,29 @@ mod tests {
             func("src/infrastructure/db.rs::write", true),
         ];
         let edges = vec![
-            edge("src/domain/order.rs", "src/domain/order.rs::place", RelationType::Contains),
-            edge("src/infrastructure/db.rs", "src/infrastructure/db.rs::write", RelationType::Contains),
-            edge("src/domain/order.rs::place", "src/infrastructure/db.rs::write", RelationType::Calls),
+            edge(
+                "src/domain/order.rs",
+                "src/domain/order.rs::place",
+                RelationType::Contains,
+            ),
+            edge(
+                "src/infrastructure/db.rs",
+                "src/infrastructure/db.rs::write",
+                RelationType::Contains,
+            ),
+            edge(
+                "src/domain/order.rs::place",
+                "src/infrastructure/db.rs::write",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let leaks = domain_leakage(&g, "AXO", "domain", "infrastructure");
         assert_eq!(leaks.len(), 1);
-        assert!(leaks[0].contains("place") && leaks[0].contains("write"), "{leaks:?}");
+        assert!(
+            leaks[0].contains("place") && leaks[0].contains("write"),
+            "{leaks:?}"
+        );
     }
 
     #[test]
@@ -2683,17 +2758,38 @@ mod tests {
 
     #[test]
     fn phantom_analytics_use_reads_and_declares() {
-        let nodes = vec![func("src/p.rs::reader", false), func("src/p.rs::decl_a", false)];
+        let nodes = vec![
+            func("src/p.rs::reader", false),
+            func("src/p.rs::decl_a", false),
+        ];
         let edges = vec![
-            edge("src/p.rs::reader", "ENV::phantom::MISSING", RelationType::Reads),
-            edge("src/p.rs::reader", "ENV::phantom::DUP", RelationType::Declares),
-            edge("src/p.rs::decl_a", "ENV::phantom::DUP", RelationType::Declares),
+            edge(
+                "src/p.rs::reader",
+                "ENV::phantom::MISSING",
+                RelationType::Reads,
+            ),
+            edge(
+                "src/p.rs::reader",
+                "ENV::phantom::DUP",
+                RelationType::Declares,
+            ),
+            edge(
+                "src/p.rs::decl_a",
+                "ENV::phantom::DUP",
+                RelationType::Declares,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
-        assert_eq!(phantom_dead_refs(&g, "AXO"), vec!["ENV::phantom::MISSING".to_string()]);
+        assert_eq!(
+            phantom_dead_refs(&g, "AXO"),
+            vec!["ENV::phantom::MISSING".to_string()]
+        );
         let multi = phantom_multi_declare(&g, "AXO");
         assert_eq!(multi.len(), 1);
-        assert!(multi[0].starts_with("ENV::phantom::DUP (2 sources)"), "{multi:?}");
+        assert!(
+            multi[0].starts_with("ENV::phantom::DUP (2 sources)"),
+            "{multi:?}"
+        );
     }
 
     #[test]
@@ -2705,8 +2801,16 @@ mod tests {
             func("src/other.rs::helper", true),
         ];
         let edges = vec![
-            edge("src/overlay.rs", "src/overlay.rs::render", RelationType::Contains),
-            edge("src/other.rs", "src/other.rs::helper", RelationType::Contains),
+            edge(
+                "src/overlay.rs",
+                "src/overlay.rs::render",
+                RelationType::Contains,
+            ),
+            edge(
+                "src/other.rs",
+                "src/other.rs::helper",
+                RelationType::Contains,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         assert_eq!(
@@ -2778,20 +2882,37 @@ mod tests {
         // id suffix is an opaque slug ("todo_7") ; the TODO text lives in `name`.
         let nodes = vec![
             file("src/parser.rs"),
-            named("AXO::src/parser.rs::todo_7", "// TODO: fix the parser", NodeKind::Other),
-            named("AXO::src/cfg.rs::sec_1", "SECRET_API_KEY hardcoded credential", NodeKind::Other),
+            named(
+                "AXO::src/parser.rs::todo_7",
+                "// TODO: fix the parser",
+                NodeKind::Other,
+            ),
+            named(
+                "AXO::src/cfg.rs::sec_1",
+                "SECRET_API_KEY hardcoded credential",
+                NodeKind::Other,
+            ),
             file("src/cfg.rs"),
         ];
         let edges = vec![
-            edge("src/parser.rs", "AXO::src/parser.rs::todo_7", RelationType::Contains),
-            edge("src/cfg.rs", "AXO::src/cfg.rs::sec_1", RelationType::Contains),
+            edge(
+                "src/parser.rs",
+                "AXO::src/parser.rs::todo_7",
+                RelationType::Contains,
+            ),
+            edge(
+                "src/cfg.rs",
+                "AXO::src/cfg.rs::sec_1",
+                RelationType::Contains,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let debt = technical_debt(&g, "AXO");
         // The returned TODO name is canonical, while legacy detector pseudo-
         // symbols are quarantined from technical debt.
         assert!(
-            debt.iter().any(|(f, n)| f == "src/parser.rs" && n == "// TODO: fix the parser"),
+            debt.iter()
+                .any(|(f, n)| f == "src/parser.rs" && n == "// TODO: fix the parser"),
             "TODO text must be matched + returned via name_of: {debt:?}"
         );
         assert!(
@@ -2806,14 +2927,38 @@ mod tests {
     fn technical_debt_flags_password_and_token_named_config_keys() {
         let nodes = vec![
             file("src/config.yaml"),
-            named("AXO::src/config.yaml::db_password", "db_password", NodeKind::ConfigKey),
-            named("AXO::src/config.yaml::api_token", "api_token", NodeKind::ConfigKey),
-            named("AXO::src/config.yaml::cache_key", "cache_key", NodeKind::ConfigKey),
+            named(
+                "AXO::src/config.yaml::db_password",
+                "db_password",
+                NodeKind::ConfigKey,
+            ),
+            named(
+                "AXO::src/config.yaml::api_token",
+                "api_token",
+                NodeKind::ConfigKey,
+            ),
+            named(
+                "AXO::src/config.yaml::cache_key",
+                "cache_key",
+                NodeKind::ConfigKey,
+            ),
         ];
         let edges = vec![
-            edge("src/config.yaml", "AXO::src/config.yaml::db_password", RelationType::Contains),
-            edge("src/config.yaml", "AXO::src/config.yaml::api_token", RelationType::Contains),
-            edge("src/config.yaml", "AXO::src/config.yaml::cache_key", RelationType::Contains),
+            edge(
+                "src/config.yaml",
+                "AXO::src/config.yaml::db_password",
+                RelationType::Contains,
+            ),
+            edge(
+                "src/config.yaml",
+                "AXO::src/config.yaml::api_token",
+                RelationType::Contains,
+            ),
+            edge(
+                "src/config.yaml",
+                "AXO::src/config.yaml::cache_key",
+                RelationType::Contains,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let debt = technical_debt(&g, "AXO");
@@ -2831,7 +2976,11 @@ mod tests {
             named("AXO::f.rs::caller", "caller", NodeKind::Function),
             named("AXO::f.rs::n42", "eval", NodeKind::Function),
         ];
-        let edges = vec![edge("AXO::f.rs::caller", "AXO::f.rs::n42", RelationType::Calls)];
+        let edges = vec![edge(
+            "AXO::f.rs::caller",
+            "AXO::f.rs::n42",
+            RelationType::Calls,
+        )];
         let g = IstGraph::build(nodes, edges);
         let pairs = security_audit_paths(&g, "AXO");
         assert!(
@@ -2842,11 +2991,7 @@ mod tests {
 
     #[test]
     fn security_audit_excludes_test_paths_and_unsafe_capability_markers() {
-        let mut unsafe_capability = named(
-            "AXO::src/ops.py::probe",
-            "probe",
-            NodeKind::Function,
-        );
+        let mut unsafe_capability = named("AXO::src/ops.py::probe", "probe", NodeKind::Function);
         unsafe_capability.flags = NodeFlags::new(false, true, false, true);
         let nodes = vec![
             file("/repo/src/ops.py"),
@@ -2856,9 +3001,21 @@ mod tests {
             named("AXO::subprocess::run", "subprocess.run", NodeKind::Function),
         ];
         let edges = vec![
-            edge("/repo/src/ops.py", "AXO::src/ops.py::probe", RelationType::Contains),
-            edge("/repo/tests/test_ops.py", "AXO::tests::caller", RelationType::Contains),
-            edge("AXO::tests::caller", "AXO::subprocess::run", RelationType::Calls),
+            edge(
+                "/repo/src/ops.py",
+                "AXO::src/ops.py::probe",
+                RelationType::Contains,
+            ),
+            edge(
+                "/repo/tests/test_ops.py",
+                "AXO::tests::caller",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::tests::caller",
+                "AXO::subprocess::run",
+                RelationType::Calls,
+            ),
         ];
         let graph = IstGraph::build(nodes, edges);
         assert!(
@@ -2901,9 +3058,21 @@ mod tests {
             func("AXO::app.rs::dead_b", false),
         ];
         let edges = vec![
-            edge("AXO::app.rs::run_main", "AXO::app.rs::prod_fn", RelationType::Calls),
-            edge("AXO::app.rs::dead_a", "AXO::app.rs::dead_b", RelationType::Calls),
-            edge("AXO::app.rs::dead_b", "AXO::app.rs::dead_a", RelationType::Calls),
+            edge(
+                "AXO::app.rs::run_main",
+                "AXO::app.rs::prod_fn",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::app.rs::dead_a",
+                "AXO::app.rs::dead_b",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::app.rs::dead_b",
+                "AXO::app.rs::dead_a",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let declared: HashSet<String> = HashSet::new();
@@ -2932,7 +3101,11 @@ mod tests {
         )];
         let g = IstGraph::build(nodes, edges);
         let report = orphan_clusters(&g, "AXO", &HashSet::new());
-        assert_eq!(report.clusters.len(), 1, "private symbols form a cluster too");
+        assert_eq!(
+            report.clusters.len(),
+            1,
+            "private symbols form a cluster too"
+        );
     }
 
     #[test]
@@ -2944,11 +3117,18 @@ mod tests {
             func("AXO::app.rs::dead_a", true),
             func("AXO::app.rs::dead_b", true),
         ];
-        let edges = vec![edge("AXO::app.rs::dead_a", "AXO::app.rs::dead_b", RelationType::Calls)];
+        let edges = vec![edge(
+            "AXO::app.rs::dead_a",
+            "AXO::app.rs::dead_b",
+            RelationType::Calls,
+        )];
         let g = IstGraph::build(nodes, edges);
         let declared: HashSet<String> = ["dead_a".to_string()].into_iter().collect();
         let report = orphan_clusters(&g, "AXO", &declared);
-        assert_eq!(report.root_count, 2, "run_main (inferred) + dead_a (declared)");
+        assert_eq!(
+            report.root_count, 2,
+            "run_main (inferred) + dead_a (declared)"
+        );
         assert_eq!(report.unreached_count, 0);
         assert!(report.clusters.is_empty());
     }
@@ -3003,7 +3183,10 @@ mod tests {
         // Only run_main is a candidate: a_test is an actual #[test] fn,
         // helper lives under /tests/ — both excluded, like wiring_orphans.
         assert_eq!(report.candidate_count, 1);
-        assert_eq!(report.unreached_count, 0, "run_main is trivially its own root");
+        assert_eq!(
+            report.unreached_count, 0,
+            "run_main is trivially its own root"
+        );
     }
 
     #[test]
@@ -3038,8 +3221,16 @@ mod tests {
             another_test,
         ];
         let edges = vec![
-            edge("AXO::app.rs::a_test", "AXO::app.rs::test_helper", RelationType::Calls),
-            edge("AXO::app.rs::another_test", "AXO::app.rs::test_helper", RelationType::Calls),
+            edge(
+                "AXO::app.rs::a_test",
+                "AXO::app.rs::test_helper",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::app.rs::another_test",
+                "AXO::app.rs::test_helper",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let report = orphan_clusters(&g, "AXO", &HashSet::new());
@@ -3068,8 +3259,9 @@ mod tests {
             RelationType::Calls,
         )];
         let g = IstGraph::build(nodes, edges);
-        let declared: HashSet<String> =
-            ["some_projects_own_dispatch_target".to_string()].into_iter().collect();
+        let declared: HashSet<String> = ["some_projects_own_dispatch_target".to_string()]
+            .into_iter()
+            .collect();
         let report = orphan_clusters(&g, "AXO", &declared);
         assert_eq!(
             report.root_count, 2,
@@ -3097,8 +3289,16 @@ mod tests {
             a_test,
         ];
         let edges = vec![
-            edge("AXO::app.rs::run_main", "AXO::app.rs::mixed_helper", RelationType::Calls),
-            edge("AXO::app.rs::a_test", "AXO::app.rs::mixed_helper", RelationType::Calls),
+            edge(
+                "AXO::app.rs::run_main",
+                "AXO::app.rs::mixed_helper",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::app.rs::a_test",
+                "AXO::app.rs::mixed_helper",
+                RelationType::Calls,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let report = orphan_clusters(&g, "AXO", &HashSet::new());
@@ -3106,7 +3306,10 @@ mod tests {
             report.candidate_count, 2,
             "mixed_helper has a real prod caller (run_main) — must stay a candidate"
         );
-        assert_eq!(report.unreached_count, 0, "reached via run_main -> mixed_helper");
+        assert_eq!(
+            report.unreached_count, 0,
+            "reached via run_main -> mixed_helper"
+        );
     }
 
     fn node(id: &str, kind: NodeKind, public: bool) -> NodeRecord {
@@ -3141,14 +3344,46 @@ mod tests {
             file("AXO::javaparser.rs"),
         ];
         let edges = vec![
-            edge("AXO::app.rs::run_main", "AXO::stage_a2.rs::a2_transform", RelationType::Calls),
-            edge("AXO::stage_a2.rs::a2_transform", "AXO::stage_a2.rs::parse", RelationType::Calls),
-            edge("AXO::cparser.rs", "AXO::cparser.rs::CParser", RelationType::Contains),
-            edge("AXO::cparser.rs", "AXO::cparser.rs::parse", RelationType::Contains),
-            edge("AXO::cparser.rs::CParser", "AXO::traits.rs::Parser", RelationType::Implements),
-            edge("AXO::javaparser.rs", "AXO::javaparser.rs::JavaParser", RelationType::Contains),
-            edge("AXO::javaparser.rs", "AXO::javaparser.rs::parse", RelationType::Contains),
-            edge("AXO::javaparser.rs::JavaParser", "AXO::traits.rs::Parser", RelationType::Implements),
+            edge(
+                "AXO::app.rs::run_main",
+                "AXO::stage_a2.rs::a2_transform",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::stage_a2.rs::a2_transform",
+                "AXO::stage_a2.rs::parse",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::cparser.rs",
+                "AXO::cparser.rs::CParser",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::cparser.rs",
+                "AXO::cparser.rs::parse",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::cparser.rs::CParser",
+                "AXO::traits.rs::Parser",
+                RelationType::Implements,
+            ),
+            edge(
+                "AXO::javaparser.rs",
+                "AXO::javaparser.rs::JavaParser",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::javaparser.rs",
+                "AXO::javaparser.rs::parse",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::javaparser.rs::JavaParser",
+                "AXO::traits.rs::Parser",
+                RelationType::Implements,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 50);
@@ -3157,7 +3392,10 @@ mod tests {
             !names.contains(&"parse"),
             "a dynamically-dispatched method in a trait-impl file must be bridged to its prod caller, not isolated"
         );
-        assert!(!names.contains(&"a2_transform"), "a2_transform is wired by run_main");
+        assert!(
+            !names.contains(&"a2_transform"),
+            "a2_transform is wired by run_main"
+        );
     }
 
     #[test]
@@ -3185,20 +3423,54 @@ mod tests {
             file("AXO::renderer_b.rs"),
         ];
         let edges = vec![
-            edge("AXO::app.rs::a_test", "AXO::app.rs::render", RelationType::Calls),
-            edge("AXO::renderer_a.rs", "AXO::renderer_a.rs::RendererA", RelationType::Contains),
-            edge("AXO::renderer_a.rs", "AXO::renderer_a.rs::render", RelationType::Contains),
-            edge("AXO::renderer_a.rs::RendererA", "AXO::traits.rs::Render", RelationType::Implements),
-            edge("AXO::renderer_b.rs", "AXO::renderer_b.rs::RendererB", RelationType::Contains),
-            edge("AXO::renderer_b.rs", "AXO::renderer_b.rs::render", RelationType::Contains),
-            edge("AXO::renderer_b.rs::RendererB", "AXO::traits.rs::Render", RelationType::Implements),
+            edge(
+                "AXO::app.rs::a_test",
+                "AXO::app.rs::render",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::renderer_a.rs",
+                "AXO::renderer_a.rs::RendererA",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::renderer_a.rs",
+                "AXO::renderer_a.rs::render",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::renderer_a.rs::RendererA",
+                "AXO::traits.rs::Render",
+                RelationType::Implements,
+            ),
+            edge(
+                "AXO::renderer_b.rs",
+                "AXO::renderer_b.rs::RendererB",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::renderer_b.rs",
+                "AXO::renderer_b.rs::render",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::renderer_b.rs::RendererB",
+                "AXO::traits.rs::Render",
+                RelationType::Implements,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 50);
         let renders: Vec<&WiringOrphan> = orphans.iter().filter(|o| o.name == "render").collect();
-        assert_eq!(renders.len(), 2, "both dynamically-dispatched render methods surface");
+        assert_eq!(
+            renders.len(),
+            2,
+            "both dynamically-dispatched render methods surface"
+        );
         assert!(
-            renders.iter().all(|o| o.category == "test_only" && o.test_callers == 1),
+            renders
+                .iter()
+                .all(|o| o.category == "test_only" && o.test_callers == 1),
             "dynamic dispatch from a #[test] only → test_only, not isolated"
         );
     }
@@ -3220,8 +3492,16 @@ mod tests {
             file("AXO::b.rs"),
         ];
         let edges = vec![
-            edge("AXO::app.rs::run_main", "AXO::app.rs::driver", RelationType::Calls),
-            edge("AXO::app.rs::driver", "AXO::app.rs::emit", RelationType::Calls),
+            edge(
+                "AXO::app.rs::run_main",
+                "AXO::app.rs::driver",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::app.rs::driver",
+                "AXO::app.rs::emit",
+                RelationType::Calls,
+            ),
             edge("AXO::a.rs", "AXO::a.rs::emit", RelationType::Contains),
             edge("AXO::b.rs", "AXO::b.rs::emit", RelationType::Contains),
         ];
@@ -3250,12 +3530,23 @@ mod tests {
         ];
         let edges = vec![
             edge("AXO::svc.rs", "AXO::svc.rs::Svc", RelationType::Contains),
-            edge("AXO::svc.rs", "AXO::svc.rs::orphaned_op", RelationType::Contains),
-            edge("AXO::svc.rs::Svc", "AXO::traits.rs::Op", RelationType::Implements),
+            edge(
+                "AXO::svc.rs",
+                "AXO::svc.rs::orphaned_op",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::svc.rs::Svc",
+                "AXO::traits.rs::Op",
+                RelationType::Implements,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 50);
-        let op = orphans.iter().find(|o| o.name == "orphaned_op").expect("must be flagged");
+        let op = orphans
+            .iter()
+            .find(|o| o.name == "orphaned_op")
+            .expect("must be flagged");
         assert_eq!(
             op.category, "isolated",
             "a trait-impl file alone must NOT wire a method with no dispatching phantom"
@@ -3278,7 +3569,9 @@ mod tests {
         let g = IstGraph::build(nodes, vec![]);
         let undeclared = wiring_orphans(&g, "AXO", &HashSet::new(), 10);
         assert!(
-            undeclared.iter().any(|o| o.name == "lazy_target" && o.category == "isolated"),
+            undeclared
+                .iter()
+                .any(|o| o.name == "lazy_target" && o.category == "isolated"),
             "an undeclared lazy-imported free fn stays isolated by design (bridge must NOT fire)"
         );
         let declared: HashSet<String> = ["lazy_target".to_string()].into_iter().collect();
@@ -3356,7 +3649,11 @@ mod tests {
             func("AXO::app.rs::run_main", true),
             func("AXO::util.rs::branche", true),
         ];
-        let edges = vec![edge("AXO::app.rs::run_main", "AXO::util.rs::branche", RelationType::Calls)];
+        let edges = vec![edge(
+            "AXO::app.rs::run_main",
+            "AXO::util.rs::branche",
+            RelationType::Calls,
+        )];
         let g = IstGraph::build(nodes, edges);
         let declared: HashSet<String> = ["branche".to_string()].into_iter().collect();
 
@@ -3382,9 +3679,18 @@ mod tests {
     /// garantit qu'aucun locataire ne voit remonter un orphelin.
     #[test]
     fn une_reference_FEUILLE_matche_exactement_comme_avant() {
-        assert!(declaration_designe_ce_symbole("AXO::a::src::x.rs::run", "run"));
-        assert!(declaration_designe_ce_symbole("AXO::app.rs::evaluator", "EVALUATOR"));
-        assert!(!declaration_designe_ce_symbole("AXO::a::src::x.rs::run", "autre"));
+        assert!(declaration_designe_ce_symbole(
+            "AXO::a::src::x.rs::run",
+            "run"
+        ));
+        assert!(declaration_designe_ce_symbole(
+            "AXO::app.rs::evaluator",
+            "EVALUATOR"
+        ));
+        assert!(!declaration_designe_ce_symbole(
+            "AXO::a::src::x.rs::run",
+            "autre"
+        ));
     }
 
     /// LA réparation : une déclaration qualifiée traverse le chemin de fichier que
@@ -3403,7 +3709,11 @@ mod tests {
     #[test]
     fn les_separateurs_sont_equivalents() {
         let id = "APS::lib::demand::order.ex::create";
-        for reference in ["demand::order::create", "demand/order/create", "demand.order.create"] {
+        for reference in [
+            "demand::order::create",
+            "demand/order/create",
+            "demand.order.create",
+        ] {
             assert!(
                 declaration_designe_ce_symbole(id, reference),
                 "`{reference}` doit désigner ce symbole"
@@ -3561,32 +3871,61 @@ mod tests {
         ];
         let edges = vec![
             // a_test calls rsi.update directly
-            edge("AXO::test.rs::test_all", "AXO::rsi.rs::update", RelationType::Calls),
+            edge(
+                "AXO::test.rs::test_all",
+                "AXO::rsi.rs::update",
+                RelationType::Calls,
+            ),
             edge("AXO::rsi.rs", "AXO::rsi.rs::RSI", RelationType::Contains),
             edge("AXO::rsi.rs", "AXO::rsi.rs::update", RelationType::Contains),
-            edge("AXO::rsi.rs::RSI", "AXO::traits.rs::Indicator", RelationType::Implements),
+            edge(
+                "AXO::rsi.rs::RSI",
+                "AXO::traits.rs::Indicator",
+                RelationType::Implements,
+            ),
             // a_test calls register directly
-            edge("AXO::test.rs::test_all", "AXO::orphan.rs::register", RelationType::Calls),
-            edge("AXO::orphan.rs", "AXO::orphan.rs::register", RelationType::Contains),
+            edge(
+                "AXO::test.rs::test_all",
+                "AXO::orphan.rs::register",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::orphan.rs",
+                "AXO::orphan.rs::register",
+                RelationType::Contains,
+            ),
             // lonely has no callers
-            edge("AXO::isolated.rs", "AXO::isolated.rs::lonely", RelationType::Contains),
+            edge(
+                "AXO::isolated.rs",
+                "AXO::isolated.rs::lonely",
+                RelationType::Contains,
+            ),
         ];
         let g = IstGraph::build(nodes, edges);
         let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 50);
 
-        let register = orphans.iter().find(|o| o.name == "register").expect("register must be reported");
+        let register = orphans
+            .iter()
+            .find(|o| o.name == "register")
+            .expect("register must be reported");
         assert_eq!(
             register.category, "test_only",
             "true orphan without trait-impl must remain test_only (criterion 2)"
         );
 
-        let lonely = orphans.iter().find(|o| o.name == "lonely").expect("lonely must be reported");
+        let lonely = orphans
+            .iter()
+            .find(|o| o.name == "lonely")
+            .expect("lonely must be reported");
         assert_eq!(
             lonely.category, "isolated",
             "callable with no callers must remain isolated"
         );
 
-        let update = orphans.iter().find(|o| o.name == "update").expect("update must be reported");
+        let update = orphans
+            .iter()
+            .find(|o| o.name == "update")
+            .expect("update must be reported");
         assert_eq!(
             update.category, "dynamic_dispatch",
             "callable in trait/behaviour impl with no phantom bridge must be dynamic_dispatch, NOT test_only (criterion 3)"

@@ -1221,7 +1221,10 @@ mod tests {
             NodeKind::ConfigKey,
             NodeKind::DataArtifact,
         ] {
-            assert!(!k.can_form_code_module(), "{k:?} must not form a code module");
+            assert!(
+                !k.can_form_code_module(),
+                "{k:?} must not form a code module"
+            );
         }
         // Everything else can form a code module, INCLUDING the REQ-AXO-902231 code
         // variants (Impl/TypeAlias/Macro, now modelled explicitly) and Other (absorbs
@@ -1307,7 +1310,7 @@ mod tests {
             node("AXO::m::hub", "AXO", NodeKind::Function), // called by the test
             node("AXO::m::deep", "AXO", NodeKind::Function), // called by hub (transitive)
             node("AXO::m::isolated", "AXO", NodeKind::Function), // only reached via Contains
-            node("AXO::m::file", "AXO", NodeKind::File),   // not reached from any test
+            node("AXO::m::file", "AXO", NodeKind::File),    // not reached from any test
         ];
         let edges = vec![
             edge("AXO::m::a_test", "AXO::m::hub", RelationType::Calls),
@@ -1316,9 +1319,15 @@ mod tests {
         ];
         let g = IstGraph::build(nodes, edges);
         let covered = |id: &str| g.node_meta(g.index_of(id).unwrap()).2.covered();
-        assert!(covered("AXO::m::a_test"), "a #[test] seeds itself as covered");
+        assert!(
+            covered("AXO::m::a_test"),
+            "a #[test] seeds itself as covered"
+        );
         assert!(covered("AXO::m::hub"), "direct CALLS callee is covered");
-        assert!(covered("AXO::m::deep"), "transitive CALLS callee is covered");
+        assert!(
+            covered("AXO::m::deep"),
+            "transitive CALLS callee is covered"
+        );
         assert!(
             !covered("AXO::m::isolated"),
             "reached only via Contains → not covered"
@@ -1428,7 +1437,11 @@ mod tests {
             node("p::b.rs::callee", "P", NodeKind::Function),
         ];
         // Indexer emitted the caller-file id `p::a.rs::callee` (no such node).
-        let edges = vec![edge("p::a.rs::caller", "p::a.rs::callee", RelationType::Calls)];
+        let edges = vec![edge(
+            "p::a.rs::caller",
+            "p::a.rs::callee",
+            RelationType::Calls,
+        )];
         let g = IstGraph::build(nodes, edges);
         let caller = g.index_of("p::a.rs::caller").unwrap();
         let callee = g.index_of("p::b.rs::callee").unwrap();
@@ -1438,7 +1451,11 @@ mod tests {
             "synthetic id must NOT become a phantom node"
         );
         let fwd: Vec<_> = g.forward_neighbors(caller).map(|(t, _)| t).collect();
-        assert_eq!(fwd, vec![callee], "synthetic target resolved to the canonical callee");
+        assert_eq!(
+            fwd,
+            vec![callee],
+            "synthetic target resolved to the canonical callee"
+        );
         let rev: Vec<_> = g.reverse_neighbors(callee).map(|(s, _)| s).collect();
         assert_eq!(rev, vec![caller], "callee now sees its real caller");
     }
@@ -1475,7 +1492,11 @@ mod tests {
         let g = IstGraph::build(nodes, edges);
         let caller = g.index_of("p::a.rs::caller").unwrap();
         let fwd: Vec<_> = g.forward_neighbors(caller).map(|(t, _)| t).collect();
-        assert_eq!(fwd.len(), 1, "canonical + resolved-synthetic dedupe to one edge");
+        assert_eq!(
+            fwd.len(),
+            1,
+            "canonical + resolved-synthetic dedupe to one edge"
+        );
     }
 
     #[test]

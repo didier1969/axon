@@ -114,7 +114,8 @@ mod tests {
                     // Une DÉFINITION, pas un appel : `fn now_ms(` / `fn now_unix_ms(`.
                     // Les helpers de test explicitement nommés `*_for_tests` sont
                     // hors sujet : ils fabriquent une heure, ils ne la lisent pas.
-                    let est_definition = (l.contains("fn now_ms(") || l.contains("fn now_unix_ms("))
+                    let est_definition = (l.contains("fn now_ms(")
+                        || l.contains("fn now_unix_ms("))
                         && !l.contains("_for_tests");
                     if est_definition {
                         coupables.push(format!(

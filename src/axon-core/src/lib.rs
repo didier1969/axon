@@ -5,8 +5,8 @@ extern crate self as axon_core;
 pub mod bench_pipeline_stages;
 pub mod bridge;
 pub mod build_identity;
-pub mod code_chunker;
 pub mod clock;
+pub mod code_chunker;
 pub mod config;
 pub mod contract;
 pub mod dashboard_state;
@@ -28,11 +28,10 @@ pub mod host_readiness;
 pub mod indexer_health_http;
 pub mod indexing_policy;
 pub mod ist_snapshot;
+pub mod mailbox;
 mod main_background;
 mod main_services;
 mod main_telemetry;
-pub mod mailbox;
-pub mod practice_memory;
 pub mod mcp;
 pub mod mcp_http;
 pub mod metrics_exporter;
@@ -43,11 +42,13 @@ pub mod parser;
 pub mod pipeline;
 pub mod pipeline_runtime;
 pub mod postgres;
+pub mod practice_memory;
 pub mod project_meta;
 pub mod queue;
 // REQ-AXO-902338 — analyse d'arguments commune aux binaires de rôle : un
 // drapeau inconnu doit être REFUSÉ, jamais ignoré (un argument ignoré démarre
 // le rôle).
+pub mod release_reconciler;
 pub mod role_cli;
 pub mod runtime_boot;
 pub mod runtime_command_proxy;
@@ -55,12 +56,9 @@ pub mod runtime_config;
 pub mod runtime_mode;
 pub mod runtime_observability;
 pub mod runtime_operational_profile;
-pub mod release_reconciler;
 // REQ-AXO-902585 — sonde de lecture du superviseur : le compteur de redémarrages
 // et l'âge du processus, que le battement PG ne peut structurellement pas porter.
-pub mod supervisor_probe;
 pub mod release_reconciler_ascent;
-pub mod structural_health;
 pub mod runtime_capacity_profile;
 pub mod runtime_readiness;
 pub mod runtime_topology;
@@ -71,6 +69,8 @@ pub mod runtime_writer_guard;
 pub mod scanner;
 pub mod service_guard;
 pub mod soll_snapshot;
+pub mod structural_health;
+pub mod supervisor_probe;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod vector_control;

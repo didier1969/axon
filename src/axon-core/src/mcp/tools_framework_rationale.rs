@@ -23,9 +23,18 @@ fn compact_project_status_brief_data(data: &Value) -> Value {
 
     let vision_raw = data.get("vision").cloned().unwrap_or(Value::Null);
     let compact_vision = if let Some(obj) = vision_raw.as_object() {
-        let id = obj.get("id").and_then(Value::as_str).unwrap_or("unavailable");
-        let title = obj.get("title").and_then(Value::as_str).unwrap_or("unavailable");
-        let status = obj.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        let id = obj
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("unavailable");
+        let title = obj
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("unavailable");
+        let status = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         let desc = obj.get("description").and_then(Value::as_str).unwrap_or("");
         let summary = if desc.is_empty() || desc == "unavailable" {
             desc.to_string()
@@ -273,7 +282,11 @@ impl McpServer {
         let previous_summary = previous_snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.get("anomaly_summary"));
-        let snapshot_id = format!("project-status-{}-{}", project_code, crate::clock::now_unix_ms());
+        let snapshot_id = format!(
+            "project-status-{}-{}",
+            project_code,
+            crate::clock::now_unix_ms()
+        );
         let generated_at = crate::clock::now_unix_ms();
         let delta_vs_previous =
             Self::build_project_status_delta(previous_summary, &anomaly_summary);
@@ -377,8 +390,12 @@ impl McpServer {
             "snapshot_io": ms_snapshot,
             "total": ms_total
         });
-        let operator_guidance =
-            project_status_operator_guidance(&degraded_notes, &snapshot_storage, &vision, project_code);
+        let operator_guidance = project_status_operator_guidance(
+            &degraded_notes,
+            &snapshot_storage,
+            &vision,
+            project_code,
+        );
         let next_best_action = operator_guidance
             .get("next_action")
             .cloned()
@@ -400,7 +417,9 @@ impl McpServer {
             if !status_recovery_hint.is_null() {
                 status_recovery_hint
             } else {
-                let (_, hint) = crate::mcp::tools_framework_runtime_status::derive_recovery_action(&project_blockers);
+                let (_, hint) = crate::mcp::tools_framework_runtime_status::derive_recovery_action(
+                    &project_blockers,
+                );
                 hint
             }
         } else {
@@ -514,8 +533,6 @@ impl McpServer {
                     "unknown".to_string()
                 }
             });
-
-
 
         // Trois etats, jamais deux. Deux lectures distinctes, parce que les grandeurs
         // n'ont pas la meme source — le rapporteur le releve lui-meme et exclut
@@ -753,7 +770,8 @@ impl McpServer {
                     rows.into_iter()
                         .filter_map(|r| {
                             let rep_id = r.get(0)?.as_str()?.to_string();
-                            let rep_title = r.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+                            let rep_title =
+                                r.get(1).and_then(Value::as_str).unwrap_or("").to_string();
                             Some((rep_id, rep_title))
                         })
                         .collect()
@@ -767,9 +785,14 @@ impl McpServer {
                     let all_ids: Vec<String> = reps.iter().map(|(id, _)| id.clone()).collect();
                     data.insert("superseded_by_all".to_string(), json!(all_ids));
                 }
-                if let Some(content_arr) = response.get_mut("content").and_then(|v| v.as_array_mut()) {
-                    if let Some(first_item) = content_arr.first_mut().and_then(|v| v.as_object_mut()) {
-                        if let Some(text_val) = first_item.get_mut("text").and_then(|v| v.as_str()) {
+                if let Some(content_arr) =
+                    response.get_mut("content").and_then(|v| v.as_array_mut())
+                {
+                    if let Some(first_item) =
+                        content_arr.first_mut().and_then(|v| v.as_object_mut())
+                    {
+                        if let Some(text_val) = first_item.get_mut("text").and_then(|v| v.as_str())
+                        {
                             let notice = if reps.len() == 1 {
                                 format!(
                                     "ℹ Notice: `{sym_trimmed}` has been superseded by `{}` ({}).\n\n{}",

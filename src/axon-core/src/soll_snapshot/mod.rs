@@ -24,7 +24,9 @@ pub mod snapshot;
 
 pub use cache::SollSnapshotCache;
 pub use declarative_rules::{parse_soll_rule, PredicateKind, SollRule, SollRuleViolation};
-pub use snapshot::{CodeExemptionReason, SnapshotEdge, SnapshotNode, SnapshotTraceability, SollSnapshot};
+pub use snapshot::{
+    CodeExemptionReason, SnapshotEdge, SnapshotNode, SnapshotTraceability, SollSnapshot,
+};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

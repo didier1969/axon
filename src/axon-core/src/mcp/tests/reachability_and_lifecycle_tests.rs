@@ -327,5 +327,3 @@ fn c4_system_indexer_topology_note_warns_on_restart_loop() {
         "la note saine doit confirmer l'indexeur vivant: {txt_h}"
     );
 }
-
-

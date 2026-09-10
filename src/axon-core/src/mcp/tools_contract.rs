@@ -39,7 +39,10 @@ fn drift_json(v: &DriftVerdict) -> Value {
         DriftVerdict::SymbolMissing { symbol_id } => json!({"verdict": "symbol_missing",
             "aligned": false, "symbol_id": symbol_id,
             "note": "l'ancre d'identité pointe un symbole absent de l'IST — candidat rename / re-anchor"}),
-        DriftVerdict::KindMismatch { expected, observed_kind } => json!({"verdict": "kind_mismatch",
+        DriftVerdict::KindMismatch {
+            expected,
+            observed_kind,
+        } => json!({"verdict": "kind_mismatch",
             "aligned": false, "expected": expected.tag(), "observed_kind": observed_kind}),
         DriftVerdict::ShapeDrift { baseline, observed } => json!({"verdict": "shape_drift",
             "aligned": false, "baseline": baseline, "observed": observed}),
@@ -87,7 +90,11 @@ impl McpServer {
                 &self.known_project_codes_hint(),
             ));
         };
-        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(25).clamp(1, 100) as i64;
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(25)
+            .clamp(1, 100) as i64;
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as i64;
 
         let total = count_contracts(&self.graph_store, &project).unwrap_or(0);
@@ -114,7 +121,11 @@ impl McpServer {
             })
             .collect();
         let returned = contracts.len() as i64;
-        let next_offset = if offset + returned < total { Some(offset + returned) } else { None };
+        let next_offset = if offset + returned < total {
+            Some(offset + returned)
+        } else {
+            None
+        };
         Some(json!({
             "content": [{"type":"text","text": format!(
                 "### 📐 contract_status `{project}` — {returned}/{total} contrat(s){}",
@@ -136,7 +147,12 @@ impl McpServer {
     fn contract_status_inspect(&self, id: &str, verbose: bool) -> Option<Value> {
         let node = match load_contract(&self.graph_store, id) {
             Ok(Some(n)) => n,
-            Ok(None) => return Some(contract_err(&format!("contrat introuvable: {id}"), "input_not_found")),
+            Ok(None) => {
+                return Some(contract_err(
+                    &format!("contrat introuvable: {id}"),
+                    "input_not_found",
+                ))
+            }
             Err(e) => return Some(contract_err(&format!("load failed: {e}"), "degraded")),
         };
         let seal = load_seal(&self.graph_store, id).ok().flatten();
@@ -150,9 +166,9 @@ impl McpServer {
         } else {
             "planned"
         };
-        let seal_json = seal.as_ref().map(|s| {
-            json!({"seal_hash": s.seal.0, "adequate": s.adequate, "revision": s.revision})
-        });
+        let seal_json = seal.as_ref().map(
+            |s| json!({"seal_hash": s.seal.0, "adequate": s.adequate, "revision": s.revision}),
+        );
 
         let mut data = json!({
             "status": "ok",
@@ -168,8 +184,11 @@ impl McpServer {
         if verbose {
             data["why"] = json!(node.why);
             data["proves_ref"] = json!(node.proves_ref);
-            data["post_conditions"] =
-                json!(node.post_conditions.iter().map(|p| &p.0).collect::<Vec<_>>());
+            data["post_conditions"] = json!(node
+                .post_conditions
+                .iter()
+                .map(|p| &p.0)
+                .collect::<Vec<_>>());
             // arêtes sortantes = gouvernance/identité que CE contrat porte (impact aval) ;
             // entrantes = qui pointe vers lui (impact amont, symétrique IST).
             data["governance_edges"] = json!(outgoing.iter().map(edge_json).collect::<Vec<_>>());
@@ -216,14 +235,22 @@ impl McpServer {
             .to_ascii_lowercase();
         let node = match load_contract(&self.graph_store, id) {
             Ok(Some(n)) => n,
-            Ok(None) => return Some(contract_err(&format!("contrat introuvable: {id}"), "input_not_found")),
+            Ok(None) => {
+                return Some(contract_err(
+                    &format!("contrat introuvable: {id}"),
+                    "input_not_found",
+                ))
+            }
             Err(e) => return Some(contract_err(&format!("load failed: {e}"), "degraded")),
         };
         match action.as_str() {
             "obsolete" => self.contract_evolve_obsolete(id, &node),
             "refactor" => self.contract_evolve_refactor(id),
             "reorient" => self.contract_evolve_reorient(id),
-            _ => Some(contract_err("action must be one of obsolete|refactor|reorient", "input_invalid")),
+            _ => Some(contract_err(
+                "action must be one of obsolete|refactor|reorient",
+                "input_invalid",
+            )),
         }
     }
 
@@ -288,14 +315,20 @@ impl McpServer {
     /// vivantes pointent vers `realized_by` (retirer du code encore appelé =
     /// orphelins). No-op idempotent si déjà retired.
     fn contract_evolve_obsolete(&self, id: &str, node: &ContractNode) -> Option<Value> {
-        if contract_status_str(&self.graph_store, id).ok().flatten().as_deref() == Some("retired") {
+        if contract_status_str(&self.graph_store, id)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("retired")
+        {
             return Some(json!({
                 "content": [{"type":"text","text": format!("### 📐 {id} — déjà retired (no-op)")}],
                 "data": {"status":"ok","verdict":"already_retired","id":id}
             }));
         }
         if let Some(sym) = &node.realized_by {
-            let (live, sample) = live_incoming_call_count(&self.graph_store, sym).unwrap_or((0, Vec::new()));
+            let (live, sample) =
+                live_incoming_call_count(&self.graph_store, sym).unwrap_or((0, Vec::new()));
             if live > 0 {
                 return Some(json!({
                     "content": [{"type":"text","text": format!(
@@ -326,15 +359,25 @@ mod tests {
 
     #[test]
     fn drift_json_maps_every_verdict_with_aligned_flag() {
-        assert_eq!(drift_json(&DriftVerdict::Aligned { observed: "h".into() })["aligned"], json!(true));
         assert_eq!(
-            drift_json(&DriftVerdict::ShapeDrift { baseline: "a".into(), observed: "b".into() })["aligned"],
+            drift_json(&DriftVerdict::Aligned {
+                observed: "h".into()
+            })["aligned"],
+            json!(true)
+        );
+        assert_eq!(
+            drift_json(&DriftVerdict::ShapeDrift {
+                baseline: "a".into(),
+                observed: "b".into()
+            })["aligned"],
             json!(false)
         );
         // Unbound / NoBaseline ne sont PAS des drifts → aligned=null (ni vrai ni faux).
         assert_eq!(drift_json(&DriftVerdict::Unbound)["aligned"], json!(null));
         assert_eq!(
-            drift_json(&DriftVerdict::NoBaseline { observed: "h".into() })["aligned"],
+            drift_json(&DriftVerdict::NoBaseline {
+                observed: "h".into()
+            })["aligned"],
             json!(null)
         );
         // KindMismatch projette le tag canonique du kind attendu.

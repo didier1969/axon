@@ -249,7 +249,9 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>) {
 /// has vectors to fuse without any config.
 pub(crate) fn spawn_soll_embedding_sweep(store: Arc<GraphStore>) {
     if !soll_embedding_sweep_enabled() {
-        info!("SOLL embedding sweep disabled via AXON_SOLL_EMBED_SWEEP_ENABLED (REQ-AXO-901757 B2)");
+        info!(
+            "SOLL embedding sweep disabled via AXON_SOLL_EMBED_SWEEP_ENABLED (REQ-AXO-901757 B2)"
+        );
         return;
     }
     let batch = soll_embedding_sweep_batch();
@@ -263,7 +265,9 @@ pub(crate) fn spawn_soll_embedding_sweep(store: Arc<GraphStore>) {
             match store.embed_pending_soll_nodes(batch) {
                 Ok(0) => std::thread::sleep(idle),
                 Ok(n) => {
-                    info!("SOLL embedding sweep: embedded {n} node(s) this pass (REQ-AXO-901757 B2)");
+                    info!(
+                        "SOLL embedding sweep: embedded {n} node(s) this pass (REQ-AXO-901757 B2)"
+                    );
                     // productive pass — yield briefly, then loop to drain backlog
                     std::thread::sleep(Duration::from_millis(50));
                 }

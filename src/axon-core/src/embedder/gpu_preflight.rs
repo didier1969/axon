@@ -144,8 +144,7 @@ pub(crate) fn run_dlopen_probe_if_requested() -> Option<i32> {
 /// plausible size, and start with the ELF magic. Catches the absent / truncated
 /// / non-ELF cases without spawning anything.
 fn check_static(path: &Path) -> Result<(), String> {
-    let meta = std::fs::metadata(path)
-        .map_err(|err| format!("not readable ({err})"))?;
+    let meta = std::fs::metadata(path).map_err(|err| format!("not readable ({err})"))?;
     if !meta.is_file() {
         return Err("not a regular file".to_string());
     }

@@ -5,7 +5,8 @@ fn main() -> anyhow::Result<()> {
     // démarré un second indexeur sur l'hôte live le 2026-08-15.
     // Le drapeau interne `--__gpu-lib-probe` reste passant (REQ-AXO-902027) :
     // `run_indexer` le traite juste après.
-    if let Some(code) = axon_core::role_cli::handle("axon-indexer", "indexeur IST (pipelines A + B)")
+    if let Some(code) =
+        axon_core::role_cli::handle("axon-indexer", "indexeur IST (pipelines A + B)")
     {
         std::process::exit(code);
     }

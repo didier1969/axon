@@ -127,8 +127,12 @@ fn verdict_de_la_completion(source: &str) -> Result<(), String> {
 
 fn start_script() -> String {
     let chemin = racine_du_depot().join("scripts").join("start.sh");
-    std::fs::read_to_string(&chemin)
-        .unwrap_or_else(|e| panic!("scripts/start.sh doit etre lisible ({}) : {e}", chemin.display()))
+    std::fs::read_to_string(&chemin).unwrap_or_else(|e| {
+        panic!(
+            "scripts/start.sh doit etre lisible ({}) : {e}",
+            chemin.display()
+        )
+    })
 }
 
 #[test]

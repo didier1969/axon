@@ -29,7 +29,10 @@ impl McpServer {
         score
     }
 
-    pub(super) fn canonical_project_doc_weight(uri: &str, project_scope_variants: &[String]) -> f64 {
+    pub(super) fn canonical_project_doc_weight(
+        uri: &str,
+        project_scope_variants: &[String],
+    ) -> f64 {
         let lower = uri.to_ascii_lowercase();
         let mut score = 0.0;
         if lower.contains("/docs/plans/") || lower.starts_with("docs/plans/") {

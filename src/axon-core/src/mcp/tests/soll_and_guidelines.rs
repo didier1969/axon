@@ -1424,7 +1424,11 @@ fn test_soll_manager_create_incompatible_attach_to_designates_attach_to_and_cand
         )
         .expect("soll_manager returns a result");
 
-    assert_eq!(res["isError"].as_bool(), Some(true), "le refus doit tenir : {res}");
+    assert_eq!(
+        res["isError"].as_bool(),
+        Some(true),
+        "le refus doit tenir : {res}"
+    );
 
     let data = &res["data"];
     let repair = &data["parameter_repair"];
@@ -1446,7 +1450,9 @@ fn test_soll_manager_create_incompatible_attach_to_designates_attach_to_and_cand
     let text = res["content"][0]["text"].as_str().expect("texte attendu");
     assert!(
         text.contains("aucun rattachement n'est possible entre ces deux types de noeuds")
-            || (text.contains("aucun rattachement n'est possible") && text.contains("DEC") && text.contains("PIL")),
+            || (text.contains("aucun rattachement n'est possible")
+                && text.contains("DEC")
+                && text.contains("PIL")),
         "le message doit expliciter l'incompatibilité de rattachement : {text}"
     );
     assert!(
@@ -1484,10 +1490,7 @@ fn test_soll_manager_create_incompatible_attach_to_designates_attach_to_and_cand
 
     // 4. Test E2E : exécuter directement corrected_call["arguments"] doit réussir sans dead-end !
     let retry_res = server
-        .execute_tool_direct(
-            "soll_manager",
-            &corrected_call["arguments"],
-        )
+        .execute_tool_direct("soll_manager", &corrected_call["arguments"])
         .expect("soll_manager retry returns a result");
     assert_ne!(
         retry_res["isError"].as_bool(),
@@ -8070,7 +8073,9 @@ fn test_soll_get_sections_and_section_truncate_the_structured_body() {
     // des centaines de titres inutiles. Il reste rendu sur `sections=true`, sans
     // paramètre, et en cas de non-match (pour guider l'appelant).
     assert_eq!(
-        sommaire["data"]["section_titles"].as_array().map(|a| a.len()),
+        sommaire["data"]["section_titles"]
+            .as_array()
+            .map(|a| a.len()),
         Some(3),
         "`sections=true` doit rendre section_titles"
     );
@@ -12104,10 +12109,16 @@ fn test_document_intent_accepts_acceptance_criteria_and_milestone_linking() {
     let parsed: Vec<Vec<String>> = serde_json::from_str(&row).unwrap_or_default();
     let node = parsed.first().expect("created Node row");
     let meta: serde_json::Value = serde_json::from_str(&node[4]).expect("valid json metadata");
-    let criteria = meta.get("acceptance_criteria").and_then(|v| v.as_array()).expect("criteria array in metadata");
+    let criteria = meta
+        .get("acceptance_criteria")
+        .and_then(|v| v.as_array())
+        .expect("criteria array in metadata");
     assert_eq!(criteria.len(), 2);
     assert_eq!(criteria[0].as_str(), Some("test passes with real files"));
-    assert_eq!(criteria[1].as_str(), Some("oversized chunk count drops to 0"));
+    assert_eq!(
+        criteria[1].as_str(),
+        Some("oversized chunk count drops to 0")
+    );
 
     // Verify MIL -> REQ TARGETS edge exists
     let targets_count = server
@@ -12116,11 +12127,17 @@ fn test_document_intent_accepts_acceptance_criteria_and_milestone_linking() {
             "SELECT count(*) FROM soll.Edge WHERE source_id = '{milestone_id}' AND target_id = '{canonical_id}' AND relation_type = 'TARGETS'"
         ))
         .unwrap();
-    assert_eq!(targets_count, 1, "Milestone TARGETS edge must be created atomically");
+    assert_eq!(
+        targets_count, 1,
+        "Milestone TARGETS edge must be created atomically"
+    );
 
     // Verify content text does not warn about missing acceptance_criteria
     let content_text = result["content"][0]["text"].as_str().unwrap_or("");
-    assert!(!content_text.contains("No acceptance_criteria"), "should not warn when criteria provided");
+    assert!(
+        !content_text.contains("No acceptance_criteria"),
+        "should not warn when criteria provided"
+    );
 }
 
 #[test]
@@ -18759,7 +18776,12 @@ fn test_req_902544_axon_commit_work_returns_verdict_committed_sha_and_correct_ne
         .expect("response from axon_commit_work");
     let res_ok = resp_ok.result.expect("result from axon_commit_work");
 
-    assert_ne!(res_ok.get("isError").and_then(Value::as_bool), Some(true), "{:?}", res_ok);
+    assert_ne!(
+        res_ok.get("isError").and_then(Value::as_bool),
+        Some(true),
+        "{:?}",
+        res_ok
+    );
 
     // Critère 1 : Verdict 'committed' explicite dans data et structuredContent
     assert_eq!(res_ok["data"]["status"], json!("committed"));
@@ -18771,15 +18793,24 @@ fn test_req_902544_axon_commit_work_returns_verdict_committed_sha_and_correct_ne
         .args(["rev-parse", "HEAD"])
         .output()
         .expect("git rev-parse HEAD");
-    let head_sha = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
+    let head_sha = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
 
     assert_eq!(res_ok["data"]["commit_sha"], json!(head_sha));
     assert_eq!(res_ok["structuredContent"]["commit_sha"], json!(head_sha));
 
     // REQ-AXO-902544 : next_action ne doit JAMAIS pointer vers pre_flight_check après un commit réussi !
-    let next_tool_data = res_ok["data"]["next_action"]["tool"].as_str().unwrap_or_default();
-    let next_tool_structured = res_ok["structuredContent"]["next_action"]["tool"].as_str().unwrap_or_default();
-    assert_ne!(next_tool_data, "pre_flight_check", "next_action in data must not recommend pre_flight_check after successful commit");
+    let next_tool_data = res_ok["data"]["next_action"]["tool"]
+        .as_str()
+        .unwrap_or_default();
+    let next_tool_structured = res_ok["structuredContent"]["next_action"]["tool"]
+        .as_str()
+        .unwrap_or_default();
+    assert_ne!(
+        next_tool_data, "pre_flight_check",
+        "next_action in data must not recommend pre_flight_check after successful commit"
+    );
     assert_ne!(next_tool_structured, "pre_flight_check", "next_action in structuredContent must not recommend pre_flight_check after successful commit");
     assert_eq!(next_tool_data, "soll_verify_requirements");
     assert_eq!(next_tool_structured, "soll_verify_requirements");
@@ -18804,7 +18835,9 @@ fn test_req_902544_axon_commit_work_returns_verdict_committed_sha_and_correct_ne
     let resp_fail = server
         .handle_request(serde_json::from_value(req_fail).unwrap())
         .expect("response from failing axon_commit_work");
-    let res_fail = resp_fail.result.expect("result from failing axon_commit_work");
+    let res_fail = resp_fail
+        .result
+        .expect("result from failing axon_commit_work");
 
     assert_eq!(res_fail.get("isError").and_then(Value::as_bool), Some(true));
 
@@ -18814,10 +18847,15 @@ fn test_req_902544_axon_commit_work_returns_verdict_committed_sha_and_correct_ne
             .args(["rev-parse", "HEAD"])
             .output()
             .expect("git rev-parse HEAD")
-            .stdout
-    ).trim().to_string();
+            .stdout,
+    )
+    .trim()
+    .to_string();
 
-    assert_eq!(head_after_fail, head_before_fail, "git HEAD must remain unchanged on commit failure");
+    assert_eq!(
+        head_after_fail, head_before_fail,
+        "git HEAD must remain unchanged on commit failure"
+    );
 }
 
 #[test]
@@ -18853,7 +18891,10 @@ fn test_req_902448_empty_completeness_delta_omits_ten_booleans() {
         .result
         .unwrap();
 
-    let created_id = resp_create["data"]["created_id"].as_str().unwrap().to_string();
+    let created_id = resp_create["data"]["created_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 2. Update without changing completeness (just title)
     let resp_update = server
@@ -18899,56 +18940,71 @@ fn test_req_902448_mcp_feedback_report_mark_resolved_returns_concise_confirmatio
     let proj = "FBR_CONCISE";
     let probe = "FBR_CONCISE test problem";
 
-    server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "mcp_feedback",
-            "arguments": {
-                "problem": probe,
-                "severity": "minor",
-                "category": "ux",
-                "tool": "mcp_feedback_report",
-                "project_code": proj
-            }
-        })),
-        id: Some(json!(1)),
-    }).unwrap();
+    server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_feedback",
+                "arguments": {
+                    "problem": probe,
+                    "severity": "minor",
+                    "category": "ux",
+                    "tool": "mcp_feedback_report",
+                    "project_code": proj
+                }
+            })),
+            id: Some(json!(1)),
+        })
+        .unwrap();
 
-    let raw_list = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "mcp_feedback_report",
-            "arguments": { "project_code": proj }
-        })),
-        id: Some(json!(2)),
-    }).unwrap().result.unwrap();
+    let raw_list = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_feedback_report",
+                "arguments": { "project_code": proj }
+            })),
+            id: Some(json!(2)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
-    let list = raw_list["data"]["feedback"].as_array().expect("feedback list");
+    let list = raw_list["data"]["feedback"]
+        .as_array()
+        .expect("feedback list");
     let item_id = list[0]["id"].as_i64().expect("item id");
 
     // Appel mark_resolved : Critère 3 — ne doit PAS re-rendre le rapport entier
-    let raw_resolved = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "mcp_feedback_report",
-            "arguments": {
-                "mark_resolved": {
-                    "id": item_id,
-                    "resolved_by_req": "REQ-AXO-902448",
-                    "note": "closed concisely"
+    let raw_resolved = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_feedback_report",
+                "arguments": {
+                    "mark_resolved": {
+                        "id": item_id,
+                        "resolved_by_req": "REQ-AXO-902448",
+                        "note": "closed concisely"
+                    }
                 }
-            }
-        })),
-        id: Some(json!(3)),
-    }).unwrap().result.unwrap();
+            })),
+            id: Some(json!(3)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     // Doit contenir une confirmation concise
     assert_eq!(raw_resolved["data"]["status"], json!("ok"));
     assert_eq!(raw_resolved["data"]["resolved_id"], json!(item_id));
-    assert_eq!(raw_resolved["data"]["resolved_by_req"], json!("REQ-AXO-902448"));
+    assert_eq!(
+        raw_resolved["data"]["resolved_by_req"],
+        json!("REQ-AXO-902448")
+    );
     // Ne doit PAS contenir la liste feedback du rapport complet
     assert!(
         raw_resolved["data"].get("feedback").is_none(),
@@ -18986,7 +19042,10 @@ fn test_req_902448_batch_deduplicates_identical_fields_across_calls() {
         }),
     ];
     let commun = McpServer::facteur_commun_du_lot(&mut lot);
-    assert_eq!(commun["guidance_source"], json!("server-side canonical soll mutation feedback"));
+    assert_eq!(
+        commun["guidance_source"],
+        json!("server-side canonical soll mutation feedback")
+    );
     assert_eq!(commun["newly_unblocked"], json!([]));
     assert_eq!(commun["remaining_blockers"], json!(["REQ-A"]));
 
@@ -19088,8 +19147,12 @@ fn test_req_902446_soll_apply_plan_substitutes_logical_key_placeholders_in_body(
     let routing_desc = &routing_rows[0][1];
 
     // Vérification du remplacement backward (multi_venue créé avant routing)
-    let expected_routing_desc = format!("Dépend de [[{}]] pour avoir plusieurs destinations.", mv_id);
-    assert_eq!(routing_desc, &expected_routing_desc, "Backward placeholder must be substituted with canonical ID");
+    let expected_routing_desc =
+        format!("Dépend de [[{}]] pour avoir plusieurs destinations.", mv_id);
+    assert_eq!(
+        routing_desc, &expected_routing_desc,
+        "Backward placeholder must be substituted with canonical ID"
+    );
 
     // Vérification du remplacement forward (consumer créé avant producer)
     let prod_raw = server
@@ -19109,7 +19172,10 @@ fn test_req_902446_soll_apply_plan_substitutes_logical_key_placeholders_in_body(
     let consumer_desc = &consumer_rows[0][1];
 
     let expected_consumer_desc = format!("Écoute [[{}]] en amont.", prod_id);
-    assert_eq!(consumer_desc, &expected_consumer_desc, "Forward placeholder must be substituted with canonical ID");
+    assert_eq!(
+        consumer_desc, &expected_consumer_desc,
+        "Forward placeholder must be substituted with canonical ID"
+    );
 }
 
 #[test]
@@ -19177,80 +19243,116 @@ fn test_req_902416_milestone_ordering_precedes_blocked_by_and_decision_governanc
     );
 
     // 3. Setup nodes for live graph link testing
-    server.graph_store.execute(
-        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
-         VALUES ('MIL-AXO-091', 'Milestone', 'AXO', 'Jalon 1', 'Premier', 'current', '{}')"
-    ).unwrap();
-    server.graph_store.execute(
-        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
-         VALUES ('MIL-AXO-092', 'Milestone', 'AXO', 'Jalon 2', 'Second', 'planned', '{}')"
-    ).unwrap();
-    server.graph_store.execute(
-        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
-         VALUES ('DEC-AXO-091', 'Decision', 'AXO', 'Dec Phasing', 'Phasage', 'delivered', '{}')"
-    ).unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('MIL-AXO-091', 'Milestone', 'AXO', 'Jalon 1', 'Premier', 'current', '{}')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('MIL-AXO-092', 'Milestone', 'AXO', 'Jalon 2', 'Second', 'planned', '{}')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('DEC-AXO-091', 'Decision', 'AXO', 'Dec Phasing', 'Phasage', 'delivered', '{}')",
+        )
+        .unwrap();
 
     // 4. Link MIL-1 -PRECEDES-> MIL-2
-    let link_resp = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "link",
-                "entity": "milestone",
-                "data": {
-                    "source_id": "MIL-AXO-091",
-                    "target_id": "MIL-AXO-092",
-                    "relation_type": "PRECEDES"
+    let link_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "link",
+                    "entity": "milestone",
+                    "data": {
+                        "source_id": "MIL-AXO-091",
+                        "target_id": "MIL-AXO-092",
+                        "relation_type": "PRECEDES"
+                    }
                 }
-            }
-        })),
-        id: Some(json!(9024163)),
-    }).unwrap().result.unwrap();
-    assert_eq!(link_resp["isError"].as_bool(), None, "Linking PRECEDES must succeed");
+            })),
+            id: Some(json!(9024163)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        link_resp["isError"].as_bool(),
+        None,
+        "Linking PRECEDES must succeed"
+    );
 
     // 5. Anti-cycle guard: attempt closing cycle MIL-2 -PRECEDES-> MIL-1 must be rejected
-    let cycle_resp = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "link",
-                "entity": "milestone",
-                "data": {
-                    "source_id": "MIL-AXO-092",
-                    "target_id": "MIL-AXO-091",
-                    "relation_type": "PRECEDES"
+    let cycle_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "link",
+                    "entity": "milestone",
+                    "data": {
+                        "source_id": "MIL-AXO-092",
+                        "target_id": "MIL-AXO-091",
+                        "relation_type": "PRECEDES"
+                    }
                 }
-            }
-        })),
-        id: Some(json!(9024164)),
-    }).unwrap().result.unwrap();
-    assert_eq!(cycle_resp["isError"].as_bool(), Some(true), "Closing cycle must be rejected");
+            })),
+            id: Some(json!(9024164)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        cycle_resp["isError"].as_bool(),
+        Some(true),
+        "Closing cycle must be rejected"
+    );
     assert_eq!(cycle_resp["data"]["status"].as_str(), Some("input_invalid"));
-    assert_eq!(cycle_resp["data"]["operator_guidance"]["problem_class"].as_str(), Some("cycle_detected"));
+    assert_eq!(
+        cycle_resp["data"]["operator_guidance"]["problem_class"].as_str(),
+        Some("cycle_detected")
+    );
 
     // 6. Link DEC-1 -SOLVES-> MIL-1
-    let dec_link_resp = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "link",
-                "entity": "decision",
-                "data": {
-                    "source_id": "DEC-AXO-091",
-                    "target_id": "MIL-AXO-091",
-                    "relation_type": "SOLVES"
+    let dec_link_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "link",
+                    "entity": "decision",
+                    "data": {
+                        "source_id": "DEC-AXO-091",
+                        "target_id": "MIL-AXO-091",
+                        "relation_type": "SOLVES"
+                    }
                 }
-            }
-        })),
-        id: Some(json!(9024165)),
-    }).unwrap().result.unwrap();
-    assert_eq!(dec_link_resp["isError"].as_bool(), None, "Linking DEC -SOLVES-> MIL must succeed");
+            })),
+            id: Some(json!(9024165)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        dec_link_resp["isError"].as_bool(),
+        None,
+        "Linking DEC -SOLVES-> MIL must succeed"
+    );
 }
 
 #[test]
@@ -19285,7 +19387,11 @@ fn test_req_902447_falsification_evidence_attachment_and_metadata() {
         .result
         .unwrap();
 
-    assert_eq!(res["data"]["attached"].as_u64(), Some(1), "Falsification attach must succeed: {res}");
+    assert_eq!(
+        res["data"]["attached"].as_u64(),
+        Some(1),
+        "Falsification attach must succeed: {res}"
+    );
 
     // Verify row in soll.Traceability
     let raw = server
@@ -19298,8 +19404,14 @@ fn test_req_902447_falsification_evidence_attachment_and_metadata() {
     let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
     assert_eq!(rows.len(), 1, "Exactly one traceability row expected");
     assert_eq!(rows[0][0].as_str(), Some("Falsification"));
-    assert_eq!(rows[0][1].as_str(), Some("crate::mcp::tests::test_req_902447_falsification"));
-    assert_eq!(rows[0][2].as_str(), Some("neutralized feature gate -> 5 red tests observed"));
+    assert_eq!(
+        rows[0][1].as_str(),
+        Some("crate::mcp::tests::test_req_902447_falsification")
+    );
+    assert_eq!(
+        rows[0][2].as_str(),
+        Some("neutralized feature gate -> 5 red tests observed")
+    );
     assert_eq!(rows[0][3].as_str(), Some("falsified"));
 
     // 2. Falsification on concept is rejected (concept does not accept falsification)
@@ -19340,9 +19452,9 @@ fn test_load_soll_rules_filters_out_planned_and_non_current_guidelines() {
     let p = "TPL";
 
     // Nettoyage préalable pour le projet de test
-    let _ = server.graph_store.execute(&format!(
-        "DELETE FROM soll.Node WHERE project_code = '{p}'"
-    ));
+    let _ = server
+        .graph_store
+        .execute(&format!("DELETE FROM soll.Node WHERE project_code = '{p}'"));
 
     let rule_json = json!({
         "soll_rule": {
@@ -19364,11 +19476,14 @@ fn test_load_soll_rules_filters_out_planned_and_non_current_guidelines() {
         ("GUI-TPL-005", "blocked"),
         ("GUI-TPL-006", "deferred"),
     ] {
-        server.graph_store.execute(&format!(
+        server
+            .graph_store
+            .execute(&format!(
             "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
              VALUES ('{id}', 'Guideline', '{p}', 'Rule {id}', 'desc', '{status}', '{rule_str}') \
              ON CONFLICT (id) DO UPDATE SET status = '{status}', metadata = '{rule_str}'"
-        )).unwrap();
+        ))
+            .unwrap();
     }
 
     let loaded = server.load_soll_rules(p);
@@ -19414,12 +19529,12 @@ fn test_load_soll_rules_shadows_pro_guidelines_when_inherited_locally() {
     let server = create_test_server();
     let p = "TSH";
 
-    let _ = server.graph_store.execute(&format!(
-        "DELETE FROM soll.Edge WHERE project_code = '{p}'"
-    ));
-    let _ = server.graph_store.execute(&format!(
-        "DELETE FROM soll.Node WHERE project_code = '{p}'"
-    ));
+    let _ = server
+        .graph_store
+        .execute(&format!("DELETE FROM soll.Edge WHERE project_code = '{p}'"));
+    let _ = server
+        .graph_store
+        .execute(&format!("DELETE FROM soll.Node WHERE project_code = '{p}'"));
 
     let rule_json = json!({
         "soll_rule": {
@@ -19433,16 +19548,22 @@ fn test_load_soll_rules_shadows_pro_guidelines_when_inherited_locally() {
     let rule_str = serde_json::to_string(&rule_json).unwrap();
 
     // Règle locale GUI-TSH-017 qui hérite de GUI-PRO-119
-    server.graph_store.execute(&format!(
-        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
          VALUES ('GUI-TSH-017', 'Guideline', '{p}', 'Local 017', 'desc', 'current', '{rule_str}') \
          ON CONFLICT (id) DO UPDATE SET status = 'current', metadata = '{rule_str}'"
-    )).unwrap();
-    server.graph_store.execute(&format!(
-        "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+        ))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
          VALUES ('GUI-TSH-017', 'GUI-PRO-119', 'INHERITS_FROM', '{p}') \
          ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
-    )).unwrap();
+        ))
+        .unwrap();
 
     let loaded = server.load_soll_rules(p);
     let loaded_ids: Vec<&str> = loaded.iter().map(|r| r.id.as_str()).collect();
@@ -19474,12 +19595,12 @@ fn test_load_soll_rules_shadowing_allows_disabling_inherited_pro_rule() {
     let server = create_test_server();
     let p = "TSD";
 
-    let _ = server.graph_store.execute(&format!(
-        "DELETE FROM soll.Edge WHERE project_code = '{p}'"
-    ));
-    let _ = server.graph_store.execute(&format!(
-        "DELETE FROM soll.Node WHERE project_code = '{p}'"
-    ));
+    let _ = server
+        .graph_store
+        .execute(&format!("DELETE FROM soll.Edge WHERE project_code = '{p}'"));
+    let _ = server
+        .graph_store
+        .execute(&format!("DELETE FROM soll.Node WHERE project_code = '{p}'"));
 
     let rule_json = json!({
         "soll_rule": {
@@ -19498,23 +19619,32 @@ fn test_load_soll_rules_shadowing_allows_disabling_inherited_pro_rule() {
          VALUES ('GUI-TSD-017', 'Guideline', '{p}', 'Retired rule', 'desc', 'superseded', '{rule_str}') \
          ON CONFLICT (id) DO UPDATE SET status = 'superseded', metadata = '{rule_str}'"
     )).unwrap();
-    server.graph_store.execute(&format!(
-        "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
          VALUES ('GUI-TSD-017', 'GUI-PRO-119', 'INHERITS_FROM', '{p}') \
          ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
-    )).unwrap();
+        ))
+        .unwrap();
 
     // GUI-TSD-018 hérite de GUI-PRO-120 mais est 'planned' (règle en cours de rédaction)
-    server.graph_store.execute(&format!(
-        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
          VALUES ('GUI-TSD-018', 'Guideline', '{p}', 'Draft rule', 'desc', 'planned', '{rule_str}') \
          ON CONFLICT (id) DO UPDATE SET status = 'planned', metadata = '{rule_str}'"
-    )).unwrap();
-    server.graph_store.execute(&format!(
-        "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+        ))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
          VALUES ('GUI-TSD-018', 'GUI-PRO-120', 'INHERITS_FROM', '{p}') \
          ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
-    )).unwrap();
+        ))
+        .unwrap();
 
     let loaded = server.load_soll_rules(p);
     let loaded_ids: Vec<&str> = loaded.iter().map(|r| r.id.as_str()).collect();
@@ -19550,19 +19680,22 @@ fn test_soll_validate_does_not_double_verdicts_for_inherited_guidelines() {
         .sync_project_registry_entry(p, Some("Test DGD"), None)
         .unwrap();
 
-    let _ = server.graph_store.execute(&format!(
-        "DELETE FROM soll.Edge WHERE project_code = '{p}'"
-    ));
-    let _ = server.graph_store.execute(&format!(
-        "DELETE FROM soll.Node WHERE project_code = '{p}'"
-    ));
+    let _ = server
+        .graph_store
+        .execute(&format!("DELETE FROM soll.Edge WHERE project_code = '{p}'"));
+    let _ = server
+        .graph_store
+        .execute(&format!("DELETE FROM soll.Node WHERE project_code = '{p}'"));
 
     // Création de la Vision du projet pour éviter le check 'missing_vision'
-    server.graph_store.execute(&format!(
-        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
          VALUES ('VIS-TDG-001', 'Vision', '{p}', 'Vision TDG', 'Une vision.', 'current', '{{}}') \
          ON CONFLICT (id) DO UPDATE SET status = 'current'"
-    )).unwrap();
+        ))
+        .unwrap();
 
     // Règle locale GUI-TDG-023 héritant de GUI-PRO-125
     let rule_json = json!({
@@ -19581,11 +19714,14 @@ fn test_soll_validate_does_not_double_verdicts_for_inherited_guidelines() {
          VALUES ('GUI-TDG-023', 'Guideline', '{p}', 'Un nœud retiré enregistre ce qui le remplace', 'desc', 'current', '{rule_str}') \
          ON CONFLICT (id) DO UPDATE SET status = 'current', metadata = '{rule_str}'"
     )).unwrap();
-    server.graph_store.execute(&format!(
-        "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
          VALUES ('GUI-TDG-023', 'GUI-PRO-125', 'INHERITS_FROM', '{p}') \
          ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
-    )).unwrap();
+        ))
+        .unwrap();
 
     // Nœud fautif REQ-TDG-128 : superseded sans arête SUPERSEDES entrante
     server.graph_store.execute(&format!(
@@ -19623,6 +19759,3 @@ fn test_soll_validate_does_not_double_verdicts_for_inherited_guidelines() {
         pro_125_matches
     );
 }
-
-
-

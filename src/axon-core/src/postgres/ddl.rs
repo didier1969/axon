@@ -83,8 +83,6 @@ pub fn generate_global_schema() -> Vec<String> {
 // Définit `const CANONICAL_DDL_FILES: &[(&str, &str)]` — (nom de fichier, contenu).
 include!(concat!(env!("OUT_DIR"), "/canonical_ddl_files.rs"));
 
-
-
 /// REQ-AXO-902328 — les NOMS des fichiers DDL canoniques, dans l'ordre d'application.
 ///
 /// Existe pour que le harnais de test applique EXACTEMENT ce que le brain compile,
@@ -520,8 +518,14 @@ mod tests {
             .collect();
         compiles.sort();
 
-        let manquants: Vec<&String> = sur_disque.iter().filter(|n| !compiles.contains(n)).collect();
-        let fantomes: Vec<&String> = compiles.iter().filter(|n| !sur_disque.contains(n)).collect();
+        let manquants: Vec<&String> = sur_disque
+            .iter()
+            .filter(|n| !compiles.contains(n))
+            .collect();
+        let fantomes: Vec<&String> = compiles
+            .iter()
+            .filter(|n| !sur_disque.contains(n))
+            .collect();
 
         assert!(
             manquants.is_empty() && fantomes.is_empty(),

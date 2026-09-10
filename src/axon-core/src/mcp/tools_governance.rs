@@ -27,7 +27,10 @@ struct FileCoverageGroup {
 impl FileCoverageGroup {
     fn policy_excluded(&self) -> bool {
         self.status == "skipped"
-            && matches!(self.reason.as_str(), "generated" | "binary" | "oversized" | "minified")
+            && matches!(
+                self.reason.as_str(),
+                "generated" | "binary" | "oversized" | "minified"
+            )
     }
 
     fn failed(&self) -> bool {
@@ -45,16 +48,24 @@ struct FileCoverage(Vec<FileCoverageGroup>);
 impl FileCoverage {
     fn decode(raw: &str) -> anyhow::Result<Self> {
         let rows: Vec<Vec<String>> = serde_json::from_str(raw)?;
-        let cell = rows.first().and_then(|row| row.first())
+        let cell = rows
+            .first()
+            .and_then(|row| row.first())
             .ok_or_else(|| anyhow::anyhow!("file coverage aggregate is missing"))?;
         let groups: Vec<FileCoverageGroup> = serde_json::from_str(cell)?;
-        anyhow::ensure!(groups.iter().all(|g| g.files > 0 && g.paths.len() <= 5),
-            "invalid file coverage counts or sample bounds");
+        anyhow::ensure!(
+            groups.iter().all(|g| g.files > 0 && g.paths.len() <= 5),
+            "invalid file coverage counts or sample bounds"
+        );
         Ok(Self(groups))
     }
 
     fn count(&self, predicate: impl Fn(&FileCoverageGroup) -> bool) -> i64 {
-        self.0.iter().filter(|g| predicate(g)).map(|g| g.files).sum()
+        self.0
+            .iter()
+            .filter(|g| predicate(g))
+            .map(|g| g.files)
+            .sum()
     }
 
     fn causes(&self) -> Vec<(&'static str, String, &'static str)> {
@@ -78,12 +89,24 @@ impl FileCoverage {
     }
 
     fn reason_lines(&self, errors_only: bool) -> String {
-        let groups: Vec<_> = self.0.iter().filter(|g| {
-            if errors_only { g.failed() } else { g.status == "skipped" || g.failed() }
-        }).collect();
+        let groups: Vec<_> = self
+            .0
+            .iter()
+            .filter(|g| {
+                if errors_only {
+                    g.failed()
+                } else {
+                    g.status == "skipped" || g.failed()
+                }
+            })
+            .collect();
         if groups.is_empty() {
-            return if errors_only { "* no persisted parsing failure in this snapshot" }
-                else { "* no persisted skip reason in this snapshot" }.to_string();
+            return if errors_only {
+                "* no persisted parsing failure in this snapshot"
+            } else {
+                "* no persisted skip reason in this snapshot"
+            }
+            .to_string();
         }
         let mut lines = groups.iter().take(12).map(|g| {
             let classification = if g.failed() { "parsing failure" }
@@ -95,7 +118,10 @@ impl FileCoverage {
                 g.reason.chars().take(80).collect::<String>(), g.files, g.paths.len(), g.files)
         }).collect::<Vec<_>>();
         if groups.len() > 12 {
-            lines.push(format!("* {} additional reason group(s) omitted", groups.len() - 12));
+            lines.push(format!(
+                "* {} additional reason group(s) omitted",
+                groups.len() - 12
+            ));
         }
         lines.join("\n")
     }
@@ -103,12 +129,19 @@ impl FileCoverage {
     fn verdict(&self, eligible: i64, parsables_ecartes: &[(String, u64)]) -> String {
         let issues = self.causes();
         if !issues.is_empty() {
-            return format!("⚠️ Extraction completeness NOT established: {}. See persisted reasons above.",
-                issues.iter().map(|(_, text, _)| text.as_str()).collect::<Vec<_>>().join("; "));
+            return format!(
+                "⚠️ Extraction completeness NOT established: {}. See persisted reasons above.",
+                issues
+                    .iter()
+                    .map(|(_, text, _)| text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
         }
         let enrolled = self.count(|_| true);
         let base = indexing_verdict(
-            eligible, enrolled,
+            eligible,
+            enrolled,
             self.count(|g| g.status == "discovered"),
             self.count(|g| g.status == "discovered" && !g.has_chunks),
             self.count(|g| !g.policy_excluded() && g.has_chunks),
@@ -265,9 +298,7 @@ impl McpServer {
                 finding["file"].as_str().unwrap_or("unknown_file"),
                 finding["line"].as_i64().unwrap_or(0),
                 finding["severity"].as_str().unwrap_or("unknown"),
-                finding["redacted_excerpt"]
-                    .as_str()
-                    .unwrap_or("<redacted>")
+                finding["redacted_excerpt"].as_str().unwrap_or("<redacted>")
             ));
         }
     }
@@ -561,7 +592,10 @@ impl McpServer {
             }
         }
         if is_registered_in_axon_project || enrolled > 0 {
-            if known > 0 && symbols == 0 && coverage.count(|g| g.has_file_chunks && !g.has_symbol_chunks) < known {
+            if known > 0
+                && symbols == 0
+                && coverage.count(|g| g.has_file_chunks && !g.has_symbol_chunks) < known
+            {
                 causes.push((
                     "parser_extraction_gap",
                     "files known but 0 symbols extracted (unsupported language or parse failure)"
@@ -573,7 +607,9 @@ impl McpServer {
             // Classified failures already have a targeted remediation. Do not also
             // suggest a generic restart for the same hash-preserved timeout.
             if let Some(cause) = Self::chunk_coverage_cause(
-                coverage.count(|g| !g.policy_excluded() && !g.failed() && !g.unqualified_skip() && g.has_chunks),
+                coverage.count(|g| {
+                    !g.policy_excluded() && !g.failed() && !g.unqualified_skip() && g.has_chunks
+                }),
                 coverage.count(|g| !g.policy_excluded() && !g.failed() && !g.unqualified_skip()),
             ) {
                 causes.push(cause);
@@ -589,7 +625,11 @@ impl McpServer {
                 ) {
                     causes.push(cause);
                 }
-            } else if pending_embeddings > 0 && !causes.iter().any(|(id, _, _)| *id == "indexer_runtime_truth_unavailable") {
+            } else if pending_embeddings > 0
+                && !causes
+                    .iter()
+                    .any(|(id, _, _)| *id == "indexer_runtime_truth_unavailable")
+            {
                 causes.push((
                     "indexer_runtime_truth_unavailable",
                     format!(
@@ -1016,8 +1056,7 @@ impl McpServer {
         // advisory and makes this axis inconclusive until source→sink evidence
         // can be anchored; it must never manufacture a numeric penalty.
         let sec_score = secret_findings.as_ref().and_then(|findings| {
-            (sensitive_path_count == Some(0))
-                .then_some((100 - findings.len() as i64 * 20).max(0))
+            (sensitive_path_count == Some(0)).then_some((100 - findings.len() as i64 * 20).max(0))
         });
         // The legacy ratio is "symbols carrying a tested marker / symbols",
         // not executable coverage. Publishing it as test coverage contradicted
@@ -1272,16 +1311,15 @@ impl McpServer {
             || !unsafe_exposure.is_empty()
             || !nif_blocking_risks.is_empty()
             || !injection_risk_paths.is_empty();
-        let overall_score = sec_score
-            .zip(cov_score)
-            .zip(telemetry_score)
-            .map(|((security, coverage), telemetry)| {
+        let overall_score = sec_score.zip(cov_score).zip(telemetry_score).map(
+            |((security, coverage), telemetry)| {
                 if structural_blocker {
                     0
                 } else {
                     (security + coverage + hygiene_score + telemetry) / 4
                 }
-            });
+            },
+        );
 
         let report = format!(
             "## 🛡️ Compliance Audit: {}\n\n{}",
@@ -1659,7 +1697,8 @@ impl McpServer {
                 "✅ Aucun clone sémantique pour '{}' : aucun symbole à une distance \
                  cosinus < {:.2} (0 = identique, 1 = orthogonal). Seuil appliqué à la \
                  requête ANN — ce n'est pas une absence de mesure.",
-                symbol, crate::duplication_scan::DUPLICATION_CLONE_THRESHOLD
+                symbol,
+                crate::duplication_scan::DUPLICATION_CLONE_THRESHOLD
             )
         };
         if let Some(section) = self.build_graph_clone_section(symbol) {
@@ -1915,7 +1954,10 @@ impl McpServer {
             let proj_filter = if project.is_empty() {
                 String::new()
             } else {
-                format!(" AND project_code IN ('{}', 'PRO')", sanitize_project(project))
+                format!(
+                    " AND project_code IN ('{}', 'PRO')",
+                    sanitize_project(project)
+                )
             };
             let sql = format!(
                 "SELECT id, title, (metadata->'structural_invariant')::text FROM {} \
@@ -2009,15 +2051,22 @@ impl McpServer {
                     Value::String(v.rule_id.clone()),
                     Value::String(v.source_id.clone()),
                     Value::String(
-                        v.target_id.clone().unwrap_or_else(|| "(missing target)".to_string()),
+                        v.target_id
+                            .clone()
+                            .unwrap_or_else(|| "(missing target)".to_string()),
                     ),
-                    Value::String(v.relation.map(|r| r.as_db().to_string()).unwrap_or_default()),
+                    Value::String(
+                        v.relation
+                            .map(|r| r.as_db().to_string())
+                            .unwrap_or_default(),
+                    ),
                 ]
             })
             .collect();
         let returned = display_rows.len() as u64;
         let has_more = (offset as u64).saturating_add(returned) < total_available;
-        let display_json = serde_json::to_string(&display_rows).unwrap_or_else(|_| "[]".to_string());
+        let display_json =
+            serde_json::to_string(&display_rows).unwrap_or_else(|_| "[]".to_string());
 
         let report = if display_rows.is_empty() {
             format!(
@@ -2084,12 +2133,25 @@ impl McpServer {
             }));
         }
         let p_esc = project.replace('\'', "''");
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("read");
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 1000);
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("read");
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .clamp(1, 1000);
 
         if action == "record" {
-            let alpha = args.get("alpha").and_then(|v| v.as_f64()).unwrap_or(dh::DEFAULT_ALPHA);
-            let k = args.get("k").and_then(|v| v.as_f64()).unwrap_or(dh::DEFAULT_K);
+            let alpha = args
+                .get("alpha")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(dh::DEFAULT_ALPHA);
+            let k = args
+                .get("k")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(dh::DEFAULT_K);
 
             // Resolve which layer-pairs to monitor.
             let mut pairs: Vec<(String, String)> = Vec::new();
@@ -2169,10 +2231,11 @@ impl McpServer {
                     .query_json(&prev_sql)
                     .ok()
                     .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
-                    .and_then(|rows| {
-                        rows.into_iter().next().and_then(|r| r.into_iter().next())
-                    })
-                    .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+                    .and_then(|rows| rows.into_iter().next().and_then(|r| r.into_iter().next()))
+                    .and_then(|v| {
+                        v.as_f64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    });
                 let ewma = dh::update_ewma(prev, score, alpha);
                 let alert = dh::is_alert(score, prev, k);
                 if alert {
@@ -2219,12 +2282,19 @@ impl McpServer {
             "SELECT layer_pair, wave_ts::text, score, ewma, alert FROM ist.drift_history \
              WHERE project_code='{p_esc}'{lp_filter} ORDER BY wave_ts DESC LIMIT {limit}"
         );
-        let raw = self.graph_store.query_json(&sql).unwrap_or_else(|_| "[]".to_string());
+        let raw = self
+            .graph_store
+            .query_json(&sql)
+            .unwrap_or_else(|_| "[]".to_string());
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         let total = rows.len() as u64;
         let alerts = rows
             .iter()
-            .filter(|r| r.get(4).map(|v| v == &Value::Bool(true) || v.as_str() == Some("true")).unwrap_or(false))
+            .filter(|r| {
+                r.get(4)
+                    .map(|v| v == &Value::Bool(true) || v.as_str() == Some("true"))
+                    .unwrap_or(false)
+            })
             .count() as u64;
         let display_json = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
         let report = if rows.is_empty() {
@@ -2232,7 +2302,10 @@ impl McpServer {
         } else {
             format!(
                 "### 📈 drift_history — `{project}` ({total} sample(s), {alerts} alert(s))\n\n{}",
-                format_table_from_json(&display_json, &["Layer pair", "Wave", "Score", "EWMA", "Alert"])
+                format_table_from_json(
+                    &display_json,
+                    &["Layer pair", "Wave", "Score", "EWMA", "Alert"]
+                )
             )
         };
         Some(json!({
@@ -2342,11 +2415,21 @@ fn format_chunk_time_window(oldest: i64, newest: i64, unknown: i64) -> String {
 mod tests {
     use super::*;
 
-    fn coverage_group(files: i64, status: &str, reason: &str, symbol: bool, document: bool) -> FileCoverageGroup {
+    fn coverage_group(
+        files: i64,
+        status: &str,
+        reason: &str,
+        symbol: bool,
+        document: bool,
+    ) -> FileCoverageGroup {
         FileCoverageGroup {
-            status: status.into(), reason: reason.into(), files,
-            has_chunks: symbol || document, has_symbol_chunks: symbol,
-            has_file_chunks: document, paths: vec!["PGT:/fixture".into()],
+            status: status.into(),
+            reason: reason.into(),
+            files,
+            has_chunks: symbol || document,
+            has_symbol_chunks: symbol,
+            has_file_chunks: document,
+            paths: vec!["PGT:/fixture".into()],
         }
     }
 
@@ -2360,13 +2443,22 @@ mod tests {
         ]);
         assert_eq!(coverage.count(|_| true), 945);
         let verdict = coverage.verdict(945, &[]);
-        assert!(verdict.contains("parse_timeout") && verdict.contains("2 file(s)"), "{verdict}");
+        assert!(
+            verdict.contains("parse_timeout") && verdict.contains("2 file(s)"),
+            "{verdict}"
+        );
         assert!(!verdict.contains('✅') && !verdict.contains("indexed AND parsed"));
         coverage.0[2].reason = "generated".into();
         let verdict = coverage.verdict(945, &[]);
         assert!(coverage.causes().is_empty(), "generated is not a failure");
-        assert!(verdict.contains("942/945") && verdict.contains("3 policy-excluded"), "{verdict}");
-        assert!(!verdict.contains("indexed AND parsed"), "excluded is not parsed: {verdict}");
+        assert!(
+            verdict.contains("942/945") && verdict.contains("3 policy-excluded"),
+            "{verdict}"
+        );
+        assert!(
+            !verdict.contains("indexed AND parsed"),
+            "excluded is not parsed: {verdict}"
+        );
         coverage.0[2].reason = "future_reason".into();
         assert!(coverage.verdict(945, &[]).contains("unclassified reason"));
     }
@@ -2402,8 +2494,14 @@ mod tests {
         let (id, explain, fix) = McpServer::chunk_coverage_cause(25, 434).expect("must flag 5.8%");
         assert_eq!(id, "chunk_coverage_severe_gap");
         assert!(explain.contains("25 of 434"), "got: {explain}");
-        assert!(explain.contains("5.8%"), "the percentage must be stated: {explain}");
-        assert!(explain.contains("409 file(s)"), "the gap must be stated: {explain}");
+        assert!(
+            explain.contains("5.8%"),
+            "the percentage must be stated: {explain}"
+        );
+        assert!(
+            explain.contains("409 file(s)"),
+            "the gap must be stated: {explain}"
+        );
         // The remediation must name the actual cure found in session 104.
         assert!(fix.contains("restart axon-indexer"), "got: {fix}");
     }
@@ -2525,19 +2623,32 @@ mod tests {
     #[test]
     fn coverage_stays_silent_on_the_healthy_projects() {
         // Measured 2026-07-26: AXO 883/885, and LLL after the fix 434/434.
-        assert!(McpServer::chunk_coverage_cause(883, 885).is_none(), "AXO 99.8% must be silent");
-        assert!(McpServer::chunk_coverage_cause(434, 434).is_none(), "100% must be silent");
+        assert!(
+            McpServer::chunk_coverage_cause(883, 885).is_none(),
+            "AXO 99.8% must be silent"
+        );
+        assert!(
+            McpServer::chunk_coverage_cause(434, 434).is_none(),
+            "100% must be silent"
+        );
         // Acceptance criterion of REQ-AXO-902254: the 41 other healthy projects must NOT
         // be flagged, otherwise a true negative is traded for a mass false positive.
-        assert!(McpServer::chunk_coverage_cause(1090, 1094).is_none(), "APS 99.6% silent");
-        assert!(McpServer::chunk_coverage_cause(3448, 3538).is_none(), "FSF 97.5% silent");
+        assert!(
+            McpServer::chunk_coverage_cause(1090, 1094).is_none(),
+            "APS 99.6% silent"
+        );
+        assert!(
+            McpServer::chunk_coverage_cause(3448, 3538).is_none(),
+            "FSF 97.5% silent"
+        );
     }
 
     #[test]
     fn coverage_partial_gap_fires_between_50_and_90_percent() {
         // TRD, measured: 1028/1186 = 86.7% — a real gap the old tool reported as
         // `no_blocker_detected`, but plausibly legitimate, so it must NOT be graded severe.
-        let (id, explain, _) = McpServer::chunk_coverage_cause(1028, 1186).expect("must flag 86.7%");
+        let (id, explain, _) =
+            McpServer::chunk_coverage_cause(1028, 1186).expect("must flag 86.7%");
         assert_eq!(id, "chunk_coverage_partial_gap");
         assert!(explain.contains("86.7%"), "got: {explain}");
         assert!(explain.contains("158 file(s)"), "got: {explain}");
@@ -2545,7 +2656,10 @@ mod tests {
 
     #[test]
     fn coverage_handles_empty_and_impossible_scopes_without_dividing_by_zero() {
-        assert!(McpServer::chunk_coverage_cause(0, 0).is_none(), "nothing enrolled → no verdict");
+        assert!(
+            McpServer::chunk_coverage_cause(0, 0).is_none(),
+            "nothing enrolled → no verdict"
+        );
         // chunked > enrolled should not underflow into a fake gap.
         assert!(McpServer::chunk_coverage_cause(10, 5).is_none());
         // Total absence of chunks on an enrolled project is the severest case.
@@ -2556,7 +2670,10 @@ mod tests {
     #[test]
     fn coverage_threshold_boundaries_are_exact() {
         // Exactly 90% is healthy (strict <90), 89.x% is a partial gap.
-        assert!(McpServer::chunk_coverage_cause(90, 100).is_none(), "90% is not a gap");
+        assert!(
+            McpServer::chunk_coverage_cause(90, 100).is_none(),
+            "90% is not a gap"
+        );
         assert_eq!(
             McpServer::chunk_coverage_cause(89, 100).unwrap().0,
             "chunk_coverage_partial_gap"
@@ -2607,7 +2724,10 @@ mod tests {
             !v.contains('✅'),
             "le verdict vert doit disparaitre — obtenu : {v}"
         );
-        assert!(v.contains("hpp"), "l'extension doit etre NOMMEE — obtenu : {v}");
+        assert!(
+            v.contains("hpp"),
+            "l'extension doit etre NOMMEE — obtenu : {v}"
+        );
         assert!(v.contains("28"), "le compte doit etre donne — obtenu : {v}");
     }
 
@@ -2640,8 +2760,11 @@ mod tests {
     #[test]
     fn indexing_verdict_flags_discovered_backlog_as_blocker() {
         // The exact #44 shape: 429 LLL files enrolled, none parsed (all `discovered`).
-    let v = indexing_verdict(429, 429, 429, 429, 0, 0, &[]);
-        assert!(v.starts_with("⛔"), "discovered backlog must block, got: {v}");
+        let v = indexing_verdict(429, 429, 429, 429, 0, 0, &[]);
+        assert!(
+            v.starts_with("⛔"),
+            "discovered backlog must block, got: {v}"
+        );
         assert!(v.contains("429"), "the backlog size must be stated: {v}");
         // REQ-AXO-902389 — was `contains("discovered")`. The verdict deliberately
         // no longer names that column: it is dead weight nothing reads
@@ -2651,7 +2774,10 @@ mod tests {
             v.contains("NOTHING EXTRACTED") && v.contains("zero chunks"),
             "the stall must be named by its real cause: {v}"
         );
-        assert!(!v.contains('✅'), "must NOT claim all-indexed over an unparsed backlog: {v}");
+        assert!(
+            !v.contains('✅'),
+            "must NOT claim all-indexed over an unparsed backlog: {v}"
+        );
     }
 
     #[test]
@@ -2665,12 +2791,18 @@ mod tests {
         // découverts / 12 vides · NEX 753/3 · AXO 660/1. Le verdict criait un
         // facteur 1000 au-dessus du réel.
         let v = indexing_verdict(1454, 1454, 710, 0, 1454, 0, &[]);
-        assert!(v.starts_with("✅"), "des fichiers parsés ne bloquent pas : {v}");
+        assert!(
+            v.starts_with("✅"),
+            "des fichiers parsés ne bloquent pas : {v}"
+        );
         assert!(
             v.contains("710") && v.contains("stale"),
             "le drapeau périmé est SIGNALÉ, pas caché : {v}"
         );
-        assert!(!v.contains('⛔'), "aucun blocage sur du bookkeeping périmé : {v}");
+        assert!(
+            !v.contains('⛔'),
+            "aucun blocage sur du bookkeeping périmé : {v}"
+        );
     }
 
     #[test]
@@ -2679,8 +2811,14 @@ mod tests {
         // doit rester ATTEIGNABLE. Un correctif qui rend l'outil muet ne vaut pas
         // mieux que celui qui le rend bavard.
         let v = indexing_verdict(1454, 1454, 710, 5, 1449, 5, &[]);
-        assert!(v.starts_with("⛔"), "5 fichiers sans rien extrait bloquent : {v}");
-        assert!(v.contains('5'), "le nombre RÉEL est nommé, pas les 710 : {v}");
+        assert!(
+            v.starts_with("⛔"),
+            "5 fichiers sans rien extrait bloquent : {v}"
+        );
+        assert!(
+            v.contains('5'),
+            "le nombre RÉEL est nommé, pas les 710 : {v}"
+        );
         assert!(
             !v.contains("710"),
             "le verdict ne doit plus citer le compte périmé : {v}"
@@ -2692,7 +2830,10 @@ mod tests {
         // LLL after the post-outage reindex: 457 parsed, zero discovered.
         let v = indexing_verdict(457, 457, 0, 0, 457, 0, &[]);
         assert!(v.starts_with("✅"), "clean parsed state is green: {v}");
-        assert!(v.contains("parsed"), "the green verdict distinguishes parsed: {v}");
+        assert!(
+            v.contains("parsed"),
+            "the green verdict distinguishes parsed: {v}"
+        );
     }
 
     #[test]
@@ -2736,9 +2877,18 @@ mod tests {
             complet.starts_with("✅"),
             "une couverture complète doit rester verte, sinon la garde crie sans discriminer ; obtenu : {complet}"
         );
-        assert!(indexing_verdict(100, 90, 0, 0, 90, 0, &[]).starts_with("⏳"), "under-enrolled → waiting");
-        assert!(indexing_verdict(0, 0, 0, 0, 0, 0, &[]).starts_with("⚠"), "no eligible → watch-root warning");
+        assert!(
+            indexing_verdict(100, 90, 0, 0, 90, 0, &[]).starts_with("⏳"),
+            "under-enrolled → waiting"
+        );
+        assert!(
+            indexing_verdict(0, 0, 0, 0, 0, 0, &[]).starts_with("⚠"),
+            "no eligible → watch-root warning"
+        );
         // A discovered backlog dominates a raw row gap: the parse stall is the actionable cause.
-        assert!(indexing_verdict(100, 90, 5, 5, 90, 5, &[]).starts_with("⛔"), "discovered dominates the gap verdict");
+        assert!(
+            indexing_verdict(100, 90, 5, 5, 90, 5, &[]).starts_with("⛔"),
+            "discovered dominates the gap verdict"
+        );
     }
 }

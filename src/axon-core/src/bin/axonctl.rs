@@ -476,12 +476,7 @@ fn cmd_liveness(config: InstanceConfig, json: bool) -> Result<()> {
         );
     } else {
         for g in &gates {
-            eprintln!(
-                "  [{}] {} — {}",
-                g.status_str(),
-                g.name,
-                g.detail
-            );
+            eprintln!("  [{}] {} — {}", g.status_str(), g.name, g.detail);
         }
         eprintln!("liveness: {}", if all_pass { "healthy" } else { phase });
     }
@@ -746,7 +741,10 @@ fn cutover_record_gate(release_dir: &Path, gate: &str, status: &str, evidence: &
             "unknown promotion gate {gate}; expected one of {REQUIRED_PROMOTION_GATES:?}"
         ));
     }
-    if !matches!(status, "passed" | "failed" | "skipped" | "timeout" | "error") {
+    if !matches!(
+        status,
+        "passed" | "failed" | "skipped" | "timeout" | "error"
+    ) {
         return Err(anyhow!(
             "invalid gate status {status}; expected passed|failed|skipped|timeout|error"
         ));
@@ -1394,7 +1392,10 @@ fn cmd_cutover(config: InstanceConfig, remaining: &[String], json: bool) -> Resu
     };
 
     // REQ-AXO-902591 — purger systématiquement les scopes cutover orphelins des sessions antérieures
-    if matches!(cargs.phase, CutoverCommandPhase::Full | CutoverCommandPhase::Prepare) {
+    if matches!(
+        cargs.phase,
+        CutoverCommandPhase::Full | CutoverCommandPhase::Prepare
+    ) {
         let _ = purge_orphaned_cutover_scopes(Some(std::process::id()));
     }
 

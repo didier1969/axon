@@ -291,7 +291,9 @@ impl RulePredicate {
             Self::UniqueBy { .. } => PredicateKind::Uniqueness,
             Self::AtMost { .. } => PredicateKind::Aggregate,
             Self::Reaches { .. } => PredicateKind::Reachability,
-            Self::BodyContainsAny { .. } | Self::BodyContainsNone { .. } => PredicateKind::BodyContent,
+            Self::BodyContainsAny { .. } | Self::BodyContainsNone { .. } => {
+                PredicateKind::BodyContent
+            }
             Self::Acyclic { .. } => PredicateKind::Acyclicity,
         }
     }
@@ -402,7 +404,9 @@ pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<S
             artifact_types: string_list("evidence_artifact_types"),
         }
     } else if !metadata_keys.is_empty() {
-        RulePredicate::RequiredMetadata { keys: metadata_keys }
+        RulePredicate::RequiredMetadata {
+            keys: metadata_keys,
+        }
     } else if let Some(field) = unique_by {
         RulePredicate::UniqueBy {
             field: RuleField::from_str_ci(&field)?,
@@ -511,11 +515,7 @@ fn violation(rule: &SollRule, subject: &str) -> SollRuleViolation {
 
 /// Les sujets de la règle, triés — un rapport dont l'ordre change d'un appel à
 /// l'autre ne se compare pas (même raison que REQ-AXO-902452).
-fn subjects<'a>(
-    snapshot: &SollSnapshot,
-    rule: &SollRule,
-    facts: &NodeFacts<'a>,
-) -> Vec<&'a str> {
+fn subjects<'a>(snapshot: &SollSnapshot, rule: &SollRule, facts: &NodeFacts<'a>) -> Vec<&'a str> {
     // REQ-AXO-902476 — la garde de corps se pose ICI, au même endroit que le filtre
     // de type/statut. C'est ce qui la fait composer avec les huit prédicats sans en
     // toucher aucun : un prédicat ne sait pas qu'il a été conditionné, il voit
@@ -654,35 +654,37 @@ fn evaluate_rule_with_facts(
                     if rule.subject.is_unconstrained() {
                         return out;
                     }
-                    let mut satisfied: HashMap<&str, bool> =
-                        subjects(snapshot, rule, facts).into_iter().map(|id| (id, false)).collect();
+                    let mut satisfied: HashMap<&str, bool> = subjects(snapshot, rule, facts)
+                        .into_iter()
+                        .map(|id| (id, false))
+                        .collect();
                     for edge in &snapshot.edges {
                         if !rel_ok(&edge.relation_type) {
                             continue;
                         }
                         for (subject_id, other_id) in orientations(edge, *direction) {
-                        if !satisfied.contains_key(subject_id) {
-                            continue;
-                        }
-                        // Une extrémité hors du snapshot n'est PAS une absence
-                        // d'arête. Cas réel et encouragé par le produit : une
-                        // Guideline de projet retirée par la canonique `PRO`
-                        // (`GUI-AXO-1032` ← `GUI-PRO-124`). Le snapshot est
-                        // chargé par projet, donc le remplaçant n'y figure pas —
-                        // 10 nœuds sur 5 projets au 2026-08-22.
-                        //
-                        // Quand la règle n'exige RIEN de l'autre bout, l'arête
-                        // satisfait : une contrainte qui ne porte pas sur ce
-                        // nœud ne peut pas être invalidée par son absence. Si
-                        // elle exige un kind ou un statut, on ne peut pas
-                        // trancher — l'arête est ignorée, comme avant.
-                        let qualifies = match facts.get(other_id) {
-                            Some((okind, ostatus)) => other.matches(okind, ostatus),
-                            None => other.is_unconstrained(),
-                        };
-                        if qualifies {
-                            satisfied.insert(subject_id, true);
-                        }
+                            if !satisfied.contains_key(subject_id) {
+                                continue;
+                            }
+                            // Une extrémité hors du snapshot n'est PAS une absence
+                            // d'arête. Cas réel et encouragé par le produit : une
+                            // Guideline de projet retirée par la canonique `PRO`
+                            // (`GUI-AXO-1032` ← `GUI-PRO-124`). Le snapshot est
+                            // chargé par projet, donc le remplaçant n'y figure pas —
+                            // 10 nœuds sur 5 projets au 2026-08-22.
+                            //
+                            // Quand la règle n'exige RIEN de l'autre bout, l'arête
+                            // satisfait : une contrainte qui ne porte pas sur ce
+                            // nœud ne peut pas être invalidée par son absence. Si
+                            // elle exige un kind ou un statut, on ne peut pas
+                            // trancher — l'arête est ignorée, comme avant.
+                            let qualifies = match facts.get(other_id) {
+                                Some((okind, ostatus)) => other.matches(okind, ostatus),
+                                None => other.is_unconstrained(),
+                            };
+                            if qualifies {
+                                satisfied.insert(subject_id, true);
+                            }
                         }
                     }
                     let mut offenders: Vec<&str> = satisfied
@@ -734,13 +736,11 @@ fn evaluate_rule_with_facts(
                 };
                 let parsed: serde_json::Value =
                     serde_json::from_str(&node.metadata_raw).unwrap_or(serde_json::Value::Null);
-                let missing = keys.iter().any(|key| {
-                    match parsed.get(key) {
-                        None | Some(serde_json::Value::Null) => true,
-                        Some(serde_json::Value::String(text)) => text.trim().is_empty(),
-                        Some(serde_json::Value::Array(items)) => items.is_empty(),
-                        Some(_) => false,
-                    }
+                let missing = keys.iter().any(|key| match parsed.get(key) {
+                    None | Some(serde_json::Value::Null) => true,
+                    Some(serde_json::Value::String(text)) => text.trim().is_empty(),
+                    Some(serde_json::Value::Array(items)) => items.is_empty(),
+                    Some(_) => false,
                 });
                 if missing {
                     out.push(violation(rule, id));
@@ -811,7 +811,10 @@ fn evaluate_rule_with_facts(
                             if !member.contains(subject_id) {
                                 continue;
                             }
-                            groups.entry(group_id.to_string()).or_default().push(subject_id);
+                            groups
+                                .entry(group_id.to_string())
+                                .or_default()
+                                .push(subject_id);
                         }
                     }
                     // Un sujet sans groupe est IGNORÉ, jamais compté dans un
@@ -935,9 +938,7 @@ fn evaluate_rule_with_facts(
                 let reached = targets
                     .iter()
                     .any(|target| snapshot.reaches_via_relations(id, target, &rel_set))
-                    || reaches_target_via_active_milestone(
-                        snapshot, id, &targets, &rel_set, facts,
-                    );
+                    || reaches_target_via_active_milestone(snapshot, id, &targets, &rel_set, facts);
                 if !reached {
                     out.push(violation(rule, id));
                 }
@@ -1044,9 +1045,12 @@ mod tests {
         }
     }
 
-    fn evidence(entity_id: &str, artifact_type: &str, r#ref: &str, status: &str)
-        -> crate::soll_snapshot::SnapshotTraceability
-    {
+    fn evidence(
+        entity_id: &str,
+        artifact_type: &str,
+        r#ref: &str,
+        status: &str,
+    ) -> crate::soll_snapshot::SnapshotTraceability {
         crate::soll_snapshot::SnapshotTraceability {
             id: format!("{entity_id}:{ref_}", ref_ = r#ref),
             soll_entity_type: "requirement".to_string(),
@@ -1123,7 +1127,10 @@ mod tests {
         let snap = snapshot(vec![marked, silent, living], vec![]);
         let found = evaluate_rule(&snap, &rule);
         assert_eq!(
-            found.iter().map(|v| v.source_id.as_str()).collect::<Vec<_>>(),
+            found
+                .iter()
+                .map(|v| v.source_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["REQ-TST-202"],
             "seul le nœud retiré SANS marqueur est fautif ; la comparaison ignore \
              la casse, et un nœud vivant n'est pas sujet.\n{found:?}"
@@ -1183,15 +1190,20 @@ mod tests {
 
         // 3. Évaluation sur graphe avec dérive (fixture LLL)
         let mut deviating = node("REQ-TST-301", "Requirement", "planned");
-        deviating.description = "Travail prévu. LIVRÉ le 2026-07-12 via commit f6ef28c.".to_string();
+        deviating.description =
+            "Travail prévu. LIVRÉ le 2026-07-12 via commit f6ef28c.".to_string();
 
         let mut planned_clean = node("REQ-TST-302", "Requirement", "planned");
-        planned_clean.description = "Travail en attente d'arbitrage. Aucune mention prématurée.".to_string();
+        planned_clean.description =
+            "Travail en attente d'arbitrage. Aucune mention prématurée.".to_string();
 
         let mut delivered_legit = node("REQ-TST-303", "Requirement", "delivered");
         delivered_legit.description = "LIVRÉ en production et qualifié.".to_string();
 
-        let snap_deviating = snapshot(vec![deviating, planned_clean.clone(), delivered_legit.clone()], vec![]);
+        let snap_deviating = snapshot(
+            vec![deviating, planned_clean.clone(), delivered_legit.clone()],
+            vec![],
+        );
         let violations = evaluate_rule(&snap_deviating, &rule);
 
         assert_eq!(
@@ -1207,7 +1219,10 @@ mod tests {
         let mut planned_healthy = node("REQ-TST-304", "Requirement", "planned");
         planned_healthy.description = "Spécification en cours de rédaction.".to_string();
 
-        let snap_healthy = snapshot(vec![planned_clean, delivered_legit, planned_healthy], vec![]);
+        let snap_healthy = snapshot(
+            vec![planned_clean, delivered_legit, planned_healthy],
+            vec![],
+        );
         let zero_violations = evaluate_rule(&snap_healthy, &rule);
         assert!(
             zero_violations.is_empty(),
@@ -1299,7 +1314,10 @@ mod tests {
         );
         let found = evaluate_rule(&snap, &rule);
         assert_eq!(
-            found.iter().map(|v| v.source_id.as_str()).collect::<Vec<_>>(),
+            found
+                .iter()
+                .map(|v| v.source_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["GUI-TST-002"],
             "seul le nœud SANS remplaçant est fautif ; celui repris par une \
              Guideline PRO a bien enregistré ce qui le remplace.\n{found:?}"
@@ -1366,7 +1384,10 @@ mod tests {
         );
         let found = evaluate_rule(&snap, &rule);
         assert_eq!(
-            found.iter().map(|v| v.source_id.as_str()).collect::<Vec<_>>(),
+            found
+                .iter()
+                .map(|v| v.source_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["REQ-TST-103"],
             "seul le nœud sans AUCUNE arête est orphelin ; le sens de \
              rattachement ne doit pas décider.\n{found:?}"
@@ -1581,8 +1602,14 @@ mod tests {
             "les DEUX porteurs sont nommés — un seul ne dirait pas quoi comparer"
         );
         // Chaque ligne NOMME l'autre : un compteur de doublons n'ouvre aucune action.
-        assert!(found[0].target_id.as_deref() == Some("REQ-TST-002"), "{found:?}");
-        assert!(found[1].target_id.as_deref() == Some("REQ-TST-001"), "{found:?}");
+        assert!(
+            found[0].target_id.as_deref() == Some("REQ-TST-002"),
+            "{found:?}"
+        );
+        assert!(
+            found[1].target_id.as_deref() == Some("REQ-TST-001"),
+            "{found:?}"
+        );
         // Contrôles positifs : l'unique n'est pas signalé, et un titre VIDE n'est
         // pas un doublon — c'est une absence, qui relève d'une autre règle.
         assert!(!flagged.contains(&"REQ-TST-003"));
@@ -1626,7 +1653,10 @@ mod tests {
         );
         // La ligne dit DE COMBIEN on dépasse, pas seulement qu'on dépasse.
         assert!(
-            found[0].target_id.as_deref().is_some_and(|t| t.contains("3 sujets")),
+            found[0]
+                .target_id
+                .as_deref()
+                .is_some_and(|t| t.contains("3 sujets")),
             "{found:?}"
         );
         // Contrôle positif : la borne est INCLUSIVE — un groupe à exactement
@@ -1794,7 +1824,6 @@ mod tests {
         )
         .is_none());
     }
-
 
     /// La règle demandée par TE2, exprimée en DONNÉE et non en branche Rust.
     fn supersedes_rule() -> SollRule {
@@ -2106,11 +2135,7 @@ mod tests {
             };
             // Le titre est le 4e champ ; on ne le compare pas, mais `parse_soll_rule`
             // l'exige et le porte dans la règle rendue.
-            let title = after_values
-                .split("', '")
-                .nth(3)
-                .unwrap_or("")
-                .to_string();
+            let title = after_values.split("', '").nth(3).unwrap_or("").to_string();
             // Le JSON de metadata va de la première accolade du bloc `'{...}'::jsonb`
             // jusqu'au marqueur de fin. Le seed double les apostrophes SQL.
             let Some(meta_start) = chunk.find("'{\"soll_rule\"") else {
@@ -2212,11 +2237,21 @@ mod garde_de_corps_tests {
         let snap = construit(
             vec![
                 // (a) annonce le remplacement, PAS d'arête → doit être signalé.
-                noeud("REQ-TST-301", "Requirement", "current", "Ce point est supersédé par REQ-TST-999."),
+                noeud(
+                    "REQ-TST-301",
+                    "Requirement",
+                    "current",
+                    "Ce point est supersédé par REQ-TST-999.",
+                ),
                 // (b) n'annonce rien, pas d'arête non plus → ne doit PAS être signalé.
                 //     C'est CE cas qui distingue une garde d'un simple filtre de statut :
                 //     sans elle, la règle exigerait une arête de TOUS les Requirements.
-                noeud("REQ-TST-302", "Requirement", "current", "Un corps ordinaire."),
+                noeud(
+                    "REQ-TST-302",
+                    "Requirement",
+                    "current",
+                    "Un corps ordinaire.",
+                ),
             ],
             Vec::new(),
         );
@@ -2253,8 +2288,18 @@ mod garde_de_corps_tests {
 
         let snap = construit(
             vec![
-                noeud("REQ-TST-301", "Requirement", "current", "Ce point est supersédé par REQ-TST-999."),
-                noeud("REQ-TST-302", "Requirement", "current", "Un corps ordinaire."),
+                noeud(
+                    "REQ-TST-301",
+                    "Requirement",
+                    "current",
+                    "Ce point est supersédé par REQ-TST-999.",
+                ),
+                noeud(
+                    "REQ-TST-302",
+                    "Requirement",
+                    "current",
+                    "Un corps ordinaire.",
+                ),
             ],
             Vec::new(),
         );
@@ -2299,9 +2344,12 @@ mod garde_de_corps_tests {
         .expect("règle locale valide");
 
         let snap = construit(
-            vec![
-                noeud("REQ-DGD-128", "Requirement", "superseded", "Nœud sans remplaçant."),
-            ],
+            vec![noeud(
+                "REQ-DGD-128",
+                "Requirement",
+                "superseded",
+                "Nœud sans remplaçant.",
+            )],
             Vec::new(),
         );
 
@@ -2315,4 +2363,3 @@ mod garde_de_corps_tests {
         assert_eq!(violations[0].source_id, "REQ-DGD-128");
     }
 }
-

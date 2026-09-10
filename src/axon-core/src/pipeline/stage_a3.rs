@@ -647,7 +647,6 @@ mod tests {
         let _ = store.execute("DELETE FROM ist.IndexedFile WHERE path LIKE '/tmp/hyd902512/%'");
     }
 
-
     #[tokio::test]
     async fn a3_enroll_persists_symbol_and_chunk_rows() {
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());

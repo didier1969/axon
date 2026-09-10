@@ -78,7 +78,10 @@ pub fn spawn_cache_invalidate_listener(database_url: String) {
         loop {
             match listen_once(&database_url).await {
                 Ok(()) => {
-                    warn!(channel = LISTEN_CHANNEL, "LISTEN loop exited cleanly; reconnecting");
+                    warn!(
+                        channel = LISTEN_CHANNEL,
+                        "LISTEN loop exited cleanly; reconnecting"
+                    );
                     backoff = BACKOFF_INITIAL_MS;
                 }
                 Err(err) => {
@@ -127,7 +130,10 @@ async fn listen_once(database_url: &str) -> Result<()> {
         .batch_execute(&format!("LISTEN {}", LISTEN_CHANNEL))
         .await
         .context("LISTEN ist_cache_invalidate failed")?;
-    info!(channel = LISTEN_CHANNEL, "ist_cache_invalidate listener attached");
+    info!(
+        channel = LISTEN_CHANNEL,
+        "ist_cache_invalidate listener attached"
+    );
 
     while let Some(n) = notify_rx.recv().await {
         if let Some(forgotten) = apply_invalidate_payload(n.payload()) {

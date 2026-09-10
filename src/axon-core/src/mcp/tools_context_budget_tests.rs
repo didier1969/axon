@@ -62,7 +62,10 @@ fn un_paquet_SOUS_le_budget_n_est_pas_touche() {
     let avant = p.clone();
     let omises = McpServer::borner_paquet_au_budget(&mut p, 100_000, AUCUNE_BANDE_PORTEUSE);
     assert!(omises.is_empty(), "aucune coupe attendue : {omises:?}");
-    assert_eq!(p, avant, "borner ce qui tient perdrait du contexte sans rien gagner");
+    assert_eq!(
+        p, avant,
+        "borner ce qui tient perdrait du contexte sans rien gagner"
+    );
 }
 
 #[test]
@@ -71,7 +74,10 @@ fn au_dessus_du_budget_les_bandes_PERIPHERIQUES_partent_les_premieres() {
     let budget = jetons_cible(&p);
     let omises = McpServer::borner_paquet_au_budget(&mut p, budget, AUCUNE_BANDE_PORTEUSE);
 
-    assert!(!omises.is_empty(), "le paquet dépasse : une coupe est attendue");
+    assert!(
+        !omises.is_empty(),
+        "le paquet dépasse : une coupe est attendue"
+    );
     let ordre: Vec<&str> = omises
         .iter()
         .filter_map(|b| b.get("band").and_then(Value::as_str))
@@ -122,7 +128,8 @@ fn une_bande_coupee_reste_PRESENTE_et_vide() {
     let mut p = paquet(20, 400);
     McpServer::borner_paquet_au_budget(&mut p, 1, AUCUNE_BANDE_PORTEUSE);
     assert_eq!(
-        p["structural_neighbors"], json!([]),
+        p["structural_neighbors"],
+        json!([]),
         "la bande coupée doit rester présente et VIDE, pas disparaître"
     );
     assert!(
@@ -192,10 +199,12 @@ fn la_bande_qui_PORTE_la_reponse_de_la_route_n_est_pas_coupee() {
     let mut p = paquet(6, 300);
     let budget = jetons(&p) * 3 / 4;
 
-    let omises =
-        McpServer::borner_paquet_au_budget(&mut p, budget, Some("structural_neighbors"));
+    let omises = McpServer::borner_paquet_au_budget(&mut p, budget, Some("structural_neighbors"));
 
-    assert!(!omises.is_empty(), "le paquet dépasse : une coupe est attendue");
+    assert!(
+        !omises.is_empty(),
+        "le paquet dépasse : une coupe est attendue"
+    );
     assert_eq!(
         p["structural_neighbors"].as_array().map(|a| a.len()),
         Some(6),

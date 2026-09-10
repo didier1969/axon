@@ -85,7 +85,6 @@ pub(crate) struct SentMessage {
     pub sig: String,
 }
 
-
 /// REQ-AXO-902494 (doléance APS #238) — TOUS les manquements d'un coup, et jamais un
 /// paramètre inconnu avalé en silence.
 ///
@@ -103,12 +102,24 @@ pub(crate) struct SentMessage {
 /// Retourne `None` si l'appel est recevable, sinon le message de refus complet.
 fn valider_arguments_outbox(args: &Value) -> Option<String> {
     const CONNUS: &[&str] = &[
-        "to_project", "to_topic", "to_room", "from", "subject", "body_dense",
-        "idempotency_key", "in_reply_to", "context_id", "kind", "priority",
-        "ref_soll_ids", "ttl_hours",
+        "to_project",
+        "to_topic",
+        "to_room",
+        "from",
+        "subject",
+        "body_dense",
+        "idempotency_key",
+        "in_reply_to",
+        "context_id",
+        "kind",
+        "priority",
+        "ref_soll_ids",
+        "ttl_hours",
     ];
 
-    let Some(obj) = args.as_object() else { return None };
+    let Some(obj) = args.as_object() else {
+        return None;
+    };
 
     // Distance d'édition bornée : on ne propose un voisin que s'il est PROCHE.
     // Suggérer n'importe quoi serait pire que se taire — le lecteur corrigerait
@@ -117,7 +128,12 @@ fn valider_arguments_outbox(args: &Value) -> Option<String> {
         CONNUS
             .iter()
             .map(|c| (*c, distance_edition(inconnu, c)))
-            .filter(|(c, d)| *d <= 4 && (c.starts_with(inconnu) || inconnu.starts_with(&c[..c.len().min(inconnu.len())]) || *d <= 2))
+            .filter(|(c, d)| {
+                *d <= 4
+                    && (c.starts_with(inconnu)
+                        || inconnu.starts_with(&c[..c.len().min(inconnu.len())])
+                        || *d <= 2)
+            })
             .min_by_key(|(_, d)| *d)
             .map(|(c, _)| c)
     }
@@ -154,7 +170,8 @@ fn valider_arguments_outbox(args: &Value) -> Option<String> {
         return None;
     }
 
-    let mut msg = String::from("mcp_outbox_send : appel refusé — TOUS les écarts, pas le premier.\n");
+    let mut msg =
+        String::from("mcp_outbox_send : appel refusé — TOUS les écarts, pas le premier.\n");
     if !inconnus.is_empty() {
         msg.push_str(&format!(
             "\n⛔ Paramètre(s) INCONNU(S), qui seraient ignorés en silence :\n  - {}\n",
@@ -295,9 +312,19 @@ impl McpServer {
 
         // MBX-7 fan-out detection. `to_topic` / `to_room` are mutually exclusive with
         // a concrete `to_project`; `to_project='*'` is a registry-wide broadcast.
-        let to_topic = args.get("to_topic").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
-        let to_room = args.get("to_room").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
-        let to_project_raw = args.get("to_project").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        let to_topic = args
+            .get("to_topic")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty());
+        let to_room = args
+            .get("to_room")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty());
+        let to_project_raw = args
+            .get("to_project")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         if (to_topic.is_some() || to_room.is_some()) && to_project_raw.is_some() {
             return Some(mbx_err(
                 "mcp_outbox_send: `to_topic`/`to_room` are exclusive of `to_project`.",
@@ -310,7 +337,12 @@ impl McpServer {
 
         let to = match to_project_raw {
             Some(t) => t.to_string(),
-            None => return Some(mbx_err("mcp_outbox_send requires `to_project` (or `to_topic`/`to_room`).", "input_invalid")),
+            None => {
+                return Some(mbx_err(
+                    "mcp_outbox_send requires `to_project` (or `to_topic`/`to_room`).",
+                    "input_invalid",
+                ))
+            }
         };
 
         // REQ-AXO-902386 — the recipient must EXIST before we answer `delivered`.
@@ -358,7 +390,11 @@ impl McpServer {
                 ))
             }
         };
-        let subject = args.get("subject").and_then(Value::as_str).unwrap_or("").to_string();
+        let subject = args
+            .get("subject")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let body_dense = args
             .get("body_dense")
             .and_then(Value::as_str)
@@ -369,13 +405,20 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let kind = args.get("kind").and_then(Value::as_str).unwrap_or("message").to_string();
+        let kind = args
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("message")
+            .to_string();
         let priority = args
             .get("priority")
             .and_then(Value::as_str)
             .unwrap_or("normal")
             .to_string();
-        let ref_soll_ids = args.get("ref_soll_ids").cloned().unwrap_or_else(|| json!([]));
+        let ref_soll_ids = args
+            .get("ref_soll_ids")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
         let context_in = args.get("context_id").and_then(Value::as_str).unwrap_or("");
         // REQ-AXO-902304 — retention declared by the sender.
         let ttl_hours = args.get("ttl_hours").and_then(Value::as_i64);
@@ -554,7 +597,10 @@ impl McpServer {
             .or_else(|| self.auto_resolve_project_code_str())
             .unwrap_or_default();
         if project.is_empty() {
-            return Some(mbx_err("inbox project unresolved — pass `project`.", "input_invalid"));
+            return Some(mbx_err(
+                "inbox project unresolved — pass `project`.",
+                "input_invalid",
+            ));
         }
         // REQ-AXO-902287 (M1) — disclose when the project was inferred from the cwd
         // (no explicit `project=`), so a cross-project inbox read is never silently
@@ -563,7 +609,11 @@ impl McpServer {
             .get("project")
             .and_then(Value::as_str)
             .is_some_and(|s| !s.trim().is_empty());
-        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100);
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(20)
+            .clamp(1, 100);
         let mode = args.get("mode").and_then(Value::as_str).unwrap_or("unread");
         let since = args.get("since_id").and_then(Value::as_i64);
 
@@ -572,7 +622,10 @@ impl McpServer {
         // read cursor without advancing the cursor or returning message bodies.
         let is_peek = mode == "peek"
             || args.get("peek").and_then(Value::as_bool).unwrap_or(false)
-            || args.get("summary_only").and_then(Value::as_bool).unwrap_or(false);
+            || args
+                .get("summary_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
 
         let durable_cursor = self
             .graph_store
@@ -593,11 +646,17 @@ impl McpServer {
             } else if let Some(k) = kind_demande {
                 filters.push_str(&format!(" AND COALESCE(kind,'message') = '{}'", esc(k)));
             }
-            let thread = args.get("context_id").and_then(Value::as_str).filter(|s| !s.is_empty());
+            let thread = args
+                .get("context_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
             if let Some(t) = thread {
                 filters.push_str(&format!(" AND context_id = '{}'", esc(t)));
             }
-            let search = args.get("search").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+            let search = args
+                .get("search")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty());
             if let Some(q) = search {
                 filters.push_str(&format!(
                     " AND to_tsvector('simple', subject || ' ' || body_dense) @@ plainto_tsquery('simple', '{}')",
@@ -667,8 +726,14 @@ impl McpServer {
         // REQ-AXO-902116 (MBX-4) — searchable threads. `context_id` filters to one
         // thread; `search` is FTS over subject+body. Both are NON-DESTRUCTIVE views
         // across the whole inbox (ignore the cursor, never advance it).
-        let thread = args.get("context_id").and_then(Value::as_str).filter(|s| !s.is_empty());
-        let search = args.get("search").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+        let thread = args
+            .get("context_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let search = args
+            .get("search")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty());
         let view_only = thread.is_some() || search.is_some();
 
         let floor = if view_only || mode == "all" {
@@ -815,8 +880,9 @@ impl McpServer {
             max_id = max_id.max(id);
             let (message_id, context_id, from, kind, idem, irt, subject, body, sig) =
                 (g(1), g(2), g(3), g(4), g(5), g(6), g(7), g(8), g(9));
-            let canonical =
-                mailbox::canonical(from, &project, context_id, message_id, kind, idem, irt, subject, body);
+            let canonical = mailbox::canonical(
+                from, &project, context_id, message_id, kind, idem, irt, subject, body,
+            );
             let verified = self.mailbox_verify(from, &canonical, sig);
             let notif_s = g(12);
             let read_s = g(13);
@@ -845,7 +911,11 @@ impl McpServer {
             // count-only text reads as "messages sans corps" even on a successful read.
             // The explicit pull is where the content is meant to land.
             let sig_mark = if verified { "✓" } else { "✗ sig" };
-            let reply = if irt.is_empty() { String::new() } else { format!(" ↩ {irt}") };
+            let reply = if irt.is_empty() {
+                String::new()
+            } else {
+                format!(" ↩ {irt}")
+            };
             // REQ-AXO-902413 — la priorité dans le TEXTE aussi : le tri se fait
             // dessus, donc un lecteur qui ne la voit pas ne comprend pas l'ordre
             // qu'on lui sert.
@@ -1292,8 +1362,13 @@ impl McpServer {
                 .map(|s| {
                     matches!(
                         s,
-                        "input_invalid" | "input_not_found" | "wrong_project_scope"
-                            | "degraded" | "error" | "rejected_all" | "writer_failed"
+                        "input_invalid"
+                            | "input_not_found"
+                            | "wrong_project_scope"
+                            | "degraded"
+                            | "error"
+                            | "rejected_all"
+                            | "writer_failed"
                     )
                 })
                 .unwrap_or(false);
@@ -1322,9 +1397,8 @@ impl McpServer {
                 .get("unread")
                 .and_then(Value::as_i64)
                 .unwrap_or_default();
-            let carte = DERNIER_COMPTE.get_or_init(|| {
-                std::sync::Mutex::new(std::collections::HashMap::new())
-            });
+            let carte = DERNIER_COMPTE
+                .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
             let mut carte = match carte.lock() {
                 Ok(c) => c,
                 // Un mutex empoisonné ne doit pas TAIRE le bandeau : il échouerait
@@ -1338,7 +1412,10 @@ impl McpServer {
                 }
             }
         }
-        let line = banner.get("banner").and_then(Value::as_str).map(str::to_string);
+        let line = banner
+            .get("banner")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         if let Some(obj) = response.as_object_mut() {
             // Structured channel.
             match obj.get_mut("data").and_then(Value::as_object_mut) {
@@ -1373,7 +1450,10 @@ impl McpServer {
     /// just drop out of the live inbox view). Idempotent: a second call within
     /// the same window archives nothing. Returns the count swept this pass.
     pub(crate) fn axon_mailbox_sweep(&self, _args: &Value) -> Option<Value> {
-        let rows: Vec<Vec<Value>> = match self.graph_store.query_json_writer("SELECT axon.mailbox_sweep()") {
+        let rows: Vec<Vec<Value>> = match self
+            .graph_store
+            .query_json_writer("SELECT axon.mailbox_sweep()")
+        {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(e) => return Some(mbx_err(&format!("mailbox sweep failed: {e}"), "degraded")),
         };
@@ -1382,9 +1462,8 @@ impl McpServer {
             .and_then(|r| r.first())
             .map(entier_json)
             .unwrap_or(0);
-        let report = format!(
-            "### 🧹 mailbox_sweep\n\n{swept} expired message(s) archived (ttl_at < now)."
-        );
+        let report =
+            format!("### 🧹 mailbox_sweep\n\n{swept} expired message(s) archived (ttl_at < now).");
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -1419,7 +1498,10 @@ impl McpServer {
             .or_else(|| self.auto_resolve_project_code_str())
             .unwrap_or_default();
         if project.is_empty() {
-            return Some(mbx_err("inbox project unresolved — pass `project`.", "input_invalid"));
+            return Some(mbx_err(
+                "inbox project unresolved — pass `project`.",
+                "input_invalid",
+            ));
         }
 
         // Accept a bare integer as well as an array: a caller archiving ONE message
@@ -1459,9 +1541,17 @@ impl McpServer {
             .map(entier_json)
             .filter(|id| *id > 0)
             .collect();
-        let foreign: Vec<i64> = ids.iter().copied().filter(|i| !owned_ids.contains(i)).collect();
+        let foreign: Vec<i64> = ids
+            .iter()
+            .copied()
+            .filter(|i| !owned_ids.contains(i))
+            .collect();
         if !foreign.is_empty() {
-            let listed = foreign.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+            let listed = foreign
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             return Some(mbx_err(
                 &format!(
                     "these ids are not in `{project}`'s inbox (unknown, or addressed to another \
@@ -1522,7 +1612,10 @@ impl McpServer {
             .or_else(|| self.auto_resolve_project_code_str())
             .unwrap_or_default();
         if project.is_empty() {
-            return Some(mbx_err("inbox project unresolved — pass `project`.", "input_invalid"));
+            return Some(mbx_err(
+                "inbox project unresolved — pass `project`.",
+                "input_invalid",
+            ));
         }
 
         let raw = args.get("message_ids").or_else(|| args.get("ids"));
@@ -1558,7 +1651,9 @@ impl McpServer {
                 p = esc(&project)
             )) {
                 Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-                Err(e) => return Some(mbx_err(&format!("inbox ack query failed: {e}"), "degraded")),
+                Err(e) => {
+                    return Some(mbx_err(&format!("inbox ack query failed: {e}"), "degraded"))
+                }
             };
             let owned_ids: Vec<i64> = owned
                 .iter()
@@ -1566,9 +1661,17 @@ impl McpServer {
                 .map(entier_json)
                 .filter(|id| *id > 0)
                 .collect();
-            let foreign: Vec<i64> = ids.iter().copied().filter(|i| !owned_ids.contains(i)).collect();
+            let foreign: Vec<i64> = ids
+                .iter()
+                .copied()
+                .filter(|i| !owned_ids.contains(i))
+                .collect();
             if !foreign.is_empty() {
-                let listed = foreign.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+                let listed = foreign
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 return Some(mbx_err(
                     &format!(
                         "these ids are not in `{project}`'s inbox (unknown, or addressed to another \
@@ -1608,7 +1711,10 @@ impl McpServer {
                  read_at = COALESCE(read_at, now()) \
              WHERE {where_clause}"
         )) {
-            return Some(mbx_err(&format!("inbox ack update failed: {e}"), "degraded"));
+            return Some(mbx_err(
+                &format!("inbox ack update failed: {e}"),
+                "degraded",
+            ));
         }
 
         let count = matched_ids.len();
@@ -1716,7 +1822,11 @@ impl McpServer {
             return true;
         }
         if is_stored {
-            return mailbox::verify_with_token(&mailbox::derived_project_token(from), canonical, sig);
+            return mailbox::verify_with_token(
+                &mailbox::derived_project_token(from),
+                canonical,
+                sig,
+            );
         }
         false
     }
@@ -1803,19 +1913,31 @@ mod req_902386_recipient_validation_tests {
 
     #[test]
     fn case_alone_resolves() {
-        assert_eq!(nearest_project_code("axo", &registry()), Some("AXO".to_string()));
-        assert_eq!(nearest_project_code("Vpc", &registry()), Some("VPC".to_string()));
+        assert_eq!(
+            nearest_project_code("axo", &registry()),
+            Some("AXO".to_string())
+        );
+        assert_eq!(
+            nearest_project_code("Vpc", &registry()),
+            Some("VPC".to_string())
+        );
     }
 
     #[test]
     fn a_truncated_code_resolves() {
         // L'autre sens du préfixe : `AX` est le début de `AXO`.
-        assert_eq!(nearest_project_code("AX", &registry()), Some("AXO".to_string()));
+        assert_eq!(
+            nearest_project_code("AX", &registry()),
+            Some("AXO".to_string())
+        );
     }
 
     #[test]
     fn one_substituted_character_resolves() {
-        assert_eq!(nearest_project_code("AXQ", &registry()), Some("AXO".to_string()));
+        assert_eq!(
+            nearest_project_code("AXQ", &registry()),
+            Some("AXO".to_string())
+        );
     }
 
     #[test]
@@ -1833,7 +1955,10 @@ mod req_902386_recipient_validation_tests {
         // Un code valide n'atteint jamais cette fonction en production (l'appelant
         // vérifie l'appartenance d'abord), mais la fonction doit rester correcte
         // isolément — elle est publique dans le module et testable seule.
-        assert_eq!(nearest_project_code("NEX", &registry()), Some("NEX".to_string()));
+        assert_eq!(
+            nearest_project_code("NEX", &registry()),
+            Some("NEX".to_string())
+        );
     }
 
     #[test]
@@ -1865,13 +1990,19 @@ mod tests_validation_outbox {
         }))
         .expect("un appel à trois défauts doit être refusé");
 
-        assert!(msg.contains("`to`"), "le destinataire fautif n'est pas nommé : {msg}");
+        assert!(
+            msg.contains("`to`"),
+            "le destinataire fautif n'est pas nommé : {msg}"
+        );
         assert!(
             msg.contains("to_project"),
             "le voisin de `to` n'est pas proposé — la correction reste à deviner : {msg}"
         );
         assert!(msg.contains("`body`"), "`body` ignoré en silence : {msg}");
-        assert!(msg.contains("body_dense"), "le voisin de `body` manque : {msg}");
+        assert!(
+            msg.contains("body_dense"),
+            "le voisin de `body` manque : {msg}"
+        );
         assert!(
             msg.contains("idempotency_key"),
             "le manquement requis n'est pas signalé dans le MÊME refus : {msg}"

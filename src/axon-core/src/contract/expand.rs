@@ -53,7 +53,10 @@ pub fn derive_postconditions(test_names: &[&str]) -> Vec<PostCondition> {
         let lower = name.to_ascii_lowercase();
         let tag = if lower.contains("normaliz") {
             "normalized"
-        } else if lower.contains("non_numeric") || lower.contains("skip") || lower.contains("invalid") {
+        } else if lower.contains("non_numeric")
+            || lower.contains("skip")
+            || lower.contains("invalid")
+        {
             "filters_invalid"
         } else if lower.contains("default") {
             "default_fallback"

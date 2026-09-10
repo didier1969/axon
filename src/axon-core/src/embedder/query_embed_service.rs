@@ -209,7 +209,9 @@ fn supervise(kind: QueryWorkerSupervisorKind, requests: Receiver<QueryEmbeddingR
         }
 
         if Instant::now() >= request.deadline {
-            tracing::warn!("query embedding request expired in queue before dispatch; skipping inference");
+            tracing::warn!(
+                "query embedding request expired in queue before dispatch; skipping inference"
+            );
             let _ = request.reply.send(Err(anyhow!(
                 "MCP real-time embedding request expired in queue. Use structural search."
             )));
@@ -808,7 +810,9 @@ mod tests {
 
         assert_ne!(primary.socket_path(), fallback.socket_path());
         assert!(primary.socket_path().ends_with("query-embed.sock"));
-        assert!(fallback.socket_path().ends_with("query-embed-cpu-fallback.sock"));
+        assert!(fallback
+            .socket_path()
+            .ends_with("query-embed-cpu-fallback.sock"));
 
         assert_eq!(fallback.provider(), "cpu");
         assert_eq!(primary.thread_name(), "axon-query-supervisor");
@@ -871,7 +875,10 @@ mod tests {
             faux_predicat(&["/w/target/debug/axon-query-embed-worker"]),
         )
         .expect("le parent de deps/ doit être retenu");
-        assert_eq!(resolved, PathBuf::from("/w/target/debug/axon-query-embed-worker"));
+        assert_eq!(
+            resolved,
+            PathBuf::from("/w/target/debug/axon-query-embed-worker")
+        );
     }
 
     #[test]

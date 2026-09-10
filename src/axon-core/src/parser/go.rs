@@ -454,7 +454,9 @@ mod tests {
         }
         let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("1")
         );
     }
@@ -486,7 +488,9 @@ mod tests {
         }
         let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("5"),
             "props: {:?}",
             f.properties
@@ -512,7 +516,9 @@ mod tests {
         }
         let m = result.symbols.iter().find(|s| s.name == "M").unwrap();
         assert_eq!(
-            m.properties.get("cyclomatic_complexity").map(String::as_str),
+            m.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("2")
         );
     }

@@ -368,7 +368,9 @@ mod tests {
         // - IndexedFile must be gone
         assert_eq!(
             store
-                .query_count(&format!("SELECT count(*) FROM ist.IndexedFile WHERE path = '{path}'"))
+                .query_count(&format!(
+                    "SELECT count(*) FROM ist.IndexedFile WHERE path = '{path}'"
+                ))
                 .unwrap(),
             0,
             "IndexedFile must be purged"
@@ -386,7 +388,9 @@ mod tests {
         // - Chunks must be gone
         assert_eq!(
             store
-                .query_count(&format!("SELECT count(*) FROM ist.Chunk WHERE file_path = '{path}'"))
+                .query_count(&format!(
+                    "SELECT count(*) FROM ist.Chunk WHERE file_path = '{path}'"
+                ))
                 .unwrap(),
             0,
             "Chunks must be purged"
@@ -420,21 +424,16 @@ mod tests {
         let path = "/tmp/empty_manifest.json";
 
         store
-            .upsert_graph_batch(
-                &[parsed_file(
-                    path,
-                    "{}",
-                    vec![],
-                )],
-                "AXO",
-            )
+            .upsert_graph_batch(&[parsed_file(path, "{}", vec![])], "AXO")
             .unwrap();
 
         store.delete_file_cascade(path).unwrap();
 
         assert_eq!(
             store
-                .query_count(&format!("SELECT count(*) FROM ist.IndexedFile WHERE path = '{path}'"))
+                .query_count(&format!(
+                    "SELECT count(*) FROM ist.IndexedFile WHERE path = '{path}'"
+                ))
                 .unwrap(),
             0,
             "IndexedFile must be purged for empty/data file"
@@ -474,8 +473,14 @@ mod tests {
             .unwrap();
 
         let (stale, legitimate) = store.audit_stale_edge_residues(Some("AXO")).unwrap();
-        assert_eq!(stale, 1, "Expected 1 stale residue for deleted examples/ghost.rs");
-        assert_eq!(legitimate, 1, "Expected 1 legitimate unindexed call in existing src/alive.rs");
+        assert_eq!(
+            stale, 1,
+            "Expected 1 stale residue for deleted examples/ghost.rs"
+        );
+        assert_eq!(
+            legitimate, 1,
+            "Expected 1 legitimate unindexed call in existing src/alive.rs"
+        );
 
         // Prune the residues
         let purged = store.prune_stale_edge_residues(Some("AXO")).unwrap();
@@ -484,7 +489,9 @@ mod tests {
         // Re-audit to verify clean state
         let (stale_after, legitimate_after) = store.audit_stale_edge_residues(Some("AXO")).unwrap();
         assert_eq!(stale_after, 0, "No stale residues should remain");
-        assert_eq!(legitimate_after, 1, "Legitimate unindexed call must be preserved intact");
+        assert_eq!(
+            legitimate_after, 1,
+            "Legitimate unindexed call must be preserved intact"
+        );
     }
 }
-

@@ -137,17 +137,18 @@ pub(super) fn render_mermaid_graph(
                     macro_nodes.push(node);
                 }
             }
-            let push_subgraph = |graph: &mut String, sg_id: &str, title: &str, bucket: &[&SollDocNode]| {
-                if bucket.is_empty() {
-                    return;
-                }
-                graph.push_str(&format!("  subgraph {}[\"{}\"]\n", sg_id, title));
-                graph.push_str("    direction TB\n");
-                for node in bucket {
-                    graph.push_str(&mermaid_node_decl("    ", node, &mermaid_ids));
-                }
-                graph.push_str("  end\n");
-            };
+            let push_subgraph =
+                |graph: &mut String, sg_id: &str, title: &str, bucket: &[&SollDocNode]| {
+                    if bucket.is_empty() {
+                        return;
+                    }
+                    graph.push_str(&format!("  subgraph {}[\"{}\"]\n", sg_id, title));
+                    graph.push_str("    direction TB\n");
+                    for node in bucket {
+                        graph.push_str(&mermaid_node_decl("    ", node, &mermaid_ids));
+                    }
+                    graph.push_str("  end\n");
+                };
             push_subgraph(&mut graph, "sgMacro", "▲ Macro · niveau −1", &macro_nodes);
             push_subgraph(&mut graph, "sgFocus", "● Focus", &focus_nodes);
             push_subgraph(&mut graph, "sgMicro", "▼ Micro · niveau +1", &micro_nodes);
@@ -797,10 +798,22 @@ mod tests {
     #[test]
     fn render_autodoc_preview() {
         let nodes = vec![
-            node("MIL-AXO-040", "Milestone", "Complétude indexeur : call-graph complet"),
+            node(
+                "MIL-AXO-040",
+                "Milestone",
+                "Complétude indexeur : call-graph complet",
+            ),
             node("DEC-AXO-060", "Decision", "4 verbes canoniques runtime"),
-            node("REQ-AXO-100", "Requirement", "Hierarchy Focus macro→micro layout"),
-            node("REQ-AXO-101", "Requirement", "Toggle tree/graph/detail symétrique"),
+            node(
+                "REQ-AXO-100",
+                "Requirement",
+                "Hierarchy Focus macro→micro layout",
+            ),
+            node(
+                "REQ-AXO-101",
+                "Requirement",
+                "Toggle tree/graph/detail symétrique",
+            ),
             node("REQ-AXO-102", "Requirement", "Subgraph LR colonnes"),
             node("REQ-AXO-103", "Requirement", "Click-through mermaid nodes"),
             node("CPT-AXO-054", "Concept", "Streaming pipeline v2"),

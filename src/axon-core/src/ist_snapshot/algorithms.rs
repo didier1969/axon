@@ -742,8 +742,11 @@ pub fn dead_clusters(graph: &IstGraph, roots: &[u32], candidates: &[u32]) -> Dea
     // file — disconnected from every real `XParser::parse`). A phantom has
     // no CONTAINS reverse-edge (nothing declares/owns it); every real
     // declared symbol does.
-    let is_phantom =
-        |idx: u32| -> bool { !graph.reverse_neighbors(idx).any(|(_, rel)| rel == RelationType::Contains) };
+    let is_phantom = |idx: u32| -> bool {
+        !graph
+            .reverse_neighbors(idx)
+            .any(|(_, rel)| rel == RelationType::Contains)
+    };
     // A method carries NO direct edge to its own struct in this IST (verified
     // empirically: the FILE contains both the struct and every one of its
     // methods as flat siblings — `impl Foo { fn parse(...) }` produces no
@@ -846,8 +849,11 @@ pub fn dead_clusters(graph: &IstGraph, roots: &[u32], candidates: &[u32]) -> Dea
     // `wiring_coverage` collapse to 0 on a perfectly-wired project, i.e. report the
     // WORST possible coverage exactly when it is best.
     let candidate_set: HashSet<u32> = candidates.iter().copied().collect();
-    let reached_candidates: Vec<u32> =
-        candidates.iter().copied().filter(|c| reached.contains(c)).collect();
+    let reached_candidates: Vec<u32> = candidates
+        .iter()
+        .copied()
+        .filter(|c| reached.contains(c))
+        .collect();
     let mut root_ids: Vec<String> = roots.iter().map(|&r| graph.id_of(r).to_string()).collect();
     root_ids.sort();
     root_ids.dedup();
@@ -1203,9 +1209,9 @@ mod tests {
                     .expect("membre présent dans le graphe");
                 let has_incoming = (0..graph.node_count() as u32).any(|src| {
                     members.contains(&graph.id_of(src).to_string())
-                        && graph.forward_neighbors(src).any(|(tgt, rel)| {
-                            tgt == idx && is_dependency_relation(rel)
-                        })
+                        && graph
+                            .forward_neighbors(src)
+                            .any(|(tgt, rel)| tgt == idx && is_dependency_relation(rel))
                 });
                 assert!(
                     has_incoming,
@@ -1251,7 +1257,13 @@ mod tests {
         const DEPTH: usize = 60_000;
         let nodes: Vec<_> = (0..DEPTH).map(|i| n(&format!("c{i}"))).collect();
         let edges: Vec<_> = (0..DEPTH - 1)
-            .map(|i| e(&format!("c{i}"), &format!("c{}", i + 1), RelationType::Calls))
+            .map(|i| {
+                e(
+                    &format!("c{i}"),
+                    &format!("c{}", i + 1),
+                    RelationType::Calls,
+                )
+            })
             .collect();
         let g = IstGraph::build(nodes, edges);
         assert!(
@@ -1267,7 +1279,13 @@ mod tests {
         const SIZE: usize = 5_000;
         let nodes: Vec<_> = (0..SIZE).map(|i| n(&format!("k{i}"))).collect();
         let mut edges: Vec<_> = (0..SIZE - 1)
-            .map(|i| e(&format!("k{i}"), &format!("k{}", i + 1), RelationType::Calls))
+            .map(|i| {
+                e(
+                    &format!("k{i}"),
+                    &format!("k{}", i + 1),
+                    RelationType::Calls,
+                )
+            })
             .collect();
         edges.push(e(&format!("k{}", SIZE - 1), "k0", RelationType::Calls));
         let g = IstGraph::build(nodes, edges);
@@ -1504,7 +1522,8 @@ mod tests {
     // ── REQ-AXO-902211 — dead_clusters ──────────────────────────
 
     fn idx(g: &IstGraph, id: &str) -> u32 {
-        g.index_of(id).unwrap_or_else(|| panic!("missing node {id}"))
+        g.index_of(id)
+            .unwrap_or_else(|| panic!("missing node {id}"))
     }
 
     #[test]
@@ -1529,7 +1548,10 @@ mod tests {
         let result = dead_clusters(&g, &roots, &candidates);
         assert_eq!(result.unreached_count, 2);
         assert_eq!(result.clusters.len(), 1);
-        assert_eq!(result.clusters[0], vec!["dead_a".to_string(), "dead_b".to_string()]);
+        assert_eq!(
+            result.clusters[0],
+            vec!["dead_a".to_string(), "dead_b".to_string()]
+        );
     }
 
     #[test]
@@ -1596,7 +1618,10 @@ mod tests {
         // DeadClusters::default()` when nothing was unreached, which would zero the new
         // fields and make coverage read 0% exactly when the project is PERFECTLY wired.
         let nodes = vec![n("main"), n("a"), n("b")];
-        let edges = vec![e("main", "a", RelationType::Calls), e("a", "b", RelationType::Calls)];
+        let edges = vec![
+            e("main", "a", RelationType::Calls),
+            e("a", "b", RelationType::Calls),
+        ];
         let g = IstGraph::build(nodes, edges);
         let roots = vec![idx(&g, "main")];
         let candidates = vec![idx(&g, "main"), idx(&g, "a"), idx(&g, "b")];
@@ -1604,7 +1629,10 @@ mod tests {
         assert_eq!(r.unreached_count, 0);
         assert_eq!(r.candidates_count, 3);
         assert_eq!(r.reached_count, 3);
-        assert!((r.wiring_coverage() - 1.0).abs() < f64::EPSILON, "fully wired must be 100%");
+        assert!(
+            (r.wiring_coverage() - 1.0).abs() < f64::EPSILON,
+            "fully wired must be 100%"
+        );
         assert_eq!(r.roots, vec!["main".to_string()]);
         // `b` calls nothing → the only leaf. `main` and `a` both call a candidate.
         assert_eq!(r.leaves, vec!["b".to_string()]);
@@ -1621,8 +1649,7 @@ mod tests {
         ];
         let g = IstGraph::build(nodes, edges);
         let roots = vec![idx(&g, "main")];
-        let candidates =
-            vec![idx(&g, "main"), idx(&g, "a"), idx(&g, "d1"), idx(&g, "d2")];
+        let candidates = vec![idx(&g, "main"), idx(&g, "a"), idx(&g, "d1"), idx(&g, "d2")];
         let r = dead_clusters(&g, &roots, &candidates);
         assert_eq!(r.candidates_count, 4);
         assert_eq!(r.reached_count, 2, "only main + a are reachable");

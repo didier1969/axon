@@ -648,7 +648,11 @@ mod tests {
         let declarees = overriding_keys(&table("[indexing]\nuse_git_global_ignore = false\n"));
         assert_eq!(declarees.len(), 1, "{declarees:?}");
         assert_eq!(declarees[0].key, "use_git_global_ignore");
-        assert_eq!(declarees[0].scalar.as_deref(), Some("false"), "{declarees:?}");
+        assert_eq!(
+            declarees[0].scalar.as_deref(),
+            Some("false"),
+            "{declarees:?}"
+        );
     }
 
     #[test]
@@ -663,7 +667,10 @@ mod tests {
     fn la_peremption_dit_NON_quand_le_fichier_n_a_pas_bouge() {
         // Les deux moities comptent. Une garde qui crierait toujours serait
         // ignoree en une semaine, et le signal du 2026-09-07 serait reperdu.
-        assert!(staleness_from("/x", 1_000, 1_000).is_none(), "mtime == loaded");
+        assert!(
+            staleness_from("/x", 1_000, 1_000).is_none(),
+            "mtime == loaded"
+        );
         assert!(staleness_from("/x", 999, 1_000).is_none(), "mtime < loaded");
     }
 
@@ -686,5 +693,4 @@ mod tests {
             }
         }
     }
-
 }

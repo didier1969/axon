@@ -149,11 +149,7 @@ static SECRET_PATTERNS: Lazy<Vec<(&'static str, regex::Regex)>> = Lazy::new(|| {
         ),
     ];
     raw.iter()
-        .filter_map(|(kind, pattern)| {
-            regex::Regex::new(pattern)
-                .ok()
-                .map(|re| (*kind, re))
-        })
+        .filter_map(|(kind, pattern)| regex::Regex::new(pattern).ok().map(|re| (*kind, re)))
         .collect()
 });
 
@@ -168,9 +164,7 @@ pub fn scan_secrets(content: &str) -> Vec<SecurityFinding> {
             {
                 continue;
             }
-            let line_start = content[..mat.start()]
-                .rfind('\n')
-                .map_or(0, |idx| idx + 1);
+            let line_start = content[..mat.start()].rfind('\n').map_or(0, |idx| idx + 1);
             let line_end = content[mat.end()..]
                 .find('\n')
                 .map_or(content.len(), |idx| mat.end() + idx);
@@ -296,8 +290,8 @@ pub fn supported_parser_ecosystems() -> &'static [EcosystemId] {
 pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "py", "ex", "exs", "rs", "scm", "ss", "sld", "sls", "ts", "tsx", "js", "jsx", "go", "java",
     "c", "h", "cpp", "hpp", "cc", "cxx", "hxx", "cs", "rb", "ruby", "kt", "kts", "php", "yaml",
-    "yml", "html", "htm", "css", "scss", "md", "markdown", "sql", "tql", "typeql", "dl",
-    "datalog", "lll", "txt", "conf", "ini",
+    "yml", "html", "htm", "css", "scss", "md", "markdown", "sql", "tql", "typeql", "dl", "datalog",
+    "lll", "txt", "conf", "ini",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
@@ -351,7 +345,11 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
 /// language to `true` the day its coverage extraction lands — ONE edit, here, beside the
 /// parser dispatch it pairs with (no scattered `== ".rs"`, no parallel language list).
 pub fn language_has_coverage_model(module_id: &str) -> bool {
-    let ext = module_id.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    let ext = module_id
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     matches!(ext.as_str(), "rs")
 }
 
@@ -362,10 +360,12 @@ mod coverage_capability_tests {
     #[test]
     fn only_rust_carries_a_coverage_model_today() {
         // REQ-AXO-902214 — Rust propagates #[test] → covered; nothing else does (yet).
-        assert!(language_has_coverage_model("AXO::src::axon-core::src::mailbox.rs"));
+        assert!(language_has_coverage_model(
+            "AXO::src::axon-core::src::mailbox.rs"
+        ));
         assert!(language_has_coverage_model("AXO::a::b::snapshot.rs")); // module id form
-        // Languages Axon PARSES but has no coverage extraction for → false (the capability is
-        // a DIFFERENT question from parser existence; see get_parser_for_file).
+                                                                        // Languages Axon PARSES but has no coverage extraction for → false (the capability is
+                                                                        // a DIFFERENT question from parser existence; see get_parser_for_file).
         assert!(!language_has_coverage_model("AXO::x::runtime_contracts.py"));
         assert!(!language_has_coverage_model("LLL::x::foo.lll"));
         assert!(!language_has_coverage_model("NEX::lib::app_web::page.ex"));

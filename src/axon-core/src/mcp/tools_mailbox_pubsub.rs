@@ -24,7 +24,12 @@ impl McpServer {
     pub(crate) fn axon_mailbox_topic_subscribe(&self, args: &Value) -> Option<Value> {
         let topic = match args.get("topic").and_then(Value::as_str) {
             Some(t) if !t.trim().is_empty() => t.trim().to_string(),
-            _ => return Some(mbx_err("mailbox_topic_subscribe requires `topic`.", "input_invalid")),
+            _ => {
+                return Some(mbx_err(
+                    "mailbox_topic_subscribe requires `topic`.",
+                    "input_invalid",
+                ))
+            }
         };
         let project = match self.pubsub_resolve_project(args) {
             Ok(p) => p,
@@ -41,7 +46,8 @@ impl McpServer {
         if let Err(e) = self.graph_store.execute(&sql) {
             return Some(mbx_err(&format!("topic subscribe failed: {e}"), "degraded"));
         }
-        let report = format!("### 📡 mailbox_topic_subscribe\n\n`{project}` subscribed to topic `{topic}`");
+        let report =
+            format!("### 📡 mailbox_topic_subscribe\n\n`{project}` subscribed to topic `{topic}`");
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": { "status": "ok", "topic": topic, "project": project }
@@ -53,7 +59,12 @@ impl McpServer {
     pub(crate) fn axon_mailbox_topic_unsubscribe(&self, args: &Value) -> Option<Value> {
         let topic = match args.get("topic").and_then(Value::as_str) {
             Some(t) if !t.trim().is_empty() => t.trim().to_string(),
-            _ => return Some(mbx_err("mailbox_topic_unsubscribe requires `topic`.", "input_invalid")),
+            _ => {
+                return Some(mbx_err(
+                    "mailbox_topic_unsubscribe requires `topic`.",
+                    "input_invalid",
+                ))
+            }
         };
         let project = match self.pubsub_resolve_project(args) {
             Ok(p) => p,
@@ -65,9 +76,14 @@ impl McpServer {
             p = esc(&project),
         );
         if let Err(e) = self.graph_store.execute(&sql) {
-            return Some(mbx_err(&format!("topic unsubscribe failed: {e}"), "degraded"));
+            return Some(mbx_err(
+                &format!("topic unsubscribe failed: {e}"),
+                "degraded",
+            ));
         }
-        let report = format!("### 📡 mailbox_topic_unsubscribe\n\n`{project}` unsubscribed from topic `{topic}`");
+        let report = format!(
+            "### 📡 mailbox_topic_unsubscribe\n\n`{project}` unsubscribed from topic `{topic}`"
+        );
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": { "status": "ok", "topic": topic, "project": project }
@@ -80,7 +96,12 @@ impl McpServer {
     pub(crate) fn axon_mailbox_room_create(&self, args: &Value) -> Option<Value> {
         let room_id = match args.get("room_id").and_then(Value::as_str) {
             Some(r) if !r.trim().is_empty() => r.trim().to_string(),
-            _ => return Some(mbx_err("mailbox_room_create requires `room_id`.", "input_invalid")),
+            _ => {
+                return Some(mbx_err(
+                    "mailbox_room_create requires `room_id`.",
+                    "input_invalid",
+                ))
+            }
         };
         let creator = match self.pubsub_resolve_project(args) {
             Ok(p) => p,
@@ -134,7 +155,12 @@ impl McpServer {
     pub(crate) fn axon_mailbox_room_join(&self, args: &Value) -> Option<Value> {
         let room_id = match args.get("room_id").and_then(Value::as_str) {
             Some(r) if !r.trim().is_empty() => r.trim().to_string(),
-            _ => return Some(mbx_err("mailbox_room_join requires `room_id`.", "input_invalid")),
+            _ => {
+                return Some(mbx_err(
+                    "mailbox_room_join requires `room_id`.",
+                    "input_invalid",
+                ))
+            }
         };
         let project = match self.pubsub_resolve_project(args) {
             Ok(p) => p,
@@ -195,12 +221,35 @@ impl McpServer {
                 ))
             }
         };
-        let subject = args.get("subject").and_then(Value::as_str).unwrap_or("").to_string();
-        let body_dense = args.get("body_dense").and_then(Value::as_str).unwrap_or("").to_string();
-        let in_reply_to = args.get("in_reply_to").and_then(Value::as_str).unwrap_or("").to_string();
-        let kind = args.get("kind").and_then(Value::as_str).unwrap_or("message").to_string();
-        let priority = args.get("priority").and_then(Value::as_str).unwrap_or("normal").to_string();
-        let ref_soll_ids = args.get("ref_soll_ids").cloned().unwrap_or_else(|| json!([]));
+        let subject = args
+            .get("subject")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let body_dense = args
+            .get("body_dense")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let in_reply_to = args
+            .get("in_reply_to")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let kind = args
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("message")
+            .to_string();
+        let priority = args
+            .get("priority")
+            .and_then(Value::as_str)
+            .unwrap_or("normal")
+            .to_string();
+        let ref_soll_ids = args
+            .get("ref_soll_ids")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
         // REQ-AXO-902304 — the fan-out path is where retention matters MOST: one
         // send lands in every registered project. 8217 promote broadcasts had piled
         // up here, 118 per project, none of them ever purgeable.
@@ -230,7 +279,12 @@ impl McpServer {
                     String::new(),
                     String::new(),
                 ),
-                _ => return Some(mbx_err("mcp_outbox_send: no fan-out target resolved.", "input_invalid")),
+                _ => {
+                    return Some(mbx_err(
+                        "mcp_outbox_send: no fan-out target resolved.",
+                        "input_invalid",
+                    ))
+                }
             };
 
         // Exclude the sender from its own broadcast; dedup recipients.
@@ -277,7 +331,12 @@ impl McpServer {
                         "deduped": s.deduped,
                     }));
                 }
-                Err(e) => return Some(mbx_err(&format!("fan-out send to `{to}` failed: {e}"), "degraded")),
+                Err(e) => {
+                    return Some(mbx_err(
+                        &format!("fan-out send to `{to}` failed: {e}"),
+                        "degraded",
+                    ))
+                }
             }
         }
 
@@ -349,7 +408,10 @@ impl McpServer {
     /// Run a single-column `project_code` query and collect the codes (writer ctx,
     /// so freshly-written subscriptions/members are visible in the same call).
     fn pubsub_codes(&self, sql: &str) -> Vec<String> {
-        let raw = self.graph_store.query_json_writer(sql).unwrap_or_else(|_| "[]".to_string());
+        let raw = self
+            .graph_store
+            .query_json_writer(sql)
+            .unwrap_or_else(|_| "[]".to_string());
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         rows.into_iter()
             .filter_map(|r| r.into_iter().next())

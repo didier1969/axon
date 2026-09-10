@@ -543,7 +543,10 @@ pub(crate) fn validate_config_file_syntax(
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let clean_err = stderr.trim();
-                if clean_err.contains("YAMLError") || clean_err.contains("yaml.scanner") || clean_err.contains("yaml.parser") {
+                if clean_err.contains("YAMLError")
+                    || clean_err.contains("yaml.scanner")
+                    || clean_err.contains("yaml.parser")
+                {
                     return Some(serde_json::json!({
                         "rule": format!("ConfigSyntax - {}", rel_path),
                         "diagnostic": format!("Fichier de configuration YAML syntaxiquement invalide dans '{}': {}", rel_path, clean_err),
@@ -3658,7 +3661,8 @@ impl McpServer {
             .or_else(|| existing_name_by_path.clone())
             .unwrap_or_else(|| derived_name.clone());
 
-        let project_code = match self.assign_project_code_for_init(&preliminary_name, project_path) {
+        let project_code = match self.assign_project_code_for_init(&preliminary_name, project_path)
+        {
             Ok(code) => code,
             Err(e) => {
                 return Some(project_workflow_error(

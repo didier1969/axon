@@ -238,7 +238,10 @@ mod resolution_says_which_branch_it_took {
             "contrôle positif : sur un emplacement vide le bootstrap DOIT être \
              demandé, sinon l'assertion suivante ne mesure rien"
         );
-        assert_eq!(snapshot.state.vector_workers, 7, "la valeur fournie est retenue");
+        assert_eq!(
+            snapshot.state.vector_workers, 7,
+            "la valeur fournie est retenue"
+        );
         assert_eq!(snapshot.version, 1);
     }
 
@@ -295,6 +298,9 @@ mod resolution_says_which_branch_it_took {
             "le MEME appel, deux fois, ne fait pas la même chose — et c'est ce \
              que l'ancienne valeur de retour taisait"
         );
-        assert_eq!(second, third, "les deux héritages sont indiscernables entre eux");
+        assert_eq!(
+            second, third,
+            "les deux héritages sont indiscernables entre eux"
+        );
     }
 }

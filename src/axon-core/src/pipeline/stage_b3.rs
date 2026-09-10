@@ -198,8 +198,11 @@ pub fn spawn_b3_batched_worker(
                         // is safe to drop all chunk_ids from the pending
                         // set in one pass.
                         let state = embedder_state();
-                        let elapsed_us =
-                            group_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                        let elapsed_us = group_started
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX))
+                            as u64;
                         let per_item_us = elapsed_us / (group_len as u64).max(1);
                         for embedded in group_batch {
                             state.mark_embedded(&embedded.chunk_id);

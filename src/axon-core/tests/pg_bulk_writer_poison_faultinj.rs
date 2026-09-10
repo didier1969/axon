@@ -79,7 +79,7 @@ fn resilient_flush_isolates_fk_poison_chunk_instead_of_freezing() {
     let batch = PgBulkBatch {
         symbols: vec![sym(&format!("AXO::{TAG}::sym"))],
         chunks: vec![
-            chunk(&valid_chunk_id, &valid_path), // FK parent created below
+            chunk(&valid_chunk_id, &valid_path),  // FK parent created below
             chunk(&poison_chunk_id, &bogus_path), // FK parent MISSING → poison
         ],
         indexed_files: vec![(valid_path.clone(), format!("h-{TAG}"), 0, 0, 0)],
@@ -123,7 +123,10 @@ fn resilient_flush_isolates_fk_poison_chunk_instead_of_freezing() {
             .get(0);
 
         assert_eq!(valid_present, 1, "the clean chunk must land");
-        assert_eq!(poison_present, 0, "the FK-poison chunk must be isolated/dropped");
+        assert_eq!(
+            poison_present, 0,
+            "the FK-poison chunk must be isolated/dropped"
+        );
 
         // Cleanup — leave the dev DB as we found it.
         for id in [&valid_chunk_id, &poison_chunk_id] {
@@ -138,7 +141,10 @@ fn resilient_flush_isolates_fk_poison_chunk_instead_of_freezing() {
             )
             .await;
         let _ = client
-            .execute("DELETE FROM ist.indexedfile WHERE path = $1", &[&valid_path])
+            .execute(
+                "DELETE FROM ist.indexedfile WHERE path = $1",
+                &[&valid_path],
+            )
             .await;
     });
 }
@@ -197,26 +203,42 @@ fn resilient_flush_isolates_fk_poison_symbol_instead_of_freezing() {
             let _ = conn.await;
         });
         let valid_present: i64 = client
-            .query_one("SELECT count(*) FROM ist.symbol WHERE id = $1", &[&valid_sym])
+            .query_one(
+                "SELECT count(*) FROM ist.symbol WHERE id = $1",
+                &[&valid_sym],
+            )
             .await
             .unwrap()
             .get(0);
         let poison_present: i64 = client
-            .query_one("SELECT count(*) FROM ist.symbol WHERE id = $1", &[&poison_sym])
+            .query_one(
+                "SELECT count(*) FROM ist.symbol WHERE id = $1",
+                &[&poison_sym],
+            )
             .await
             .unwrap()
             .get(0);
         assert_eq!(valid_present, 1, "the clean symbol must land");
-        assert_eq!(poison_present, 0, "the FK-poison symbol must be isolated/dropped");
+        assert_eq!(
+            poison_present, 0,
+            "the FK-poison symbol must be isolated/dropped"
+        );
 
         // Cleanup.
         for id in [&valid_sym, &poison_sym] {
-            let _ = client.execute("DELETE FROM ist.symbol WHERE id = $1", &[id]).await;
+            let _ = client
+                .execute("DELETE FROM ist.symbol WHERE id = $1", &[id])
+                .await;
         }
         let _ = client
-            .execute("DELETE FROM ist.chunk WHERE id = $1", &[&format!("AXO::{tag}::chunk")])
+            .execute(
+                "DELETE FROM ist.chunk WHERE id = $1",
+                &[&format!("AXO::{tag}::chunk")],
+            )
             .await;
-        let _ = client.execute("DELETE FROM ist.indexedfile WHERE path = $1", &[&file]).await;
+        let _ = client
+            .execute("DELETE FROM ist.indexedfile WHERE path = $1", &[&file])
+            .await;
     });
 }
 
@@ -400,14 +422,26 @@ fn reindex_purges_stale_outbound_call_edge() {
         });
         for id in [&caller, &callee] {
             let _ = client
-                .execute("DELETE FROM ist.edge WHERE source_id=$1 OR target_id=$1", &[id])
+                .execute(
+                    "DELETE FROM ist.edge WHERE source_id=$1 OR target_id=$1",
+                    &[id],
+                )
                 .await;
-            let _ = client.execute("DELETE FROM ist.symbol WHERE id=$1", &[id]).await;
+            let _ = client
+                .execute("DELETE FROM ist.symbol WHERE id=$1", &[id])
+                .await;
         }
-        let _ = client.execute("DELETE FROM ist.edge WHERE source_id=$1", &[&file]).await;
         let _ = client
-            .execute("DELETE FROM ist.chunk WHERE id=$1", &[&format!("AXO::{tag}::chunk")])
+            .execute("DELETE FROM ist.edge WHERE source_id=$1", &[&file])
             .await;
-        let _ = client.execute("DELETE FROM ist.indexedfile WHERE path=$1", &[&file]).await;
+        let _ = client
+            .execute(
+                "DELETE FROM ist.chunk WHERE id=$1",
+                &[&format!("AXO::{tag}::chunk")],
+            )
+            .await;
+        let _ = client
+            .execute("DELETE FROM ist.indexedfile WHERE path=$1", &[&file])
+            .await;
     });
 }

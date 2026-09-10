@@ -27,7 +27,6 @@ use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-
 /// Wire-compatible enum for telemetry / MCP heartbeat. Numeric repr
 /// matches the underlying AtomicU8 so reads stay lock-free.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -97,7 +96,8 @@ impl EmbedderLifecycle {
     /// awake forever — that is the 901931 failure-mode reincarnated at the
     /// queue layer (advisor review, s101).
     pub fn mark_used(&self) {
-        self.last_used_ms.store(crate::clock::now_unix_ms(), Ordering::Release);
+        self.last_used_ms
+            .store(crate::clock::now_unix_ms(), Ordering::Release);
     }
 
     /// REQ-AXO-902220 — the ORT session was just rebuilt after an idle drop.
@@ -108,7 +108,8 @@ impl EmbedderLifecycle {
         self.phase
             .store(EmbedderPhase::Ready as u8, Ordering::Release);
         self.wake_count.fetch_add(1, Ordering::AcqRel);
-        self.last_used_ms.store(crate::clock::now_unix_ms(), Ordering::Release);
+        self.last_used_ms
+            .store(crate::clock::now_unix_ms(), Ordering::Release);
     }
 
     /// REQ-AXO-902220 — the ORT session was just dropped (VRAM released).

@@ -73,7 +73,9 @@ fn sources_du_crate() -> String {
     let mut out = String::new();
     let mut pile = vec![racine];
     while let Some(dir) = pile.pop() {
-        let Ok(entrees) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entrees) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entree in entrees.flatten() {
             let chemin = entree.path();
             if chemin.is_dir() {
@@ -109,7 +111,9 @@ fn proprietes_par_outil() -> Vec<(String, Vec<String>)> {
         return out;
     };
     for outil in outils {
-        let Some(nom) = outil.get("name").and_then(Value::as_str) else { continue };
+        let Some(nom) = outil.get("name").and_then(Value::as_str) else {
+            continue;
+        };
         // REQ-AXO-902583 (s146) — CHEMINS (`data.section`), pas clés plates : la
         // table déclare désormais des paramètres imbriqués, et les confronter à une
         // liste de premier niveau les ferait tous passer pour des fantômes.
@@ -221,7 +225,11 @@ fn la_couverture_des_dispositions_ne_REGRESSE_pas() {
     noms.sort_unstable();
     let avant = noms.len();
     noms.dedup();
-    assert_eq!(avant, noms.len(), "un outil est déclaré deux fois : {noms:?}");
+    assert_eq!(
+        avant,
+        noms.len(),
+        "un outil est déclaré deux fois : {noms:?}"
+    );
 }
 
 #[test]
@@ -311,7 +319,10 @@ fn half_life_days_est_INERTE_seulement_sous_include_decay_false() {
         &serde_json::json!({ "include_decay": false, "half_life_days": 14 }),
     );
     assert_eq!(
-        neutralise.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+        neutralise
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["half_life_days"],
         "`decay_factor_for_node` rend 1.0 dès la première ligne : la demi-vie est jetée"
     );
@@ -329,7 +340,10 @@ fn half_life_days_est_INERTE_seulement_sous_include_decay_false() {
         "soll_work_plan",
         &serde_json::json!({ "include_decay": true, "half_life_days": 14 }),
     );
-    assert!(explicite.is_empty(), "`include_decay=true` : idem : {explicite:?}");
+    assert!(
+        explicite.is_empty(),
+        "`include_decay=true` : idem : {explicite:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------
@@ -344,8 +358,9 @@ fn half_life_days_est_INERTE_seulement_sous_include_decay_false() {
 /// quatre tables réelles, et tous les tests ci-dessus resteraient verts.
 #[test]
 fn MUTANT_le_controle_sait_REFUSER_une_table_incomplete() {
-    use crate::mcp::tool_contracts::{ecart_de_couverture, ParameterDeclaration,
-                                     ParameterDisposition, ToolDispositions};
+    use crate::mcp::tool_contracts::{
+        ecart_de_couverture, ParameterDeclaration, ParameterDisposition, ToolDispositions,
+    };
 
     const LUE: &[ParameterDeclaration] = &[ParameterDeclaration {
         name: "question",
@@ -355,18 +370,30 @@ fn MUTANT_le_controle_sait_REFUSER_une_table_incomplete() {
 
     // La table RATE `top_k` : c'est exactement la dérive que 5c7218cd avait laissée
     // passer sur `retrieve_context` (3 déclarés sur 10 servis).
-    let incomplete = ToolDispositions { declared: LUE, unexamined: &[] };
+    let incomplete = ToolDispositions {
+        declared: LUE,
+        unexamined: &[],
+    };
     let ecart = ecart_de_couverture(&schema, &incomplete)
         .expect("une table qui rate une propriété DOIT être refusée");
-    assert!(ecart.contains("top_k"), "l'écart doit NOMMER ce qui manque : {ecart}");
+    assert!(
+        ecart.contains("top_k"),
+        "l'écart doit NOMMER ce qui manque : {ecart}"
+    );
 
     // La même table, complétée par un `unexamined` honnête, passe.
-    let complete = ToolDispositions { declared: LUE, unexamined: &["top_k"] };
+    let complete = ToolDispositions {
+        declared: LUE,
+        unexamined: &["top_k"],
+    };
     assert_eq!(ecart_de_couverture(&schema, &complete), None);
 
     // Et un paramètre déclaré LU et non lu à la fois est refusé : sans ce cas, on
     // pourrait satisfaire l'invariant en listant tout des deux côtés.
-    let contradictoire = ToolDispositions { declared: LUE, unexamined: &["question", "top_k"] };
+    let contradictoire = ToolDispositions {
+        declared: LUE,
+        unexamined: &["question", "top_k"],
+    };
     assert!(ecart_de_couverture(&schema, &contradictoire).is_some());
 }
 
@@ -376,7 +403,10 @@ fn MUTANT_le_controle_sait_REFUSER_une_table_incomplete() {
 fn MUTANT_un_outil_entierement_unexamined_ne_compte_pas_comme_examine() {
     use crate::mcp::tool_contracts::ToolDispositions;
 
-    let vitrine = ToolDispositions { declared: &[], unexamined: &["a", "b", "c"] };
+    let vitrine = ToolDispositions {
+        declared: &[],
+        unexamined: &["a", "b", "c"],
+    };
     assert_eq!(
         vitrine.declared.len(),
         0,
@@ -430,7 +460,11 @@ fn la_descente_rend_les_FEUILLES_et_jamais_le_conteneur() {
     let chemins = chemins_de_proprietes_du_schema(&schema_imbrique_de_demonstration());
     assert_eq!(
         chemins,
-        vec!["action".to_string(), "data.id".to_string(), "data.section".to_string()],
+        vec![
+            "action".to_string(),
+            "data.id".to_string(),
+            "data.section".to_string()
+        ],
         "un objet porteur de sous-propriétés est REMPLACÉ par ses feuilles, pas doublé \
          par elles : compter `data` en plus de `data.section` compterait deux fois le \
          même fait, et `Honoured` sur un conteneur n'affirme rien d'éprouvable"
@@ -439,19 +473,29 @@ fn la_descente_rend_les_FEUILLES_et_jamais_le_conteneur() {
 
 #[test]
 fn MUTANT_la_descente_sait_dire_NON_sur_ses_DEUX_moities() {
-    use crate::mcp::tool_contracts::{chemins_de_proprietes_du_schema, ecart_de_couverture,
-                                     ParameterDeclaration, ParameterDisposition,
-                                     ToolDispositions};
+    use crate::mcp::tool_contracts::{
+        chemins_de_proprietes_du_schema, ecart_de_couverture, ParameterDeclaration,
+        ParameterDisposition, ToolDispositions,
+    };
 
     let schema = chemins_de_proprietes_du_schema(&schema_imbrique_de_demonstration());
 
     // MOITIÉ 1 — un champ imbriqué SERVI mais absent de la table. Sans la descente,
     // ce cas passait au vert : `data` était couvert, donc tout `data.*` l'était.
     const SANS_LA_FEUILLE: &[ParameterDeclaration] = &[
-        ParameterDeclaration { name: "action", disposition: ParameterDisposition::Honoured },
-        ParameterDeclaration { name: "data.id", disposition: ParameterDisposition::Honoured },
+        ParameterDeclaration {
+            name: "action",
+            disposition: ParameterDisposition::Honoured,
+        },
+        ParameterDeclaration {
+            name: "data.id",
+            disposition: ParameterDisposition::Honoured,
+        },
     ];
-    let trouee = ToolDispositions { declared: SANS_LA_FEUILLE, unexamined: &[] };
+    let trouee = ToolDispositions {
+        declared: SANS_LA_FEUILLE,
+        unexamined: &[],
+    };
     let ecart = ecart_de_couverture(&schema, &trouee)
         .expect("une feuille servie et non déclarée DOIT être refusée");
     assert!(
@@ -463,12 +507,27 @@ fn MUTANT_la_descente_sait_dire_NON_sur_ses_DEUX_moities() {
     // inverse, et elle est tout aussi silencieuse : la table décrit un paramètre
     // que plus personne ne peut poser.
     const AVEC_UN_FANTOME: &[ParameterDeclaration] = &[
-        ParameterDeclaration { name: "action", disposition: ParameterDisposition::Honoured },
-        ParameterDeclaration { name: "data.id", disposition: ParameterDisposition::Honoured },
-        ParameterDeclaration { name: "data.section", disposition: ParameterDisposition::Honoured },
-        ParameterDeclaration { name: "data.disparu", disposition: ParameterDisposition::Honoured },
+        ParameterDeclaration {
+            name: "action",
+            disposition: ParameterDisposition::Honoured,
+        },
+        ParameterDeclaration {
+            name: "data.id",
+            disposition: ParameterDisposition::Honoured,
+        },
+        ParameterDeclaration {
+            name: "data.section",
+            disposition: ParameterDisposition::Honoured,
+        },
+        ParameterDeclaration {
+            name: "data.disparu",
+            disposition: ParameterDisposition::Honoured,
+        },
     ];
-    let fantome = ToolDispositions { declared: AVEC_UN_FANTOME, unexamined: &[] };
+    let fantome = ToolDispositions {
+        declared: AVEC_UN_FANTOME,
+        unexamined: &[],
+    };
     let ecart = ecart_de_couverture(&schema, &fantome)
         .expect("une feuille déclarée et plus servie DOIT être refusée");
     assert!(
@@ -478,12 +537,27 @@ fn MUTANT_la_descente_sait_dire_NON_sur_ses_DEUX_moities() {
 
     // Et la table exacte passe — sinon le contrôle crie toujours et ne dit rien.
     const EXACTE: &[ParameterDeclaration] = &[
-        ParameterDeclaration { name: "action", disposition: ParameterDisposition::Honoured },
-        ParameterDeclaration { name: "data.id", disposition: ParameterDisposition::Honoured },
-        ParameterDeclaration { name: "data.section", disposition: ParameterDisposition::Honoured },
+        ParameterDeclaration {
+            name: "action",
+            disposition: ParameterDisposition::Honoured,
+        },
+        ParameterDeclaration {
+            name: "data.id",
+            disposition: ParameterDisposition::Honoured,
+        },
+        ParameterDeclaration {
+            name: "data.section",
+            disposition: ParameterDisposition::Honoured,
+        },
     ];
     assert_eq!(
-        ecart_de_couverture(&schema, &ToolDispositions { declared: EXACTE, unexamined: &[] }),
+        ecart_de_couverture(
+            &schema,
+            &ToolDispositions {
+                declared: EXACTE,
+                unexamined: &[]
+            }
+        ),
         None
     );
 }
@@ -514,7 +588,10 @@ fn soll_manager_signale_un_champ_imbrique_sans_effet_sous_cette_action() {
         !noms.contains(&"data.id"),
         "`data.id` EST lu par `update` — le signaler enverrait corriger ce qui marche : {noms:?}"
     );
-    let section = inertes.iter().find(|i| i.name == "data.section").expect("présent");
+    let section = inertes
+        .iter()
+        .find(|i| i.name == "data.section")
+        .expect("présent");
     assert!(
         section.reason.contains("update"),
         "la raison doit nommer la valeur REÇUE, pas décrire une généralité : {}",
@@ -647,7 +724,10 @@ fn MUTANT_FieldOneOf_ne_se_laisse_PAS_ecrire_comme_une_negation() {
     // Sur une action FUTURE, elles divergent — et c'est tout l'enjeu : la forme
     // négative la déclarerait « effectif » sans qu'aucun test ne rougisse.
     let demain = serde_json::json!({ "action": "une_action_ajoutee_demain" });
-    assert!(!positive.holds(&demain), "la forme positive reste muette sur l'inconnu");
+    assert!(
+        !positive.holds(&demain),
+        "la forme positive reste muette sur l'inconnu"
+    );
     assert!(
         negative.holds(&demain),
         "la forme négative accueille l'inconnu comme effectif — c'est le défaut \

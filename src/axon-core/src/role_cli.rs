@@ -267,7 +267,10 @@ mod tests {
     #[test]
     fn internal_gpu_probe_flag_still_runs() {
         assert_eq!(
-            decide(&args(&[GPU_LIB_PROBE_FLAG, "/nix/store/x/libonnxruntime.so"])),
+            decide(&args(&[
+                GPU_LIB_PROBE_FLAG,
+                "/nix/store/x/libonnxruntime.so"
+            ])),
             RoleCliDecision::Run
         );
     }

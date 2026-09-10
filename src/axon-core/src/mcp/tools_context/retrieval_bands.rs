@@ -62,7 +62,10 @@ impl McpServer {
     }
 
     // code_band truncation: drop chunks from the back (the lowest-ranked).
-    pub(super) fn truncate_chunks_band(chunks: Vec<Value>, budget: usize) -> (Vec<Value>, usize, usize) {
+    pub(super) fn truncate_chunks_band(
+        chunks: Vec<Value>,
+        budget: usize,
+    ) -> (Vec<Value>, usize, usize) {
         let pre_text = serde_json::to_string(&chunks).unwrap_or_default();
         let pre = estimate_tokens(&[&pre_text]);
         if pre <= budget {

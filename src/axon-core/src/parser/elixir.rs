@@ -478,7 +478,13 @@ impl ElixirParser {
         });
 
         if let Some((body_node, _)) = Self::find_function_body_node(node, source_bytes) {
-            Self::extract_calls_from_expression(body_node, source_bytes, result, &full_name, aliases);
+            Self::extract_calls_from_expression(
+                body_node,
+                source_bytes,
+                result,
+                &full_name,
+                aliases,
+            );
         }
     }
 
@@ -550,7 +556,13 @@ impl ElixirParser {
         });
 
         if let Some((body_node, _)) = Self::find_function_body_node(node, source_bytes) {
-            Self::extract_calls_from_expression(body_node, source_bytes, result, &full_name, aliases);
+            Self::extract_calls_from_expression(
+                body_node,
+                source_bytes,
+                result,
+                &full_name,
+                aliases,
+            );
         }
     }
 
@@ -723,7 +735,10 @@ impl ElixirParser {
             if let Some(dot_node) = Self::find_child_by_type(node, "dot") {
                 let mut cursor = dot_node.walk();
                 for child in dot_node.named_children(&mut cursor) {
-                    if child.kind() != "identifier" && child.kind() != "alias" && child.kind() != "atom" {
+                    if child.kind() != "identifier"
+                        && child.kind() != "alias"
+                        && child.kind() != "atom"
+                    {
                         Self::extract_calls_from_expression(
                             child,
                             source_bytes,
@@ -1137,16 +1152,22 @@ mod tests {
         let result = parser.parse(content);
 
         assert!(
-            result.relations.iter().any(|rel| rel.from == "Nexus.Parliament.dispatch"
-                && rel.to == "Nexus.Agents.Router.route"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "Nexus.Parliament.dispatch"
+                    && rel.to == "Nexus.Agents.Router.route"
+                    && rel.rel_type == "CALLS"),
             "multi-alias first member unresolved; got: {:?}",
             result.relations
         );
         assert!(
-            result.relations.iter().any(|rel| rel.from == "Nexus.Parliament.dispatch"
-                && rel.to == "Nexus.Agents.Memory.store"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "Nexus.Parliament.dispatch"
+                    && rel.to == "Nexus.Agents.Memory.store"
+                    && rel.rel_type == "CALLS"),
             "multi-alias second member unresolved; got: {:?}",
             result.relations
         );
@@ -1178,9 +1199,12 @@ mod tests {
         let result = parser.parse(content);
 
         assert!(
-            result.relations.iter().any(|rel| rel.from == "Nexus.Controller.index"
-                && rel.to == "Nexus.Governance.LegalSources.list"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "Nexus.Controller.index"
+                    && rel.to == "Nexus.Governance.LegalSources.list"
+                    && rel.rel_type == "CALLS"),
             "as: rename unresolved; got: {:?}",
             result.relations
         );
@@ -1283,10 +1307,12 @@ mod tests {
         let result = parser.parse(content);
 
         assert!(
-            result.relations.iter().any(|rel| rel.from
-                == "FiscalyCore.Governance.LegalSources.list"
-                && rel.to == "FiscalyCore.Repo.all"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "FiscalyCore.Governance.LegalSources.list"
+                    && rel.to == "FiscalyCore.Repo.all"
+                    && rel.rel_type == "CALLS"),
             "qualified call should target the function symbol; got: {:?}",
             result.relations
         );
@@ -1344,9 +1370,12 @@ mod tests {
         "#;
         let result = parser.parse(content);
         assert!(
-            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
-                && rel.to == "Axon.Sample.prepare_dataset"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "Axon.Sample.run"
+                    && rel.to == "Axon.Sample.prepare_dataset"
+                    && rel.rel_type == "CALLS"),
             "call inside `case` missing; got: {:?}",
             result.relations
         );
@@ -1374,16 +1403,22 @@ mod tests {
         "#;
         let result = parser.parse(content);
         assert!(
-            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
-                && rel.to == "Axon.Sample.prepare_dataset"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "Axon.Sample.run"
+                    && rel.to == "Axon.Sample.prepare_dataset"
+                    && rel.rel_type == "CALLS"),
             "call inside `with` head missing; got: {:?}",
             result.relations
         );
         assert!(
-            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
-                && rel.to == "Axon.Sample.label_multi_horizon"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "Axon.Sample.run"
+                    && rel.to == "Axon.Sample.label_multi_horizon"
+                    && rel.rel_type == "CALLS"),
             "call inside `with` body missing; got: {:?}",
             result.relations
         );
@@ -1411,16 +1446,22 @@ mod tests {
         "#;
         let result = parser.parse(content);
         assert!(
-            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
-                && rel.to == "Axon.Sample.prepare_dataset"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "Axon.Sample.run"
+                    && rel.to == "Axon.Sample.prepare_dataset"
+                    && rel.rel_type == "CALLS"),
             "piped call prepare_dataset missing; got: {:?}",
             result.relations
         );
         assert!(
-            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
-                && rel.to == "Axon.Sample.label_multi_horizon"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "Axon.Sample.run"
+                    && rel.to == "Axon.Sample.label_multi_horizon"
+                    && rel.rel_type == "CALLS"),
             "piped call label_multi_horizon missing; got: {:?}",
             result.relations
         );
@@ -1528,7 +1569,9 @@ mod tests {
             .find(|s| s.name == "Axon.Sample.f")
             .expect("f symbol");
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("1")
         );
     }
@@ -1558,7 +1601,9 @@ mod tests {
             .find(|s| s.name == "Axon.Sample.f")
             .expect("f symbol");
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("4"),
             "props: {:?}",
             f.properties
@@ -1596,11 +1641,17 @@ mod tests {
             .find(|s| s.name == "Axon.Sample.inner")
             .expect("inner symbol");
         assert_eq!(
-            outer.properties.get("cyclomatic_complexity").map(String::as_str),
+            outer
+                .properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("2")
         );
         assert_eq!(
-            inner.properties.get("cyclomatic_complexity").map(String::as_str),
+            inner
+                .properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("2")
         );
     }
@@ -1617,9 +1668,12 @@ mod tests {
         "#;
         let result = parser.parse(content);
         assert!(
-            result.relations.iter().any(|rel| rel.from == "Axon.Sample.run"
-                && rel.to == "Axon.Sample.prepare_dataset"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "Axon.Sample.run"
+                    && rel.to == "Axon.Sample.prepare_dataset"
+                    && rel.rel_type == "CALLS"),
             "call inside anonymous fn argument missing; got: {:?}",
             result.relations
         );
@@ -1639,23 +1693,26 @@ mod tests {
         "#;
         let result = parser.parse(content);
         assert!(
-            result.relations.iter().any(|rel| rel.from == "T.entry"
-                && rel.to == "T.pick"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "T.entry" && rel.to == "T.pick" && rel.rel_type == "CALLS"),
             "entry -> pick missing; got: {:?}",
             result.relations
         );
         assert!(
-            result.relations.iter().any(|rel| rel.from == "T.pick"
-                && rel.to == "T.alpha"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "T.pick" && rel.to == "T.alpha" && rel.rel_type == "CALLS"),
             "pick -> alpha missing; got: {:?}",
             result.relations
         );
         assert!(
-            result.relations.iter().any(|rel| rel.from == "T.pick"
-                && rel.to == "T.beta"
-                && rel.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|rel| rel.from == "T.pick" && rel.to == "T.beta" && rel.rel_type == "CALLS"),
             "pick -> beta missing; got: {:?}",
             result.relations
         );
@@ -1767,9 +1824,12 @@ mod tests {
         "#;
         let result = parser.parse(content);
         assert!(
-            result.relations.iter().any(|r| r.from == "TraderElixirV2.Agents.CryptoAgent.executing"
-                && r.to == "TraderElixirV2.Trading.ExecutionRouter.open_position"
-                && r.rel_type == "CALLS"),
+            result
+                .relations
+                .iter()
+                .any(|r| r.from == "TraderElixirV2.Agents.CryptoAgent.executing"
+                    && r.to == "TraderElixirV2.Trading.ExecutionRouter.open_position"
+                    && r.rel_type == "CALLS"),
             "ExecutionRouter.open_position inside Tracer.with_span do-block missing; got: {:?}",
             result.relations
         );
@@ -1795,11 +1855,12 @@ mod tests {
         "#;
         let result = parser.parse(content);
         assert!(
-            !result.relations.iter().any(|r| r.to.contains("register") && r.rel_type == "CALLS"),
+            !result
+                .relations
+                .iter()
+                .any(|r| r.to.contains("register") && r.rel_type == "CALLS"),
             "Calls inside @moduledoc must never be emitted; got: {:?}",
             result.relations
         );
     }
 }
-
-

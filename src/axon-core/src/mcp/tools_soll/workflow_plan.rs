@@ -358,9 +358,14 @@ impl McpServer {
                                 row.get(2).and_then(|v| v.as_str()),
                                 row.get(3).and_then(|v| v.as_str()),
                             ) {
-                                let sim = row.get(4).and_then(|v| {
-                                    v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
-                                }).unwrap_or(0.0);
+                                let sim = row
+                                    .get(4)
+                                    .and_then(|v| {
+                                        v.as_f64().or_else(|| {
+                                            v.as_str().and_then(|s| s.parse::<f64>().ok())
+                                        })
+                                    })
+                                    .unwrap_or(0.0);
                                 cand.push(json!({
                                     "id": id,
                                     "title": t,
@@ -376,7 +381,7 @@ impl McpServer {
                             ("found", cand)
                         }
                     }
-                    Err(_) => ("search_unavailable", vec![])
+                    Err(_) => ("search_unavailable", vec![]),
                 };
                 plan_nearby_nodes.push(json!({
                     "logical_key": logical_key,
@@ -481,7 +486,8 @@ impl McpServer {
         }
 
         // REQ-AXO-902474 / GUI-PRO-121: Reject duplicate titles at plan validation time
-        let mut seen_titles: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut seen_titles: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for op in operations {
             let entity = op.get("entity").and_then(Value::as_str).unwrap_or("");
             if entity == "relation" {
@@ -775,11 +781,13 @@ impl McpServer {
                     escape_sql(&entity_id)
                 ));
                 if let Ok(raw) = current_raw {
-                    let rows: Vec<Vec<Option<String>>> = serde_json::from_str(&raw).unwrap_or_default();
+                    let rows: Vec<Vec<Option<String>>> =
+                        serde_json::from_str(&raw).unwrap_or_default();
                     if let Some(row) = rows.first() {
                         if let Some(Some(desc)) = row.first() {
                             if desc.contains("{{") {
-                                let substituted = substitute_logical_keys_in_str(desc, &identity_mapping);
+                                let substituted =
+                                    substitute_logical_keys_in_str(desc, &identity_mapping);
                                 if &substituted != desc {
                                     let _ = self.graph_store.execute_param(
                                         "UPDATE soll.Node SET description = ? WHERE id = ?",
@@ -911,9 +919,7 @@ impl McpServer {
         // wraps.
         let mut mapping_lines: Vec<String> = identity_mapping
             .iter()
-            .map(|(logical, canonical): (&String, &String)| {
-                format!("| {logical} | {canonical} |")
-            })
+            .map(|(logical, canonical): (&String, &String)| format!("| {logical} | {canonical} |"))
             .collect();
         mapping_lines.sort();
         let mapping_block = if mapping_lines.is_empty() {
@@ -1148,20 +1154,33 @@ impl McpServer {
             }
         };
 
-        let cell = |r: &[Value], i: usize| r.get(i).and_then(Value::as_str).unwrap_or("").to_string();
+        let cell =
+            |r: &[Value], i: usize| r.get(i).and_then(Value::as_str).unwrap_or("").to_string();
         let items: Vec<Value> = rows
             .iter()
-            .map(|r| json!({
-                "id": cell(r, 0), "type": cell(r, 1),
-                "status": cell(r, 2), "title": cell(r, 3),
-                "relation_type": cell(r, 4),
-                "source_id": cell(r, 5), "target_id": cell(r, 6),
-            }))
+            .map(|r| {
+                json!({
+                    "id": cell(r, 0), "type": cell(r, 1),
+                    "status": cell(r, 2), "title": cell(r, 3),
+                    "relation_type": cell(r, 4),
+                    "source_id": cell(r, 5), "target_id": cell(r, 6),
+                })
+            })
             .collect();
 
         let lines: Vec<String> = rows
             .iter()
-            .map(|r| format!("- {} [{}] {} ({} -> {}) — {}", cell(r, 0), cell(r, 2), cell(r, 4), cell(r, 5), cell(r, 6), cell(r, 3)))
+            .map(|r| {
+                format!(
+                    "- {} [{}] {} ({} -> {}) — {}",
+                    cell(r, 0),
+                    cell(r, 2),
+                    cell(r, 4),
+                    cell(r, 5),
+                    cell(r, 6),
+                    cell(r, 3)
+                )
+            })
             .collect();
 
         let capped = items.len() >= 200;
@@ -1230,7 +1249,11 @@ impl McpServer {
                     let other = "outgoing";
                     let q = format!(
                         "SELECT count(*) FROM soll.Edge WHERE source_id = ?{}",
-                        if rel.is_some() { " AND relation_type = ?" } else { "" }
+                        if rel.is_some() {
+                            " AND relation_type = ?"
+                        } else {
+                            ""
+                        }
                     );
                     let p = match rel {
                         Some(r) => json!([id, r]),
@@ -1242,7 +1265,11 @@ impl McpServer {
                     let other = "incoming";
                     let q = format!(
                         "SELECT count(*) FROM soll.Edge WHERE target_id = ?{}",
-                        if rel.is_some() { " AND relation_type = ?" } else { "" }
+                        if rel.is_some() {
+                            " AND relation_type = ?"
+                        } else {
+                            ""
+                        }
                     );
                     let p = match rel {
                         Some(r) => json!([id, r]),
@@ -1253,20 +1280,22 @@ impl McpServer {
                 _ => unreachable!(),
             };
 
-            let count: i64 = self
-                .graph_store
-                .query_json_param(&other_sql, &other_params)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
-                .and_then(|rows| {
-                    rows.first()?.first()?.as_i64().or_else(|| {
-                        rows.first()?.first()?.as_str().and_then(|s| s.parse().ok())
+            let count: i64 =
+                self.graph_store
+                    .query_json_param(&other_sql, &other_params)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                    .and_then(|rows| {
+                        rows.first()?.first()?.as_i64().or_else(|| {
+                            rows.first()?.first()?.as_str().and_then(|s| s.parse().ok())
+                        })
                     })
-                })
-                .unwrap_or(0);
+                    .unwrap_or(0);
 
             if count > 0 {
-                let rel_arg = rel.map(|r| format!(", relation_type=\"{r}\"")).unwrap_or_default();
+                let rel_arg = rel
+                    .map(|r| format!(", relation_type=\"{r}\""))
+                    .unwrap_or_default();
                 Some(format!(
                     "\n\n_0 in this direction, but {count} edge(s) exist the other way: \
                      `soll_children(id=\"{id}\", direction=\"{other_dir}\"{rel_arg})`. SOLL orientation is not \
@@ -1295,7 +1324,8 @@ impl McpServer {
                     rows.into_iter()
                         .filter_map(|r| {
                             let rep_id = r.get(0)?.as_str()?.to_string();
-                            let rep_title = r.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+                            let rep_title =
+                                r.get(1).and_then(Value::as_str).unwrap_or("").to_string();
                             Some((rep_id, rep_title))
                         })
                         .collect()
@@ -1330,14 +1360,21 @@ impl McpServer {
             let first_rep = &superseded_replacements[0];
             data_obj["superseded_by"] = json!(first_rep.0);
             data_obj["superseded_by_title"] = json!(first_rep.1);
-            let all_ids: Vec<String> = superseded_replacements.iter().map(|(r_id, _)| r_id.clone()).collect();
+            let all_ids: Vec<String> = superseded_replacements
+                .iter()
+                .map(|(r_id, _)| r_id.clone())
+                .collect();
             data_obj["superseded_by_all"] = json!(all_ids);
 
             if superseded_replacements.len() == 1 {
                 superseded_notice = format!(
                     "ℹ Note: `{id}` has been superseded by `{}` ({}).\n\n",
                     first_rep.0,
-                    if first_rep.1.is_empty() { "replacement node" } else { &first_rep.1 }
+                    if first_rep.1.is_empty() {
+                        "replacement node"
+                    } else {
+                        &first_rep.1
+                    }
                 );
             } else {
                 let reps_str = superseded_replacements
@@ -1351,9 +1388,8 @@ impl McpServer {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                superseded_notice = format!(
-                    "ℹ Note: `{id}` has been superseded by: {reps_str}.\n\n"
-                );
+                superseded_notice =
+                    format!("ℹ Note: `{id}` has been superseded by: {reps_str}.\n\n");
             }
         }
 
@@ -1385,14 +1421,14 @@ impl McpServer {
     ///
     /// Terse by default (GUI-AXO-1026 inv.4): the body IS the answer, since that
     /// is what the procedures reach for. Identity/status ride along in `data`.
-/// REQ-AXO-902621 — au-delà de ce nombre de caractères, `soll_get` sans `sections`
-/// ni `section` ne sert plus le corps entier. Calé sur la même valeur que le bornage
-/// de `re_anchor` : les deux servent le même objet, un session pointer de plusieurs
-/// centaines de milliers de caractères, et deux seuils différents pour un même corps
-/// seraient une source de surprise pour rien.
-const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
-/// REQ-AXO-902449 — budget global de caractères pour le multi-get soll_get(ids=[...]).
-const MULTI_GET_TEXT_BUDGET: usize = 32_000;
+    /// REQ-AXO-902621 — au-delà de ce nombre de caractères, `soll_get` sans `sections`
+    /// ni `section` ne sert plus le corps entier. Calé sur la même valeur que le bornage
+    /// de `re_anchor` : les deux servent le même objet, un session pointer de plusieurs
+    /// centaines de milliers de caractères, et deux seuils différents pour un même corps
+    /// seraient une source de surprise pour rien.
+    const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
+    /// REQ-AXO-902449 — budget global de caractères pour le multi-get soll_get(ids=[...]).
+    const MULTI_GET_TEXT_BUDGET: usize = 32_000;
 
     fn soll_get_multiple(&self, req_ids: &[String]) -> Value {
         if req_ids.is_empty() {
@@ -1487,10 +1523,13 @@ const MULTI_GET_TEXT_BUDGET: usize = 32_000;
                 body.to_string()
             };
 
-            let rendered_node_text = format!("## {id} — {title}\n_{node_type} · {status} · {project}_\n\n{corps_rendu}");
+            let rendered_node_text =
+                format!("## {id} — {title}\n_{node_type} · {status} · {project}_\n\n{corps_rendu}");
             let block_len = rendered_node_text.len();
 
-            if !rendered_blocks.is_empty() && cumulated_chars + block_len > Self::MULTI_GET_TEXT_BUDGET {
+            if !rendered_blocks.is_empty()
+                && cumulated_chars + block_len > Self::MULTI_GET_TEXT_BUDGET
+            {
                 deferred_ids.push(id.clone());
                 continue;
             }
@@ -1758,7 +1797,10 @@ const MULTI_GET_TEXT_BUDGET: usize = 32_000;
                 // Aucune section : on garde la QUEUE, jamais la tête — sur un journal
                 // append-only, la tête est le plus ancien.
                 None => {
-                    let saut = body.chars().count().saturating_sub(Self::SEUIL_CORPS_ENTIER_CHARS);
+                    let saut = body
+                        .chars()
+                        .count()
+                        .saturating_sub(Self::SEUIL_CORPS_ENTIER_CHARS);
                     let octet = body.char_indices().nth(saut).map(|(i, _)| i).unwrap_or(0);
                     format!(
                         "_corps de {} caractères sans titre `##` — au-delà du seuil de {}, seule \
@@ -2104,7 +2146,13 @@ const MULTI_GET_TEXT_BUDGET: usize = 32_000;
     ///
     /// REQ-AXO-902449 — supports optional `kind` filter to restrict FTS to a
     /// specific node type.
-    fn soll_fts_search(&self, project_code: &str, query: &str, kind: Option<&str>, limit: i64) -> Value {
+    fn soll_fts_search(
+        &self,
+        project_code: &str,
+        query: &str,
+        kind: Option<&str>,
+        limit: i64,
+    ) -> Value {
         let escaped_project = escape_sql(project_code);
         let escaped_query = escape_sql(query);
         let kind_clause = if let Some(k) = kind {

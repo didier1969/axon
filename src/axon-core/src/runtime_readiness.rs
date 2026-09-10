@@ -417,7 +417,10 @@ mod ist_writer_degradation_tests {
                 reason: "writer lock lost".to_string(),
             },
         )]);
-        assert!(note.is_some(), "`failed` est au moins aussi grave que `degraded`");
+        assert!(
+            note.is_some(),
+            "`failed` est au moins aussi grave que `degraded`"
+        );
     }
 
     #[test]
@@ -438,7 +441,9 @@ mod ist_writer_degradation_tests {
     fn sans_rapport_d_ecrivain_ist_on_n_invente_aucune_degradation() {
         // Registre froid : ne rien savoir n'est pas savoir que c'est cassé.
         assert!(ist_writer_degradation_note(&[]).is_none());
-        assert!(ist_writer_degradation_note(&[rapport("brain_mcp", SubsystemState::Ready)]).is_none());
+        assert!(
+            ist_writer_degradation_note(&[rapport("brain_mcp", SubsystemState::Ready)]).is_none()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -456,7 +461,10 @@ mod ist_writer_degradation_tests {
         let SubsystemState::Degraded { reason } = etat else {
             panic!("un tenant à 12 lots refusés n'est pas un écrivain sain : {etat:?}");
         };
-        assert!(reason.contains("MRG"), "le remède commence par le NOM : {reason}");
+        assert!(
+            reason.contains("MRG"),
+            "le remède commence par le NOM : {reason}"
+        );
         assert!(reason.contains("NXA"), "{reason}");
         assert!(
             reason.contains("axon.Project"),

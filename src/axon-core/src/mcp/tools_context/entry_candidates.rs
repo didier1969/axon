@@ -422,7 +422,11 @@ impl McpServer {
     /// SQL fallback used when `Chunk.file_path` is NULL. Resolves from the
     /// row's own project snapshot; empty when cold / absent (display-only
     /// enrichment, so a miss is non-fatal — never a silent PG fallback).
-    pub(super) fn resolve_containing_file_ram(&self, project_code: &str, symbol_id: &str) -> String {
+    pub(super) fn resolve_containing_file_ram(
+        &self,
+        project_code: &str,
+        symbol_id: &str,
+    ) -> String {
         if project_code.is_empty()
             || symbol_id.is_empty()
             || !self.ensure_ram_snapshot_warm(project_code)

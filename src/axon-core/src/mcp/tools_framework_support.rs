@@ -27,7 +27,10 @@ pub(super) fn cache_read_with_ts(
     now_ms: i64,
     ttl_ms: i64,
 ) -> Option<(i64, Value)> {
-    if std::env::var("AXON_ENABLE_TEST_CACHE").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("AXON_ENABLE_TEST_CACHE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         let guard = cache.lock().ok()?;
         let (stored_at, value) = guard.get(key)?;
         if now_ms.saturating_sub(*stored_at) > ttl_ms {
@@ -67,7 +70,10 @@ pub(super) fn cache_write(
     now_ms: i64,
     value: &Value,
 ) {
-    if std::env::var("AXON_ENABLE_TEST_CACHE").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("AXON_ENABLE_TEST_CACHE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         if let Ok(mut guard) = cache.lock() {
             guard.insert(key, (now_ms, value.clone()));
         }
@@ -157,8 +163,14 @@ pub(super) fn diff_shi_snapshots(current: &Value, previous: &Value) -> Value {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0)
     };
-    let aggregate_delta = current.get("aggregate").and_then(|v| v.as_f64()).unwrap_or(0.0)
-        - previous.get("aggregate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let aggregate_delta = current
+        .get("aggregate")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        - previous
+            .get("aggregate")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
     let mut per_dimension = serde_json::Map::new();
     if let Some(obj) = current.get("sub_scores").and_then(|v| v.as_object()) {
         for name in obj.keys() {
@@ -223,9 +235,11 @@ mod tests {
         let path = dir.path().join("AXO-shi.jsonl");
         assert!(load_snapshots_at(&path).is_empty());
 
-        let first = json!({"snapshot_id": "v1", "aggregate": 0.5, "sub_scores": {"acyclicity": 0.9}});
+        let first =
+            json!({"snapshot_id": "v1", "aggregate": 0.5, "sub_scores": {"acyclicity": 0.9}});
         persist_snapshot_at(&path, &first).unwrap();
-        let second = json!({"snapshot_id": "v2", "aggregate": 0.6, "sub_scores": {"acyclicity": 0.95}});
+        let second =
+            json!({"snapshot_id": "v2", "aggregate": 0.6, "sub_scores": {"acyclicity": 0.95}});
         persist_snapshot_at(&path, &second).unwrap();
 
         let loaded = load_snapshots_at(&path);
@@ -248,7 +262,12 @@ mod tests {
         });
         let delta = diff_shi_snapshots(&current, &previous);
         assert!((delta["aggregate_delta"].as_f64().unwrap() - 0.05).abs() < 1e-9);
-        assert!(delta["per_dimension_delta"]["weighted_coverage"].as_f64().unwrap() > 0.0);
+        assert!(
+            delta["per_dimension_delta"]["weighted_coverage"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
         assert!(
             delta["per_dimension_delta"]["acyclicity"].as_f64().unwrap() < 0.0,
             "acyclicity regressed 0.9 -> 0.85, delta must be negative"

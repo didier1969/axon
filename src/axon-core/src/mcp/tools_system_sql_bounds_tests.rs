@@ -28,9 +28,7 @@ use crate::mcp::McpServer;
 /// `n` lignes JSON d'environ `poids` caractères chacune.
 fn lignes(n: usize, poids: usize) -> String {
     let cellule = "x".repeat(poids);
-    let corps: Vec<String> = (0..n)
-        .map(|i| format!("[\"{i}\",\"{cellule}\"]"))
-        .collect();
+    let corps: Vec<String> = (0..n).map(|i| format!("[\"{i}\",\"{cellule}\"]")).collect();
     format!("[{}]", corps.join(","))
 }
 
@@ -42,7 +40,10 @@ fn une_sortie_SOUS_le_seuil_passe_intacte() {
     let (rendu, rendues, tronque) = McpServer::borner_lignes_sql(&petite, 60_000);
     assert_eq!(rendu, petite, "une sortie courte ne doit pas être touchée");
     assert!(!tronque);
-    assert_eq!(rendues, None, "rien n'a été coupé : il n'y a pas de « lignes rendues »");
+    assert_eq!(
+        rendues, None,
+        "rien n'a été coupé : il n'y a pas de « lignes rendues »"
+    );
 }
 
 #[test]
@@ -52,7 +53,10 @@ fn une_sortie_AU_DESSUS_du_seuil_rend_des_lignes_ENTIERES_et_le_dit() {
 
     assert!(tronque);
     let rendues = rendues.expect("une coupe sur lignes délimitées doit savoir compter");
-    assert!(rendues > 0 && rendues < 500, "coupe partielle attendue, obtenu {rendues}");
+    assert!(
+        rendues > 0 && rendues < 500,
+        "coupe partielle attendue, obtenu {rendues}"
+    );
     // La coupe porte sur des LIGNES : le JSON rendu doit rester parsable, sinon un
     // appelant programmatique reçoit un tableau cassé — pire qu'une réponse longue.
     let json_seul = rendu.split("\n\n").next().unwrap();
@@ -60,9 +64,18 @@ fn une_sortie_AU_DESSUS_du_seuil_rend_des_lignes_ENTIERES_et_le_dit() {
         serde_json::from_str(json_seul).expect("le JSON rendu doit rester valide");
     assert_eq!(reparse.len(), rendues);
     // Et le rendu doit DIRE ce qu'il a fait, avec le total et la suite.
-    assert!(rendu.contains("ok_truncated"), "le statut doit être dans le texte : {rendu:.200}");
-    assert!(rendu.contains("sur 500"), "le TOTAL doit être nommé, pas seulement le rendu");
-    assert!(rendu.contains("OFFSET"), "la suite doit être exploitable, pas seulement annoncée");
+    assert!(
+        rendu.contains("ok_truncated"),
+        "le statut doit être dans le texte : {rendu:.200}"
+    );
+    assert!(
+        rendu.contains("sur 500"),
+        "le TOTAL doit être nommé, pas seulement le rendu"
+    );
+    assert!(
+        rendu.contains("OFFSET"),
+        "la suite doit être exploitable, pas seulement annoncée"
+    );
 }
 
 #[test]
@@ -72,7 +85,11 @@ fn une_ligne_ENORME_est_rendue_plutot_que_zero() {
     let enorme = lignes(2, 50_000);
     let (rendu, rendues, tronque) = McpServer::borner_lignes_sql(&enorme, 1_000);
     assert!(tronque);
-    assert_eq!(rendues, Some(1), "au moins une ligne, même au-delà du seuil");
+    assert_eq!(
+        rendues,
+        Some(1),
+        "au moins une ligne, même au-delà du seuil"
+    );
     let json_seul = rendu.split("\n\n").next().unwrap();
     let reparse: Vec<serde_json::Value> = serde_json::from_str(json_seul).expect("JSON valide");
     assert_eq!(reparse.len(), 1);
@@ -106,7 +123,10 @@ fn les_deux_coupes_ne_portent_PAS_le_meme_statut() {
     // Rien coupé : le statut d'origine passe, quel qu'il soit.
     assert_eq!(S::statut_apres_borne("ok", None, false), "ok");
     assert_eq!(S::statut_apres_borne("ok_empty", None, false), "ok_empty");
-    assert_eq!(S::statut_apres_borne("ok_uncounted", None, false), "ok_uncounted");
+    assert_eq!(
+        S::statut_apres_borne("ok_uncounted", None, false),
+        "ok_uncounted"
+    );
 
     // Coupe sur lignes délimitées : comptable.
     assert_eq!(S::statut_apres_borne("ok", Some(12), true), "ok_truncated");
@@ -126,9 +146,16 @@ fn les_deux_coupes_ne_portent_PAS_le_meme_statut() {
 #[test]
 fn MUTANT_un_statut_unique_confond_les_deux_coupes() {
     fn ancienne_regle(status: &str, tronque: bool) -> &str {
-        if tronque { "ok_truncated" } else { status }
+        if tronque {
+            "ok_truncated"
+        } else {
+            status
+        }
     }
-    assert_eq!(ancienne_regle("ok", true), ancienne_regle("ok_uncounted", true));
+    assert_eq!(
+        ancienne_regle("ok", true),
+        ancienne_regle("ok_uncounted", true)
+    );
     // Et l'ancien `rows_rendered` valait 0 dans les DEUX cas où rien n'est comptable.
     let ancien_rendu_non_delimitable = 0usize;
     let ancien_rendu_sans_coupe = 0usize;
@@ -300,4 +327,3 @@ fn sql_erreur_rend_statut_error_et_message_brut_et_accuse_schema() {
     // Sur erreur, l'orientation vers schema_overview est attendue
     assert_eq!(data["next_action"]["tool"], "schema_overview");
 }
-

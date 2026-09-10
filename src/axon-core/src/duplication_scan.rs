@@ -62,7 +62,10 @@ pub(crate) fn scalar_count(raw: &str) -> usize {
     let rows: Vec<Vec<Value>> = serde_json::from_str(raw).unwrap_or_default();
     rows.first()
         .and_then(|row| row.first())
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        })
         .unwrap_or(0) as usize
 }
 
@@ -164,7 +167,10 @@ impl GraphStore {
             .map_err(|e| e.to_string())?;
         let pairs_found = scalar_count(&pairs_raw);
 
-        Ok(DuplicationScanReport { symbols_scanned, pairs_found })
+        Ok(DuplicationScanReport {
+            symbols_scanned,
+            pairs_found,
+        })
     }
 }
 

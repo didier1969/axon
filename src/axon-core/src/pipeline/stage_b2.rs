@@ -384,10 +384,7 @@ pub(crate) async fn quarantine_hung_batch(
 /// batch the embedder could not process, off the async worker thread. Best
 /// effort: a failure to record just means the chunk is retried again next loop,
 /// which is the pre-fix behaviour — no worse, and bounded once it records.
-async fn record_batch_failure(
-    store: &Arc<crate::graph::GraphStore>,
-    batch: &[ChunkForEmbedding],
-) {
+async fn record_batch_failure(store: &Arc<crate::graph::GraphStore>, batch: &[ChunkForEmbedding]) {
     let ids: Vec<String> = batch.iter().map(|p| p.chunk_id.clone()).collect();
     let store = store.clone();
     match tokio::task::spawn_blocking(move || store.record_embed_failure(&ids, MAX_EMBED_ATTEMPTS))
@@ -516,10 +513,11 @@ mod tests {
 
         let mut received = Vec::new();
         for _ in 0..16 {
-            let item = tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), out_rx.recv())
-                .await
-                .expect("16 EmbeddedChunk must arrive within 2 s")
-                .expect("output yields Some");
+            let item =
+                tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), out_rx.recv())
+                    .await
+                    .expect("16 EmbeddedChunk must arrive within 2 s")
+                    .expect("output yields Some");
             received.push(item);
         }
         assert_eq!(received.len(), 16);
@@ -583,10 +581,11 @@ mod tests {
 
         let mut received = Vec::new();
         for _ in 0..3 {
-            let item = tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), out_rx.recv())
-                .await
-                .expect("partial batch must flush within 2 s")
-                .expect("output yields Some");
+            let item =
+                tokio::time::timeout(Duration::from_secs(LIVENESS_TIMEOUT_SECS), out_rx.recv())
+                    .await
+                    .expect("partial batch must flush within 2 s")
+                    .expect("output yields Some");
             received.push(item);
         }
         assert_eq!(received.len(), 3);
@@ -748,10 +747,18 @@ mod tests {
         assert_eq!(b2_inference_timeout_ms(), 180_000, "default budget");
 
         unsafe { std::env::set_var("AXON_B2_INFERENCE_TIMEOUT_MS", "5000") };
-        assert_eq!(b2_inference_timeout_ms(), 5_000, "explicit override honoured");
+        assert_eq!(
+            b2_inference_timeout_ms(),
+            5_000,
+            "explicit override honoured"
+        );
 
         unsafe { std::env::set_var("AXON_B2_INFERENCE_TIMEOUT_MS", "0") };
-        assert_eq!(b2_inference_timeout_ms(), u64::MAX, "0 disables the watchdog");
+        assert_eq!(
+            b2_inference_timeout_ms(),
+            u64::MAX,
+            "0 disables the watchdog"
+        );
 
         unsafe { std::env::remove_var("AXON_B2_INFERENCE_TIMEOUT_MS") };
     }

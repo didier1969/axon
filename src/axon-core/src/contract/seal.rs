@@ -83,7 +83,11 @@ pub struct EmpiricalAttestation {
 
 impl EmpiricalAttestation {
     pub fn new(result: Verdict, at_ms: u64, ttl_s: u64) -> Self {
-        Self { result, at_ms, ttl_s }
+        Self {
+            result,
+            at_ms,
+            ttl_s,
+        }
     }
 
     /// Fraîche si `now_ms` est dans la fenêtre TTL depuis l'attestation.

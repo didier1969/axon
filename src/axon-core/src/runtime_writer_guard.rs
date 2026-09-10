@@ -274,10 +274,14 @@ pub fn guard_liveness_soll(db_root: &str) -> Result<GuardLiveness> {
 
 fn guard_liveness(target: WriterTarget, db_root: &str) -> Result<GuardLiveness> {
     let Some(lock_path) = target.lock_path(db_root) else {
-        return Ok(GuardLiveness::Free { recorded_owner: None });
+        return Ok(GuardLiveness::Free {
+            recorded_owner: None,
+        });
     };
     if !lock_path.exists() {
-        return Ok(GuardLiveness::Free { recorded_owner: None });
+        return Ok(GuardLiveness::Free {
+            recorded_owner: None,
+        });
     }
     let mut file = OpenOptions::new()
         .read(true)
@@ -552,9 +556,19 @@ mod tests {
     #[test]
     fn guard_liveness_free_when_lock_absent_or_memory_root() {
         let mem = guard_liveness(WriterTarget::Ist, ":memory:").unwrap();
-        assert!(matches!(mem, GuardLiveness::Free { recorded_owner: None }));
+        assert!(matches!(
+            mem,
+            GuardLiveness::Free {
+                recorded_owner: None
+            }
+        ));
         let missing = guard_liveness(WriterTarget::Soll, "/nonexistent-axon-dir-902190").unwrap();
-        assert!(matches!(missing, GuardLiveness::Free { recorded_owner: None }));
+        assert!(matches!(
+            missing,
+            GuardLiveness::Free {
+                recorded_owner: None
+            }
+        ));
     }
 
     fn wait_for_ready_file(path: &std::path::Path) {
@@ -693,7 +707,12 @@ mod tests {
     fn guard_liveness_free_when_no_lock_file() {
         let db_root = tempdir().unwrap();
         let live = guard_liveness_soll(db_root.path().to_str().unwrap()).unwrap();
-        assert_eq!(live, GuardLiveness::Free { recorded_owner: None });
+        assert_eq!(
+            live,
+            GuardLiveness::Free {
+                recorded_owner: None
+            }
+        );
     }
 
     #[test]
@@ -813,8 +832,13 @@ mod tests {
 
     #[test]
     fn un_proprietaire_d_un_autre_superviseur_n_est_jamais_repris() {
-        let decision =
-            super::decide_takeover(&orphelin_frere(), "axon-live-axon-indexer", 999_999, 2_000, true);
+        let decision = super::decide_takeover(
+            &orphelin_frere(),
+            "axon-live-axon-indexer",
+            999_999,
+            2_000,
+            true,
+        );
         assert!(
             matches!(decision, super::TakeoverDecision::Refuse { .. }),
             "un indexeur lance a la main ou par un autre superviseur ne se tue pas"
@@ -823,8 +847,13 @@ mod tests {
 
     #[test]
     fn un_proprietaire_d_une_autre_identite_n_est_jamais_repris() {
-        let decision =
-            super::decide_takeover(&orphelin_frere(), "axon-dev-axon-indexer", 473_194, 2_000, true);
+        let decision = super::decide_takeover(
+            &orphelin_frere(),
+            "axon-dev-axon-indexer",
+            473_194,
+            2_000,
+            true,
+        );
         assert!(matches!(decision, super::TakeoverDecision::Refuse { .. }));
     }
 
@@ -886,7 +915,13 @@ mod tests {
         for decision in [
             super::decide_takeover(&orphelin_frere(), "autre", 473_194, 2_000, true),
             super::decide_takeover(&orphelin_frere(), "axon-live-axon-indexer", 1, 2_000, true),
-            super::decide_takeover(&orphelin_frere(), "axon-live-axon-indexer", 473_194, 1, true),
+            super::decide_takeover(
+                &orphelin_frere(),
+                "axon-live-axon-indexer",
+                473_194,
+                1,
+                true,
+            ),
         ] {
             match decision {
                 super::TakeoverDecision::Refuse { reason } => {
@@ -926,7 +961,10 @@ mod tests {
         let (ppid, starttime) =
             super::read_proc_ppid_and_starttime(pid).expect("/proc du processus courant");
         assert_eq!(ppid, unsafe { libc::getppid() } as i64);
-        assert!(starttime > 0, "un starttime nul ne saurait ordonner deux processus");
+        assert!(
+            starttime > 0,
+            "un starttime nul ne saurait ordonner deux processus"
+        );
     }
 
     /// REQ-AXO-902614 critère 4 — deux boots concurrents, MÊME superviseur (le
@@ -999,7 +1037,10 @@ mod tests {
             .env_remove("AXON_RUNTIME_IDENTITY")
             .status()
             .expect("sonde de refus");
-        assert!(refuse.success(), "une identite non declaree ne doit JAMAIS reprendre");
+        assert!(
+            refuse.success(),
+            "une identite non declaree ne doit JAMAIS reprendre"
+        );
         let _ = holder.wait();
     }
 }

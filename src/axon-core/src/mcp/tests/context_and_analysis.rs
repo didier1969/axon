@@ -3091,7 +3091,7 @@ fn test_cpt_axo_90060_query_chunks_deduplicates_same_symbol_multiple_parts() {
         .execute(
             "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) \
              VALUES ('CDP::dup_sym_1', 'dup_sym', 'function', false, true, false, 'CDP'), \
-                    ('CDP::dup_sym_2', 'dup_sym', 'function', false, true, false, 'CDP')"
+                    ('CDP::dup_sym_2', 'dup_sym', 'function', false, true, false, 'CDP')",
         )
         .unwrap();
     server
@@ -8027,10 +8027,11 @@ fn test_req_902546_project_status_freshness_reconciliation_and_actionable_recove
     );
 
     // REQ-AXO-902546: next_best_action ne doit JAMAIS pointer vers `status` (boucle récursive interdite)
-    let next_tool = cockpit_fsf["next_best_action"]["tool"].as_str().unwrap_or("");
+    let next_tool = cockpit_fsf["next_best_action"]["tool"]
+        .as_str()
+        .unwrap_or("");
     assert_ne!(
-        next_tool,
-        "status",
+        next_tool, "status",
         "next_best_action must never point back recursively to status"
     );
 
@@ -8057,7 +8058,9 @@ fn test_req_902546_project_status_freshness_reconciliation_and_actionable_recove
     // Sur un projet sans fichiers indexés, un blocker clair et un recovery_hint exécutable sont requis
     assert!(cockpit_emp["current_blocker"].is_string());
     assert_ne!(
-        cockpit_emp["next_best_action"]["tool"].as_str().unwrap_or(""),
+        cockpit_emp["next_best_action"]["tool"]
+            .as_str()
+            .unwrap_or(""),
         "status",
         "recovery action for empty/degraded project must not be recursive status"
     );
@@ -8094,50 +8097,81 @@ fn test_req_902538_status_and_project_status_cache_epoch_and_degraded_to_fresh_t
         .sync_project_registry_entry("OPV", Some("opv-proj"), Some("/home/test/opv-proj"))
         .unwrap();
 
-    server.graph_store.execute(
-        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
-         VALUES ('VIS-OPV-001', 'Vision', 'OPV', 'OPV Vision', 'OPV Test', 'current', '{}')"
-    ).unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('VIS-OPV-001', 'Vision', 'OPV', 'OPV Vision', 'OPV Test', 'current', '{}')",
+        )
+        .unwrap();
 
     // Phase 1: Initial degraded state (0 indexed files)
     // 1. Call status(mode=brief)
-    let status_brief_resp = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "status",
-            "arguments": { "mode": "brief", "project_code": "OPV" }
-        })),
-        id: Some(json!(9025381)),
-    }).unwrap().result.unwrap();
+    let status_brief_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief", "project_code": "OPV" }
+            })),
+            id: Some(json!(9025381)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     let status_data = status_brief_resp.get("data").expect("status data missing");
     let cache_meta = &status_data["cache_meta"];
-    assert!(cache_meta.is_object(), "status must explicitly declare cache_meta (REQ-AXO-902538)");
-    assert_eq!(cache_meta["is_cached"], false, "first call must be a cache miss");
-    assert!(cache_meta["epoch_ms"].is_i64(), "cache_meta must have epoch_ms");
-    assert!(cache_meta["cache_age_ms"].is_i64(), "cache_meta must have cache_age_ms");
+    assert!(
+        cache_meta.is_object(),
+        "status must explicitly declare cache_meta (REQ-AXO-902538)"
+    );
+    assert_eq!(
+        cache_meta["is_cached"], false,
+        "first call must be a cache miss"
+    );
+    assert!(
+        cache_meta["epoch_ms"].is_i64(),
+        "cache_meta must have epoch_ms"
+    );
+    assert!(
+        cache_meta["cache_age_ms"].is_i64(),
+        "cache_meta must have cache_age_ms"
+    );
     assert_eq!(cache_meta["ttl_ms"], json!(5000), "ttl_ms must be 5000ms");
 
     // 2. Call project_status(project_code=OPV)
-    let proj_status_resp = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "project_status",
-            "arguments": { "project_code": "OPV", "mode": "brief" }
-        })),
-        id: Some(json!(9025382)),
-    }).unwrap().result.unwrap();
+    let proj_status_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_status",
+                "arguments": { "project_code": "OPV", "mode": "brief" }
+            })),
+            id: Some(json!(9025382)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
-    let proj_data = proj_status_resp.get("data").expect("project_status data missing");
+    let proj_data = proj_status_resp
+        .get("data")
+        .expect("project_status data missing");
     let proj_freshness = &proj_data["truth_cockpit"]["freshness"];
-    assert_eq!(proj_freshness["state"], "degraded", "initial state must be degraded");
+    assert_eq!(
+        proj_freshness["state"], "degraded",
+        "initial state must be degraded"
+    );
     assert!(
         proj_freshness["cache_meta"].is_object(),
         "project_status freshness must explicitly expose cache_meta (REQ-AXO-902538)"
     );
-    assert_eq!(proj_freshness["cache_meta"]["is_cached"], true, "status called by project_status must hit the brief cache");
+    assert_eq!(
+        proj_freshness["cache_meta"]["is_cached"], true,
+        "status called by project_status must hit the brief cache"
+    );
     assert!(
         proj_freshness["epoch_ms"].is_i64(),
         "project_status freshness must expose epoch_ms"
@@ -8153,25 +8187,34 @@ fn test_req_902538_status_and_project_status_cache_epoch_and_degraded_to_fresh_t
 
     // Phase 2: Transition degraded -> fresh
     // Indexer indexed the file:
-    server.graph_store.execute(
-        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status) \
-         VALUES ('/home/test/opv-proj/main.rs', 'OPV', 1, 'indexed')"
-    ).unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status) \
+         VALUES ('/home/test/opv-proj/main.rs', 'OPV', 1, 'indexed')",
+        )
+        .unwrap();
 
     // Clear cache to simulate expiry/invalidation on transition
     crate::mcp::tools_framework_support::cache_clear(crate::mcp::McpServer::status_cache());
 
-    let proj_fresh_resp = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "project_status",
-            "arguments": { "project_code": "OPV", "mode": "brief" }
-        })),
-        id: Some(json!(9025383)),
-    }).unwrap().result.unwrap();
+    let proj_fresh_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_status",
+                "arguments": { "project_code": "OPV", "mode": "brief" }
+            })),
+            id: Some(json!(9025383)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
-    let proj_fresh_data = proj_fresh_resp.get("data").expect("project_status data missing");
+    let proj_fresh_data = proj_fresh_resp
+        .get("data")
+        .expect("project_status data missing");
     let proj_fresh_freshness = &proj_fresh_data["truth_cockpit"]["freshness"];
     assert_eq!(
         proj_fresh_freshness["state"], "fresh",
@@ -8182,5 +8225,3 @@ fn test_req_902538_status_and_project_status_cache_epoch_and_degraded_to_fresh_t
         "blocker must be cleared on fresh transition"
     );
 }
-
-

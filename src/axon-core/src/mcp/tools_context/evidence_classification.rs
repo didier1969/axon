@@ -59,7 +59,10 @@ impl McpServer {
             .collect()
     }
 
-    pub(super) fn classify_supporting_code_context(chunks: &[Value], neighbors: &[Value]) -> Vec<Value> {
+    pub(super) fn classify_supporting_code_context(
+        chunks: &[Value],
+        neighbors: &[Value],
+    ) -> Vec<Value> {
         let mut items = chunks
             .iter()
             .filter_map(|row| {
@@ -293,7 +296,11 @@ impl McpServer {
     /// `id` and unioning `ranking_reasons`. Pure list reconciliation.
     pub(super) fn merge_soll_entities(base: &mut Vec<Value>, additions: Vec<Value>) {
         for add in additions {
-            let Some(id) = add.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+            let Some(id) = add
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+            else {
                 continue;
             };
             if let Some(found) = base

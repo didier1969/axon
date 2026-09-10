@@ -397,7 +397,11 @@ fn resolve_scoped_symbol_uses_ist_ram() {
     // ne doit produire NI homonyme NI note. Sans cette moitié, le correctif
     // échangerait un défaut contre un autre — une note sur chaque appel serait
     // du bruit, et le bruit se filtre.
-    assert!(by_name.homonyms.is_empty(), "nom non ambigu : {:?}", by_name.homonyms);
+    assert!(
+        by_name.homonyms.is_empty(),
+        "nom non ambigu : {:?}",
+        by_name.homonyms
+    );
     assert!(by_name.ambiguity_note().is_none());
     // By canonical id → recognised directly from RAM.
     let by_id = server
@@ -416,7 +420,10 @@ fn resolve_scoped_symbol_uses_ist_ram() {
         ambiguous.id, "TSR::a_early.rs::twice",
         "le tri doit primer sur l'ordre d'insertion du snapshot"
     );
-    assert_eq!(ambiguous.homonyms, vec!["TSR::z_late.rs::twice".to_string()]);
+    assert_eq!(
+        ambiguous.homonyms,
+        vec!["TSR::z_late.rs::twice".to_string()]
+    );
     let note = ambiguous
         .ambiguity_note()
         .expect("un nom ambigu doit produire une note");

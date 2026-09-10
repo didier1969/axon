@@ -462,7 +462,10 @@ mod tests {
 
         let client = connect(&url).await;
         let table_count: i64 = client
-            .query_one("SELECT count(*) FROM pg_tables WHERE schemaname = 'axon'", &[])
+            .query_one(
+                "SELECT count(*) FROM pg_tables WHERE schemaname = 'axon'",
+                &[],
+            )
             .await
             .expect("count axon tables")
             .get(0);

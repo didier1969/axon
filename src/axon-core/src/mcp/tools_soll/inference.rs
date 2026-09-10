@@ -279,7 +279,8 @@ pub(super) fn score_node(
             "criteria_declared" => {
                 proof_gap_score += 10;
                 reasons.push("criteria declared but not verified".to_string());
-                validation_gates.push("verify acceptance criteria or deliver requirement".to_string());
+                validation_gates
+                    .push("verify acceptance criteria or deliver requirement".to_string());
             }
             "partial" => {
                 proof_gap_score += 8;
@@ -606,7 +607,10 @@ mod tests {
             "monotone P0>P1>P2>P3>unset: {p0},{p1},{p2},{p3_score},{unset}"
         );
         // The #47 regression: a P3 node must earn a bonus AND surface a visible reason.
-        assert!(p3_score > 0, "P3 must earn a positive bonus, got {p3_score}");
+        assert!(
+            p3_score > 0,
+            "P3 must earn a positive bonus, got {p3_score}"
+        );
         assert!(
             p3_reasons.iter().any(|r| r == "priority P3"),
             "P3 must surface its priority reason: {p3_reasons:?}"
@@ -666,7 +670,8 @@ mod tests {
         unproven.requirement_state = Some("missing".to_string());
 
         let (proven_score, proven_gap, ..) = super::score_node(&proven, false, false, 30.0, 0);
-        let (unproven_score, unproven_gap, ..) = super::score_node(&unproven, false, false, 30.0, 0);
+        let (unproven_score, unproven_gap, ..) =
+            super::score_node(&unproven, false, false, 30.0, 0);
 
         assert_eq!(
             proven_score, unproven_score,
@@ -786,7 +791,11 @@ mod tests {
 
         let (_, proof_gap, reasons, gates) = super::score_node(&gapped, false, false, 30.0, 0);
         assert_eq!(proof_gap, 8 + 10 + 5);
-        for expected in ["requirement partial", "no evidence attached", "project backlog visible"] {
+        for expected in [
+            "requirement partial",
+            "no evidence attached",
+            "project backlog visible",
+        ] {
             assert!(
                 reasons.iter().any(|r| r == expected),
                 "reason `{expected}` must still be disclosed: {reasons:?}"

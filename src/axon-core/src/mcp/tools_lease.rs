@@ -34,13 +34,18 @@ impl McpServer {
     /// REQ-AXO-902120 (MBX-8) — advisory lease surface. `action` ∈
     /// {acquire, release, check}.
     pub(crate) fn axon_mailbox_lease(&self, args: &Value) -> Option<Value> {
-        let action = args.get("action").and_then(Value::as_str).unwrap_or("check");
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("check");
         match action {
             "acquire" => self.mailbox_lease_acquire(args),
             "release" => self.mailbox_lease_release(args),
             "check" => self.mailbox_lease_check(args),
             other => Some(lease_err(
-                &format!("mailbox_lease: unknown action `{other}` (expected acquire|release|check)."),
+                &format!(
+                    "mailbox_lease: unknown action `{other}` (expected acquire|release|check)."
+                ),
                 "input_invalid",
             )),
         }
@@ -70,7 +75,10 @@ impl McpServer {
             .map(|row| {
                 let lease_id = row
                     .first()
-                    .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                    .and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
                     .unwrap_or(0);
                 let g = |i: usize| row.get(i).and_then(Value::as_str).unwrap_or("");
                 json!({
@@ -87,7 +95,12 @@ impl McpServer {
     fn mailbox_lease_acquire(&self, args: &Value) -> Option<Value> {
         let resource = match args.get("resource").and_then(Value::as_str) {
             Some(r) if !r.trim().is_empty() => r.trim().to_string(),
-            _ => return Some(lease_err("mailbox_lease acquire requires `resource`.", "input_invalid")),
+            _ => {
+                return Some(lease_err(
+                    "mailbox_lease acquire requires `resource`.",
+                    "input_invalid",
+                ))
+            }
         };
         let holder = args
             .get("holder")
@@ -107,7 +120,11 @@ impl McpServer {
             .and_then(Value::as_u64)
             .unwrap_or(LEASE_TTL_DEFAULT_S)
             .clamp(LEASE_TTL_MIN_S, LEASE_TTL_MAX_S);
-        let intent = args.get("intent").and_then(Value::as_str).unwrap_or("").to_string();
+        let intent = args
+            .get("intent")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
 
         let sql = format!(
             "INSERT INTO axon.mailbox_lease (resource, holder_project, intent, expires_at) \
@@ -125,7 +142,10 @@ impl McpServer {
         let lease_id = rows
             .first()
             .and_then(|r| r.first())
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .unwrap_or(0);
         let expires_at = rows
             .first()
@@ -161,9 +181,10 @@ impl McpServer {
     }
 
     fn mailbox_lease_release(&self, args: &Value) -> Option<Value> {
-        let lease_id = args
-            .get("lease_id")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+        let lease_id = args.get("lease_id").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
         let resource = args
             .get("resource")
             .and_then(Value::as_str)
@@ -198,9 +219,7 @@ impl McpServer {
             ));
         };
 
-        let sql = format!(
-            "DELETE FROM axon.mailbox_lease WHERE {where_clause} RETURNING lease_id"
-        );
+        let sql = format!("DELETE FROM axon.mailbox_lease WHERE {where_clause} RETURNING lease_id");
         let rows: Vec<Vec<Value>> = match self.graph_store.query_json_writer(&sql) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(e) => return Some(lease_err(&format!("lease release failed: {e}"), "degraded")),
@@ -221,7 +240,12 @@ impl McpServer {
     fn mailbox_lease_check(&self, args: &Value) -> Option<Value> {
         let resource = match args.get("resource").and_then(Value::as_str) {
             Some(r) if !r.trim().is_empty() => r.trim().to_string(),
-            _ => return Some(lease_err("mailbox_lease check requires `resource`.", "input_invalid")),
+            _ => {
+                return Some(lease_err(
+                    "mailbox_lease check requires `resource`.",
+                    "input_invalid",
+                ))
+            }
         };
         let holders = self.lease_live_holders(&resource, None);
         let report = format!(

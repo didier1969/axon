@@ -1466,7 +1466,10 @@ impl McpServer {
         for (id, _) in &fused {
             if let Some(snap) = snap_opt.as_ref() {
                 if let Some(n) = snap.nodes.get(id) {
-                    node_meta.insert(id.clone(), (n.entity_type.clone(), n.title.clone(), n.status.clone()));
+                    node_meta.insert(
+                        id.clone(),
+                        (n.entity_type.clone(), n.title.clone(), n.status.clone()),
+                    );
                     continue;
                 }
             }
@@ -1479,9 +1482,8 @@ impl McpServer {
                 .map(|id| format!("'{}'", escape_sql(id)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let sql = format!(
-                "SELECT id, type, title, status FROM soll.Node WHERE id IN ({quoted})"
-            );
+            let sql =
+                format!("SELECT id, type, title, status FROM soll.Node WHERE id IN ({quoted})");
             if let Ok(raw) = self.graph_store.query_json(&sql) {
                 if let Ok(rows) = serde_json::from_str::<Vec<Vec<Value>>>(&raw) {
                     for r in rows {
@@ -1537,13 +1539,31 @@ impl McpServer {
                 let status = r["status"].as_str().unwrap_or("unknown");
                 let score = r["rrf_score"].as_f64().unwrap_or(0.0);
                 if title.is_empty() {
-                    text_lines.push(format!("  {}. {} [{} · {}] (score: {:.3})", idx + 1, id, ty, status, score));
+                    text_lines.push(format!(
+                        "  {}. {} [{} · {}] (score: {:.3})",
+                        idx + 1,
+                        id,
+                        ty,
+                        status,
+                        score
+                    ));
                 } else {
-                    text_lines.push(format!("  {}. {} [{} · {}] {} (score: {:.3})", idx + 1, id, ty, status, title, score));
+                    text_lines.push(format!(
+                        "  {}. {} [{} · {}] {} (score: {:.3})",
+                        idx + 1,
+                        id,
+                        ty,
+                        status,
+                        title,
+                        score
+                    ));
                 }
             }
             if results.len() > 5 {
-                text_lines.push(format!("  ... and {} more results in structuredContent.results", results.len() - 5));
+                text_lines.push(format!(
+                    "  ... and {} more results in structuredContent.results",
+                    results.len() - 5
+                ));
             }
             text_lines.push("\nUse `soll_get(id=\"<ID>\")` to inspect node bodies.".to_string());
         }
@@ -2111,9 +2131,27 @@ mod tests {
             "planned",
             400,
         );
-        add(&mut nodes, "REQ-AXO-10", WorkPlanEntityType::Requirement, "current", 20);
-        add(&mut nodes, "REQ-AXO-11", WorkPlanEntityType::Requirement, "current", 20);
-        add(&mut nodes, "REQ-AXO-12", WorkPlanEntityType::Requirement, "current", 20);
+        add(
+            &mut nodes,
+            "REQ-AXO-10",
+            WorkPlanEntityType::Requirement,
+            "current",
+            20,
+        );
+        add(
+            &mut nodes,
+            "REQ-AXO-11",
+            WorkPlanEntityType::Requirement,
+            "current",
+            20,
+        );
+        add(
+            &mut nodes,
+            "REQ-AXO-12",
+            WorkPlanEntityType::Requirement,
+            "current",
+            20,
+        );
 
         let schedulable: HashSet<String> = [
             "MIL-AXO-900",

@@ -56,11 +56,42 @@ pub fn symbol_id_is_presentable(id: &str) -> bool {
     // Language and stdlib primitives. `Some` is not a structural neighbour, it
     // is a variant constructor; a neighbour list containing it ranks nothing.
     const PRIMITIVES: &[&str] = &[
-        "Some", "None", "Ok", "Err", "new", "default", "clone", "lock", "min", "max", "len",
-        "push", "get", "insert", "unwrap", "unwrap_or", "unwrap_or_else", "unwrap_or_default",
-        "into_inner", "get_or_insert", "get_or_init", "to_string", "from", "into", "iter",
-        "collect", "map", "filter", "next", "as_str", "is_empty", "trim", "format", "println",
-        "start_link", "child_spec",
+        "Some",
+        "None",
+        "Ok",
+        "Err",
+        "new",
+        "default",
+        "clone",
+        "lock",
+        "min",
+        "max",
+        "len",
+        "push",
+        "get",
+        "insert",
+        "unwrap",
+        "unwrap_or",
+        "unwrap_or_else",
+        "unwrap_or_default",
+        "into_inner",
+        "get_or_insert",
+        "get_or_init",
+        "to_string",
+        "from",
+        "into",
+        "iter",
+        "collect",
+        "map",
+        "filter",
+        "next",
+        "as_str",
+        "is_empty",
+        "trim",
+        "format",
+        "println",
+        "start_link",
+        "child_spec",
     ];
     let Some((_, tail)) = id.rsplit_once("::") else {
         // No `::` at all — this is a file path or a bare token, not a symbol
@@ -199,9 +230,11 @@ mod refresh_tests {
         fn query_json(&self, sql: &str) -> Result<String, String> {
             if sql.contains("ist.symbol") {
                 // id, kind, project_code, tested, is_public, is_nif, is_unsafe, name
-                Ok(r#"[["AXO::x","function","AXO","false","true","false","false","x"],
+                Ok(
+                    r#"[["AXO::x","function","AXO","false","true","false","false","x"],
                        ["AXO::y","function","AXO","false","true","false","false","y"]]"#
-                    .to_string())
+                        .to_string(),
+                )
             } else {
                 // source_id, target_id, relation_type
                 Ok(r#"[["AXO::x","AXO::y","CALLS"]]"#.to_string())
@@ -237,7 +270,10 @@ mod refresh_tests {
         let mut swapped = false;
         for _ in 0..200 {
             let snap = cache.get("AXO");
-            assert!(snap.is_some(), "REQ-AXO-902005: cache must never go cold during refresh");
+            assert!(
+                snap.is_some(),
+                "REQ-AXO-902005: cache must never go cold during refresh"
+            );
             if snap.unwrap().node_count() == 2 {
                 swapped = true;
                 break;
@@ -246,6 +282,9 @@ mod refresh_tests {
         }
         assert!(swapped, "async refresh should swap in the fresh snapshot");
         // in_flight cleared after a clean finish → a new refresh can start.
-        assert!(cache.begin_rebuild("AXO"), "rebuild slot freed after refresh");
+        assert!(
+            cache.begin_rebuild("AXO"),
+            "rebuild slot freed after refresh"
+        );
     }
 }

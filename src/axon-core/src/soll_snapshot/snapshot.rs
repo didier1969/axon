@@ -54,21 +54,30 @@ impl SnapshotNode {
         // 1. Explicit metadata exemption
         if !self.metadata_raw.is_empty() && self.metadata_raw != "{}" {
             if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&self.metadata_raw) {
-                let is_explicit = meta.get("code_exempt").and_then(|v| v.as_bool()).unwrap_or(false)
-                    || meta.get("exempt").and_then(|v| v.as_bool()).unwrap_or(false)
+                let is_explicit = meta
+                    .get("code_exempt")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                    || meta
+                        .get("exempt")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
                     || meta.get("exemption_reason").map_or(false, |v| !v.is_null())
-                    || meta.get("role").and_then(|v| v.as_str()).map_or(false, |r| {
-                        matches!(
-                            r,
-                            "exempt"
-                                | "concept_only"
-                                | "abstract"
-                                | "methodology"
-                                | "documentation"
-                                | "process"
-                                | "human_only"
-                        )
-                    });
+                    || meta
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .map_or(false, |r| {
+                            matches!(
+                                r,
+                                "exempt"
+                                    | "concept_only"
+                                    | "abstract"
+                                    | "methodology"
+                                    | "documentation"
+                                    | "process"
+                                    | "human_only"
+                            )
+                        });
                 if is_explicit {
                     return Some(CodeExemptionReason::ExplicitMetadata);
                 }
@@ -370,13 +379,13 @@ impl SollSnapshot {
         if from == to {
             return true;
         }
-        let (Some(from_idx), Some(to_idx)) =
-            (self.node_index.get(from).copied(), self.node_index.get(to).copied())
-        else {
+        let (Some(from_idx), Some(to_idx)) = (
+            self.node_index.get(from).copied(),
+            self.node_index.get(to).copied(),
+        ) else {
             return false;
         };
-        let filtered =
-            EdgeFiltered::from_fn(&self.graph, |e| relations.contains(e.weight()));
+        let filtered = EdgeFiltered::from_fn(&self.graph, |e| relations.contains(e.weight()));
         petgraph::algo::has_path_connecting(&filtered, from_idx, to_idx, None)
     }
 
@@ -588,7 +597,10 @@ mod tests {
             2
         );
         // only the bare name → 1 (the file-typed row is excluded).
-        assert_eq!(snap.traceability_count_for_artifact("Symbol", &["render"]), 1);
+        assert_eq!(
+            snap.traceability_count_for_artifact("Symbol", &["render"]),
+            1
+        );
         // no match.
         assert_eq!(snap.traceability_count_for_artifact("Symbol", &["nope"]), 0);
     }
@@ -630,7 +642,11 @@ mod tests {
             Some(CodeExemptionReason::ExplicitMetadata)
         );
 
-        let explicit_reason = node("Requirement", "current", r#"{"exemption_reason": "No compiled artifact"}"#);
+        let explicit_reason = node(
+            "Requirement",
+            "current",
+            r#"{"exemption_reason": "No compiled artifact"}"#,
+        );
         assert_eq!(
             explicit_reason.code_exemption_reason(),
             Some(CodeExemptionReason::ExplicitMetadata)
@@ -660,9 +676,18 @@ mod tests {
         assert_eq!(deferred.code_exemption_reason(), None);
 
         // Current / planned / delivered requirements require code traces unless explicitly exempt
-        assert_eq!(node("Requirement", "current", "{}").code_exemption_reason(), None);
-        assert_eq!(node("Requirement", "planned", "{}").code_exemption_reason(), None);
-        assert_eq!(node("Requirement", "delivered", "{}").code_exemption_reason(), None);
+        assert_eq!(
+            node("Requirement", "current", "{}").code_exemption_reason(),
+            None
+        );
+        assert_eq!(
+            node("Requirement", "planned", "{}").code_exemption_reason(),
+            None
+        );
+        assert_eq!(
+            node("Requirement", "delivered", "{}").code_exemption_reason(),
+            None
+        );
 
         // 3. Documentation Concept / Decision
         let concept = node("Concept", "current", "{}");

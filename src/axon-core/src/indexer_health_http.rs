@@ -321,7 +321,9 @@ mod tests {
                 Err(error) => panic!("dedicated health runtime did not bind: {error}"),
             }
         };
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         stream
             .write_all(b"GET /livez HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .unwrap();

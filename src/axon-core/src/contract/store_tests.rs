@@ -87,7 +87,8 @@ fn upsert_overwrites_desired_shape() {
     let mut node = anchor_node(None);
     persist_contract(&store, "CON-AXO-3", &node).unwrap();
 
-    node.post_conditions.push(PostCondition("disable->empty".into()));
+    node.post_conditions
+        .push(PostCondition("disable->empty".into()));
     persist_contract(&store, "CON-AXO-3", &node).unwrap();
 
     let loaded = load_contract(&store, "CON-AXO-3").unwrap().unwrap();
@@ -119,7 +120,10 @@ fn seal_round_trip_then_invalidated_by_shape_change() {
     node_b.signature = "parse_seq_buckets_from_env(raw: Option<&str>) -> Vec<u32>".to_string();
     assert_ne!(node_b.shape_hash(), node.shape_hash());
     let seal_b = structural_seal(&node_b.shape_hash(), &node_b.proves_ref, true, &[]).unwrap();
-    assert_ne!(seal_b, stored.seal, "un changement de forme invalide le sceau");
+    assert_ne!(
+        seal_b, stored.seal,
+        "un changement de forme invalide le sceau"
+    );
 }
 
 #[test]
@@ -146,7 +150,9 @@ fn reconcile_symbol_missing_when_anchor_absent() {
     persist_contract(&store, "CON-AXO-7", &anchor_node(Some("AXO::ghost"))).unwrap();
     assert_eq!(
         reconcile_contract(&store, "CON-AXO-7").unwrap(),
-        DriftVerdict::SymbolMissing { symbol_id: "AXO::ghost".to_string() }
+        DriftVerdict::SymbolMissing {
+            symbol_id: "AXO::ghost".to_string()
+        }
     );
 }
 
@@ -155,11 +161,14 @@ fn reconcile_kind_mismatch() {
     let store = crate::tests::test_helpers::create_test_db().unwrap();
     let sym = "AXO::SomeStruct";
     seed_symbol(&store, sym, "struct", "SomeStruct"); // IST = type-ish
-    // contrat désiré = Function -> incompatible avec un struct observé.
+                                                      // contrat désiré = Function -> incompatible avec un struct observé.
     persist_contract(&store, "CON-AXO-8", &anchor_node(Some(sym))).unwrap();
 
     match reconcile_contract(&store, "CON-AXO-8").unwrap() {
-        DriftVerdict::KindMismatch { expected, observed_kind } => {
+        DriftVerdict::KindMismatch {
+            expected,
+            observed_kind,
+        } => {
             assert_eq!(expected, ContractKind::Function);
             assert_eq!(observed_kind, "struct");
         }
@@ -192,9 +201,15 @@ fn reconcile_detects_drift_against_baseline() {
     // l'IST dérive (rename du symbole, même id stable) -> ShapeDrift typé.
     seed_symbol(&store, sym, "function", "parse_buckets_renamed");
     match reconcile_contract(&store, "CON-AXO-9").unwrap() {
-        DriftVerdict::ShapeDrift { baseline: b, observed } => {
+        DriftVerdict::ShapeDrift {
+            baseline: b,
+            observed,
+        } => {
             assert_eq!(b, baseline);
-            assert_ne!(observed, baseline, "la forme observée a dérivé de la baseline");
+            assert_ne!(
+                observed, baseline,
+                "la forme observée a dérivé de la baseline"
+            );
         }
         other => panic!("attendu ShapeDrift, eu {other:?}"),
     }
@@ -204,10 +219,14 @@ fn reconcile_detects_drift_against_baseline() {
 fn capture_baseline_none_when_unbound_or_missing() {
     let store = crate::tests::test_helpers::create_test_db().unwrap();
     persist_contract(&store, "CON-AXO-10", &anchor_node(None)).unwrap();
-    assert!(capture_observed_baseline(&store, "CON-AXO-10").unwrap().is_none());
+    assert!(capture_observed_baseline(&store, "CON-AXO-10")
+        .unwrap()
+        .is_none());
 
     persist_contract(&store, "CON-AXO-11", &anchor_node(Some("AXO::ghost"))).unwrap();
-    assert!(capture_observed_baseline(&store, "CON-AXO-11").unwrap().is_none());
+    assert!(capture_observed_baseline(&store, "CON-AXO-11")
+        .unwrap()
+        .is_none());
 }
 
 // ── S7 : surface de consommation (REQ-AXO-902094) ─────────────────────
@@ -263,7 +282,12 @@ fn obsolescence_blocked_while_live_callers_then_retires_when_orphan() {
     persist_contract(&store, "CON-AXO-30", &anchor_node(Some(sym))).unwrap();
 
     // bound (realized_by set) at first.
-    assert_eq!(contract_status_str(&store, "CON-AXO-30").unwrap().as_deref(), Some("bound"));
+    assert_eq!(
+        contract_status_str(&store, "CON-AXO-30")
+            .unwrap()
+            .as_deref(),
+        Some("bound")
+    );
 
     // two live callers → obsolescence HARD-blocked (gate).
     seed_edge(&store, "AXO::caller_a", sym, "CALLS");
@@ -279,13 +303,20 @@ fn obsolescence_blocked_while_live_callers_then_retires_when_orphan() {
     let (live_after, _) = live_incoming_call_count(&store, sym).unwrap();
     assert_eq!(live_after, 0);
     retire_contract(&store, "CON-AXO-30").unwrap();
-    assert_eq!(contract_status_str(&store, "CON-AXO-30").unwrap().as_deref(), Some("retired"));
+    assert_eq!(
+        contract_status_str(&store, "CON-AXO-30")
+            .unwrap()
+            .as_deref(),
+        Some("retired")
+    );
 }
 
 #[test]
 fn contract_status_str_none_when_absent() {
     let store = crate::tests::test_helpers::create_test_db().unwrap();
-    assert!(contract_status_str(&store, "CON-AXO-404").unwrap().is_none());
+    assert!(contract_status_str(&store, "CON-AXO-404")
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -297,12 +328,25 @@ fn clear_seal_invalidates_and_falls_back_to_bound() {
     let seal = structural_seal(&node.shape_hash(), &node.proves_ref, true, &[]).unwrap();
     persist_seal(&store, "CON-AXO-31", &seal, true).unwrap();
     assert!(load_seal(&store, "CON-AXO-31").unwrap().is_some());
-    assert_eq!(contract_status_str(&store, "CON-AXO-31").unwrap().as_deref(), Some("sealed"));
+    assert_eq!(
+        contract_status_str(&store, "CON-AXO-31")
+            .unwrap()
+            .as_deref(),
+        Some("sealed")
+    );
 
     clear_seal(&store, "CON-AXO-31").unwrap();
-    assert!(load_seal(&store, "CON-AXO-31").unwrap().is_none(), "sceau invalidé");
+    assert!(
+        load_seal(&store, "CON-AXO-31").unwrap().is_none(),
+        "sceau invalidé"
+    );
     // realized_by présent → repli sur 'bound'.
-    assert_eq!(contract_status_str(&store, "CON-AXO-31").unwrap().as_deref(), Some("bound"));
+    assert_eq!(
+        contract_status_str(&store, "CON-AXO-31")
+            .unwrap()
+            .as_deref(),
+        Some("bound")
+    );
 }
 
 #[test]

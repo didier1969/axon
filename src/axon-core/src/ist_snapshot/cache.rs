@@ -309,7 +309,6 @@ impl IstSnapshotCache {
             false
         }
     }
-
 }
 
 #[cfg(test)]
@@ -371,15 +370,24 @@ mod tests {
     #[test]
     fn first_begin_rebuild_wins_second_marks_dirty() {
         let cache = IstSnapshotCache::new();
-        assert!(cache.begin_rebuild("AXO"), "first caller wins the rebuild slot");
+        assert!(
+            cache.begin_rebuild("AXO"),
+            "first caller wins the rebuild slot"
+        );
         assert!(
             !cache.begin_rebuild("AXO"),
             "second caller loses (rebuild already in flight)"
         );
         // The lost caller recorded dirty → finish must request a re-run.
-        assert!(cache.finish_rebuild("AXO"), "dirty after concurrent request → re-run");
+        assert!(
+            cache.finish_rebuild("AXO"),
+            "dirty after concurrent request → re-run"
+        );
         // No further mutation → finish clears in_flight, next begin wins again.
-        assert!(!cache.finish_rebuild("AXO"), "clean finish clears in_flight");
+        assert!(
+            !cache.finish_rebuild("AXO"),
+            "clean finish clears in_flight"
+        );
         assert!(cache.begin_rebuild("AXO"), "slot freed after clean finish");
     }
 
@@ -462,7 +470,10 @@ mod tests {
             poseur.join().expect("poseur");
 
             assert!(cache.get("GARDE").is_some(), "un projet intact a disparu");
-            assert!(cache.get("NEUF").is_some(), "la publication concurrente a été perdue");
+            assert!(
+                cache.get("NEUF").is_some(),
+                "la publication concurrente a été perdue"
+            );
             assert!(cache.get("JETE").is_none(), "l'éviction n'a pas eu lieu");
         }
     }
@@ -547,8 +558,15 @@ mod tests {
         // Insertion d'un 3ème projet P3: P1 est le plus ancien accédé car P2 a été accédé par get("P2")
         cache.publish("P3".to_string(), empty_snapshot());
 
-        assert_eq!(cache.project_codes().len(), 2, "La taille du cache doit être bornée à la capacité (2)");
-        assert!(cache.get("P1").is_none(), "P1 doit avoir été évincé car LRU");
+        assert_eq!(
+            cache.project_codes().len(),
+            2,
+            "La taille du cache doit être bornée à la capacité (2)"
+        );
+        assert!(
+            cache.get("P1").is_none(),
+            "P1 doit avoir été évincé car LRU"
+        );
         assert!(cache.get("P2").is_some(), "P2 doit être présent");
         assert!(cache.get("P3").is_some(), "P3 doit être présent");
 
@@ -558,7 +576,10 @@ mod tests {
         // Insertion de P4: P3 doit être évincé car P2 a été accédé plus récemment
         cache.publish("P4".to_string(), empty_snapshot());
         assert_eq!(cache.project_codes().len(), 2);
-        assert!(cache.get("P3").is_none(), "P3 doit avoir été évincé car LRU");
+        assert!(
+            cache.get("P3").is_none(),
+            "P3 doit avoir été évincé car LRU"
+        );
         assert!(cache.get("P2").is_some(), "P2 doit être préservé");
         assert!(cache.get("P4").is_some(), "P4 doit être présent");
     }
@@ -575,8 +596,15 @@ mod tests {
         std::thread::sleep(Duration::from_millis(60));
 
         // get() sur une entrée expirée doit évincer et renvoyer None
-        assert!(cache.get("SHORT").is_none(), "SHORT doit avoir expiré par TTL");
-        assert_eq!(cache.project_codes().len(), 0, "Cache nettoyé après get expiré");
+        assert!(
+            cache.get("SHORT").is_none(),
+            "SHORT doit avoir expiré par TTL"
+        );
+        assert_eq!(
+            cache.project_codes().len(),
+            0,
+            "Cache nettoyé après get expiré"
+        );
 
         // Test de prune_expired
         cache.publish("PRUNE1".to_string(), empty_snapshot());
@@ -586,7 +614,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(60));
         let pruned = cache.prune_expired();
         assert_eq!(pruned, 2, "prune_expired doit évincer 2 entrées expirées");
-        assert_eq!(cache.project_codes().len(), 0, "Cache vide après prune_expired");
+        assert_eq!(
+            cache.project_codes().len(),
+            0,
+            "Cache vide après prune_expired"
+        );
     }
 
     #[test]
@@ -605,7 +637,10 @@ mod tests {
         assert!(cache.get("C").is_some());
 
         let count = cache.evict_all();
-        assert_eq!(count, 2, "evict_all doit avoir retiré les 2 projets restants (A et C)");
+        assert_eq!(
+            count, 2,
+            "evict_all doit avoir retiré les 2 projets restants (A et C)"
+        );
         assert_eq!(cache.project_codes().len(), 0);
         assert!(cache.get("A").is_none());
         assert!(cache.get("C").is_none());

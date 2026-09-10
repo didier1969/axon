@@ -812,7 +812,10 @@ impl McpServer {
                 .iter()
                 .filter_map(|p| {
                     let code = p.get("project_code").and_then(serde_json::Value::as_str)?;
-                    let name = p.get("project_name").and_then(serde_json::Value::as_str).unwrap_or("");
+                    let name = p
+                        .get("project_name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
                     if name.is_empty() {
                         Some(code.to_string())
                     } else {
@@ -834,7 +837,10 @@ impl McpServer {
                 .iter()
                 .filter_map(|p| {
                     let code = p.get("project_code").and_then(serde_json::Value::as_str)?;
-                    let name = p.get("project_name").and_then(serde_json::Value::as_str).unwrap_or("");
+                    let name = p
+                        .get("project_name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
                     if name.is_empty() {
                         Some(code.to_string())
                     } else {
@@ -845,7 +851,8 @@ impl McpServer {
                 .join(", ");
             format!("retry with suggested project: {}", suggestions_text)
         } else {
-            "use axon_init_project or retry with the exact canonical code, name, or path".to_string()
+            "use axon_init_project or retry with the exact canonical code, name, or path"
+                .to_string()
         };
 
         let mut data = serde_json::json!({

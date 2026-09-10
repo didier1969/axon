@@ -244,7 +244,9 @@ pub(crate) fn gpu_process_used_mib_via_nvml(pid: u32) -> Option<u64> {
         let nvml_device_get_handle_by_index: libloading::Symbol<'_, NvmlDeviceGetHandleByIndexV2> =
             library.get(b"nvmlDeviceGetHandleByIndex_v2").ok()?;
         let nvml_get_procs: libloading::Symbol<'_, NvmlDeviceGetComputeRunningProcessesV3> =
-            library.get(b"nvmlDeviceGetComputeRunningProcesses_v3").ok()?;
+            library
+                .get(b"nvmlDeviceGetComputeRunningProcesses_v3")
+                .ok()?;
 
         if nvml_init() != NVML_SUCCESS {
             return None;

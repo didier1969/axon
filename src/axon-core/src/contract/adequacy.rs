@@ -18,7 +18,10 @@ pub struct AdequacyThresholds {
 
 impl Default for AdequacyThresholds {
     fn default() -> Self {
-        Self { min_kill_rate: 0.80, min_coverage: 1.00 }
+        Self {
+            min_kill_rate: 0.80,
+            min_coverage: 1.00,
+        }
     }
 }
 
@@ -43,9 +46,18 @@ pub fn assess(
 ) -> AdequacyReport {
     let total = mutation_killed.len();
     let killed = mutation_killed.iter().filter(|k| **k).count();
-    let kill_rate = if total == 0 { 0.0 } else { killed as f64 / total as f64 };
-    let passed = total > 0
-        && kill_rate >= thresholds.min_kill_rate
-        && coverage >= thresholds.min_coverage;
-    AdequacyReport { kill_rate, coverage, killed, total, passed }
+    let kill_rate = if total == 0 {
+        0.0
+    } else {
+        killed as f64 / total as f64
+    };
+    let passed =
+        total > 0 && kill_rate >= thresholds.min_kill_rate && coverage >= thresholds.min_coverage;
+    AdequacyReport {
+        kill_rate,
+        coverage,
+        killed,
+        total,
+        passed,
+    }
 }

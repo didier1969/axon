@@ -12,8 +12,8 @@
 //     migrations + their remnants + progression. p95 < 100 ms (AC7).
 //   - N4 helper (REQ-AXO-902032): `migrations_with_remnant_path` — pre-flight /
 //     sub-agent residue lookup for a set of edited paths.
-use super::*;
 use super::storage::escape_sql;
+use super::*;
 
 /// IST target-kind discriminators for HAS_REMNANT cross-graph edges.
 /// Tuple: (`target_kind` label stored in edge metadata, IST table, PK column).
@@ -71,8 +71,7 @@ impl McpServer {
         //    actually exists; otherwise auto-detect by probing IST tables.
         let resolved_kind: Option<&'static str> = match target_kind_hint {
             Some(hint) => {
-                let Some(entry) = REMNANT_KINDS.iter().find(|(label, _, _)| *label == hint)
-                else {
+                let Some(entry) = REMNANT_KINDS.iter().find(|(label, _, _)| *label == hint) else {
                     return Some(json!({
                         "content": [{ "type": "text", "text": format!(
                             "Unknown `target_kind` `{}`. Allowed: ist:symbol, ist:indexed_file, ist:chunk (omit to auto-detect).",
@@ -347,9 +346,7 @@ impl McpServer {
             // Progress: honest only when a baseline was recorded at migration
             // creation (metadata.baseline_remnants). Otherwise null (no
             // fabricated %). debt_budget surfaces breach when declared.
-            let baseline = metadata
-                .get("baseline_remnants")
-                .and_then(Value::as_i64);
+            let baseline = metadata.get("baseline_remnants").and_then(Value::as_i64);
             let progress_pct = baseline.and_then(|b| {
                 if b > 0 {
                     Some((((b - remnant_count).max(0) as f64) / (b as f64) * 100.0).round())
@@ -456,7 +453,10 @@ impl McpServer {
             if r.len() < 5 {
                 continue;
             }
-            let remnants = r[4].as_i64().or_else(|| r[4].as_str().and_then(|s| s.parse().ok())).unwrap_or(0);
+            let remnants = r[4]
+                .as_i64()
+                .or_else(|| r[4].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0);
             total += remnants;
             let metadata: Value = match &r[3] {
                 Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),

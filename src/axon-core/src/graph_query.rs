@@ -312,9 +312,10 @@ impl GraphStore {
         }
         combined.push_str("COMMIT;");
 
-        self.pool.native.run_execute(&combined).map_err(|e| {
-            anyhow!("Batch Writer Error (size={}): {e}", queries.len())
-        })
+        self.pool
+            .native
+            .run_execute(&combined)
+            .map_err(|e| anyhow!("Batch Writer Error (size={}): {e}", queries.len()))
     }
 
     /// REQ-AXO-901881 W2 — native query dispatcher (was `query_on_ctx`, the
@@ -611,8 +612,7 @@ fn sql_skeleton(sql: &str) -> String {
 /// side-effecting function call (e.g. `SELECT nextval(...)` or
 /// `SELECT a_function_that_inserts()`); such writes are out of scope here.
 pub(crate) fn is_read_only_sql(query: &str) -> bool {
-    const READ_VERBS: &[&str] =
-        &["select", "with", "pragma", "show", "describe", "explain"];
+    const READ_VERBS: &[&str] = &["select", "with", "pragma", "show", "describe", "explain"];
     // Write signals that may appear AFTER a read leading verb: the
     // data-modifying statements PostgreSQL allows inside a `WITH` clause plus
     // the table-creating `SELECT … INTO newtbl`. `update` is handled separately
@@ -670,7 +670,7 @@ mod tests {
         assert!(is_read_only_sql("/* block */ SELECT 1"));
         assert!(is_read_only_sql("WITH x AS (SELECT 1) SELECT * FROM x"));
         assert!(is_read_only_sql("SELECT 'a;b' AS x")); // `;` in a string literal
-        // mutations + injection-after-semicolon stay rejected.
+                                                        // mutations + injection-after-semicolon stay rejected.
         assert!(!is_read_only_sql("DELETE FROM t"));
         assert!(!is_read_only_sql("-- x\nUPDATE t SET a=1"));
         assert!(!is_read_only_sql("SELECT 1; DROP TABLE t"));
@@ -702,7 +702,9 @@ mod tests {
              SELECT * FROM inner_cte) SELECT * FROM outer_cte"
         ));
         // `EXPLAIN ANALYZE <dml>` actually executes the write.
-        assert!(!is_read_only_sql("EXPLAIN ANALYZE INSERT INTO t VALUES (1)"));
+        assert!(!is_read_only_sql(
+            "EXPLAIN ANALYZE INSERT INTO t VALUES (1)"
+        ));
         // `SELECT … INTO newtbl` creates a table (the `CREATE TABLE AS` cousin).
         assert!(!is_read_only_sql("SELECT * INTO new_table FROM t"));
         assert!(!is_read_only_sql("SELECT id INTO t2 FROM t1 WHERE id > 0"));
@@ -722,8 +724,8 @@ mod tests {
         assert!(is_read_only_sql("SELECT col AS updated_at FROM t")); // substring, not a token
         assert!(is_read_only_sql("SELECT created_at, deleted_flag FROM t"));
         assert!(is_read_only_sql("WITH x AS (SELECT 1) SELECT * FROM x")); // read-only CTE
-        // a non-reserved keyword used as an ordinary column mid-statement is
-        // not a write and must not become a false positive.
+                                                                           // a non-reserved keyword used as an ordinary column mid-statement is
+                                                                           // not a write and must not become a false positive.
         assert!(is_read_only_sql("SELECT copy, refresh FROM audit_log"));
         // `FOR [NO KEY] UPDATE` / `FOR SHARE` are row-locking *reads* — the
         // bare `update` token there must NOT trigger a rejection.
@@ -793,7 +795,10 @@ mod tests {
         assert!(res.contains("13:00:00"), "time value missing: {res}");
         // REQ-AXO-901905 — numeric (literal + sum(bigint)) renders natively now.
         assert!(res.contains("3.14"), "numeric literal value missing: {res}");
-        assert!(res.contains('3'), "sum(bigint)::numeric value missing: {res}");
+        assert!(
+            res.contains('3'),
+            "sum(bigint)::numeric value missing: {res}"
+        );
     }
 
     /// REQ-AXO-129 — `query_on_ctx` must convert plugin error

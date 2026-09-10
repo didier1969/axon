@@ -109,21 +109,14 @@ mod tool_contracts;
 mod tool_contracts_coverage_tests;
 mod tools_context;
 // REQ-AXO-902596 — `token_budget` comme borne DURE sur le paquet rendu.
+mod tools_agent_card;
 #[cfg(test)]
 #[path = "mcp/tools_context_budget_tests.rs"]
 mod tools_context_budget_tests;
+mod tools_contract;
 mod tools_data_catalog;
 mod tools_dx;
 mod tools_framework;
-mod tools_mailbox;
-mod tools_agent_card;
-mod tools_lease;
-mod tools_mailbox_pubsub;
-mod tools_mailbox_render;
-mod tools_practice;
-mod tools_contract;
-mod tools_nli;
-mod tools_release;
 mod tools_framework_anomalies;
 mod tools_framework_anomaly_heuristics;
 mod tools_framework_change_safety;
@@ -140,21 +133,28 @@ mod tools_framework_status_guidance;
 mod tools_framework_support;
 mod tools_framework_surface;
 mod tools_framework_validation;
+mod tools_friction;
 mod tools_governance;
 mod tools_help;
 mod tools_ist_algorithms;
 mod tools_ist_snapshot;
+mod tools_lease;
+mod tools_mailbox;
+mod tools_mailbox_pubsub;
+mod tools_mailbox_render;
+mod tools_nli;
+mod tools_practice;
+mod tools_release;
 mod tools_risk;
 mod tools_skill;
-mod tools_friction;
 mod tools_soll;
 pub(crate) mod tools_srs;
 pub(crate) mod tools_system;
 // REQ-AXO-902621 (suite) — la borne de `sql`, la surface la plus lourde du serveur.
+mod tools_system_debug;
 #[cfg(test)]
 #[path = "mcp/tools_system_sql_bounds_tests.rs"]
 mod tools_system_sql_bounds_tests;
-mod tools_system_debug;
 
 use self::catalog::tools_catalog;
 #[allow(unused_imports)]
@@ -465,7 +465,9 @@ impl McpServer {
             "why" => "recover governing intent and rationale",
             "path" | "bidi_trace" => "understand source/sink or dependency flow between anchors",
             "impact" => "estimate blast radius before mutation",
-            "fuse" => "fuse a symbol's governing intent (WHY) with its impact radius (HOW) in one read",
+            "fuse" => {
+                "fuse a symbol's governing intent (WHY) with its impact radius (HOW) in one read"
+            }
             "anomalies" => "surface structural risks worth explicit follow-up",
             "conception_view" => "read the derived architecture map",
             "change_safety" => "decide whether a mutation is safe enough to proceed",
@@ -477,9 +479,7 @@ impl McpServer {
             "structural_invariants" => {
                 "validate declarative forbidden/required edge invariants against the IST"
             }
-            "drift_history" => {
-                "track architectural drift over time (EWMA + threshold alerts)"
-            }
+            "drift_history" => "track architectural drift over time (EWMA + threshold alerts)",
             "soll_query_context" => "recover compact canonical intent",
             "soll_work_plan" => "turn intent into executable work ordering",
             "soll_validate" => "find graph consistency and completeness gaps",
@@ -536,7 +536,9 @@ impl McpServer {
                 "use when you need a compact evidence packet that minimizes downstream LLM tokens"
             }
             "impact" => "use when you need blast radius before editing or mutating",
-            "fuse" => "use when you need a symbol's governing intent and impact together in one call",
+            "fuse" => {
+                "use when you need a symbol's governing intent and impact together in one call"
+            }
             "path" => "use when the missing truth is connectivity or source-to-sink flow",
             "why" => "use when the missing truth is rationale or governing intent",
             "anomalies" => "use when you need prioritized structural findings",
@@ -817,16 +819,17 @@ impl McpServer {
         };
 
         // REQ-AXO-902560 (Critère 1) — vérification préalable de charge utile dans content.
-        let has_useful_content = object
-            .get("content")
-            .and_then(Value::as_array)
-            .map_or(false, |items| {
-                items.iter().any(|item| {
-                    item.get("text")
-                        .and_then(Value::as_str)
-                        .map_or(false, |t| !t.trim().is_empty())
-                })
-            });
+        let has_useful_content =
+            object
+                .get("content")
+                .and_then(Value::as_array)
+                .map_or(false, |items| {
+                    items.iter().any(|item| {
+                        item.get("text")
+                            .and_then(Value::as_str)
+                            .map_or(false, |t| !t.trim().is_empty())
+                    })
+                });
 
         let data = object
             .entry("data".to_string())
@@ -886,7 +889,8 @@ impl McpServer {
                     data_object.insert("surfaces_degraded".to_string(), json!([normalized_name]));
                 }
             }
-            let notice = format!("status: degraded — surface `{normalized_name}` returned an empty payload");
+            let notice =
+                format!("status: degraded — surface `{normalized_name}` returned an empty payload");
             data_object.insert("rendered_text".to_string(), json!(notice));
             Some(notice)
         } else {
@@ -1081,8 +1085,9 @@ impl McpServer {
                 "content".to_string(),
                 json!([{ "type": "text", "text": notice }]),
             );
-            if let Some(structured_object) =
-                object.get_mut("structuredContent").and_then(Value::as_object_mut)
+            if let Some(structured_object) = object
+                .get_mut("structuredContent")
+                .and_then(Value::as_object_mut)
             {
                 if structured_object.get("status").and_then(Value::as_str) == Some("ok") {
                     structured_object.insert("status".to_string(), json!("degraded"));
@@ -2045,7 +2050,11 @@ impl McpServer {
     /// no missing required field can be named (`dispatch.rs`). The caller learnt
     /// only that "the arguments" were wrong: the least actionable signature in the
     /// log, and the reason this one sat at 22 occurrences.
-    const SCALAR_TO_ARRAY_PARAMS: &'static [(&'static str, &'static str, &'static [&'static str])] = &[
+    const SCALAR_TO_ARRAY_PARAMS: &'static [(
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+    )] = &[
         ("pre_flight_check", "diff_paths", &["files", "paths"]),
         ("commit_work", "diff_paths", &["files", "paths"]),
     ];
@@ -2243,9 +2252,7 @@ impl McpServer {
             return true;
         }
         match chemin.split_once('.') {
-            Some((_, feuille)) if !feuille.contains('.') => {
-                ecrit(original_arguments.get(feuille))
-            }
+            Some((_, feuille)) if !feuille.contains('.') => ecrit(original_arguments.get(feuille)),
             _ => false,
         }
     }
@@ -2264,10 +2271,7 @@ impl McpServer {
         let stray: Vec<&str> = Self::SOLL_MANAGER_DATA_FIELDS
             .iter()
             .copied()
-            .filter(|f| {
-                obj.contains_key(*f)
-                    && existing_data.is_none_or(|d| !d.contains_key(*f))
-            })
+            .filter(|f| obj.contains_key(*f) && existing_data.is_none_or(|d| !d.contains_key(*f)))
             .collect();
         if stray.is_empty() {
             return (std::borrow::Cow::Borrowed(arguments), None);
@@ -2381,10 +2385,7 @@ impl McpServer {
             // Observability (REQ-AXO-902239): without this, the effect of the fix is
             // unmeasurable — we could not tell a recovered call from one that always
             // passed the argument.
-            obj.insert(
-                "project_code_source".to_string(),
-                Value::from("cwd_auto"),
-            );
+            obj.insert("project_code_source".to_string(), Value::from("cwd_auto"));
         }
         tracing::debug!(
             tool = normalized_name,
@@ -2435,11 +2436,8 @@ impl McpServer {
         // cas par cas ». Un paramètre compte comme ignoré s'il était dans l'appel
         // D'ORIGINE et s'y trouve ENCORE après les normalisations — ce qu'un alias
         // renommé, un champ hoisté ou un scope injecté par le serveur ne sont pas.
-        let ignored_parameters = Self::parameters_outside_the_schema(
-            normalized_name,
-            original_arguments,
-            &normalised,
-        );
+        let ignored_parameters =
+            Self::parameters_outside_the_schema(normalized_name, original_arguments, &normalised);
         // REQ-AXO-902583 (P4) — l'autre cause, et la plus coûteuse : le nom EXISTE,
         // l'orthographe est bonne, et la valeur est quand même sans effet. Les deux
         // remédiations sont OPPOSÉES — « corrigez l'orthographe » pour un inconnu,
@@ -2618,10 +2616,9 @@ impl McpServer {
             None => result,
         };
         let result = match list_note {
-            Some(note) => Self::append_disclosure(
-                result,
-                &format!("\n\n_↳ {note} (REQ-AXO-902302)._"),
-            ),
+            Some(note) => {
+                Self::append_disclosure(result, &format!("\n\n_↳ {note} (REQ-AXO-902302)._"))
+            }
             None => result,
         };
         let result = match data_note {
@@ -2652,7 +2649,9 @@ impl McpServer {
                 .map(|p| format!("`{p}`"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let explication = if Self::tool_accepted_fields(normalized_name).is_some_and(|f| f.is_empty()) {
+            let explication = if Self::tool_accepted_fields(normalized_name)
+                .is_some_and(|f| f.is_empty())
+            {
                 format!(
                     "\n\n_↳ paramètre(s) {noms} ignoré(s) — cet outil n'en prend aucun (REQ-AXO-902515). \
                      Votre appel n'est pas malformé — cet outil s'appelle sans argument ; \
@@ -2775,7 +2774,6 @@ impl McpServer {
         }
         Some(result)
     }
-
 
     /// REQ-AXO-210: monotonic counter that pairs with `now_unix_ms` to
     /// build a job id immune to same-millisecond collisions. The

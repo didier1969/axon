@@ -264,7 +264,10 @@ mod tests {
             "worst case must stay under 1 GiB, got {worst_case_bytes} (cap={cap})"
         );
         // Sanity: still deep enough to pipeline (not collapsed to the floor).
-        assert!(cap >= 32, "cap should still allow real pipelining, got {cap}");
+        assert!(
+            cap >= 32,
+            "cap should still allow real pipelining, got {cap}"
+        );
     }
 
     #[test]

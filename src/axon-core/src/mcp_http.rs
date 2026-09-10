@@ -80,7 +80,9 @@ async fn handle_readyz(Extension(server): Extension<Arc<McpServer>>) -> Response
     }
 
     match tokio::time::timeout(std::time::Duration::from_secs(2), rx).await {
-        Ok(Ok(Ok(_))) => (StatusCode::OK, Json(serde_json::json!({"state": "ready"}))).into_response(),
+        Ok(Ok(Ok(_))) => {
+            (StatusCode::OK, Json(serde_json::json!({"state": "ready"}))).into_response()
+        }
         Ok(Ok(Err(e))) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
@@ -155,7 +157,8 @@ async fn handle_metrics(Extension(server): Extension<Arc<McpServer>>) -> Respons
     let spawn_result = std::thread::Builder::new()
         .name("axon-metrics-probe".to_string())
         .spawn(move || {
-            let body = crate::metrics_exporter::render_prometheus_metrics(probe_server.graph_store());
+            let body =
+                crate::metrics_exporter::render_prometheus_metrics(probe_server.graph_store());
             let _ = tx.send(body);
         });
 
@@ -396,7 +399,8 @@ async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible>>> 
     // prompts a compliant client to re-fetch tools/list. Additive + harmless to
     // clients that ignore it (they still get the `status` anti-stale note).
     let list_changed = stream::once(async {
-        Ok(Event::default().data(r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#))
+        Ok(Event::default()
+            .data(r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#))
     });
 
     // 3. Keep-alive heartbeat every 15 seconds to prevent proxy timeouts
@@ -579,8 +583,7 @@ mod tests {
             "HTTP tools/call must expose the machine kickoff bundle: {result}"
         );
         assert_eq!(
-            result["structuredContent"]["kickoff_bundle"],
-            result["data"]["kickoff_bundle"],
+            result["structuredContent"]["kickoff_bundle"], result["data"]["kickoff_bundle"],
             "the HTTP envelope must not fork canonical producer data"
         );
     }
@@ -945,19 +948,48 @@ mod tests {
         );
 
         // Required Prometheus gauges and counters specified by REQ-AXO-902392
-        assert!(body.contains("axon_brain_up 1"), "missing axon_brain_up in: {body}");
+        assert!(
+            body.contains("axon_brain_up 1"),
+            "missing axon_brain_up in: {body}"
+        );
         assert!(body.contains("up 1"), "missing up 1 in: {body}");
-        assert!(body.contains("axon_indexer_alive "), "missing axon_indexer_alive in: {body}");
-        assert!(body.contains("axon_chunks_pending "), "missing axon_chunks_pending in: {body}");
-        assert!(body.contains("axon_chunks_embedded "), "missing axon_chunks_embedded in: {body}");
-        assert!(body.contains("axon_chunks_total "), "missing axon_chunks_total in: {body}");
-        assert!(body.contains("axon_coverage_pct "), "missing axon_coverage_pct in: {body}");
+        assert!(
+            body.contains("axon_indexer_alive "),
+            "missing axon_indexer_alive in: {body}"
+        );
+        assert!(
+            body.contains("axon_chunks_pending "),
+            "missing axon_chunks_pending in: {body}"
+        );
+        assert!(
+            body.contains("axon_chunks_embedded "),
+            "missing axon_chunks_embedded in: {body}"
+        );
+        assert!(
+            body.contains("axon_chunks_total "),
+            "missing axon_chunks_total in: {body}"
+        );
+        assert!(
+            body.contains("axon_coverage_pct "),
+            "missing axon_coverage_pct in: {body}"
+        );
 
         // Strict invariant: when not armed, b2_cpu_fallback_ratio MUST be -1, NEVER 0
-        assert!(body.contains("axon_b2_armed 0"), "b2 must be unarmed in fresh test db: {body}");
-        assert!(body.contains("axon_b2_cpu_fallback_ratio -1"), "unarmed ratio MUST be -1: {body}");
-        assert!(body.contains("axon_b2_degraded_threshold "), "missing degraded threshold: {body}");
-        assert!(body.contains("axon_b2_critical_threshold "), "missing critical threshold: {body}");
+        assert!(
+            body.contains("axon_b2_armed 0"),
+            "b2 must be unarmed in fresh test db: {body}"
+        );
+        assert!(
+            body.contains("axon_b2_cpu_fallback_ratio -1"),
+            "unarmed ratio MUST be -1: {body}"
+        );
+        assert!(
+            body.contains("axon_b2_degraded_threshold "),
+            "missing degraded threshold: {body}"
+        );
+        assert!(
+            body.contains("axon_b2_critical_threshold "),
+            "missing critical threshold: {body}"
+        );
     }
 }
-

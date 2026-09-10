@@ -60,12 +60,16 @@ pub(crate) fn practice_lane_for(vec_lit: Option<&str>, lexical_matched: bool) ->
 pub(crate) fn practice_lane_note(lane: PracticeLane) -> &'static str {
     match lane {
         PracticeLane::Semantic => "",
-        PracticeLane::Lexical => " · ⚠️ Mode LEXICAL — l'embed est indisponible, \
+        PracticeLane::Lexical => {
+            " · ⚠️ Mode LEXICAL — l'embed est indisponible, \
 la sélection est textuelle et le classement reste gouverné (confiance × rétrievabilité). \
-Une pratique pertinente mais formulée autrement peut manquer.",
-        PracticeLane::Governance => " · ⚠️ Mode GOUVERNANCE — l'embed est indisponible ET \
+Une pratique pertinente mais formulée autrement peut manquer."
+        }
+        PracticeLane::Governance => {
+            " · ⚠️ Mode GOUVERNANCE — l'embed est indisponible ET \
 aucune pratique ne correspond textuellement à la question. Voici les mieux établies du \
-scope : elles ne répondent PAS à la question posée.",
+scope : elles ne répondent PAS à la question posée."
+        }
     }
 }
 
@@ -85,7 +89,8 @@ pub(crate) fn practice_selection_sql(
 ) -> String {
     const COLS: &str = "id, scope, COALESCE(NULLIF(dense,''), practice) AS practice, evidence, \
 trust, stability, EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since";
-    const TAIL: &str = "tier, perishability, role, model, COALESCE(source_project, '') AS source_project";
+    const TAIL: &str =
+        "tier, perishability, role, model, COALESCE(source_project, '') AS source_project";
     match lane {
         PracticeLane::Semantic => {
             let v = vec_lit.unwrap_or("NULL");
@@ -142,7 +147,11 @@ fn render_practice_list(practices: &[Value]) -> String {
                 text = format!("{}…", text.chars().take(400).collect::<String>());
             }
             let tier = s("tier");
-            let tier = if tier.is_empty() { String::new() } else { format!(" · {tier}") };
+            let tier = if tier.is_empty() {
+                String::new()
+            } else {
+                format!(" · {tier}")
+            };
             let scope = s("scope");
             let source_proj = s("source_project");
             let origin_tag = if !source_proj.is_empty() && (scope == "*" || source_proj != scope) {
@@ -168,14 +177,53 @@ fn render_practice_list(practices: &[Value]) -> String {
 fn is_failure_mode(context: &str, practice: &str) -> bool {
     const MARKERS: &[&str] = &[
         // EN
-        "fail", "breaks", "broke", "crash", "bug", "leak", "regression", "race",
-        "deadlock", "oom", "panic", "stale", "timeout", "wedge", "corrupt", "dead",
-        "hang", "stall", "interrupted", "killed", "abort", "degraded", "pitfall",
-        "gotcha", "footgun", "anti-pattern", "antipattern", "when it goes wrong",
+        "fail",
+        "breaks",
+        "broke",
+        "crash",
+        "bug",
+        "leak",
+        "regression",
+        "race",
+        "deadlock",
+        "oom",
+        "panic",
+        "stale",
+        "timeout",
+        "wedge",
+        "corrupt",
+        "dead",
+        "hang",
+        "stall",
+        "interrupted",
+        "killed",
+        "abort",
+        "degraded",
+        "pitfall",
+        "gotcha",
+        "footgun",
+        "anti-pattern",
+        "antipattern",
+        "when it goes wrong",
         // FR
-        "échec", "échoue", "casse", "cassé", "plante", "fuite", "régression",
-        "interrompu", "tué", "corrompu", "bloqué", "mort", "panne", "piège",
-        "ne pas", "à éviter", "attention", "mode d'échec",
+        "échec",
+        "échoue",
+        "casse",
+        "cassé",
+        "plante",
+        "fuite",
+        "régression",
+        "interrompu",
+        "tué",
+        "corrompu",
+        "bloqué",
+        "mort",
+        "panne",
+        "piège",
+        "ne pas",
+        "à éviter",
+        "attention",
+        "mode d'échec",
     ];
     let hay = format!("{context} {practice}").to_lowercase();
     MARKERS.iter().any(|m| hay.contains(m))
@@ -196,11 +244,36 @@ fn is_failure_mode(context: &str, practice: &str) -> bool {
 fn is_imperative_directive(context: &str, practice: &str) -> bool {
     const DEONTIC: &[&str] = &[
         // EN normative / deontic register
-        "always", "never", "must", "mustn't", "shall", "should", "do not", "don't",
-        "ensure", "make sure", "avoid", "prefer", "require", "only use", "use only",
+        "always",
+        "never",
+        "must",
+        "mustn't",
+        "shall",
+        "should",
+        "do not",
+        "don't",
+        "ensure",
+        "make sure",
+        "avoid",
+        "prefer",
+        "require",
+        "only use",
+        "use only",
         // FR
-        "toujours", "jamais", "ne pas", "pas de", "il faut", "veiller à", "éviter",
-        "préférer", "doit", "ne doit", "exiger", "n'oublie", "assure", "à éviter",
+        "toujours",
+        "jamais",
+        "ne pas",
+        "pas de",
+        "il faut",
+        "veiller à",
+        "éviter",
+        "préférer",
+        "doit",
+        "ne doit",
+        "exiger",
+        "n'oublie",
+        "assure",
+        "à éviter",
     ];
     let hay = format!("{context} {practice}").to_lowercase();
     if DEONTIC.iter().any(|m| hay.contains(m)) {
@@ -209,10 +282,35 @@ fn is_imperative_directive(context: &str, practice: &str) -> bool {
     // Leading imperative verb on the practice itself (e.g. "mix assets.build…",
     // "use the promote script…", "garde le dashboard…").
     const IMPERATIVE_LEAD: &[&str] = &[
-        "use", "run", "add", "keep", "set", "pass", "call", "check", "verify", "rebuild",
-        "mix", "include", "delete", "remove", "restart", "build", "ship", "commit",
-        "utilise", "lance", "ajoute", "garde", "vérifie", "relance", "passe", "inclus",
-        "supprime", "reconstruis", "livre",
+        "use",
+        "run",
+        "add",
+        "keep",
+        "set",
+        "pass",
+        "call",
+        "check",
+        "verify",
+        "rebuild",
+        "mix",
+        "include",
+        "delete",
+        "remove",
+        "restart",
+        "build",
+        "ship",
+        "commit",
+        "utilise",
+        "lance",
+        "ajoute",
+        "garde",
+        "vérifie",
+        "relance",
+        "passe",
+        "inclus",
+        "supprime",
+        "reconstruis",
+        "livre",
     ];
     let first = practice
         .trim_start()
@@ -390,9 +488,8 @@ fn axis_recall_set(caller: &str) -> Vec<String> {
 }
 
 /// REQ-AXO-902556 — LLM tool-use parameter delimiter regex.
-static PARAM_OPEN_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)<parameter\s+name=["']?([a-zA-Z0-9_]+)["']?\s*>"#).unwrap()
-});
+static PARAM_OPEN_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)<parameter\s+name=["']?([a-zA-Z0-9_]+)["']?\s*>"#).unwrap());
 
 /// REQ-AXO-902556 — sanitized practice_put arguments after stripping injected XML
 /// and extracting misplaced parameter fields.
@@ -497,7 +594,10 @@ pub(crate) fn extract_inlined_mcp_params(
 
     for (i, m) in matches.iter().enumerate() {
         let caps = PARAM_OPEN_RE.captures(m.as_str()).unwrap();
-        let param_name = caps.get(1).map(|c| c.as_str().to_lowercase()).unwrap_or_default();
+        let param_name = caps
+            .get(1)
+            .map(|c| c.as_str().to_lowercase())
+            .unwrap_or_default();
         let val_start = m.end();
         let val_end = if i + 1 < matches.len() {
             matches[i + 1].start()
@@ -544,19 +644,51 @@ pub(crate) fn sanitize_practice_put_args(args: &Value) -> SanitizedPracticeArgs 
     let mut res = SanitizedPracticeArgs::default();
     let mut repairs = Vec::new();
 
-    let raw_context = args.get("context").and_then(Value::as_str).unwrap_or("").trim();
-    let raw_practice = args.get("practice").and_then(Value::as_str).unwrap_or("").trim();
-    let raw_dense = args.get("dense").and_then(Value::as_str).unwrap_or("").trim();
-    let raw_evidence = args.get("evidence").and_then(Value::as_str).unwrap_or("").trim();
+    let raw_context = args
+        .get("context")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let raw_practice = args
+        .get("practice")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let raw_dense = args
+        .get("dense")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let raw_evidence = args
+        .get("evidence")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
     let raw_scope = args
         .get("scope")
         .and_then(Value::as_str)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let raw_from = args.get("from").and_then(Value::as_str).unwrap_or("").trim();
-    let raw_perishability = args.get("perishability").and_then(Value::as_str).unwrap_or("").trim();
-    let raw_role = args.get("role").and_then(Value::as_str).unwrap_or("").trim();
-    let raw_model = args.get("model").and_then(Value::as_str).unwrap_or("").trim();
+    let raw_from = args
+        .get("from")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let raw_perishability = args
+        .get("perishability")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let raw_role = args
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let raw_model = args
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
 
     res.scope = raw_scope;
     res.context = raw_context.to_string();
@@ -698,14 +830,16 @@ impl McpServer {
         let source = sanitized.from.trim();
         let dense_arg = sanitized.dense.trim();
         if context.is_empty() || practice.is_empty() {
-            return Some(practice_err("context and practice are required", "input_invalid"));
+            return Some(practice_err(
+                "context and practice are required",
+                "input_invalid",
+            ));
         }
         // REQ-AXO-902136 — caller-provided dense form (brain validates, no LLM here).
         let (dense, dense_advisory) = resolve_dense_form(dense_arg, practice);
         // REQ-AXO-902141 — perishability class (durable by default: a best practice
         // is timeless, it must NOT be time-decayed).
-        let perishability =
-            normalize_perishability(&sanitized.perishability);
+        let perishability = normalize_perishability(&sanitized.perishability);
         // REQ-AXO-902149 — multi-agent partitioning axes (default '*' = shared/agnostic).
         let role = normalize_axis_tag(&sanitized.role);
         let model = normalize_axis_tag(&sanitized.model);
@@ -772,7 +906,11 @@ impl McpServer {
             .as_deref()
             .map(|lit| format!("{lit}::vector"))
             .unwrap_or_else(|| "NULL".to_string());
-        let embed_state = if embed_lit.is_some() { "embedded" } else { "deferred" };
+        let embed_state = if embed_lit.is_some() {
+            "embedded"
+        } else {
+            "deferred"
+        };
 
         // --- UPSERT idempotent: re-put refreshes evidence, keeps accrued governance. ---
         let sql = format!(
@@ -803,7 +941,13 @@ impl McpServer {
         let (id, inserted) = rows
             .first()
             .map(|r| {
-                let id = r.first().and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0);
+                let id = r
+                    .first()
+                    .and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
+                    .unwrap_or(0);
                 // REQ-AXO-902583 — `inserted` valait TOUJOURS `false`, sur un INSERT
                 // comme sur un UPDATE. Rapporté par DOC (« rend `inserted: false` et
                 // stocke quand même »), et d'abord pris pour un simple problème de nom.
@@ -834,7 +978,11 @@ impl McpServer {
             })
             .unwrap_or((0, false));
 
-        let dense_state = if dense.is_empty() { "prose_fallback" } else { "dense" };
+        let dense_state = if dense.is_empty() {
+            "prose_fallback"
+        } else {
+            "dense"
+        };
         // REQ-AXO-902408 — say what the verdict MEANS and whether it asks
         // anything of the caller.
         //
@@ -919,16 +1067,20 @@ impl McpServer {
     /// must exist and be active when supplied (never point the reader at nothing), and the
     /// reason is appended to `evidence` so the trail survives the state change.
     pub(crate) fn axon_practice_retire(&self, args: &Value) -> Option<Value> {
-        let Some(id) = args
-            .get("id")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-        else {
+        let Some(id) = args.get("id").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        }) else {
             return Some(practice_err(
                 "practice_retire requires `id` (the practice to retire — find it with practice_recall or practice_card)",
                 "input_invalid",
             ));
         };
-        let reason = args.get("reason").and_then(Value::as_str).unwrap_or("").trim();
+        let reason = args
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
         if reason.is_empty() {
             // Repair-as-data (GUI-AXO-1026 inv.5): a retirement without a stated reason
             // is indistinguishable from an accident when read back months later.
@@ -944,9 +1096,10 @@ impl McpServer {
                         "superseded_by":"<id of the replacement, if any>"}}}}
             }));
         }
-        let superseded_by = args
-            .get("superseded_by")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+        let superseded_by = args.get("superseded_by").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
 
         // The target must exist AND still be active — retiring twice, or retiring a row
         // already merged away, would silently report success on a no-op.
@@ -1040,8 +1193,16 @@ impl McpServer {
             .get("scope")
             .and_then(Value::as_str)
             .is_some_and(|s| !s.trim().is_empty());
-        let query = args.get("query").and_then(Value::as_str).unwrap_or("").trim();
-        let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(5).clamp(1, 50) as usize;
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let top_k = args
+            .get("top_k")
+            .and_then(Value::as_u64)
+            .unwrap_or(5)
+            .clamp(1, 50) as usize;
         if query.is_empty() {
             return Some(practice_err("query is required", "input_invalid"));
         }
@@ -1060,8 +1221,12 @@ impl McpServer {
         // (retro-compatible: every legacy row is role='*' model='*'). Re-rank unchanged.
         let role = args.get("role").and_then(Value::as_str).unwrap_or("");
         let model = args.get("model").and_then(Value::as_str).unwrap_or("");
-        let in_list =
-            |vals: &[String]| vals.iter().map(|v| format!("'{}'", esc(v))).collect::<Vec<_>>().join(", ");
+        let in_list = |vals: &[String]| {
+            vals.iter()
+                .map(|v| format!("'{}'", esc(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let scope_filter = format!(
             "scope IN ({}) AND role IN ({}) AND model IN ({})",
             in_list(&covering_scopes(&scope)),
@@ -1077,7 +1242,8 @@ impl McpServer {
         let pool = (top_k * 3).clamp(top_k, 60);
         let run = |sql: &str, semantic: bool| -> Result<Vec<Vec<Value>>, String> {
             let raw = if semantic && !(scope_count > 0 && scope_count <= EXACT_SCAN_MAX) {
-                self.graph_store.query_ann_json(sql, (pool as u32).max(40).min(1000))
+                self.graph_store
+                    .query_ann_json(sql, (pool as u32).max(40).min(1000))
             } else {
                 self.graph_store.query_exact_scan_json(sql)
             };
@@ -1105,12 +1271,22 @@ impl McpServer {
             .unwrap_or_default();
         }
 
-        let f = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0) as f32;
+        let f = |v: &Value| {
+            v.as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0.0) as f32
+        };
         let mut scored: Vec<(f32, i64, Value)> = rows
             .iter()
             .map(|r| {
                 let g = |i: usize| r.get(i).cloned().unwrap_or(Value::Null);
-                let id = r.first().and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0);
+                let id = r
+                    .first()
+                    .and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
+                    .unwrap_or(0);
                 let trust = f(&g(4));
                 let stability = f(&g(5));
                 let days = f(&g(6));
@@ -1118,19 +1294,23 @@ impl McpServer {
                 let r_ret = retrievability(days, stability);
                 // governance-weighted score: closeness × trust × retrievability.
                 let score = (1.0 - dist).max(0.0) * (0.5 + 0.5 * trust) * r_ret;
-                (score, id, json!({
-                    "id": id,
-                    "scope": g(1),
-                    "practice": g(2),
-                    "evidence": g(3),
-                    "trust": trust,
-                    "tier": g(8),
-                    "perishability": g(9),
-                    "role": g(10),
-                    "model": g(11),
-                    "score": score,
-                    "source_project": g(12)
-                }))
+                (
+                    score,
+                    id,
+                    json!({
+                        "id": id,
+                        "scope": g(1),
+                        "practice": g(2),
+                        "evidence": g(3),
+                        "trust": trust,
+                        "tier": g(8),
+                        "perishability": g(9),
+                        "role": g(10),
+                        "model": g(11),
+                        "score": score,
+                        "source_project": g(12)
+                    }),
+                )
             })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -1191,10 +1371,14 @@ impl McpServer {
             .unwrap_or_default();
         let i64c = |r: &Vec<Value>, i: usize| {
             r.get(i)
-                .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
                 .unwrap_or(0)
         };
-        let strc = |r: &Vec<Value>, i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let strc =
+            |r: &Vec<Value>, i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let mut consumed: std::collections::HashSet<i64> = std::collections::HashSet::new();
         let mut fused = 0u32;
         for rep in &reps {
@@ -1237,7 +1421,11 @@ impl McpServer {
                 continue;
             }
             consumed.insert(rep_id);
-            let ids_list = merged_ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+            let ids_list = merged_ids
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             // Fold governance into the representative…
             let _ = self.graph_store.execute(&format!(
                 "UPDATE axon.practice SET use_count = use_count + {add_use}, \
@@ -1258,7 +1446,11 @@ impl McpServer {
     /// practices (status='pruned', never DELETE) + stagnation verdict.
     /// REQ-AXO-902137 — also fuses near-duplicates first (cluster → strongest rep).
     pub(crate) fn axon_practice_tick(&self, args: &Value) -> Option<Value> {
-        let scope_filter = match args.get("scope").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+        let scope_filter = match args
+            .get("scope")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
             Some(s) => format!("AND scope = '{}'", esc(s)),
             None => String::new(),
         };
@@ -1276,16 +1468,36 @@ impl McpServer {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(e) => return Some(practice_err(&format!("tick load failed: {e}"), "degraded")),
         };
-        let f = |v: &Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0) as f32;
+        let f = |v: &Value| {
+            v.as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0.0) as f32
+        };
         let (mut decayed, mut pruned, mut consolidated, mut preserved) = (0u32, 0u32, 0u32, 0u32);
         for r in &rows {
-            let id = r.first().and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0);
+            let id = r
+                .first()
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .unwrap_or(0);
             let trust = f(r.get(1).unwrap_or(&Value::Null));
             let stability = f(r.get(2).unwrap_or(&Value::Null));
-            let use_count = r.get(3).and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0) as i32;
+            let use_count = r
+                .get(3)
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .unwrap_or(0) as i32;
             let days_since = f(r.get(4).unwrap_or(&Value::Null));
             let age_days = f(r.get(5).unwrap_or(&Value::Null));
-            let tier = r.get(6).and_then(|v| v.as_str()).unwrap_or("episode").to_string();
+            let tier = r
+                .get(6)
+                .and_then(|v| v.as_str())
+                .unwrap_or("episode")
+                .to_string();
             let prov_n = provenance_count(r.get(7).and_then(|v| v.as_str()).unwrap_or(""));
             let perishability = r.get(8).and_then(|v| v.as_str()).unwrap_or("durable");
             // REQ-AXO-902138 — promotion uses the PRE-decay trust (the accrued
@@ -1312,9 +1524,12 @@ impl McpServer {
             let r_ret = retrievability(days_since, stability);
             let new_trust = decay_trust(trust, r_ret);
             // principles survive the decay-prune (transverse) ; episodes/rules prune.
-            let prune = should_prune(new_trust, r_ret, use_count, age_days) && effective_tier != "principle";
+            let prune = should_prune(new_trust, r_ret, use_count, age_days)
+                && effective_tier != "principle";
             let status = if prune { "pruned" } else { "active" };
-            let tier_set = promoted.map(|t| format!(", tier = '{t}'")).unwrap_or_default();
+            let tier_set = promoted
+                .map(|t| format!(", tier = '{t}'"))
+                .unwrap_or_default();
             let _ = self.graph_store.execute(&format!(
                 "UPDATE axon.practice SET trust = {new_trust}, status = '{status}'{tier_set}, updated_at = now() WHERE id = {id}"
             ));
@@ -1342,8 +1557,18 @@ impl McpServer {
     pub(crate) fn axon_practice_card(&self, args: &Value) -> Option<Value> {
         let scope = self.resolve_practice_scope(args);
         let scope_filter = format!("scope IN ('{}', '*')", esc(&scope));
-        let active = self.graph_store.query_count(&format!("SELECT count(*) FROM axon.practice WHERE status='active' AND {scope_filter}")).unwrap_or(0);
-        let prunedc = self.graph_store.query_count(&format!("SELECT count(*) FROM axon.practice WHERE status='pruned' AND {scope_filter}")).unwrap_or(0);
+        let active = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM axon.practice WHERE status='active' AND {scope_filter}"
+            ))
+            .unwrap_or(0);
+        let prunedc = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM axon.practice WHERE status='pruned' AND {scope_filter}"
+            ))
+            .unwrap_or(0);
         let mean_trust = self.graph_store.query_count(&format!("SELECT round(avg(trust)*1000) FROM axon.practice WHERE status='active' AND {scope_filter}")).unwrap_or(500) as f32 / 1000.0;
         let top_sql = format!(
             "SELECT practice, round(trust*100)/100.0, use_count FROM axon.practice \
@@ -1357,11 +1582,13 @@ impl McpServer {
             .unwrap_or_default();
         let top: Vec<Value> = top_rows
             .iter()
-            .map(|r| json!({
-                "practice": r.first().cloned().unwrap_or(Value::Null),
-                "trust": r.get(1).cloned().unwrap_or(Value::Null),
-                "use_count": r.get(2).cloned().unwrap_or(Value::Null)
-            }))
+            .map(|r| {
+                json!({
+                    "practice": r.first().cloned().unwrap_or(Value::Null),
+                    "trust": r.get(1).cloned().unwrap_or(Value::Null),
+                    "use_count": r.get(2).cloned().unwrap_or(Value::Null)
+                })
+            })
             .collect();
         // REQ-AXO-902325 — the tool's own description promises "top practices by trust",
         // and `top` was computed, put in `data`, and never rendered. Most MCP client
@@ -1428,7 +1655,10 @@ mod tests {
         let t = retirement_trail("root cause was false", Some(438));
         assert!(t.starts_with("[RETIRED: "), "marker must lead: {t}");
         assert!(t.contains("root cause was false"));
-        assert!(t.contains("superseded_by=#438"), "pointer must survive in the text: {t}");
+        assert!(
+            t.contains("superseded_by=#438"),
+            "pointer must survive in the text: {t}"
+        );
 
         let bare = retirement_trail("obsolete since the tool was removed", None);
         assert!(bare.starts_with("[RETIRED: "));
@@ -1457,7 +1687,10 @@ mod tests {
         // `reason` is required BY DESIGN: an unexplained retirement is unauditable, and the
         // row is never deleted so the reason is the only record of why advice was withdrawn.
         assert!(required.contains(&"id"), "got: {required:?}");
-        assert!(required.contains(&"reason"), "reason must be mandatory: {required:?}");
+        assert!(
+            required.contains(&"reason"),
+            "reason must be mandatory: {required:?}"
+        );
         let desc = tool["description"].as_str().unwrap_or("");
         assert!(
             desc.contains("NEVER delete") || desc.contains("NEVER deletes"),
@@ -1484,13 +1717,24 @@ mod tests {
         assert!(body.contains("AXO"), "scope must appear: {body}");
         assert!(body.contains("0.73"), "trust must appear: {body}");
         assert!(body.contains("0.61"), "score must appear: {body}");
-        assert!(body.contains("promote_live_safe.sh"), "practice text must appear: {body}");
+        assert!(
+            body.contains("promote_live_safe.sh"),
+            "practice text must appear: {body}"
+        );
         // A pathological long body is bounded (token safety, GUI-PRO-100).
         let long = "x".repeat(1000);
-        let big = vec![json!({"id": 1, "scope": "AXO", "practice": long, "trust": 0.5, "score": 0.5})];
+        let big =
+            vec![json!({"id": 1, "scope": "AXO", "practice": long, "trust": 0.5, "score": 0.5})];
         let out = render_practice_list(&big);
-        assert!(out.contains('…'), "over-long practice must be truncated: {out}");
-        assert!(out.chars().count() < 600, "bounded length: {}", out.chars().count());
+        assert!(
+            out.contains('…'),
+            "over-long practice must be truncated: {out}"
+        );
+        assert!(
+            out.chars().count() < 600,
+            "bounded length: {}",
+            out.chars().count()
+        );
     }
 
     #[test]
@@ -1562,11 +1806,11 @@ mod tests {
         assert_eq!(consolidate_tier("episode", 0.72, 3, 1), Some("rule"));
         assert_eq!(consolidate_tier("episode", 0.69, 9, 3), None); // trust too low
         assert_eq!(consolidate_tier("episode", 0.9, 2, 3), None); // not enough uses
-        // rule → principle: trust ≥ 0.85 AND ≥ 8 uses AND ≥ 2 tenants.
+                                                                  // rule → principle: trust ≥ 0.85 AND ≥ 8 uses AND ≥ 2 tenants.
         assert_eq!(consolidate_tier("rule", 0.86, 8, 2), Some("principle"));
         assert_eq!(consolidate_tier("rule", 0.86, 8, 1), None); // single-tenant, not transverse
         assert_eq!(consolidate_tier("rule", 0.84, 20, 5), None); // trust too low
-        // principle is the ceiling; episode never skips straight to principle.
+                                                                 // principle is the ceiling; episode never skips straight to principle.
         assert_eq!(consolidate_tier("principle", 0.99, 100, 9), None);
         assert_eq!(consolidate_tier("episode", 0.99, 100, 9), Some("rule"));
     }
@@ -1592,7 +1836,10 @@ mod tests {
     #[test]
     fn resolve_dense_form_902136() {
         // empty dense → prose fallback (stored ''), no advisory.
-        assert_eq!(resolve_dense_form("", "the full prose practice"), (String::new(), None));
+        assert_eq!(
+            resolve_dense_form("", "the full prose practice"),
+            (String::new(), None)
+        );
         assert_eq!(resolve_dense_form("   ", "prose"), (String::new(), None));
         // a genuinely denser form → stored trimmed, no advisory.
         let (d, adv) = resolve_dense_form("  use exact scan <=5k rows  ", "When the scope is small, prefer an exact scan over HNSW because it bypasses corruption.");
@@ -1607,27 +1854,63 @@ mod tests {
     #[test]
     fn failure_mode_detection_902132() {
         // failure-framed lessons → advisory (not rejected)
-        assert!(is_failure_mode("livraison promote", "un promote tué laisse query-embed mort"));
-        assert!(is_failure_mode("pipeline", "the indexer OOMs at full throughput"));
-        assert!(is_failure_mode("HNSW", "duplicate vectors corrupt the graph"));
+        assert!(is_failure_mode(
+            "livraison promote",
+            "un promote tué laisse query-embed mort"
+        ));
+        assert!(is_failure_mode(
+            "pipeline",
+            "the indexer OOMs at full throughput"
+        ));
+        assert!(is_failure_mode(
+            "HNSW",
+            "duplicate vectors corrupt the graph"
+        ));
         // factual non-failure claims → NOT failure-framed (a contradiction stays a reject)
-        assert!(!is_failure_mode("database choice", "Axon uses MongoDB for everything"));
-        assert!(!is_failure_mode("vector search", "use exact scan for small scopes"));
+        assert!(!is_failure_mode(
+            "database choice",
+            "Axon uses MongoDB for everything"
+        ));
+        assert!(!is_failure_mode(
+            "vector search",
+            "use exact scan for small scopes"
+        ));
     }
 
     #[test]
     fn imperative_directive_detection_902154() {
         // deontic register → directive (downgraded to advisory, not rejected)
-        assert!(is_imperative_directive("dashboard", "toujours inclure le dashboard"));
+        assert!(is_imperative_directive(
+            "dashboard",
+            "toujours inclure le dashboard"
+        ));
         assert!(is_imperative_directive("git", "never force-push main"));
-        assert!(is_imperative_directive("DDL", "pas de CHECK vocab au bootstrap DDL"));
-        assert!(is_imperative_directive("delivery", "you must run the promote script"));
+        assert!(is_imperative_directive(
+            "DDL",
+            "pas de CHECK vocab au bootstrap DDL"
+        ));
+        assert!(is_imperative_directive(
+            "delivery",
+            "you must run the promote script"
+        ));
         // leading imperative verb (no explicit deontic marker)
-        assert!(is_imperative_directive("Tailwind", "mix assets.build after a new class"));
-        assert!(is_imperative_directive("runtime", "garde le brain et l'indexer séparés"));
+        assert!(is_imperative_directive(
+            "Tailwind",
+            "mix assets.build after a new class"
+        ));
+        assert!(is_imperative_directive(
+            "runtime",
+            "garde le brain et l'indexer séparés"
+        ));
         // declarative factual assertions → NOT a directive (anti-poison reject preserved)
-        assert!(!is_imperative_directive("database choice", "Axon uses MongoDB for everything"));
-        assert!(!is_imperative_directive("storage", "the canonical store is PostgreSQL"));
+        assert!(!is_imperative_directive(
+            "database choice",
+            "Axon uses MongoDB for everything"
+        ));
+        assert!(!is_imperative_directive(
+            "storage",
+            "the canonical store is PostgreSQL"
+        ));
     }
 
     /// REQ-AXO-902430 — la voie découle de ce qui est DISPONIBLE.
@@ -1689,7 +1972,10 @@ mod tests {
 
         let semantic = practice_selection_sql(f, PracticeLane::Semantic, Some("'[0.1]'"), "q", 10);
         assert!(semantic.contains("embedding IS NOT NULL"));
-        assert!(semantic.contains("<=>"), "la voie semantique classe par distance");
+        assert!(
+            semantic.contains("<=>"),
+            "la voie semantique classe par distance"
+        );
         assert!(!semantic.contains("plainto_tsquery"));
 
         let lexical = practice_selection_sql(f, PracticeLane::Lexical, None, "verrou env", 10);
@@ -1698,7 +1984,10 @@ mod tests {
             "une pratique sans vecteur reste recuperable par son texte"
         );
         assert!(lexical.contains("plainto_tsquery"));
-        assert!(lexical.contains("verrou env"), "la question doit atteindre la requete");
+        assert!(
+            lexical.contains("verrou env"),
+            "la question doit atteindre la requete"
+        );
         assert!(
             lexical.contains("0.0 AS dist"),
             "dist=0 preserve la forme du score gouverne au lieu de la reinventer"
@@ -1706,21 +1995,31 @@ mod tests {
         assert!(lexical.contains("trust DESC"));
 
         let gov = practice_selection_sql(f, PracticeLane::Governance, None, "q", 10);
-        assert!(!gov.contains("plainto_tsquery"), "la voie gouvernance ne filtre pas sur le texte");
+        assert!(
+            !gov.contains("plainto_tsquery"),
+            "la voie gouvernance ne filtre pas sur le texte"
+        );
         assert!(gov.contains("0.0 AS dist") && gov.contains("trust DESC"));
 
         // Le filtre de partition (scope × role × model) survit dans les TROIS voies :
         // un repli ne doit jamais elargir la portee au-dela de ce qui etait demande.
         for sql in [semantic.as_str(), lexical.as_str(), gov.as_str()] {
-            assert!(sql.contains(f), "le filtre de partition doit survivre a tout repli");
+            assert!(
+                sql.contains(f),
+                "le filtre de partition doit survivre a tout repli"
+            );
         }
     }
 
     /// L'apostrophe d'une question ne doit pas casser la requete lexicale.
     #[test]
     fn a_quote_in_the_question_is_escaped_in_the_lexical_lane() {
-        let sql = practice_selection_sql("scope IN ('*')", PracticeLane::Lexical, None, "l'init", 5);
-        assert!(sql.contains("l''init"), "l'apostrophe doit etre echappee, got {sql}");
+        let sql =
+            practice_selection_sql("scope IN ('*')", PracticeLane::Lexical, None, "l'init", 5);
+        assert!(
+            sql.contains("l''init"),
+            "l'apostrophe doit etre echappee, got {sql}"
+        );
     }
 
     // =========================================================================
@@ -1729,17 +2028,33 @@ mod tests {
 
     #[test]
     fn test_extract_inlined_cas_1705() {
-        let raw_practice = "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.</practice>\n\
+        let raw_practice =
+            "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.</practice>\n\
 <parameter name=\"dense\">Rôle mort : lire la FIN des logs.</dense>\n\
 <parameter name=\"evidence\">2026-08-29 session 130 AXO : diagnostic erroné.</evidence>\n\
 <parameter name=\"scope\">*";
 
         let (cleaned, inlined, stripped) = extract_inlined_mcp_params("practice", raw_practice);
-        assert_eq!(cleaned, "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.");
+        assert_eq!(
+            cleaned,
+            "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs."
+        );
         assert!(!stripped.is_empty());
         assert_eq!(inlined.len(), 3);
-        assert_eq!(inlined[0], ("dense".to_string(), "Rôle mort : lire la FIN des logs.".to_string()));
-        assert_eq!(inlined[1], ("evidence".to_string(), "2026-08-29 session 130 AXO : diagnostic erroné.".to_string()));
+        assert_eq!(
+            inlined[0],
+            (
+                "dense".to_string(),
+                "Rôle mort : lire la FIN des logs.".to_string()
+            )
+        );
+        assert_eq!(
+            inlined[1],
+            (
+                "evidence".to_string(),
+                "2026-08-29 session 130 AXO : diagnostic erroné.".to_string()
+            )
+        );
         assert_eq!(inlined[2], ("scope".to_string(), "*".to_string()));
     }
 
@@ -1752,7 +2067,13 @@ mod tests {
         assert_eq!(cleaned, "Rôle mort : lire la FIN des logs.");
         assert!(!stripped.is_empty());
         assert_eq!(inlined.len(), 1);
-        assert_eq!(inlined[0], ("evidence".to_string(), "2026-08-29 session 130 AXO : diagnostic erroné.".to_string()));
+        assert_eq!(
+            inlined[0],
+            (
+                "evidence".to_string(),
+                "2026-08-29 session 130 AXO : diagnostic erroné.".to_string()
+            )
+        );
     }
 
     #[test]
@@ -1761,10 +2082,20 @@ mod tests {
 <parameter name=\"dense\">Readiness : un contrôle n'y a sa place que si retirer CE réplica aide.";
 
         let (cleaned, inlined, stripped) = extract_inlined_mcp_params("practice", raw_practice);
-        assert_eq!(cleaned, "Un contrôle appartient à la readiness SEULEMENT si retirer CE réplica aide.");
+        assert_eq!(
+            cleaned,
+            "Un contrôle appartient à la readiness SEULEMENT si retirer CE réplica aide."
+        );
         assert!(!stripped.is_empty());
         assert_eq!(inlined.len(), 1);
-        assert_eq!(inlined[0], ("dense".to_string(), "Readiness : un contrôle n'y a sa place que si retirer CE réplica aide.".to_string()));
+        assert_eq!(
+            inlined[0],
+            (
+                "dense".to_string(),
+                "Readiness : un contrôle n'y a sa place que si retirer CE réplica aide."
+                    .to_string()
+            )
+        );
     }
 
     #[test]
@@ -1777,8 +2108,20 @@ mod tests {
         assert_eq!(cleaned, "Garde qui compare deux compteurs = inatteignable.");
         assert!(!stripped.is_empty());
         assert_eq!(inlined.len(), 2);
-        assert_eq!(inlined[0], ("dense".to_string(), "Garde compare compteurs = inatteignable.".to_string()));
-        assert_eq!(inlined[1], ("evidence".to_string(), "OPV REQ-OPV-887 commits 40d6351e".to_string()));
+        assert_eq!(
+            inlined[0],
+            (
+                "dense".to_string(),
+                "Garde compare compteurs = inatteignable.".to_string()
+            )
+        );
+        assert_eq!(
+            inlined[1],
+            (
+                "evidence".to_string(),
+                "OPV REQ-OPV-887 commits 40d6351e".to_string()
+            )
+        );
     }
 
     #[test]
@@ -1792,9 +2135,15 @@ mod tests {
         });
 
         let sanitized = sanitize_practice_put_args(&raw_json);
-        assert_eq!(sanitized.practice, "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.");
+        assert_eq!(
+            sanitized.practice,
+            "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs."
+        );
         assert_eq!(sanitized.dense, "Rôle mort : lire la FIN des logs.");
-        assert_eq!(sanitized.evidence, "2026-08-29 session 130 AXO : diagnostic erroné.");
+        assert_eq!(
+            sanitized.evidence,
+            "2026-08-29 session 130 AXO : diagnostic erroné."
+        );
         assert_eq!(sanitized.scope.as_deref(), Some("*"));
         assert!(sanitized.repaired);
         assert!(!sanitized.repairs.is_empty());
@@ -1811,7 +2160,10 @@ mod tests {
         });
 
         let sanitized = sanitize_practice_put_args(&raw_json);
-        assert_eq!(sanitized.practice, "Use Vec<T> and Option<T> with &Rc<..> for pure functions without allocation.");
+        assert_eq!(
+            sanitized.practice,
+            "Use Vec<T> and Option<T> with &Rc<..> for pure functions without allocation."
+        );
         assert_eq!(sanitized.dense, "Use Vec<T> and Option<T> with &Rc<..>.");
         assert_eq!(sanitized.evidence, "commit ab12cd34");
         assert_eq!(sanitized.scope.as_deref(), Some("AXO"));
@@ -1830,7 +2182,10 @@ mod tests {
         });
 
         let sanitized = sanitize_practice_put_args(&raw_json);
-        assert_eq!(sanitized.practice, "Une pratique avec balise fermante orpheline");
+        assert_eq!(
+            sanitized.practice,
+            "Une pratique avec balise fermante orpheline"
+        );
         assert_eq!(sanitized.dense, "Dense propre");
         assert_eq!(sanitized.evidence, "commit 1234");
         assert!(sanitized.repaired);

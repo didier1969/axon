@@ -213,9 +213,8 @@ impl McpServer {
                 .collect();
             (displayed, kinds)
         };
-        let resolved_path: Option<(Vec<String>, Vec<String>)> = ram_routes
-            .first()
-            .map(|(ids, rels)| map_route(ids, rels));
+        let resolved_path: Option<(Vec<String>, Vec<String>)> =
+            ram_routes.first().map(|(ids, rels)| map_route(ids, rels));
         // Independent alternate routes (node-disjoint on intermediates).
         let detours: Vec<Value> = ram_routes
             .iter()

@@ -215,7 +215,10 @@ pub(super) enum EtatCritere {
     /// Écarté AVEC une raison non vide. `levee` dit à quelle condition il redeviendrait
     /// exigible — facultative, parce qu'un écart peut être définitif (« nécessite un
     /// matériel qu'on n'aura pas »).
-    Ecarte { raison: String, levee: Option<String> },
+    Ecarte {
+        raison: String,
+        levee: Option<String>,
+    },
     /// Écarté SANS raison — délibérément replié sur « non tenu ».
     NonTenu,
 }
@@ -590,73 +593,75 @@ pub(super) fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'stat
     // Les valeurs sont comparées via `to_ascii_lowercase()` du type rendu, donc
     // "sollref" et non "soll_ref" — attrapé par le test de schéma.
     let mut accepted = vec!["commit", "sollref", "url"];
-    accepted.extend(match normalize_traceability_entity_type(entity_type).as_str() {
-        // REQ-AXO-902499 (doléance VPC #245) — `rationale` est ACCEPTÉ sur `requirement`.
-        //
-        // Il ne l'était pas, et c'était le type qui en a le plus besoin. Cas rapporté :
-        // sur six preuves attachées à `REQ-VPC-220`, la SEULE rejetée portait
-        // `rationale` — et c'était le récit de ce que l'auteur avait cassé en vérifiant
-        // son propre travail (cinq vraies alertes parties d'un banc censé être isolé,
-        // en échouant SILENCIEUSEMENT).
-        //
-        // > « Les cinq items acceptés disent ce qui EST. Le sixième disait POURQUOI c'est
-        // > comme ça et ce qu'il ne faut pas refaire. C'est le seul qu'un successeur ne
-        // > peut pas reconstruire en lisant le dépôt, et c'est exactement celui qui n'a
-        // > pas de place. »
-        //
-        // Une exigence qui documente pourquoi elle existe sous cette forme est le cas
-        // NOMINAL, pas l'exception. `document`/`url` sont de mauvais substituts : ils
-        // pointent ailleurs au lieu de PORTER le texte.
-        "requirement" => vec![
-            "document",
-            "file",
-            "symbol",
-            "test",
-            "metric",
-            "validation",
-            "rationale",
-            "falsification", // REQ-AXO-902447
-        ],
-        "decision" => vec![
-            "document",
-            "file",
-            "symbol",
-            "rationale",
-            "diff",
-            "validation",
-            "falsification", // REQ-AXO-902447
-        ],
-        "validation" => vec![
-            "document",
-            "file",
-            "symbol",
-            "test",
-            "metric",
-            "diff",
-            "falsification", // REQ-AXO-902447
-        ],
-        "concept" => vec!["document", "file", "symbol", "rationale"],
-        "guideline" => vec!["document", "file", "symbol", "diff"],
-        "skill" => vec![
-            "document",
-            "file",
-            "symbol",
-            "test",
-            "diff",
-            "falsification", // REQ-AXO-902447
-        ], // REQ-AXO-91578
-        "prompt_template" => vec![
-            "document",
-            "file",
-            "symbol",
-            "test",
-            "falsification", // REQ-AXO-902447
-        ], // REQ-AXO-91579
-        "vision" | "pillar" | "milestone" | "stakeholder" => {
-            vec!["document", "file", "symbol", "metric"]
-        }
-        _ => vec!["document", "file", "symbol"],
-    });
+    accepted.extend(
+        match normalize_traceability_entity_type(entity_type).as_str() {
+            // REQ-AXO-902499 (doléance VPC #245) — `rationale` est ACCEPTÉ sur `requirement`.
+            //
+            // Il ne l'était pas, et c'était le type qui en a le plus besoin. Cas rapporté :
+            // sur six preuves attachées à `REQ-VPC-220`, la SEULE rejetée portait
+            // `rationale` — et c'était le récit de ce que l'auteur avait cassé en vérifiant
+            // son propre travail (cinq vraies alertes parties d'un banc censé être isolé,
+            // en échouant SILENCIEUSEMENT).
+            //
+            // > « Les cinq items acceptés disent ce qui EST. Le sixième disait POURQUOI c'est
+            // > comme ça et ce qu'il ne faut pas refaire. C'est le seul qu'un successeur ne
+            // > peut pas reconstruire en lisant le dépôt, et c'est exactement celui qui n'a
+            // > pas de place. »
+            //
+            // Une exigence qui documente pourquoi elle existe sous cette forme est le cas
+            // NOMINAL, pas l'exception. `document`/`url` sont de mauvais substituts : ils
+            // pointent ailleurs au lieu de PORTER le texte.
+            "requirement" => vec![
+                "document",
+                "file",
+                "symbol",
+                "test",
+                "metric",
+                "validation",
+                "rationale",
+                "falsification", // REQ-AXO-902447
+            ],
+            "decision" => vec![
+                "document",
+                "file",
+                "symbol",
+                "rationale",
+                "diff",
+                "validation",
+                "falsification", // REQ-AXO-902447
+            ],
+            "validation" => vec![
+                "document",
+                "file",
+                "symbol",
+                "test",
+                "metric",
+                "diff",
+                "falsification", // REQ-AXO-902447
+            ],
+            "concept" => vec!["document", "file", "symbol", "rationale"],
+            "guideline" => vec!["document", "file", "symbol", "diff"],
+            "skill" => vec![
+                "document",
+                "file",
+                "symbol",
+                "test",
+                "diff",
+                "falsification", // REQ-AXO-902447
+            ], // REQ-AXO-91578
+            "prompt_template" => vec![
+                "document",
+                "file",
+                "symbol",
+                "test",
+                "falsification", // REQ-AXO-902447
+            ], // REQ-AXO-91579
+            "vision" | "pillar" | "milestone" | "stakeholder" => {
+                vec!["document", "file", "symbol", "metric"]
+            }
+            _ => vec!["document", "file", "symbol"],
+        },
+    );
     accepted
 }
 
@@ -823,10 +828,7 @@ fn is_git_object_id(raw: &str) -> bool {
 
 /// `HEAD`, `HEAD~1`, `HEAD^`, `ORIG_HEAD`, `FETCH_HEAD` — symbolic revisions.
 fn is_git_symbolic_rev(raw: &str) -> bool {
-    let head = raw
-        .split(['~', '^'])
-        .next()
-        .unwrap_or(raw);
+    let head = raw.split(['~', '^']).next().unwrap_or(raw);
     matches!(head, "HEAD" | "ORIG_HEAD" | "FETCH_HEAD" | "MERGE_HEAD")
 }
 
@@ -846,7 +848,9 @@ fn is_canonical_soll_id_prefix(raw: &str) -> bool {
     kind.len() >= 3
         && kind.chars().all(|c| c.is_ascii_uppercase())
         && project.len() == 3
-        && project.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && project
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
         && !number.is_empty()
         && number.chars().all(|c| c.is_ascii_digit())
 }
@@ -1056,9 +1060,15 @@ mod requirement_state_tests {
         let satisfied_criteria = r#"[{"criterion": "AC1: foo", "state": "met"}]"#;
         for status in ["current", "accepted"] {
             // Critères satisfaits + evidence → done.
-            assert_eq!(requirement_state_from(status, satisfied_criteria, 1, 0), "done");
+            assert_eq!(
+                requirement_state_from(status, satisfied_criteria, 1, 0),
+                "done"
+            );
             // Critères déclarés mais non vérifiés + evidence → criteria_declared (REQ-AXO-902595).
-            assert_eq!(requirement_state_from(status, "AC1: foo", 1, 0), "criteria_declared");
+            assert_eq!(
+                requirement_state_from(status, "AC1: foo", 1, 0),
+                "criteria_declared"
+            );
             // Missing evidence → partial, not done.
             assert_eq!(requirement_state_from(status, "AC1: foo", 0, 0), "partial");
             // Broken file evidence → partial.
@@ -1156,7 +1166,10 @@ mod req_902390_artifact_ref_shape_tests {
         let real = "/home/dstadel/projects/aps3d/lib/aps3d/tms/route_optimizer.ex";
         assert_eq!(classify_artifact_ref(real), ArtifactRefShape::Path);
         assert!(evidence_ref_is_disk_checkable("File", real));
-        assert!(evidence_ref_is_disk_checkable("Document", "docs/architecture.md"));
+        assert!(evidence_ref_is_disk_checkable(
+            "Document",
+            "docs/architecture.md"
+        ));
     }
 
     #[test]
@@ -1193,7 +1206,10 @@ mod req_902390_artifact_ref_shape_tests {
     fn document_is_no_longer_the_fallback_bucket() {
         // La cause racine : `Document` recevait tout ce qui n'avait ni `/` ni `.md`.
         assert_eq!(normalize_evidence_artifact_type("", "01c24be7"), "Commit");
-        assert_eq!(normalize_evidence_artifact_type("document", "CPT-AXO-018"), "SollRef");
+        assert_eq!(
+            normalize_evidence_artifact_type("document", "CPT-AXO-018"),
+            "SollRef"
+        );
         assert_eq!(
             normalize_evidence_artifact_type("doc", "https://example.test/x"),
             "Url"
@@ -1211,8 +1227,14 @@ mod req_902390_artifact_ref_shape_tests {
         // Sans ça, inférer le BON type le ferait rejeter — 6058 lignes `Commit`
         // existent déjà dans le graphe live alors que le vocabulaire les ignorait.
         for entity in ["requirement", "decision", "concept", "vision"] {
-            assert!(artifact_schema_accepts(entity, "Commit"), "{entity} / Commit");
-            assert!(artifact_schema_accepts(entity, "SollRef"), "{entity} / SollRef");
+            assert!(
+                artifact_schema_accepts(entity, "Commit"),
+                "{entity} / Commit"
+            );
+            assert!(
+                artifact_schema_accepts(entity, "SollRef"),
+                "{entity} / SollRef"
+            );
             assert!(artifact_schema_accepts(entity, "Url"), "{entity} / Url");
         }
     }
@@ -1275,8 +1297,14 @@ mod req_902390_artifact_ref_shape_tests {
     #[test]
     fn a_hex_looking_filename_is_a_path_not_a_hash() {
         // Le piège inverse : ne pas classer un fichier comme un commit.
-        assert_eq!(classify_artifact_ref("deadbeef.txt"), ArtifactRefShape::Path);
-        assert_eq!(classify_artifact_ref("docs/abc123.md"), ArtifactRefShape::Path);
+        assert_eq!(
+            classify_artifact_ref("deadbeef.txt"),
+            ArtifactRefShape::Path
+        );
+        assert_eq!(
+            classify_artifact_ref("docs/abc123.md"),
+            ArtifactRefShape::Path
+        );
         // Trop court pour un hash abrégé, et pas un chemin : on ne devine pas.
         assert_eq!(classify_artifact_ref("abc12"), ArtifactRefShape::Unknown);
         assert!(!evidence_ref_is_disk_checkable("Document", "abc12"));
@@ -1332,7 +1360,10 @@ mod req_902390_artifact_ref_shape_tests {
 
         // ── Contrôles positifs : ne pas élargir au-delà du mesuré ──────────
         // Un vrai fichier dont le nom ressemble à ces formes reste un chemin.
-        assert_eq!(classify_artifact_ref("deadbeef.txt"), ArtifactRefShape::Path);
+        assert_eq!(
+            classify_artifact_ref("deadbeef.txt"),
+            ArtifactRefShape::Path
+        );
         assert_eq!(classify_artifact_ref("docs/a:b.md"), ArtifactRefShape::Path);
         // Un `:` suivi d'autre chose que des lignes n'est pas une ancre.
         assert_eq!(
@@ -1359,9 +1390,7 @@ mod criteres_acceptation_tests {
     /// `NonTenu`, exactement comme s'il n'avait pas été écarté du tout.
     #[test]
     fn un_waived_sans_raison_vaut_non_tenu() {
-        let c = parse_acceptance_criteria(
-            r#"[{"criterion":"tourne sous root","state":"waived"}]"#,
-        );
+        let c = parse_acceptance_criteria(r#"[{"criterion":"tourne sous root","state":"waived"}]"#);
         assert_eq!(c.len(), 1);
         assert_eq!(
             c[0].etat,
@@ -1420,9 +1449,14 @@ mod criteres_acceptation_tests {
                 {"criterion":"tourne sous root","state":"waived","reason":"exige root"}]"#,
         );
         let r = resume_criteres(&c).expect("un état déclaré doit se publier");
-        assert!(r.contains("3 critère(s)") && r.contains("2 tenu(s)"), "got: {r}");
         assert!(
-            r.contains("ÉCARTÉ assumé") && r.contains("tourne sous root") && r.contains("exige root"),
+            r.contains("3 critère(s)") && r.contains("2 tenu(s)"),
+            "got: {r}"
+        );
+        assert!(
+            r.contains("ÉCARTÉ assumé")
+                && r.contains("tourne sous root")
+                && r.contains("exige root"),
             "l'écart doit être nommé AVEC sa raison, got: {r}"
         );
     }

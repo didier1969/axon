@@ -8,8 +8,8 @@
 use serde_json::{json, Value};
 
 use super::runtime_topology_support::{
-    IndexerSupervisorObservation,
-    resolve_indexer_liveness, EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+    resolve_indexer_liveness, IndexerSupervisorObservation,
+    EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
 };
 use super::McpServer;
 use crate::release_reconciler::IstOwnershipFacts;
@@ -26,7 +26,10 @@ impl McpServer {
     ///
     /// L'échappatoire `AXON_PROMOTE_STATUS_SUPERVISOR_PROBE=0` désactive la sonde ;
     /// elle se déclare alors comme désactivée, donc impossible à lire comme saine.
-    pub(crate) fn collect_supervisor_facts(&self, heartbeat_age_ms: Option<i64>) -> SupervisorFacts {
+    pub(crate) fn collect_supervisor_facts(
+        &self,
+        heartbeat_age_ms: Option<i64>,
+    ) -> SupervisorFacts {
         let mut facts = SupervisorFacts {
             heartbeat_age_ms,
             ..Default::default()
@@ -160,7 +163,11 @@ impl McpServer {
         // en redémarrage complet — « THIS INTERRUPTS THE BRAIN ». Un `Unknown` qui
         // fuiterait ici couperait le service à chaque promote sur un manifeste
         // ancien, c'est-à-dire presque toujours.
-        let failed: Vec<&str> = gates.iter().filter(|g| g.is_red()).map(|g| g.name).collect();
+        let failed: Vec<&str> = gates
+            .iter()
+            .filter(|g| g.is_red())
+            .map(|g| g.name)
+            .collect();
         let unknown: Vec<&str> = gates
             .iter()
             .filter(|g| g.status == crate::release_reconciler::GateStatus::Unknown)
@@ -372,7 +379,10 @@ mod ist_ownership_probe_tests {
     fn sans_verrou_la_sonde_mesure_et_dit_libre() {
         let dir = tempdir().expect("tempdir");
         let facts = probe_ist_ownership_at(dir.path().to_str().unwrap());
-        assert!(facts.probed, "l'absence de verrou est une MESURE, pas un échec");
+        assert!(
+            facts.probed,
+            "l'absence de verrou est une MESURE, pas un échec"
+        );
         assert!(!facts.held_by_live_process);
         assert_eq!(facts.label(Some(1)), "free");
     }

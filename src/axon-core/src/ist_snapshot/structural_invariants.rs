@@ -146,7 +146,8 @@ pub fn evaluate_invariant(
                         return false;
                     }
                     let (tkind_b, _tp, _tf) = graph.node_meta(tgt);
-                    rule.target.matches(graph.id_of(tgt), NodeKind::from_u8(tkind_b))
+                    rule.target
+                        .matches(graph.id_of(tgt), NodeKind::from_u8(tkind_b))
                 });
                 if !satisfied {
                     out.push(InvariantViolation {
@@ -218,9 +219,18 @@ mod tests {
 
     #[test]
     fn mode_parses_case_insensitively() {
-        assert_eq!(InvariantMode::from_str_ci("Forbidden"), Some(InvariantMode::Forbidden));
-        assert_eq!(InvariantMode::from_str_ci("REQUIRE"), Some(InvariantMode::Required));
-        assert_eq!(InvariantMode::from_str_ci(" must "), Some(InvariantMode::Required));
+        assert_eq!(
+            InvariantMode::from_str_ci("Forbidden"),
+            Some(InvariantMode::Forbidden)
+        );
+        assert_eq!(
+            InvariantMode::from_str_ci("REQUIRE"),
+            Some(InvariantMode::Required)
+        );
+        assert_eq!(
+            InvariantMode::from_str_ci(" must "),
+            Some(InvariantMode::Required)
+        );
         assert_eq!(InvariantMode::from_str_ci("whatever"), None);
     }
 
@@ -245,8 +255,16 @@ mod tests {
             node("AXO::mcp/b.rs::bar", "AXO", NodeKind::Function),
         ];
         let edges = vec![
-            edge("AXO::core/a.rs::foo", "AXO::mcp/b.rs::bar", RelationType::Calls),
-            edge("AXO::mcp/b.rs::bar", "AXO::core/a.rs::foo", RelationType::Calls),
+            edge(
+                "AXO::core/a.rs::foo",
+                "AXO::mcp/b.rs::bar",
+                RelationType::Calls,
+            ),
+            edge(
+                "AXO::mcp/b.rs::bar",
+                "AXO::core/a.rs::foo",
+                RelationType::Calls,
+            ),
         ];
         IstGraph::build(nodes, edges)
     }

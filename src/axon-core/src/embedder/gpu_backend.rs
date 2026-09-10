@@ -66,7 +66,12 @@ pub(crate) fn take_previous_gpu_init_crash_in(dir: &Path) -> Option<String> {
     let path = dir.join(GPU_INIT_STAGE_FILE);
     let contenu = fs::read_to_string(&path).ok()?;
     let _ = fs::remove_file(&path);
-    let etape = contenu.lines().next().unwrap_or_default().trim().to_string();
+    let etape = contenu
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if etape.is_empty() || etape == GPU_INIT_STAGE_COMPLETED {
         None
     } else {
@@ -157,9 +162,8 @@ impl OrtGpuFirstTextEmbedding {
         // the pool when idle costs a few µs of wake latency but reclaims the
         // cores; TensorRT/CUDA execution is unaffected. Override with
         // `AXON_ORT_ALLOW_SPINNING=1` for throughput benchmarking.
-        let allow_spinning = ort_allow_spinning_from_env(
-            std::env::var("AXON_ORT_ALLOW_SPINNING").ok().as_deref(),
-        );
+        let allow_spinning =
+            ort_allow_spinning_from_env(std::env::var("AXON_ORT_ALLOW_SPINNING").ok().as_deref());
         let mut builder = Session::builder()
             .map_err(|err| anyhow!("failed to create ORT session builder: {err}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
@@ -169,9 +173,7 @@ impl OrtGpuFirstTextEmbedding {
                 anyhow!("failed to set ORT memory pattern={memory_pattern_enabled}: {err}")
             })?
             .with_intra_op_spinning(allow_spinning)
-            .map_err(|err| {
-                anyhow!("failed to set ORT intra-op spinning={allow_spinning}: {err}")
-            })?
+            .map_err(|err| anyhow!("failed to set ORT intra-op spinning={allow_spinning}: {err}"))?
             .with_inter_op_spinning(allow_spinning)
             .map_err(|err| {
                 anyhow!("failed to set ORT inter-op spinning={allow_spinning}: {err}")
@@ -749,14 +751,18 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
 /// Dérive de AXON_GPU_CONCURRENT_SESSIONS ou AXON_B2_WORKERS (défaut 1).
 pub(crate) fn concurrent_gpu_sessions_count() -> usize {
     if let Ok(v) = std::env::var("AXON_GPU_CONCURRENT_SESSIONS").and_then(|raw| {
-        raw.trim().parse::<usize>().map_err(|_| std::env::VarError::NotPresent)
+        raw.trim()
+            .parse::<usize>()
+            .map_err(|_| std::env::VarError::NotPresent)
     }) {
         if v > 0 {
             return v;
         }
     }
     if let Ok(v) = std::env::var("AXON_B2_WORKERS").and_then(|raw| {
-        raw.trim().parse::<usize>().map_err(|_| std::env::VarError::NotPresent)
+        raw.trim()
+            .parse::<usize>()
+            .map_err(|_| std::env::VarError::NotPresent)
     }) {
         if v > 0 {
             return v;

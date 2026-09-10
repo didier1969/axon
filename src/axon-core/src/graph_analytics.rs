@@ -272,7 +272,6 @@ impl GraphStore {
             .nif_blocking_risks(project)
             .unwrap_or_default())
     }
-
 }
 
 #[cfg(test)]
@@ -317,7 +316,10 @@ mod migration_guard_tests {
         let code = code_only(SOURCE, "pub fn get_telemetry_score");
         assert!(!code.contains("FROM ist.Edge"), "no IST graph SQL");
         assert!(!code.contains("query_count"), "no SQL round-trip");
-        assert!(code.contains("telemetry_log_call_count"), "routed through RAM");
+        assert!(
+            code.contains("telemetry_log_call_count"),
+            "routed through RAM"
+        );
     }
 
     // REQ-AXO-901970 — the reciprocal-cycle count is now RAM-only (linear scan
@@ -346,7 +348,6 @@ mod migration_guard_tests {
         assert!(!code.contains("query_json"), "no SQL round-trip");
         assert!(code.contains("technical_debt"), "routed through RAM");
     }
-
 
     // REQ-AXO-901952 — the cycle LISTING is now RAM-only (Tarjan SCC over the
     // process snapshot); the legacy PG `WITH RECURSIVE` path enumeration is

@@ -246,7 +246,9 @@ impl McpServer {
             } else {
                 "IST RAM snapshot is cold for this project and could not be warmed ; call `ist_snapshot_warm` then retry (REQ-AXO-901952, no PG fallback)"
             };
-            return Some(Self::impact_ram_unavailable_error(symbol, project, depth, why));
+            return Some(Self::impact_ram_unavailable_error(
+                symbol, project, depth, why,
+            ));
         }
         let view = process_view();
         let surfaces_used: Vec<&'static str> = vec!["graph_ram"];
@@ -950,8 +952,10 @@ impl McpServer {
         let calls_count = sentinel_project
             .filter(|code| self.ensure_ram_snapshot_warm(code))
             .and_then(|code| {
-                process_view()
-                    .count_edges_with_relation(&code, &[RelationType::Calls, RelationType::CallsNif])
+                process_view().count_edges_with_relation(
+                    &code,
+                    &[RelationType::Calls, RelationType::CallsNif],
+                )
             });
         let Some(calls_count) = calls_count else {
             return Some(Self::impact_ram_unavailable_error(
@@ -1643,7 +1647,11 @@ impl McpServer {
                 "data": { "status": "input_invalid", "parameter_repair": { "invalid_field": "project_code" } }
             }));
         };
-        let radius = args.get("radius").and_then(|v| v.as_u64()).unwrap_or(4).clamp(1, 8) as u32;
+        let radius = args
+            .get("radius")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(4)
+            .clamp(1, 8) as u32;
         let Some(symbol_id) = self.resolve_test_target_id(&project, symbol) else {
             return Some(json!({
                 "content": [{ "type": "text", "text": format!("`tests_for`: symbol '{symbol}' not found in {project}.") }],
@@ -1693,7 +1701,11 @@ impl McpServer {
         let symbols: Vec<String> = args
             .get("symbols")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         if symbols.is_empty() {
             return Some(json!({
@@ -1714,7 +1726,11 @@ impl McpServer {
                 "data": { "status": "input_invalid", "parameter_repair": { "invalid_field": "project_code" } }
             }));
         };
-        let radius = args.get("radius").and_then(|v| v.as_u64()).unwrap_or(4).clamp(1, 8) as u32;
+        let radius = args
+            .get("radius")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(4)
+            .clamp(1, 8) as u32;
         if !self.ensure_ram_snapshot_warm(&project) {
             return Some(json!({
                 "content": [{ "type": "text", "text": "`test_impact`: RAM IST snapshot cold." }],

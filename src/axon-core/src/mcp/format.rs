@@ -95,7 +95,6 @@ pub(crate) fn evidence_by_mode(evidence: &str, mode: Option<&str>) -> String {
     clipped
 }
 
-
 /// REQ-AXO-902409 tranche 3 — un compte qui dit COMMENT il a été obtenu.
 ///
 /// Invariant KKI (doléance #204, `blocking`) : *aucun outil ne rend une valeur
@@ -252,7 +251,10 @@ mod tests {
             "≥ 45 (recherche bornée)"
         );
         // Sous la borne : la recherche est allée au bout, aucune décoration.
-        assert_eq!(Compte::plancher_si_sature(3, 45, "recherche bornée").rendre(), "3");
+        assert_eq!(
+            Compte::plancher_si_sature(3, 45, "recherche bornée").rendre(),
+            "3"
+        );
     }
 
     /// REQ-AXO-902409 — un zéro MESURÉ et un zéro NON CALCULÉ ne se rendent pas

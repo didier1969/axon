@@ -68,12 +68,9 @@ fn call_fixture_canonical_and_synthetic_both_persist() {
 // snapshot at boot, not just the startup project (symmetric to the IST boot-warm).
 #[test]
 fn warm_all_soll_snapshots_warms_every_project_902177() {
-    let harness = create_test_server_with_ist_seed(
-        IstSeed::new().node(
-            SollNodeFixture::new("VIS-ZZZ-001", "Vision", "ZZZ", "warm-all sanity")
-                .status("current"),
-        ),
-    )
+    let harness = create_test_server_with_ist_seed(IstSeed::new().node(
+        SollNodeFixture::new("VIS-ZZZ-001", "Vision", "ZZZ", "warm-all sanity").status("current"),
+    ))
     .unwrap();
     assert!(
         !harness

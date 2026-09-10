@@ -80,7 +80,10 @@ impl McpServer {
             .iter()
             .flat_map(|e| {
                 e.broken_file_evidence.iter().map(move |b| {
-                    format!("  {} → {} (trc {})", e.id, b.artifact_ref, b.traceability_id)
+                    format!(
+                        "  {} → {} (trc {})",
+                        e.id, b.artifact_ref, b.traceability_id
+                    )
                 })
             })
             .collect();

@@ -42,9 +42,10 @@ impl McpServer {
     /// REQ-AXO-902122 (MBX-10) — render a message/thread to bounded human
     /// markdown with SOLL pointers resolved to titles. Read-only.
     pub(crate) fn axon_mailbox_render(&self, args: &Value) -> Option<Value> {
-        let id = args
-            .get("id")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+        let id = args.get("id").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
         let context_id = args
             .get("context_id")
             .and_then(Value::as_str)
@@ -72,10 +73,18 @@ impl McpServer {
         );
         let rows: Vec<Vec<Value>> = match self.graph_store.query_json(&sql) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(e) => return Some(render_err(&format!("mailbox render failed: {e}"), "degraded")),
+            Err(e) => {
+                return Some(render_err(
+                    &format!("mailbox render failed: {e}"),
+                    "degraded",
+                ))
+            }
         };
         if rows.is_empty() {
-            return Some(render_err("mailbox_render: no message matched.", "not_found"));
+            return Some(render_err(
+                "mailbox_render: no message matched.",
+                "not_found",
+            ));
         }
 
         // Pass 1 — gather all referenced SOLL ids across the rendered messages
@@ -89,16 +98,16 @@ impl McpServer {
             }
         }
 
-        let mut titles: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut titles: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         if !ref_ids.is_empty() {
             let arr = ref_ids
                 .iter()
                 .map(|r| format!("'{}'", esc(r)))
                 .collect::<Vec<_>>()
                 .join(",");
-            let tsql = format!(
-                "SELECT id, title FROM soll.Node WHERE id = ANY(ARRAY[{arr}]::text[])"
-            );
+            let tsql =
+                format!("SELECT id, title FROM soll.Node WHERE id = ANY(ARRAY[{arr}]::text[])");
             if let Ok(s) = self.graph_store.query_json(&tsql) {
                 let trows: Vec<Vec<Value>> = serde_json::from_str(&s).unwrap_or_default();
                 for tr in &trows {
@@ -128,7 +137,10 @@ impl McpServer {
             let g = |i: usize| row.get(i).and_then(Value::as_str).unwrap_or("");
             let rid = row
                 .first()
-                .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
                 .unwrap_or(0);
             let (message_id, from, to, subject, body, created_at, priority) =
                 (g(1), g(3), g(4), g(5), g(6), g(8), g(9));
@@ -215,14 +227,18 @@ impl McpServer {
         for row in &rows {
             let id = row
                 .first()
-                .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
                 .unwrap_or(0);
             let g = |i: usize| row.get(i).and_then(Value::as_str).unwrap_or("");
             let (message_id, ctx, from_p, to_p, kind, idem, irt, subject, body, sig) =
                 (g(1), g(2), g(3), g(4), g(5), g(6), g(7), g(8), g(9), g(10));
             // Verify against the SENDER's HMAC; tap knows the true to_project per row.
-            let canonical =
-                mailbox::canonical(from_p, to_p, ctx, message_id, kind, idem, irt, subject, body);
+            let canonical = mailbox::canonical(
+                from_p, to_p, ctx, message_id, kind, idem, irt, subject, body,
+            );
             // REQ-AXO-902117 (MBX-5) — resolve the sender's per-project stored
             // token (else derived fallback) so stored-token signatures verify here.
             let verified = self.mailbox_verify(from_p, &canonical, sig);
@@ -230,8 +246,16 @@ impl McpServer {
             let notif_str = g(13);
             let read_str = g(14);
             let ack_str = g(15);
-            let notif_opt = if is_set(notif_str) { Some(notif_str) } else { None };
-            let read_opt = if is_set(read_str) { Some(read_str) } else { None };
+            let notif_opt = if is_set(notif_str) {
+                Some(notif_str)
+            } else {
+                None
+            };
+            let read_opt = if is_set(read_str) {
+                Some(read_str)
+            } else {
+                None
+            };
             let ack_opt = if is_set(ack_str) { Some(ack_str) } else { None };
             let status = if ack_opt.is_some() {
                 "acknowledged"
@@ -271,7 +295,9 @@ impl McpServer {
         let mut report = format!(
             "### 👁️ mailbox_tap (observation, no cursor advanced)\n\n{} message(s){}{}{}",
             messages.len(),
-            context_id.map(|c| format!(" · thread=`{c}`")).unwrap_or_default(),
+            context_id
+                .map(|c| format!(" · thread=`{c}`"))
+                .unwrap_or_default(),
             from.map(|f| format!(" · from=`{f}`")).unwrap_or_default(),
             to.map(|t| format!(" · to=`{t}`")).unwrap_or_default(),
         );
@@ -282,22 +308,27 @@ impl McpServer {
                 "SELECT count(*), count(notified_at), count(read_at), count(acknowledged_at) \
                  FROM axon.mailbox_message WHERE context_id = '{c}'"
             );
-            let (delivered, notified, read_cnt, acked) = match self.graph_store.query_json(&counts_sql) {
-                Ok(s) => {
-                    let parsed: Vec<Vec<Value>> = serde_json::from_str(&s).unwrap_or_default();
-                    if let Some(first) = parsed.first() {
-                        let to_i64 = |idx: usize| {
-                            first.get(idx).and_then(|v| {
-                                v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                            }).unwrap_or(0)
-                        };
-                        (to_i64(0), to_i64(1), to_i64(2), to_i64(3))
-                    } else {
-                        (0, 0, 0, 0)
+            let (delivered, notified, read_cnt, acked) =
+                match self.graph_store.query_json(&counts_sql) {
+                    Ok(s) => {
+                        let parsed: Vec<Vec<Value>> = serde_json::from_str(&s).unwrap_or_default();
+                        if let Some(first) = parsed.first() {
+                            let to_i64 = |idx: usize| {
+                                first
+                                    .get(idx)
+                                    .and_then(|v| {
+                                        v.as_i64()
+                                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                                    })
+                                    .unwrap_or(0)
+                            };
+                            (to_i64(0), to_i64(1), to_i64(2), to_i64(3))
+                        } else {
+                            (0, 0, 0, 0)
+                        }
                     }
-                }
-                Err(_) => (0, 0, 0, 0),
-            };
+                    Err(_) => (0, 0, 0, 0),
+                };
 
             let recs_sql = format!(
                 "SELECT to_project, notified_at, read_at, acknowledged_at \

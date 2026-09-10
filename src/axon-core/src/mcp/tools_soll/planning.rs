@@ -9,5 +9,6 @@ mod planning_revision;
 #[path = "planning_work_plan.rs"]
 mod planning_work_plan;
 
-pub(crate) use planning_revision::{substitute_logical_keys_in_str, substitute_logical_keys_in_value};
-
+pub(crate) use planning_revision::{
+    substitute_logical_keys_in_str, substitute_logical_keys_in_value,
+};

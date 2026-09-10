@@ -545,8 +545,7 @@ impl McpServer {
                 source_kind.label(),
                 target_kind.label(),
                 Some(relation_type),
-            )
-            else {
+            ) else {
                 violations.push(format!(
                     "{}: {} -> {} (pair {} -> {} forbidden)",
                     relation_type,

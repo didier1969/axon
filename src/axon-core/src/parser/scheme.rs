@@ -128,11 +128,7 @@ impl SchemeParser {
                 match head_text.as_str() {
                     "if" | "when" | "unless" => count += 1,
                     "cond" | "case" => {
-                        count += items
-                            .iter()
-                            .skip(1)
-                            .filter(|n| n.kind() == "list")
-                            .count() as i32;
+                        count += items.iter().skip(1).filter(|n| n.kind() == "list").count() as i32;
                     }
                     _ => {}
                 }
@@ -424,7 +420,9 @@ mod tests {
         let r = parse("(define (square x) (* x x))");
         let sym = r.symbols.iter().find(|s| s.name == "square").unwrap();
         assert_eq!(
-            sym.properties.get("cyclomatic_complexity").map(String::as_str),
+            sym.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("1")
         );
     }
@@ -440,7 +438,9 @@ mod tests {
         let sym = r.symbols.iter().find(|s| s.name == "classify").unwrap();
         // base 1 + if + 3 cond-clauses + when = 6
         assert_eq!(
-            sym.properties.get("cyclomatic_complexity").map(String::as_str),
+            sym.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("6")
         );
     }
@@ -455,11 +455,17 @@ mod tests {
         let outer = r.symbols.iter().find(|s| s.name == "outer").unwrap();
         let inner = r.symbols.iter().find(|s| s.name == "inner").unwrap();
         assert_eq!(
-            outer.properties.get("cyclomatic_complexity").map(String::as_str),
+            outer
+                .properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("2")
         );
         assert_eq!(
-            inner.properties.get("cyclomatic_complexity").map(String::as_str),
+            inner
+                .properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("2")
         );
     }
@@ -469,7 +475,9 @@ mod tests {
         let r = parse("(define add (lambda (a b) (if (> a b) a b)))");
         let sym = r.symbols.iter().find(|s| s.name == "add").unwrap();
         assert_eq!(
-            sym.properties.get("cyclomatic_complexity").map(String::as_str),
+            sym.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("2")
         );
     }

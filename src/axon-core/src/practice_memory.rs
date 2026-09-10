@@ -58,7 +58,11 @@ pub fn update_stability(stability: f32, retrievability: f32, usefulness: f32) ->
 pub fn reinforce_trust(trust: f32, usefulness: f32) -> f32 {
     let t = trust.clamp(TRUST_FLOOR, TRUST_CEIL);
     let u = usefulness.clamp(0.0, 1.0);
-    let headroom = if u >= 0.5 { (1.0 - t).max(0.05) } else { t.max(0.05) };
+    let headroom = if u >= 0.5 {
+        (1.0 - t).max(0.05)
+    } else {
+        t.max(0.05)
+    };
     let delta = TRUST_REINFORCE_GAIN * (2.0 * u - 1.0) * headroom;
     (t + delta).clamp(TRUST_FLOOR, TRUST_CEIL)
 }

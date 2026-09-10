@@ -1075,15 +1075,24 @@ mod tests {
             return;
         }
         let stubs: Vec<&Symbol> = result.symbols.iter().filter(|s| s.kind == "STUB").collect();
-        assert_eq!(stubs.len(), 3, "one STUB per placeholder macro, got {:?}", stubs);
+        assert_eq!(
+            stubs.len(),
+            3,
+            "one STUB per placeholder macro, got {:?}",
+            stubs
+        );
         // The enclosing function is named in the marker so the operator can act.
         assert!(
-            stubs.iter().any(|s| s.name.contains("pending") && s.name.contains("todo!")),
+            stubs
+                .iter()
+                .any(|s| s.name.contains("pending") && s.name.contains("todo!")),
             "todo!() marker names its fn: {:?}",
             stubs
         );
         assert!(
-            stubs.iter().any(|s| s.name.contains("later") && s.name.contains("unimplemented!")),
+            stubs
+                .iter()
+                .any(|s| s.name.contains("later") && s.name.contains("unimplemented!")),
             "unimplemented!() marker names its fn: {:?}",
             stubs
         );
@@ -1121,11 +1130,22 @@ mod tests {
             eprintln!("rust wasm grammar unavailable, skipping");
             return;
         }
-        let targets: Vec<&str> = calls(&result.relations).iter().map(|c| c.to.as_str()).collect();
-        assert!(targets.contains(&"commit_message_is_refactor"), "got {:?}", targets);
+        let targets: Vec<&str> = calls(&result.relations)
+            .iter()
+            .map(|c| c.to.as_str())
+            .collect();
+        assert!(
+            targets.contains(&"commit_message_is_refactor"),
+            "got {:?}",
+            targets
+        );
         assert!(targets.contains(&"foo"), "got {:?}", targets);
         assert!(targets.contains(&"bar"), "got {:?}", targets);
-        assert!(targets.contains(&"assert!"), "macro name still captured: {:?}", targets);
+        assert!(
+            targets.contains(&"assert!"),
+            "macro name still captured: {:?}",
+            targets
+        );
     }
 
     #[test]
@@ -1293,7 +1313,12 @@ mod tests {
             return;
         }
         let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
-        assert_eq!(f.properties.get("cyclomatic_complexity").map(String::as_str), Some("1"));
+        assert_eq!(
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]
@@ -1314,7 +1339,9 @@ mod tests {
         }
         let f = result.symbols.iter().find(|s| s.name == "f").unwrap();
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("6"),
             "props: {:?}",
             f.properties
@@ -1338,7 +1365,19 @@ mod tests {
         }
         let outer = result.symbols.iter().find(|s| s.name == "outer").unwrap();
         let inner = result.symbols.iter().find(|s| s.name == "inner").unwrap();
-        assert_eq!(outer.properties.get("cyclomatic_complexity").map(String::as_str), Some("2"));
-        assert_eq!(inner.properties.get("cyclomatic_complexity").map(String::as_str), Some("2"));
+        assert_eq!(
+            outer
+                .properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            inner
+                .properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
+            Some("2")
+        );
     }
 }

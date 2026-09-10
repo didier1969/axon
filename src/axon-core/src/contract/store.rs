@@ -55,7 +55,10 @@ pub enum DriftVerdict {
     SymbolMissing { symbol_id: String },
     /// Le `kind` IST-observé est incompatible avec le `ContractKind` désiré — la
     /// forme réalisée a divergé de la promesse structurelle.
-    KindMismatch { expected: ContractKind, observed_kind: String },
+    KindMismatch {
+        expected: ContractKind,
+        observed_kind: String,
+    },
     /// La forme IST-observée a dérivé depuis la baseline stockée (même symbole,
     /// même kind compatible, mais hash observé ≠ baseline).
     ShapeDrift { baseline: String, observed: String },
@@ -286,15 +289,20 @@ pub fn capture_observed_baseline(store: &GraphStore, id: &str) -> Result<Option<
 /// aucun marqueur `realizes:` omniprésent dans le code source (ce qui ramènerait au
 /// MDA, le RED FLAG du panel) et n'interroge AUCUN verdict de certification.
 pub fn reconcile_contract(store: &GraphStore, id: &str) -> Result<DriftVerdict> {
-    let row = load_reconcile_row(store, id)?
-        .ok_or_else(|| anyhow!("contrat introuvable: {id}"))?;
-    let ReconcileRow { kind, realized_by, baseline } = row;
+    let row = load_reconcile_row(store, id)?.ok_or_else(|| anyhow!("contrat introuvable: {id}"))?;
+    let ReconcileRow {
+        kind,
+        realized_by,
+        baseline,
+    } = row;
 
     let Some(realized_by) = realized_by else {
         return Ok(DriftVerdict::Unbound);
     };
     let Some((ist_kind, name)) = ist_symbol(store, &realized_by)? else {
-        return Ok(DriftVerdict::SymbolMissing { symbol_id: realized_by });
+        return Ok(DriftVerdict::SymbolMissing {
+            symbol_id: realized_by,
+        });
     };
 
     if !ist_kind_matches(kind, &ist_kind) {
@@ -308,7 +316,10 @@ pub fn reconcile_contract(store: &GraphStore, id: &str) -> Result<DriftVerdict> 
     match baseline {
         None => Ok(DriftVerdict::NoBaseline { observed }),
         Some(b) if b == observed => Ok(DriftVerdict::Aligned { observed }),
-        Some(b) => Ok(DriftVerdict::ShapeDrift { baseline: b, observed }),
+        Some(b) => Ok(DriftVerdict::ShapeDrift {
+            baseline: b,
+            observed,
+        }),
     }
 }
 
@@ -319,11 +330,17 @@ fn ist_kind_matches(kind: ContractKind, ist_kind: &str) -> bool {
     match kind {
         ContractKind::Function => matches!(k.as_str(), "function" | "method" | "fn"),
         ContractKind::Type => {
-            matches!(k.as_str(), "struct" | "enum" | "type" | "typealias" | "union" | "class")
+            matches!(
+                k.as_str(),
+                "struct" | "enum" | "type" | "typealias" | "union" | "class"
+            )
         }
         ContractKind::Interface => matches!(k.as_str(), "trait" | "interface" | "protocol"),
         ContractKind::Module => {
-            matches!(k.as_str(), "module" | "mod" | "file_context" | "namespace" | "package")
+            matches!(
+                k.as_str(),
+                "module" | "mod" | "file_context" | "namespace" | "package"
+            )
         }
     }
 }
@@ -457,10 +474,7 @@ pub fn contract_edges(
 /// (l'ancre `realized_by`). L'obsolescence est HARD-bloquée tant que des appelants
 /// existent (DEC-AXO-901658) : retirer un contrat dont le code est encore appelé
 /// orphelinerait les appelants. CALLS + CALLS_NIF (le call-graph canonique de l'IST).
-pub fn live_incoming_call_count(
-    store: &GraphStore,
-    symbol_id: &str,
-) -> Result<(i64, Vec<String>)> {
+pub fn live_incoming_call_count(store: &GraphStore, symbol_id: &str) -> Result<(i64, Vec<String>)> {
     let raw = store.query_json_param(
         "SELECT source_id FROM ist.Edge \
            WHERE target_id = $sym AND relation_type IN ('CALLS','CALLS_NIF') \
@@ -591,7 +605,11 @@ fn upsert_edge(
 fn project_code_from_id(id: &str) -> String {
     id.split('-')
         .nth(1)
-        .filter(|p| p.len() == 3 && p.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
+        .filter(|p| {
+            p.len() == 3
+                && p.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        })
         .map(|p| p.to_string())
         .unwrap_or_else(|| "AXO".to_string())
 }

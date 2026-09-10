@@ -62,7 +62,11 @@ impl McpServer {
             ));
         }
         // Owner-write ACL: refuse to write another project's card.
-        if let Some(target) = args.get("project").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        if let Some(target) = args
+            .get("project")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
             if target != owner {
                 return Some(card_err(
                     &format!(
@@ -83,9 +87,21 @@ impl McpServer {
         };
 
         // Denormalised projections from the card (for indexing/listing).
-        let name = card.get("name").and_then(Value::as_str).unwrap_or(&owner).to_string();
-        let description = card.get("description").and_then(Value::as_str).unwrap_or("").to_string();
-        let version = card.get("version").and_then(Value::as_str).unwrap_or("1.0.0").to_string();
+        let name = card
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(&owner)
+            .to_string();
+        let description = card
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let version = card
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or("1.0.0")
+            .to_string();
 
         // Deterministic canonical → HMAC. Re-serialisation can never change bytes.
         let canonical = mailbox::canonical_card(&owner, &card);
@@ -111,7 +127,11 @@ impl McpServer {
         if let Err(e) = self.graph_store.query_json_writer(&sql) {
             return Some(card_err(&format!("agent_card set failed: {e}"), "degraded"));
         }
-        let skill_count = card.get("skills").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+        let skill_count = card
+            .get("skills")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
         let report = format!(
             "### 🪪 mcp_agent_card set\n\n`{owner}` · {name} v{version} · {skill_count} skill(s) · published + signed"
         );
@@ -191,7 +211,10 @@ impl McpServer {
     /// `list` — discover published cards, optionally filtered by `skill` tag via the
     /// GIN containment index on `card->'skills'`.
     fn agent_card_list(&self, args: &Value) -> Option<Value> {
-        let skill = args.get("skill").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+        let skill = args
+            .get("skill")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty());
         let mut filter = String::new();
         if let Some(tag) = skill {
             // Containment: any skill element whose `tags` array contains the tag.
@@ -207,7 +230,12 @@ impl McpServer {
         );
         let rows: Vec<Vec<Value>> = match self.graph_store.query_json(&sql) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(e) => return Some(card_err(&format!("agent_card list failed: {e}"), "degraded")),
+            Err(e) => {
+                return Some(card_err(
+                    &format!("agent_card list failed: {e}"),
+                    "degraded",
+                ))
+            }
         };
         let cards: Vec<Value> = rows
             .iter()

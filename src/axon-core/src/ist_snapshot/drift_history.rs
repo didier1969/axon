@@ -55,7 +55,9 @@ pub fn drift_score(graph: &IstGraph, source_layer: &str, target_layer: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ist_snapshot::snapshot::{EdgeTriple, NodeFlags, NodeKind, NodeRecord, RelationType};
+    use crate::ist_snapshot::snapshot::{
+        EdgeTriple, NodeFlags, NodeKind, NodeRecord, RelationType,
+    };
 
     #[test]
     fn ewma_first_sample_seeds_with_score() {
@@ -86,7 +88,10 @@ mod tests {
 
     #[test]
     fn pair_key_is_stable() {
-        assert_eq!(layer_pair_key("AXO::core/", "AXO::mcp/"), "AXO::core/->AXO::mcp/");
+        assert_eq!(
+            layer_pair_key("AXO::core/", "AXO::mcp/"),
+            "AXO::core/->AXO::mcp/"
+        );
     }
 
     fn node(id: &str, kind: NodeKind) -> NodeRecord {

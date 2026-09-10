@@ -288,7 +288,10 @@ mod tests {
             entry("hash-a", 1, 1_000, 10),
         )]);
         // File `touch`ed: mtime moved 1_000 → 2_000, size + content identical.
-        assert!(cache.should_read("/p/f.rs", 2_000, 10), "L1 forwards on mtime drift");
+        assert!(
+            cache.should_read("/p/f.rs", 2_000, 10),
+            "L1 forwards on mtime drift"
+        );
         // L2 finds the content hash unchanged → MUR 2 refresh with new mtime.
         cache.mark_indexed("/p/f.rs".into(), "hash-a".into(), 9, 2_000, 10);
         // Next reconciliation walk: L1 now skips with zero I/O.
@@ -407,7 +410,11 @@ mod tests {
         // Before: identical mtime/size → A1 skips the read.
         assert!(!cache.should_read("/home/u/proj/a.rs", 100, 10));
 
-        assert_eq!(cache.forget_prefix("/home/u/proj"), 2, "both files under the prefix");
+        assert_eq!(
+            cache.forget_prefix("/home/u/proj"),
+            2,
+            "both files under the prefix"
+        );
 
         // After: unknown to the cache → A1 reads it, which is the entire point.
         assert!(cache.should_read("/home/u/proj/a.rs", 100, 10));
@@ -423,12 +430,18 @@ mod tests {
     fn forget_prefix_does_not_bleed_into_a_sibling_with_a_shared_stem() {
         let cache = IndexedFileCache::from_iter([
             ("/home/u/proj/a.rs".to_string(), entry("h", 1, 100, 10)),
-            ("/home/u/proj-other/a.rs".to_string(), entry("h", 1, 100, 10)),
+            (
+                "/home/u/proj-other/a.rs".to_string(),
+                entry("h", 1, 100, 10),
+            ),
             ("/home/u/projx".to_string(), entry("h", 1, 100, 10)),
         ]);
         assert_eq!(cache.forget_prefix("/home/u/proj"), 1);
         assert!(cache.should_read("/home/u/proj/a.rs", 100, 10), "purged");
-        assert!(!cache.should_read("/home/u/proj-other/a.rs", 100, 10), "sibling kept");
+        assert!(
+            !cache.should_read("/home/u/proj-other/a.rs", 100, 10),
+            "sibling kept"
+        );
         assert!(!cache.should_read("/home/u/projx", 100, 10), "sibling kept");
     }
 
@@ -439,7 +452,10 @@ mod tests {
         let mk = || {
             IndexedFileCache::from_iter([
                 ("/home/u/proj/a.rs".to_string(), entry("h", 1, 100, 10)),
-                ("/home/u/proj-other/a.rs".to_string(), entry("h", 1, 100, 10)),
+                (
+                    "/home/u/proj-other/a.rs".to_string(),
+                    entry("h", 1, 100, 10),
+                ),
             ])
         };
         assert_eq!(mk().forget_prefix("/home/u/proj"), 1);
@@ -450,9 +466,10 @@ mod tests {
     /// invalidate" from "invalidated N", instead of assuming success.
     #[test]
     fn forget_prefix_reports_zero_when_nothing_matches() {
-        let cache = IndexedFileCache::from_iter([
-            ("/home/u/proj/a.rs".to_string(), entry("h", 1, 100, 10)),
-        ]);
+        let cache = IndexedFileCache::from_iter([(
+            "/home/u/proj/a.rs".to_string(),
+            entry("h", 1, 100, 10),
+        )]);
         assert_eq!(cache.forget_prefix("/nowhere"), 0);
         assert_eq!(cache.len(), 1);
     }
@@ -466,7 +483,10 @@ mod tests {
     fn walk_wake_signal_is_the_same_instance_for_every_caller() {
         let a = super::walk_wake_signal();
         let b = super::walk_wake_signal();
-        assert!(std::sync::Arc::ptr_eq(&a, &b), "signal must be process-wide, not per-call");
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "signal must be process-wide, not per-call"
+        );
     }
 
     /// REQ-AXO-902512 — forget_prefix must accept an exact file path as well as a directory
@@ -493,4 +513,3 @@ mod tests {
         );
     }
 }
-

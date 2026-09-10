@@ -211,8 +211,8 @@ impl McpServer {
             })
             .or_else(|| self.auto_resolve_project_code_str())
             .unwrap_or_default();
-        let build_id =
-            std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+        let build_id = std::env::var("AXON_BUILD_ID")
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
         // Event-sourced upsert (PIL-AXO-9004): one row per distinct signature,
         // occurrence_count + last_observed_at bumped on recurrence. A resolved
         // signature stays `resolved` but its bumped last_observed_at lets the
@@ -247,7 +247,13 @@ impl McpServer {
         } else {
             lower
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect()
         }
     }
@@ -310,8 +316,8 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or("");
         let client = Self::resolve_mcp_client(arguments, data);
-        let build_id =
-            std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+        let build_id = std::env::var("AXON_BUILD_ID")
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
         let lm = latency_ms.max(0);
         // REQ-AXO-902621 — le POIDS, à côté de la latence. Ce sont des TAILLES :
         // pas un octet de contenu d'argument n'entre en base (PIL-AXO-9003), et
@@ -360,7 +366,10 @@ impl McpServer {
             "too_verbose",
             "other",
         ];
-        let category = args.get("category").and_then(Value::as_str).unwrap_or("other");
+        let category = args
+            .get("category")
+            .and_then(Value::as_str)
+            .unwrap_or("other");
         let category = if CATEGORIES.contains(&category) {
             category
         } else {
@@ -372,15 +381,24 @@ impl McpServer {
         //   token_cost = it worked, but cost significant extra tokens / turns
         //   minor      = cosmetic / small annoyance (default)
         const SEVERITIES: &[&str] = &["blocking", "token_cost", "minor"];
-        let severity = args.get("severity").and_then(Value::as_str).unwrap_or("minor");
+        let severity = args
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or("minor");
         let severity = if SEVERITIES.contains(&severity) {
             severity
         } else {
             "minor"
         };
-        let llm_identity = args.get("llm_identity").and_then(Value::as_str).unwrap_or("");
+        let llm_identity = args
+            .get("llm_identity")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let tool = args.get("tool").and_then(Value::as_str).unwrap_or("");
-        let project_code = args.get("project_code").and_then(Value::as_str).unwrap_or("");
+        let project_code = args
+            .get("project_code")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let proposed_solution = args
             .get("proposed_solution")
             .and_then(Value::as_str)
@@ -393,8 +411,8 @@ impl McpServer {
             .filter(|n| (1..=5).contains(n))
             .map(|n| n.to_string())
             .unwrap_or_else(|| "NULL".to_string());
-        let build_id =
-            std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+        let build_id = std::env::var("AXON_BUILD_ID")
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
 
         let result = self.graph_store.execute_param(
             &format!(
@@ -427,8 +445,14 @@ impl McpServer {
     pub(crate) fn axon_mcp_friction_report(&self, args: &Value) -> Option<Value> {
         if let Some(mr) = args.get("mark_resolved") {
             if let Some(id) = mr.get("id").and_then(Value::as_i64) {
-                let req = mr.get("resolved_by_req").and_then(Value::as_str).unwrap_or("");
-                let val = mr.get("resolved_by_val").and_then(Value::as_str).unwrap_or("");
+                let req = mr
+                    .get("resolved_by_req")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let val = mr
+                    .get("resolved_by_val")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 let note = mr.get("note").and_then(Value::as_str).unwrap_or("");
                 let _ = self.graph_store.execute_param(
                     "UPDATE axon.mcp_friction SET status='resolved', resolved_at=now(),
@@ -460,7 +484,10 @@ impl McpServer {
                 .filter(|s| !s.is_empty());
             match (id, note) {
                 (Some(id), Some(note)) => {
-                    let req = md.get("resolved_by_req").and_then(Value::as_str).unwrap_or("");
+                    let req = md
+                        .get("resolved_by_req")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
                     let _ = self.graph_store.execute_param(
                         &format!(
                             "UPDATE axon.mcp_friction SET status='{BY_DESIGN_STATUS}', resolved_at=now(),
@@ -495,7 +522,11 @@ impl McpServer {
             .get("project_code")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(15).max(1);
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(15)
+            .max(1);
 
         let open_rows = self
             .graph_store
@@ -637,7 +668,9 @@ impl McpServer {
                  showing {} of {total_by_design}):\n\n",
                 by_design_frictions.len()
             );
-            out.push_str("| id | tool | problem | field | count | pourquoi |\n|---|---|---|---|---|---|\n");
+            out.push_str(
+                "| id | tool | problem | field | count | pourquoi |\n|---|---|---|---|---|---|\n",
+            );
             for f in &by_design_frictions {
                 let cell = |k: &str| -> String {
                     match f.get(k) {
@@ -668,7 +701,11 @@ impl McpServer {
                 .query_json_param(sql, &params)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
-                .and_then(|rows| rows.first().and_then(|r| r.first()).and_then(Self::i64_cell))
+                .and_then(|rows| {
+                    rows.first()
+                        .and_then(|r| r.first())
+                        .and_then(Self::i64_cell)
+                })
                 .unwrap_or(-1)
         };
         let regressed_count = scalar(
@@ -759,7 +796,10 @@ impl McpServer {
     pub(crate) fn axon_mcp_feedback_report(&self, args: &Value) -> Option<Value> {
         if let Some(mr) = args.get("mark_resolved") {
             if let Some(id) = mr.get("id").and_then(Value::as_i64) {
-                let req = mr.get("resolved_by_req").and_then(Value::as_str).unwrap_or("");
+                let req = mr
+                    .get("resolved_by_req")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 let note = mr.get("note").and_then(Value::as_str).unwrap_or("");
                 let _ = self.graph_store.execute_param(
                     "UPDATE axon.llm_feedback SET triage_status='resolved', resolved_at=now(),
@@ -771,7 +811,11 @@ impl McpServer {
                 let text = format!(
                     "Feedback item #{} marked resolved{}.",
                     id,
-                    if req.is_empty() { String::new() } else { format!(" by {}", req) }
+                    if req.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" by {}", req)
+                    }
                 );
                 return Some(json!({
                     "content": [{ "type": "text", "text": text }],
@@ -799,7 +843,10 @@ impl McpServer {
             .map(|values| {
                 values
                     .iter()
-                    .filter_map(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                    .filter_map(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
                     .collect()
             })
             .or_else(|| args.get("id").and_then(Value::as_i64).map(|id| vec![id]))
@@ -808,12 +855,23 @@ impl McpServer {
             return self.mcp_feedback_items_in_full(&requested_ids);
         }
 
-        let project_code = args.get("project_code").and_then(Value::as_str).unwrap_or("");
+        let project_code = args
+            .get("project_code")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let category = args.get("category").and_then(Value::as_str).unwrap_or("");
         let severity = args.get("severity").and_then(Value::as_str).unwrap_or("");
         let tool = args.get("tool").and_then(Value::as_str).unwrap_or("");
-        let window_hours = args.get("window_hours").and_then(Value::as_i64).unwrap_or(168).max(1);
-        let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(30).max(1);
+        let window_hours = args
+            .get("window_hours")
+            .and_then(Value::as_i64)
+            .unwrap_or(168)
+            .max(1);
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(30)
+            .max(1);
         let include_resolved = args
             .get("include_resolved")
             .and_then(Value::as_bool)
@@ -836,10 +894,14 @@ impl McpServer {
                  LIMIT ?",
                 &json!([
                     window_hours,
-                    project_code, project_code,
-                    category, category,
-                    severity, severity,
-                    tool, tool,
+                    project_code,
+                    project_code,
+                    category,
+                    category,
+                    severity,
+                    severity,
+                    tool,
+                    tool,
                     if include_resolved { 1 } else { 0 },
                     limit
                 ]),
@@ -855,9 +917,12 @@ impl McpServer {
                 // id + satisfaction back to numbers so the LLM consumer gets the
                 // proper types (id is what mark_resolved expects as an integer).
                 let as_i64 = |cell: Option<&Value>| -> Value {
-                    cell.and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-                        .map(Value::from)
-                        .unwrap_or(Value::Null)
+                    cell.and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
+                    .map(Value::from)
+                    .unwrap_or(Value::Null)
                 };
                 json!({
                     "id": as_i64(r.first()),
@@ -916,7 +981,9 @@ impl McpServer {
                  not proof that nothing was reported._\n",
             );
         } else {
-            report.push_str("\n| id | sev | cat | tool | proj | problem |\n|---|---|---|---|---|---|\n");
+            report.push_str(
+                "\n| id | sev | cat | tool | proj | problem |\n|---|---|---|---|---|---|\n",
+            );
             for f in &feedback {
                 report.push_str(&format!(
                     "| {} | {} | {} | {} | {} | {} |\n",
@@ -1019,8 +1086,10 @@ impl McpServer {
         // ~24 KB of text: several full doléances per call, still far from any
         // client-side truncation point.
         const TEXT_BUDGET: usize = 24_000;
-        let mut report = String::from("## 📨 MCP Feedback — items in full
-");
+        let mut report = String::from(
+            "## 📨 MCP Feedback — items in full
+",
+        );
         let mut rendered = 0usize;
         let mut deferred: Vec<String> = Vec::new();
         for r in &rows {
@@ -1134,13 +1203,20 @@ impl McpServer {
             "DELETE FROM axon.mcp_call_stat WHERE bucket_hour < now() - make_interval(days => ?)",
             &json!([MCP_CALL_STAT_RETENTION_DAYS]),
         );
-        let project_code = args.get("project_code").and_then(Value::as_str).unwrap_or("");
+        let project_code = args
+            .get("project_code")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let client_filter = args
             .get("client")
             .and_then(Value::as_str)
             .map(Self::canonical_client_name)
             .unwrap_or_default();
-        let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(20).max(1);
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(20)
+            .max(1);
         let window_hours = args
             .get("window_hours")
             .and_then(Value::as_i64)
@@ -1270,19 +1346,30 @@ impl McpServer {
                    AND (? = '' OR client = ?)
                  GROUP BY client_name, tool
                  ORDER BY client_name, calls DESC",
-                &json!([window_hours, project_code, project_code, client_filter, client_filter]),
+                &json!([
+                    window_hours,
+                    project_code,
+                    project_code,
+                    client_filter,
+                    client_filter
+                ]),
             )
             .ok()
             .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
             .unwrap_or_default();
 
-        let mut client_tools_map: std::collections::HashMap<String, std::collections::BTreeMap<String, i64>> =
-            std::collections::HashMap::new();
+        let mut client_tools_map: std::collections::HashMap<
+            String,
+            std::collections::BTreeMap<String, i64>,
+        > = std::collections::HashMap::new();
         for r in &client_tool_rows {
             let c_name = cell(r, 0);
             let tool_name = cell(r, 1);
             let c_calls = to_i(&cell(r, 2));
-            client_tools_map.entry(c_name).or_default().insert(tool_name, c_calls);
+            client_tools_map
+                .entry(c_name)
+                .or_default()
+                .insert(tool_name, c_calls);
         }
 
         let mut discipline_by_client: Vec<Value> = Vec::new();
@@ -1323,7 +1410,11 @@ impl McpServer {
                 c_commits,
                 c_calls,
                 calls_per_commit,
-                if c_commits == 0 { "(0 commits — ratio n/a)".to_string() } else { top_ratios_str.join(" · ") }
+                if c_commits == 0 {
+                    "(0 commits — ratio n/a)".to_string()
+                } else {
+                    top_ratios_str.join(" · ")
+                }
             ));
 
             discipline_by_client.push(json!({
@@ -1458,14 +1549,24 @@ mod friction_rendering_tests {
         ];
         let out = render_friction_rows(&rows, 2, "Open signatures");
 
-        for needle in ["sql", "soll_manager", "input_invalid", "data.status", "459", "57"] {
+        for needle in [
+            "sql",
+            "soll_manager",
+            "input_invalid",
+            "data.status",
+            "459",
+            "57",
+        ] {
             assert!(
                 out.contains(needle),
                 "the text channel must carry `{needle}` — an LLM that reads only \
                  content[0].text cannot triage a count, and falls back to raw SQL"
             );
         }
-        assert!(!out.contains("more not shown"), "nothing was truncated here");
+        assert!(
+            !out.contains("more not shown"),
+            "nothing was truncated here"
+        );
     }
 
     // Truncation is disclosed against the TRUE total, never the page size — the
@@ -1475,8 +1576,14 @@ mod friction_rendering_tests {
         let rows = vec![row(1, "sql", "input_invalid", "", 459)];
         let out = render_friction_rows(&rows, 40, "Open signatures");
 
-        assert!(out.contains("showing 1 of 40"), "the page must state its own bounds: {out}");
-        assert!(out.contains("39 more not shown"), "the remainder must be named: {out}");
+        assert!(
+            out.contains("showing 1 of 40"),
+            "the page must state its own bounds: {out}"
+        );
+        assert!(
+            out.contains("39 more not shown"),
+            "the remainder must be named: {out}"
+        );
     }
 
     #[test]

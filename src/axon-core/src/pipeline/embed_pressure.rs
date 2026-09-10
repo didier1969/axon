@@ -137,10 +137,12 @@ impl EmbedPressure {
         let mut prev = self.window.load(Ordering::Relaxed);
         loop {
             let next = (prev << 1) | u64::from(fell_back);
-            match self
-                .window
-                .compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed)
-            {
+            match self.window.compare_exchange_weak(
+                prev,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break,
                 Err(actual) => prev = actual,
             }
@@ -330,7 +332,11 @@ mod tests {
         for _ in 0..SUCCESSES_BEFORE_RAISE {
             p.record_gpu_batch(16);
         }
-        assert_eq!(p.effective_batch_cap(64), 32, "remontée prudente après série");
+        assert_eq!(
+            p.effective_batch_cap(64),
+            32,
+            "remontée prudente après série"
+        );
         // Et le compteur repart de zéro : la hausse suivante exige sa propre série.
         p.record_gpu_batch(32);
         assert_eq!(p.effective_batch_cap(64), 32);

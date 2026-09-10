@@ -942,9 +942,15 @@ mod tests {
         // Les colonnes VOISINES, pour qu'un décalage d'index se voie : une
         // lecture décalée rendrait un champ juste et son voisin faux.
         assert_eq!(relu.allowed_gpu_workers, 3);
-        assert_eq!(relu.vector_worker_admission_reason, "semantic_workers_enabled");
+        assert_eq!(
+            relu.vector_worker_admission_reason,
+            "semantic_workers_enabled"
+        );
         assert_eq!(relu.a3_consecutive_failures, 0);
-        assert_eq!(relu.a3_last_error.as_deref(), Some("23503 foreign key violation"));
+        assert_eq!(
+            relu.a3_last_error.as_deref(),
+            Some("23503 foreign key violation")
+        );
     }
 
     #[test]

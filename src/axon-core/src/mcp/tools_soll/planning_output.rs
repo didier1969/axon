@@ -191,7 +191,11 @@ pub(super) fn render_ecartes_section(
                 "- {} : {} — {}{}\n",
                 statut,
                 compte.rendre(),
-                ids.iter().take(montres).cloned().collect::<Vec<_>>().join(", "),
+                ids.iter()
+                    .take(montres)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 if ids.len() > montres { ", …" } else { "" }
             ));
             budget -= montres;

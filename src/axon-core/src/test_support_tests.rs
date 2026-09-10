@@ -104,7 +104,9 @@ fn crate_sources() -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -114,7 +116,9 @@ fn crate_sources() -> Vec<(String, String)> {
             if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
             let rel = path
                 .strip_prefix(&root)
                 .unwrap_or(&path)
@@ -726,9 +730,10 @@ fn no_test_sets_a_runtime_tuning_env_var_without_establishing_the_snapshot() {
                 .filter_map(|v| body.rfind(&format!("remove_var(\"{v}\"")))
                 .max()
                 .unwrap_or(body.len());
-            let established_in_body = ESTABLISHES
-                .iter()
-                .any(|e| body.match_indices(e).any(|(at, _)| at > last_set && at < teardown_at));
+            let established_in_body = ESTABLISHES.iter().any(|e| {
+                body.match_indices(e)
+                    .any(|(at, _)| at > last_set && at < teardown_at)
+            });
             if established_in_body {
                 continue;
             }
@@ -836,7 +841,10 @@ fn tests_lisant_une_politique_sans_etablir_les_caches(sources: &[(String, String
             if absents.is_empty() {
                 continue;
             }
-            manquants.push(format!("{path}::{name} — n'etablit pas {}", absents.join(" ni ")));
+            manquants.push(format!(
+                "{path}::{name} — n'etablit pas {}",
+                absents.join(" ni ")
+            ));
         }
     }
     manquants
@@ -902,14 +910,26 @@ fn MUTANT_la_garde_de_politique_exige_les_DEUX_etablissements() {
     // Le reglage seul : toujours rouge, et SEUL le controleur est reproche.
     let sans_controleur = verdict(corps(reglage));
     assert_eq!(sans_controleur.len(), 1, "{sans_controleur:?}");
-    assert!(!sans_controleur[0].contains("reglage runtime"), "{sans_controleur:?}");
-    assert!(sans_controleur[0].contains("controleur de lot"), "{sans_controleur:?}");
+    assert!(
+        !sans_controleur[0].contains("reglage runtime"),
+        "{sans_controleur:?}"
+    );
+    assert!(
+        sans_controleur[0].contains("controleur de lot"),
+        "{sans_controleur:?}"
+    );
 
     // Le controleur seul : toujours rouge, et SEUL le reglage est reproche.
     let sans_reglage = verdict(corps(controleur));
     assert_eq!(sans_reglage.len(), 1, "{sans_reglage:?}");
-    assert!(sans_reglage[0].contains("reglage runtime"), "{sans_reglage:?}");
-    assert!(!sans_reglage[0].contains("controleur de lot"), "{sans_reglage:?}");
+    assert!(
+        sans_reglage[0].contains("reglage runtime"),
+        "{sans_reglage:?}"
+    );
+    assert!(
+        !sans_reglage[0].contains("controleur de lot"),
+        "{sans_reglage:?}"
+    );
 
     // Les deux : vert.
     assert!(
@@ -918,6 +938,7 @@ fn MUTANT_la_garde_de_politique_exige_les_DEUX_etablissements() {
     );
 
     // Et un test qui ne LIT aucune politique n'est pas concerne, meme nu.
-    let hors_sujet = format!("{entete}    #[test]\n    fn essai() {{\n        assert!(true);\n    }}\n{pied}");
+    let hors_sujet =
+        format!("{entete}    #[test]\n    fn essai() {{\n        assert!(true);\n    }}\n{pied}");
     assert!(verdict(hors_sujet).is_empty());
 }

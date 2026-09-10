@@ -261,7 +261,9 @@ mod tests {
             }),
         );
         assert_ne!(
-            unlink.pointer("/isError").and_then(serde_json::Value::as_bool),
+            unlink
+                .pointer("/isError")
+                .and_then(serde_json::Value::as_bool),
             Some(true),
             "unlink must succeed, got: {unlink}"
         );
@@ -291,7 +293,9 @@ mod tests {
         arguments: serde_json::Value,
     ) -> serde_json::Value {
         server
-            .handle_call_tool(Some(serde_json::json!({ "name": name, "arguments": arguments })))
+            .handle_call_tool(Some(
+                serde_json::json!({ "name": name, "arguments": arguments }),
+            ))
             .expect("dispatch returned a tool response")
     }
 

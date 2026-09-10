@@ -574,15 +574,18 @@ impl McpServer {
                 .latest_lifecycle_heartbeat("indexer")
                 .ok()
                 .flatten();
-            let sup_facts = self.collect_supervisor_facts(hb.as_ref().map(|row| now_ms - row.heartbeat_ms));
+            let sup_facts =
+                self.collect_supervisor_facts(hb.as_ref().map(|row| now_ms - row.heartbeat_ms));
             let observation = if sup_facts.reachable && sup_facts.role_found {
-                Some(super::runtime_topology_support::IndexerSupervisorObservation {
-                    status: sup_facts.status,
-                    exit_code: sup_facts.exit_code,
-                    is_running: sup_facts.is_running,
-                    restarts: sup_facts.restarts,
-                    age_ms: sup_facts.age_ms,
-                })
+                Some(
+                    super::runtime_topology_support::IndexerSupervisorObservation {
+                        status: sup_facts.status,
+                        exit_code: sup_facts.exit_code,
+                        is_running: sup_facts.is_running,
+                        restarts: sup_facts.restarts,
+                        age_ms: sup_facts.age_ms,
+                    },
+                )
             } else {
                 None
             };
@@ -597,7 +600,10 @@ impl McpServer {
         let indexed_projection_fresh = indexer_feed_state == "fresh"
             && indexer_feed_reason.is_none()
             && runtime_authority_converged
-            && !supervisor_obs.as_ref().map(|o| o.is_restart_loop()).unwrap_or(false);
+            && !supervisor_obs
+                .as_ref()
+                .map(|o| o.is_restart_loop())
+                .unwrap_or(false);
         let standalone_brain_only =
             process_role == "brain" && runtime_mode == AxonRuntimeMode::BrainOnly;
         let indexer_feed_degraded = !standalone_brain_only

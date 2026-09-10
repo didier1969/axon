@@ -44,8 +44,7 @@ const PEER_HEARTBEAT_FRESH_MS: i64 = 30_000;
 /// Deux nombres suffisent : le tick courant, et le pire depuis le démarrage. Le pire
 /// est indispensable — une queue qui frappe une seconde sur cent est invisible sur
 /// le dernier tick, et c'est exactement le régime mesuré (1,7 % des appels).
-static TELEMETRY_TICK_PIRE_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static TELEMETRY_TICK_PIRE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Enregistre la durée d'un tick et DIT quand elle dépasse sa propre période.
 ///
@@ -132,7 +131,9 @@ pub(crate) fn spawn_runtime_telemetry(
                 // fresh. The brain stays a pure reader (PIL-AXO-001).
                 if !runtime_mode.ingestion_enabled() {
                     if let Ok(Some(truth)) = store.latest_indexer_runtime_truth("indexer") {
-                        if (now_ms_tick as i64 - truth.heartbeat_ms).max(0) <= PEER_HEARTBEAT_FRESH_MS {
+                        if (now_ms_tick as i64 - truth.heartbeat_ms).max(0)
+                            <= PEER_HEARTBEAT_FRESH_MS
+                        {
                             // Canonical, owner-observed (pipeline). graph_workers_active
                             // = Σ A-stage inflight; embed rate = indexer's own accessor;
                             // ready_queue_chunks = the dashboard funnel's backlog signal.
@@ -144,7 +145,8 @@ pub(crate) fn spawn_runtime_telemetry(
                             // to project onto — surfacing them is a presentation slice.
                             snapshot.graph_workers_active_current =
                                 truth.graph_workers_active.max(0) as u64;
-                            snapshot.chunk_embeddings_per_second = truth.chunk_embeddings_per_second;
+                            snapshot.chunk_embeddings_per_second =
+                                truth.chunk_embeddings_per_second;
                             snapshot.ready_queue_chunks_current =
                                 truth.ready_queue_chunks.max(0) as u64;
                             // REQ-AXO-902630 — la décision vit dans une
@@ -171,7 +173,9 @@ pub(crate) fn spawn_runtime_telemetry(
                 let runtime_truth_feed = if runtime_mode.ingestion_enabled() {
                     service_guard::record_runtime_truth_bridge_dispatch(None)
                 } else if let Some(ref hb) = indexer_peer_hb {
-                    service_guard::runtime_truth_feed_from_peer_heartbeat(hb.heartbeat_ms.max(0) as u64)
+                    service_guard::runtime_truth_feed_from_peer_heartbeat(
+                        hb.heartbeat_ms.max(0) as u64
+                    )
                 } else {
                     service_guard::current_runtime_truth_feed()
                 };
@@ -207,7 +211,8 @@ pub(crate) fn spawn_runtime_telemetry(
                     interactive_requests_in_flight: snapshot.interactive_requests_in_flight,
                     oversized_refusals_total: snapshot.oversized_refusals_total,
                     degraded_mode_entries_total: snapshot.degraded_mode_entries_total,
-                    background_launches_suppressed_total: snapshot.background_launches_suppressed_total,
+                    background_launches_suppressed_total: snapshot
+                        .background_launches_suppressed_total,
                     vectorization_suppressed_due_to_interactive: snapshot
                         .vectorization_suppressed_due_to_interactive,
                     vectorization_interrupted_due_to_interactive: snapshot
@@ -335,7 +340,8 @@ pub(crate) fn spawn_runtime_telemetry(
                         embedder_compute_source: dashboard_compute_source,
                         last_consumed_batch_lane: dashboard_last_lane.as_str(),
                         chunk_embeddings_per_second: snapshot.chunk_embeddings_per_second,
-                        vector_chunks_embedded_cumulative: snapshot.vector_chunks_embedded_cumulative,
+                        vector_chunks_embedded_cumulative: snapshot
+                            .vector_chunks_embedded_cumulative,
                         graph_workers_active: snapshot.graph_workers_active_current,
                         graph_workers_started: snapshot.graph_workers_started_total,
                         // REQ-AXO-901893 (LEGACY FEED PURGE) — ingress_buffer ripped;

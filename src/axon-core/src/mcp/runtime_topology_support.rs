@@ -185,10 +185,9 @@ pub(crate) fn resolve_indexer_liveness(
         }
         None => {
             let (lifecycle, source) = match supervisor {
-                Some(o) if o.status.eq_ignore_ascii_case("disabled") => (
-                    INDEXER_LIFECYCLE_DISABLED_FOR_MODE,
-                    "supervisor_disabled",
-                ),
+                Some(o) if o.status.eq_ignore_ascii_case("disabled") => {
+                    (INDEXER_LIFECYCLE_DISABLED_FOR_MODE, "supervisor_disabled")
+                }
                 _ => (INDEXER_LIFECYCLE_NEVER_LAUNCHED, "no_heartbeat"),
             };
             IndexerLiveness {
@@ -374,8 +373,12 @@ mod resolve_indexer_liveness_tests {
 
     #[test]
     fn absent_heartbeat_is_loud_not_silent() {
-        let live =
-            resolve_indexer_liveness(1_000_000, None, EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS, None);
+        let live = resolve_indexer_liveness(
+            1_000_000,
+            None,
+            EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+            None,
+        );
         assert!(live.feed.stale);
         assert_eq!(
             live.feed.degraded_reason.as_deref(),

@@ -43,7 +43,10 @@ fn each_signal_disqualifies_on_its_own() {
 #[test]
 fn load_bar_is_two_times_cores_not_one() {
     assert!(assess(sample(16, 16, 10, 0)).is_quiet());
-    assert!(assess(sample(32, 16, 10, 0)).is_quiet(), "exactly 2x is accepted");
+    assert!(
+        assess(sample(32, 16, 10, 0)).is_quiet(),
+        "exactly 2x is accepted"
+    );
     assert_eq!(
         assess(sample(33, 16, 10, 0)).render(),
         "busy:load=33>2x16cores",
@@ -85,7 +88,10 @@ fn zero_cores_is_coerced_to_one() {
 fn proc_readers_never_panic_and_return_plausible_values() {
     let load = super::read_load_1m();
     let swap = super::read_swap_used_pct();
-    assert!(swap <= 100, "swap percentage must be a percentage, got {swap}");
+    assert!(
+        swap <= 100,
+        "swap percentage must be a percentage, got {swap}"
+    );
     // `load` is unbounded by nature; the contract is only that reading it cannot panic
     // and yields something usable by `assess`.
     let _ = assess(sample(load, 16, swap, 0));

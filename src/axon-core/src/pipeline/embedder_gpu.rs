@@ -399,8 +399,7 @@ impl B2Embedder for GpuB2Embedder {
 /// while the MCP tool lives in `axon-brain` (two processes).
 static IDLE_DROP_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// REQ-AXO-902234 — runtime `t_idle` seconds; 0 = unset (env seed applies).
-static IDLE_SECONDS_OVERRIDE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static IDLE_SECONDS_OVERRIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// REQ-AXO-902234 — apply a control-plane update (called by the control
 /// listener on `LISTEN embedder_control`, and at boot from the seeded row).
@@ -575,7 +574,11 @@ mod tests {
         assert_eq!(idle_drop_seconds(), 300, "explicit override honoured");
 
         unsafe { std::env::set_var("AXON_EMBEDDER_IDLE_SECONDS", "0") };
-        assert_eq!(idle_drop_seconds(), 1, "0 clamps to 1 s (gate stays meaningful)");
+        assert_eq!(
+            idle_drop_seconds(),
+            1,
+            "0 clamps to 1 s (gate stays meaningful)"
+        );
 
         unsafe { std::env::remove_var("AXON_EMBEDDER_IDLE_SECONDS") };
     }
@@ -611,7 +614,10 @@ mod tests {
 
         // back to unset → env seed governs again.
         reset_idle_drop_control_for_tests();
-        assert!(idle_drop_enabled(), "cleared override falls back to the env seed");
+        assert!(
+            idle_drop_enabled(),
+            "cleared override falls back to the env seed"
+        );
         unsafe { std::env::remove_var("AXON_EMBEDDER_IDLE_DROP") };
     }
 
@@ -619,7 +625,11 @@ mod tests {
     fn runtime_control_clamps_zero_seconds() {
         reset_idle_drop_control_for_tests();
         apply_idle_drop_control(true, 0);
-        assert_eq!(idle_drop_seconds(), 1, "0 s would make the gate meaningless");
+        assert_eq!(
+            idle_drop_seconds(),
+            1,
+            "0 s would make the gate meaningless"
+        );
         reset_idle_drop_control_for_tests();
     }
 
@@ -672,7 +682,10 @@ mod tests {
 
         // (1) Drop → VRAM must return to the device.
         assert!(embedder.drop_session(), "first drop_session returns true");
-        assert!(!embedder.drop_session(), "second drop is an idempotent no-op");
+        assert!(
+            !embedder.drop_session(),
+            "second drop is an idempotent no-op"
+        );
         settle();
         let dropped = total_gpu_used_mib();
         assert!(
@@ -702,9 +715,9 @@ mod tests {
 
 #[cfg(test)]
 mod req_902373_tests {
-    use super::is_gpu_allocation_failure;
-    use super::embed_resizing_with;
     use super::super::embed_pressure::EmbedPressure;
+    use super::embed_resizing_with;
+    use super::is_gpu_allocation_failure;
     use std::cell::RefCell;
 
     /// L'erreur ORT VERBATIM de l'incident du 2026-08-20, tronquée au cadre
@@ -873,7 +886,6 @@ mod req_902373_tests {
             "rien n'a été servi : la jauge reste non armée"
         );
     }
-
 
     /// The VERBATIM error from the 2026-08-20 incident. Kept literal: the guard has to
     /// recognise what the GPU actually emits, not a paraphrase of it.

@@ -595,7 +595,10 @@ impl Scanner {
                     if dispatch_scanner_batch(&graph, &batch) {
                         total_files += batch.len();
                     } else {
-                        error!("Scanner: durable discovery batch dispatch failed for {} files", batch.len());
+                        error!(
+                            "Scanner: durable discovery batch dispatch failed for {} files",
+                            batch.len()
+                        );
                     }
                     batch.clear();
                     info!("... {} files mapped", total_files);
@@ -614,7 +617,10 @@ impl Scanner {
             if dispatch_scanner_batch(&graph, &batch) {
                 total_files += batch.len();
             } else {
-                error!("Scanner: durable discovery batch dispatch failed for remaining {} files", batch.len());
+                error!(
+                    "Scanner: durable discovery batch dispatch failed for remaining {} files",
+                    batch.len()
+                );
             }
         }
 
@@ -1729,7 +1735,9 @@ mod eligibilite_selon_la_racine_tests {
         let parc = tempfile::tempdir().unwrap();
         let ailleurs = tempfile::tempdir().unwrap();
         std::fs::write(parc.path().join(".axonignore"), "/*\n").unwrap();
-        assert!(refus_d_enrolement(parc.path().to_str().unwrap(), ailleurs.path(), "TST").is_none());
+        assert!(
+            refus_d_enrolement(parc.path().to_str().unwrap(), ailleurs.path(), "TST").is_none()
+        );
     }
 
     /// Le cas reel de DVM et SWT : exclus par le `.gitignore` de la racine, pas
@@ -1902,8 +1910,7 @@ mod invalidation_des_regles_tests {
                 .unwrap_or_else(|| panic!("{suffixe} doit etre reconnu comme fichier de regles"));
             assert_eq!(reconnu, suffixe);
             assert_eq!(
-                porteur,
-                racine,
+                porteur, racine,
                 "le repertoire porteur de {suffixe} est la racine, pas un intermediaire"
             );
         }

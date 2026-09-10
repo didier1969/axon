@@ -233,7 +233,10 @@ impl McpServer {
         // (ist.Symbol kind='data_artifact' + ist.DataArtifact metadata) so
         // artifacts join the structural graph; action=read (default) just
         // summarizes on demand. Off the indexing hot-path (PIL-AXO-007).
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("read");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("read");
         if action == "index" {
             // CSV files (for header reads) resolve relative to the catalog's
             // own directory, not a hardcoded project/data/ — so a fixture
@@ -242,7 +245,11 @@ impl McpServer {
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| PathBuf::from(&project_path));
-            return Some(self.ingest_data_artifacts_into_ist(&project_code, &catalog_dir, &summary));
+            return Some(self.ingest_data_artifacts_into_ist(
+                &project_code,
+                &catalog_dir,
+                &summary,
+            ));
         }
 
         let by_kind_text = summary
@@ -274,10 +281,7 @@ impl McpServer {
         // ⛔ **Pas de troncage silencieux** (REQ-AXO-902409) : le mode bref DIT ce
         // qu'il ne montre pas et comment l'obtenir. Un total exact à côté d'une liste
         // bornée, jamais un des deux pris pour l'autre.
-        let mode = args
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("brief");
+        let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("brief");
         let plafond = if mode == "verbose" {
             summary.artifacts.len()
         } else {
@@ -329,7 +333,11 @@ impl McpServer {
             catalog_path.display(),
             ist_status_line,
             summary.total_artifacts,
-            if by_kind_text.is_empty() { "—".to_string() } else { by_kind_text },
+            if by_kind_text.is_empty() {
+                "—".to_string()
+            } else {
+                by_kind_text
+            },
             summary.total_rows,
             summary.total_bytes,
             summary.with_manifest,
@@ -642,7 +650,10 @@ mod tests {
         // The ingest path needs the raw manifest path, not just the has_manifest flag.
         let s = parse_data_catalog(SAMPLE).expect("valid catalog");
         let bis = s.artifacts.iter().find(|a| a.id == "bis_lake.csv").unwrap();
-        assert_eq!(bis.manifest.as_deref(), Some("data/lakes/bis_lake_manifest.json"));
+        assert_eq!(
+            bis.manifest.as_deref(),
+            Some("data/lakes/bis_lake_manifest.json")
+        );
         assert!(bis.has_manifest);
     }
 
@@ -659,10 +670,7 @@ mod tests {
             "'[\"a\",\"b\"]'::jsonb"
         );
         // A single quote inside JSON is doubled so the SQL literal stays valid.
-        assert_eq!(
-            sql_opt_jsonb(Some(json!(["o'x"]))),
-            "'[\"o''x\"]'::jsonb"
-        );
+        assert_eq!(sql_opt_jsonb(Some(json!(["o'x"]))), "'[\"o''x\"]'::jsonb");
     }
 
     #[test]

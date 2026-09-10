@@ -1365,7 +1365,10 @@ mod tests {
         let lot = rels(&[(".axoninclude", true), ("note.rs", true)]);
         let perimees = perimer_les_regles_du_lot(racine, &lot, &scanner);
 
-        assert_eq!(perimees, 1, "le seul fichier de regles du lot doit etre perime");
+        assert_eq!(
+            perimees, 1,
+            "le seul fichier de regles du lot doit etre perime"
+        );
         assert!(
             scanner.should_process_path(&note),
             "apres la purge la regle neuve doit s'appliquer — sinon la purge a vise une autre cle"

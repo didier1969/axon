@@ -127,20 +127,24 @@ impl ReleaseFacts {
         // REQ-AXO-902620 — manifest_runtime_match lit l'identité du processus vivant
         // (AXON_BUILD_ID de son environnement ou empreinte du binaire sur disque),
         // pas seulement la constante compilée.
-        let (live_build_id, live_build_source) = if !live_build_id.is_empty() && live_build_id != "unknown" {
-            (live_build_id, "env:AXON_BUILD_ID".to_string())
-        } else if let Some(env_id) = std::env::var("AXON_BUILD_ID").ok().filter(|s| !s.is_empty() && s != "unknown") {
-            (env_id, "env:AXON_BUILD_ID".to_string())
-        } else {
-            let compiled = crate::build_identity::compiled_build_id();
-            if !compiled.is_empty() && compiled != "unknown" {
-                (compiled.to_string(), "binary:.axon_build_id".to_string())
-            } else if !live_build_id.is_empty() {
-                (live_build_id, "unknown".to_string())
+        let (live_build_id, live_build_source) =
+            if !live_build_id.is_empty() && live_build_id != "unknown" {
+                (live_build_id, "env:AXON_BUILD_ID".to_string())
+            } else if let Some(env_id) = std::env::var("AXON_BUILD_ID")
+                .ok()
+                .filter(|s| !s.is_empty() && s != "unknown")
+            {
+                (env_id, "env:AXON_BUILD_ID".to_string())
             } else {
-                ("".to_string(), "absent".to_string())
-            }
-        };
+                let compiled = crate::build_identity::compiled_build_id();
+                if !compiled.is_empty() && compiled != "unknown" {
+                    (compiled.to_string(), "binary:.axon_build_id".to_string())
+                } else if !live_build_id.is_empty() {
+                    (live_build_id, "unknown".to_string())
+                } else {
+                    ("".to_string(), "absent".to_string())
+                }
+            };
         let manifest_state = current
             .as_ref()
             .and_then(|c| c.get("state"))
@@ -204,12 +208,13 @@ impl ReleaseFacts {
         let attempt_journal_path = champ_attempt("journal_path");
         // REQ-AXO-902628 — juger le journal, pas la projection qui le résume.
         // Le chemin est déjà là ; il n'était simplement jamais ouvert.
-        let attempt_completion_evidence = attempt_journal_path.as_deref().map(|chemin| {
-            match std::fs::read_to_string(chemin) {
-                Ok(contenu) => preuve_de_completion(&contenu),
-                Err(erreur) => format!("{PREFIXE_JOURNAL_ILLISIBLE} ({chemin}) — {erreur}"),
-            }
-        });
+        let attempt_completion_evidence =
+            attempt_journal_path
+                .as_deref()
+                .map(|chemin| match std::fs::read_to_string(chemin) {
+                    Ok(contenu) => preuve_de_completion(&contenu),
+                    Err(erreur) => format!("{PREFIXE_JOURNAL_ILLISIBLE} ({chemin}) — {erreur}"),
+                });
         let live_scopes = probe_live_cutover_scopes();
         let current_pid = std::process::id();
         let is_alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
@@ -373,9 +378,7 @@ pub fn brain_accept_queue_gate(l: &LivenessFacts) -> Gate {
         Some(depth) => Gate::binary(
             "brain_accept_queue",
             true,
-            format!(
-                "brain MCP accept queue healthy ({depth} <= {ACCEPT_QUEUE_MAX_HEALTHY_DEPTH})"
-            ),
+            format!("brain MCP accept queue healthy ({depth} <= {ACCEPT_QUEUE_MAX_HEALTHY_DEPTH})"),
         ),
         None => Gate::binary(
             "brain_accept_queue",
@@ -428,7 +431,8 @@ fn indexer_alive_gate(l: &LivenessFacts) -> Gate {
             if !l.indexer_expected {
                 "no separate indexer in runtime_contract — gate N/A".to_string()
             } else {
-                "indexer disabled for this runtime mode (supervisor Disabled) — gate N/A".to_string()
+                "indexer disabled for this runtime mode (supervisor Disabled) — gate N/A"
+                    .to_string()
             },
         );
     }
@@ -465,7 +469,10 @@ fn indexer_alive_gate(l: &LivenessFacts) -> Gate {
 pub fn liveness_phase(l: &LivenessFacts) -> Option<&'static str> {
     if !l.brain_serving {
         Some("brain_down")
-    } else if l.accept_queue_depth.is_some_and(|depth| depth > ACCEPT_QUEUE_MAX_HEALTHY_DEPTH) {
+    } else if l
+        .accept_queue_depth
+        .is_some_and(|depth| depth > ACCEPT_QUEUE_MAX_HEALTHY_DEPTH)
+    {
         Some("brain_accept_queue_saturated")
     } else if l.indexer_expected && !l.indexer_ready {
         if l.indexer_lifecycle == "disabled_for_runtime_mode" || l.indexer_lifecycle == "disabled" {
@@ -539,17 +546,33 @@ pub struct Gate {
 
 impl Gate {
     pub fn pass(name: &'static str, detail: impl Into<String>) -> Self {
-        Gate { name, status: GateStatus::Pass, detail: detail.into() }
+        Gate {
+            name,
+            status: GateStatus::Pass,
+            detail: detail.into(),
+        }
     }
     pub fn fail(name: &'static str, detail: impl Into<String>) -> Self {
-        Gate { name, status: GateStatus::Fail, detail: detail.into() }
+        Gate {
+            name,
+            status: GateStatus::Fail,
+            detail: detail.into(),
+        }
     }
     pub fn unknown(name: &'static str, detail: impl Into<String>) -> Self {
-        Gate { name, status: GateStatus::Unknown, detail: detail.into() }
+        Gate {
+            name,
+            status: GateStatus::Unknown,
+            detail: detail.into(),
+        }
     }
     /// Porte binaire — pour les prédicats qui SAVENT toujours répondre.
     pub fn binary(name: &'static str, pass: bool, detail: impl Into<String>) -> Self {
-        if pass { Gate::pass(name, detail) } else { Gate::fail(name, detail) }
+        if pass {
+            Gate::pass(name, detail)
+        } else {
+            Gate::fail(name, detail)
+        }
     }
     /// Lecture conservatrice pour les consommateurs existants : `Unknown` n'est
     /// pas un succès.
@@ -578,12 +601,27 @@ pub fn evaluate_gates(f: &ReleaseFacts) -> Vec<Gate> {
         (Some(m), l) if !l.is_empty() && l != "unknown" => m == l,
         _ => false,
     };
-    let running_disp = if f.live_build_id.is_empty() { "<none>" } else { &f.live_build_id };
-    let running_src = if f.live_build_source.is_empty() { "absent" } else { &f.live_build_source };
+    let running_disp = if f.live_build_id.is_empty() {
+        "<none>"
+    } else {
+        &f.live_build_id
+    };
+    let running_src = if f.live_build_source.is_empty() {
+        "absent"
+    } else {
+        &f.live_build_source
+    };
     let manifest_disp = f.manifest_build_id.as_deref().unwrap_or("<none>");
-    let manifest_src = if f.manifest_source.is_empty() { "absent" } else { f.manifest_source };
+    let manifest_src = if f.manifest_source.is_empty() {
+        "absent"
+    } else {
+        f.manifest_source
+    };
 
-    let manifest_gate = if f.manifest_build_id.is_none() || f.live_build_id.is_empty() || f.live_build_id == "unknown" {
+    let manifest_gate = if f.manifest_build_id.is_none()
+        || f.live_build_id.is_empty()
+        || f.live_build_id == "unknown"
+    {
         Gate::unknown(
             "manifest_runtime_match",
             format!("running={running_disp} (source={running_src}) manifest={manifest_disp} (source={manifest_src}) — non mesurable"),
@@ -701,7 +739,10 @@ pub fn attempt_next_action(f: &ReleaseFacts) -> Option<String> {
     // build sortait `completed`, donc silence total. C'est la moitie symetrique
     // du gate ci-dessus — corriger l'un sans l'autre laisserait l'operateur sans
     // verdict ET sans conseil.
-    let statut_actionnable = matches!(f.attempt_status.as_deref(), Some("failed") | Some("incomplete"));
+    let statut_actionnable = matches!(
+        f.attempt_status.as_deref(),
+        Some("failed") | Some("incomplete")
+    );
     if !statut_actionnable {
         return None;
     }
@@ -1006,7 +1047,10 @@ pub fn preuve_de_completion(journal: &str) -> String {
         );
     }
     if !terminees.contains(ETAPE_TERMINALE) {
-        let dernier = demarrees.last().map(String::as_str).unwrap_or(PHASE_ABSENTE);
+        let dernier = demarrees
+            .last()
+            .map(String::as_str)
+            .unwrap_or(PHASE_ABSENTE);
         return format!(
             "incomplete:{ETAPE_TERMINALE} never completed — {} step(s) done, last started `{dernier}`",
             terminees.len()
@@ -1711,7 +1755,11 @@ mod tests {
         ];
 
         let mut emis: Vec<&str> = Vec::new();
-        emis.extend(evaluate_gates(&ReleaseFacts::default()).iter().map(|g| g.name));
+        emis.extend(
+            evaluate_gates(&ReleaseFacts::default())
+                .iter()
+                .map(|g| g.name),
+        );
         emis.extend(
             evaluate_liveness_gates(&LivenessFacts::default())
                 .iter()
@@ -1768,7 +1816,11 @@ mod tests {
             live_build_id: live.to_string(),
             live_build_source: "test".to_string(),
             manifest_build_id: manifest.map(str::to_string),
-            manifest_source: if manifest.is_some() { "current.json" } else { "absent" },
+            manifest_source: if manifest.is_some() {
+                "current.json"
+            } else {
+                "absent"
+            },
             manifest_state: Some("promoted".to_string()),
             core_qualification_status: Some("passed".to_string()),
             core_qualification_evidence: Some("exit_code=0".to_string()),
@@ -1893,7 +1945,11 @@ mod tests {
     #[test]
     fn manifest_runtime_match_nominal_pass_with_sources() {
         // En cas d'égalité nominale, la porte passe et nomme les valeurs et sources.
-        let f = facts("v0.8.0-1716-g1b97e118", Some("v0.8.0-1716-g1b97e118"), false);
+        let f = facts(
+            "v0.8.0-1716-g1b97e118",
+            Some("v0.8.0-1716-g1b97e118"),
+            false,
+        );
         let gates = evaluate_gates(&f);
         let gate = gates
             .iter()
@@ -1913,7 +1969,11 @@ mod tests {
         // (brain à v0.8.0-1633-g771dfe74, manifeste à v0.8.0-1716-g1b97e118)
         // la porte rend Fail ou Unknown, JAMAIS match.
         // Hors transition (aucun promote en vol) : le verdict est Fail.
-        let mut f = facts("v0.8.0-1633-g771dfe74", Some("v0.8.0-1716-g1b97e118"), false);
+        let mut f = facts(
+            "v0.8.0-1633-g771dfe74",
+            Some("v0.8.0-1716-g1b97e118"),
+            false,
+        );
         f.live_build_source = "env:AXON_BUILD_ID".to_string();
         f.manifest_source = "current.json";
         let gates = evaluate_gates(&f);
@@ -1944,11 +2004,20 @@ mod tests {
             .expect("gate present");
         assert_eq!(gate_staged.status, GateStatus::Unknown);
         assert!(!gate_staged.passes());
-        assert!(!gate_staged.is_red(), "Un transitoire ne doit PAS être rouge");
-        assert!(gate_staged.detail.contains("transition/redémarrage en cours"));
+        assert!(
+            !gate_staged.is_red(),
+            "Un transitoire ne doit PAS être rouge"
+        );
+        assert!(gate_staged
+            .detail
+            .contains("transition/redémarrage en cours"));
 
         // Cas B : attempt_status == "running".
-        let mut f_running = facts("v0.8.0-1633-g771dfe74", Some("v0.8.0-1716-g1b97e118"), false);
+        let mut f_running = facts(
+            "v0.8.0-1633-g771dfe74",
+            Some("v0.8.0-1716-g1b97e118"),
+            false,
+        );
         f_running.attempt_status = Some("running".to_string());
         let gates_running = evaluate_gates(&f_running);
         let gate_running = gates_running
@@ -1960,7 +2029,11 @@ mod tests {
         assert!(!gate_running.is_red());
 
         // Cas C : cutover scope actif.
-        let mut f_cutover = facts("v0.8.0-1633-g771dfe74", Some("v0.8.0-1716-g1b97e118"), false);
+        let mut f_cutover = facts(
+            "v0.8.0-1633-g771dfe74",
+            Some("v0.8.0-1716-g1b97e118"),
+            false,
+        );
         f_cutover.live_cutover_scopes_count = 1;
         let gates_cutover = evaluate_gates(&f_cutover);
         let gate_cutover = gates_cutover
@@ -2066,10 +2139,8 @@ mod tests {
     #[test]
     fn qualification_gate_reads_promotion_gates_not_build_provenance() {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!(
-            "axon-req902585-a-{}",
-            crate::clock::now_unix_ms()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("axon-req902585-a-{}", crate::clock::now_unix_ms()));
         fs::create_dir_all(&dir).unwrap();
         // La forme RÉELLE : les deux clés coexistent, et seule la seconde compte.
         fs::write(
@@ -2097,10 +2168,8 @@ mod tests {
     #[test]
     fn a_manifest_without_promotion_gates_is_unknown_not_green() {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!(
-            "axon-req902585-b-{}",
-            crate::clock::now_unix_ms()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("axon-req902585-b-{}", crate::clock::now_unix_ms()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("current.json"),
@@ -2128,10 +2197,8 @@ mod tests {
     #[test]
     fn an_in_flight_staging_answers_the_qualification_question() {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!(
-            "axon-req902585-c-{}",
-            crate::clock::now_unix_ms()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("axon-req902585-c-{}", crate::clock::now_unix_ms()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("current.json"),
@@ -2231,8 +2298,15 @@ mod tests {
                 .to_string(),
         );
         let gate = evaluate_attempt_gate(&f);
-        assert!(gate.passes(), "la preuve est là, la porte doit passer : {gate:?}");
-        assert_eq!(attempt_next_action(&f), None, "rien à conseiller sur un succès prouvé");
+        assert!(
+            gate.passes(),
+            "la preuve est là, la porte doit passer : {gate:?}"
+        );
+        assert_eq!(
+            attempt_next_action(&f),
+            None,
+            "rien à conseiller sur un succès prouvé"
+        );
     }
 
     /// REQ-AXO-902628 — le statut que l'écrivain pose désormais quand il sort
@@ -2249,7 +2323,10 @@ mod tests {
         f.attempt_journal_path = Some("/tmp/attempts/tue.jsonl".to_string());
 
         let gate = evaluate_attempt_gate(&f);
-        assert!(!gate.passes() && !gate.is_red(), "ni preuve, ni alarme : {gate:?}");
+        assert!(
+            !gate.passes() && !gate.is_red(),
+            "ni preuve, ni alarme : {gate:?}"
+        );
         assert!(
             gate.detail.contains("INCOMPLETE"),
             "le mot doit y être, l'opérateur lit le texte : {}",
@@ -2275,7 +2352,10 @@ mod tests {
         const MARQUE: &str = "complete:15 steps, cutover_finalize passed";
         assert!(completion_est_prouvee(Some("completed"), Some(MARQUE)));
         // Le statut seul ne suffit pas — c'est le défaut d'origine.
-        assert!(!completion_est_prouvee(Some("completed"), Some("exited with rc=0")));
+        assert!(!completion_est_prouvee(
+            Some("completed"),
+            Some("exited with rc=0")
+        ));
         assert!(!completion_est_prouvee(Some("completed"), None));
         // La marque seule ne suffit pas non plus : un `failed` qui aurait franchi
         // le cutover puis échoué après reste un échec.
@@ -2357,7 +2437,11 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let journal = dir.join("tue.jsonl");
         // Le cas mesuré : une étape démarrée sur quinze, aucune terminée.
-        fs::write(&journal, "{\"event\":\"step_started\",\"phase\":\"build\"}\n").unwrap();
+        fs::write(
+            &journal,
+            "{\"event\":\"step_started\",\"phase\":\"build\"}\n",
+        )
+        .unwrap();
         fs::write(
             dir.join("attempt-current.json"),
             format!(
@@ -2400,7 +2484,10 @@ mod tests {
         let sans_cutover = "{\"event\":\"step_started\",\"phase\":\"build\"}\n\
                             {\"event\":\"step_completed\",\"phase\":\"build\"}\n";
         let v = preuve_de_completion(sans_cutover);
-        assert!(v.starts_with("incomplete:") && v.contains("cutover_finalize"), "{v}");
+        assert!(
+            v.starts_with("incomplete:") && v.contains("cutover_finalize"),
+            "{v}"
+        );
         // Une ligne illisible n'est pas une preuve d'incomplétude.
         assert!(preuve_de_completion(&format!("pas du json\n{complet}")).starts_with("complete:"));
         // Et jamais muet.
@@ -2415,8 +2502,9 @@ mod tests {
         f.attempt_id = Some("attempt-archivé".to_string());
         f.attempt_status = Some("completed".to_string());
         f.attempt_journal_path = Some("/ce/chemin/n/existe/pas.jsonl".to_string());
-        f.attempt_completion_evidence =
-            Some(format!("{PREFIXE_JOURNAL_ILLISIBLE} (/ce/chemin/n/existe/pas.jsonl) — nope"));
+        f.attempt_completion_evidence = Some(format!(
+            "{PREFIXE_JOURNAL_ILLISIBLE} (/ce/chemin/n/existe/pas.jsonl) — nope"
+        ));
 
         // Sans la marque : rien ne prouve, donc `unknown`.
         f.attempt_last_event_detail = Some("promotion process exited with rc=0".to_string());
@@ -2440,7 +2528,10 @@ mod tests {
         f.attempt_status = Some("running".to_string());
         let gate = evaluate_attempt_gate(&f);
         assert!(!gate.is_red(), "jamais rouge pendant un promote : {gate:?}");
-        assert!(!gate.passes(), "et pas vert non plus : rien n'est encore su");
+        assert!(
+            !gate.passes(),
+            "et pas vert non plus : rien n'est encore su"
+        );
         assert_eq!(attempt_next_action(&f), None);
     }
 
@@ -2519,7 +2610,10 @@ mod tests {
             ..Default::default()
         };
         let gate = evaluate_supervisor_gates(&s).into_iter().next().unwrap();
-        assert!(!gate.is_red() && !gate.passes(), "ni l'un ni l'autre : {gate:?}");
+        assert!(
+            !gate.is_red() && !gate.passes(),
+            "ni l'un ni l'autre : {gate:?}"
+        );
     }
 
     /// Beaucoup de redémarrages MAIS un processus qui tient depuis une heure : ce
@@ -3033,8 +3127,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(libre.label(Some(1)), "free");
-        assert_eq!(proprietaire_vivant(544_703).label(Some(544_703)), "supervised");
-        assert_eq!(proprietaire_vivant(650_712).label(Some(544_703)), "diverged");
+        assert_eq!(
+            proprietaire_vivant(544_703).label(Some(544_703)),
+            "supervised"
+        );
+        assert_eq!(
+            proprietaire_vivant(650_712).label(Some(544_703)),
+            "diverged"
+        );
         let anonyme = IstOwnershipFacts {
             probed: true,
             held_by_live_process: true,
@@ -3122,7 +3222,10 @@ mod tests {
             ..Default::default()
         };
         let gate = evaluate_supervisor_gates(&s).into_iter().next().unwrap();
-        assert!(gate.is_red(), "le verdict reste rouge, c'est bien une panne");
+        assert!(
+            gate.is_red(),
+            "le verdict reste rouge, c'est bien une panne"
+        );
         assert!(
             !gate.detail.contains("nothing holds"),
             "quelque chose tenait : 650712, vivant. Le message ment : {}",
@@ -3327,4 +3430,3 @@ axon-live-cutover-314159-2.scope  loaded active running [systemd-run] bash
         assert_eq!(orphelins_avec_nouveau.len(), 2);
     }
 }
-

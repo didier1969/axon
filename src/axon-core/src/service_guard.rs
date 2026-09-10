@@ -1021,15 +1021,18 @@ pub fn record_vector_worker_restart() {
 
 // REQ-AXO-270 AC1.5 — per-stage heartbeat writers for the 3-stage pipeline.
 pub fn record_vector_pipeline_producer_heartbeat() {
-    VECTOR_PIPELINE_PRODUCER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
+    VECTOR_PIPELINE_PRODUCER_HEARTBEAT_AT_MS
+        .store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 pub fn record_vector_pipeline_embedder_heartbeat() {
-    VECTOR_PIPELINE_EMBEDDER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
+    VECTOR_PIPELINE_EMBEDDER_HEARTBEAT_AT_MS
+        .store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 pub fn record_vector_pipeline_persister_heartbeat() {
-    VECTOR_PIPELINE_PERSISTER_HEARTBEAT_AT_MS.store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
+    VECTOR_PIPELINE_PERSISTER_HEARTBEAT_AT_MS
+        .store(crate::clock::now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 // Read accessors — Phase 1 only used by tests; Phase 2 wires them into
@@ -1362,7 +1365,10 @@ pub fn vector_chunks_embedded_cumulative() -> u64 {
 }
 
 pub fn vector_chunk_embeddings_per_second() -> f64 {
-    vector_chunk_embeddings_per_second_at(crate::clock::now_unix_ms() as u64, VECTOR_EMBED_THROUGHPUT_WINDOW_MS)
+    vector_chunk_embeddings_per_second_at(
+        crate::clock::now_unix_ms() as u64,
+        VECTOR_EMBED_THROUGHPUT_WINDOW_MS,
+    )
 }
 
 pub fn vector_chunk_embeddings_rate_window_ms() -> u64 {

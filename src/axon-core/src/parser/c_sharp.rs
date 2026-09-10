@@ -224,7 +224,9 @@ mod tests {
         }
         let f = result.symbols.iter().find(|s| s.name == "F").unwrap();
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("1")
         );
     }
@@ -250,7 +252,9 @@ mod tests {
         let f = result.symbols.iter().find(|s| s.name == "F").unwrap();
         // base 1 + if + for + foreach + catch + case + ternary = 7
         assert_eq!(
-            f.properties.get("cyclomatic_complexity").map(String::as_str),
+            f.properties
+                .get("cyclomatic_complexity")
+                .map(String::as_str),
             Some("7")
         );
     }

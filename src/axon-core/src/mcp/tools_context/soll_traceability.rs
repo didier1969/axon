@@ -310,7 +310,9 @@ impl McpServer {
         let mut req_rows: Vec<(String, Value)> = Vec::new();
         for concept_id in &concept_ids {
             for (tgt, rel) in snap.outgoing_edges(concept_id) {
-                let Some(node) = snap.nodes.get(tgt) else { continue };
+                let Some(node) = snap.nodes.get(tgt) else {
+                    continue;
+                };
                 if node.entity_type != "Requirement" {
                     continue;
                 }
@@ -333,12 +335,16 @@ impl McpServer {
         let mut dec_rows: Vec<(String, Value)> = Vec::new();
         for concept_id in &concept_ids {
             for (req_tgt, _rel) in snap.outgoing_edges(concept_id) {
-                let Some(req_node) = snap.nodes.get(req_tgt) else { continue };
+                let Some(req_node) = snap.nodes.get(req_tgt) else {
+                    continue;
+                };
                 if req_node.entity_type != "Requirement" {
                     continue;
                 }
                 for (dec_src, de_rel) in snap.incoming_edges(&req_node.id) {
-                    let Some(dec_node) = snap.nodes.get(dec_src) else { continue };
+                    let Some(dec_node) = snap.nodes.get(dec_src) else {
+                        continue;
+                    };
                     if dec_node.entity_type != "Decision" {
                         continue;
                     }

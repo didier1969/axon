@@ -27,7 +27,10 @@ fn un_corps_court_passe_INTACT() {
     // Borner ce qui n'a pas besoin de l'être perdrait du contexte sans rien gagner.
     let corps = "## Règle\nune ligne\n\n## Pourquoi\ndeux lignes\n";
     let (rendu, titres, tronque) = McpServer::borner_corps_pointeur(corps);
-    assert_eq!(rendu, corps, "un corps sous le seuil ne doit pas être touché");
+    assert_eq!(
+        rendu, corps,
+        "un corps sous le seuil ne doit pas être touché"
+    );
     assert!(!tronque);
     assert_eq!(titres, vec!["Règle".to_string(), "Pourquoi".to_string()]);
 }
@@ -37,7 +40,11 @@ fn un_journal_long_rend_la_DERNIERE_section_et_tous_les_titres() {
     let corps = journal(40, 500); // ~20 k caractères, bien au-delà du seuil
     let (rendu, titres, tronque) = McpServer::borner_corps_pointeur(&corps);
 
-    assert!(tronque, "un corps de {} chars doit être borné", corps.chars().count());
+    assert!(
+        tronque,
+        "un corps de {} chars doit être borné",
+        corps.chars().count()
+    );
     assert!(
         rendu.starts_with("## DERNIÈRE"),
         "le recalage doit recevoir la dernière section ; obtenu le début : {:?}",
@@ -68,7 +75,10 @@ fn un_corps_long_SANS_section_garde_la_queue_pas_la_tete() {
 
     assert!(tronque);
     assert!(titres.is_empty(), "aucun `## ` : aucun titre à annoncer");
-    assert!(rendu.ends_with("FIN-RECENTE"), "la queue doit être conservée");
+    assert!(
+        rendu.ends_with("FIN-RECENTE"),
+        "la queue doit être conservée"
+    );
     assert!(
         !rendu.contains("DEBUT-ANCIEN"),
         "la tête doit être écartée, pas la queue"
@@ -81,7 +91,10 @@ fn le_tronquage_n_est_jamais_MUET() {
     // contrôle, un appelant lirait un pointeur amputé en le croyant complet.
     let corps = journal(40, 500);
     let (_, _, tronque) = McpServer::borner_corps_pointeur(&corps);
-    assert!(tronque, "`body_truncated` est le seul signal que l'appelant reçoit");
+    assert!(
+        tronque,
+        "`body_truncated` est le seul signal que l'appelant reçoit"
+    );
 }
 
 // ---------------------------------------------------------------------------------

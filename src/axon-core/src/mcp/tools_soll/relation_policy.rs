@@ -949,9 +949,9 @@ pub(super) fn prefix_for_node_type(node_type: &str) -> &str {
         "Validation" => "VAL",
         "Stakeholder" => "STK",
         "Guideline" => "GUI",
-        "Skill" => "SKI",                               // REQ-AXO-91578
-        "PromptTemplate" => "PRT",                      // REQ-AXO-91579
-        "TechnologyMigration" => "TMG",                 // REQ-AXO-901727
+        "Skill" => "SKI",               // REQ-AXO-91578
+        "PromptTemplate" => "PRT",      // REQ-AXO-91579
+        "TechnologyMigration" => "TMG", // REQ-AXO-901727
         other => other,
     }
 }
@@ -1077,7 +1077,8 @@ pub(super) fn render_kind_schema_matrix_text(data: &Value) -> Option<String> {
     if data.get("allowed_targets").is_none() {
         if let (Some(target_kind), Some(sources)) = (
             data.get("target_kind").and_then(Value::as_str),
-            data.get("incoming_from_source_kinds").and_then(Value::as_array),
+            data.get("incoming_from_source_kinds")
+                .and_then(Value::as_array),
         ) {
             let routes = routes_from(sources, "source_kind");
             if !routes.is_empty() {
@@ -1263,8 +1264,8 @@ mod blocked_by_policy_tests {
     /// as a forbidden relation (31 false-positives, session 88).
     #[test]
     fn has_remnant_allowed_for_tmg_artifact() {
-        let policy = relation_policy_for_pair("TMG", "ART")
-            .expect("TMG -> ART must have a relation policy");
+        let policy =
+            relation_policy_for_pair("TMG", "ART").expect("TMG -> ART must have a relation policy");
         assert!(
             policy.allowed.contains(&"HAS_REMNANT"),
             "TMG -> ART must allow HAS_REMNANT (allowed = {:?})",
@@ -1309,7 +1310,10 @@ mod blocked_by_policy_tests {
     #[test]
     fn validation_decision_allows_refutes_exclusive() {
         let policy = relation_policy_for_pair("VAL", "DEC").expect("VAL -> DEC policy exists");
-        assert!(policy.allowed.contains(&"REFUTES"), "VAL -> DEC must allow REFUTES");
+        assert!(
+            policy.allowed.contains(&"REFUTES"),
+            "VAL -> DEC must allow REFUTES"
+        );
         assert!(policy.allowed.contains(&"VERIFIES"));
         assert!(
             !policy.allow_multiple_types,
@@ -1383,7 +1387,7 @@ mod matrix_version_tests {
     /// dilue pas dans un renommage.
     #[test]
     fn la_paire_requirement_milestone_est_bien_le_piege_a_deux_faces() {
-            let directe = relation_policy_for_pair("REQ", "MIL").expect("(REQ, MIL) doit être connue");
+        let directe = relation_policy_for_pair("REQ", "MIL").expect("(REQ, MIL) doit être connue");
         assert_eq!(
             directe.allowed,
             vec!["BLOCKED_BY"],
@@ -1417,6 +1421,9 @@ mod matrix_version_tests {
         };
         avale(b"TARGETS/parent_to_child", &mut h1);
         avale(b"TARGETS/child_to_parent", &mut h2);
-        assert_ne!(h1, h2, "l'empreinte doit falsifier tout changement de sémantique de traversée");
+        assert_ne!(
+            h1, h2,
+            "l'empreinte doit falsifier tout changement de sémantique de traversée"
+        );
     }
 }

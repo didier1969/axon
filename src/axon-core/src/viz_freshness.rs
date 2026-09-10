@@ -96,7 +96,10 @@ fn memgraph_snapshot_from_body(body: Option<&str>, now_unix: i64) -> Value {
     let Ok(parsed) = serde_json::from_str::<Value>(body) else {
         return json!({ "verdict": "unknown", "detail": "marker present but unparseable" });
     };
-    let status = parsed.get("status").and_then(Value::as_str).unwrap_or("unknown");
+    let status = parsed
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     let detail = parsed.get("detail").and_then(Value::as_str).unwrap_or("");
     let at_unix = parsed.get("at_unix").and_then(Value::as_i64).unwrap_or(0);
     let source_commit = parsed
@@ -187,7 +190,8 @@ mod tests {
 
     #[test]
     fn ok_old_publish_is_stale() {
-        let body = r#"{"status":"ok","detail":"published pub-1","at_unix":0,"source_commit":"abc"}"#;
+        let body =
+            r#"{"status":"ok","detail":"published pub-1","at_unix":0,"source_commit":"abc"}"#;
         let snap = memgraph_snapshot_from_body(Some(body), MEMGRAPH_STALE_AFTER_SECONDS + 10);
         assert_eq!(snap["verdict"], "stale");
     }

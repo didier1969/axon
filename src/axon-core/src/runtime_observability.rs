@@ -248,7 +248,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn parse_proc_status_extracts_rss_breakdown() {
         let snapshot = parse_proc_status_kb(

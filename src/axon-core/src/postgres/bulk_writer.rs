@@ -2172,7 +2172,11 @@ mod tests {
     fn sans_artefact_neuf_la_reconciliation_a3_ne_fait_qu_une_requete() {
         let changed = ids("path", 3);
         let statements = a3_reconcile_statements(&changed, &[]);
-        assert_eq!(statements.len(), 1, "le regime stable ne paie que les chemins");
+        assert_eq!(
+            statements.len(),
+            1,
+            "le regime stable ne paie que les chemins"
+        );
         assert!(statements[0].0.contains(A3_SELECTOR_CHANGED_PATHS));
         assert_eq!(statements[0].1, changed.as_slice());
     }

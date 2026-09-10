@@ -24,7 +24,12 @@ mod tests {
     fn soll_node_embedding_store_select_and_staleness() {
         let store = create_test_db().unwrap();
         let id = "REQ-TST-001";
-        insert_node(&store, id, "GPU embedding throughput", "restore the embed rate");
+        insert_node(
+            &store,
+            id,
+            "GPU embedding throughput",
+            "restore the embed rate",
+        );
 
         // Before embedding: the node is selected as needing one, with its hash.
         let needing = store.select_soll_nodes_needing_embedding(100).unwrap();
@@ -41,7 +46,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .query_count("SELECT count(*) FROM soll.NodeEmbedding WHERE node_id = 'REQ-TST-001'")
+                .query_count(
+                    "SELECT count(*) FROM soll.NodeEmbedding WHERE node_id = 'REQ-TST-001'"
+                )
                 .unwrap(),
             1,
             "embedding row stored"
@@ -58,7 +65,12 @@ mod tests {
         );
 
         // Edit the description → hash drifts → the node is stale again.
-        insert_node(&store, id, "GPU embedding throughput", "restore the embed rate ON THE LANE");
+        insert_node(
+            &store,
+            id,
+            "GPU embedding throughput",
+            "restore the embed rate ON THE LANE",
+        );
         assert!(
             store
                 .select_soll_nodes_needing_embedding(100)
@@ -92,8 +104,14 @@ mod tests {
         let (text_a, hash_a) = get("REQ-TST-001");
         let (text_b, hash_b) = get("REQ-TST-002");
 
-        assert_eq!(text_a, "ab\nc", "embedded text keeps the title/description separator");
-        assert_eq!(text_b, "a\nbc", "embedded text keeps the title/description separator");
+        assert_eq!(
+            text_a, "ab\nc",
+            "embedded text keeps the title/description separator"
+        );
+        assert_eq!(
+            text_b, "a\nbc",
+            "embedded text keeps the title/description separator"
+        );
         assert_ne!(
             hash_a, hash_b,
             "distinct embedded texts must yield distinct staleness hashes (no separator-stripping collision)"
@@ -114,13 +132,20 @@ mod tests {
         };
         // The test template pre-seeds SOLL nodes, so assert on convergence and on
         // our own nodes rather than absolute counts.
-        let pending_before = store.select_soll_nodes_needing_embedding(1000).unwrap().len();
+        let pending_before = store
+            .select_soll_nodes_needing_embedding(1000)
+            .unwrap()
+            .len();
         insert_node(&store, "REQ-TST-001", "alpha", "first body");
         insert_node(&store, "REQ-TST-002", "beta", "second body");
 
         // First pass embeds everything pending (baseline + our 2 nodes).
         let n = store.embed_pending_soll_nodes_with(1000, synth).unwrap();
-        assert_eq!(n, pending_before + 2, "every pending node embedded this pass");
+        assert_eq!(
+            n,
+            pending_before + 2,
+            "every pending node embedded this pass"
+        );
         assert_eq!(
             store
                 .query_count(
@@ -160,7 +185,11 @@ mod tests {
             v[axis] = 1.0;
             v
         }
-        for (id, axis) in [("REQ-TST-001", 0usize), ("REQ-TST-002", 1), ("REQ-TST-003", 2)] {
+        for (id, axis) in [
+            ("REQ-TST-001", 0usize),
+            ("REQ-TST-002", 1),
+            ("REQ-TST-003", 2),
+        ] {
             insert_node(&store, id, &format!("node {id}"), "semantic body");
             store
                 .upsert_soll_node_embedding(id, "TST", &format!("h-{axis}"), &axis_vec(axis), 0)
@@ -169,7 +198,10 @@ mod tests {
 
         let hits = store.select_soll_nodes_by_ann(&axis_vec(1), 3).unwrap();
         assert!(!hits.is_empty(), "ANN returns results");
-        assert_eq!(hits[0].0, "REQ-TST-002", "nearest node by embedding: {hits:?}");
+        assert_eq!(
+            hits[0].0, "REQ-TST-002",
+            "nearest node by embedding: {hits:?}"
+        );
         assert!(
             hits[0].1 < 0.01,
             "self-match cosine distance ~0, got {:?}",

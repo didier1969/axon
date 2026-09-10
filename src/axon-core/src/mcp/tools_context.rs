@@ -18,14 +18,13 @@ mod repo_literal;
 mod retrieval_bands;
 mod retrieval_model;
 mod retrieval_routing;
+mod retrieval_scoring;
 mod semantic_pressure;
 mod soll_collection;
 mod soll_retrieval;
 mod soll_traceability;
 mod structural_neighbors;
-mod retrieval_scoring;
 mod util;
-use util::*;
 use retrieval_model::{
     ChunkCandidate, EntryCandidate, RetrievalDiagnostics, RetrievalRoute, RetrievalRuntimeState,
     RetrievalTimings,
@@ -34,6 +33,7 @@ use retrieval_model::{
 use retrieval_model::{
     RetrieveContextCache, RETRIEVE_CONTEXT_CACHE, RETRIEVE_CONTEXT_CACHE_TTL_MS,
 };
+use util::*;
 
 const DEFAULT_TOKEN_BUDGET: usize = 1400;
 const DEFAULT_TOP_K: usize = 8;
@@ -111,7 +111,11 @@ impl ScopedSymbolResolution {
             "**{}{} définitions portent ce nom** — le verdict ci-dessous ne porte QUE sur la \
              première :\n{}Passez l'id canonique complet pour viser une autre (REQ-AXO-902452).\
              \n\n",
-            if self.homonyms_truncated { "au moins " } else { "" },
+            if self.homonyms_truncated {
+                "au moins "
+            } else {
+                ""
+            },
             self.homonyms.len() + 1,
             lines,
         ))
@@ -322,10 +326,7 @@ impl McpServer {
                 .to_string()
         };
         self.graph_store
-            .query_json_param(
-                &fuzzy,
-                &json!({ "needle": needle, "limit": limit as u64 }),
-            )
+            .query_json_param(&fuzzy, &json!({ "needle": needle, "limit": limit as u64 }))
             .unwrap_or_else(|_| "[]".to_string())
     }
 
@@ -536,8 +537,9 @@ impl McpServer {
             |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
         );
         if waited_for_semantic_ms > 0 {
-            excluded_because
-                .push(format!("waited_{waited_for_semantic_ms}ms_for_semantic_pressure_recovery"));
+            excluded_because.push(format!(
+                "waited_{waited_for_semantic_ms}ms_for_semantic_pressure_recovery"
+            ));
         }
         let semantic_corpus_allowed = Self::semantic_corpus_pressure_ok(pressure);
         // REQ-AXO-902023 tier C.2 — embed per sub-question when composed (each
@@ -1572,13 +1574,15 @@ impl McpServer {
                 || !matches!(Self::evidence_provenance_for_uri(&c.uri), "code_chunk")
         };
         let semantic_primary = matches!(route, RetrievalRoute::Hybrid | RetrievalRoute::SollHybrid)
-            && candidates
-                .iter()
-                .any(|c| c.semantic_distance.map_or(false, |d| d < ENTRY_SEMANTIC_RELEVANCE_MAX));
+            && candidates.iter().any(|c| {
+                c.semantic_distance
+                    .map_or(false, |d| d < ENTRY_SEMANTIC_RELEVANCE_MAX)
+            });
         if semantic_primary {
             let primary_relevant = candidates.iter().any(|c| {
                 !is_secondary_entry(c)
-                    && c.semantic_distance.map_or(false, |d| d < ENTRY_SEMANTIC_RELEVANCE_MAX)
+                    && c.semantic_distance
+                        .map_or(false, |d| d < ENTRY_SEMANTIC_RELEVANCE_MAX)
             });
             candidates.sort_by(|left, right| {
                 if primary_relevant {
@@ -1673,8 +1677,11 @@ impl McpServer {
                 // composed question (one fill per sub-question vector) ranks each
                 // candidate by its CLOSEST sub-question. Single-call: existing None
                 // → `dist`, identical to the prior overwrite.
-                candidate.semantic_distance =
-                    Some(candidate.semantic_distance.map_or(*dist, |ex| ex.min(*dist)));
+                candidate.semantic_distance = Some(
+                    candidate
+                        .semantic_distance
+                        .map_or(*dist, |ex| ex.min(*dist)),
+                );
             }
         }
     }
@@ -1727,8 +1734,11 @@ impl McpServer {
             if let Some(dist) = dist_by_id.get(&candidate.chunk_id) {
                 // REQ-AXO-902023 tier C.2 — MIN across sub-question vectors (see
                 // fill_entry_semantic_distances). Single-call behavior unchanged.
-                candidate.semantic_distance =
-                    Some(candidate.semantic_distance.map_or(*dist, |ex| ex.min(*dist)));
+                candidate.semantic_distance = Some(
+                    candidate
+                        .semantic_distance
+                        .map_or(*dist, |ex| ex.min(*dist)),
+                );
             }
         }
     }
@@ -1784,14 +1794,26 @@ impl McpServer {
                 Some(id) if !existing.contains(id) => id.to_string(),
                 _ => continue,
             };
-            let name = row.get(1).and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let kind = row.get(2).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let name = row
+                .get(1)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let kind = row
+                .get(2)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
             let project_code = row
                 .get(3)
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let uri = row.get(4).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let uri = row
+                .get(4)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
             let dist = row.get(5).and_then(|v| {
                 v.as_f64()
                     .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
@@ -3024,7 +3046,9 @@ impl McpServer {
     /// call is the cost the author flagged — lexical+anchor is the measured first
     /// pass, mirroring the rank-based lexical/structural choice of DEC-AXO-901632.
     pub(super) fn governing_overlaps_question(entity: &Value, question_terms: &[String]) -> bool {
-        if entity.get("evidence_class").and_then(|value| value.as_str())
+        if entity
+            .get("evidence_class")
+            .and_then(|value| value.as_str())
             == Some("soll_traceability")
         {
             return true;
@@ -3077,7 +3101,6 @@ impl McpServer {
         })
     }
 
-
     /// REQ-AXO-902596 — coupe le paquet jusqu'à tenir dans `token_budget`, et rend
     /// la liste de ce qui a été retiré.
     ///
@@ -3117,8 +3140,12 @@ impl McpServer {
             if Some(bande) == bande_porteuse {
                 continue;
             }
-            let Some(obj) = packet.as_object_mut() else { break };
-            let Some(valeur) = obj.get(bande) else { continue };
+            let Some(obj) = packet.as_object_mut() else {
+                break;
+            };
+            let Some(valeur) = obj.get(bande) else {
+                continue;
+            };
             let compte = valeur.as_array().map(|a| a.len()).unwrap_or(0);
             if compte == 0 {
                 continue;
@@ -3233,12 +3260,7 @@ impl McpServer {
                     .unwrap_or_else(|| serde_json::to_string(valeur).unwrap_or_default())
             })
             .collect();
-        estimate_tokens(
-            &morceaux
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-        )
+        estimate_tokens(&morceaux.iter().map(String::as_str).collect::<Vec<_>>())
     }
 
     fn render_evidence_packet(&self, packet: &Value, route: RetrievalRoute) -> String {
@@ -3501,7 +3523,6 @@ impl McpServer {
 
         rendered
     }
-
 
     // REQ-AXO-219 — pub(super) so the extracted retrieval submodules
     // (retrieval_routing) can reuse the same single-quote escaper.

@@ -196,7 +196,10 @@ fn run(args: Args) -> anyhow::Result<()> {
         let report =
             axon_core::ist_snapshot::code_smells::orphan_clusters(&graph, &args.project, &declared);
         let largest = report.clusters.iter().map(|c| c.len()).max().unwrap_or(0);
-        println!("\n=== orphan_clusters {} (REQ-AXO-902221) ===", args.project);
+        println!(
+            "\n=== orphan_clusters {} (REQ-AXO-902221) ===",
+            args.project
+        );
         println!("candidates          : {}", report.candidate_count);
         println!("roots               : {}", report.root_count);
         println!("unreached           : {}", report.unreached_count);
@@ -204,8 +207,12 @@ fn run(args: Args) -> anyhow::Result<()> {
         println!("largest_cluster     : {}", largest);
         println!("soll_role=entry     : {}", declared.len());
 
-        let wiring =
-            axon_core::ist_snapshot::code_smells::wiring_orphans(&graph, &args.project, &declared, 200);
+        let wiring = axon_core::ist_snapshot::code_smells::wiring_orphans(
+            &graph,
+            &args.project,
+            &declared,
+            200,
+        );
         let test_only = wiring.iter().filter(|o| o.category == "test_only").count();
         let isolated = wiring.iter().filter(|o| o.category == "isolated").count();
         println!("\n=== wiring {} ===", args.project);

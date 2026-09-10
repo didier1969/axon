@@ -10,7 +10,6 @@ use super::tools_framework_support::{cache_read, cache_write};
 use super::McpServer;
 use crate::mcp::format::Compte;
 
-
 /// REQ-AXO-902409 tranche 3 — raison publiée quand une grandeur n'a PAS été calculée.
 ///
 /// `&'static str` À DESSEIN : elle décrit une BRANCHE du code (`ram_view == None`),

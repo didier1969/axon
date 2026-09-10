@@ -12,14 +12,16 @@ use crate::ist_snapshot::algorithms::{
 };
 use crate::ist_snapshot::{process_view, IstGraph, IstSnapshotCache, NodeKind};
 use crate::mcp::format::Compte;
-use crate::mcp::tools_framework_support::{diff_shi_snapshots, load_shi_snapshots, persist_shi_snapshot};
+use crate::mcp::tools_framework_support::{
+    diff_shi_snapshots, load_shi_snapshots, persist_shi_snapshot,
+};
 use crate::mcp::McpServer;
 use std::collections::{HashMap, HashSet};
 
 use crate::structural_health::{
-    acyclicity_score, duplication_score, geometric_aggregate, god_objects_score, impact_radius_score,
-    martin_distance, main_sequence_score, module_depth_score, resilience_score,
-    weighted_coverage_score, StructuralHealthIndex, SubScore,
+    acyclicity_score, duplication_score, geometric_aggregate, god_objects_score,
+    impact_radius_score, main_sequence_score, martin_distance, module_depth_score,
+    resilience_score, weighted_coverage_score, StructuralHealthIndex, SubScore,
 };
 
 /// REQ-AXO-902279 (feedback #46, NEX — blocking) — sample up to `cap` identifiers into a
@@ -36,7 +38,13 @@ fn sample_identities(label: &str, names: &[String], cap: usize) -> String {
     let shown = names.len().min(cap);
     let list = names[..shown].join(", ");
     if names.len() > shown {
-        format!(" · {} (showing {} of {}): {}, …", label, shown, names.len(), list)
+        format!(
+            " · {} (showing {} of {}): {}, …",
+            label,
+            shown,
+            names.len(),
+            list
+        )
     } else {
         format!(" · {}: {}", label, list)
     }
@@ -187,11 +195,11 @@ fn is_test_id(id: &str) -> bool {
         "_test.go",
         ".md",
     ];
-    SUFFIX_FRAGMENTS.iter().any(|suf| {
-        lowered.contains(&format!("{suf}::")) || lowered.ends_with(suf)
-    })
-    || lowered.contains("::test_")
-    || lowered.contains("/test_")
+    SUFFIX_FRAGMENTS
+        .iter()
+        .any(|suf| lowered.contains(&format!("{suf}::")) || lowered.ends_with(suf))
+        || lowered.contains("::test_")
+        || lowered.contains("/test_")
 }
 
 /// REQ-AXO-902573 — Honest intent alignment metrics distinguishing legitimate non-code intent.
@@ -239,7 +247,9 @@ impl Default for IntentAlignmentMetrics {
     }
 }
 
-fn orphan_intent_over_snapshot(snap: &crate::soll_snapshot::SollSnapshot) -> IntentAlignmentMetrics {
+fn orphan_intent_over_snapshot(
+    snap: &crate::soll_snapshot::SollSnapshot,
+) -> IntentAlignmentMetrics {
     use crate::soll_snapshot::CodeExemptionReason;
 
     let mut raw_orphans = 0usize;
@@ -350,10 +360,7 @@ struct ShiRawMetrics {
     total_real_functions: usize,
 }
 
-fn compute_shi_raw_metrics(
-    snapshot: &IstGraph,
-    intent: IntentAlignmentMetrics,
-) -> ShiRawMetrics {
+fn compute_shi_raw_metrics(snapshot: &IstGraph, intent: IntentAlignmentMetrics) -> ShiRawMetrics {
     let total_nodes = snapshot.node_count();
     let sccs = structural_sccs(snapshot);
     let (_bridges, articulation) = bridges_and_articulation(snapshot);
@@ -380,7 +387,12 @@ fn compute_shi_raw_metrics(
             covered_pr += s;
         }
         let radius = snapshot
-            .bfs_reverse(id, IMPACT_RADIUS_MAX_DEPTH, IMPACT_RADIUS_MAX_NEIGHBORS, &[])
+            .bfs_reverse(
+                id,
+                IMPACT_RADIUS_MAX_DEPTH,
+                IMPACT_RADIUS_MAX_NEIGHBORS,
+                &[],
+            )
             .len();
         impact_radii.push(radius);
     }
@@ -393,7 +405,8 @@ fn compute_shi_raw_metrics(
     // struct exists to avoid) — `reconcile_duplication_edges` persists them
     // out-of-band via a pgvector HNSW scan, and `ist_snapshot_warm` loads them into
     // the CSR exactly like CALLS/CONTAINS. A plain relation-type count is O(E).
-    let clone_pairs = snapshot.count_edges_with_relation(&[crate::ist_snapshot::RelationType::SimilarTo]);
+    let clone_pairs =
+        snapshot.count_edges_with_relation(&[crate::ist_snapshot::RelationType::SimilarTo]);
 
     // REQ-AXO-902186 (dogfood finding, dev-tested against real AXO data) — restrict
     // module-coupling attribution to REAL source symbols. Without this gate, a documentary
@@ -459,7 +472,11 @@ fn compute_shi_raw_metrics(
                     let fan_out = snapshot
                         .forward_neighbors(i)
                         .filter(|(_, rel)| {
-                            matches!(rel, crate::ist_snapshot::RelationType::Calls | crate::ist_snapshot::RelationType::CallsNif)
+                            matches!(
+                                rel,
+                                crate::ist_snapshot::RelationType::Calls
+                                    | crate::ist_snapshot::RelationType::CallsNif
+                            )
                         })
                         .count();
                     if complexity > GOD_OBJECT_COMPLEXITY_THRESHOLD
@@ -511,13 +528,21 @@ fn compute_shi_raw_metrics(
             continue;
         }
         let (traits, types) = mod_types.get(m).copied().unwrap_or((0, 0));
-        let abstractness = if types == 0 { 0.0 } else { traits as f64 / types as f64 };
+        let abstractness = if types == 0 {
+            0.0
+        } else {
+            traits as f64 / types as f64
+        };
         let d = martin_distance(ca, ce, abstractness);
         d_sum += d;
         d_count += 1;
         mod_d.insert(m.clone(), (d, ca, ce));
     }
-    let mean_distance = if d_count == 0 { 0.0 } else { d_sum / d_count as f64 };
+    let mean_distance = if d_count == 0 {
+        0.0
+    } else {
+        d_sum / d_count as f64
+    };
 
     // REQ-AXO-902185 (module depth) — mean public/total ratio over modules that carry at
     // least one real source symbol (empty modules can't happen here since mod_pub_total
@@ -528,7 +553,13 @@ fn compute_shi_raw_metrics(
     } else {
         let sum: f64 = mod_pub_total
             .values()
-            .map(|(pub_count, total)| if *total == 0 { 0.0 } else { *pub_count as f64 / *total as f64 })
+            .map(|(pub_count, total)| {
+                if *total == 0 {
+                    0.0
+                } else {
+                    *pub_count as f64 / *total as f64
+                }
+            })
             .sum();
         sum / mod_pub_total_count as f64
     };
@@ -939,8 +970,9 @@ impl McpServer {
             "sub_scores": sub_scores_map,
         });
         let previous_snapshots = load_shi_snapshots(&project);
-        let delta_vs_previous =
-            previous_snapshots.last().map(|prev| diff_shi_snapshots(&shi_snapshot, prev));
+        let delta_vs_previous = previous_snapshots
+            .last()
+            .map(|prev| diff_shi_snapshots(&shi_snapshot, prev));
         if let Err(err) = persist_shi_snapshot(&project, &shi_snapshot) {
             tracing::warn!(error = %err, project = %project, "REQ-AXO-902187: failed to persist SHI snapshot (non-fatal, index still returned)");
         }
@@ -948,9 +980,8 @@ impl McpServer {
             .as_ref()
             .and_then(|d| d.get("per_dimension_delta"))
             .cloned();
-        let dimension_delta = |name: &str| -> Option<f64> {
-            per_dimension_delta.as_ref()?.get(name)?.as_f64()
-        };
+        let dimension_delta =
+            |name: &str| -> Option<f64> { per_dimension_delta.as_ref()?.get(name)?.as_f64() };
 
         let below: Vec<Value> = index
             .below_target()
@@ -972,7 +1003,11 @@ impl McpServer {
             .collect();
         let re_surfaced_count = below
             .iter()
-            .filter(|b| b.get("re_surfaced").and_then(|v| v.as_bool()).unwrap_or(false))
+            .filter(|b| {
+                b.get("re_surfaced")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            })
             .count();
         let not_applicable_count = index.sub_scores.iter().filter(|s| s.not_applicable).count();
         let summary = format!(
@@ -1083,7 +1118,11 @@ impl McpServer {
             Some(s) => s,
             None => return Some(ist_cache_miss_error("wiring", &project)),
         };
-        let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(20).clamp(1, 200) as usize;
+        let top = args
+            .get("top")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(20)
+            .clamp(1, 200) as usize;
         // REQ-AXO-902192 S2 — SOLL-declared symbols are exempt: a traceability edge means the
         // symbol is wired to INTENT, so a dispatch-dynamic / lazy-import / hook entry the static
         // CALLS graph can't reach is not an orphan (the OPV blind spots). RAM-first via the SOLL
@@ -1109,9 +1148,7 @@ impl McpServer {
                 snap.traceability
                     .iter()
                     .filter(|t| t.artifact_type == "Symbol")
-                    .filter(|t| {
-                        !politique_stricte || t.role.as_deref() == Some("entry")
-                    })
+                    .filter(|t| !politique_stricte || t.role.as_deref() == Some("entry"))
                     .map(|t| t.artifact_ref.to_ascii_lowercase())
                     .collect()
             })
@@ -1125,7 +1162,10 @@ impl McpServer {
         let orphans =
             crate::ist_snapshot::code_smells::wiring_orphans(&snapshot, &project, &declared, top);
         let test_only = orphans.iter().filter(|o| o.category == "test_only").count();
-        let dynamic_dispatch = orphans.iter().filter(|o| o.category == "dynamic_dispatch").count();
+        let dynamic_dispatch = orphans
+            .iter()
+            .filter(|o| o.category == "dynamic_dispatch")
+            .count();
         let isolated = orphans.iter().filter(|o| o.category == "isolated").count();
         let items: Vec<Value> = orphans
             .iter()
@@ -1142,8 +1182,10 @@ impl McpServer {
         // REQ-AXO-902279 (feedback #46) — name the orphans in the TEXT channel, not just
         // the count. `orphans` is already capped at `top` upstream, so this samples the
         // returned set (each annotated with its category) with truncation disclosure.
-        let orphan_names: Vec<String> =
-            orphans.iter().map(|o| format!("{} [{}]", o.name, o.category)).collect();
+        let orphan_names: Vec<String> = orphans
+            .iter()
+            .map(|o| format!("{} [{}]", o.name, o.category))
+            .collect();
         let orphan_phrase = sample_identities("orphans", &orphan_names, 12);
         // REQ-AXO-902592 — l'exemption est annoncee dans le MEME canal que le
         // resultat. Un rapport vide qui ne dit pas combien de symboles il a ecartes
@@ -1170,17 +1212,21 @@ impl McpServer {
         // REQ-AXO-902592 — l'ambiguite est mesuree a 0 aujourd'hui. On la publie
         // quand meme : le jour ou elle quitte 0, une exemption s'elargit, et une
         // surface qui elargit en silence est exactement ce que ce REQ corrige.
-        let phrase_ambigues = if audit.declarations_matching_many.is_empty() {
-            String::new()
-        } else {
-            format!(
+        let phrase_ambigues =
+            if audit.declarations_matching_many.is_empty() {
+                String::new()
+            } else {
+                format!(
                 " ⚠ {} declaration(s) designent PLUSIEURS symboles — l'exemption porte sur tous{}.",
                 audit.declarations_matching_many.len(),
                 sample_identities("ambiguous declarations", &audit.declarations_matching_many, 8)
             )
-        };
+            };
         let phrase_dynamic = if dynamic_dispatch > 0 {
-            format!(" + {} dynamic_dispatch (unreachable by static call graph)", dynamic_dispatch)
+            format!(
+                " + {} dynamic_dispatch (unreachable by static call graph)",
+                dynamic_dispatch
+            )
         } else {
             String::new()
         };
@@ -1386,7 +1432,11 @@ impl McpServer {
             Some(s) => s,
             None => return Some(ist_cache_miss_error("structural_health_worklist", &project)),
         };
-        let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(15).clamp(1, 200) as usize;
+        let top = args
+            .get("top")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(15)
+            .clamp(1, 200) as usize;
         let total_nodes = snapshot.node_count();
 
         let intent = self
@@ -1464,7 +1514,11 @@ impl McpServer {
 
         // 2) Coupling — worst modules by Martin distance D.
         let mut coupled: Vec<(&String, &(f64, usize, usize))> = raw.mod_d.iter().collect();
-        coupled.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
+        coupled.sort_by(|a, b| {
+            b.1 .0
+                .partial_cmp(&a.1 .0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for (m, (d, ca, ce)) in coupled.into_iter().take(scan_cap) {
             // Simulate this ONE module fixed to D=0 (perfectly on the main sequence).
             let new_mean = if raw.d_count == 0 {
@@ -1519,7 +1573,9 @@ impl McpServer {
         candidates.sort_by(|a, b| {
             let roi_a = a.expected_delta_shi / a.blast_radius as f64;
             let roi_b = b.expected_delta_shi / b.blast_radius as f64;
-            roi_b.partial_cmp(&roi_a).unwrap_or(std::cmp::Ordering::Equal)
+            roi_b
+                .partial_cmp(&roi_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         let ranked_candidates: Vec<Value> = candidates
             .iter()
@@ -1614,11 +1670,17 @@ impl McpServer {
             Some(s) => s,
             None => return Some(ist_cache_miss_error("debt_digest", &project)),
         };
-        let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(10).clamp(1, 200) as usize;
-        let wanted: Option<HashSet<String>> = args
-            .get("sections")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect());
+        let top = args
+            .get("top")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10)
+            .clamp(1, 200) as usize;
+        let wanted: Option<HashSet<String>> =
+            args.get("sections").and_then(|v| v.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            });
         let (counts, sections) =
             self.collect_debt_sections(&snapshot, &project, top, wanted.as_ref());
 
@@ -1678,7 +1740,11 @@ impl McpServer {
                     .unwrap_or_else(|| "?".to_string());
                 body.push_str(&format!("  - `{label}`\n"));
             }
-            if let Some(first) = offenders.first().and_then(|o| o.get("remediation")).and_then(|v| v.as_str()) {
+            if let Some(first) = offenders
+                .first()
+                .and_then(|o| o.get("remediation"))
+                .and_then(|v| v.as_str())
+            {
                 body.push_str(&format!("  _→ {first}_\n"));
             }
         }
@@ -1720,7 +1786,10 @@ impl McpServer {
         } else {
             Vec::new()
         };
-        let pr: HashMap<&str, f64> = ranked.iter().map(|(id, s)| (id.as_str(), *s as f64)).collect();
+        let pr: HashMap<&str, f64> = ranked
+            .iter()
+            .map(|(id, s)| (id.as_str(), *s as f64))
+            .collect();
 
         let mut counts = serde_json::Map::new();
         let mut sections: Vec<Value> = Vec::new();
@@ -1854,8 +1923,9 @@ impl McpServer {
                         .collect()
                 })
                 .unwrap_or_default();
-            let orphans =
-                crate::ist_snapshot::code_smells::wiring_orphans(snapshot, project, &declared, 1000);
+            let orphans = crate::ist_snapshot::code_smells::wiring_orphans(
+                snapshot, project, &declared, 1000,
+            );
             let n_symbols = orphans.len();
             let mut symbol_offenders: Vec<(Value, f64)> = orphans
                 .iter()
@@ -1886,12 +1956,13 @@ impl McpServer {
                      WHERE artifact_type = 'Symbol' AND metadata->>'role' = 'entry'",
                 )
                 .unwrap_or_else(|_| "[]".to_string());
-            let declared_entries: HashSet<String> = serde_json::from_str::<Vec<Vec<String>>>(&entry_raw)
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|r| r.into_iter().next())
-                .map(|s| s.to_ascii_lowercase())
-                .collect();
+            let declared_entries: HashSet<String> =
+                serde_json::from_str::<Vec<Vec<String>>>(&entry_raw)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|r| r.into_iter().next())
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect();
             let report = crate::ist_snapshot::code_smells::orphan_clusters(
                 snapshot,
                 project,
@@ -1899,9 +1970,16 @@ impl McpServer {
             );
             let n_clusters = report.clusters.len();
 
-            let mut offenders: Vec<Value> =
-                symbol_offenders.into_iter().take(top).map(|(v, _)| v).collect();
-            for c in report.clusters.iter().take(top.saturating_sub(offenders.len())) {
+            let mut offenders: Vec<Value> = symbol_offenders
+                .into_iter()
+                .take(top)
+                .map(|(v, _)| v)
+                .collect();
+            for c in report
+                .clusters
+                .iter()
+                .take(top.saturating_sub(offenders.len()))
+            {
                 offenders.push(json!({
                     "kind": "dead_cluster",
                     "size": c.len(),
@@ -2141,7 +2219,10 @@ mod structural_health_helpers_tests {
             "all names present under cap: {out}"
         );
         // Not truncated → no "showing N of M" disclosure clause.
-        assert!(!out.contains("showing"), "no truncation clause when under cap: {out}");
+        assert!(
+            !out.contains("showing"),
+            "no truncation clause when under cap: {out}"
+        );
     }
 
     #[test]
@@ -2149,10 +2230,19 @@ mod structural_health_helpers_tests {
         let names: Vec<String> = (0..80).map(|i| format!("sym{i}")).collect();
         let out = super::sample_identities("largest dead cluster (80 symbols)", &names, 12);
         // The first `cap` names are present; the (cap+1)-th is not.
-        assert!(out.contains("sym0") && out.contains("sym11"), "capped names present: {out}");
-        assert!(!out.contains("sym12"), "name past the cap must not appear: {out}");
+        assert!(
+            out.contains("sym0") && out.contains("sym11"),
+            "capped names present: {out}"
+        );
+        assert!(
+            !out.contains("sym12"),
+            "name past the cap must not appear: {out}"
+        );
         // Magnitude is NEVER hidden — the class of defect rejected for the S4 wiring image.
-        assert!(out.contains("showing 12 of 80"), "truncation disclosed with magnitude: {out}");
+        assert!(
+            out.contains("showing 12 of 80"),
+            "truncation disclosed with magnitude: {out}"
+        );
     }
 
     #[test]
@@ -2246,7 +2336,10 @@ mod structural_health_helpers_tests {
             Some(NodeKind::Method)
         ));
         // Rust file still passes.
-        assert!(is_testable_symbol("AXO::x::view.rs::try_snapshot", Some(NodeKind::Method)));
+        assert!(is_testable_symbol(
+            "AXO::x::view.rs::try_snapshot",
+            Some(NodeKind::Method)
+        ));
     }
 
     #[test]
@@ -2278,27 +2371,54 @@ mod structural_health_helpers_tests {
             n("AXO::docs::y.md::Purpose", NodeKind::Section),
         ];
         let edges = vec![
-            e("AXO::src::a.rs::foo", "AXO::src::b.rs::bar", RelationType::Calls),
-            e("AXO::src::c.rs::baz", "AXO::src::a.rs::foo", RelationType::SimilarTo),
+            e(
+                "AXO::src::a.rs::foo",
+                "AXO::src::b.rs::bar",
+                RelationType::Calls,
+            ),
+            e(
+                "AXO::src::c.rs::baz",
+                "AXO::src::a.rs::foo",
+                RelationType::SimilarTo,
+            ),
             e(
                 "AXO::docs::x.md::Purpose",
                 "AXO::docs::y.md::Purpose",
                 RelationType::SimilarTo,
             ),
         ];
-        let raw = super::compute_shi_raw_metrics(&IstGraph::build(nodes, edges), super::IntentAlignmentMetrics::default());
+        let raw = super::compute_shi_raw_metrics(
+            &IstGraph::build(nodes, edges),
+            super::IntentAlignmentMetrics::default(),
+        );
         let keys: Vec<&str> = raw.mod_d.keys().map(String::as_str).collect();
         // Real cross-module dependency survives on BOTH endpoints.
-        assert!(raw.mod_d.contains_key("AXO::src::a.rs"), "caller module present: {keys:?}");
-        assert!(raw.mod_d.contains_key("AXO::src::b.rs"), "callee module present: {keys:?}");
+        assert!(
+            raw.mod_d.contains_key("AXO::src::a.rs"),
+            "caller module present: {keys:?}"
+        );
+        assert!(
+            raw.mod_d.contains_key("AXO::src::b.rs"),
+            "callee module present: {keys:?}"
+        );
         // Doc modules never appear (non-code kind AND non-dependency edge).
-        assert!(!keys.iter().any(|k| k.contains(".md")), "no .md coupling module: {keys:?}");
+        assert!(
+            !keys.iter().any(|k| k.contains(".md")),
+            "no .md coupling module: {keys:?}"
+        );
         // A code module wired ONLY by SIMILAR_TO carries no Martin coupling (relation gate).
-        assert!(!raw.mod_d.contains_key("AXO::src::c.rs"), "SIMILAR_TO-only excluded: {keys:?}");
+        assert!(
+            !raw.mod_d.contains_key("AXO::src::c.rs"),
+            "SIMILAR_TO-only excluded: {keys:?}"
+        );
     }
 
     // REQ-AXO-902214 — build_sub_scores wires the capability signal into the coverage axis.
-    fn raw_metrics(total_testable_symbols: usize, covered_pr: f64, total_pr: f64) -> super::ShiRawMetrics {
+    fn raw_metrics(
+        total_testable_symbols: usize,
+        covered_pr: f64,
+        total_pr: f64,
+    ) -> super::ShiRawMetrics {
         super::ShiRawMetrics {
             total_nodes: 100,
             sccs: vec![],
@@ -2328,9 +2448,18 @@ mod structural_health_helpers_tests {
         // NEUTRALIZE the axis — not read "100% covered" (the pre-902214 mislabel that inflated
         // SHI). total_testable_symbols == 0 is the capability trigger.
         let scores = super::build_sub_scores(&raw_metrics(0, 0.0, 0.0));
-        let cov = scores.iter().find(|s| s.name == "weighted_coverage").expect("axis present");
-        assert!(cov.not_applicable, "neutralized when no coverage-capable symbol exists");
-        assert_eq!(cov.weight, 0.0, "weight 0 → excluded from the geometric aggregate");
+        let cov = scores
+            .iter()
+            .find(|s| s.name == "weighted_coverage")
+            .expect("axis present");
+        assert!(
+            cov.not_applicable,
+            "neutralized when no coverage-capable symbol exists"
+        );
+        assert_eq!(
+            cov.weight, 0.0,
+            "weight 0 → excluded from the geometric aggregate"
+        );
     }
 
     #[test]
@@ -2340,10 +2469,19 @@ mod structural_health_helpers_tests {
         // (else it would inflate SHI + vanish from the worklist). Trigger on the capability
         // count, never on covered_pr==0.
         let scores = super::build_sub_scores(&raw_metrics(42, 0.0, 100.0));
-        let cov = scores.iter().find(|s| s.name == "weighted_coverage").expect("axis present");
-        assert!(!cov.not_applicable, "0% real coverage is a measured failure, not not_applicable");
+        let cov = scores
+            .iter()
+            .find(|s| s.name == "weighted_coverage")
+            .expect("axis present");
+        assert!(
+            !cov.not_applicable,
+            "0% real coverage is a measured failure, not not_applicable"
+        );
         assert_eq!(cov.weight, 1.0);
-        assert_eq!(cov.value, 0.0, "0 covered / 100 total → measured 0.0, below the 0.80 target");
+        assert_eq!(
+            cov.value, 0.0,
+            "0 covered / 100 total → measured 0.0, below the 0.80 target"
+        );
     }
 
     #[test]
@@ -2421,17 +2559,45 @@ mod structural_health_helpers_tests {
 
         let mut nodes: HashMap<String, SnapshotNode> = HashMap::new();
         // 1. Traced requirement (not orphan)
-        nodes.insert("REQ-1".into(), node("REQ-1", "Requirement", "current", "{}"));
+        nodes.insert(
+            "REQ-1".into(),
+            node("REQ-1", "Requirement", "current", "{}"),
+        );
         // 2. Actionable orphan requirement (current, no trace, no exemption)
-        nodes.insert("REQ-2".into(), node("REQ-2", "Requirement", "current", "{}"));
+        nodes.insert(
+            "REQ-2".into(),
+            node("REQ-2", "Requirement", "current", "{}"),
+        );
         // 3. Rejected requirement (terminal closed without delivery -> legitimate exemption)
-        nodes.insert("REQ-3".into(), node("REQ-3", "Requirement", "rejected", "{}"));
+        nodes.insert(
+            "REQ-3".into(),
+            node("REQ-3", "Requirement", "rejected", "{}"),
+        );
         // 4. Superseded requirement (terminal closed without delivery -> legitimate exemption)
-        nodes.insert("REQ-4".into(), node("REQ-4", "Requirement", "superseded", "{}"));
+        nodes.insert(
+            "REQ-4".into(),
+            node("REQ-4", "Requirement", "superseded", "{}"),
+        );
         // 5. Explicitly exempt requirement via metadata code_exempt
-        nodes.insert("REQ-5".into(), node("REQ-5", "Requirement", "current", r#"{"code_exempt": true}"#));
+        nodes.insert(
+            "REQ-5".into(),
+            node(
+                "REQ-5",
+                "Requirement",
+                "current",
+                r#"{"code_exempt": true}"#,
+            ),
+        );
         // 6. Explicitly exempt requirement via role=concept_only
-        nodes.insert("REQ-6".into(), node("REQ-6", "Requirement", "current", r#"{"role": "concept_only"}"#));
+        nodes.insert(
+            "REQ-6".into(),
+            node(
+                "REQ-6",
+                "Requirement",
+                "current",
+                r#"{"role": "concept_only"}"#,
+            ),
+        );
         // 7. Decision without code trace -> legitimate exemption (documentation)
         nodes.insert("DEC-1".into(), node("DEC-1", "Decision", "current", "{}"));
         // 8. Decision WITH code trace -> traced (not orphan)
@@ -2476,9 +2642,14 @@ mod structural_health_helpers_tests {
         // Verify sub_scores formatting
         let raw = super::compute_shi_raw_metrics(&super::IstGraph::build(vec![], vec![]), m);
         let scores = super::build_sub_scores(&raw);
-        let intent_sub = scores.iter().find(|s| s.name == "intent_alignment").expect("intent_alignment present");
+        let intent_sub = scores
+            .iter()
+            .find(|s| s.name == "intent_alignment")
+            .expect("intent_alignment present");
         assert!((intent_sub.value - 0.50).abs() < 1e-9);
-        assert!(intent_sub.detail.contains("2/4 actionable intent node(s) orphaned"));
+        assert!(intent_sub
+            .detail
+            .contains("2/4 actionable intent node(s) orphaned"));
         assert!(intent_sub.detail.contains("honest: 0.500"));
         assert!(intent_sub.detail.contains("raw: 8/10 -> 0.200"));
         assert!(intent_sub.detail.contains("Δ=+0.300"));

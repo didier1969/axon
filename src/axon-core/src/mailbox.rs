@@ -173,17 +173,23 @@ mod tests {
 
     #[test]
     fn sign_verify_round_trip() {
-        let c = canonical("NEX", "AXO", "ctx-1", "msg-abc", "message", "idem-1", "", "subj", "body");
+        let c = canonical(
+            "NEX", "AXO", "ctx-1", "msg-abc", "message", "idem-1", "", "subj", "body",
+        );
         let sig = sign("NEX", &c);
         assert!(verify("NEX", &c, &sig));
     }
 
     #[test]
     fn tamper_or_wrong_sender_fails() {
-        let c = canonical("NEX", "AXO", "ctx-1", "msg-abc", "message", "idem-1", "", "subj", "body");
+        let c = canonical(
+            "NEX", "AXO", "ctx-1", "msg-abc", "message", "idem-1", "", "subj", "body",
+        );
         let sig = sign("NEX", &c);
         // tampered body
-        let c2 = canonical("NEX", "AXO", "ctx-1", "msg-abc", "message", "idem-1", "", "subj", "EVIL");
+        let c2 = canonical(
+            "NEX", "AXO", "ctx-1", "msg-abc", "message", "idem-1", "", "subj", "EVIL",
+        );
         assert!(!verify("NEX", &c2, &sig));
         // wrong sender (different derived token)
         assert!(!verify("AXO", &c, &sig));
@@ -204,7 +210,8 @@ mod tests {
 
     #[test]
     fn canonical_card_sign_verify_round_trip() {
-        let card = serde_json::json!({ "name": "AXO", "skills": [{ "id": "discover", "tags": ["a2a"] }] });
+        let card =
+            serde_json::json!({ "name": "AXO", "skills": [{ "id": "discover", "tags": ["a2a"] }] });
         let c = canonical_card("AXO", &card);
         let sig = sign("AXO", &c);
         assert!(verify("AXO", &c, &sig));
@@ -216,7 +223,9 @@ mod tests {
     fn mbx5_stored_token_round_trip_and_distinct_from_derived() {
         // REQ-AXO-902117 (MBX-5) — a stored per-project token signs and verifies
         // independently of the derived fallback, and the two are NOT interchangeable.
-        let c = canonical("NEX", "AXO", "ctx-1", "msg-abc", "message", "idem-1", "", "subj", "body");
+        let c = canonical(
+            "NEX", "AXO", "ctx-1", "msg-abc", "message", "idem-1", "", "subj", "body",
+        );
         let stored = decode_hex("00112233445566778899aabbccddeeff").expect("valid hex");
         let sig = sign_with_token(&stored, &c);
         // round-trip under the same stored token

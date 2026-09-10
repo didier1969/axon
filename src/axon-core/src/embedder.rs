@@ -8,9 +8,9 @@ use crate::embedding_profile::{
 };
 use crate::graph::GraphStore;
 use crate::queue::QueueStore;
+use crate::runtime_capacity_profile::{recommend_embedding_lane_sizing, RuntimeProfile};
 use crate::runtime_mode::canonical_embedding_provider_request_for_mode;
 use crate::runtime_mode::AxonRuntimeMode;
-use crate::runtime_capacity_profile::{recommend_embedding_lane_sizing, RuntimeProfile};
 use crate::runtime_tuning::{
     resolve_runtime_tuning_snapshot as runtime_tuning_snapshot,
     resolve_runtime_tuning_state as runtime_tuning_state,
@@ -32,14 +32,12 @@ use tracing::{error, info};
 
 #[path = "embedder/cpu_query_service.rs"]
 mod cpu_query_service;
-#[path = "embedder/query_embed_service.rs"]
-mod query_embed_service;
 #[path = "embedder/gpu_backend.rs"]
 pub(crate) mod gpu_backend; // REQ-AXO-902103 — expose CUDA EP dispatch for the NLI session
-#[path = "embedder/gpu_preflight.rs"]
-pub(crate) mod gpu_preflight;
 #[path = "embedder/gpu_policy.rs"]
 mod gpu_policy;
+#[path = "embedder/gpu_preflight.rs"]
+pub(crate) mod gpu_preflight;
 #[path = "embedder/gpu_telemetry.rs"]
 mod gpu_telemetry;
 #[path = "embedder/inline_embed.rs"]
@@ -52,6 +50,8 @@ pub(crate) mod lifecycle_machine;
 mod provider_contract;
 #[path = "embedder/provider_runtime.rs"]
 mod provider_runtime;
+#[path = "embedder/query_embed_service.rs"]
+mod query_embed_service;
 
 pub(crate) use cpu_query_service::spawn_brain_query_worker_if_needed;
 pub(crate) use gpu_backend::OrtGpuFirstTextEmbedding;
@@ -169,8 +169,7 @@ pub(crate) fn query_worker_compute_label() -> Option<&'static str> {
 /// when the reload generation changes.
 static QUERY_EMBED_PROVIDER_OVERRIDE: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(0);
-static QUERY_RELOAD_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static QUERY_RELOAD_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Set the runtime query-embed provider override and bump the reload generation
 /// so the worker rebuilds with the new provider on its next request. Returns the
@@ -1108,13 +1107,28 @@ pub fn enforce_passive_ort_runtime_env() {
         if !allow_spinning {
             std::env::set_var("OMP_WAIT_POLICY", "PASSIVE");
         }
-        if std::env::var("OMP_NUM_THREADS").as_deref().unwrap_or("").trim().is_empty() {
+        if std::env::var("OMP_NUM_THREADS")
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
             std::env::set_var("OMP_NUM_THREADS", "1");
         }
-        if std::env::var("AXON_QUERY_ORT_INTRA_THREADS").as_deref().unwrap_or("").trim().is_empty() {
+        if std::env::var("AXON_QUERY_ORT_INTRA_THREADS")
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
             std::env::set_var("AXON_QUERY_ORT_INTRA_THREADS", "1");
         }
-        if std::env::var("AXON_ORT_INTRA_THREADS").as_deref().unwrap_or("").trim().is_empty() {
+        if std::env::var("AXON_ORT_INTRA_THREADS")
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
             let val = std::env::var("AXON_QUERY_ORT_INTRA_THREADS").unwrap_or_else(|_| "1".into());
             std::env::set_var("AXON_ORT_INTRA_THREADS", val);
         }
@@ -1137,8 +1151,9 @@ pub(crate) fn ensure_cpu_fallback_query_worker() {
                 .unwrap_or_else(|poison| poison.into_inner());
             *slot = Some(tx);
         }
-        query_embed_service::spawn_fallback_supervisor(rx)
-            .expect("failed to spawn out-of-process CPU fallback query supervisor (REQ-AXO-902646)");
+        query_embed_service::spawn_fallback_supervisor(rx).expect(
+            "failed to spawn out-of-process CPU fallback query supervisor (REQ-AXO-902646)",
+        );
     });
 }
 
@@ -1504,9 +1519,9 @@ fn request_query_embedding(
             deadline,
         })
         .map_err(|error| match error {
-            crossbeam_channel::TrySendError::Full(_) => anyhow::anyhow!(
-                "MCP real-time embedding queue saturated. Use structural search."
-            ),
+            crossbeam_channel::TrySendError::Full(_) => {
+                anyhow::anyhow!("MCP real-time embedding queue saturated. Use structural search.")
+            }
             crossbeam_channel::TrySendError::Disconnected(_) => anyhow::anyhow!(
                 "MCP real-time embedding worker unavailable. Use structural search."
             ),
@@ -1778,8 +1793,7 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
     // (CPU BGE-large), and re-asks / retries / multi-tool flows repeat the same
     // question — those now skip the embed entirely. Keyed by the RAW text (the
     // BGE prefix is deterministic).
-    let mut results: Vec<Option<Vec<f32>>> =
-        texts.iter().map(|t| query_vec_cache_get(t)).collect();
+    let mut results: Vec<Option<Vec<f32>>> = texts.iter().map(|t| query_vec_cache_get(t)).collect();
     let miss_indices: Vec<usize> = results
         .iter()
         .enumerate()

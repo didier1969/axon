@@ -80,7 +80,10 @@ fn cpu_fallback_query_worker_spawns_out_of_process_supervisor() {
     // supervised out-of-process via socket, not in-process via SemanticWorkerPool.
     crate::embedder::ensure_cpu_fallback_query_worker();
     let sender = crate::embedder::current_cpu_fallback_query_sender();
-    assert!(sender.is_some(), "Fallback worker sender must be registered in slot");
+    assert!(
+        sender.is_some(),
+        "Fallback worker sender must be registered in slot"
+    );
 
     let fallback_socket = crate::embedder::query_embed_service::query_cpu_fallback_socket_path();
     assert!(

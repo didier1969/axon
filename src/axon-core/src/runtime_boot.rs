@@ -1007,30 +1007,26 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     // REQ-AXO-902256 — report WHICH of the two cases this is (see classify_stale_socket).
     // Only a cross-role path warrants the collision wording; a same-role leftover is the
     // normal consequence of a restart and must not read as an anomaly.
-    let log_stale_socket = |path: &str, kind: StaleSocketKind, env_var: &str, which: &str| match kind
-    {
-        StaleSocketKind::SelfRestartLeftover => info!(
-            socket = %path,
-            "{which} socket left by a previous instance of this role; removed before bind (expected after a restart — NOT a cross-role collision)"
-        ),
-        StaleSocketKind::CrossRoleCollision => warn!(
-            socket = %path,
-            "{which} socket belongs to the OTHER role and was removed before bind — genuine brain/indexer collision, a live peer may have been orphaned; verify the per-role {env_var} override"
-        ),
-        StaleSocketKind::RoleUnmarked => warn!(
-            socket = %path,
-            "{which} socket pre-existed at boot with no role marker in its path (legacy shared default); removed before bind — set a per-role {env_var} so collisions become diagnosable"
-        ),
+    let log_stale_socket = |path: &str, kind: StaleSocketKind, env_var: &str, which: &str| {
+        match kind {
+            StaleSocketKind::SelfRestartLeftover => info!(
+                socket = %path,
+                "{which} socket left by a previous instance of this role; removed before bind (expected after a restart — NOT a cross-role collision)"
+            ),
+            StaleSocketKind::CrossRoleCollision => warn!(
+                socket = %path,
+                "{which} socket belongs to the OTHER role and was removed before bind — genuine brain/indexer collision, a live peer may have been orphaned; verify the per-role {env_var} override"
+            ),
+            StaleSocketKind::RoleUnmarked => warn!(
+                socket = %path,
+                "{which} socket pre-existed at boot with no role marker in its path (legacy shared default); removed before bind — set a per-role {env_var} so collisions become diagnosable"
+            ),
+        }
     };
     if std::path::Path::new(&tel_socket_path).exists() {
         let kind = classify_stale_socket(&tel_socket_path, profile.role);
         match fs::remove_file(&tel_socket_path) {
-            Ok(()) => log_stale_socket(
-                &tel_socket_path,
-                kind,
-                "AXON_TELEMETRY_SOCK",
-                "telemetry",
-            ),
+            Ok(()) => log_stale_socket(&tel_socket_path, kind, "AXON_TELEMETRY_SOCK", "telemetry"),
             Err(err) => warn!(
                 socket = %tel_socket_path,
                 error = %err,
@@ -1409,12 +1405,12 @@ mod tests {
         apply_canonical_embedding_lane_sizing_defaults, apply_canonical_ort_runtime_env,
         apply_canonical_ort_thread_defaults_from_openmp, apply_graph_first_indexer_memory_defaults,
         canonical_effective_embedding_lane_config, canonical_embedding_provider_request,
-        graph_first_indexer_lane_sizing, parse_boot_warm_project_codes,
-        classify_stale_socket, parse_build_info_identity, resource_release_identity,
-        should_hard_exit_on_shutdown, RuntimeBootProfile, RuntimeBootRole, StaleSocketKind,
+        classify_stale_socket, graph_first_indexer_lane_sizing, parse_boot_warm_project_codes,
+        parse_build_info_identity, resource_release_identity, should_hard_exit_on_shutdown,
+        RuntimeBootProfile, RuntimeBootRole, StaleSocketKind,
     };
-    use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_capacity_profile::{EmbeddingLaneSizing, RuntimeProfile};
+    use crate::runtime_mode::AxonRuntimeMode;
     use crate::runtime_writer_guard::WriterTarget;
 
     // REQ-AXO-902271 — the indexer must NOT run its GPU teardown on SIGTERM.
@@ -1542,7 +1538,10 @@ mod tests {
         }
         std::fs::remove_file(&path).ok();
 
-        assert_eq!(got_build, "v9.9.9-promoted", "active-identity must override stale env");
+        assert_eq!(
+            got_build, "v9.9.9-promoted",
+            "active-identity must override stale env"
+        );
         assert_eq!(got_gen, "gen-promoted");
     }
 
@@ -1600,7 +1599,10 @@ mod tests {
                    AXON_INSTALL_GENERATION=workspace\n";
         let map: std::collections::HashMap<_, _> =
             parse_build_info_identity(raw).into_iter().collect();
-        assert_eq!(map.get("AXON_BUILD_ID").map(String::as_str), Some("v0.8.0-1142-g9d0f3164"));
+        assert_eq!(
+            map.get("AXON_BUILD_ID").map(String::as_str),
+            Some("v0.8.0-1142-g9d0f3164")
+        );
         assert!(
             !map.contains_key("AXON_INSTALL_GENERATION"),
             "workspace placeholder must be skipped"

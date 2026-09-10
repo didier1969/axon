@@ -416,8 +416,11 @@ impl McpServer {
                 // exactly the guessing this frontier exists to forbid. (Written that way
                 // first; the `rationale` + "parce que" test caught it. A repair rule needs
                 // its own counter-example or it is indistinguishable from a coercion.)
-                let looks_like_path =
-                    artifact_ref.contains('/') && artifact_ref.rsplit('/').next().is_some_and(|f| f.contains('.'));
+                let looks_like_path = artifact_ref.contains('/')
+                    && artifact_ref
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|f| f.contains('.'));
                 if looks_like_path && artifact_schema_accepts(&normalized_entity_type, "File") {
                     type_repaired_from = normalized_artifact_type.clone();
                     normalized_artifact_type = "File".to_string();
@@ -819,12 +822,16 @@ mod resolve_artifact_ref_and_type_tests {
     #[test]
     fn type_and_path_aliases_resolve() {
         let art = json!({"type": "document", "path": "docs/y.md"});
-        assert_eq!(resolve_artifact_ref_and_type(&art), ("docs/y.md", "document"));
+        assert_eq!(
+            resolve_artifact_ref_and_type(&art),
+            ("docs/y.md", "document")
+        );
     }
 
     #[test]
     fn canonical_wins_over_alias() {
-        let art = json!({"artifact_ref": "canon", "ref": "alias", "artifact_type": "file", "kind": "x"});
+        let art =
+            json!({"artifact_ref": "canon", "ref": "alias", "artifact_type": "file", "kind": "x"});
         assert_eq!(resolve_artifact_ref_and_type(&art), ("canon", "file"));
     }
 
@@ -884,11 +891,7 @@ mod unmatched_explicit_refs_tests {
         let removed = vec![json!({"artifact_ref": "a"})];
         let kept = vec![json!({"artifact_ref": "b", "status": "delete_failed"})];
         assert_eq!(
-            unmatched_explicit_refs(
-                &["a".into(), "b".into(), "c".into()],
-                &removed,
-                &kept
-            ),
+            unmatched_explicit_refs(&["a".into(), "b".into(), "c".into()], &removed, &kept),
             vec!["c".to_string()]
         );
     }
@@ -1169,7 +1172,9 @@ fn first_rejected_repair(
                     ArtifactRefShape::Url => ("url", "a URL"),
                     // Guarded by the `if` above; kept total rather than
                     // unreachable!() so a new shape cannot panic a repair path.
-                    ArtifactRefShape::Path | ArtifactRefShape::Unknown => ("document", "a document"),
+                    ArtifactRefShape::Path | ArtifactRefShape::Unknown => {
+                        ("document", "a document")
+                    }
                 };
                 json!({
                     "invalid_field": "artifact_type",

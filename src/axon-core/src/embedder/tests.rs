@@ -1,10 +1,10 @@
 use super::{
     build_token_aware_micro_batches, configured_embedding_max_length,
     cuda_execution_provider_dispatch, current_runtime_tuning_snapshot,
-    current_runtime_tuning_state, effective_provider_request_for_lane, embedding_lane_config_from_env,
-    embedding_model_cache_dir, gpu_memory_soft_limit_mb, query_embedding_allowed_for,
-    request_query_embedding, resolve_query_embed_route, EmbeddingLaneConfig, QueryEmbedRoute,
-    QueryEmbeddingRequest,
+    current_runtime_tuning_state, effective_provider_request_for_lane,
+    embedding_lane_config_from_env, embedding_model_cache_dir, gpu_memory_soft_limit_mb,
+    query_embedding_allowed_for, request_query_embedding, resolve_query_embed_route,
+    EmbeddingLaneConfig, QueryEmbedRoute, QueryEmbeddingRequest,
 };
 use crate::embedding_contract::{fastembed_model, MAX_LENGTH};
 use crate::service_guard::{ServicePressure, VectorRuntimeMetrics};
@@ -219,13 +219,15 @@ fn un_reglage_laisse_par_un_VOISIN_bascule_la_politique_sans_un_mot() {
     // un etat gele et CE test deviendrait a son tour flaky.
     crate::service_guard::reset_for_tests();
     reset_utility_first_scheduler_for_tests();
-    crate::runtime_tuning::reset_runtime_tuning_snapshot(crate::runtime_tuning::RuntimeTuningState {
-        // 64 x 48 = 3 072 chunks reclames, contre 512 + 128 = 640 fournis :
-        // `cadence_underfed` bascule, et la raison devient `gpu_cadence_underfed`.
-        vector_ready_queue_depth: 64,
-        chunk_batch_size: 48,
-        ..super::bootstrap_runtime_tuning_state()
-    });
+    crate::runtime_tuning::reset_runtime_tuning_snapshot(
+        crate::runtime_tuning::RuntimeTuningState {
+            // 64 x 48 = 3 072 chunks reclames, contre 512 + 128 = 640 fournis :
+            // `cadence_underfed` bascule, et la raison devient `gpu_cadence_underfed`.
+            vector_ready_queue_depth: 64,
+            chunk_batch_size: 48,
+            ..super::bootstrap_runtime_tuning_state()
+        },
+    );
     compteurs();
     assert_eq!(
         semantic_policy(2_000, ServicePressure::Healthy).profile,
@@ -1691,7 +1693,9 @@ fn req_902414_cruise_verdict_follows_the_memoized_snapshot_not_the_environment()
     std::env::set_var("AXON_VECTOR_WORKERS", "8");
     super::refresh_runtime_tuning_snapshot_from_env();
     assert_eq!(
-        super::current_runtime_tuning_snapshot().state.vector_workers,
+        super::current_runtime_tuning_snapshot()
+            .state
+            .vector_workers,
         8,
         "precondition du repro : l'emplacement doit porter 8 workers"
     );
@@ -1947,7 +1951,8 @@ fn test_request_query_embedding_rejects_full_queue_without_waiting_for_a_consume
         texts: vec!["already queued".into()],
         reply,
         deadline: std::time::Instant::now() + Duration::from_secs(15),
-    }).unwrap();
+    })
+    .unwrap();
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
     let caller = std::thread::spawn(move || {
         let result = request_query_embedding(&tx, vec!["must not be queued".into()]);
@@ -1957,7 +1962,8 @@ fn test_request_query_embedding_rejects_full_queue_without_waiting_for_a_consume
     let retained = rx.try_recv().unwrap();
     drop(rx);
     caller.join().unwrap();
-    let error = observed.expect("full admission must fail before a consumer drains the queue")
+    let error = observed
+        .expect("full admission must fail before a consumer drains the queue")
         .expect_err("saturation is not a successful embedding");
     assert!(error.to_string().contains("saturated"), "{error:#}");
     assert_eq!(retained.texts, vec!["already queued"]);
@@ -1972,7 +1978,8 @@ fn test_query_embedding_expired_request_in_queue_rejected() {
         texts: vec!["stale query".into()],
         reply: reply_tx,
         deadline: past_deadline,
-    }).unwrap();
+    })
+    .unwrap();
 
     let request = rx.recv().unwrap();
     assert!(std::time::Instant::now() >= request.deadline);
@@ -2155,4 +2162,3 @@ fn test_enforce_passive_ort_runtime_env_eradicates_idle_spinning() {
         std::env::remove_var("AXON_ORT_ALLOW_SPINNING");
     }
 }
-

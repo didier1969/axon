@@ -49,13 +49,24 @@ fn mut_no_sort(raw: Option<&str>) -> Vec<usize> {
         Some(v) => v.trim(),
         None => return DEFAULT.to_vec(),
     };
-    if raw.is_empty() || raw == "0" || raw.eq_ignore_ascii_case("off") || raw.eq_ignore_ascii_case("none") {
+    if raw.is_empty()
+        || raw == "0"
+        || raw.eq_ignore_ascii_case("off")
+        || raw.eq_ignore_ascii_case("none")
+    {
         return Vec::new();
     }
-    let mut out: Vec<usize> =
-        raw.split(',').filter_map(|t| t.trim().parse::<usize>().ok()).filter(|v| *v > 0).collect();
+    let mut out: Vec<usize> = raw
+        .split(',')
+        .filter_map(|t| t.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .collect();
     out.dedup(); // SDL: sort retiré
-    if out.is_empty() { DEFAULT.to_vec() } else { out }
+    if out.is_empty() {
+        DEFAULT.to_vec()
+    } else {
+        out
+    }
 }
 
 fn mut_no_dedup(raw: Option<&str>) -> Vec<usize> {
@@ -63,13 +74,24 @@ fn mut_no_dedup(raw: Option<&str>) -> Vec<usize> {
         Some(v) => v.trim(),
         None => return DEFAULT.to_vec(),
     };
-    if raw.is_empty() || raw == "0" || raw.eq_ignore_ascii_case("off") || raw.eq_ignore_ascii_case("none") {
+    if raw.is_empty()
+        || raw == "0"
+        || raw.eq_ignore_ascii_case("off")
+        || raw.eq_ignore_ascii_case("none")
+    {
         return Vec::new();
     }
-    let mut out: Vec<usize> =
-        raw.split(',').filter_map(|t| t.trim().parse::<usize>().ok()).filter(|v| *v > 0).collect();
+    let mut out: Vec<usize> = raw
+        .split(',')
+        .filter_map(|t| t.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .collect();
     out.sort_unstable(); // SDL: dedup retiré
-    if out.is_empty() { DEFAULT.to_vec() } else { out }
+    if out.is_empty() {
+        DEFAULT.to_vec()
+    } else {
+        out
+    }
 }
 
 // La mutation EST `> -> >=` ; sur usize `>= 0` est toujours vrai (c'est le bug
@@ -81,7 +103,11 @@ fn mut_ge_zero(raw: Option<&str>) -> Vec<usize> {
         Some(v) => v.trim(),
         None => return DEFAULT.to_vec(),
     };
-    if raw.is_empty() || raw == "0" || raw.eq_ignore_ascii_case("off") || raw.eq_ignore_ascii_case("none") {
+    if raw.is_empty()
+        || raw == "0"
+        || raw.eq_ignore_ascii_case("off")
+        || raw.eq_ignore_ascii_case("none")
+    {
         return Vec::new();
     }
     let mut out: Vec<usize> = raw
@@ -91,7 +117,11 @@ fn mut_ge_zero(raw: Option<&str>) -> Vec<usize> {
         .collect();
     out.sort_unstable();
     out.dedup();
-    if out.is_empty() { DEFAULT.to_vec() } else { out }
+    if out.is_empty() {
+        DEFAULT.to_vec()
+    } else {
+        out
+    }
 }
 
 fn mut_disable_default(raw: Option<&str>) -> Vec<usize> {
@@ -99,14 +129,25 @@ fn mut_disable_default(raw: Option<&str>) -> Vec<usize> {
         Some(v) => v.trim(),
         None => return DEFAULT.to_vec(),
     };
-    if raw.is_empty() || raw == "0" || raw.eq_ignore_ascii_case("off") || raw.eq_ignore_ascii_case("none") {
+    if raw.is_empty()
+        || raw == "0"
+        || raw.eq_ignore_ascii_case("off")
+        || raw.eq_ignore_ascii_case("none")
+    {
         return DEFAULT.to_vec(); // BRANCH: disable renvoie DEFAULT au lieu de []
     }
-    let mut out: Vec<usize> =
-        raw.split(',').filter_map(|t| t.trim().parse::<usize>().ok()).filter(|v| *v > 0).collect();
+    let mut out: Vec<usize> = raw
+        .split(',')
+        .filter_map(|t| t.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .collect();
     out.sort_unstable();
     out.dedup();
-    if out.is_empty() { DEFAULT.to_vec() } else { out }
+    if out.is_empty() {
+        DEFAULT.to_vec()
+    } else {
+        out
+    }
 }
 
 fn mut_always_empty(_raw: Option<&str>) -> Vec<usize> {
@@ -114,7 +155,13 @@ fn mut_always_empty(_raw: Option<&str>) -> Vec<usize> {
 }
 
 fn mutants() -> Vec<Impl> {
-    vec![mut_no_sort, mut_no_dedup, mut_ge_zero, mut_disable_default, mut_always_empty]
+    vec![
+        mut_no_sort,
+        mut_no_dedup,
+        mut_ge_zero,
+        mut_disable_default,
+        mut_always_empty,
+    ]
 }
 
 // --- Deux bundles `proves`. -------------------------------------------------
@@ -129,7 +176,7 @@ fn proves_strong(f: Impl) -> bool {
         && f(Some("0,128")) == vec![128]                  // positive (0 dropped)
         && f(Some("off")) == Vec::<usize>::new()          // disable -> empty
         && f(None) == DEFAULT.to_vec()                    // none -> default
-        && f(Some("abc")) == DEFAULT.to_vec()             // all-invalid -> default
+        && f(Some("abc")) == DEFAULT.to_vec() // all-invalid -> default
 }
 
 /// `true` = mutant TUÉ (le bundle échoue dessus). La référence DOIT passer.
@@ -168,11 +215,21 @@ fn weak_proves_fails_the_seal() {
     let report = assess(&killed, 3.0 / 6.0, &AdequacyThresholds::default());
 
     assert_eq!(report.total, 5);
-    assert!(report.kill_rate < 0.80, "kill_rate faible attendu, eu {}", report.kill_rate);
-    assert!(!report.passed, "un proves faible NE doit PAS passer l'adéquation");
+    assert!(
+        report.kill_rate < 0.80,
+        "kill_rate faible attendu, eu {}",
+        report.kill_rate
+    );
+    assert!(
+        !report.passed,
+        "un proves faible NE doit PAS passer l'adéquation"
+    );
 
     let seal = structural_seal(&node.shape_hash(), &node.proves_ref, report.passed, &[]);
-    assert!(seal.is_none(), "proves faible -> AUCUN sceau (anti théâtre du sceau)");
+    assert!(
+        seal.is_none(),
+        "proves faible -> AUCUN sceau (anti théâtre du sceau)"
+    );
 }
 
 // ===========================================================================
@@ -197,7 +254,10 @@ fn empirical_attestation_is_out_of_the_structural_hash() {
     let node = anchor_contract();
     let seal_green = structural_seal(&node.shape_hash(), "p", true, &[]);
     let seal_red = structural_seal(&node.shape_hash(), "p", true, &[]);
-    assert_eq!(seal_green, seal_red, "le sceau structurel ne dépend pas du run empirique");
+    assert_eq!(
+        seal_green, seal_red,
+        "le sceau structurel ne dépend pas du run empirique"
+    );
 
     let green = EmpiricalAttestation::new(Verdict::Green, 1_000, 3_600);
     let red = EmpiricalAttestation::new(Verdict::Red, 1_000, 3_600);
@@ -214,7 +274,10 @@ fn parent_unsealed_when_required_child_unsealed() {
 
     // enfant requis non scellé (None) -> parent non scellable
     let blocked = seal_node(parent_shape, "p", true, &[None]);
-    assert!(blocked.is_none(), "parent non scellable si un enfant requis n'est pas scellé");
+    assert!(
+        blocked.is_none(),
+        "parent non scellable si un enfant requis n'est pas scellé"
+    );
 
     // enfant requis scellé -> parent scellable
     let ok = seal_node(parent_shape, "p", true, &[child_sealed]);
@@ -251,23 +314,41 @@ fn binding_falls_back_to_anchor_then_none() {
     assert_eq!(anchored.source, BindingSource::IdentityAnchor);
     assert_eq!(anchored.symbol_id, "sym::anchor");
 
-    assert!(bind("CON-1", None, None).is_none(), "ni couverture ni ancre -> pas de binding");
+    assert!(
+        bind("CON-1", None, None).is_none(),
+        "ni couverture ni ancre -> pas de binding"
+    );
 }
 
 #[test]
 fn certification_is_derived_never_declared() {
     // Aucun chemin pour certifier sans (vert ET adéquat) : pas de preuve verte
     // ou pas d'adéquation -> aucune Certification, quelle que soit la "déclaration".
-    assert!(certify(false, true, "code_v1", "evidence").is_none(), "non-vert -> pas de certif");
-    assert!(certify(true, false, "code_v1", "evidence").is_none(), "non-adéquat -> pas de certif");
-    assert!(certify(true, true, "code_v1", "evidence").is_some(), "vert + adéquat -> certif dérivée");
+    assert!(
+        certify(false, true, "code_v1", "evidence").is_none(),
+        "non-vert -> pas de certif"
+    );
+    assert!(
+        certify(true, false, "code_v1", "evidence").is_none(),
+        "non-adéquat -> pas de certif"
+    );
+    assert!(
+        certify(true, true, "code_v1", "evidence").is_some(),
+        "vert + adéquat -> certif dérivée"
+    );
 }
 
 #[test]
 fn certification_is_invalidated_by_code_change() {
     let cert = certify(true, true, "code_v1", "evidence").unwrap();
-    assert!(cert.is_valid_for("code_v1"), "valide pour l'état de code prouvé");
-    assert!(!cert.is_valid_for("code_v2"), "vert-périmé : code changé -> certif invalide");
+    assert!(
+        cert.is_valid_for("code_v1"),
+        "valide pour l'état de code prouvé"
+    );
+    assert!(
+        !cert.is_valid_for("code_v2"),
+        "vert-périmé : code changé -> certif invalide"
+    );
 }
 
 // ===========================================================================
@@ -290,9 +371,19 @@ fn legacy_bootstrap_proposes_observed_contract_not_abduced() {
         &tests,
     );
     // realized_by déjà rempli = OBSERVÉ (le code existe), pas abduit ex nihilo.
-    assert!(node.realized_by.is_some(), "contrat proposé depuis l'IST observé");
-    assert!(!node.post_conditions.is_empty(), "post-conditions dérivées des tests");
-    assert_eq!(node.validate(), Ok(()), "un contrat auto-amorcé est bien formé");
+    assert!(
+        node.realized_by.is_some(),
+        "contrat proposé depuis l'IST observé"
+    );
+    assert!(
+        !node.post_conditions.is_empty(),
+        "post-conditions dérivées des tests"
+    );
+    assert_eq!(
+        node.validate(),
+        Ok(()),
+        "un contrat auto-amorcé est bien formé"
+    );
 }
 
 #[test]
@@ -315,7 +406,11 @@ fn expansion_is_bounded_to_seams_pull_driven() {
     assert!(!should_expand(Interface, Expanded));
 
     // pull : prend la première couture expansable, None si tout figé/feuille
-    let frontier = [(Function, LeafPending), (Interface, LeafPending), (Module, LeafPending)];
+    let frontier = [
+        (Function, LeafPending),
+        (Interface, LeafPending),
+        (Module, LeafPending),
+    ];
     assert_eq!(next_pull(&frontier), Some(1));
     assert_eq!(next_pull(&[(Function, LeafPending), (Type, Frozen)]), None);
 }
@@ -328,5 +423,9 @@ fn shape_hash_is_deterministic_and_signature_sensitive() {
 
     let mut c = anchor_contract();
     c.signature = "parse_seq_buckets_from_env(raw: Option<&str>) -> Vec<u32>".to_string();
-    assert_ne!(a.shape_hash(), c.shape_hash(), "un changement de signature change le shape_hash");
+    assert_ne!(
+        a.shape_hash(),
+        c.shape_hash(),
+        "un changement de signature change le shape_hash"
+    );
 }

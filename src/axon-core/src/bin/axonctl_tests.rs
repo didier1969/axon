@@ -107,7 +107,13 @@ fn mcp_socket_row_is_satisfied_by_http_when_the_port_listens() {
 #[test]
 fn mcp_socket_row_is_not_applicable_for_an_indexer() {
     // An indexer never binds the MCP socket, so its absence is not even news.
-    let row = mcp_socket_status(RuntimeRole::Indexer, "/tmp/x.sock".into(), false, false, 44129);
+    let row = mcp_socket_status(
+        RuntimeRole::Indexer,
+        "/tmp/x.sock".into(),
+        false,
+        false,
+        44129,
+    );
     assert!(!row.applicable);
 }
 
@@ -116,7 +122,13 @@ fn mcp_socket_row_stays_bare_when_mcp_is_genuinely_unreachable() {
     // NON-REGRESSION: the whole point is to silence the FALSE positive without
     // silencing a real outage. No socket AND no HTTP on a brain must leave both
     // fields empty, which is what makes `status` warn.
-    let row = mcp_socket_status(RuntimeRole::Brain, "/tmp/x.sock".into(), false, false, 44129);
+    let row = mcp_socket_status(
+        RuntimeRole::Brain,
+        "/tmp/x.sock".into(),
+        false,
+        false,
+        44129,
+    );
     assert!(row.satisfied_by.is_none(), "nothing satisfies the surface");
     assert!(row.applicable, "and it IS expected for this role → warn");
     // And the contract must flag it too, so status degrades rather than lying.

@@ -36,7 +36,13 @@ pub struct SubScore {
 
 impl SubScore {
     /// Build a sub-score, clamping `value`/`target` into [0,1] and `weight` to >= 0.
-    pub fn new(name: &'static str, value: f64, weight: f64, target: f64, detail: impl Into<String>) -> Self {
+    pub fn new(
+        name: &'static str,
+        value: f64,
+        weight: f64,
+        target: f64,
+        detail: impl Into<String>,
+    ) -> Self {
         SubScore {
             name,
             value: clamp01(value),
@@ -114,7 +120,11 @@ impl StructuralHealthIndex {
             .iter()
             .filter(|s| !s.not_applicable && !s.meets_target())
             .collect();
-        v.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap_or(std::cmp::Ordering::Equal));
+        v.sort_by(|a, b| {
+            a.value
+                .partial_cmp(&b.value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         v
     }
 }
@@ -297,8 +307,14 @@ mod tests {
         // Geometric mean of 0.25 and 1.0 (equal weight) = 0.5, below the arithmetic 0.625.
         let scores = vec![s("a", 0.25, 1.0), s("b", 1.0, 1.0)];
         let g = geometric_aggregate(&scores);
-        assert!((g - 0.5).abs() < 1e-9, "geometric mean should be 0.5, got {g}");
-        assert!(g < 0.625, "must be below the arithmetic mean (which would mask the weak axis)");
+        assert!(
+            (g - 0.5).abs() < 1e-9,
+            "geometric mean should be 0.5, got {g}"
+        );
+        assert!(
+            g < 0.625,
+            "must be below the arithmetic mean (which would mask the weak axis)"
+        );
     }
 
     #[test]
@@ -331,7 +347,11 @@ mod tests {
             SubScore::new("worse", 0.10, 1.0, 0.9, ""),
         ]);
         let failing: Vec<&str> = idx.below_target().iter().map(|s| s.name).collect();
-        assert_eq!(failing, vec!["worse", "bad"], "worst-first, target-meeting axis excluded");
+        assert_eq!(
+            failing,
+            vec!["worse", "bad"],
+            "worst-first, target-meeting axis excluded"
+        );
     }
 
     // --- REQ-AXO-902214: not_applicable (neutralized) axis -------------------
@@ -354,7 +374,10 @@ mod tests {
             geometric_aggregate(&with_na),
             base
         );
-        assert!(base < 0.65, "sanity: the real axes keep the index honest (base={base})");
+        assert!(
+            base < 0.65,
+            "sanity: the real axes keep the index honest (base={base})"
+        );
     }
 
     #[test]
@@ -375,7 +398,11 @@ mod tests {
             SubScore::not_applicable("weighted_coverage", 0.8, "no coverage model"),
         ]);
         let failing: Vec<&str> = idx.below_target().iter().map(|s| s.name).collect();
-        assert_eq!(failing, vec!["bad"], "not_applicable axis excluded from the worklist");
+        assert_eq!(
+            failing,
+            vec!["bad"],
+            "not_applicable axis excluded from the worklist"
+        );
     }
 
     #[test]
@@ -383,7 +410,10 @@ mod tests {
         let na = SubScore::not_applicable("weighted_coverage", 0.8, "why");
         assert!(na.not_applicable);
         assert_eq!(na.weight, 0.0);
-        assert!(na.meets_target(), "display value must not read as below-target");
+        assert!(
+            na.meets_target(),
+            "display value must not read as below-target"
+        );
         assert!(!SubScore::new("x", 0.5, 1.0, 0.9, "").not_applicable);
     }
 
@@ -432,11 +462,11 @@ mod tests {
         // On the main sequence (D=0): unstable+concrete (I=1,A=0) OR stable+abstract (I=0,A=1).
         assert!((martin_distance(0, 5, 0.0)).abs() < 1e-9); // I=1, A=0 → |0+1-1|=0
         assert!((martin_distance(5, 0, 1.0)).abs() < 1e-9); // I=0, A=1 → |1+0-1|=0
-        // Zone of pain (D=1): concrete + stable (many depend on it, it depends on nothing).
+                                                            // Zone of pain (D=1): concrete + stable (many depend on it, it depends on nothing).
         assert!((martin_distance(5, 0, 0.0) - 1.0).abs() < 1e-9); // I=0, A=0 → |0+0-1|=1
-        // Zone of uselessness (D=1): abstract + unstable.
+                                                                  // Zone of uselessness (D=1): abstract + unstable.
         assert!((martin_distance(0, 5, 1.0) - 1.0).abs() < 1e-9); // I=1, A=1 → |1+1-1|=1
-        // No coupling → I=0; concrete isolated module sits at D=1 (dead weight).
+                                                                  // No coupling → I=0; concrete isolated module sits at D=1 (dead weight).
         assert!((martin_distance(0, 0, 0.0) - 1.0).abs() < 1e-9);
         // Balanced middle.
         assert!((martin_distance(1, 1, 0.0) - 0.5).abs() < 1e-9); // I=0.5, A=0 → 0.5
@@ -482,16 +512,44 @@ mod tests {
         // Compose the two s95-measured axes + a couple of placeholders into an index and
         // assert the aggregate reflects the weakest axis (coverage), not the strongest.
         let idx = StructuralHealthIndex::compute(vec![
-            SubScore::new("acyclicity", acyclicity_score(4, 11393), 1.0, 0.99, "1 SCC/4 of 11393"),
-            SubScore::new("duplication", duplication_score(0, 900), 1.0, 0.98, "no clone pairs"),
+            SubScore::new(
+                "acyclicity",
+                acyclicity_score(4, 11393),
+                1.0,
+                0.99,
+                "1 SCC/4 of 11393",
+            ),
+            SubScore::new(
+                "duplication",
+                duplication_score(0, 900),
+                1.0,
+                0.98,
+                "no clone pairs",
+            ),
             SubScore::new("layering", layering_score(0, 50578), 1.0, 1.0, "no drift"),
-            SubScore::new("weighted_coverage", weighted_coverage_score(14.0, 100.0), 1.0, 0.8, "14% weighted"),
+            SubScore::new(
+                "weighted_coverage",
+                weighted_coverage_score(14.0, 100.0),
+                1.0,
+                0.8,
+                "14% weighted",
+            ),
         ]);
         assert_eq!(idx.sub_scores.len(), 4);
         // The 0.14 coverage axis drags the geometric aggregate well below the ~1.0 others.
-        assert!(idx.aggregate < 0.65, "weak coverage must drag the index down: {}", idx.aggregate);
+        assert!(
+            idx.aggregate < 0.65,
+            "weak coverage must drag the index down: {}",
+            idx.aggregate
+        );
         assert!(idx.aggregate > 0.0);
         // Coverage is the sole below-target axis.
-        assert_eq!(idx.below_target().iter().map(|s| s.name).collect::<Vec<_>>(), vec!["weighted_coverage"]);
+        assert_eq!(
+            idx.below_target()
+                .iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>(),
+            vec!["weighted_coverage"]
+        );
     }
 }

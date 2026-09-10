@@ -261,8 +261,8 @@ impl McpServer {
         before: &Value,
         after: &Value,
     ) -> anyhow::Result<String> {
-        let project_code = project_code_from_canonical_entity_id(entity_id)
-            .unwrap_or_else(|| "AXO".to_string());
+        let project_code =
+            project_code_from_canonical_entity_id(entity_id).unwrap_or_else(|| "AXO".to_string());
         self.record_revision(RevisionRecord {
             action: "update",
             revision_key: entity_id,
@@ -385,7 +385,10 @@ impl McpServer {
         };
         // Read the current body ; unknown id → clear not-found envelope.
         let current = match self.query_named_row(
-            &format!("SELECT description FROM soll.Node WHERE id = '{}'", escape_sql(id)),
+            &format!(
+                "SELECT description FROM soll.Node WHERE id = '{}'",
+                escape_sql(id)
+            ),
             1,
         ) {
             Ok(rows) if !rows.is_empty() => rows[0].clone(),
@@ -710,7 +713,8 @@ impl McpServer {
                     .or_else(|| data.get("project_code").and_then(|v| v.as_str()))
                     .map(str::trim)
                     .filter(|s| !s.is_empty());
-                let project_code_inferred = explicit_code.is_none() && inferred_from_parent.is_some();
+                let project_code_inferred =
+                    explicit_code.is_none() && inferred_from_parent.is_some();
                 let project_code_raw = explicit_code.or(inferred_from_parent.as_deref());
                 let project_code = match self.require_registered_mutation_project_code(
                     project_code_raw,
@@ -760,7 +764,8 @@ impl McpServer {
                         escape_sql(title_candidate)
                     );
                     if let Ok(raw) = self.graph_store.query_json(&check_dup_sql) {
-                        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+                        let rows: Vec<Vec<serde_json::Value>> =
+                            serde_json::from_str(&raw).unwrap_or_default();
                         if let Some(row) = rows.first() {
                             let existing_id = row.get(0).and_then(|v| v.as_str()).unwrap_or("");
                             let existing_title = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
@@ -816,7 +821,8 @@ impl McpServer {
                     );
                     match self.graph_store.query_json(&nearby_query) {
                         Ok(raw) => {
-                            let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+                            let rows: Vec<Vec<serde_json::Value>> =
+                                serde_json::from_str(&raw).unwrap_or_default();
                             let mut candidates = Vec::new();
                             for row in rows {
                                 if let (Some(id), Some(t), Some(tp), Some(st)) = (
@@ -825,9 +831,14 @@ impl McpServer {
                                     row.get(2).and_then(|v| v.as_str()),
                                     row.get(3).and_then(|v| v.as_str()),
                                 ) {
-                                    let sim = row.get(4).and_then(|v| {
-                                        v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
-                                    }).unwrap_or(0.0);
+                                    let sim = row
+                                        .get(4)
+                                        .and_then(|v| {
+                                            v.as_f64().or_else(|| {
+                                                v.as_str().and_then(|s| s.parse::<f64>().ok())
+                                            })
+                                        })
+                                        .unwrap_or(0.0);
                                     candidates.push(json!({
                                         "id": id,
                                         "title": t,
@@ -843,7 +854,7 @@ impl McpServer {
                                 ("found", candidates)
                             }
                         }
-                        Err(_) => ("search_unavailable", vec![])
+                        Err(_) => ("search_unavailable", vec![]),
                     }
                 } else {
                     ("none", vec![])
@@ -1285,8 +1296,8 @@ impl McpServer {
                 // La substitution elle-même n'est PAS remise en cause : sur une paire
                 // single-legal l'appelant n'avait pas le choix (REQ-AXO-902288). Seul son
                 // silence l'est.
-                let auto_canonized_from: Option<String> = relation_type_requested
-                    .filter(|requested| *requested != relation_type);
+                let auto_canonized_from: Option<String> =
+                    relation_type_requested.filter(|requested| *requested != relation_type);
                 // « inféré » couvre les DEUX cas où le serveur a choisi la relation :
                 // absente à l'entrée, ou fournie puis remplacée. Le message distingue.
                 let relation_type_inferred = relation_type_absent || auto_canonized_from.is_some();
@@ -1310,8 +1321,7 @@ impl McpServer {
                         // Surface what the SOURCE kind CAN legally reach (the same
                         // data soll_relation_schema returns) so the error is
                         // self-sufficient.
-                        let source_can_reach =
-                            allowed_relation_targets_from_source(source_prefix);
+                        let source_can_reach = allowed_relation_targets_from_source(source_prefix);
                         let reach_summary: String = source_can_reach
                             .iter()
                             .filter_map(|e| {
@@ -1385,7 +1395,8 @@ impl McpServer {
                                 corrected_data["attach_to"] = json!(first_id);
                                 corrected_data["relation_type"] = json!(first_rel);
                             } else {
-                                corrected_data["attach_to"] = json!("<choisir dans candidate_parents>");
+                                corrected_data["attach_to"] =
+                                    json!("<choisir dans candidate_parents>");
                                 corrected_data["relation_type"] = json!("<relation_type>");
                             }
                             let corrected_call = json!({
@@ -1651,7 +1662,8 @@ impl McpServer {
                                 .filter_map(|c| {
                                     let id = c.get("id")?.as_str()?;
                                     let t = c.get("title")?.as_str()?;
-                                    let sim = c.get("similarity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let sim =
+                                        c.get("similarity").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     Some(format!("`{id}` (sim: {sim:.2}) \"{t}\""))
                                 })
                                 .collect();
@@ -1808,7 +1820,10 @@ impl McpServer {
                             ))
                             .unwrap_or(0) > 0;
 
-                        if superseded_by.is_none() && !has_incoming_supersedes && retirement_reason.is_none() {
+                        if superseded_by.is_none()
+                            && !has_incoming_supersedes
+                            && retirement_reason.is_none()
+                        {
                             return Some(json!({
                                 "content": [{
                                     "type": "text",
@@ -1848,10 +1863,14 @@ impl McpServer {
                         }
 
                         if let Some(replacement) = superseded_by {
-                            let exists = self.graph_store.query_count(&format!(
-                                "SELECT count(*) FROM soll.Node WHERE id = '{}'",
-                                escape_sql(replacement)
-                            )).unwrap_or(0) > 0;
+                            let exists = self
+                                .graph_store
+                                .query_count(&format!(
+                                    "SELECT count(*) FROM soll.Node WHERE id = '{}'",
+                                    escape_sql(replacement)
+                                ))
+                                .unwrap_or(0)
+                                > 0;
                             if !exists {
                                 return Some(json!({
                                     "content": [{
@@ -1931,7 +1950,10 @@ impl McpServer {
                 // one instead of guessing.
                 if data.get("status").and_then(|v| v.as_str()).is_none() {
                     if let Ok(existing) = self.query_named_row(
-                        &format!("SELECT status FROM soll.Node WHERE id = '{}'", escape_sql(id)),
+                        &format!(
+                            "SELECT status FROM soll.Node WHERE id = '{}'",
+                            escape_sql(id)
+                        ),
                         1,
                     ) {
                         let existing_status = existing.first().map(String::as_str).unwrap_or("");
@@ -2132,18 +2154,41 @@ impl McpServer {
                             // Un rapport qui pousse à une action destructrice inutile est
                             // pire qu'un rapport muet.
                             let champs_envoyes: Vec<&str> = {
-                                let mut v: Vec<&str> = ["title", "description", "status",
-                                    "priority", "tags", "acceptance_criteria", "code_exempt", "exempt", "exemption_reason",
-                                    "superseded_by", "retirement_reason", "rationale", "metadata"]
-                                    .into_iter()
-                                    .filter(|c| data.get(*c).is_some())
-                                    .collect();
+                                let mut v: Vec<&str> = [
+                                    "title",
+                                    "description",
+                                    "status",
+                                    "priority",
+                                    "tags",
+                                    "acceptance_criteria",
+                                    "code_exempt",
+                                    "exempt",
+                                    "exemption_reason",
+                                    "superseded_by",
+                                    "retirement_reason",
+                                    "rationale",
+                                    "metadata",
+                                ]
+                                .into_iter()
+                                .filter(|c| data.get(*c).is_some())
+                                .collect();
                                 // `metadata` est DÉRIVÉ quand priority/tags/criteria sont
                                 // fournis : le nommer alors, sans le fabriquer si rien ne
                                 // l'a touché.
                                 if !v.contains(&"metadata")
                                     && v.iter().any(|c| {
-                                        matches!(*c, "priority" | "tags" | "acceptance_criteria" | "code_exempt" | "exempt" | "exemption_reason" | "superseded_by" | "retirement_reason" | "rationale")
+                                        matches!(
+                                            *c,
+                                            "priority"
+                                                | "tags"
+                                                | "acceptance_criteria"
+                                                | "code_exempt"
+                                                | "exempt"
+                                                | "exemption_reason"
+                                                | "superseded_by"
+                                                | "retirement_reason"
+                                                | "rationale"
+                                        )
                                     })
                                 {
                                     v.push("metadata");
@@ -2591,7 +2636,9 @@ impl McpServer {
                                     }
                                 });
                                 // REQ-AXO-901949 inv.5 — auto-continue (single source).
-                                if let Some(next) = crate::mcp::tool_contracts::next_links("soll_manager") {
+                                if let Some(next) =
+                                    crate::mcp::tool_contracts::next_links("soll_manager")
+                                {
                                     payload["data"]["next"] = next;
                                 }
                                 if let Some(revision_id) = revision_id {
@@ -2939,7 +2986,10 @@ mod tests {
         apply_metadata_routed_fields(&data, &mut meta);
         assert_eq!(meta["code_exempt"], json!(true));
         assert_eq!(meta["exempt"], json!(true));
-        assert_eq!(meta["exemption_reason"], json!("High-level architecture concept"));
+        assert_eq!(
+            meta["exemption_reason"],
+            json!("High-level architecture concept")
+        );
     }
 
     #[test]
