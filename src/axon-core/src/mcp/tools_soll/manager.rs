@@ -1328,14 +1328,6 @@ impl McpServer {
                             .join(", ");
                         let reverse_hint =
                             reverse_relation_hint_payload(source_prefix, &target_prefix);
-                        // REQ-AXO-902288 — no `corrected_call` here anymore: a single-legal
-                        // pair now AUTO-CANONIZES above (it never reaches this error branch),
-                        // so the only way to land here with exactly one allowed relation is a
-                        // single-SUPERSEDES pair — and suggesting a DESTRUCTIVE SUPERSEDES for
-                        // the LLM to blindly re-send is exactly what REQ-902098 guards against.
-                        // The branch now serves only ambiguous (>1) and no-legal (0) pairs, for
-                        // which `accepted_values` + `source_can_reach` + `reverse_direction` are
-                        // the correct repair (there is no single value to hand back).
                         // REQ-AXO-902283 (Lot F, item 2) — the milestone orientation hint.
                         // A MIL→PIL/VIS create lands here (no legal relation, so the MIL
                         // auto-canonize above could not fire): teach the mental model
@@ -1345,6 +1337,110 @@ impl McpServer {
                         } else {
                             Value::Null
                         };
+
+                        // REQ-AXO-902651 (Feedback #423) — Quand la paire (source, target)
+                        // n'admet AUCUNE relation (allowed.is_empty()), désigner
+                        // `invalid_field: data.attach_to` (et non data.relation_type),
+                        // indiquer qu'aucun rattachement n'est possible entre ces deux types de noeuds,
+                        // nommer les cibles atteignables, et fournir dans parameter_repair
+                        // les `candidate_parents` réels du projet ainsi qu'un `corrected_call`
+                        // directement exploitable pour permettre la correction en un seul coup.
+                        if allowed.is_empty() {
+                            let candidates =
+                                self.candidate_parents_for_source(&project_code, source_prefix);
+                            let candidate_lines: String = candidates
+                                .iter()
+                                .map(|(id, title, relation)| {
+                                    format!("\n  {id} — {title}  (relation_type: {relation})")
+                                })
+                                .collect();
+                            let candidate_hint = if candidates.is_empty() {
+                                format!(
+                                    "\n\nAucun parent légal pour un `{entity}` dans `{project_code}` : {}",
+                                    relation_reach_sentence_for_source(source_prefix)
+                                )
+                            } else {
+                                format!(
+                                    "\n\nParents ATTEIGNABLES depuis un `{entity}` dans `{project_code}` (filtrés par la matrice de relations) :{candidate_lines}"
+                                )
+                            };
+                            let reach_str = if reach_summary.is_empty() {
+                                "aucun type de nœud (kind terminal)".to_string()
+                            } else {
+                                reach_summary.clone()
+                            };
+                            let candidate_parents_json: Vec<Value> = candidates
+                                .iter()
+                                .map(|(id, title, relation)| {
+                                    json!({
+                                        "id": id,
+                                        "title": title,
+                                        "relation_type": relation,
+                                    })
+                                })
+                                .collect();
+
+                            let mut corrected_data = data.clone();
+                            if let Some((first_id, _, first_rel)) = candidates.first() {
+                                corrected_data["attach_to"] = json!(first_id);
+                                corrected_data["relation_type"] = json!(first_rel);
+                            } else {
+                                corrected_data["attach_to"] = json!("<choisir dans candidate_parents>");
+                                corrected_data["relation_type"] = json!("<relation_type>");
+                            }
+                            let corrected_call = json!({
+                                "tool": "soll_manager",
+                                "arguments": {
+                                    "action": "create",
+                                    "entity": entity,
+                                    "data": corrected_data,
+                                }
+                            });
+
+                            return Some(json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!(
+                                        "aucun rattachement n'est possible entre ces deux types de noeuds : `{source_prefix}` et `{target_prefix}` n'admettent aucune relation. `{source_prefix}` peut légalement atteindre : {reach_str}. Modifiez `attach_to` pour désigner une cible compatible.{candidate_hint}"
+                                    )
+                                }],
+                                "isError": true,
+                                "data": {
+                                    "status": "input_invalid",
+                                    "operator_guidance": {
+                                        "problem_class": "forbidden_relation_for_type",
+                                        "follow_up_tools": ["soll_relation_schema", "soll_query_context"],
+                                        "confidence": "high",
+                                    },
+                                    "parameter_repair": {
+                                        "tool": "soll_manager",
+                                        "category": "forbidden_relation_for_type",
+                                        "invalid_field": "data.attach_to",
+                                        "supplied_value": attach_to,
+                                        "accepted_values": allowed,
+                                        "source_type": source_prefix,
+                                        "target_type": target_prefix,
+                                        "source_can_reach": source_can_reach,
+                                        "reverse_direction": reverse_hint,
+                                        "candidate_parents": candidate_parents_json,
+                                        "corrected_call": corrected_call,
+                                        "hint": "aucun rattachement n'est possible entre ces deux types de noeuds : modifiez attach_to pour désigner un parent compatible (voir candidate_parents) ou appliquez corrected_call.",
+                                        "follow_up_tools": ["soll_relation_schema", "soll_query_context"],
+                                        "milestone_guidance": milestone_guidance,
+                                    },
+                                    "canonical_source": "MIL-AXO-020",
+                                },
+                            }));
+                        }
+
+                        // REQ-AXO-902288 — no `corrected_call` here anymore: a single-legal
+                        // pair now AUTO-CANONIZES above (it never reaches this error branch),
+                        // so the only way to land here with exactly one allowed relation is a
+                        // single-SUPERSEDES pair — and suggesting a DESTRUCTIVE SUPERSEDES for
+                        // the LLM to blindly re-send is exactly what REQ-902098 guards against.
+                        // The branch now serves only ambiguous (>1) and no-legal (0) pairs, for
+                        // which `accepted_values` + `source_can_reach` + `reverse_direction` are
+                        // the correct repair (there is no single value to hand back).
                         return Some(json!({
                             "content": [{
                                 "type": "text",

@@ -1390,6 +1390,112 @@ fn the_missing_parent_refusal_names_its_candidates() {
     );
 }
 
+// REQ-AXO-902651 (Feedback #423) — soll_manager create avec attach_to incompatible
+// (ex: Decision attach_to=PIL) doit désigner `invalid_field: data.attach_to`,
+// expliquer qu'aucun rattachement n'est possible, fournir les `candidate_parents`
+// réels du projet et un `corrected_call` directement exploitable.
+#[test]
+fn test_soll_manager_create_incompatible_attach_to_designates_attach_to_and_candidates() {
+    let server = create_test_server();
+    seed_pillar(&server, "TST", "PIL-TST-903", "Pilier architectural");
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('REQ-TST-901', 'Requirement', 'TST', 'Exigence candidate', 'corps req', 'current', '{}') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .unwrap();
+
+    let res = server
+        .execute_tool_direct(
+            "soll_manager",
+            &json!({
+                "action": "create",
+                "entity": "decision",
+                "data": {
+                    "project_code": "TST",
+                    "title": "Décision de test",
+                    "description": "Explication du choix",
+                    "attach_to": "PIL-TST-903",
+                    "relation_type": "EXPLAINS"
+                }
+            }),
+        )
+        .expect("soll_manager returns a result");
+
+    assert_eq!(res["isError"].as_bool(), Some(true), "le refus doit tenir : {res}");
+
+    let data = &res["data"];
+    let repair = &data["parameter_repair"];
+
+    // 1. invalid_field doit valoir data.attach_to (et non data.relation_type)
+    assert_eq!(
+        repair["invalid_field"],
+        json!("data.attach_to"),
+        "invalid_field doit désigner attach_to quand la paire n'admet aucune relation : {res}"
+    );
+    assert_eq!(
+        repair["supplied_value"],
+        json!("PIL-TST-903"),
+        "supplied_value doit contenir l'attach_to fautif : {res}"
+    );
+
+    // 2. Le message textuel indique explicitement qu'aucun rattachement n'est possible
+    //    et nomme les types cibles atteignables.
+    let text = res["content"][0]["text"].as_str().expect("texte attendu");
+    assert!(
+        text.contains("aucun rattachement n'est possible entre ces deux types de noeuds")
+            || (text.contains("aucun rattachement n'est possible") && text.contains("DEC") && text.contains("PIL")),
+        "le message doit expliciter l'incompatibilité de rattachement : {text}"
+    );
+    assert!(
+        text.contains("REQ"),
+        "le message doit nommer les types cibles atteignables par DEC : {text}"
+    );
+
+    // 3. parameter_repair inclut candidate_parents et corrected_call exploitable
+    let candidates = repair["candidate_parents"]
+        .as_array()
+        .expect("candidate_parents doit être présent dans parameter_repair");
+    assert!(
+        candidates.iter().any(|c| c["id"] == "REQ-TST-901"),
+        "candidate_parents doit lister le parent atteignable réel REQ-TST-901 : {candidates:?}"
+    );
+
+    let corrected_call = &repair["corrected_call"];
+    assert!(
+        !corrected_call.is_null(),
+        "corrected_call doit être présent et non-null : {repair}"
+    );
+    assert_eq!(corrected_call["tool"], "soll_manager");
+    assert_eq!(corrected_call["arguments"]["action"], "create");
+    assert_eq!(corrected_call["arguments"]["entity"], "decision");
+    assert_eq!(
+        corrected_call["arguments"]["data"]["attach_to"],
+        json!("REQ-TST-901"),
+        "corrected_call doit préremplir attach_to avec un candidat valide : {corrected_call}"
+    );
+    assert_eq!(
+        corrected_call["arguments"]["data"]["relation_type"],
+        json!("SOLVES"),
+        "corrected_call doit préremplir la relation_type admise pour ce candidat : {corrected_call}"
+    );
+
+    // 4. Test E2E : exécuter directement corrected_call["arguments"] doit réussir sans dead-end !
+    let retry_res = server
+        .execute_tool_direct(
+            "soll_manager",
+            &corrected_call["arguments"],
+        )
+        .expect("soll_manager retry returns a result");
+    assert_ne!(
+        retry_res["isError"].as_bool(),
+        Some(true),
+        "l'exécution de corrected_call doit réussir directement sans dead-end : {retry_res}"
+    );
+}
+
 // REQ-AXO-902313 — `field_in_error = "arguments"` n'est pas une cause, c'est un
 // agrégat de causes non mesurées (38 occurrences, 2ᵉ signature ouverte). On ne
 // corrige pas ce qu'on ne nomme pas.
