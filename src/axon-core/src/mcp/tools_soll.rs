@@ -64,7 +64,7 @@ mod shared;
 mod storage;
 mod tech_debt;
 mod tech_debt_detect;
-mod workflow;
+pub(crate) mod workflow;
 
 use inference::*;
 use relation_policy::*;

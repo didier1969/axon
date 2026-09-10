@@ -427,6 +427,8 @@ fn graph_embedding_sql(seed: &[f32]) -> String {
 
 /// REQ-AXO-902537 — modes brief/json compacts bornés avec pointeurs de détail et RRF lisible.
 mod compact_payload_bounds_tests;
+/// REQ-AXO-902657 (Feedback #431) — validation syntaxique fail-closed des fichiers de configuration.
+mod config_syntax_validation_tests;
 mod context_and_analysis;
 mod guidance_contract;
 mod mailbox_conformance;

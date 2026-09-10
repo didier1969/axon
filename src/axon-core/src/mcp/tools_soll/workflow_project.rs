@@ -466,6 +466,110 @@ impl KickoffMode {
     }
 }
 
+/// REQ-AXO-902657 (Feedback #431) — Validation syntaxique fail-closed des fichiers de configuration
+/// critiques (.json, .toml, .nix, .yaml, .yml) modifiés.
+/// Rejette immédiatement toute modification syntaxiquement corrompue d'un fichier de configuration
+/// pour empêcher la casse silencieuse des environnements hôtes ou de build.
+pub(crate) fn validate_config_file_syntax(
+    project_dir: &std::path::Path,
+    rel_path: &str,
+) -> Option<serde_json::Value> {
+    let full_path = project_dir.join(rel_path);
+    if !full_path.is_file() {
+        return None;
+    }
+
+    let lower = rel_path.to_ascii_lowercase();
+
+    if lower.ends_with(".json") {
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return Some(serde_json::json!({
+                    "rule": format!("ConfigSyntax - {}", rel_path),
+                    "diagnostic": format!("Impossible de lire le fichier JSON '{}': {}", rel_path, e),
+                    "remediation_plan": format!("Vérifier les permissions et l'existence de '{}'.", rel_path)
+                }));
+            }
+        };
+        if let Err(err) = serde_json::from_str::<serde_json::Value>(&content) {
+            return Some(serde_json::json!({
+                "rule": format!("ConfigSyntax - {}", rel_path),
+                "diagnostic": format!("Fichier de configuration JSON syntaxiquement invalide dans '{}': {}", rel_path, err),
+                "remediation_plan": format!("Corriger l'erreur de syntaxe JSON dans '{}' avant de commiter.", rel_path)
+            }));
+        }
+    } else if lower.ends_with(".toml") {
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return Some(serde_json::json!({
+                    "rule": format!("ConfigSyntax - {}", rel_path),
+                    "diagnostic": format!("Impossible de lire le fichier TOML '{}': {}", rel_path, e),
+                    "remediation_plan": format!("Vérifier les permissions et l'existence de '{}'.", rel_path)
+                }));
+            }
+        };
+        if let Err(err) = toml::from_str::<toml::Value>(&content) {
+            return Some(serde_json::json!({
+                "rule": format!("ConfigSyntax - {}", rel_path),
+                "diagnostic": format!("Fichier de configuration TOML syntaxiquement invalide dans '{}': {}", rel_path, err),
+                "remediation_plan": format!("Corriger l'erreur de syntaxe TOML dans '{}' avant de commiter.", rel_path)
+            }));
+        }
+    } else if lower.ends_with(".nix") {
+        let output = std::process::Command::new("nix-instantiate")
+            .arg("--parse")
+            .arg(&full_path)
+            .output();
+        if let Ok(out) = output {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let clean_err = stderr.trim();
+                return Some(serde_json::json!({
+                    "rule": format!("ConfigSyntax - {}", rel_path),
+                    "diagnostic": format!("Fichier de configuration Nix syntaxiquement invalide dans '{}': {}", rel_path, clean_err),
+                    "remediation_plan": format!("Corriger l'erreur d'évaluation/syntaxe Nix dans '{}' avant de commiter.", rel_path)
+                }));
+            }
+        }
+    } else if lower.ends_with(".yaml") || lower.ends_with(".yml") {
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import yaml, sys; yaml.safe_load(open(sys.argv[1], 'rb'))")
+            .arg(&full_path)
+            .output();
+        if let Ok(out) = output {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let clean_err = stderr.trim();
+                if clean_err.contains("YAMLError") || clean_err.contains("yaml.scanner") || clean_err.contains("yaml.parser") {
+                    return Some(serde_json::json!({
+                        "rule": format!("ConfigSyntax - {}", rel_path),
+                        "diagnostic": format!("Fichier de configuration YAML syntaxiquement invalide dans '{}': {}", rel_path, clean_err),
+                        "remediation_plan": format!("Corriger l'erreur de syntaxe YAML dans '{}' avant de commiter.", rel_path)
+                    }));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub(crate) fn validate_diff_paths_config_syntax(
+    project_dir: &std::path::Path,
+    diff_paths: &[String],
+) -> Vec<serde_json::Value> {
+    let mut violations = Vec::new();
+    for p in diff_paths {
+        if let Some(v) = validate_config_file_syntax(project_dir, p) {
+            violations.push(v);
+        }
+    }
+    violations
+}
+
 impl McpServer {
     /// REQ-AXO-902296 — sort `diff_paths` into (stageable, already-staged, rejected)
     /// BEFORE touching the index.
@@ -1192,11 +1296,20 @@ impl McpServer {
             ) {
                 violations.push(orc_violation);
             }
+
+            // REQ-AXO-902657 (Feedback #431) — validation syntaxique statique fail-closed
+            // des fichiers de configuration critiques (.json, .toml, .nix, .yaml, .yml)
+            violations.extend(validate_diff_paths_config_syntax(target_dir, &paths));
         }
 
         if !violations.is_empty() {
+            let diag_line = violations[0]
+                .get("diagnostic")
+                .and_then(|v| v.as_str())
+                .map(|d| format!("\nDiagnostic: {}", d))
+                .unwrap_or_default();
             return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("Violation: {}\nRemediation: {}", violations[0]["rule"], violations[0]["remediation_plan"]) }],
+                "content": [{ "type": "text", "text": format!("Violation: {}{}\nRemediation: {}", violations[0]["rule"], diag_line, violations[0]["remediation_plan"]) }],
                 "isError": true,
                 "data": { "violations": violations }
             }));
