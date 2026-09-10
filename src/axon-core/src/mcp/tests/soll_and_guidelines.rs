@@ -12748,14 +12748,22 @@ fn test_supersedes_retires_the_target_without_reopening_the_source() {
          (PIL-AXO-002).\n{recovered}"
     );
 
-    // CONTRÔLE NÉGATIF : quand un remplaçant EST enregistré, refuser reste le bon
-    // conseil — sinon le correctif aurait supprimé la garde au lieu de la borner.
-    let refused = link("REQ-CCL-904", "REQ-CCL-905");
+    // REQ-AXO-902579 — Éclatement : une AUTRE source (REQ-CCL-904) peut superséder
+    // la même cible retirée (motif fréquent : découpage / umbrella).
+    let fanout = link("REQ-CCL-904", "REQ-CCL-905");
+    assert_ne!(
+        fanout.get("isError").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "une source distincte doit pouvoir superséder une cible déjà retirée (éclatement) : {fanout}"
+    );
+
+    // CONTRÔLE NÉGATIF : quand la MÊME source (REQ-CCL-906) tente à nouveau de
+    // superséder REQ-CCL-905, refuser reste la garde stricte contre le doublon.
+    let refused = link("REQ-CCL-906", "REQ-CCL-905");
     assert_eq!(
         refused.get("isError").and_then(serde_json::Value::as_bool),
         Some(true),
-        "une cible dont le remplaçant est DÉJÀ enregistré doit toujours être \
-         refusée, en nommant ce remplaçant.\n{refused}"
+        "la même source ne peut pas superséder deux fois la même cible : {refused}"
     );
     assert!(
         refused["content"][0]["text"]

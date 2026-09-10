@@ -651,39 +651,65 @@ impl McpServer {
         {
             data.insert("framework_alias".to_string(), json!("why"));
         }
-        // REQ-AXO-902429 — Surfacing living replacement when querying a superseded SOLL node
+        // REQ-AXO-902429 / REQ-AXO-902579 — Surfacing living replacement(s) when querying a superseded SOLL node
         if let Some(sym) = args.get("symbol").and_then(|v| v.as_str()) {
             let sym_trimmed = sym.trim();
             let sql = "SELECT e.source_id, COALESCE(n.title, '') \
                        FROM soll.Edge e \
                        JOIN soll.Node n ON n.id = e.source_id \
                        WHERE e.target_id = ? AND e.relation_type = 'SUPERSEDES' \
-                       LIMIT 1";
-            if let Some((rep_id, rep_title)) = self
+                       ORDER BY e.source_id ASC";
+            let reps: Vec<(String, String)> = self
                 .graph_store
                 .query_json_param(sql, &json!([sym_trimmed]))
                 .ok()
                 .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
-                .and_then(|rows| {
-                    let first = rows.first()?;
-                    let r_id = first.get(0)?.as_str()?.to_string();
-                    let r_title = first.get(1).and_then(Value::as_str).unwrap_or("").to_string();
-                    Some((r_id, r_title))
+                .map(|rows| {
+                    rows.into_iter()
+                        .filter_map(|r| {
+                            let rep_id = r.get(0)?.as_str()?.to_string();
+                            let rep_title = r.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+                            Some((rep_id, rep_title))
+                        })
+                        .collect()
                 })
-            {
+                .unwrap_or_default();
+            if !reps.is_empty() {
+                let first_rep = &reps[0];
                 if let Some(data) = response.get_mut("data").and_then(|v| v.as_object_mut()) {
-                    data.insert("superseded_by".to_string(), json!(rep_id));
-                    data.insert("superseded_by_title".to_string(), json!(rep_title));
+                    data.insert("superseded_by".to_string(), json!(first_rep.0));
+                    data.insert("superseded_by_title".to_string(), json!(first_rep.1));
+                    let all_ids: Vec<String> = reps.iter().map(|(id, _)| id.clone()).collect();
+                    data.insert("superseded_by_all".to_string(), json!(all_ids));
                 }
                 if let Some(content_arr) = response.get_mut("content").and_then(|v| v.as_array_mut()) {
                     if let Some(first_item) = content_arr.first_mut().and_then(|v| v.as_object_mut()) {
                         if let Some(text_val) = first_item.get_mut("text").and_then(|v| v.as_str()) {
-                            let updated_text = format!(
-                                "ℹ Notice: `{sym_trimmed}` has been superseded by `{rep_id}` ({}).\n\n{}",
-                                if rep_title.is_empty() { "replacement node" } else { &rep_title },
-                                text_val
-                            );
-                            first_item.insert("text".to_string(), json!(updated_text));
+                            let notice = if reps.len() == 1 {
+                                format!(
+                                    "ℹ Notice: `{sym_trimmed}` has been superseded by `{}` ({}).\n\n{}",
+                                    first_rep.0,
+                                    if first_rep.1.is_empty() { "replacement node" } else { &first_rep.1 },
+                                    text_val
+                                )
+                            } else {
+                                let reps_str = reps
+                                    .iter()
+                                    .map(|(rep_id, rep_title)| {
+                                        if rep_title.is_empty() {
+                                            format!("`{rep_id}`")
+                                        } else {
+                                            format!("`{rep_id}` ({rep_title})")
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                format!(
+                                    "ℹ Notice: `{sym_trimmed}` has been superseded by: {reps_str}.\n\n{}",
+                                    text_val
+                                )
+                            };
+                            first_item.insert("text".to_string(), json!(notice));
                         }
                     }
                 }

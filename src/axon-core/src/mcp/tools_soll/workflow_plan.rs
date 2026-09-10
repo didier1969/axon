@@ -1218,23 +1218,27 @@ impl McpServer {
             None
         };
 
-        // REQ-AXO-902429 — Check if the queried node is superseded and has a living replacement.
-        let superseded_replacement: Option<(String, String)> = {
+        // REQ-AXO-902429 / REQ-AXO-902579 — Check if the queried node is superseded and has living replacement(s).
+        let superseded_replacements: Vec<(String, String)> = {
             let sql = "SELECT e.source_id, COALESCE(n.title, '') \
                        FROM soll.Edge e \
                        JOIN soll.Node n ON n.id = e.source_id \
                        WHERE e.target_id = ? AND e.relation_type = 'SUPERSEDES' \
-                       LIMIT 1";
+                       ORDER BY e.source_id ASC";
             self.graph_store
                 .query_json_param(sql, &json!([id]))
                 .ok()
                 .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
-                .and_then(|rows| {
-                    let first = rows.first()?;
-                    let rep_id = first.get(0)?.as_str()?.to_string();
-                    let rep_title = first.get(1).and_then(Value::as_str).unwrap_or("").to_string();
-                    Some((rep_id, rep_title))
+                .map(|rows| {
+                    rows.into_iter()
+                        .filter_map(|r| {
+                            let rep_id = r.get(0)?.as_str()?.to_string();
+                            let rep_title = r.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+                            Some((rep_id, rep_title))
+                        })
+                        .collect()
                 })
+                .unwrap_or_default()
         };
 
         let direction_title = match direction {
@@ -1260,13 +1264,35 @@ impl McpServer {
         });
 
         let mut superseded_notice = String::new();
-        if let Some((ref rep_id, ref rep_title)) = superseded_replacement {
-            data_obj["superseded_by"] = json!(rep_id);
-            data_obj["superseded_by_title"] = json!(rep_title);
-            superseded_notice = format!(
-                "ℹ Note: `{id}` has been superseded by `{rep_id}` ({}).\n\n",
-                if rep_title.is_empty() { "replacement node" } else { rep_title }
-            );
+        if !superseded_replacements.is_empty() {
+            let first_rep = &superseded_replacements[0];
+            data_obj["superseded_by"] = json!(first_rep.0);
+            data_obj["superseded_by_title"] = json!(first_rep.1);
+            let all_ids: Vec<String> = superseded_replacements.iter().map(|(r_id, _)| r_id.clone()).collect();
+            data_obj["superseded_by_all"] = json!(all_ids);
+
+            if superseded_replacements.len() == 1 {
+                superseded_notice = format!(
+                    "ℹ Note: `{id}` has been superseded by `{}` ({}).\n\n",
+                    first_rep.0,
+                    if first_rep.1.is_empty() { "replacement node" } else { &first_rep.1 }
+                );
+            } else {
+                let reps_str = superseded_replacements
+                    .iter()
+                    .map(|(rep_id, rep_title)| {
+                        if rep_title.is_empty() {
+                            format!("`{rep_id}`")
+                        } else {
+                            format!("`{rep_id}` ({rep_title})")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                superseded_notice = format!(
+                    "ℹ Note: `{id}` has been superseded by: {reps_str}.\n\n"
+                );
+            }
         }
 
         Some(json!({

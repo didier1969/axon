@@ -2259,25 +2259,20 @@ impl McpServer {
                                     },
                                 }));
                             }
-                            // REQ-AXO-902428 — cette branche refusait TOUTE cible
-                            // deja `superseded`, y compris le cas que son propre
-                            // message decrit comme un trou : « No SUPERSEDES edge
-                            // points at it, so its replacement is UNRECORDED ».
-                            // Elle refusait donc precisement d'enregistrer ce
-                            // qu'elle signalait comme manquant (PIL-AXO-002 :
-                            // decrire un trou sans dire comment le combler est
-                            // une impasse). VPC a du contourner en repassant le
-                            // noeud retire en `current` pour poser l'arete — un
-                            // geste qui RESSEMBLE a une regression de donnee et
-                            // que rien ne documente. On refuse desormais
-                            // seulement quand un remplacant EST deja enregistre :
-                            // la, superseder le plus recent est le bon conseil.
+                            // REQ-AXO-902428 / REQ-AXO-902579
+                            // L'eclatement (REQ-AXO-902579) permet a N sources DISTINCTES
+                            // de superseder le meme noeud retire (motif frequent : 1 pilier
+                            // redistribue vers N piliers, un REQ umbrella decoupe).
+                            // On refuse uniquement si la MEME source tente de superseder
+                            // a nouveau ce noeud (garde contre le doublon ou boucle sur
+                            // la meme source dans une chaine de revision).
                             let recorded_replacement = if tgt_status == "superseded" {
                                 self.query_single_column(&format!(
                                     "SELECT source_id FROM soll.Edge \
-                                     WHERE target_id = '{}' AND relation_type = 'SUPERSEDES' \
+                                     WHERE target_id = '{}' AND source_id = '{}' AND relation_type = 'SUPERSEDES' \
                                      LIMIT 1",
-                                    escape_sql(tgt)
+                                    escape_sql(tgt),
+                                    escape_sql(src)
                                 ))
                                 .ok()
                                 .and_then(|rows| rows.into_iter().next())
