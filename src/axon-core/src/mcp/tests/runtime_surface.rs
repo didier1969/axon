@@ -5,11 +5,14 @@ use super::*;
 #[test]
 fn diagnose_indexing_distinguishes_documentary_files_and_failed_skips() {
     let server = create_test_server();
-    server.graph_store.execute(
-        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status, skip_reason) \
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status, skip_reason) \
          SELECT '/coverage/' || n || '.rs', 'PGT', 1, 'indexed', NULL \
-         FROM generate_series(1,942) n"
-    ).unwrap();
+         FROM generate_series(1,942) n",
+        )
+        .unwrap();
     server.graph_store.execute(
         "INSERT INTO ist.chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash) \
          SELECT 'coverage-' || n, CASE WHEN n <= 881 THEN 'symbol' ELSE 'file' END, \
@@ -23,41 +26,100 @@ fn diagnose_indexing_distinguishes_documentary_files_and_failed_skips() {
          ('/coverage/task_plan.md', 'PGT', 1, 'skipped', 'parse_timeout'), \
          ('/coverage/package-lock.json', 'PGT', 1, 'skipped', 'generated')"
     ).unwrap();
-    let report = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".into(),
-        method: "tools/call".into(),
-        params: Some(json!({"name": "diagnose_indexing", "arguments": {"project": "PGT"}})),
-        id: Some(json!(902643)),
-    }).unwrap().result.unwrap();
+    let report = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({"name": "diagnose_indexing", "arguments": {"project": "PGT"}})),
+            id: Some(json!(902643)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
     let text = report["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("parse_timeout"), "persisted failure disappeared: {text}");
-    assert!(text.contains("progress.md") && text.contains("task_plan.md"), "name affected paths: {text}");
-    assert!(text.contains("documentary-only files: 61"), "documents are not missing symbols: {text}");
-    assert!(text.contains("files with symbol chunks: 881"), "separate the populations: {text}");
-    assert!(text.contains("pipeline A queue/inflight: not measured"), "file presence is not runtime activity: {text}");
-    assert!(!text.contains("* pending: 0") && !text.contains("* indexing: 0"), "do not invent activity counters: {text}");
-    assert!(!text.contains("no_blocker_detected"), "timeouts cannot certify health: {text}");
+    assert!(
+        text.contains("parse_timeout"),
+        "persisted failure disappeared: {text}"
+    );
+    assert!(
+        text.contains("progress.md") && text.contains("task_plan.md"),
+        "name affected paths: {text}"
+    );
+    assert!(
+        text.contains("documentary-only files: 61"),
+        "documents are not missing symbols: {text}"
+    );
+    assert!(
+        text.contains("files with symbol chunks: 881"),
+        "separate the populations: {text}"
+    );
+    assert!(
+        text.contains("pipeline A queue/inflight: not measured"),
+        "file presence is not runtime activity: {text}"
+    );
+    assert!(
+        !text.contains("* pending: 0") && !text.contains("* indexing: 0"),
+        "do not invent activity counters: {text}"
+    );
+    assert!(
+        !text.contains("no_blocker_detected"),
+        "timeouts cannot certify health: {text}"
+    );
     assert!(!text.contains("every eligible source file is indexed AND parsed"));
     let recovery_contract = [
-        ("scope before retry", text.contains("confirm the affected files belong to the intended indexing scope")),
-        ("current cache invalidation", text.contains("invalidates the project's IndexedFile rows and notifies the indexer's RAM cache")),
-        ("no mandatory restart", !text.contains("without an indexer restart right after")),
-        ("current persisted reason", !text.contains("last_error_reason")),
-        ("no exact-file API invented", text.contains("does not provide an exact-file retry")),
+        (
+            "scope before retry",
+            text.contains("confirm the affected files belong to the intended indexing scope"),
+        ),
+        (
+            "current cache invalidation",
+            text.contains(
+                "invalidates the project's IndexedFile rows and notifies the indexer's RAM cache",
+            ),
+        ),
+        (
+            "no mandatory restart",
+            !text.contains("without an indexer restart right after"),
+        ),
+        (
+            "current persisted reason",
+            !text.contains("last_error_reason"),
+        ),
+        (
+            "no exact-file API invented",
+            text.contains("does not provide an exact-file retry"),
+        ),
     ];
-    let broken = recovery_contract.iter().filter(|(_, satisfied)| !satisfied)
-        .map(|(name, _)| *name).collect::<Vec<_>>();
-    assert!(broken.is_empty(), "unsafe or obsolete recovery guidance {broken:?}: {text}");
+    let broken = recovery_contract
+        .iter()
+        .filter(|(_, satisfied)| !satisfied)
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
+    assert!(
+        broken.is_empty(),
+        "unsafe or obsolete recovery guidance {broken:?}: {text}"
+    );
 
     // Counterfactual: an intentional exclusion must not retain the failure verdict.
-    server.graph_store.execute(
-        "UPDATE ist.indexedfile SET skip_reason='generated' \
-         WHERE project_code='PGT' AND skip_reason='parse_timeout'"
-    ).unwrap();
-    let report = server.axon_diagnose_indexing(&json!({"project": "PGT"})).unwrap();
+    server
+        .graph_store
+        .execute(
+            "UPDATE ist.indexedfile SET skip_reason='generated' \
+         WHERE project_code='PGT' AND skip_reason='parse_timeout'",
+        )
+        .unwrap();
+    let report = server
+        .axon_diagnose_indexing(&json!({"project": "PGT"}))
+        .unwrap();
     let text = report["content"][0]["text"].as_str().unwrap();
-    assert!(!text.contains("**persisted_parse_failure**"), "generated is not a parse failure: {text}");
-    assert!(text.contains("policy-excluded files: 3"), "exclusions must remain visible: {text}");
+    assert!(
+        !text.contains("**persisted_parse_failure**"),
+        "generated is not a parse failure: {text}"
+    );
+    assert!(
+        text.contains("policy-excluded files: 3"),
+        "exclusions must remain visible: {text}"
+    );
 }
 
 #[test]
@@ -72,29 +134,54 @@ fn diagnose_indexing_documentary_only_is_not_a_parser_failure() {
         "INSERT INTO ist.chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash) \
          VALUES ('doc-only', 'file', '/docs/settings.json', 'PGT', '/docs/settings.json', 'file_context', '{}', 'hash')"
     ).unwrap();
-    let report = server.axon_diagnose_indexing(&json!({"project": "PGT"})).unwrap();
+    let report = server
+        .axon_diagnose_indexing(&json!({"project": "PGT"}))
+        .unwrap();
     let text = report["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("documentary-only files: 1"), "{text}");
     assert!(text.contains("policy-excluded files: 1"), "{text}");
-    assert!(!text.contains("parser_extraction_gap"), "no AST symbol is required for a document: {text}");
-    assert!(!text.contains("chunk_coverage_partial_gap"), "generated is not missing work: {text}");
+    assert!(
+        !text.contains("parser_extraction_gap"),
+        "no AST symbol is required for a document: {text}"
+    );
+    assert!(
+        !text.contains("chunk_coverage_partial_gap"),
+        "generated is not missing work: {text}"
+    );
     // The fixture's documentary chunk still awaits an embedding. Removing a
     // false parser alarm must NOT hide that independent, legitimate problem.
-    assert!(text.contains("indexer_runtime_truth_unavailable"), "retain the semantic-lane warning: {text}");
-    server.graph_store.execute("DELETE FROM ist.chunk WHERE id='doc-only'").unwrap();
-    server.graph_store.execute("DELETE FROM ist.indexedfile WHERE path='/docs/settings.json'").unwrap();
-    let report = server.axon_diagnose_indexing(&json!({"project": "PGT"})).unwrap();
+    assert!(
+        text.contains("indexer_runtime_truth_unavailable"),
+        "retain the semantic-lane warning: {text}"
+    );
+    server
+        .graph_store
+        .execute("DELETE FROM ist.chunk WHERE id='doc-only'")
+        .unwrap();
+    server
+        .graph_store
+        .execute("DELETE FROM ist.indexedfile WHERE path='/docs/settings.json'")
+        .unwrap();
+    let report = server
+        .axon_diagnose_indexing(&json!({"project": "PGT"}))
+        .unwrap();
     let text = report["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("no_blocker_detected"), "a generated-only population is not an indexing failure: {text}");
+    assert!(
+        text.contains("no_blocker_detected"),
+        "a generated-only population is not an indexing failure: {text}"
+    );
 }
 
 #[test]
 fn diagnose_indexing_scopes_coverage_and_bounds_failure_paths() {
     let server = create_test_server();
-    server.graph_store.execute(
-        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status) \
-         VALUES ('/shared/path.rs', 'PGT', 1, 'indexed')"
-    ).unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status) \
+         VALUES ('/shared/path.rs', 'PGT', 1, 'indexed')",
+        )
+        .unwrap();
     // A stale chunk from another tenant must not cover PGT's same path.
     server.graph_store.execute(
         "INSERT INTO ist.chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash) \
@@ -104,31 +191,60 @@ fn diagnose_indexing_scopes_coverage_and_bounds_failure_paths() {
         "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status, skip_reason) \
          SELECT '/timeout/path-' || n || '.md', 'PGT', 1, 'skipped', 'parse_timeout' FROM generate_series(1,7) n"
     ).unwrap();
-    server.graph_store.execute(
-        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status, skip_reason) \
-         VALUES ('/unknown.md', 'PGT', 1, 'skipped', 'future_reason')"
-    ).unwrap();
-    let report = server.axon_diagnose_indexing(&json!({"project": "PGT"})).unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status, skip_reason) \
+         VALUES ('/unknown.md', 'PGT', 1, 'skipped', 'future_reason')",
+        )
+        .unwrap();
+    let report = server
+        .axon_diagnose_indexing(&json!({"project": "PGT"}))
+        .unwrap();
     let text = report["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("files WITH chunks (retrievable): 0"), "another tenant must not cover PGT: {text}");
+    assert!(
+        text.contains("files WITH chunks (retrievable): 0"),
+        "another tenant must not cover PGT: {text}"
+    );
     assert!(text.contains("`parse_timeout`: 7"), "{text}");
-    assert!(text.contains("paths 5/7"), "sample must disclose its bound: {text}");
-    assert!(!text.contains("path-6.md") && !text.contains("path-7.md"), "sample must stay bounded: {text}");
-    assert!(text.contains("unqualified_skip_reason") && text.contains("future_reason"), "{text}");
-    assert!(!text.contains("no_blocker_detected"), "unknown is not healthy: {text}");
+    assert!(
+        text.contains("paths 5/7"),
+        "sample must disclose its bound: {text}"
+    );
+    assert!(
+        !text.contains("path-6.md") && !text.contains("path-7.md"),
+        "sample must stay bounded: {text}"
+    );
+    assert!(
+        text.contains("unqualified_skip_reason") && text.contains("future_reason"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("no_blocker_detected"),
+        "unknown is not healthy: {text}"
+    );
 }
 
 #[test]
 fn diagnose_indexing_unavailable_coverage_does_not_invent_zeroes() {
     let server = create_test_server();
     // Reversible fault injection in this test's disposable clone only.
-    server.graph_store.execute(
-        "ALTER TABLE ist.indexedfile RENAME COLUMN skip_reason TO unavailable_skip_reason"
-    ).unwrap();
-    let report = server.axon_diagnose_indexing(&json!({"project": "PGT"})).unwrap();
+    server
+        .graph_store
+        .execute("ALTER TABLE ist.indexedfile RENAME COLUMN skip_reason TO unavailable_skip_reason")
+        .unwrap();
+    let report = server
+        .axon_diagnose_indexing(&json!({"project": "PGT"}))
+        .unwrap();
     let text = report["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("inconclusive_file_coverage_unavailable"), "{text}");
-    assert!(!text.contains("enrolled files: 0"), "unavailable is not empty: {text}");
+    assert!(
+        text.contains("inconclusive_file_coverage_unavailable"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("enrolled files: 0"),
+        "unavailable is not empty: {text}"
+    );
     assert!(!text.contains("no_blocker_detected"), "{text}");
 }
 
@@ -170,7 +286,10 @@ fn query_count_decodes_float_and_numeric_aggregates_not_just_bigint() {
         .graph_store
         .query_count("SELECT round(avg(v)*1000) FROM (VALUES (1::int),(2::int)) AS t(v)")
         .expect("numeric aggregate must decode");
-    assert_eq!(d, 1500, "avg over int is numeric; it must not collapse to 0");
+    assert_eq!(
+        d, 1500,
+        "avg over int is numeric; it must not collapse to 0"
+    );
 
     // Rounded, not truncated: a caller scaling by 1000 to keep three decimals is
     // asking for the nearest integer, and truncation would quietly bias every mean low.
@@ -208,7 +327,10 @@ fn practice_put_gate_says_what_it_means_and_whether_to_act() {
         .unwrap();
 
     let text = resp["content"][0]["text"].as_str().unwrap_or("");
-    assert!(text.contains("gate="), "le verdict doit être rendu : {text}");
+    assert!(
+        text.contains("gate="),
+        "le verdict doit être rendu : {text}"
+    );
     assert!(
         text.contains("aucune action requise")
             || text.contains("rien à faire")
@@ -226,8 +348,18 @@ fn practice_put_gate_says_what_it_means_and_whether_to_act() {
 fn practice_card_renders_its_advertised_top_and_a_real_mean() {
     let server = create_test_server();
     for (scope, practice, trust, uses) in [
-        ("AXO", "verifier ce que compte un chiffre avant de decider", 0.91_f32, 12),
-        ("AXO", "falsifier un gate avant de le committer", 0.72_f32, 5),
+        (
+            "AXO",
+            "verifier ce que compte un chiffre avant de decider",
+            0.91_f32,
+            12,
+        ),
+        (
+            "AXO",
+            "falsifier un gate avant de le committer",
+            0.72_f32,
+            5,
+        ),
     ] {
         server
             .graph_store
@@ -401,7 +533,10 @@ fn test_every_published_tool_name_normalises_to_something_the_router_knows() {
     }
 
     // Et les six noms préfixés du catalogue doivent réellement se raboter.
-    let prefixed: Vec<&String> = published.iter().filter(|n| n.starts_with("axon_")).collect();
+    let prefixed: Vec<&String> = published
+        .iter()
+        .filter(|n| n.starts_with("axon_"))
+        .collect();
     assert!(
         !prefixed.is_empty(),
         "contrôle positif : le catalogue publie bien des noms préfixés, sinon la \
@@ -432,7 +567,11 @@ fn test_help_resolves_a_tool_whose_real_name_carries_the_axon_prefix() {
             .expect("help doit répondre")
     };
 
-    for tool in ["axon_handoff_check", "axon_pre_flight_check", "axon_commit_work"] {
+    for tool in [
+        "axon_handoff_check",
+        "axon_pre_flight_check",
+        "axon_commit_work",
+    ] {
         let res = ask(tool);
         assert_ne!(
             res.get("isError").and_then(serde_json::Value::as_bool),
@@ -561,11 +700,9 @@ fn test_help_author_soll_intent_surfaces_soll_apply_plan() {
     );
     // The soll topic routing also points at it (the path that was missing).
     assert!(
-        data["routing"]
-            .as_array()
-            .is_some_and(|items| items
-                .iter()
-                .any(|item| item.as_str().is_some_and(|s| s.contains("soll_apply_plan")))),
+        data["routing"].as_array().is_some_and(|items| items
+            .iter()
+            .any(|item| item.as_str().is_some_and(|s| s.contains("soll_apply_plan")))),
         "soll topic must route to soll_apply_plan: {data}"
     );
 }
@@ -1012,9 +1149,8 @@ fn test_soll_apply_plan_accepts_freshly_initialized_project_code_across_runtime_
     let db_url = test_db.url();
     let temp = tempdir().unwrap();
     let root = temp.path().join("graph-store");
-    let store = Arc::new(
-        GraphStore::new_with_database(root.to_string_lossy().as_ref(), &db_url).unwrap(),
-    );
+    let store =
+        Arc::new(GraphStore::new_with_database(root.to_string_lossy().as_ref(), &db_url).unwrap());
     let server = McpServer::new(store);
 
     let init_response = server
@@ -1037,9 +1173,8 @@ fn test_soll_apply_plan_accepts_freshly_initialized_project_code_across_runtime_
     assert_eq!(init_response["data"]["project_code"].as_str(), Some("NTO"));
     drop(server);
 
-    let reopened_store = Arc::new(
-        GraphStore::new_with_database(root.to_string_lossy().as_ref(), &db_url).unwrap(),
-    );
+    let reopened_store =
+        Arc::new(GraphStore::new_with_database(root.to_string_lossy().as_ref(), &db_url).unwrap());
     let reopened_server = McpServer::new(reopened_store);
 
     let lookup_response = reopened_server
@@ -1890,8 +2025,7 @@ fn test_client_cwd_header_overrides_server_cwd_for_project_resolution() {
     );
     // Client cwd (a non-AXO project) installed for this request → MUST win.
     {
-        let _cwd =
-            crate::mcp::ClientCwdGuard::install(Some("/home/test/te2-fixture".to_string()));
+        let _cwd = crate::mcp::ClientCwdGuard::install(Some("/home/test/te2-fixture".to_string()));
         assert_eq!(
             server.auto_resolve_project_code_str().as_deref(),
             Some("TE2"),
@@ -1957,8 +2091,8 @@ fn test_cwd_provenance_disclosed_only_when_auto_resolved() {
     let base = json!({ "content": [{ "type": "text", "text": "body" }] });
     // Auto-resolved (stamped `cwd_auto`) → note appended, names the project.
     let auto_args = json!({ "project_code": "AXO", "project_code_source": "cwd_auto" });
-    let out = crate::mcp::McpServer::disclose_cwd_provenance(&auto_args, Some(base.clone()))
-        .unwrap();
+    let out =
+        crate::mcp::McpServer::disclose_cwd_provenance(&auto_args, Some(base.clone())).unwrap();
     let text = out["content"][0]["text"].as_str().unwrap();
     assert!(
         text.contains("déduit du cwd") && text.contains("AXO"),
@@ -1966,8 +2100,7 @@ fn test_cwd_provenance_disclosed_only_when_auto_resolved() {
     );
     // Explicit project (no stamp) → untouched.
     let explicit_args = json!({ "project_code": "AXO" });
-    let out2 = crate::mcp::McpServer::disclose_cwd_provenance(&explicit_args, Some(base))
-        .unwrap();
+    let out2 = crate::mcp::McpServer::disclose_cwd_provenance(&explicit_args, Some(base)).unwrap();
     assert_eq!(
         out2["content"][0]["text"].as_str().unwrap(),
         "body",
@@ -2175,7 +2308,6 @@ fn test_handoff_check_fails_on_a_declarative_rule_violation_but_only_warns_on_un
     );
 }
 
-
 /// REQ-AXO-902250 + REQ-AXO-902358 — GUI-PRO-028's THREE SOLL hard gates now run
 /// INSIDE `axon_handoff_check` instead of being raw SQL the LLM must retype at
 /// every handoff of every project (session 104 mistyped one: `column e.src does
@@ -2241,7 +2373,10 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
     let result = server
         .axon_handoff_check(&json!({ "project_code": "HND" }))
         .expect("handoff_check must answer");
-    let checks = result["data"]["checks"].as_array().cloned().unwrap_or_default();
+    let checks = result["data"]["checks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let find = |name: &str| {
         checks
             .iter()
@@ -2253,7 +2388,11 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
     let ev = find("delivered_without_evidence");
     let offenders: Vec<String> = ev["offenders"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     assert!(
         offenders.contains(&"REQ-HND-001".to_string()),
@@ -2267,7 +2406,11 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
     let mil = find("milestone_reconciliation");
     let mil_offenders: Vec<String> = mil["offenders"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     assert!(
         !mil_offenders.contains(&"MIL-HND-900".to_string()),
@@ -2301,25 +2444,37 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
     let unmeasured = find("milestone_without_targets");
     let unmeasured_offenders: Vec<String> = unmeasured["offenders"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     assert!(
-        unmeasured_offenders.iter().any(|o| o.starts_with("MIL-HND-905")),
+        unmeasured_offenders
+            .iter()
+            .any(|o| o.starts_with("MIL-HND-905")),
         "un jalon ouvert sans arete TARGETS doit apparaitre dans son propre verdict ; got \
          {unmeasured_offenders:?}"
     );
     assert!(
-        unmeasured_offenders.iter().any(|o| o.contains("MIL-HND-905 (non-TARGETS REQ edges: 1)")),
+        unmeasured_offenders
+            .iter()
+            .any(|o| o.contains("MIL-HND-905 (non-TARGETS REQ edges: 1)")),
         "l'offender doit NOMMER les aretes non-TARGETS deja presentes — c'est ce qui oriente la \
          reparation (MIL-APS-047 en portait 18) ; got {unmeasured_offenders:?}"
     );
     assert!(
-        unmeasured_offenders.iter().any(|o| o.contains("MIL-HND-906 (non-TARGETS REQ edges: 1)")),
+        unmeasured_offenders
+            .iter()
+            .any(|o| o.contains("MIL-HND-906 (non-TARGETS REQ edges: 1)")),
         "l'arete legale `REQ --BLOCKED_BY--> MIL` doit compter elle aussi : ne regarder qu'un \
          seul sens ferait dire « 0 arete » la ou il y en a ; got {unmeasured_offenders:?}"
     );
     assert!(
-        !unmeasured_offenders.iter().any(|o| o.starts_with("MIL-HND-901")),
+        !unmeasured_offenders
+            .iter()
+            .any(|o| o.starts_with("MIL-HND-901")),
         "un jalon QUI PORTE une arete TARGETS ne doit jamais tomber dans ce verdict ; got \
          {unmeasured_offenders:?}"
     );
@@ -2333,7 +2488,11 @@ fn test_handoff_check_runs_soll_gates_and_spares_deliberate_terminal_states() {
     let orphan = find("requirement_without_milestone");
     let orphan_offenders: Vec<String> = orphan["offenders"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     assert!(
         orphan_offenders.contains(&"REQ-HND-003".to_string()),
@@ -2943,9 +3102,13 @@ fn test_status_reports_public_surface_and_runtime_truth() {
             .as_bool()
             .is_some()
     );
-    assert_eq!(
+    assert_ne!(
         data["runtime_authority"]["lane_parameters"]["vector_workers"]["authority_state"].as_str(),
         Some("partially_unified")
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["authority_state"].as_str(),
+        Some("unified")
     );
     assert!(
         data["runtime_authority"]["lane_parameters"]["graph_workers"]["seed"]
@@ -2957,9 +3120,15 @@ fn test_status_reports_public_surface_and_runtime_truth() {
             .as_u64()
             .is_some()
     );
-    assert_eq!(
+    assert_ne!(
         data["runtime_authority"]["lane_parameters"]["graph_workers"]["authority_state"].as_str(),
         Some("partially_unified")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["graph_workers"]["authority_state"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("historical_inert")
     );
     assert!(
         data["runtime_authority"]["lane_parameters"]["chunk_batch_size"]["seed"]
@@ -2995,7 +3164,7 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     assert_eq!(
         data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]["authority_state"]
             .as_str(),
-        Some("partially_unified")
+        Some("observed_live")
     );
     assert!(
         data["runtime_authority"]["lane_parameters"]["vector_persist_queue_bound"]["seed"]
@@ -3053,7 +3222,7 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     assert_eq!(
         data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["authority_state"]
             .as_str(),
-        Some("partially_unified")
+        Some("unified")
     );
     assert!(
         data["runtime_authority"]["lane_parameters"]["gpu_vector_lease"]["exclusive_required"]
@@ -4327,8 +4496,10 @@ fn test_soll_manager_infers_entity_from_canonical_id_prefix() {
 // SILENTLY NARROW its answer, strictly worse than today's visible wrong one.
 #[test]
 fn single_project_readonly_tools_resolve_scope_from_cwd() {
-    let listed: std::collections::HashMap<&str, &str> =
-        McpServer::PROJECT_AUTORESOLVE_TOOLS.iter().copied().collect();
+    let listed: std::collections::HashMap<&str, &str> = McpServer::PROJECT_AUTORESOLVE_TOOLS
+        .iter()
+        .copied()
+        .collect();
 
     // Each of these carried `args.get("project_code").unwrap_or("AXO")` in its
     // handler — it answers about exactly one project.
@@ -4434,7 +4605,10 @@ fn un_alias_honore_disparait_des_arguments_et_n_est_pas_accuse() {
 fn une_liste_normalisee_depuis_un_alias_ne_laisse_pas_la_cle_source() {
     let flat = json!({ "files": "src/lib.rs", "message": "fix: x" });
     let (patched, note) = McpServer::with_normalised_list_parameter("commit_work", &flat);
-    assert!(note.is_some(), "la normalisation doit avoir eu lieu : {patched}");
+    assert!(
+        note.is_some(),
+        "la normalisation doit avoir eu lieu : {patched}"
+    );
     assert_eq!(
         patched.get("diff_paths"),
         Some(&json!(["src/lib.rs"])),
@@ -4554,7 +4728,8 @@ fn a_usable_canonical_list_is_left_untouched() {
     assert_eq!(patched.as_ref(), &ok, "zero-copy when nothing needs fixing");
     assert_eq!(note, None);
     assert_eq!(
-        patched["diff_paths"], json!(["src/a.rs"]),
+        patched["diff_paths"],
+        json!(["src/a.rs"]),
         "an alias must never overwrite a usable canonical list"
     );
 }
@@ -4638,7 +4813,9 @@ fn no_alias_shadows_a_real_parameter_of_its_own_tool() {
                 name == Some(tool) || name == Some(prefixed.as_str())
             })
             .map(|t| &t["inputSchema"]["properties"])
-            .unwrap_or_else(|| panic!("`{tool}` must exist in the catalog (bare or axon_-prefixed)"));
+            .unwrap_or_else(|| {
+                panic!("`{tool}` must exist in the catalog (bare or axon_-prefixed)")
+            });
         for alias in *aliases {
             assert!(
                 schema.get(alias).is_none(),
@@ -4651,8 +4828,10 @@ fn no_alias_shadows_a_real_parameter_of_its_own_tool() {
 
 #[test]
 fn rollup_tools_are_never_scope_injected() {
-    let listed: std::collections::HashMap<&str, &str> =
-        McpServer::PROJECT_AUTORESOLVE_TOOLS.iter().copied().collect();
+    let listed: std::collections::HashMap<&str, &str> = McpServer::PROJECT_AUTORESOLVE_TOOLS
+        .iter()
+        .copied()
+        .collect();
 
     // For these, an absent project means EVERY project: they return a per-project
     // rollup. Injecting a scope would narrow the answer with no error raised —
@@ -4918,9 +5097,11 @@ fn toute_disposition_declaree_couvre_exactement_le_schema_de_son_outil() {
         let entree = outils
             .iter()
             .find(|tool| {
-                tool.get("name").and_then(Value::as_str).is_some_and(|name| {
-                    crate::mcp::catalog::tool_names_denote_the_same_tool(name, nom)
-                })
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| {
+                        crate::mcp::catalog::tool_names_denote_the_same_tool(name, nom)
+                    })
             })
             .unwrap_or_else(|| panic!("`{nom}` est déclaré mais absent du catalogue"));
 
@@ -4930,10 +5111,7 @@ fn toute_disposition_declaree_couvre_exactement_le_schema_de_son_outil() {
         // version plate de ce contrôle validait une table structurellement incapable
         // de signaler quoi que ce soit.
         let proprietes = entree["inputSchema"]["properties"].clone();
-        assert!(
-            proprietes.is_object(),
-            "`{nom}` n'expose pas de propriétés"
-        );
+        assert!(proprietes.is_object(), "`{nom}` n'expose pas de propriétés");
         let mut du_schema =
             crate::mcp::tool_contracts::chemins_de_proprietes_du_schema(&proprietes);
         du_schema.sort();
@@ -5041,11 +5219,7 @@ fn un_parametre_conditionnel_dont_la_condition_tient_n_est_pas_signale() {
     // Un outil NON instrumenté ne rend jamais de verdict — silence, pas « rien à
     // signaler » : les deux se lisent différemment et confondre les deux est le
     // défaut que ce REQ ferme.
-    assert!(inert_parameters_for_call(
-        "diff",
-        &json!({ "left": "a", "right": "b" })
-    )
-    .is_empty());
+    assert!(inert_parameters_for_call("diff", &json!({ "left": "a", "right": "b" })).is_empty());
 }
 
 /// TIER 3, moitié NÉGATIVE — la condition ne tient pas, donc le paramètre est
@@ -5058,7 +5232,11 @@ fn un_parametre_conditionnel_inerte_est_nomme_avec_sa_cause_et_son_remede() {
         "soll_get",
         &json!({ "id": "GUI-AXO-1034", "sections": true, "section": "Porte" }),
     );
-    assert_eq!(inertes.len(), 1, "seul `section` est inerte ici : {inertes:?}");
+    assert_eq!(
+        inertes.len(),
+        1,
+        "seul `section` est inerte ici : {inertes:?}"
+    );
     assert_eq!(inertes[0].name, "section");
     assert!(
         inertes[0].reason.contains("`sections`") && inertes[0].reason.contains("true"),
@@ -5110,11 +5288,10 @@ fn un_parametre_conditionnel_non_fourni_n_est_jamais_signale() {
     assert!(inert_parameters_for_call("inspect", &json!({ "symbol": "f" })).is_empty());
     assert!(inert_parameters_for_call("soll_get", &json!({ "id": "X" })).is_empty());
     // `null` explicite = absent, pas « fourni avec une valeur vide ».
-    assert!(inert_parameters_for_call(
-        "inspect",
-        &json!({ "symbol": "f", "around": Value::Null })
-    )
-    .is_empty());
+    assert!(
+        inert_parameters_for_call("inspect", &json!({ "symbol": "f", "around": Value::Null }))
+            .is_empty()
+    );
 }
 
 /// TIER 3 COMPORTEMENTAL — ce qui rend la déclaration VRAIE plutôt que supposée.
@@ -5237,7 +5414,8 @@ fn les_deux_causes_se_divulguent_separement_et_ne_s_annulent_pas() {
         "les deux phrases doivent coexister : {texte}"
     );
     assert_eq!(
-        deux.pointer("/data/ignored_parameters/0").and_then(Value::as_str),
+        deux.pointer("/data/ignored_parameters/0")
+            .and_then(Value::as_str),
         Some("zorglub")
     );
     assert_eq!(
@@ -5271,8 +5449,14 @@ fn practice_put_repond_a_la_question_posee_est_ce_ecrit() {
             "scope": "PDS"
         }))
         .expect("practice_put répond");
-    assert_eq!(premier.pointer("/data/persisted").and_then(Value::as_bool), Some(true));
-    assert_eq!(premier.pointer("/data/write").and_then(Value::as_str), Some("stored"));
+    assert_eq!(
+        premier.pointer("/data/persisted").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        premier.pointer("/data/write").and_then(Value::as_str),
+        Some("stored")
+    );
 
     // Rejouée à l'identique : c'est un UPDATE, donc `inserted` passe à false — et
     // c'est CE cas qui trompait DOC. `persisted` doit rester vrai.
@@ -5332,11 +5516,16 @@ fn soll_verify_requirements_est_compact_par_defaut_et_verbose_est_explicitement_
     // non résoluble rend une enveloppe d'ERREUR — qui n'a ni `details` ni `summary` —
     // et le test échoue sur une clé absente en laissant croire à un défaut du mode
     // `brief`. C'est exactement ce qui s'est produit au premier passage.
-    for (nom, r) in [("compact_par_defaut", &compact_par_defaut), ("verbose", &verbose)] {
+    for (nom, r) in [
+        ("compact_par_defaut", &compact_par_defaut),
+        ("verbose", &verbose),
+    ] {
         assert!(
             r.get("isError").and_then(Value::as_bool) != Some(true),
             "l'appel `{nom}` a échoué, le reste du test ne mesure rien : {}",
-            r.pointer("/content/0/text").and_then(Value::as_str).unwrap_or("?")
+            r.pointer("/content/0/text")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
         );
     }
 
@@ -5360,7 +5549,11 @@ fn soll_verify_requirements_est_compact_par_defaut_et_verbose_est_explicitement_
     let omis: Vec<String> = compact_par_defaut
         .pointer("/data/omitted_in_brief")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     assert!(
         omis.contains(&"details".to_string()),
@@ -5391,19 +5584,36 @@ fn practice_put_repare_inlining_xml_et_route_champs_perdus_902556() {
         .axon_practice_put(&payload)
         .expect("practice_put répond");
 
-    assert_eq!(res.pointer("/data/status").and_then(Value::as_str), Some("ok"));
-    assert_eq!(res.pointer("/data/scope").and_then(Value::as_str), Some("*"));
-    assert_eq!(res.pointer("/data/encoding").and_then(Value::as_str), Some("dense"));
-    assert_eq!(res.pointer("/data/repaired").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        res.pointer("/data/status").and_then(Value::as_str),
+        Some("ok")
+    );
+    assert_eq!(
+        res.pointer("/data/scope").and_then(Value::as_str),
+        Some("*")
+    );
+    assert_eq!(
+        res.pointer("/data/encoding").and_then(Value::as_str),
+        Some("dense")
+    );
+    assert_eq!(
+        res.pointer("/data/repaired").and_then(Value::as_bool),
+        Some(true)
+    );
 
-    let id = res.pointer("/data/id").and_then(Value::as_i64).expect("id numérique");
+    let id = res
+        .pointer("/data/id")
+        .and_then(Value::as_i64)
+        .expect("id numérique");
     assert!(id > 0);
 
     // Vérification de la vérité physique en base via SQL
-    let check_sql = format!(
-        "SELECT scope, practice, dense, evidence FROM axon.practice WHERE id = {id};"
-    );
-    let rows_str = server.graph_store.query_json_writer(&check_sql).expect("query ok");
+    let check_sql =
+        format!("SELECT scope, practice, dense, evidence FROM axon.practice WHERE id = {id};");
+    let rows_str = server
+        .graph_store
+        .query_json_writer(&check_sql)
+        .expect("query ok");
     let rows: Vec<Vec<Value>> = serde_json::from_str(&rows_str).expect("parse json");
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
@@ -5413,10 +5623,22 @@ fn practice_put_repare_inlining_xml_et_route_champs_perdus_902556() {
     let db_dense = row[2].as_str().unwrap_or("");
     let db_evidence = row[3].as_str().unwrap_or("");
 
-    assert_eq!(db_scope, "*", "le scope extrait doit être '*' et non retomber sur AXO");
-    assert_eq!(db_practice, "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.", "practice doit être débarrassé de tout balisage");
-    assert_eq!(db_dense, "Rôle mort : lire la FIN des logs.", "dense doit être débarrassé de tout balisage");
-    assert_eq!(db_evidence, "REQ-AXO-902556 preuve de réparation.", "evidence doit être restauré depuis les paramètres inlinés");
+    assert_eq!(
+        db_scope, "*",
+        "le scope extrait doit être '*' et non retomber sur AXO"
+    );
+    assert_eq!(
+        db_practice, "Avant de déclarer un rôle mort, lire la FIN RÉELLE des logs.",
+        "practice doit être débarrassé de tout balisage"
+    );
+    assert_eq!(
+        db_dense, "Rôle mort : lire la FIN des logs.",
+        "dense doit être débarrassé de tout balisage"
+    );
+    assert_eq!(
+        db_evidence, "REQ-AXO-902556 preuve de réparation.",
+        "evidence doit être restauré depuis les paramètres inlinés"
+    );
 
     assert!(!db_practice.contains("</practice>"));
     assert!(!db_practice.contains("<parameter"));
@@ -5449,12 +5671,29 @@ fn test_req_902637_status_ingress_does_not_render_orphaned_subtree_hints() {
         .unwrap();
 
     let data = response.get("data").unwrap();
-    let ingress = data.pointer("/machine_status/ingress").expect("ingress must exist");
-    assert!(ingress.get("subtree_hints").is_none(), "subtree_hints must not be rendered: {ingress}");
-    assert!(ingress.get("subtree_hint_in_flight").is_none(), "subtree_hint_in_flight must not be rendered: {ingress}");
-    assert!(ingress.get("subtree_hint_accepted_total").is_none(), "subtree_hint_accepted_total must not be rendered: {ingress}");
-    assert!(ingress.get("subtree_hint_blocked_total").is_none(), "subtree_hint_blocked_total must not be rendered: {ingress}");
-    assert!(ingress.get("subtree_hint_suppressed_total").is_none(), "subtree_hint_suppressed_total must not be rendered: {ingress}");
+    let ingress = data
+        .pointer("/machine_status/ingress")
+        .expect("ingress must exist");
+    assert!(
+        ingress.get("subtree_hints").is_none(),
+        "subtree_hints must not be rendered: {ingress}"
+    );
+    assert!(
+        ingress.get("subtree_hint_in_flight").is_none(),
+        "subtree_hint_in_flight must not be rendered: {ingress}"
+    );
+    assert!(
+        ingress.get("subtree_hint_accepted_total").is_none(),
+        "subtree_hint_accepted_total must not be rendered: {ingress}"
+    );
+    assert!(
+        ingress.get("subtree_hint_blocked_total").is_none(),
+        "subtree_hint_blocked_total must not be rendered: {ingress}"
+    );
+    assert!(
+        ingress.get("subtree_hint_suppressed_total").is_none(),
+        "subtree_hint_suppressed_total must not be rendered: {ingress}"
+    );
 }
 
 /// REQ-AXO-902483 — practice_recall surfaces source_project provenance on global practices.
@@ -5467,19 +5706,117 @@ fn test_req_902483_practice_recall_surfaces_source_project_provenance() {
          VALUES ('*', 'test context 902483', 'une pratique globale de test 902483', 'pratique 902483', 'ev 902483', 'LLL', 'active', 0.8, 10.0, 5)"
     ).expect("insert practice 902483");
 
-    let res = server.execute_tool_direct("practice_recall", &json!({
-        "query": "pratique globale de test 902483",
-        "scope": "DVM",
-        "top_k": 5
-    })).expect("practice_recall response");
+    let res = server
+        .execute_tool_direct(
+            "practice_recall",
+            &json!({
+                "query": "pratique globale de test 902483",
+                "scope": "DVM",
+                "top_k": 5
+            }),
+        )
+        .expect("practice_recall response");
 
     assert_ne!(res["isError"].as_bool(), Some(true));
     let text = res["content"][0]["text"].as_str().expect("text");
-    assert!(text.contains("(origine: LLL)"), "recalled text must surface source_project provenance: {text}");
+    assert!(
+        text.contains("(origine: LLL)"),
+        "recalled text must surface source_project provenance: {text}"
+    );
 
-    let practices = res["data"]["practices"].as_array().expect("practices array");
-    let target = practices.iter().find(|p| p["practice"].as_str().unwrap_or("").contains("902483")).expect("target practice in results");
+    let practices = res["data"]["practices"]
+        .as_array()
+        .expect("practices array");
+    let target = practices
+        .iter()
+        .find(|p| p["practice"].as_str().unwrap_or("").contains("902483"))
+        .expect("target practice in results");
     assert_eq!(target["source_project"], "LLL");
 
-    let _ = server.graph_store.execute("DELETE FROM axon.practice WHERE practice = 'une pratique globale de test 902483'");
+    let _ = server.graph_store.execute(
+        "DELETE FROM axon.practice WHERE practice = 'une pratique globale de test 902483'",
+    );
+}
+
+/// REQ-AXO-902561 — La gouvernance de débit rendue par `status.runtime_authority`
+/// doit refléter la réalité physique du pipeline v2 (variables réelles, backpressure borné)
+/// et authority_state ne doit plus être une chaîne en dur 'partially_unified'.
+#[test]
+fn test_req_902561_lane_authority_governance_truth() {
+    let _guard = env_lock();
+    let server = create_test_server();
+
+    let res = server
+        .execute_tool_direct("status", &json!({ "mode": "full" }))
+        .expect("status response");
+    assert_ne!(res["isError"].as_bool(), Some(true));
+
+    let data = res.get("data").expect("data present");
+    let authority = data
+        .get("runtime_authority")
+        .expect("runtime_authority present");
+    let lane_params = authority
+        .get("lane_parameters")
+        .expect("lane_parameters present");
+
+    // 1. Invariant absolu : AUCUN authority_state n'est codé en dur à 'partially_unified'
+    for param_name in [
+        "vector_workers",
+        "graph_workers",
+        "chunk_batch_size",
+        "file_vectorization_batch_size",
+        "vector_ready_queue_depth",
+        "vector_persist_queue_bound",
+        "vector_max_inflight_persists",
+    ] {
+        let p = lane_params
+            .get(param_name)
+            .unwrap_or_else(|| panic!("missing {param_name}"));
+        let state = p["authority_state"].as_str().unwrap_or("");
+        assert_ne!(
+            state, "partially_unified",
+            "parameter {param_name} must NOT carry hardcoded 'partially_unified' authority_state"
+        );
+        assert!(
+            !state.is_empty(),
+            "parameter {param_name} must have a computed authority_state"
+        );
+        assert!(
+            p.get("is_active_control")
+                .and_then(Value::as_bool)
+                .is_some(),
+            "is_active_control boolean missing on {param_name}"
+        );
+        assert!(
+            p.get("control_status").and_then(Value::as_str).is_some(),
+            "control_status string missing on {param_name}"
+        );
+    }
+
+    // 2. Présence de la gouvernance réelle du pipeline v2 (active_pipeline_controls)
+    let active_controls = authority
+        .get("active_pipeline_controls")
+        .expect("active_pipeline_controls must be exposed");
+    assert_eq!(
+        active_controls["control_model"].as_str(),
+        Some("bounded_channel_backpressure_and_env_workers")
+    );
+    assert_eq!(
+        active_controls["backpressure_mechanism"].as_str(),
+        Some("tokio_mpsc_bounded")
+    );
+
+    let pipe_a = &active_controls["pipeline_a"];
+    let pipe_b = &active_controls["pipeline_b"];
+
+    let real_counts_a = crate::pipeline::PipelineAWorkerCounts::from_env();
+    let real_counts_b = crate::pipeline::PipelineBWorkerCounts::from_env();
+
+    assert_eq!(pipe_a["a1_workers"].as_u64(), Some(real_counts_a.a1 as u64));
+    assert_eq!(pipe_a["a2_workers"].as_u64(), Some(real_counts_a.a2 as u64));
+    assert_eq!(pipe_a["a3_workers"].as_u64(), Some(real_counts_a.a3 as u64));
+
+    assert_eq!(pipe_b["b2_workers"].as_u64(), Some(real_counts_b.b2 as u64));
+    assert_eq!(pipe_b["b3_workers"].as_u64(), Some(real_counts_b.b3 as u64));
+    assert!(pipe_b["drain_reservoir"].as_u64().unwrap_or(0) > 0);
 }

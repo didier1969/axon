@@ -21,7 +21,8 @@ pub use types::{
     EmbedderLifecycleHeartbeatRecord, EmbedderObservedState, FileLifecycleEvent,
     FileVectorizationLeaseSnapshot, FileVectorizationWork, IgnoreReconcileStats,
     IndexerRuntimeTruthRecord, ProjectScopeTruthRecord, VectorBatchRun, VectorLaneStateRecord,
-    VectorPersistOutboxPayload, VectorPersistOutboxUpdate, VectorPersistOutboxWork, VectorWorkerFault,
+    VectorPersistOutboxPayload, VectorPersistOutboxUpdate, VectorPersistOutboxWork,
+    VectorWorkerFault,
 };
 
 /// REQ-AXO-902185 (god-objects) — read the parser-computed McCabe cyclomatic
@@ -295,10 +296,8 @@ impl GraphStore {
             }
             // REQ-AXO-902635 — sans receveur, si un homonyme existe dans le fichier
             // de l'appelant, l'appel local prévaut.
-            let local_matches: Vec<&String> = ids
-                .iter()
-                .filter(|id| id.contains(caller_path))
-                .collect();
+            let local_matches: Vec<&String> =
+                ids.iter().filter(|id| id.contains(caller_path)).collect();
             if local_matches.len() == 1 {
                 return local_matches[0].clone();
             }
@@ -525,6 +524,11 @@ impl GraphStore {
     // Pipeline-v2 consumes file paths through the Scanner -> A1 channel,
     // not through SQL claim cursors.
 
+    /// REQ-AXO-902561 / DEC-AXO-070 — retired in pipeline v2.
+    /// Symbols are embedded via code chunks; isolated symbol vectorization is inactive.
+    #[deprecated(
+        note = "DEC-AXO-070 / REQ-AXO-902561: symbol embedding channel retired in pipeline v2"
+    )]
     pub fn fetch_unembedded_symbols(&self, count: usize) -> Result<Vec<(String, String)>> {
         let query = format!(
             "SELECT id, name || ': ' || kind FROM Symbol WHERE embedding IS NULL LIMIT {}",
@@ -935,12 +939,13 @@ impl GraphStore {
             filters.push(format!("f.path LIKE '{safe_prefix}%'"));
         }
         let where_clause = filters.join(" AND ");
-        let select_sql = format!(
-            "SELECT f.path FROM ist.IndexedFile f WHERE {where_clause}"
-        );
+        let select_sql = format!("SELECT f.path FROM ist.IndexedFile f WHERE {where_clause}");
         let raw = self.query_json_writer(&select_sql)?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-        let paths: Vec<String> = rows.into_iter().filter_map(|r| r.into_iter().next()).collect();
+        let paths: Vec<String> = rows
+            .into_iter()
+            .filter_map(|r| r.into_iter().next())
+            .collect();
         if paths.is_empty() {
             return Ok(Vec::new());
         }
@@ -952,9 +957,7 @@ impl GraphStore {
                 .map(|p| format!("'{}'", p.replace('\'', "''")))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let delete_sql = format!(
-                "DELETE FROM ist.IndexedFile WHERE path IN ({in_list})"
-            );
+            let delete_sql = format!("DELETE FROM ist.IndexedFile WHERE path IN ({in_list})");
             self.execute_raw_sql_gateway(&delete_sql)?;
         }
 
@@ -1141,7 +1144,8 @@ impl GraphStore {
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         let parse_u64 = |val: Option<&Value>| -> usize {
             val.and_then(|v| {
-                v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
             })
             .unwrap_or(0) as usize
         };
@@ -1208,7 +1212,8 @@ impl GraphStore {
             .first()
             .and_then(|r| r.first())
             .and_then(|v| {
-                v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
             })
             .unwrap_or(0) as usize;
         Ok(count)
@@ -1687,10 +1692,7 @@ impl GraphStore {
                 // always co-located with their file).
                 let target_id = match table {
                     "CALLS" | "CALLS_NIF" => {
-                        let raw_receiver = relation
-                            .properties
-                            .get("receiver")
-                            .map(String::as_str);
+                        let raw_receiver = relation.properties.get("receiver").map(String::as_str);
                         // REQ-AXO-902582 — resolve alias receivers (e.g. NA -> nexus-admission)
                         let resolved_receiver = raw_receiver
                             .and_then(|r| file_imports.get(r).map(String::as_str))
@@ -2400,8 +2402,7 @@ mod req_axo_140_call_resolution {
                 &[],
             )
             .unwrap();
-        let documentary_id =
-            GraphStore::symbol_id(project, documentary_path, documentary_name);
+        let documentary_id = GraphStore::symbol_id(project, documentary_path, documentary_name);
         assert_eq!(
             store
                 .query_count(&format!(
@@ -2770,10 +2771,7 @@ mod req_axo_140_call_resolution {
             "axon-core/src/soll_snapshot/declarative_rules.rs",
             "evaluate_all",
         );
-        let idx = index(&[
-            ("evaluate_all", &id_struct),
-            ("evaluate_all", &id_decls),
-        ]);
+        let idx = index(&[("evaluate_all", &id_struct), ("evaluate_all", &id_decls)]);
 
         // Appel qualifié complet (ex: operations.rs ligne 399)
         let resolved_decls = GraphStore::resolve_call_target_id_with_receiver(
@@ -2808,10 +2806,7 @@ mod req_axo_140_call_resolution {
     fn local_call_without_receiver_disambiguates_to_same_file() {
         let id_local = GraphStore::symbol_id("PRJ", "prj/local.rs", "helper");
         let id_other = GraphStore::symbol_id("PRJ", "prj/other.rs", "helper");
-        let idx = index(&[
-            ("helper", &id_local),
-            ("helper", &id_other),
-        ]);
+        let idx = index(&[("helper", &id_local), ("helper", &id_other)]);
 
         let resolved = GraphStore::resolve_call_target_id_with_receiver(
             "PRJ",

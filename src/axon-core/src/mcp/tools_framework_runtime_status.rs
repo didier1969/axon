@@ -1,9 +1,9 @@
 use crate::embedder::current_embedding_provider_diagnostics;
 use crate::optimizer;
+use crate::runtime_capacity_profile::RuntimeProfile;
 use crate::runtime_command_proxy::RuntimeCommandProxy;
 use crate::runtime_mode::{canonical_embedding_provider_request_for_mode, AxonRuntimeMode};
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
-use crate::runtime_capacity_profile::RuntimeProfile;
 use crate::runtime_topology::{current_runtime_shadow_role, AxonProcessRole};
 use crate::service_guard;
 use crate::vector_control::{
@@ -42,7 +42,6 @@ le label « Runtime mode: brain_only » ci-dessus est le rôle de CE process, PA
         None
     }
 }
-
 
 /// REQ-AXO-902478 — la ligne code-intel de `status`, rendue DANS TOUS LES CAS.
 ///
@@ -768,11 +767,11 @@ impl McpServer {
             }
         }
         let _ = next_best_kind; // retained in data.truth_cockpit.next_best_action
-        // REQ-AXO-901757 slice C (AC4) — snapshot-cache warmth from the cache
-        // hit/miss counters. Ratio = ram_hits / (ram_hits + pg_loads). This is
-        // the WHOLE-snapshot cache-warmth across every tool that calls
-        // `snapshot()` (admin reporting tools included) — NOT the retrieval
-        // fusion lane (see the fused-lane line below).
+                                // REQ-AXO-901757 slice C (AC4) — snapshot-cache warmth from the cache
+                                // hit/miss counters. Ratio = ram_hits / (ram_hits + pg_loads). This is
+                                // the WHOLE-snapshot cache-warmth across every tool that calls
+                                // `snapshot()` (admin reporting tools included) — NOT the retrieval
+                                // fusion lane (see the fused-lane line below).
         let (soll_ram_hits, soll_pg_loads) = self.soll_cache().read_stats();
         let soll_ram_ratio = {
             let total = soll_ram_hits + soll_pg_loads;
@@ -1462,6 +1461,7 @@ impl McpServer {
                     "canonical_edges": canonical_edges,
                     "priority_contract": priority_contract,
                     "lane_parameters": lane_parameters,
+                    "active_pipeline_controls": Self::active_pipeline_controls_snapshot(),
                     "quiescent_state": quiescent_state,
                     "limiting_factors": limiting_factors
                 },
@@ -1603,10 +1603,7 @@ impl McpServer {
             } else {
                 methodology_drift
             };
-            data.insert(
-                "methodology_drift_warnings".to_string(),
-                methodology_drift,
-            );
+            data.insert("methodology_drift_warnings".to_string(), methodology_drift);
         }
         cache_write(Self::status_cache(), cache_key, now_ms, &response);
         Some(response)
@@ -2322,7 +2319,10 @@ mod tests_ligne_code_intel {
         let sans_portee = ligne_code_intel(Some("DVM"), None);
         assert!(sans_portee.contains("Code-intel:"), "{sans_portee}");
         assert!(sans_portee.contains("NON MESUREE"), "{sans_portee}");
-        assert!(sans_portee.contains("DVM"), "le projet doit etre nomme : {sans_portee}");
+        assert!(
+            sans_portee.contains("DVM"),
+            "le projet doit etre nomme : {sans_portee}"
+        );
 
         // 3. Le cas DVM mesure : 0 fichier porteur de symboles.
         let vide = ligne_code_intel(Some("DVM"), Some(&portee(0, 0)));
@@ -2376,9 +2376,8 @@ mod ist_writer_degradation_recovery_tests {
 
     #[test]
     fn un_ecrivain_ist_en_echec_ne_conseille_pas_de_demarrer_un_indexeur() {
-        let notes = vec![
-            "ist_writer_degraded: A3 persistence failed 101 consecutive batches".to_string(),
-        ];
+        let notes =
+            vec!["ist_writer_degraded: A3 persistence failed 101 consecutive batches".to_string()];
         let (action, hint) = derive_recovery_action(&notes);
         assert_eq!(
             action["kind"], "inspect_ist_writer",
@@ -2427,7 +2426,7 @@ mod degraded_notes_tests {
             true,  // indexed_projection_fresh : rien n'a changé, donc « frais »
             false, // le flux n'est pas dégradé
             None,
-            true,  // autorité convergée
+            true, // autorité convergée
             false,
             &[rapport(
                 "ist_writer",

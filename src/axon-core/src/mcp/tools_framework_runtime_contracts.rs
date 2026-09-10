@@ -1,13 +1,13 @@
 use crate::embedder::{
     bootstrap_runtime_tuning_state, current_runtime_tuning_state, embedding_lane_config_from_env,
 };
-use crate::runtime_mode::{canonical_embedding_provider_request_for_mode, AxonRuntimeMode};
 use crate::runtime_capacity_profile::{
     canonical_watcher_first_priority_lanes, current_admission_controller_state,
     current_graph_production_state, current_runtime_priority_contract_state,
     current_vector_downstream_state, recommend_admission_controller_profile,
     recommend_embedding_lane_sizing, RuntimeProfile,
 };
+use crate::runtime_mode::{canonical_embedding_provider_request_for_mode, AxonRuntimeMode};
 use crate::service_guard;
 use crate::vector_control::{
     apply_semantic_policy_runtime_tuning, baseline_semantic_policy,
@@ -413,10 +413,12 @@ impl McpServer {
         seed: usize,
         target: usize,
         effective: usize,
-        clamp_reason: Option<&'static str>,
-        authority_state: &'static str,
-        target_source: &'static str,
-        effective_source: &'static str,
+        clamp_reason: Option<&str>,
+        authority_state: &str,
+        target_source: &str,
+        effective_source: &str,
+        is_active_control: bool,
+        control_status: &str,
     ) -> Value {
         json!({
             "seed": seed,
@@ -426,7 +428,38 @@ impl McpServer {
             "clamp_reason": clamp_reason,
             "authority_state": authority_state,
             "target_source": target_source,
-            "effective_source": effective_source
+            "effective_source": effective_source,
+            "is_active_control": is_active_control,
+            "control_status": control_status,
+        })
+    }
+
+    pub(super) fn active_pipeline_controls_snapshot() -> Value {
+        let counts_a = crate::pipeline::PipelineAWorkerCounts::from_env();
+        let counts_b = crate::pipeline::PipelineBWorkerCounts::from_env();
+        let caps = crate::pipeline::PipelineChannelCaps::from_env();
+        let reservoir = crate::pipeline_runtime::vector_drain_reservoir_from_env();
+
+        json!({
+            "control_model": "bounded_channel_backpressure_and_env_workers",
+            "backpressure_mechanism": "tokio_mpsc_bounded",
+            "pipeline_a": {
+                "a1_workers": counts_a.a1,
+                "a2_workers": counts_a.a2,
+                "a3_workers": counts_a.a3,
+                "a_content_channel_cap": caps.a_content,
+                "a3_batch_size": caps.a3_batch_size,
+                "a3_batch_timeout_ms": caps.a3_batch_timeout_ms
+            },
+            "pipeline_b": {
+                "b2_workers": counts_b.b2,
+                "b3_workers": counts_b.b3,
+                "b2_batch_size": caps.b2_batch_size,
+                "b2_batch_timeout_ms": caps.b2_batch_timeout_ms,
+                "b3_batch_size": caps.b3_batch_size,
+                "b3_batch_timeout_ms": caps.b3_batch_timeout_ms,
+                "drain_reservoir": reservoir
+            }
         })
     }
 
@@ -460,10 +493,27 @@ impl McpServer {
             .map(|value| value.trim().eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        let vector_workers_clamp_reason = if effective.vector_workers != target.vector_workers {
+        // REQ-AXO-902561 — alignement sur les paramètres réellement consommés en production
+        let active_counts_b = crate::pipeline::PipelineBWorkerCounts::from_env();
+        let real_vector_workers = active_counts_b.b2;
+        let vector_workers_authority_state = if let Ok(v) = std::env::var("AXON_VECTOR_WORKERS") {
+            if let Ok(parsed) = v.trim().parse::<usize>() {
+                if parsed != real_vector_workers {
+                    format!("divergent: AXON_VECTOR_WORKERS ({parsed}) != AXON_B2_WORKERS ({real_vector_workers})")
+                } else {
+                    "unified".to_string()
+                }
+            } else {
+                "divergent: AXON_VECTOR_WORKERS unparseable".to_string()
+            }
+        } else {
+            "unified".to_string()
+        };
+
+        let vector_workers_clamp_reason = if real_vector_workers != target.vector_workers {
             if provider_requested.eq_ignore_ascii_case("cuda")
                 && !oversubscription_allowed
-                && target.vector_workers > effective.vector_workers
+                && target.vector_workers > real_vector_workers
             {
                 Some("hard_safety_clamp:gpu_vector_workers_capped_without_oversubscription")
             } else {
@@ -485,7 +535,23 @@ impl McpServer {
             None
         };
 
-        let chunk_batch_clamp_reason = if effective.chunk_batch_size != target.chunk_batch_size {
+        let active_caps = crate::pipeline::PipelineChannelCaps::from_env();
+        let real_chunk_batch_size = active_caps.b2_batch_size;
+        let chunk_batch_authority_state = if let Ok(v) = std::env::var("AXON_CHUNK_BATCH_SIZE") {
+            if let Ok(parsed) = v.trim().parse::<usize>() {
+                if parsed != real_chunk_batch_size {
+                    format!("divergent: AXON_CHUNK_BATCH_SIZE ({parsed}) != AXON_B2_BATCH_SIZE ({real_chunk_batch_size})")
+                } else {
+                    "unified".to_string()
+                }
+            } else {
+                "divergent: AXON_CHUNK_BATCH_SIZE unparseable".to_string()
+            }
+        } else {
+            "unified".to_string()
+        };
+
+        let chunk_batch_clamp_reason = if real_chunk_batch_size != target.chunk_batch_size {
             Some("clamp_visible:effective_chunk_batch_size_diverges_from_target")
         } else {
             None
@@ -498,69 +564,91 @@ impl McpServer {
                 None
             };
 
+        let cadence_authority_state = if cadence_effective.sleep == cadence_target.sleep
+            && cadence_effective.idle_sleep == cadence_target.idle_sleep
+        {
+            "unified"
+        } else {
+            "scaled_by_runtime_tuning"
+        };
+
         json!({
             "vector_workers": Self::lane_parameter_snapshot(
                 seed.vector_workers,
                 target.vector_workers,
-                effective.vector_workers,
+                real_vector_workers,
                 vector_workers_clamp_reason,
-                "partially_unified",
+                &vector_workers_authority_state,
                 "runtime_tuning_controller",
-                "embedding_lane_config",
+                "PipelineBWorkerCounts::from_env().b2 (AXON_B2_WORKERS)",
+                true,
+                "active_applied",
             ),
             "graph_workers": Self::lane_parameter_snapshot(
                 seed.graph_workers,
                 target.graph_workers,
                 effective.graph_workers,
                 graph_workers_clamp_reason,
-                "partially_unified",
+                "historical_inert: dedicated graph_workers pool retired in pipeline v2 (DEC-AXO-070)",
                 "runtime_tuning_controller",
-                "embedding_lane_config",
+                "historical_embedding_lane_config (inert in pipeline v2)",
+                false,
+                "historical_inert",
             ),
             "chunk_batch_size": Self::lane_parameter_snapshot(
                 seed.chunk_batch_size,
                 target.chunk_batch_size,
-                effective.chunk_batch_size,
+                real_chunk_batch_size,
                 chunk_batch_clamp_reason,
-                "partially_unified",
+                &chunk_batch_authority_state,
                 "runtime_tuning_controller",
-                "embedding_lane_config",
+                "PipelineChannelCaps::from_env().b2_batch_size (AXON_B2_BATCH_SIZE)",
+                true,
+                "active_applied",
             ),
             "file_vectorization_batch_size": Self::lane_parameter_snapshot(
                 seed.file_vectorization_batch_size,
                 target.file_vectorization_batch_size,
                 effective.file_vectorization_batch_size,
                 file_batch_clamp_reason,
-                "partially_unified",
+                "historical_inert: chunk-level sorted drain supersedes file-level batching (DEC-AXO-901631)",
                 "runtime_tuning_controller",
-                "embedding_lane_config",
+                "historical_embedding_lane_config (inert in pipeline v2)",
+                false,
+                "historical_inert",
             ),
             "vector_ready_queue_depth": Self::lane_parameter_snapshot(
                 runtime_seed.vector_ready_queue_depth,
                 target.vector_ready_queue_depth,
                 vector_runtime.ready_queue_depth_current as usize,
                 None,
-                "partially_unified",
+                "observed_live",
                 "runtime_tuning_controller",
                 "service_guard.current_ready_queue_depth",
+                false,
+                "observed_diagnostic",
             ),
             "vector_persist_queue_bound": Self::lane_parameter_snapshot(
                 runtime_seed.vector_persist_queue_bound,
                 target.vector_persist_queue_bound,
                 vector_runtime.persist_queue_depth_current as usize,
                 None,
-                "partially_unified",
+                "observed_live",
                 "runtime_tuning_controller",
                 "service_guard.current_persist_queue_depth",
+                false,
+                "observed_diagnostic",
             ),
             "vector_max_inflight_persists": Self::lane_parameter_snapshot(
                 runtime_seed.vector_max_inflight_persists,
                 target.vector_max_inflight_persists,
                 vector_runtime.persist_claimed_current as usize,
                 None,
-                "partially_unified",
+                "observed_live",
                 "runtime_tuning_controller",
                 "service_guard.current_persist_claims",
+                false,
+                "observed_diagnostic",
             ),
             "queue_persist_effective_semantics": {
                 "vector_ready_queue_depth": "observed_current_queue_depth_not_capacity",
@@ -595,7 +683,9 @@ impl McpServer {
                 } else {
                     Value::Null
                 },
-                "authority_state": "partially_unified",
+                "authority_state": cadence_authority_state,
+                "is_active_control": true,
+                "control_status": "active_applied",
                 "target_source": "semantic_policy_controller",
                 "effective_source": "runtime_tuning_scaled_policy",
                 "controller_state": batch_controller.state.as_str(),

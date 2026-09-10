@@ -63,7 +63,7 @@ fn env_usize(key: &str, default: usize) -> usize {
 /// number of token-sorted pending chunks pulled per drain wave. The
 /// SELECT already orders by `token_count`, so a fixed-size B2 batch carved
 /// from this reservoir is length-homogeneous → one GPU inference per batch.
-fn vector_drain_reservoir_from_env() -> usize {
+pub(crate) fn vector_drain_reservoir_from_env() -> usize {
     env_usize("AXON_B2_RESERVOIR", 8192)
 }
 

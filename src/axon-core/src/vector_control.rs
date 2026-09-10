@@ -1432,6 +1432,10 @@ pub fn semantic_policy_with_graph(
     ))
 }
 
+/// REQ-AXO-902561 / DEC-AXO-070 — retired in pipeline v2.
+#[deprecated(
+    note = "DEC-AXO-070 / REQ-AXO-902561: symbol embedding channel retired in pipeline v2"
+)]
 pub fn symbol_embedding_allowed(
     file_backlog_depth: usize,
     service_pressure: ServicePressure,
@@ -1587,8 +1591,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let _g_path = crate::test_support::EnvVarGuard::unset("AXON_GPU_VECTOR_LEASE_PATH");
-        let _g_root =
-            crate::test_support::EnvVarGuard::set("AXON_RUN_ROOT", "/var/run/axon-test");
+        let _g_root = crate::test_support::EnvVarGuard::set("AXON_RUN_ROOT", "/var/run/axon-test");
 
         let path = gpu_vector_lease_path();
         assert_eq!(
