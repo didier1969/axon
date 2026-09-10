@@ -1898,6 +1898,7 @@ impl McpServer {
         "idle_drop",
         "rescan_project",
         "ist_snapshot_warm",
+        "ist_snapshot_evict",
         "re_anchor",
         "skill_invoke",
         // Mémoire gouvernée
@@ -1958,6 +1959,7 @@ impl McpServer {
         ("wiring", "project_code"),
         ("orphan_clusters", "project_code"),
         ("ist_snapshot_warm", "project_code"),
+        ("ist_snapshot_evict", "project_code"),
         ("soll_work_plan", "project_code"),
         ("soll_roadmap", "project_code"),
         ("soll_id_registry", "project_code"),
@@ -2476,6 +2478,7 @@ impl McpServer {
             "soll_validate" => self.axon_validate_soll(arguments),
             "soll_acyclic_audit" => self.axon_soll_acyclic_audit(arguments),
             "ist_snapshot_warm" => self.axon_ist_snapshot_warm(arguments),
+            "ist_snapshot_evict" => self.axon_ist_snapshot_evict(arguments),
             "ist_centrality_pagerank" => self.axon_ist_centrality_pagerank(arguments),
             "ist_structural_sccs" => self.axon_ist_structural_sccs(arguments),
             "structural_health_index" => self.axon_structural_health_index(arguments),

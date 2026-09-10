@@ -595,6 +595,19 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "ist_snapshot_evict",
+                "description": "[IST] REQ-AXO-902647 — Evict one or all project IST snapshots from in-memory RAM cache and release unmapped virtual memory to OS via glibc malloc_trim. When project_code is given, evicts that project; when all=true, evicts all cached snapshots; when prune_expired=true, evicts snapshots exceeding the inactivity TTL (default 30m).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted (REQ-AXO-902239)." },
+                        "all": { "type": "boolean", "description": "When true, evict all resident project snapshots from RAM and compact heap." },
+                        "prune_expired": { "type": "boolean", "description": "When true, evict all snapshots that exceeded the inactivity TTL." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "ist_centrality_pagerank",
                 "description": "[IST] REQ-AXO-91488 — PageRank centrality over the in-memory IST CSR. Requires `ist_snapshot_warm` first. Returns top-N nodes by score. Damping default 0.85, iterations default 50.",
                 "inputSchema": {

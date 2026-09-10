@@ -7486,3 +7486,92 @@ fn test_req_axo_902560_inspect_mode_source_explains_missing_source() {
     }
 }
 
+#[test]
+fn req_902647_ist_snapshot_evict_mcp_tool_releases_ram_and_reports_state() {
+    use crate::ist_snapshot::{publish_process_snapshot, IstGraph};
+    use crate::mcp::protocol::JsonRpcRequest;
+    use std::sync::Arc;
+
+    let server = create_test_server();
+    let empty_snap = Arc::new(IstGraph::build(vec![], vec![]));
+
+    publish_process_snapshot("EV1".to_string(), Arc::clone(&empty_snap));
+    publish_process_snapshot("EV2".to_string(), Arc::clone(&empty_snap));
+    assert!(crate::ist_snapshot::process_view().is_warm("EV1"));
+    assert!(crate::ist_snapshot::process_view().is_warm("EV2"));
+
+    // 1. Appel sans argument -> missing_parameter
+    let err_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "ist_snapshot_evict",
+                "arguments": {}
+            })),
+            id: Some(json!(9026471)),
+        })
+        .unwrap()
+        .result
+        .expect("rpc result");
+    assert_eq!(err_resp["isError"].as_bool(), Some(true));
+    assert_eq!(err_resp["data"]["status"].as_str(), Some("missing_parameter"));
+
+    // 2. Éviction d'un projet spécifique EV1
+    let ev1_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "ist_snapshot_evict",
+                "arguments": { "project_code": "EV1" }
+            })),
+            id: Some(json!(9026472)),
+        })
+        .unwrap()
+        .result
+        .expect("rpc result");
+    assert_eq!(ev1_resp["data"]["status"].as_str(), Some("ok"));
+    assert_eq!(ev1_resp["data"]["evicted"].as_bool(), Some(true));
+    assert_eq!(ev1_resp["data"]["project_code"].as_str(), Some("EV1"));
+    assert_eq!(ev1_resp["data"]["memory_trimmed"].as_bool(), Some(true));
+    assert!(!crate::ist_snapshot::process_view().is_warm("EV1"));
+    assert!(crate::ist_snapshot::process_view().is_warm("EV2"));
+
+    // 3. Second evict sur EV1 (non résident)
+    let ev1_again = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "ist_snapshot_evict",
+                "arguments": { "project_code": "EV1" }
+            })),
+            id: Some(json!(9026473)),
+        })
+        .unwrap()
+        .result
+        .expect("rpc result");
+    assert_eq!(ev1_again["data"]["status"].as_str(), Some("ok"));
+    assert_eq!(ev1_again["data"]["evicted"].as_bool(), Some(false));
+
+    // 4. Éviction globale (all: true)
+    let ev_all = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "ist_snapshot_evict",
+                "arguments": { "all": true }
+            })),
+            id: Some(json!(9026474)),
+        })
+        .unwrap()
+        .result
+        .expect("rpc result");
+    assert_eq!(ev_all["data"]["status"].as_str(), Some("ok"));
+    assert_eq!(ev_all["data"]["evicted_all"].as_bool(), Some(true));
+    assert!(ev_all["data"]["evicted_count"].as_u64().unwrap_or(0) >= 1);
+    assert!(!crate::ist_snapshot::process_view().is_warm("EV2"));
+}
+

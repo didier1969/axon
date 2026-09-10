@@ -205,6 +205,14 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>) {
             continue;
         }
 
+        let pruned = axon_core::ist_snapshot::prune_process_snapshots();
+        if pruned > 0 {
+            info!(
+                "Memory reclaimer pruned {} expired IST snapshot(s) from RAM [REQ-AXO-902647]",
+                pruned
+            );
+        }
+
         let process_memory = process_memory_snapshot();
         let min_anon_bytes = memory_reclaimer_min_anon_bytes();
         let pressure = axon_core::runtime_observability::current_memory_pressure();

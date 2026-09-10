@@ -611,10 +611,20 @@ fn warm_all_ist_snapshots_at_boot(graph_store: Arc<GraphStore>) {
                 return;
             }
         };
+        let capacity = crate::ist_snapshot::cache_capacity();
+        let mut warmed = 0;
         for project in parse_boot_warm_project_codes(&raw) {
+            if capacity > 0 && warmed >= capacity {
+                info!(
+                    capacity = capacity,
+                    "REQ-AXO-902647: boot warm reached cache capacity limit; remaining projects will warm on demand"
+                );
+                break;
+            }
             match crate::ist_snapshot::load_snapshot(&store, &project) {
                 Ok((graph, stats)) => {
                     crate::ist_snapshot::publish_process_snapshot(project.clone(), Arc::new(graph));
+                    warmed += 1;
                     info!(
                         project = %project,
                         nodes = stats.nodes_loaded,
@@ -628,6 +638,9 @@ fn warm_all_ist_snapshots_at_boot(graph_store: Arc<GraphStore>) {
                     "REQ-AXO-901869 A1: boot warm failed (PG fallback remains)"
                 ),
             }
+        }
+        if crate::runtime_observability::malloc_trim_system_allocator() {
+            info!("REQ-AXO-902647: system allocator trimmed after boot warm");
         }
     });
 }

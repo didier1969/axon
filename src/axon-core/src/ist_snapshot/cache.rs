@@ -17,19 +17,45 @@ use crate::ist_snapshot::snapshot::IstGraph;
 /// hot snapshot map value stays `Arc<IstGraph>` (zero churn on the read path /
 /// view methods). `in_flight`/`dirty` drive single-flight coalescing: while a
 /// rebuild runs, a fresh `ist_mutated` sets `dirty` instead of spawning a second
-/// loader; the running rebuild re-runs once on finish.
-#[derive(Default, Clone, Copy)]
+pub const DEFAULT_CACHE_CAPACITY: usize = 16;
+pub const DEFAULT_TTL_SECS: u64 = 1800; // 30 minutes
+
+/// REQ-AXO-902005 / REQ-AXO-902647 — per-project rebuild coordination and LRU/TTL access tracking.
+#[derive(Clone, Copy)]
 struct ProjectState {
     in_flight: bool,
     dirty: bool,
+    last_accessed: std::time::Instant,
+    inserted_at: std::time::Instant,
 }
 
-/// Atomic per-project snapshot cache. Cloning the cache handle is cheap (one
-/// `Arc` clone) ; the snapshots themselves never move once published.
+impl Default for ProjectState {
+    fn default() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            in_flight: false,
+            dirty: false,
+            last_accessed: now,
+            inserted_at: now,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IstCacheStats {
+    pub capacity: usize,
+    pub ttl_secs: u64,
+    pub cached_count: usize,
+    pub cached_projects: Vec<String>,
+}
+
+/// Atomic per-project snapshot cache with LRU capacity & TTL eviction (REQ-AXO-902647).
 pub struct IstSnapshotCache {
     inner: Arc<ArcSwap<HashMap<String, Arc<IstGraph>>>>,
-    /// REQ-AXO-902005 — rebuild single-flight + freshness, keyed by project.
+    /// REQ-AXO-902005 — rebuild single-flight + freshness + LRU/TTL timestamps, keyed by project.
     state: Arc<Mutex<HashMap<String, ProjectState>>>,
+    capacity: usize,
+    ttl: std::time::Duration,
 }
 
 impl Default for IstSnapshotCache {
@@ -40,9 +66,23 @@ impl Default for IstSnapshotCache {
 
 impl IstSnapshotCache {
     pub fn new() -> Self {
+        let capacity = std::env::var("AXON_IST_SNAPSHOT_CACHE_CAPACITY")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_CACHE_CAPACITY);
+        let ttl_secs = std::env::var("AXON_IST_SNAPSHOT_TTL_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_TTL_SECS);
+        Self::with_policy(capacity, std::time::Duration::from_secs(ttl_secs))
+    }
+
+    pub fn with_policy(capacity: usize, ttl: std::time::Duration) -> Self {
         Self {
             inner: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
             state: Arc::new(Mutex::new(HashMap::new())),
+            capacity,
+            ttl,
         }
     }
 
@@ -50,6 +90,26 @@ impl IstSnapshotCache {
         Self {
             inner: Arc::clone(&self.inner),
             state: Arc::clone(&self.state),
+            capacity: self.capacity,
+            ttl: self.ttl,
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn ttl(&self) -> std::time::Duration {
+        self.ttl
+    }
+
+    pub fn cache_stats(&self) -> IstCacheStats {
+        let projects = self.project_codes();
+        IstCacheStats {
+            capacity: self.capacity,
+            ttl_secs: self.ttl.as_secs(),
+            cached_count: projects.len(),
+            cached_projects: projects,
         }
     }
 
@@ -64,48 +124,151 @@ impl IstSnapshotCache {
     }
 
     pub fn get(&self, project_code: &str) -> Option<Arc<IstGraph>> {
-        self.inner.load().get(project_code).cloned()
+        let snap = self.inner.load().get(project_code).cloned()?;
+
+        // REQ-AXO-902647 — Check TTL expiration if active
+        if self.ttl > std::time::Duration::ZERO {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = state.get(project_code) {
+                if entry.last_accessed.elapsed() > self.ttl {
+                    drop(state);
+                    self.evict(project_code);
+                    return None;
+                }
+            }
+        }
+
+        // Update last_accessed timestamp for LRU
+        {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = state.entry(project_code.to_string()).or_default();
+            entry.last_accessed = std::time::Instant::now();
+        }
+
+        Some(snap)
     }
 
-    /// REQ-AXO-902625 — `rcu`, jamais `load` puis `store`.
-    ///
-    /// Le motif précédent — lire, cloner la carte ENTIÈRE, muter, écraser — perd
-    /// les écritures concurrentes, et il les perd même sur des `project_code`
-    /// DISJOINTS : ce n'est pas une collision de clé, c'est le `store` final qui
-    /// remplace toute la carte, y compris les entrées qu'un voisin vient d'y
-    /// mettre. Un *lost update* classique.
-    ///
-    /// Ce que ça cassait, mesuré : `cargo test --lib -- tools_context` rendait
-    /// 28/1 avec un test PERDANT qui changeait d'un run à l'autre, chacun vert en
-    /// isolation. Le partenaire de course n'était pas entre les tests RAM : c'est
-    /// `ensure_ram_snapshot_warm` (tools_ist_snapshot.rs), déclenché par les 13
-    /// tests qui construisent un `McpServer`. Et c'est AUSSI une course de
-    /// production — `warm_all_ist_snapshots_at_boot` publie N projets pendant que
-    /// des appels MCP publient en parallèle, donc un projet peut disparaître du
-    /// cache en service.
-    ///
-    /// `rcu` boucle jusqu'à ce que le compare-and-swap réussisse : la closure est
-    /// `FnMut` et peut être REJOUÉE, d'où les clones à chaque tentative.
+    /// REQ-AXO-902625 / REQ-AXO-902647 — `rcu`, jamais `load` puis `store`.
+    /// Éviction LRU automatique lorsque la capacité est dépassée, suivie de `malloc_trim`.
     pub fn publish(&self, project_code: String, snapshot: Arc<IstGraph>) {
+        let now = std::time::Instant::now();
+        {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = state.entry(project_code.clone()).or_default();
+            entry.last_accessed = now;
+            entry.inserted_at = now;
+        }
+
+        let mut evicted_keys: Vec<String> = Vec::new();
         self.inner.rcu(|current| {
             let mut next: HashMap<String, Arc<IstGraph>> = (**current).clone();
             next.insert(project_code.clone(), Arc::clone(&snapshot));
+
+            evicted_keys.clear();
+            if self.capacity > 0 && next.len() > self.capacity {
+                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                let mut candidates: Vec<(String, std::time::Instant)> = next
+                    .keys()
+                    .filter(|k| *k != &project_code)
+                    .map(|k| {
+                        let last = state.get(k).map(|s| s.last_accessed).unwrap_or(now);
+                        (k.clone(), last)
+                    })
+                    .collect();
+                candidates.sort_by_key(|(_, last)| *last);
+                let to_remove = next.len().saturating_sub(self.capacity);
+                for (k, _) in candidates.into_iter().take(to_remove) {
+                    next.remove(&k);
+                    evicted_keys.push(k);
+                }
+            }
             next
         });
+
+        if !evicted_keys.is_empty() {
+            {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                for k in &evicted_keys {
+                    state.remove(k);
+                }
+            }
+            crate::runtime_observability::malloc_trim_system_allocator();
+        }
     }
 
-    /// Voir `publish` — même défaut, même remède.
-    ///
-    /// L'ancien court-circuit « absent ⇒ ne rien faire » a disparu : il lisait la
-    /// carte HORS du compare-and-swap, donc il pouvait décider sur un état périmé.
-    /// Le prix est un clone quand il n'y a rien à retirer ; `evict` n'est pas un
-    /// chemin chaud, et un raccourci qui rouvre la course ne vaut pas ce clone.
-    pub fn evict(&self, project_code: &str) {
+    /// REQ-AXO-902647 — explicit eviction with glibc malloc_trim.
+    pub fn evict(&self, project_code: &str) -> bool {
+        let mut removed = false;
         self.inner.rcu(|current| {
             let mut next: HashMap<String, Arc<IstGraph>> = (**current).clone();
-            next.remove(project_code);
+            if next.remove(project_code).is_some() {
+                removed = true;
+            }
             next
         });
+        if removed {
+            {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.remove(project_code);
+            }
+            crate::runtime_observability::malloc_trim_system_allocator();
+        }
+        removed
+    }
+
+    /// REQ-AXO-902647 — clear all cached snapshots and trim system allocator.
+    pub fn evict_all(&self) -> usize {
+        let mut count = 0;
+        self.inner.rcu(|current| {
+            count = current.len();
+            HashMap::new()
+        });
+        if count > 0 {
+            {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.clear();
+            }
+            crate::runtime_observability::malloc_trim_system_allocator();
+        }
+        count
+    }
+
+    /// REQ-AXO-902647 — prune snapshots that exceeded inactivity TTL.
+    pub fn prune_expired(&self) -> usize {
+        if self.ttl == std::time::Duration::ZERO {
+            return 0;
+        }
+        let expired_keys: Vec<String> = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state
+                .iter()
+                .filter(|(_, s)| s.last_accessed.elapsed() > self.ttl)
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        if expired_keys.is_empty() {
+            return 0;
+        }
+        let mut pruned = 0;
+        self.inner.rcu(|current| {
+            let mut next: HashMap<String, Arc<IstGraph>> = (**current).clone();
+            for k in &expired_keys {
+                if next.remove(k).is_some() {
+                    pruned += 1;
+                }
+            }
+            next
+        });
+        if pruned > 0 {
+            {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                for k in &expired_keys {
+                    state.remove(k);
+                }
+            }
+            crate::runtime_observability::malloc_trim_system_allocator();
+        }
+        pruned
     }
 
     pub fn project_codes(&self) -> Vec<String> {
@@ -362,5 +525,105 @@ mod tests {
              {ECRIVAINS} écrivains : la fixture ne reproduit pas la course, et les tests \
              de non-régression ci-dessus ne prouvent donc rien"
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // REQ-AXO-902647 — LRU & TTL cache eviction + explicit evict & cache stats
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn req_902647_lru_eviction_when_capacity_exceeded() {
+        use std::time::Duration;
+
+        // Cache limité à 2 projets avec TTL infini (1h)
+        let cache = IstSnapshotCache::with_policy(2, Duration::from_secs(3600));
+        cache.publish("P1".to_string(), empty_snapshot());
+        cache.publish("P2".to_string(), empty_snapshot());
+
+        assert!(cache.get("P1").is_some(), "P1 présent");
+        assert!(cache.get("P2").is_some(), "P2 présent");
+        assert_eq!(cache.project_codes().len(), 2);
+
+        // Insertion d'un 3ème projet P3: P1 est le plus ancien accédé car P2 a été accédé par get("P2")
+        cache.publish("P3".to_string(), empty_snapshot());
+
+        assert_eq!(cache.project_codes().len(), 2, "La taille du cache doit être bornée à la capacité (2)");
+        assert!(cache.get("P1").is_none(), "P1 doit avoir été évincé car LRU");
+        assert!(cache.get("P2").is_some(), "P2 doit être présent");
+        assert!(cache.get("P3").is_some(), "P3 doit être présent");
+
+        // Toucher P2 pour que P3 devienne le LRU
+        assert!(cache.get("P2").is_some());
+
+        // Insertion de P4: P3 doit être évincé car P2 a été accédé plus récemment
+        cache.publish("P4".to_string(), empty_snapshot());
+        assert_eq!(cache.project_codes().len(), 2);
+        assert!(cache.get("P3").is_none(), "P3 doit avoir été évincé car LRU");
+        assert!(cache.get("P2").is_some(), "P2 doit être préservé");
+        assert!(cache.get("P4").is_some(), "P4 doit être présent");
+    }
+
+    #[test]
+    fn req_902647_ttl_expiration_eviction_and_prune() {
+        use std::time::Duration;
+
+        // Cache avec TTL très court (50 ms)
+        let cache = IstSnapshotCache::with_policy(10, Duration::from_millis(50));
+        cache.publish("SHORT".to_string(), empty_snapshot());
+        assert!(cache.get("SHORT").is_some(), "SHORT présent immédiatement");
+
+        std::thread::sleep(Duration::from_millis(60));
+
+        // get() sur une entrée expirée doit évincer et renvoyer None
+        assert!(cache.get("SHORT").is_none(), "SHORT doit avoir expiré par TTL");
+        assert_eq!(cache.project_codes().len(), 0, "Cache nettoyé après get expiré");
+
+        // Test de prune_expired
+        cache.publish("PRUNE1".to_string(), empty_snapshot());
+        cache.publish("PRUNE2".to_string(), empty_snapshot());
+        assert_eq!(cache.project_codes().len(), 2);
+
+        std::thread::sleep(Duration::from_millis(60));
+        let pruned = cache.prune_expired();
+        assert_eq!(pruned, 2, "prune_expired doit évincer 2 entrées expirées");
+        assert_eq!(cache.project_codes().len(), 0, "Cache vide après prune_expired");
+    }
+
+    #[test]
+    fn req_902647_explicit_evict_and_evict_all() {
+        use std::time::Duration;
+
+        let cache = IstSnapshotCache::with_policy(10, Duration::from_secs(3600));
+        cache.publish("A".to_string(), empty_snapshot());
+        cache.publish("B".to_string(), empty_snapshot());
+        cache.publish("C".to_string(), empty_snapshot());
+
+        assert!(cache.evict("B"), "B doit être retiré et retourner true");
+        assert!(!cache.evict("B"), "Second evict sur B doit retourner false");
+        assert!(cache.get("B").is_none());
+        assert!(cache.get("A").is_some());
+        assert!(cache.get("C").is_some());
+
+        let count = cache.evict_all();
+        assert_eq!(count, 2, "evict_all doit avoir retiré les 2 projets restants (A et C)");
+        assert_eq!(cache.project_codes().len(), 0);
+        assert!(cache.get("A").is_none());
+        assert!(cache.get("C").is_none());
+    }
+
+    #[test]
+    fn req_902647_cache_stats_reporting() {
+        use std::time::Duration;
+
+        let cache = IstSnapshotCache::with_policy(5, Duration::from_secs(1200));
+        cache.publish("STAT1".to_string(), empty_snapshot());
+        cache.publish("STAT2".to_string(), empty_snapshot());
+
+        let stats = cache.cache_stats();
+        assert_eq!(stats.capacity, 5);
+        assert_eq!(stats.ttl_secs, 1200);
+        assert_eq!(stats.cached_count, 2);
+        assert!(stats.cached_projects.contains(&"STAT1".to_string()));
+        assert!(stats.cached_projects.contains(&"STAT2".to_string()));
     }
 }

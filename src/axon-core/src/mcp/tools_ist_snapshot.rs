@@ -148,6 +148,105 @@ impl McpServer {
         }))
     }
 
+    pub(crate) fn axon_ist_snapshot_evict(&self, args: &Value) -> Option<Value> {
+        let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let prune_expired = args
+            .get("prune_expired")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let project_arg = args.get("project_code").and_then(|v| v.as_str());
+
+        if all {
+            let count = crate::ist_snapshot::evict_all_process_snapshots();
+            let stats = crate::ist_snapshot::process_cache_stats();
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("ist_snapshot_evict: all {} project snapshot(s) evicted from RAM", count)
+                }],
+                "data": {
+                    "status": "ok",
+                    "evicted_all": true,
+                    "evicted_count": count,
+                    "remaining_cached_projects": Vec::<String>::new(),
+                    "cache_capacity": stats.capacity,
+                    "ttl_secs": stats.ttl_secs,
+                    "memory_trimmed": true
+                }
+            }));
+        }
+
+        if prune_expired {
+            let count = crate::ist_snapshot::prune_process_snapshots();
+            let remaining = crate::ist_snapshot::process_cache_project_codes();
+            let stats = crate::ist_snapshot::process_cache_stats();
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("ist_snapshot_evict: pruned {} expired snapshot(s) from RAM ({} active projects remaining)", count, remaining.len())
+                }],
+                "data": {
+                    "status": "ok",
+                    "pruned_expired": true,
+                    "evicted_count": count,
+                    "remaining_cached_projects": remaining,
+                    "cache_capacity": stats.capacity,
+                    "ttl_secs": stats.ttl_secs,
+                    "memory_trimmed": count > 0
+                }
+            }));
+        }
+
+        let Some(code) = project_arg else {
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "ist_snapshot_evict requires either `project_code` (canonical 3-letter, e.g. AXO), `all: true`, or `prune_expired: true`."
+                }],
+                "isError": true,
+                "data": {
+                    "status": "missing_parameter",
+                    "parameter_repair": {
+                        "invalid_field": "project_code",
+                        "tool": "ist_snapshot_evict",
+                        "follow_up_tools": ["ist_snapshot_warm", "project_registry_lookup"],
+                        "hint": "provide `project_code: \"AXO\"` or `all: true` to evict snapshots"
+                    }
+                }
+            }));
+        };
+
+        let resolved = match self.resolve_project_code_value(code) {
+            Some(c) => c,
+            None => code.trim().to_uppercase(),
+        };
+
+        let evicted = crate::ist_snapshot::evict_process_snapshot(&resolved);
+        let remaining = crate::ist_snapshot::process_cache_project_codes();
+        let stats = crate::ist_snapshot::process_cache_stats();
+
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": if evicted {
+                    format!("ist_snapshot_evict ok: snapshot for {} evicted from RAM ({} projects remaining in cache).", resolved, remaining.len())
+                } else {
+                    format!("ist_snapshot_evict: snapshot for {} was not resident in RAM cache.", resolved)
+                }
+            }],
+            "data": {
+                "status": "ok",
+                "project_code": resolved,
+                "evicted": evicted,
+                "evicted_count": if evicted { 1 } else { 0 },
+                "remaining_cached_projects": remaining,
+                "cache_capacity": stats.capacity,
+                "ttl_secs": stats.ttl_secs,
+                "memory_trimmed": evicted
+            }
+        }))
+    }
+
     fn resolve_project_code_value(&self, code: &str) -> Option<String> {
         self.resolve_project_code(code).ok()
     }

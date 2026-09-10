@@ -16,7 +16,7 @@ pub mod snapshot;
 pub mod structural_invariants;
 pub mod view;
 
-pub use cache::IstSnapshotCache;
+pub use cache::{IstCacheStats, IstSnapshotCache, DEFAULT_CACHE_CAPACITY, DEFAULT_TTL_SECS};
 pub use loader::{load_snapshot, LoadStats};
 pub use snapshot::{IstGraph, NodeFlags, NodeKind, RelationType};
 pub use view::IstGraphView;
@@ -86,11 +86,35 @@ pub fn publish_process_snapshot(project_code: String, snapshot: Arc<IstGraph>) {
     process_cache().publish(project_code, snapshot);
 }
 
-/// REQ-AXO-91486 — evict a project from the process cache (used by tests
-/// and for genuine project removal). NB: the `ist_mutated` listener no longer
-/// evicts on mutation — see `refresh_process_snapshot` (serve-stale).
-pub fn evict_process_snapshot(project_code: &str) {
-    process_cache().evict(project_code);
+/// REQ-AXO-91486 / REQ-AXO-902647 — evict a project from the process cache.
+/// Returns true if the project was present and removed, triggering malloc_trim.
+pub fn evict_process_snapshot(project_code: &str) -> bool {
+    process_cache().evict(project_code)
+}
+
+/// REQ-AXO-902647 — evict all cached snapshots from process cache.
+pub fn evict_all_process_snapshots() -> usize {
+    process_cache().evict_all()
+}
+
+/// REQ-AXO-902647 — prune snapshots that exceeded the inactivity TTL.
+pub fn prune_process_snapshots() -> usize {
+    process_cache().prune_expired()
+}
+
+/// REQ-AXO-902647 — read cache retention stats (capacity, ttl, resident projects).
+pub fn process_cache_stats() -> cache::IstCacheStats {
+    process_cache().cache_stats()
+}
+
+/// REQ-AXO-902647 — list all currently resident project codes in cache.
+pub fn process_cache_project_codes() -> Vec<String> {
+    process_cache().project_codes()
+}
+
+/// REQ-AXO-902647 — configured cache capacity.
+pub fn cache_capacity() -> usize {
+    process_cache().capacity()
 }
 
 /// REQ-AXO-902005 — serve-stale refresh on `ist_mutated`. Instead of evicting
