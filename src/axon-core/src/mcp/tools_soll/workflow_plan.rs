@@ -1329,8 +1329,183 @@ impl McpServer {
 /// centaines de milliers de caractères, et deux seuils différents pour un même corps
 /// seraient une source de surprise pour rien.
 const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
+/// REQ-AXO-902449 — budget global de caractères pour le multi-get soll_get(ids=[...]).
+const MULTI_GET_TEXT_BUDGET: usize = 32_000;
+
+    fn soll_get_multiple(&self, req_ids: &[String]) -> Value {
+        if req_ids.is_empty() {
+            return json!({
+                "content": [{ "type": "text", "text": "soll_get: `ids` array must not be empty." }],
+                "isError": true,
+                "data": { "status": "input_invalid" }
+            });
+        }
+
+        let in_clause = req_ids
+            .iter()
+            .map(|id| format!("'{}'", escape_sql(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, type, COALESCE(title,''), COALESCE(description,''), \
+                    COALESCE(status,''), COALESCE(project_code,'') \
+             FROM soll.Node WHERE id IN ({in_clause})"
+        );
+        let rows: Vec<Vec<Value>> = self
+            .graph_store
+            .query_json(&sql)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+
+        let mut row_map: HashMap<String, (String, String, String, String, String)> = HashMap::new();
+        for r in rows {
+            let cell = |i: usize| r.get(i).and_then(Value::as_str).unwrap_or("").to_string();
+            let id = cell(0);
+            row_map.insert(id.clone(), (cell(1), cell(2), cell(3), cell(4), cell(5)));
+        }
+
+        let mut missing_ids: Vec<String> = Vec::new();
+        let mut deferred_ids: Vec<String> = Vec::new();
+        let mut nodes_json: Vec<Value> = Vec::new();
+        let mut rendered_blocks: Vec<String> = Vec::new();
+        let mut cumulated_chars = 0;
+
+        for id in req_ids {
+            let Some((node_type, title, body, status, project)) = row_map.get(id) else {
+                missing_ids.push(id.clone());
+                continue;
+            };
+
+            let titres: Vec<&str> = body
+                .lines()
+                .filter(|l| l.trim_start().starts_with("## "))
+                .map(|l| l.trim_start().trim_start_matches("## ").trim())
+                .collect();
+
+            let corps_rendu: String = if body.chars().count() > Self::SEUIL_CORPS_ENTIER_CHARS {
+                let derniere = body
+                    .match_indices("\n## ")
+                    .last()
+                    .map(|(i, _)| &body[i + 1..])
+                    .or_else(|| body.starts_with("## ").then_some(body.as_str()));
+                let table = if titres.is_empty() {
+                    "_(ce corps ne porte aucun titre `##`)_".to_string()
+                } else {
+                    titres
+                        .iter()
+                        .map(|t| format!("- {t}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                match derniere {
+                    Some(sec) => format!(
+                        "_corps de {} caractères — au-delà du seuil de {}, seule la DERNIÈRE section \
+                         est rendue. Les {} titres sont ci-dessous ; `section=\"<fragment>\"` en tire \
+                         une autre._\n{}\n\n---\n\n{}",
+                        body.chars().count(),
+                        Self::SEUIL_CORPS_ENTIER_CHARS,
+                        titres.len(),
+                        table,
+                        sec
+                    ),
+                    None => {
+                        let saut = body.chars().count().saturating_sub(Self::SEUIL_CORPS_ENTIER_CHARS);
+                        let octet = body.char_indices().nth(saut).map(|(i, _)| i).unwrap_or(0);
+                        format!(
+                            "_corps de {} caractères sans titre `##` — au-delà du seuil de {}, seule \
+                             la FIN est rendue._\n\n{}",
+                            body.chars().count(),
+                            Self::SEUIL_CORPS_ENTIER_CHARS,
+                            &body[octet..]
+                        )
+                    }
+                }
+            } else {
+                body.to_string()
+            };
+
+            let rendered_node_text = format!("## {id} — {title}\n_{node_type} · {status} · {project}_\n\n{corps_rendu}");
+            let block_len = rendered_node_text.len();
+
+            if !rendered_blocks.is_empty() && cumulated_chars + block_len > Self::MULTI_GET_TEXT_BUDGET {
+                deferred_ids.push(id.clone());
+                continue;
+            }
+
+            cumulated_chars += block_len;
+            rendered_blocks.push(rendered_node_text);
+            nodes_json.push(json!({
+                "id": id,
+                "type": node_type,
+                "title": title,
+                "node_status": status,
+                "status": status,
+                "project_code": project,
+                "section_titles": titres,
+                "description": corps_rendu
+            }));
+        }
+
+        let mut full_text = rendered_blocks.join("\n\n---\n\n");
+        if !missing_ids.is_empty() {
+            if !full_text.is_empty() {
+                full_text.push_str("\n\n---\n\n");
+            }
+            full_text.push_str(&format!(
+                "**Missing node(s)** (not found in SOLL): {}",
+                missing_ids.join(", ")
+            ));
+        }
+        if !deferred_ids.is_empty() {
+            if !full_text.is_empty() {
+                full_text.push_str("\n\n---\n\n");
+            }
+            full_text.push_str(&format!(
+                "**Deferred node(s)** (text budget reached, call soll_get with these ids to read): {}",
+                deferred_ids.join(", ")
+            ));
+        }
+
+        json!({
+            "content": [{ "type": "text", "text": full_text }],
+            "data": {
+                "status": "ok",
+                "nodes": nodes_json,
+                "missing_ids": missing_ids,
+                "deferred_ids": deferred_ids,
+                "total_found": nodes_json.len(),
+                "total_requested": req_ids.len(),
+                "next_action": { "kind": "continue_with_follow_up_tool", "tool": "soll_query_context", "when": "if_more_context_needed" }
+            }
+        })
+    }
 
     pub(crate) fn axon_soll_get(&self, args: &Value) -> Option<Value> {
+        // REQ-AXO-902449 — prise en charge de `ids` en mode batch.
+        if let Some(ids_val) = args.get("ids") {
+            let req_ids: Vec<String> = if let Some(arr) = ids_val.as_array() {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            } else if let Some(s) = ids_val.as_str() {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|x| !x.is_empty())
+                    .map(String::from)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            if !req_ids.is_empty() {
+                return Some(self.soll_get_multiple(&req_ids));
+            }
+        }
+
         let Some(id) = args
             .get("id")
             .and_then(Value::as_str)
@@ -1338,7 +1513,7 @@ const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
             .filter(|s| !s.is_empty())
         else {
             return Some(json!({
-                "content": [{ "type": "text", "text": "soll_get requires `id` (canonical SOLL id, e.g. GUI-PRO-028)." }],
+                "content": [{ "type": "text", "text": "soll_get requires `id` (canonical SOLL id, e.g. GUI-PRO-028) or `ids` (array of canonical ids)." }],
                 "isError": true,
                 "data": { "status": "input_invalid", "parameter_repair": {
                     "invalid_field": "id",
@@ -1581,6 +1756,12 @@ const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
             .and_then(|v| v.as_i64())
             .unwrap_or(25)
             .max(1);
+        let kind = args
+            .get("kind")
+            .or_else(|| args.get("type"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         // REQ-AXO-901757 slice A — FTS search mode. When `search` is supplied,
         // return SOLL nodes ranked by ts_rank over title+description (served by
         // the soll_node_fts_idx GIN) instead of the project overview.
@@ -1590,7 +1771,11 @@ const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            return Some(self.soll_fts_search(&project_code, search, limit));
+            return Some(self.soll_fts_search(&project_code, search, kind, limit));
+        }
+        // REQ-AXO-902449 — filtrage par TYPE/KIND sans recherche plein texte.
+        if let Some(k) = kind {
+            return Some(self.soll_query_by_kind(&project_code, k, limit));
         }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1779,14 +1964,80 @@ const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
         Some(response)
     }
 
+    /// REQ-AXO-902449 — query SOLL nodes by exact type/kind (e.g. "guideline", "requirement").
+    fn soll_query_by_kind(&self, project_code: &str, kind: &str, limit: i64) -> Value {
+        let escaped_project = escape_sql(project_code);
+        let escaped_kind = escape_sql(kind);
+        let rows = self
+            .query_single_column(&format!(
+                "SELECT id || '|' || type || '|' || COALESCE(title,'') || '|' || COALESCE(status,'') \
+                 FROM soll.Node \
+                 WHERE project_code = '{escaped_project}' AND lower(type) = lower('{escaped_kind}') \
+                 ORDER BY id DESC \
+                 LIMIT {limit}"
+            ))
+            .unwrap_or_default();
+        let nodes: Vec<Value> = rows
+            .iter()
+            .map(|row| {
+                let p: Vec<&str> = row.splitn(4, '|').collect();
+                json!({
+                    "id": p.first().copied().unwrap_or(""),
+                    "type": p.get(1).copied().unwrap_or(""),
+                    "title": p.get(2).copied().unwrap_or(""),
+                    "status": p.get(3).copied().unwrap_or("")
+                })
+            })
+            .collect();
+        let text = if nodes.is_empty() {
+            format!("No SOLL node of type \"{kind}\" in {project_code}.")
+        } else {
+            let lines: Vec<String> = nodes
+                .iter()
+                .map(|m| {
+                    format!(
+                        "- {} [{}] {}",
+                        m["id"].as_str().unwrap_or(""),
+                        m["status"].as_str().unwrap_or(""),
+                        m["title"].as_str().unwrap_or("")
+                    )
+                })
+                .collect();
+            format!(
+                "SOLL nodes of type \"{kind}\" in {project_code} ({} returned, limit {limit}):\n{}\n\nRead a node body via `soll_get(id='<ID>')` or multiple bodies via `soll_get(ids=['<ID1>', '<ID2>'])`.",
+                nodes.len(),
+                lines.join("\n")
+            )
+        };
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "data": {
+                "project_code": project_code,
+                "kind": kind,
+                "nodes": nodes,
+                "count": nodes.len(),
+                "limit": limit,
+                "next_call_hint": "read a node body via `soll_get(id='<ID>')` or multiple bodies via `soll_get(ids=['<ID1>', '<ID2>'])`"
+            }
+        })
+    }
+
     /// REQ-AXO-901757 slice A — Full-Text Search over `soll.Node`
     /// (title+description), ranked by `ts_rank`. The `to_tsvector('simple', …)`
     /// expression is byte-identical to `soll_node_fts_idx` so the planner uses
     /// the GIN. `plainto_tsquery` is injection-safe for the operator (parses raw
     /// words into AND-tokens); the literal is still escaped defensively.
-    fn soll_fts_search(&self, project_code: &str, query: &str, limit: i64) -> Value {
+    ///
+    /// REQ-AXO-902449 — supports optional `kind` filter to restrict FTS to a
+    /// specific node type.
+    fn soll_fts_search(&self, project_code: &str, query: &str, kind: Option<&str>, limit: i64) -> Value {
         let escaped_project = escape_sql(project_code);
         let escaped_query = escape_sql(query);
+        let kind_clause = if let Some(k) = kind {
+            format!(" AND lower(type) = lower('{}')", escape_sql(k))
+        } else {
+            String::new()
+        };
         let tsv = "to_tsvector('simple', COALESCE(title,'') || ' ' || COALESCE(description,''))";
         let tsq = format!("plainto_tsquery('simple', '{escaped_query}')");
         let rows = self
@@ -1794,7 +2045,7 @@ const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
                 "SELECT id || '|' || type || '|' || COALESCE(title,'') || '|' \
                      || COALESCE(status,'') || '|' || ts_rank({tsv}, {tsq})::text \
                  FROM soll.Node \
-                 WHERE project_code = '{escaped_project}' AND {tsv} @@ {tsq} \
+                 WHERE project_code = '{escaped_project}' AND {tsv} @@ {tsq}{kind_clause} \
                  ORDER BY ts_rank({tsv}, {tsq}) DESC, id DESC \
                  LIMIT {limit}"
             ))
@@ -1812,8 +2063,9 @@ const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
                 })
             })
             .collect();
+        let kind_label = kind.map(|k| format!(" [{k}]")).unwrap_or_default();
         let text = if matches.is_empty() {
-            format!("No SOLL node matches FTS \"{query}\" in {project_code}.")
+            format!("No SOLL node matches FTS \"{query}\"{kind_label} in {project_code}.")
         } else {
             let lines: Vec<String> = matches
                 .iter()
@@ -1827,21 +2079,25 @@ const SEUIL_CORPS_ENTIER_CHARS: usize = 8_000;
                 })
                 .collect();
             format!(
-                "SOLL FTS \"{query}\" in {project_code} ({} match(es)):\n{}",
+                "SOLL FTS \"{query}\"{kind_label} in {project_code} ({} match(es)):\n{}",
                 matches.len(),
                 lines.join("\n")
             )
         };
+        let mut data = json!({
+            "project_code": project_code,
+            "search": query,
+            "matches": matches,
+            "surfaces_used": ["soll_fts"],
+            "total_available": matches.len() as u64,
+            "next_call_hint": "read a match body via `soll_get(id='<ID>')` or multiple bodies via `soll_get(ids=['<ID1>', '<ID2>'])`"
+        });
+        if let Some(k) = kind {
+            data["kind"] = json!(k);
+        }
         json!({
             "content": [{"type": "text", "text": text}],
-            "data": {
-                "project_code": project_code,
-                "search": query,
-                "matches": matches,
-                "surfaces_used": ["soll_fts"],
-                "total_available": matches.len() as u64,
-                "next_call_hint": "read a match body via `soll_get(id='<ID>')` — REQ-AXO-902299: this prescribed the exact raw SQL that `soll_get` exists to replace"
-            }
+            "data": data
         })
     }
 }

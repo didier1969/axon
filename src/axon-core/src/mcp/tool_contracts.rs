@@ -93,13 +93,18 @@ pub(crate) struct SollChildrenInput {
     pub relation_type: Option<String>,
 }
 
-/// `soll_get` — REQ-AXO-902248: return the BODY of one SOLL node by id. Replaces
-/// the raw `sql SELECT description FROM soll.Node WHERE id='<ID>'` that the global
+/// `soll_get` — REQ-AXO-902248: return the BODY of one SOLL node by id, or
+/// multiple bodies via `ids` (REQ-AXO-902449). Replaces the raw
+/// `sql SELECT description FROM soll.Node WHERE id='<ID>'` that the global
 /// CLAUDE.md prescribes to every LLM in every project.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct SollGetInput {
     /// Canonical SOLL id, e.g. "GUI-PRO-028", "REQ-AXO-902248", "CPT-AXO-052".
-    pub id: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    /// REQ-AXO-902449 — multiple canonical SOLL ids to fetch in a single call.
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
     /// REQ-AXO-902496 — rendre UNIQUEMENT la table des titres `##` du corps, sans le
     /// corps. Un session pointer fait couramment 6 000 jetons quand on en veut 120 :
     /// deux allers-retours bon marché valent mieux qu'un aller cher.

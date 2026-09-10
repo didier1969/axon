@@ -17633,4 +17633,106 @@ fn test_req_902482_sql_undefined_table_suggests_nearby_tables() {
     );
 }
 
+/// REQ-AXO-902449 — soll_get(ids=[...]) et soll_query_context(kind="...")
+#[test]
+fn test_req_902449_soll_multi_get_and_type_filter() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let _ = server.graph_store.execute(
+        "INSERT INTO axon.Project (code) VALUES ('M49') ON CONFLICT (code) DO NOTHING"
+    );
+    server.graph_store.execute(
+        "INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) \
+         VALUES ('M49', '/tmp/m49', 'm49') ON CONFLICT (project_code) DO NOTHING"
+    ).expect("insert registry");
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('GUI-M49-001', 'Guideline', 'M49', 'Règle Alpha', 'Corps de la règle alpha pour le test', 'current', '{}') \
+         ON CONFLICT (id) DO UPDATE SET title = 'Règle Alpha', description = 'Corps de la règle alpha pour le test'"
+    ).expect("insert node 1");
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('GUI-M49-002', 'Guideline', 'M49', 'Règle Beta', 'Corps de la règle beta pour le test', 'current', '{}') \
+         ON CONFLICT (id) DO UPDATE SET title = 'Règle Beta', description = 'Corps de la règle beta pour le test'"
+    ).expect("insert node 2");
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('REQ-M49-001', 'Requirement', 'M49', 'Exigence Gamma', 'Corps de exigence gamma pour le test', 'planned', '{}') \
+         ON CONFLICT (id) DO UPDATE SET title = 'Exigence Gamma', description = 'Corps de exigence gamma pour le test'"
+    ).expect("insert node 3");
+
+    // 1. soll_get avec `ids` multiple
+    let multi = server
+        .axon_soll_get(&json!({ "ids": ["GUI-M49-001", "GUI-M49-002"] }))
+        .expect("soll_get must answer multi");
+    assert_ne!(multi.get("isError").and_then(Value::as_bool), Some(true));
+    let text = multi["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("Règle Alpha"), "multi text must contain node 1: {text}");
+    assert!(text.contains("Règle Beta"), "multi text must contain node 2: {text}");
+    let nodes = multi["data"]["nodes"].as_array().expect("nodes array in data");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["id"], "GUI-M49-001");
+    assert_eq!(nodes[1]["id"], "GUI-M49-002");
+
+    // 2. soll_get avec id manquant
+    let partiel = server
+        .axon_soll_get(&json!({ "ids": ["GUI-M49-001", "GUI-M49-404"] }))
+        .expect("soll_get must answer partial");
+    assert_ne!(partiel.get("isError").and_then(Value::as_bool), Some(true));
+    let nodes_p = partiel["data"]["nodes"].as_array().expect("nodes array");
+    assert_eq!(nodes_p.len(), 1);
+    let missing = partiel["data"]["missing_ids"].as_array().expect("missing_ids array");
+    assert_eq!(missing, &vec![json!("GUI-M49-404")]);
+    let text_p = partiel["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text_p.contains("GUI-M49-404"), "text must mention missing id: {text_p}");
+
+    // 3. soll_get rétrocompatibilité id singulier
+    let single = server
+        .axon_soll_get(&json!({ "id": "GUI-M49-001" }))
+        .expect("soll_get must answer single");
+    assert_eq!(single["data"]["id"], "GUI-M49-001");
+    assert_eq!(single["data"]["type"], "Guideline");
+
+    // 4. soll_query_context filtré par `kind="guideline"`
+    let q_kind = server
+        .axon_soll_query_context(&json!({ "project_code": "M49", "kind": "guideline" }))
+        .expect("soll_query_context must answer");
+    assert_ne!(q_kind.get("isError").and_then(Value::as_bool), Some(true));
+    let text_k = q_kind["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text_k.contains("Règle Alpha") && text_k.contains("Règle Beta"));
+    assert!(!text_k.contains("Exigence Gamma"));
+
+    // 5. soll_query_context avec `search` ET `kind`
+    let q_fts = server
+        .axon_soll_query_context(&json!({ "project_code": "M49", "search": "alpha", "kind": "guideline" }))
+        .expect("soll_query_context FTS must answer");
+    assert_ne!(q_fts.get("isError").and_then(Value::as_bool), Some(true));
+    let text_fts = q_fts["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text_fts.contains("GUI-M49-001"));
+
+    // 6. soll_get avec `ids` vide
+    let empty_ids = server
+        .axon_soll_get(&json!({ "ids": [] }))
+        .expect("soll_get must answer empty ids");
+    assert_eq!(empty_ids.get("isError").and_then(Value::as_bool), Some(true));
+
+    // 7. soll_query_context avec kind inexistant
+    let q_none = server
+        .axon_soll_query_context(&json!({ "project_code": "M49", "kind": "inexistant" }))
+        .expect("soll_query_context must answer");
+    assert_ne!(q_none.get("isError").and_then(Value::as_bool), Some(true));
+    let text_none = q_none["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text_none.contains("No SOLL node of type"));
+
+    // 8. soll_query_context avec kind insensible à la casse ("GUIDELINE")
+    let q_case = server
+        .axon_soll_query_context(&json!({ "project_code": "M49", "kind": "GUIDELINE" }))
+        .expect("soll_query_context must answer");
+    assert_ne!(q_case.get("isError").and_then(Value::as_bool), Some(true));
+    assert_eq!(q_case["data"]["count"], 2);
+
+    let _ = server.graph_store.execute("DELETE FROM soll.Node WHERE id IN ('GUI-M49-001', 'GUI-M49-002', 'REQ-M49-001')");
+    let _ = server.graph_store.execute("DELETE FROM soll.ProjectCodeRegistry WHERE project_code = 'M49'");
+}
+
 

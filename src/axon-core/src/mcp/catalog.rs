@@ -343,12 +343,13 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_query_context",
-                "description": "[SOLL] Return compact project intent: visions, requirements, decisions, revisions. LLM-ready. Pass `search` for FTS over SOLL title+description (ranked by ts_rank).",
+                "description": "[SOLL] Return compact project intent: visions, requirements, decisions, revisions. LLM-ready. Pass `kind` (REQ-AXO-902449) to filter by node type (guideline, requirement, etc.). Pass `search` for FTS over SOLL title+description (ranked by ts_rank).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from the CALLING client's cwd when omitted (REQ-AXO-902239 / REQ-AXO-902286) — not from the shared brain's own directory. Pass it explicitly to scope another project." },
                         "limit": { "type": "integer" },
+                        "kind": { "type": "string", "description": "REQ-AXO-902449: filter by node type (e.g. guideline, requirement, decision, concept). When set without search, lists nodes of this type." },
                         "search": { "type": "string", "description": "REQ-AXO-901757: full-text search query. When set, returns SOLL nodes whose title+description match (to_tsvector @@ plainto_tsquery), ranked by ts_rank, instead of the project overview." }
                     },
                     "required": []
@@ -1263,7 +1264,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_get",
-                "description": "[SOLL] REQ-AXO-902248 — return the BODY (description) of ONE SOLL node by canonical id, plus its type/title/status/project. Use this instead of `sql SELECT description FROM soll.node WHERE id=...` (the table is LOWERCASE — REQ-AXO-902482): it is the same answer, validated, with nearby-id repair when the id is wrong.\n\nREQ-AXO-902496 — a long body (a session pointer runs to ~6 000 tokens) need not be read whole: `sections=true` returns ONLY the list of `##` section titles, and `section=\"<title fragment>\"` returns just that section plus the available titles (so a fragment that does not match costs no blind round-trip). Without either, the behaviour is unchanged. This is the READ counterpart of `soll_manager action=append_section`.\n\nFor the project-wide picture use `soll_query_context`; for scored execution order use `soll_work_plan`.",
+                "description": "[SOLL] REQ-AXO-902248 — return the BODY (description) of ONE SOLL node by canonical id (or multiple bodies via `ids` — REQ-AXO-902449), plus its type/title/status/project. Use this instead of `sql SELECT description FROM soll.node WHERE id=...` (the table is LOWERCASE — REQ-AXO-902482): it is the same answer, validated, with nearby-id repair when the id is wrong.\n\nREQ-AXO-902496 — a long body (a session pointer runs to ~6 000 tokens) need not be read whole: `sections=true` returns ONLY the list of `##` section titles, and `section=\"<title fragment>\"` returns just that section plus the available titles (so a fragment that does not match costs no blind round-trip). Without either, the behaviour is unchanged. This is the READ counterpart of `soll_manager action=append_section`.\n\nFor the project-wide picture use `soll_query_context`; for scored execution order use `soll_work_plan`.",
                 "inputSchema": { "$comment": "derived from tool_contracts::SollGetInput — injected post-build" }
             },
             {
