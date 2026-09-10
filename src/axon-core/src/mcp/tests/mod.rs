@@ -445,3 +445,5 @@ mod compact_payload_bounds_tests;
 mod soll_retirement_supersedes_tests;
 /// REQ-AXO-902352 — Scope completeness distingue le dénominateur indexé du code source.
 mod scope_completeness_tests;
+/// REQ-AXO-902491 — rescan_project ne doit pas rendre status=ok si le wipe de cache a échoué.
+mod rescan_project_wipe_failure_tests;

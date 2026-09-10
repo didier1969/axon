@@ -1902,8 +1902,16 @@ impl McpServer {
             String::new()
         };
 
+        let overall_status = rescan_compute_overall_status(&cache_invalidation, &notify_outcome);
+        let wipe_warning = if overall_status == "partial" {
+            "\n\n⚠️ **Échec de l'invalidation du cache :** le cache n'a pas été effacé. L'indexeur considérera ces fichiers comme inchangés et ne les refera pas. Réessayez."
+        } else {
+            ""
+        };
+
         let report = format!(
             "### Rescan Project\n\n\
+             **status:** {overall_status}\n\
              **project_code:** `{project_code}`\n\
              **project_path:** `{project_path_display}`\n\
              **mode:** {mode_label} (full={full})\n\
@@ -1916,7 +1924,8 @@ impl McpServer {
              **config_source:** `{config_source}`\n\
              **config_loaded_at_unix_ms:** {config_loaded_at}\n\
              **config_overriding_keys:** {config_overriding_display}\
-             {config_staleness_line}\n\n\
+             {config_staleness_line}\
+             {wipe_warning}\n\n\
              The subtree is enrolled SYNCHRONOUSLY into `ist.IndexedFile` \
              (status='discovered') by this call ; the DBQ-A claim feeder \
              (REQ-AXO-901897) drains those rows into pipeline A. \
@@ -1933,7 +1942,7 @@ impl McpServer {
                 .unwrap_or_else(|| "unknown".to_string()),
         );
         let mut structured = json!({
-            "status": "ok",
+            "status": overall_status,
             "project_code": project_code,
             "project_path": project_path,
             "mode": mode_label,
@@ -2029,18 +2038,34 @@ impl McpServer {
              ) SELECT count(*) FROM deleted",
             escaped_code
         );
-        let invalidated_rows = match self.graph_store.execute_raw_sql_gateway(&sql) {
-            Ok(raw) => serde_json::from_str::<Vec<Vec<Value>>>(&raw)
-                .ok()
-                .and_then(|rows| rows.first().and_then(|row| row.first()).cloned())
-                .and_then(|value| {
-                    value
-                        .as_u64()
-                        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-                })
-                .map(|count| count as usize),
-            Err(err) => return (format!("wipe_failed: {err}"), None),
-        };
+        let mut last_err = None;
+        let mut invalidated_rows = None;
+        for attempt in 1..=3 {
+            match self.graph_store.execute_raw_sql_gateway(&sql) {
+                Ok(raw) => {
+                    invalidated_rows = serde_json::from_str::<Vec<Vec<Value>>>(&raw)
+                        .ok()
+                        .and_then(|rows| rows.first().and_then(|row| row.first()).cloned())
+                        .and_then(|value| {
+                            value
+                                .as_u64()
+                                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+                        })
+                        .map(|count| count as usize);
+                    last_err = None;
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    if attempt < 3 {
+                        std::thread::sleep(std::time::Duration::from_millis(50 * attempt as u64));
+                    }
+                }
+            }
+        }
+        if let Some(err) = last_err {
+            return (rescan_format_cache_wipe_failure("wipe_failed", &err), None);
+        }
         let notify_sql = format!(
             "SELECT pg_notify('{}', '{}')",
             crate::pipeline::cache_invalidate_listener::LISTEN_CHANNEL,
@@ -2083,7 +2108,12 @@ impl McpServer {
             .reconcile_chunkless_indexed_files(Some(project_code), None)
         {
             Ok(paths) => paths,
-            Err(err) => return (format!("delta_reconcile_failed: {err}"), None),
+            Err(err) => {
+                return (
+                    rescan_format_cache_wipe_failure("delta_reconcile_failed", &err),
+                    None,
+                )
+            }
         };
 
         if reconciled_paths.is_empty() {
@@ -2207,18 +2237,37 @@ impl McpServer {
              ) SELECT count(*) FROM deleted",
             in_list.join(", ")
         );
-        let invalidated_rows = match self.graph_store.execute_raw_sql_gateway(&sql) {
-            Ok(raw) => serde_json::from_str::<Vec<Vec<Value>>>(&raw)
-                .ok()
-                .and_then(|rows| rows.first().and_then(|row| row.first()).cloned())
-                .and_then(|value| {
-                    value
-                        .as_u64()
-                        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-                })
-                .map(|count| count as usize),
-            Err(err) => return (format!("targeted_wipe_failed: {err}"), None),
-        };
+        let mut last_err = None;
+        let mut invalidated_rows = None;
+        for attempt in 1..=3 {
+            match self.graph_store.execute_raw_sql_gateway(&sql) {
+                Ok(raw) => {
+                    invalidated_rows = serde_json::from_str::<Vec<Vec<Value>>>(&raw)
+                        .ok()
+                        .and_then(|rows| rows.first().and_then(|row| row.first()).cloned())
+                        .and_then(|value| {
+                            value
+                                .as_u64()
+                                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+                        })
+                        .map(|count| count as usize);
+                    last_err = None;
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    if attempt < 3 {
+                        std::thread::sleep(std::time::Duration::from_millis(50 * attempt as u64));
+                    }
+                }
+            }
+        }
+        if let Some(err) = last_err {
+            return (
+                rescan_format_cache_wipe_failure("targeted_wipe_failed", &err),
+                None,
+            );
+        }
 
         // Notify indexer RAM cache specifically for targeted paths (chunks of 32 to stay within pg_notify 8000-byte bound)
         let mut notify_err = None;
@@ -2469,6 +2518,34 @@ impl McpServer {
             }
         }))
     }
+}
+
+/// REQ-AXO-902491 — le statut global de rescan_project doit refléter l'opération entière.
+/// Un wipe échoué en mode full ou targeted, ou une réconciliation échouée en mode delta,
+/// ne doit JAMAIS rendre status="ok" (l'appelant croirait avoir réussi alors que
+/// le cache n'a pas été effacé et que l'indexeur ne refera rien).
+pub(crate) fn rescan_compute_overall_status(
+    cache_invalidation: &str,
+    notify_outcome: &str,
+) -> &'static str {
+    if notify_outcome.starts_with("refused:") {
+        "refused"
+    } else if cache_invalidation.starts_with("wipe_failed")
+        || cache_invalidation.starts_with("targeted_wipe_failed")
+        || cache_invalidation.starts_with("delta_reconcile_failed")
+    {
+        "partial"
+    } else {
+        "ok"
+    }
+}
+
+/// REQ-AXO-902491 — formate le message d'échec d'invalidation de cache en expliquant
+/// explicitement la conséquence et le remède pour l'appelant.
+pub(crate) fn rescan_format_cache_wipe_failure(prefix: &str, err: impl std::fmt::Display) -> String {
+    format!(
+        "{prefix}: {err} — le cache n'a pas été effacé : l'indexeur considérera ces fichiers comme inchangés et ne les refera pas. Réessayez."
+    )
 }
 
 /// Build a standard MCP error envelope for rescan_project failures.
