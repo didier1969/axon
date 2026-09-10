@@ -3965,19 +3965,23 @@ impl McpServer {
                 continue;
             }
             let row_raw = self.graph_store.query_json(&format!(
-                "SELECT title, description, metadata FROM soll.Node WHERE id = '{}' AND type='Guideline'",
+                "SELECT title, description, metadata, COALESCE(status, 'current') FROM soll.Node WHERE id = '{}' AND type='Guideline'",
                 escape_sql(global_id)
             )).unwrap_or_else(|_| "[]".to_string());
 
             let rows: Vec<Vec<String>> = serde_json::from_str(&row_raw).unwrap_or_default();
             if let Some(row) = rows.first() {
-                if row.len() < 3 {
+                if row.len() < 4 {
                     unknown.push(global_id.to_string());
                     continue;
                 }
                 let title = &row[0];
                 let desc = &row[1];
                 let meta = &row[2];
+                let inherited_status = match row[3].as_str() {
+                    "current" | "active" => "current",
+                    other => other,
+                };
 
                 // REQ-AXO-901613 bug #2 — idempotence gate BEFORE id allocation.
                 // soll.allocate_node_id increments last_gui irreversibly, so a
@@ -4011,14 +4015,12 @@ impl McpServer {
                 };
                 let local_id = format!("{}-{}-{:03}", prefix, p_code, num);
 
-                // REQ-AXO-901613 bug #1 — status='planned' is the canonical
-                // draft vocabulary (DEC-PRO-100) honoured by the
-                // soll_node_status_canonical CHECK ; legacy 'active' violated it
-                // and the swallowed error left a phantom edge with no node.
+                // REQ-AXO-902650 — the imported guideline inherits the active canonical status
+                // ('current' from DEC-PRO-100 / REQ-AXO-902016) so that load_soll_rules applies it.
                 if let Err(e) = self.graph_store.execute_param(
                     "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
-                     VALUES (?, 'Guideline', ?, ?, ?, 'planned', ?)",
-                    &serde_json::json!([local_id, p_code, title, desc, meta])
+                     VALUES (?, 'Guideline', ?, ?, ?, ?, ?)",
+                    &serde_json::json!([local_id, p_code, title, desc, inherited_status, meta])
                 ) {
                     tracing::warn!(project_code = %p_code, local_id = %local_id, global_id = %global_id, error = %e, "guideline node insert failed; skipping edge");
                     failed.push(global_id.to_string());

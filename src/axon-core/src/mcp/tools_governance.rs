@@ -1873,7 +1873,8 @@ impl McpServer {
             };
             let sql = format!(
                 "SELECT id, title, (metadata->'structural_invariant')::text FROM {} \
-                 WHERE type='Guideline' AND metadata->'structural_invariant' IS NOT NULL{} ORDER BY id",
+                 WHERE type='Guideline' AND metadata->'structural_invariant' IS NOT NULL \
+                   AND COALESCE(status, '') IN ('current', 'active'){} ORDER BY id",
                 self.graph_store.soll_table("Node"),
                 proj_filter
             );

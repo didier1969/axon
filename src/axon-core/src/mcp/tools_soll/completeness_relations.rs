@@ -380,13 +380,44 @@ impl McpServer {
     /// Best-effort : une base sans règle rend un vecteur vide, et l'audit se
     /// réduit aux checks en code. Une règle illisible est écartée par
     /// `parse_soll_rule`, jamais traitée comme permissive.
+    ///
+    /// REQ-AXO-902650 (Feedback #429) — Deux garanties d'isolation de tenant :
+    /// 1. Statuts en vigueur : seules les Guidelines dont le statut est 'current'
+    ///    ou 'active' sont chargées. Les statuts 'planned' (brouillon DEC-PRO-100),
+    ///    'superseded', 'rejected', 'archived', 'blocked', 'deferred' ne doivent
+    ///    jamais mordre comme règles actives.
+    /// 2. Masquage (shadowing) : quand un tenant a instancié ou hérité localement
+    ///    d'une règle GUI-PRO-xxx (arête INHERITS_FROM), la règle PRO est masquée
+    ///    pour ce tenant pour éviter le doublement des verdicts et permettre au
+    ///    tenant d'éteindre la règle localement via un statut terminal.
     pub(crate) fn load_soll_rules(&self, project_code: &str) -> Vec<SollRule> {
         let escaped = escape_sql(project_code);
+
+        let shadowed_pro_ids: std::collections::HashSet<String> = if project_code != "PRO" {
+            let edge_sql = format!(
+                "SELECT DISTINCT target_id FROM {} \
+                 WHERE relation_type = 'INHERITS_FROM' \
+                   AND target_id LIKE 'GUI-PRO-%' \
+                   AND (project_code = '{escaped}' OR source_id LIKE 'GUI-{escaped}-%')",
+                self.graph_store.soll_table("Edge")
+            );
+            self.graph_store
+                .query_json(&edge_sql)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|row| row.into_iter().next())
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
         let sql = format!(
-            "SELECT id, COALESCE(title, ''), (metadata->'soll_rule')::text FROM {} \
+            "SELECT id, COALESCE(title, ''), (metadata->'soll_rule')::text, project_code FROM {} \
              WHERE type = 'Guideline' AND metadata->'soll_rule' IS NOT NULL \
                AND project_code IN ('{escaped}', 'PRO') \
-               AND COALESCE(status, '') NOT IN ('superseded', 'rejected', 'archived') \
+               AND COALESCE(status, '') IN ('current', 'active') \
              ORDER BY id",
             self.graph_store.soll_table("Node")
         );
@@ -396,7 +427,15 @@ impl McpServer {
             .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.len() >= 3)
+            .filter(|row| row.len() >= 4)
+            .filter(|row| {
+                let id = &row[0];
+                let p_code = &row[3];
+                if p_code == "PRO" && shadowed_pro_ids.contains(id) {
+                    return false;
+                }
+                true
+            })
             .filter_map(|row| {
                 let body = serde_json::from_str::<Value>(&row[2]).ok()?;
                 parse_soll_rule(&row[0], &row[1], &body)

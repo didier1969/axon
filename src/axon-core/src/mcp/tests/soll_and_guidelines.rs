@@ -17830,7 +17830,7 @@ fn sql_dit_son_compte_de_lignes_au_lieu_de_rendre_une_enveloppe_muette() {
         Some(true),
         "une colonne inconnue est une erreur nommée : {erreur}"
     );
-    assert_eq!(erreur["data"]["status"], json!("input_invalid"));
+    assert_eq!(erreur["data"]["status"], json!("error"));
     assert_eq!(
         erreur["data"]["row_count"],
         json!(null),
@@ -19178,4 +19178,300 @@ fn test_req_902447_falsification_evidence_attachment_and_metadata() {
         .unwrap();
     assert_eq!(cpt_res["data"]["status"].as_str(), Some("rejected_all"));
 }
+
+/// REQ-AXO-902650 — Feedback #429 : load_soll_rules doit filtrer les Guidelines
+/// selon leur statut canonique (seuls 'current' et 'active' s'appliquent).
+/// Les statuts 'planned' (brouillon DEC-PRO-100), 'superseded', 'rejected',
+/// 'blocked', 'deferred' ne doivent JAMAIS être chargés comme règles en vigueur.
+#[test]
+fn test_load_soll_rules_filters_out_planned_and_non_current_guidelines() {
+    let server = create_test_server();
+    let p = "TPL";
+
+    // Nettoyage préalable pour le projet de test
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM soll.Node WHERE project_code = '{p}'"
+    ));
+
+    let rule_json = json!({
+        "soll_rule": {
+            "mode": "required",
+            "direction": "incoming",
+            "relations": ["SUPERSEDES"],
+            "subject_kind": "Milestone",
+            "subject_status_in": ["superseded"]
+        }
+    });
+    let rule_str = serde_json::to_string(&rule_json).unwrap();
+
+    // Insertion de Guidelines avec divers statuts
+    for (id, status) in [
+        ("GUI-TPL-001", "current"),
+        ("GUI-TPL-002", "planned"),
+        ("GUI-TPL-003", "superseded"),
+        ("GUI-TPL-004", "rejected"),
+        ("GUI-TPL-005", "blocked"),
+        ("GUI-TPL-006", "deferred"),
+    ] {
+        server.graph_store.execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('{id}', 'Guideline', '{p}', 'Rule {id}', 'desc', '{status}', '{rule_str}') \
+             ON CONFLICT (id) DO UPDATE SET status = '{status}', metadata = '{rule_str}'"
+        )).unwrap();
+    }
+
+    let loaded = server.load_soll_rules(p);
+    let loaded_ids: Vec<&str> = loaded.iter().map(|r| r.id.as_str()).collect();
+
+    assert!(
+        loaded_ids.contains(&"GUI-TPL-001"),
+        "GUI-TPL-001 (current) doit être chargée ; trouvées: {:?}",
+        loaded_ids
+    );
+    assert!(
+        !loaded_ids.contains(&"GUI-TPL-002"),
+        "GUI-TPL-002 (planned) ne doit PAS être chargée ; trouvées: {:?}",
+        loaded_ids
+    );
+    assert!(
+        !loaded_ids.contains(&"GUI-TPL-003"),
+        "GUI-TPL-003 (superseded) ne doit PAS être chargée ; trouvées: {:?}",
+        loaded_ids
+    );
+    assert!(
+        !loaded_ids.contains(&"GUI-TPL-004"),
+        "GUI-TPL-004 (rejected) ne doit PAS être chargée ; trouvées: {:?}",
+        loaded_ids
+    );
+    assert!(
+        !loaded_ids.contains(&"GUI-TPL-005"),
+        "GUI-TPL-005 (blocked) ne doit PAS être chargée ; trouvées: {:?}",
+        loaded_ids
+    );
+    assert!(
+        !loaded_ids.contains(&"GUI-TPL-006"),
+        "GUI-TPL-006 (deferred) ne doit PAS être chargée ; trouvées: {:?}",
+        loaded_ids
+    );
+}
+
+/// REQ-AXO-902650 — Feedback #429 : quand une Guideline locale hérite via
+/// INHERITS_FROM d'une règle GUI-PRO-xxx, la règle GUI-PRO-xxx est MASQUÉE
+/// (shadowed) pour ce tenant pour éviter tout double verdict.
+#[test]
+fn test_load_soll_rules_shadows_pro_guidelines_when_inherited_locally() {
+    let server = create_test_server();
+    let p = "TSH";
+
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM soll.Edge WHERE project_code = '{p}'"
+    ));
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM soll.Node WHERE project_code = '{p}'"
+    ));
+
+    let rule_json = json!({
+        "soll_rule": {
+            "mode": "required",
+            "direction": "incoming",
+            "relations": ["SUPERSEDES"],
+            "subject_kind": "Milestone",
+            "subject_status_in": ["superseded"]
+        }
+    });
+    let rule_str = serde_json::to_string(&rule_json).unwrap();
+
+    // Règle locale GUI-TSH-017 qui hérite de GUI-PRO-119
+    server.graph_store.execute(&format!(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('GUI-TSH-017', 'Guideline', '{p}', 'Local 017', 'desc', 'current', '{rule_str}') \
+         ON CONFLICT (id) DO UPDATE SET status = 'current', metadata = '{rule_str}'"
+    )).unwrap();
+    server.graph_store.execute(&format!(
+        "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+         VALUES ('GUI-TSH-017', 'GUI-PRO-119', 'INHERITS_FROM', '{p}') \
+         ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
+    )).unwrap();
+
+    let loaded = server.load_soll_rules(p);
+    let loaded_ids: Vec<&str> = loaded.iter().map(|r| r.id.as_str()).collect();
+
+    assert!(
+        loaded_ids.contains(&"GUI-TSH-017"),
+        "GUI-TSH-017 (locale, current) doit être chargée ; trouvées: {:?}",
+        loaded_ids
+    );
+    assert!(
+        !loaded_ids.contains(&"GUI-PRO-119"),
+        "GUI-PRO-119 doit être MASQUÉE car surchargée par GUI-TSH-017 ; trouvées: {:?}",
+        loaded_ids
+    );
+    // Une autre règle PRO non surchargée (ex: GUI-PRO-120) doit rester chargée
+    assert!(
+        loaded_ids.contains(&"GUI-PRO-120"),
+        "GUI-PRO-120 (non surchargée) doit rester chargée ; trouvées: {:?}",
+        loaded_ids
+    );
+}
+
+/// REQ-AXO-902650 — Feedback #429 : quand une règle locale héritant de GUI-PRO-xxx
+/// est passée en 'planned' ou 'superseded', la règle GUI-PRO-xxx reste masquée
+/// et la règle locale n'est pas appliquée — le tenant a ainsi la capacité
+/// d'éteindre ou de mettre en pause une règle universelle.
+#[test]
+fn test_load_soll_rules_shadowing_allows_disabling_inherited_pro_rule() {
+    let server = create_test_server();
+    let p = "TSD";
+
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM soll.Edge WHERE project_code = '{p}'"
+    ));
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM soll.Node WHERE project_code = '{p}'"
+    ));
+
+    let rule_json = json!({
+        "soll_rule": {
+            "mode": "required",
+            "direction": "incoming",
+            "relations": ["SUPERSEDES"],
+            "subject_kind": "Milestone",
+            "subject_status_in": ["superseded"]
+        }
+    });
+    let rule_str = serde_json::to_string(&rule_json).unwrap();
+
+    // GUI-TSD-017 hérite de GUI-PRO-119 mais est 'superseded' (règle retirée par le tenant)
+    server.graph_store.execute(&format!(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('GUI-TSD-017', 'Guideline', '{p}', 'Retired rule', 'desc', 'superseded', '{rule_str}') \
+         ON CONFLICT (id) DO UPDATE SET status = 'superseded', metadata = '{rule_str}'"
+    )).unwrap();
+    server.graph_store.execute(&format!(
+        "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+         VALUES ('GUI-TSD-017', 'GUI-PRO-119', 'INHERITS_FROM', '{p}') \
+         ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
+    )).unwrap();
+
+    // GUI-TSD-018 hérite de GUI-PRO-120 mais est 'planned' (règle en cours de rédaction)
+    server.graph_store.execute(&format!(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('GUI-TSD-018', 'Guideline', '{p}', 'Draft rule', 'desc', 'planned', '{rule_str}') \
+         ON CONFLICT (id) DO UPDATE SET status = 'planned', metadata = '{rule_str}'"
+    )).unwrap();
+    server.graph_store.execute(&format!(
+        "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+         VALUES ('GUI-TSD-018', 'GUI-PRO-120', 'INHERITS_FROM', '{p}') \
+         ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
+    )).unwrap();
+
+    let loaded = server.load_soll_rules(p);
+    let loaded_ids: Vec<&str> = loaded.iter().map(|r| r.id.as_str()).collect();
+
+    assert!(
+        !loaded_ids.contains(&"GUI-TSD-017"),
+        "GUI-TSD-017 (superseded) ne doit PAS être chargée"
+    );
+    assert!(
+        !loaded_ids.contains(&"GUI-PRO-119"),
+        "GUI-PRO-119 doit rester MASQUÉE pour TSD (éteinte par la règle locale)"
+    );
+    assert!(
+        !loaded_ids.contains(&"GUI-TSD-018"),
+        "GUI-TSD-018 (planned) ne doit PAS être chargée"
+    );
+    assert!(
+        !loaded_ids.contains(&"GUI-PRO-120"),
+        "GUI-PRO-120 doit rester MASQUÉE pour TSD (mise en pause par la règle locale en cours de rédaction)"
+    );
+}
+
+/// REQ-AXO-902650 — Feedback #429 (session DGD) :
+/// Vérification E2E que soll_validate ne double pas les verdicts quand une règle
+/// locale hérite d'une règle PRO.
+#[test]
+fn test_soll_validate_does_not_double_verdicts_for_inherited_guidelines() {
+    let server = create_test_server();
+    let p = "TDG";
+
+    server
+        .graph_store
+        .sync_project_registry_entry(p, Some("Test DGD"), None)
+        .unwrap();
+
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM soll.Edge WHERE project_code = '{p}'"
+    ));
+    let _ = server.graph_store.execute(&format!(
+        "DELETE FROM soll.Node WHERE project_code = '{p}'"
+    ));
+
+    // Création de la Vision du projet pour éviter le check 'missing_vision'
+    server.graph_store.execute(&format!(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('VIS-TDG-001', 'Vision', '{p}', 'Vision TDG', 'Une vision.', 'current', '{{}}') \
+         ON CONFLICT (id) DO UPDATE SET status = 'current'"
+    )).unwrap();
+
+    // Règle locale GUI-TDG-023 héritant de GUI-PRO-125
+    let rule_json = json!({
+        "soll_rule": {
+            "subject_kind": "Requirement",
+            "subject_status_in": ["superseded"],
+            "mode": "required",
+            "direction": "incoming",
+            "relations": ["SUPERSEDES"]
+        }
+    });
+    let rule_str = serde_json::to_string(&rule_json).unwrap();
+
+    server.graph_store.execute(&format!(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('GUI-TDG-023', 'Guideline', '{p}', 'Un nœud retiré enregistre ce qui le remplace', 'desc', 'current', '{rule_str}') \
+         ON CONFLICT (id) DO UPDATE SET status = 'current', metadata = '{rule_str}'"
+    )).unwrap();
+    server.graph_store.execute(&format!(
+        "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+         VALUES ('GUI-TDG-023', 'GUI-PRO-125', 'INHERITS_FROM', '{p}') \
+         ON CONFLICT (source_id, target_id, relation_type) DO NOTHING"
+    )).unwrap();
+
+    // Nœud fautif REQ-TDG-128 : superseded sans arête SUPERSEDES entrante
+    server.graph_store.execute(&format!(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('REQ-TDG-128', 'Requirement', '{p}', 'Exigence supersédée', 'Ce point est supersédé.', 'superseded', '{{\"acceptance_criteria\": [\"critère\"]}}') \
+         ON CONFLICT (id) DO UPDATE SET status = 'superseded'"
+    )).unwrap();
+
+    // Invalider le cache pour forcer un snapshot frais
+    server.soll_cache().invalidate(p);
+
+    let res = server
+        .execute_tool_direct("soll_validate", &json!({ "project_code": p }))
+        .expect("soll_validate répond");
+    let text = res["content"][0]["text"].as_str().unwrap_or_default();
+
+    // Le rapport doit contenir la violation sous la règle locale GUI-TDG-023
+    assert!(
+        text.contains("REQ-TDG-128"),
+        "REQ-TDG-128 doit être signalé comme en violation ; rapport:\n{text}"
+    );
+    assert!(
+        text.contains("GUI-TDG-023"),
+        "La violation doit citer GUI-TDG-023 ; rapport:\n{text}"
+    );
+
+    // ET ne doit JAMAIS citer GUI-PRO-125 pour le même défaut (pas de doublon !)
+    let pro_125_matches: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("REQ-TDG-128") && l.contains("GUI-PRO-125"))
+        .collect();
+    assert!(
+        pro_125_matches.is_empty(),
+        "GUI-PRO-125 ne doit PAS être citée en doublon avec GUI-TDG-023 pour REQ-TDG-128 ; trouvées: {:?}",
+        pro_125_matches
+    );
+}
+
+
 

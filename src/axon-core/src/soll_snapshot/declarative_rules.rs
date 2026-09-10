@@ -270,7 +270,7 @@ pub struct SollRule {
 /// Quel prédicat a produit une violation. Permet à un consommateur de filtrer
 /// par NATURE de règle sans coder en dur l'id d'une Guideline — le couplage
 /// code→règle que le passage aux règles-données supprime précisément.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PredicateKind {
     Edge,
     EvidenceStatus,
@@ -949,14 +949,49 @@ fn evaluate_rule_with_facts(
 
 /// Évalue un lot en partageant un seul index de faits entre toutes les règles.
 pub fn evaluate_all(snapshot: &SollSnapshot, rules: &[SollRule]) -> Vec<SollRuleViolation> {
-    if rules.len() == 1 {
-        return evaluate_rule(snapshot, &rules[0]);
+    if rules.is_empty() {
+        return Vec::new();
     }
     let facts = node_facts(snapshot);
-    rules
-        .iter()
-        .flat_map(|rule| evaluate_rule_with_facts(snapshot, rule, &facts))
-        .collect()
+    let violations: Vec<SollRuleViolation> = if rules.len() == 1 {
+        evaluate_rule_with_facts(snapshot, &rules[0], &facts)
+    } else {
+        rules
+            .iter()
+            .flat_map(|rule| evaluate_rule_with_facts(snapshot, rule, &facts))
+            .collect()
+    };
+
+    // REQ-AXO-902650 (Feedback #429) — Déduplication des violations identiques
+    // (même source, cible, relation, et prédicat) pour garantir l'unicité des défauts
+    // signalés par le moteur déclaratif. Si une règle locale (non PRO) et une règle PRO
+    // ont toutes deux mordu sur le même défaut, la règle locale prévaut (intention locale).
+    let mut deduplicated: Vec<SollRuleViolation> = Vec::new();
+    let mut seen: std::collections::HashMap<
+        (String, Option<String>, Option<String>, PredicateKind),
+        usize,
+    > = std::collections::HashMap::new();
+
+    for v in violations {
+        let key = (
+            v.source_id.clone(),
+            v.target_id.clone(),
+            v.relation.clone(),
+            v.predicate,
+        );
+        if let Some(&existing_idx) = seen.get(&key) {
+            let existing_is_pro = deduplicated[existing_idx].rule_id.starts_with("GUI-PRO-");
+            let new_is_pro = v.rule_id.starts_with("GUI-PRO-");
+            if existing_is_pro && !new_is_pro {
+                deduplicated[existing_idx] = v;
+            }
+        } else {
+            seen.insert(key, deduplicated.len());
+            deduplicated.push(v);
+        }
+    }
+
+    deduplicated
 }
 
 #[cfg(test)]
@@ -2233,4 +2268,51 @@ mod garde_de_corps_tests {
             "sans garde les DEUX sont jugés — got: {ids:?}"
         );
     }
+
+    /// REQ-AXO-902650 — Feedback #429 : evaluate_all déduplique les violations
+    /// identiques (même source, cible, relation, et prédicat) pour qu'un défaut
+    /// structurel unique ne soit pas rapporté deux fois au locataire.
+    #[test]
+    fn test_evaluate_all_deduplicates_duplicate_violations_on_same_fault() {
+        let regle_pro = parse_soll_rule(
+            "GUI-PRO-125",
+            "Un nœud retiré enregistre ce qui le remplace",
+            &json!({
+                "subject_status_in": ["superseded"],
+                "mode": "required",
+                "direction": "incoming",
+                "relations": ["SUPERSEDES"]
+            }),
+        )
+        .expect("règle PRO valide");
+
+        let regle_locale = parse_soll_rule(
+            "GUI-DGD-023",
+            "Un nœud retiré enregistre ce qui le remplace",
+            &json!({
+                "subject_status_in": ["superseded"],
+                "mode": "required",
+                "direction": "incoming",
+                "relations": ["SUPERSEDES"]
+            }),
+        )
+        .expect("règle locale valide");
+
+        let snap = construit(
+            vec![
+                noeud("REQ-DGD-128", "Requirement", "superseded", "Nœud sans remplaçant."),
+            ],
+            Vec::new(),
+        );
+
+        let violations = evaluate_all(&snap, &[regle_locale, regle_pro]);
+        assert_eq!(
+            violations.len(),
+            1,
+            "evaluate_all doit dédupliquer les violations identiques sur le même nœud ; obtenues: {:?}",
+            violations
+        );
+        assert_eq!(violations[0].source_id, "REQ-DGD-128");
+    }
 }
+
