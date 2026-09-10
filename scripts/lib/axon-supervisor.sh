@@ -541,9 +541,18 @@ axon_restart_role_verified() {
         ready="$(_axon_role_field "$pc_port" "$proc" is_ready)"
         action="$(axon_role_recovery_action "$status" "$observed_pid" "$original_pid")"
 
-        if [[ "$action" == "done" && "$ready" == "Ready" ]]; then
-            _axon_sup_log "[restart-verified] ${proc} back after ${elapsed}s (pid ${original_pid} → ${observed_pid}, ready)"
-            return 0
+        if [[ "$action" == "done" ]]; then
+            local hp
+            hp="$(_axon_role_health_port "$instance_kind" "$proc")"
+            if [[ -z "$hp" ]]; then
+                if [[ "$ready" == "Ready" ]]; then
+                    _axon_sup_log "[restart-verified] ${proc} back after ${elapsed}s (pid ${original_pid} → ${observed_pid}, ready)"
+                    return 0
+                fi
+            elif _axon_role_serving "$instance_kind" "$proc"; then
+                _axon_sup_log "[restart-verified] ${proc} back after ${elapsed}s (pid ${original_pid} → ${observed_pid}, serving)"
+                return 0
+            fi
         fi
         # REQ-AXO-902263 — GROUND TRUTH, checked on EVERY tick the supervisor claims the
         # role is down. process-compose can report `Completed` while a perfectly healthy

@@ -301,11 +301,19 @@ fi
 # A restart that succeeds while ANOTHER role was silently abandoned is not a green
 # lifecycle. The survey is the surface an operator reads; assert on it here so a
 # regression in the verdicts is caught by the test rather than in production.
-SURVEY="$(axon_role_survey "$ROOT_DIR" "$INSTANCE" 2>/dev/null || true)"
+SURVEY=""
+BAD_ROLES=""
+for _ in {1..15}; do
+    SURVEY="$(axon_role_survey "$ROOT_DIR" "$INSTANCE" 2>/dev/null || true)"
+    [[ -z "$SURVEY" ]] && { sleep 1; continue; }
+    BAD_ROLES="$(printf '%s\n' "$SURVEY" | awk -F'|' '$7 == "exhausted" || $7 == "down" {print $1"("$7")"}' | tr '\n' ' ')"
+    [[ -z "${BAD_ROLES// /}" ]] && break
+    sleep 1
+done
+
 if [[ -z "$SURVEY" ]]; then
     fail "role survey returned nothing while the supervisor is up — the observability surface is blind"
 else
-    BAD_ROLES="$(printf '%s\n' "$SURVEY" | awk -F'|' '$7 == "exhausted" || $7 == "down" {print $1"("$7")"}' | tr '\n' ' ')"
     if [[ -z "${BAD_ROLES// /}" ]]; then
         pass "role survey: $(printf '%s\n' "$SURVEY" | wc -l | tr -d ' ') role(s), none abandoned"
     else
