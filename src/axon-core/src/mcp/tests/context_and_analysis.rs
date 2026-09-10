@@ -6496,6 +6496,8 @@ fn test_unopenable_entities_never_reach_a_reader_facing_surface() {
         "AXO::axon::src::axon-core::src::structural_health.rs::Some",
         "AXO::axon::src::axon-core::src::structural_health.rs::unwrap_or_else",
         "AXO::axon::src::axon-core::src::structural_health.rs::lock",
+        "TE2::apps::nexus::lib::rate_limiter.ex::start_link",
+        "TE2::apps::nexus::lib::rate_limiter.ex::child_spec",
     ] {
         assert!(
             !symbol_id_is_presentable(id),

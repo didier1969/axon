@@ -60,6 +60,7 @@ pub fn symbol_id_is_presentable(id: &str) -> bool {
         "push", "get", "insert", "unwrap", "unwrap_or", "unwrap_or_else", "unwrap_or_default",
         "into_inner", "get_or_insert", "get_or_init", "to_string", "from", "into", "iter",
         "collect", "map", "filter", "next", "as_str", "is_empty", "trim", "format", "println",
+        "start_link", "child_spec",
     ];
     let Some((_, tail)) = id.rsplit_once("::") else {
         // No `::` at all — this is a file path or a bare token, not a symbol

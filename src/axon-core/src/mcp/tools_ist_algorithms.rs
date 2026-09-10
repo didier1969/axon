@@ -142,14 +142,56 @@ fn short_symbol_label(id: &str) -> String {
     }
 }
 
-/// REQ-AXO-902361 — a symbol whose id sits in a test/script path is not production
-/// duplication worth acting on; the `dry` digest excludes such pairs (noise, not debt).
-/// Ids embed the path with either `::` (real IST ids) or `/` (some fixtures) separators.
+/// REQ-AXO-902361 / REQ-AXO-902420 — a symbol whose id sits in a test/script/doc/fixture
+/// path is not production duplication worth acting on; the `dry` digest excludes such
+/// pairs (actionable, not raw).
+/// Ids embed the path with either `::` (real IST ids) or `/` (some fixtures/tools) separators.
 fn is_test_id(id: &str) -> bool {
+    let lowered = id.to_ascii_lowercase();
     const FRAG: &[&str] = &[
-        "::tests::", "::test::", "::scripts::", "/tests/", "/test/", "/scripts/",
+        "::tests::",
+        "::test::",
+        "::scripts::",
+        "::fixtures::",
+        "::fixture::",
+        "::benches::",
+        "::bench::",
+        "::docs::",
+        "::doc::",
+        "::test_support::",
+        "::test_helpers::",
+        "/tests/",
+        "/test/",
+        "/scripts/",
+        "/fixtures/",
+        "/fixture/",
+        "/benches/",
+        "/bench/",
+        "/docs/",
+        "/doc/",
+        "/test_support/",
+        "/test_helpers/",
     ];
-    FRAG.iter().any(|f| id.contains(f))
+    if FRAG.iter().any(|f| lowered.contains(f)) {
+        return true;
+    }
+    const SUFFIX_FRAGMENTS: &[&str] = &[
+        "_test.rs",
+        "_tests.rs",
+        "_test.exs",
+        "_test.ex",
+        ".test.ts",
+        ".test.js",
+        ".spec.ts",
+        ".spec.js",
+        "_test.go",
+        ".md",
+    ];
+    SUFFIX_FRAGMENTS.iter().any(|suf| {
+        lowered.contains(&format!("{suf}::")) || lowered.ends_with(suf)
+    })
+    || lowered.contains("::test_")
+    || lowered.contains("/test_")
 }
 
 /// REQ-AXO-902573 — Honest intent alignment metrics distinguishing legitimate non-code intent.
@@ -2126,6 +2168,42 @@ mod structural_health_helpers_tests {
         assert!(!is_real_source_symbol("AXO::body.encode")); // '.' only in the LAST segment
         assert!(!is_real_source_symbol("AXO::json.loads"));
         assert!(!is_real_source_symbol("bare"));
+    }
+
+    #[test]
+    fn is_test_id_excludes_tests_scripts_fixtures_and_docs() {
+        // REQ-AXO-902420 — test support files, docs, scripts and test suffixes
+        // must be recognized as non-production targets so debt_digest.dry / stubs
+        // are actionable and respect "test/script pairs excluded".
+        for id in [
+            "TE2::apps::nexus::test::support::factory.ex::build",
+            "TE2::apps::nexus::lib::rate_limiter_test.exs::test_consume",
+            "TE2::apps::nexus::test::rate_limiter_test.exs::test_consume",
+            "AXO::axon::src::axon-core::src::test_support_tests.rs::test_foo",
+            "AXO::axon::tests::pg_backend_boot.rs::test_boot",
+            "AXO::axon::scripts::verify.sh::run",
+            "AXO::docs::api.md::fused_L1_10_0",
+            "AXO::benches::pipeline_bench.rs::bench_pipeline",
+            "PRJ::fixtures::sample.json::data",
+            "PRJ::test_helpers::mock.py::setup",
+        ] {
+            assert!(
+                super::is_test_id(id),
+                "must be recognized as non-production test/script/doc: {id}"
+            );
+        }
+
+        // Positive control: real production symbols must NOT be excluded!
+        for id in [
+            "TE2::apps::nexus::lib::rate_limiter.ex::consume",
+            "AXO::axon::src::axon-core::src::mcp::tools_ist_algorithms.rs::axon_debt_digest",
+            "AXO::axon::src::axon-core::src::parser::elixir.rs::ElixirParser::parse",
+        ] {
+            assert!(
+                !super::is_test_id(id),
+                "production symbol must NOT be excluded: {id}"
+            );
+        }
     }
 
     #[test]
