@@ -13,8 +13,13 @@ use super::*;
 
 impl McpServer {
     pub(crate) fn axon_soll_acyclic_audit(&self, args: &Value) -> Option<Value> {
-        let project_arg = args.get("project_code").and_then(|v| v.as_str());
-        let resolved = match project_arg {
+        // REQ-AXO-902467 / CPT-AXO-90059 — auto-resolve project_code when omitted.
+        let project_arg = args
+            .get("project_code")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let resolved = match project_arg.as_deref() {
             Some(code) => match self.resolve_project_code(code) {
                 Ok(c) => c,
                 Err(_) => {
@@ -22,22 +27,10 @@ impl McpServer {
                 }
             },
             None => {
-                return Some(json!({
-                    "content": [{
-                        "type": "text",
-                        "text": "soll_acyclic_audit requires a project_code (e.g. AXO)."
-                    }],
-                    "isError": true,
-                    "data": {
-                        "status": "missing_project_code",
-                        "parameter_repair": {
-                            "invalid_field": "project_code",
-                            "tool": "soll_acyclic_audit",
-                            "follow_up_tools": ["project_registry_lookup", "help"],
-                            "hint": "supply the canonical 3-letter project code (e.g. AXO)"
-                        }
-                    }
-                }));
+                return Some(crate::mcp::guidance::unresolved_project_error(
+                    "soll_acyclic_audit",
+                    &self.known_project_codes_hint(),
+                ));
             }
         };
 

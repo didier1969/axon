@@ -3030,6 +3030,126 @@ fn test_axon_query_dedups_multi_chunk_symbols_and_preserves_recall() {
     );
 }
 
+/// CPT-AXO-90060 — query chunk fallback must deduplicate symbols matching across
+/// multiple chunks (same name, kind, uri) to save LLM tokens and table slots.
+#[test]
+fn test_cpt_axo_90060_query_chunks_deduplicates_same_symbol_multiple_parts() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) \
+             VALUES ('CDP::multi_part_sym', 'multi_part_sym', 'function', false, true, false, 'CDP')"
+        )
+        .unwrap();
+
+    // Two chunks for the SAME symbol, both containing the search term "searchable_term_xyz".
+    for part in 1..=2 {
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content, content_hash, chunk_part_index) \
+                 VALUES ('cdp-chunk-{part}', 'symbol', 'CDP::multi_part_sym', 'CDP', 'cdp/sym.rs', 'prefix docstring: searchable_term_xyz part {part}\n\nbody searchable_term_xyz', 'h-cdp-{part}', {part})"
+            ))
+            .unwrap();
+    }
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "query",
+            "arguments": { "query": "searchable_term_xyz", "project": "CDP", "semantic": "lexical" }
+        })),
+        id: Some(json!(900_060)),
+    };
+    let result = server
+        .handle_request(req)
+        .unwrap()
+        .result
+        .expect("Expected result");
+
+    let text = result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    // In markdown table, multi_part_sym must appear exactly once in table rows
+    let table_occurrences = text.matches("multi_part_sym").count();
+    assert_eq!(
+        table_occurrences, 1,
+        "multi_part_sym must appear exactly once in chunk fallback output, got {table_occurrences}: {text}"
+    );
+
+    // Also test primary symbol path: two symbols with same name, kind, and path
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) \
+             VALUES ('CDP::dup_sym_1', 'dup_sym', 'function', false, true, false, 'CDP'), \
+                    ('CDP::dup_sym_2', 'dup_sym', 'function', false, true, false, 'CDP')"
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content, content_hash, chunk_part_index) \
+             VALUES ('cdp-chunk-dup1', 'symbol', 'CDP::dup_sym_1', 'CDP', 'cdp/dup.rs', 'fn dup_sym()', 'h-dup-1', 1), \
+                    ('cdp-chunk-dup2', 'symbol', 'CDP::dup_sym_2', 'CDP', 'cdp/dup.rs', 'fn dup_sym()', 'h-dup-2', 1)"
+        )
+        .unwrap();
+
+    let req2 = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "query",
+            "arguments": { "query": "dup_sym", "project": "CDP", "semantic": "lexical" }
+        })),
+        id: Some(json!(900_061)),
+    };
+    let result2 = server
+        .handle_request(req2)
+        .unwrap()
+        .result
+        .expect("Expected result");
+
+    let text2 = result2
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let table_occurrences2 = text2.matches("| dup_sym |").count();
+    assert_eq!(
+        table_occurrences2, 1,
+        "dup_sym must appear exactly once in symbol query table rows, got {table_occurrences2}: {text2}"
+    );
+
+    let structured_names2: Vec<String> = result2
+        .get("data")
+        .and_then(|d| d.get("results"))
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let structured_count2 = structured_names2.iter().filter(|n| *n == "dup_sym").count();
+    assert_eq!(
+        structured_count2, 1,
+        "structured results must contain dup_sym once, got {structured_count2} in {structured_names2:?}"
+    );
+}
+
 /// REQ-AXO-901949 inv.5 — `query` graph r=1 expansion is a detail surface:
 /// omitted under brief (default), included under verbose/full. Proves `mode` is
 /// a real knob for normal-sized results, not a no-op until the text cap.

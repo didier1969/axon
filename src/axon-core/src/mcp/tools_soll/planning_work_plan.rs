@@ -411,7 +411,18 @@ fn build_waves_snapshot(
 
 impl McpServer {
     pub(crate) fn axon_soll_work_plan(&self, args: &Value) -> Option<Value> {
-        let project_code_input = args.get("project_code")?.as_str()?;
+        // REQ-AXO-902467 / CPT-AXO-90059 — auto-resolve project_code when omitted.
+        let resolved_input = args
+            .get("project_code")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        let Some(project_code_input) = resolved_input.as_deref() else {
+            return Some(crate::mcp::guidance::unresolved_project_error(
+                "soll_work_plan",
+                &self.known_project_codes_hint(),
+            ));
+        };
         // REQ-AXO-043 — wrong_project_scope contract via shared helper.
         let project_code_owned = match self.resolve_project_code(project_code_input) {
             Ok(code) => code,

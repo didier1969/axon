@@ -2587,6 +2587,95 @@ fn test_allow_listed_tool_auto_resolves_project_code_from_cwd() {
     }
 }
 
+/// CPT-AXO-90059 — soll_work_plan, soll_acyclic_audit, and IST algorithm tools
+/// must auto-resolve project_code from cwd/env when omitted in direct calls,
+/// and must return canonical `missing_project_code` guidance when unresolved.
+#[test]
+fn test_cpt_axo_90059_soll_and_ist_tools_auto_resolve_and_canonical_error() {
+    let _guard = env_lock();
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/test/axo-scope-fixture"))
+        .unwrap();
+
+    // 1. With AXON_PROJECT_ROOT set, direct call to axon_soll_work_plan without project_code must auto-resolve
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/home/test/axo-scope-fixture");
+    }
+    let work_plan_res = server
+        .axon_soll_work_plan(&json!({"top": 5}))
+        .expect("soll_work_plan must not return None when project_code is omitted and resolvable");
+    let work_plan_text = work_plan_res
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        work_plan_text.contains("SOLL Work Plan: AXO"),
+        "soll_work_plan must auto-resolve to AXO, got: {work_plan_text}"
+    );
+
+    // Direct call to axon_soll_acyclic_audit without project_code must auto-resolve
+    let audit_res = server
+        .axon_soll_acyclic_audit(&json!({}))
+        .expect("soll_acyclic_audit must return Some");
+    let audit_text = audit_res
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        !audit_text.contains("requires a project_code"),
+        "soll_acyclic_audit must auto-resolve, got: {audit_text}"
+    );
+
+    // Direct call to axon_structural_health_index without project_code must auto-resolve
+    let shi_res = server
+        .axon_structural_health_index(&json!({}))
+        .expect("structural_health_index must return Some");
+    let shi_text = shi_res
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        !shi_text.contains("requires project_code"),
+        "structural_health_index must auto-resolve, got: {shi_text}"
+    );
+
+    // 2. When project is UNRESOLVABLE, must return canonical missing_project_code
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", "/tmp/unregistered_path_xyz");
+    }
+
+    let unres_plan = server
+        .axon_soll_work_plan(&json!({"top": 5}))
+        .expect("soll_work_plan must return Some(unresolved_project_error), not None");
+    assert_eq!(
+        unres_plan.pointer("/data/status").and_then(Value::as_str),
+        Some("missing_project_code"),
+        "unresolvable soll_work_plan must return missing_project_code status: {unres_plan}"
+    );
+    assert_eq!(unres_plan.get("isError").and_then(Value::as_bool), Some(true));
+
+    let unres_audit = server
+        .axon_soll_acyclic_audit(&json!({}))
+        .expect("soll_acyclic_audit must return Some");
+    assert_eq!(
+        unres_audit.pointer("/data/status").and_then(Value::as_str),
+        Some("missing_project_code"),
+        "unresolvable soll_acyclic_audit must return missing_project_code status: {unres_audit}"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+    }
+}
+
 /// REQ-AXO-902239 — the EXCLUSION list is the safety-critical half.
 ///
 /// For a whole family of tools an ABSENT project means "every project".

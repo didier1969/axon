@@ -1420,8 +1420,16 @@ impl McpServer {
                             .unwrap_or(false)
                     });
                 }
-                let rows: Vec<Vec<Value>> =
+                let mut rows: Vec<Vec<Value>> =
                     Self::rerank_symbol_rows(parsed, query_text, query_intent);
+                // CPT-AXO-90060: deduplicate symbols with same (name, kind, uri)
+                let mut seen = std::collections::HashSet::new();
+                rows.retain(|row| {
+                    let name = row.first().and_then(Value::as_str).unwrap_or("");
+                    let kind = row.get(1).and_then(Value::as_str).unwrap_or("");
+                    let uri = row.get(2).and_then(Value::as_str).unwrap_or("");
+                    seen.insert((name.to_string(), kind.to_string(), uri.to_string()))
+                });
                 if rows.is_empty() {
                     return self.axon_query_from_chunks(
                         query_text,
@@ -1837,8 +1845,16 @@ impl McpServer {
                         }
                     }
                 }
-                let rows: Vec<Vec<Value>> =
+                let mut rows: Vec<Vec<Value>> =
                     Self::rerank_chunk_rows(parsed, query_text, query_intent);
+                // CPT-AXO-90060: deduplicate symbols with same (name, kind, uri)
+                let mut seen = std::collections::HashSet::new();
+                rows.retain(|row| {
+                    let name = row.first().and_then(Value::as_str).unwrap_or("");
+                    let kind = row.get(1).and_then(Value::as_str).unwrap_or("");
+                    let uri = row.get(2).and_then(Value::as_str).unwrap_or("");
+                    seen.insert((name.to_string(), kind.to_string(), uri.to_string()))
+                });
                 if rows.is_empty() {
                     return self.axon_query_without_contains(
                         query_text,

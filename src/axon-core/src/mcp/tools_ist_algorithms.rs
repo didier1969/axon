@@ -2060,23 +2060,20 @@ impl McpServer {
     }
 
     fn ist_resolve_project(&self, args: &Value, tool: &str) -> Result<String, Value> {
-        let raw = args.get("project_code").and_then(|v| v.as_str());
-        match raw {
+        // REQ-AXO-902467 / CPT-AXO-90059 — auto-resolve project_code when omitted.
+        let raw = args
+            .get("project_code")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
+        match raw.as_deref() {
             Some(code) => self
                 .resolve_project_code(code)
                 .map_err(|_| self.wrong_project_scope_response(code, tool)),
-            None => Err(json!({
-                "content": [{ "type": "text", "text": format!("{} requires project_code", tool) }],
-                "isError": true,
-                "data": {
-                    "status": "missing_project_code",
-                    "parameter_repair": {
-                        "invalid_field": "project_code",
-                        "tool": tool,
-                        "follow_up_tools": ["project_registry_lookup", "help"]
-                    }
-                }
-            })),
+            None => Err(crate::mcp::guidance::unresolved_project_error(
+                tool,
+                &self.known_project_codes_hint(),
+            )),
         }
     }
 }
