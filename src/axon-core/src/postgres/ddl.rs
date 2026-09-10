@@ -422,6 +422,7 @@ mod tests {
             "axon.VectorLaneState",
             "axon.VectorPersistOutbox",
             "axon.vector_batch_run",
+            "axon.project_scope_truth",
         ] {
             assert!(
                 joined.contains(tbl),

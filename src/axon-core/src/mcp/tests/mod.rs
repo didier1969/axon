@@ -443,3 +443,5 @@ mod mailbox_wake_tests;
 mod compact_payload_bounds_tests;
 /// REQ-AXO-902429 — gouvernance du retrait d'un nœud SOLL et obligation de remplaçant / raison.
 mod soll_retirement_supersedes_tests;
+/// REQ-AXO-902352 — Scope completeness distingue le dénominateur indexé du code source.
+mod scope_completeness_tests;

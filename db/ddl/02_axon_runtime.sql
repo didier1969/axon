@@ -380,6 +380,19 @@ CREATE TABLE IF NOT EXISTS axon.role_exit_event (
     reason        TEXT                            -- human interpretation (signal / TensorRT-hang / exit N)
 );
 
+-- REQ-AXO-902352 — vérité de portée disque vs indexée par projet.
+-- Persistée par l'indexeur/scanner pour éviter le parcours FS synchrone de 3,1 s
+-- sur le chemin chaud de project_scope_truth_note.
+CREATE TABLE IF NOT EXISTS axon.project_scope_truth (
+    project_code          TEXT PRIMARY KEY REFERENCES axon.Project(code) ON DELETE CASCADE,
+    walked_files          BIGINT NOT NULL DEFAULT 0,
+    eligible_files        BIGINT NOT NULL DEFAULT 0,
+    indexed_files         BIGINT NOT NULL DEFAULT 0,
+    excluded_source_files BIGINT NOT NULL DEFAULT 0,
+    excluded_extensions   TEXT NOT NULL DEFAULT '',
+    updated_at_ms         BIGINT NOT NULL DEFAULT 0
+);
+
 -- ── Indexes ──────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_role_exit_event_role_ms
     ON axon.role_exit_event (role, observed_ms DESC);

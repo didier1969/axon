@@ -773,6 +773,17 @@ impl McpServer {
         let eligible = breakdown.eligible as i64;
         let gap = eligible - indexed;
 
+        let record = crate::graph_ingestion::ProjectScopeTruthRecord {
+            project_code: project.to_string(),
+            walked_files: breakdown.walked_files as i64,
+            eligible_files: eligible,
+            indexed_files: indexed,
+            excluded_source_files: breakdown.excluded_source_count() as i64,
+            excluded_extensions: breakdown.excluded_source_summary(),
+            updated_at_ms: crate::clock::now_unix_ms(),
+        };
+        let _ = self.graph_store.record_project_scope_truth(&record);
+
         let verdict = coverage.verdict(eligible, &breakdown.parsable_but_excluded);
 
         let reason_lines = if breakdown.excluded_by_reason.is_empty() {

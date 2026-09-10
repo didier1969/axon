@@ -267,3 +267,15 @@ pub struct IgnoreReconcileStats {
     pub newly_included: usize,
     pub dry_run: bool,
 }
+
+/// REQ-AXO-902352 — Vérité de portée disque vs indexée par projet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ProjectScopeTruthRecord {
+    pub project_code: String,
+    pub walked_files: i64,
+    pub eligible_files: i64,
+    pub indexed_files: i64,
+    pub excluded_source_files: i64,
+    pub excluded_extensions: String,
+    pub updated_at_ms: i64,
+}

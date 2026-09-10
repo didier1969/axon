@@ -60,6 +60,22 @@ pub struct ScopeBreakdown {
     pub parsable_but_excluded: Vec<(String, u64)>,
 }
 
+impl ScopeBreakdown {
+    /// REQ-AXO-902352 — nombre total de fichiers de code source écartés par le filtre.
+    pub fn excluded_source_count(&self) -> u64 {
+        self.parsable_but_excluded.iter().map(|(_, n)| *n).sum()
+    }
+
+    /// REQ-AXO-902352 — résumé textuel des extensions source écartées (ex: ".rs: 18").
+    pub fn excluded_source_summary(&self) -> String {
+        self.parsable_but_excluded
+            .iter()
+            .map(|(ext, count)| format!(".{ext}: {count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// REQ-AXO-902045 MUR 0 — true when the file walker must NOT descend into
 /// `dir`: it is a build-output / dependency-store / VCS / tooling-state
 /// directory the indexing policy excludes (node_modules, target, _build,

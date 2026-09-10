@@ -19,6 +19,10 @@ pub(crate) struct ProjectScopeSummary {
     pub(crate) completed_files: i64,
     pub(crate) backlog_files: i64,
     pub(crate) pending_reasons: Vec<(String, i64)>,
+    /// REQ-AXO-902352 — nombre de fichiers source / parsables écartés par le filtre.
+    pub(crate) excluded_source_files: i64,
+    /// REQ-AXO-902352 — détail des extensions source écartées (ex: ".rs: 18").
+    pub(crate) excluded_extensions: String,
 }
 
 impl ProjectScopeSummary {
@@ -31,7 +35,7 @@ impl ProjectScopeSummary {
         (self.total_files - self.completed_files) as f64 / self.total_files as f64
     }
 
-    /// REQ-AXO-902424 — l'index de symboles peut-il porter un NÉGATIF ?
+    /// REQ-AXO-902424 / REQ-AXO-902352 — l'index de symboles peut-il porter un NÉGATIF ?
     ///
     /// Le seuil est un jugement, assumé comme tel, et il vit ICI pour que les
     /// deux surfaces qui l'appliquent — le bandeau de `status` et la note de
@@ -42,9 +46,73 @@ impl ProjectScopeSummary {
     /// Quelques pour cent d'écart sont NORMAUX : un `.md`, un `.json` ne
     /// portent pas de symboles (AXO 7 %, APS 5 %, OPV 7 %). Au-delà d'un quart,
     /// un résultat vide ne prouve plus rien — KKI était à 91 %.
+    ///
+    /// REQ-AXO-902352 : si des fichiers de CODE SOURCE sont écartés (ex: 18 fichiers .rs
+    /// d'un projet polyglotte INK), l'index ne peut JAMAIS être certifié trustworthy —
+    /// un résultat vide sur le projet ne prouve rien pour ces langages.
     pub(crate) fn symbol_coverage_is_trustworthy(&self) -> bool {
-        self.symbol_shortfall_ratio() < 0.25
+        self.excluded_source_files == 0 && self.symbol_shortfall_ratio() < 0.25
     }
+}
+
+pub(crate) fn project_scope_truth_note_pure(
+    project: &str,
+    summary: &ProjectScopeSummary,
+) -> String {
+    let reason_note = if summary.pending_reasons.is_empty() {
+        String::new()
+    } else {
+        let reasons = summary
+            .pending_reasons
+            .iter()
+            .map(|(reason, count)| format!("`{reason}`: {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" Top backlog causes: {}.", reasons)
+    };
+
+    let excluded_mention = if summary.excluded_source_files > 0 {
+        format!(
+            "; {} fichier(s) source écarté(s) ({})",
+            summary.excluded_source_files, summary.excluded_extensions
+        )
+    } else {
+        String::new()
+    };
+
+    // REQ-AXO-902424 / REQ-AXO-902352 — quand une part importante des fichiers enrôlés ne
+    // porte AUCUN symbole, ou que des fichiers source sont écartés par le scanner,
+    // un résultat vide de `query` ne prouve rien.
+    let shortfall_ratio = summary.symbol_shortfall_ratio();
+    let unreliable_note = if !summary.symbol_coverage_is_trustworthy() {
+        if summary.excluded_source_files > 0 {
+            format!(
+                "\n⚠️ **{} fichier(s) source écarté(s) ({}).** Un résultat VIDE de `query`/`inspect` sur ce projet ne prouve PAS l'absence pour ces langages — recouper par `retrieve_context` (contenu) avant de conclure, et voir `diagnose_indexing`.",
+                summary.excluded_source_files, summary.excluded_extensions
+            )
+        } else {
+            format!(
+                "\n⚠️ **{:.0} % des fichiers enrôlés ne portent aucun symbole extrait.** Un \
+                 résultat VIDE de `query`/`inspect` sur ce projet ne prouve PAS l'absence — \
+                 recouper par `retrieve_context` (contenu) avant de conclure, et voir \
+                 `diagnose_indexing`.",
+                shortfall_ratio * 100.0
+            )
+        }
+    } else {
+        String::new()
+    };
+
+    format!(
+        "**Scope completeness `{}`:** {}/{} fichier(s) enrôlé(s) portent des symboles extraits; sans symbole: {}{}.{}{}\n",
+        project,
+        summary.completed_files,
+        summary.total_files,
+        summary.backlog_files,
+        excluded_mention,
+        reason_note,
+        unreliable_note
+    )
 }
 
 /// REQ-AXO-91511 — materialize IST symbol ids into the JSON row-of-row
@@ -290,11 +358,21 @@ impl McpServer {
         let backlog_files = (total_files - completed_files).max(0);
         let pending_reasons: Vec<(String, i64)> = Vec::new();
 
+        let (excluded_source_files, excluded_extensions) = match self
+            .graph_store
+            .latest_project_scope_truth(project)
+        {
+            Ok(Some(record)) => (record.excluded_source_files, record.excluded_extensions),
+            _ => (0, String::new()),
+        };
+
         Some(ProjectScopeSummary {
             total_files,
             completed_files,
             backlog_files,
             pending_reasons,
+            excluded_source_files,
+            excluded_extensions,
         })
     }
 
@@ -304,52 +382,7 @@ impl McpServer {
         if summary.total_files <= 0 {
             return None;
         }
-
-        let reason_note = if summary.pending_reasons.is_empty() {
-            String::new()
-        } else {
-            let reasons = summary
-                .pending_reasons
-                .iter()
-                .map(|(reason, count)| format!("`{reason}`: {count}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(" Top backlog causes: {}.", reasons)
-        };
-
-        // REQ-AXO-902424 — quand une part importante des fichiers enrôlés ne
-        // porte AUCUN symbole, un résultat vide de `query` ne prouve rien, et
-        // c'est ce bandeau qui autorise à préférer l'index au grep.
-        //
-        // Le seuil est un jugement, et il est assumé comme tel : un écart de
-        // quelques pour cent est NORMAL (un `.md`, un `.json` ne portent pas de
-        // symboles et ne devraient pas alarmer — AXO 7 %, APS 5 %, OPV 7 %).
-        // Au-delà d'un quart, l'index de symboles ne peut plus porter un négatif
-        // — KKI était à 91 %.
-        let shortfall_ratio = summary.symbol_shortfall_ratio();
-        let unreliable_note = if !summary.symbol_coverage_is_trustworthy() {
-            format!(
-                "\n⚠️ **{:.0} % des fichiers enrôlés ne portent aucun symbole extrait.** Un \
-                 résultat VIDE de `query`/`inspect` sur ce projet ne prouve PAS l'absence — \
-                 recouper par `retrieve_context` (contenu) avant de conclure, et voir \
-                 `diagnose_indexing`.",
-                shortfall_ratio * 100.0
-            )
-        } else {
-            String::new()
-        };
-
-        Some(format!(
-            "**Scope completeness `{}`:** {}/{} fichier(s) enrôlé(s) portent des symboles \
-             extraits; sans symbole: {}.{}{}\
-\n",
-            project,
-            summary.completed_files,
-            summary.total_files,
-            summary.backlog_files,
-            reason_note,
-            unreliable_note
-        ))
+        Some(project_scope_truth_note_pure(project, &summary))
     }
 
     pub(crate) fn degraded_file_count(&self, _project: Option<&str>) -> i64 {

@@ -20,8 +20,8 @@ mod vector_runtime;
 pub use types::{
     EmbedderLifecycleHeartbeatRecord, EmbedderObservedState, FileLifecycleEvent,
     FileVectorizationLeaseSnapshot, FileVectorizationWork, IgnoreReconcileStats,
-    IndexerRuntimeTruthRecord, VectorBatchRun, VectorLaneStateRecord, VectorPersistOutboxPayload,
-    VectorPersistOutboxUpdate, VectorPersistOutboxWork, VectorWorkerFault,
+    IndexerRuntimeTruthRecord, ProjectScopeTruthRecord, VectorBatchRun, VectorLaneStateRecord,
+    VectorPersistOutboxPayload, VectorPersistOutboxUpdate, VectorPersistOutboxWork, VectorWorkerFault,
 };
 
 /// REQ-AXO-902185 (god-objects) — read the parser-computed McCabe cyclomatic

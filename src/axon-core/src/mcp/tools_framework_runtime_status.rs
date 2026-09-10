@@ -88,6 +88,15 @@ pub(crate) fn ligne_code_intel(
             "**Code-intel:** LIVE — `{}` {}/{} fichier(s) enrole(s) portent des symboles (query/inspect/impact/why operational — prefer over grep)\n",
             projet, portee.completed_files, portee.total_files,
         )
+    } else if portee.excluded_source_files > 0 {
+        format!(
+            "**Code-intel:** PARTIAL — `{}` {} fichier(s) source écarté(s) ({}); {}/{} fichier(s) enrôlé(s) portent des symboles. Un résultat VIDE de `query`/`inspect` ne prouve PAS l'absence pour ces langages : recouper par `retrieve_context`, et voir `diagnose_indexing`.\n",
+            projet,
+            portee.excluded_source_files,
+            portee.excluded_extensions,
+            portee.completed_files,
+            portee.total_files,
+        )
     } else {
         format!(
             "**Code-intel:** PARTIAL — `{}` seulement {}/{} fichier(s) enrole(s) portent des symboles ({:.0} % sans). Un resultat VIDE de `query`/`inspect` ne prouve PAS l'absence : recouper par `retrieve_context`, et voir `diagnose_indexing`.\n",
@@ -2260,6 +2269,8 @@ mod tests_ligne_code_intel {
             completed_files: complets,
             backlog_files: total - complets,
             pending_reasons: Vec::new(),
+            excluded_source_files: 0,
+            excluded_extensions: String::new(),
         }
     }
 

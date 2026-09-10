@@ -6,7 +6,7 @@ use crate::service_guard;
 use super::sql_helpers::{parse_i64_field, parse_u64_field};
 use super::{
     EmbedderLifecycleHeartbeatRecord, EmbedderObservedState, IndexerRuntimeTruthRecord,
-    VectorLaneStateRecord, VectorWorkerFault,
+    ProjectScopeTruthRecord, VectorLaneStateRecord, VectorWorkerFault,
 };
 
 fn parse_bool_field(value: &serde_json::Value) -> bool {
@@ -368,6 +368,69 @@ impl GraphStore {
             embedded_total: row.get(1).and_then(parse_i64_field).unwrap_or_default(),
             oldest_pending_age_s: row.get(2).and_then(parse_i64_field).unwrap_or_default(),
         })
+    }
+
+    /// REQ-AXO-902352 — UPSERT la vérité de portée par projet (fichiers éligibles, enrôlés et extensions source écartées).
+    pub fn record_project_scope_truth(&self, record: &ProjectScopeTruthRecord) -> Result<()> {
+        let table_ref = self.axon_table_ref("project_scope_truth");
+        let sql = format!(
+            "INSERT INTO {table_ref} (project_code, walked_files, eligible_files, indexed_files, excluded_source_files, excluded_extensions, updated_at_ms) \
+             VALUES ('{project}', {walked}, {eligible}, {indexed}, {excluded}, '{ext}', {updated}) \
+             ON CONFLICT (project_code) DO UPDATE SET \
+                walked_files = EXCLUDED.walked_files, \
+                eligible_files = EXCLUDED.eligible_files, \
+                indexed_files = EXCLUDED.indexed_files, \
+                excluded_source_files = EXCLUDED.excluded_source_files, \
+                excluded_extensions = EXCLUDED.excluded_extensions, \
+                updated_at_ms = EXCLUDED.updated_at_ms",
+            project = Self::escape_sql(&record.project_code),
+            walked = record.walked_files,
+            eligible = record.eligible_files,
+            indexed = record.indexed_files,
+            excluded = record.excluded_source_files,
+            ext = Self::escape_sql(&record.excluded_extensions),
+            updated = record.updated_at_ms,
+        );
+        self.execute(&sql)
+    }
+
+    /// REQ-AXO-902352 — lecture de la dernière vérité de portée pour un projet donné.
+    pub fn latest_project_scope_truth(
+        &self,
+        project_code: &str,
+    ) -> Result<Option<ProjectScopeTruthRecord>> {
+        let table_ref = self.axon_table_ref("project_scope_truth");
+        let raw = self.query_json_writer(&format!(
+            "SELECT project_code, walked_files, eligible_files, indexed_files, excluded_source_files, excluded_extensions, updated_at_ms \
+             FROM {table_ref} \
+             WHERE project_code = '{}' \
+             LIMIT 1",
+            Self::escape_sql(project_code)
+        ))?;
+        if raw == "[]" || raw.is_empty() {
+            return Ok(None);
+        }
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some(ProjectScopeTruthRecord {
+            project_code: row
+                .first()
+                .and_then(|v| v.as_str())
+                .unwrap_or(project_code)
+                .to_string(),
+            walked_files: row.get(1).and_then(parse_i64_field).unwrap_or_default(),
+            eligible_files: row.get(2).and_then(parse_i64_field).unwrap_or_default(),
+            indexed_files: row.get(3).and_then(parse_i64_field).unwrap_or_default(),
+            excluded_source_files: row.get(4).and_then(parse_i64_field).unwrap_or_default(),
+            excluded_extensions: row
+                .get(5)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            updated_at_ms: row.get(6).and_then(parse_i64_field).unwrap_or_default(),
+        }))
     }
 }
 
