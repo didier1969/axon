@@ -401,6 +401,16 @@ async fn registry_discovery_once(
                 continue;
             }
         }
+
+        if payload.op == "delete" {
+            info!(
+                project_code = %payload.project_code,
+                project_path = %payload.project_path,
+                "registry discovery: project un-enrolled; resolver refreshed (REQ-AXO-902508)"
+            );
+            continue;
+        }
+
         maybe_watch_new_root(
             &payload,
             database_url,
@@ -1293,7 +1303,17 @@ mod tests {
         let raw = r#"{"op":"update","project_code":"FSF","project_path":"/srv/fsf"}"#;
         let parsed = parse_registry_payload(raw).expect("valid update payload");
         assert_eq!(parsed.op, "update");
+        assert_eq!(parsed.project_code, "FSF");
         assert_eq!(parsed.project_path, "/srv/fsf");
+    }
+
+    #[test]
+    fn registry_payload_delete_is_parsed() {
+        let raw = r#"{"op":"delete","project_code":"KKD","project_path":"/srv/kkd"}"#;
+        let parsed = parse_registry_payload(raw).expect("valid delete payload");
+        assert_eq!(parsed.op, "delete");
+        assert_eq!(parsed.project_code, "KKD");
+        assert_eq!(parsed.project_path, "/srv/kkd");
     }
 
     #[test]

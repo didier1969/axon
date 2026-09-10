@@ -7,10 +7,10 @@
 -- registered project without a manual restart.
 --
 -- Payload shape:
---   {"op":"insert|update","project_code":"AXO","project_path":"/home/.../axon"}
+--   {"op":"insert|update|delete","project_code":"AXO","project_path":"/home/.../axon"}
 --
--- DELETE is intentionally NOT notified: registry rows are preserved per
--- SOLL discipline (CPT-AXO-019 / DEC-AXO-085 — preserve above all).
+-- REQ-AXO-902508: DELETE is notified so the running indexer resolver drops
+-- the retired project without requiring a process restart (avoids orphan rows).
 --
 -- Idempotent: safe to re-run on every startup.
 
@@ -31,6 +31,17 @@ BEGIN
       RETURN NULL;
     END IF;
     op_kind := 'update';
+  ELSIF TG_OP = 'DELETE' THEN
+    -- REQ-AXO-902508: Notify on deletion so the running indexer resolver drops
+    -- the retired project without requiring a process restart.
+    op_kind := 'delete';
+    payload := jsonb_build_object(
+      'op',           op_kind,
+      'project_code', COALESCE(OLD.project_code, ''),
+      'project_path', COALESCE(OLD.project_path, '')
+    );
+    PERFORM pg_notify('axon_registry_changed', payload::text);
+    RETURN NULL;
   ELSE
     RETURN NULL;
   END IF;
@@ -45,5 +56,5 @@ END;
 $$;
 
 CREATE OR REPLACE TRIGGER trg_registry_notify
-AFTER INSERT OR UPDATE ON soll.ProjectCodeRegistry
+AFTER INSERT OR UPDATE OR DELETE ON soll.ProjectCodeRegistry
 FOR EACH ROW EXECUTE FUNCTION soll.fn_registry_notify();

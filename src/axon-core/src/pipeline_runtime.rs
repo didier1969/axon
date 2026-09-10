@@ -625,6 +625,21 @@ pub fn spawn_pipeline_indexer(
                     }
                 }
 
+                // REQ-AXO-902508 — rafraîchir le résolveur de projets au début de chaque passe
+                // de réconciliation pour que tout nouveau projet enregistré après le boot (ou retiré)
+                // soit pris en compte immédiatement, sans redémarrage de l'indexeur.
+                let store_for_registry = store_for_walk.clone();
+                let registry_refresh = tokio::task::spawn_blocking(move || {
+                    crate::project_meta::registered_project_identities(&store_for_registry)
+                })
+                .await;
+                if let Ok(Ok(ids)) = registry_refresh {
+                    if !ids.is_empty() {
+                        let _ = store_for_walk.reconcile_project_fk_parents(&ids);
+                        let _ = resolver.refresh_from_identities(ids);
+                    }
+                }
+
                 let scanner = scanner_for_walk.clone();
                 let files = tokio::task::spawn_blocking(move || scanner.enumerate_files())
                     .await

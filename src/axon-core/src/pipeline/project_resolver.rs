@@ -150,6 +150,33 @@ impl ProjectCodeResolver {
             .map(|snapshot| snapshot.project_paths())
             .unwrap_or_default()
     }
+
+    /// REQ-AXO-902508 — vérifie si un project_code fait partie du snapshot actif.
+    pub fn contains_code(&self, code: &str) -> bool {
+        if let Some(c) = &self.constant {
+            return c.as_str() == code;
+        }
+        self.snapshot
+            .read()
+            .map(|s| s.entries.iter().any(|(_path, pc)| pc.as_str() == code))
+            .unwrap_or(false)
+    }
+
+    /// REQ-AXO-902508 — rafraîchit le snapshot in-RAM atomiquement à partir des identités canoniques.
+    pub fn refresh_from_identities(
+        &self,
+        identities: Vec<crate::project_meta::CanonicalProjectIdentity>,
+    ) -> Result<usize, String> {
+        let count = identities.len();
+        let snapshot = ProjectRegistrySnapshot::from_rows(
+            identities
+                .into_iter()
+                .map(|id| (id.code, id.project_path.to_string_lossy().into_owned())),
+        )
+        .map_err(|e| e.to_string())?;
+        self.replace(snapshot);
+        Ok(count)
+    }
 }
 
 pub fn const_resolver(project_code: impl Into<String>) -> ProjectCodeResolver {

@@ -447,3 +447,5 @@ mod soll_retirement_supersedes_tests;
 mod scope_completeness_tests;
 /// REQ-AXO-902491 — rescan_project ne doit pas rendre status=ok si le wipe de cache a échoué.
 mod rescan_project_wipe_failure_tests;
+/// REQ-AXO-902508 — rafraîchissement à chaud du registre de projets dans l'indexeur sans redémarrage.
+mod registry_hot_reload_tests;
