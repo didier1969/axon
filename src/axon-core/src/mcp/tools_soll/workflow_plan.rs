@@ -1083,6 +1083,25 @@ impl McpServer {
             None
         };
 
+        // REQ-AXO-902429 — Check if the queried node is superseded and has a living replacement.
+        let superseded_replacement: Option<(String, String)> = {
+            let sql = "SELECT e.source_id, COALESCE(n.title, '') \
+                       FROM soll.Edge e \
+                       JOIN soll.Node n ON n.id = e.source_id \
+                       WHERE e.target_id = ? AND e.relation_type = 'SUPERSEDES' \
+                       LIMIT 1";
+            self.graph_store
+                .query_json_param(sql, &json!([id]))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                .and_then(|rows| {
+                    let first = rows.first()?;
+                    let rep_id = first.get(0)?.as_str()?.to_string();
+                    let rep_title = first.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+                    Some((rep_id, rep_title))
+                })
+        };
+
         let direction_title = match direction {
             "parents" => "Parents",
             "incoming" => "Incoming edges",
@@ -1095,9 +1114,30 @@ impl McpServer {
             ""
         };
 
+        let mut data_obj = json!({
+            "status": "ok",
+            "id": id,
+            "direction": direction,
+            "relation_type": rel,
+            "count": items.len(),
+            "capped": capped,
+            "nodes": items,
+        });
+
+        let mut superseded_notice = String::new();
+        if let Some((ref rep_id, ref rep_title)) = superseded_replacement {
+            data_obj["superseded_by"] = json!(rep_id);
+            data_obj["superseded_by_title"] = json!(rep_title);
+            superseded_notice = format!(
+                "ℹ Note: `{id}` has been superseded by `{rep_id}` ({}).\n\n",
+                if rep_title.is_empty() { "replacement node" } else { rep_title }
+            );
+        }
+
         Some(json!({
             "content": [{ "type": "text", "text": format!(
-                "{} of {}{}: {} found\n{}{}{}",
+                "{}{} of {}{}: {} found\n{}{}{}",
+                superseded_notice,
                 direction_title,
                 id,
                 rel.map(|r| format!(" via {r}")).unwrap_or_default(),
@@ -1106,15 +1146,7 @@ impl McpServer {
                 capping_text,
                 opposite_hint.unwrap_or_default(),
             ) }],
-            "data": {
-                "status": "ok",
-                "id": id,
-                "direction": direction,
-                "relation_type": rel,
-                "count": items.len(),
-                "capped": capped,
-                "nodes": items,
-            }
+            "data": data_obj
         }))
     }
 

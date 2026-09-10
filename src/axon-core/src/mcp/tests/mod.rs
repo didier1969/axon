@@ -441,3 +441,5 @@ mod soll_children_tests;
 mod mailbox_wake_tests;
 /// REQ-AXO-902537 — modes brief/json compacts bornés avec pointeurs de détail et RRF lisible.
 mod compact_payload_bounds_tests;
+/// REQ-AXO-902429 — gouvernance du retrait d'un nœud SOLL et obligation de remplaçant / raison.
+mod soll_retirement_supersedes_tests;

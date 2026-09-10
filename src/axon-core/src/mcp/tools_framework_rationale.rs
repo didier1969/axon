@@ -651,6 +651,44 @@ impl McpServer {
         {
             data.insert("framework_alias".to_string(), json!("why"));
         }
+        // REQ-AXO-902429 — Surfacing living replacement when querying a superseded SOLL node
+        if let Some(sym) = args.get("symbol").and_then(|v| v.as_str()) {
+            let sym_trimmed = sym.trim();
+            let sql = "SELECT e.source_id, COALESCE(n.title, '') \
+                       FROM soll.Edge e \
+                       JOIN soll.Node n ON n.id = e.source_id \
+                       WHERE e.target_id = ? AND e.relation_type = 'SUPERSEDES' \
+                       LIMIT 1";
+            if let Some((rep_id, rep_title)) = self
+                .graph_store
+                .query_json_param(sql, &json!([sym_trimmed]))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+                .and_then(|rows| {
+                    let first = rows.first()?;
+                    let r_id = first.get(0)?.as_str()?.to_string();
+                    let r_title = first.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+                    Some((r_id, r_title))
+                })
+            {
+                if let Some(data) = response.get_mut("data").and_then(|v| v.as_object_mut()) {
+                    data.insert("superseded_by".to_string(), json!(rep_id));
+                    data.insert("superseded_by_title".to_string(), json!(rep_title));
+                }
+                if let Some(content_arr) = response.get_mut("content").and_then(|v| v.as_array_mut()) {
+                    if let Some(first_item) = content_arr.first_mut().and_then(|v| v.as_object_mut()) {
+                        if let Some(text_val) = first_item.get_mut("text").and_then(|v| v.as_str()) {
+                            let updated_text = format!(
+                                "ℹ Notice: `{sym_trimmed}` has been superseded by `{rep_id}` ({}).\n\n{}",
+                                if rep_title.is_empty() { "replacement node" } else { &rep_title },
+                                text_val
+                            );
+                            first_item.insert("text".to_string(), json!(updated_text));
+                        }
+                    }
+                }
+            }
+        }
         Self::summarize_why_response(args, &mut response);
         cache_write(Self::why_cache(), cache_key, now_ms, &response);
         Some(response)

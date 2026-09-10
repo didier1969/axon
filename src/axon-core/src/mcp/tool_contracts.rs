@@ -264,6 +264,18 @@ pub(crate) struct SollManagerData {
     /// REQ-AXO-902573 — reason for code exemption (metadata-routed).
     #[serde(default)]
     pub exemption_reason: Option<String>,
+    /// REQ-AXO-902429 — replacement node id when updating to status `superseded`.
+    /// When provided, soll_manager automatically establishes the canonical
+    /// `SUPERSEDES` edge (`<superseded_by> --SUPERSEDES--> <id>`).
+    #[serde(default)]
+    pub superseded_by: Option<String>,
+    /// REQ-AXO-902429 — explicit reason for retiring or rejecting a node when updating
+    /// to status `rejected` (or `superseded` without immediate replacement).
+    #[serde(default)]
+    pub retirement_reason: Option<String>,
+    /// REQ-AXO-902429 — alias for retirement_reason or general update rationale.
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 /// `soll_manager` — create / update / link / unlink intent entities.

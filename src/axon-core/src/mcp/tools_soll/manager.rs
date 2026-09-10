@@ -1560,6 +1560,146 @@ impl McpServer {
                     }
                 }
 
+                // REQ-AXO-902429 — Retirement governance:
+                // An update to `superseded` or `rejected` must enforce replacement or rationale.
+                let effective_target_status = data.get("status").and_then(|v| v.as_str());
+                if let Some(target_status) = effective_target_status {
+                    if target_status == "superseded" {
+                        let superseded_by = data
+                            .get("superseded_by")
+                            .or_else(|| data.get("replacement_id"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+                        let retirement_reason = data
+                            .get("retirement_reason")
+                            .or_else(|| data.get("rationale"))
+                            .or_else(|| data.get("rejection_reason"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+
+                        let has_incoming_supersedes = self
+                            .graph_store
+                            .query_count(&format!(
+                                "SELECT count(*) FROM soll.Edge WHERE target_id = '{}' AND relation_type = 'SUPERSEDES'",
+                                escape_sql(id)
+                            ))
+                            .unwrap_or(0) > 0;
+
+                        if superseded_by.is_none() && !has_incoming_supersedes && retirement_reason.is_none() {
+                            return Some(json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!(
+                                        "Retirement blocked: updating node `{id}` to `status='superseded'` requires either `data.superseded_by=<REPLACEMENT_ID>` (to record the replacement node and create the SUPERSEDES edge), or an explicit retirement rationale (via `data.retirement_reason`). If this requirement was simply abandoned with no replacement, update status to `rejected` with `data.retirement_reason`."
+                                    )
+                                }],
+                                "isError": true,
+                                "data": {
+                                    "status": "input_invalid",
+                                    "operator_guidance": {
+                                        "problem_class": "input_invalid",
+                                        "likely_cause": "superseded_without_replacement_or_rationale",
+                                        "follow_up_tools": ["soll_manager", "soll_query_context"],
+                                        "confidence": "high"
+                                    },
+                                    "parameter_repair": {
+                                        "tool": "soll_manager",
+                                        "invalid_field": "data.superseded_by | data.retirement_reason",
+                                        "accepted_alternatives": [
+                                            "data.superseded_by = \"<living_node_id>\"",
+                                            "data.retirement_reason = \"<explicit reason for retiring>\""
+                                        ],
+                                        "hint": "Provide `data.superseded_by=<REPLACEMENT_ID>` to record the replacement node, or `data.retirement_reason` explaining why the node was retired."
+                                    },
+                                    "example_valid_call": {
+                                        "action": "update",
+                                        "entity": entity,
+                                        "data": {
+                                            "id": id,
+                                            "status": "superseded",
+                                            "superseded_by": "REQ-PRO-999"
+                                        }
+                                    }
+                                }
+                            }));
+                        }
+
+                        if let Some(replacement) = superseded_by {
+                            let exists = self.graph_store.query_count(&format!(
+                                "SELECT count(*) FROM soll.Node WHERE id = '{}'",
+                                escape_sql(replacement)
+                            )).unwrap_or(0) > 0;
+                            if !exists {
+                                return Some(json!({
+                                    "content": [{
+                                        "type": "text",
+                                        "text": format!("Retirement blocked: replacement node `{replacement}` specified in `data.superseded_by` does not exist in soll.Node.")
+                                    }],
+                                    "isError": true,
+                                    "data": {
+                                        "status": "input_invalid",
+                                        "invalid_field": "data.superseded_by",
+                                        "supplied_value": replacement,
+                                        "hint": "Verify the replacement node ID exists before retiring this node."
+                                    }
+                                }));
+                            }
+                        }
+                    } else if target_status == "rejected" {
+                        let retirement_reason = data
+                            .get("retirement_reason")
+                            .or_else(|| data.get("rationale"))
+                            .or_else(|| data.get("rejection_reason"))
+                            .or_else(|| data.get("explanation"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+                        let superseded_by = data
+                            .get("superseded_by")
+                            .or_else(|| data.get("replacement_id"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+
+                        if retirement_reason.is_none() && superseded_by.is_none() {
+                            return Some(json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!(
+                                        "Retirement blocked: updating node `{id}` to `status='rejected'` requires an explicit retirement rationale (via `data.retirement_reason` or `data.rationale`), or `data.superseded_by=<ID>` if replaced."
+                                    )
+                                }],
+                                "isError": true,
+                                "data": {
+                                    "status": "input_invalid",
+                                    "operator_guidance": {
+                                        "problem_class": "input_invalid",
+                                        "likely_cause": "rejected_without_rationale",
+                                        "follow_up_tools": ["soll_manager"],
+                                        "confidence": "high"
+                                    },
+                                    "parameter_repair": {
+                                        "tool": "soll_manager",
+                                        "invalid_field": "data.retirement_reason",
+                                        "hint": "Provide `data.retirement_reason` explaining why the node was rejected."
+                                    },
+                                    "example_valid_call": {
+                                        "action": "update",
+                                        "entity": entity,
+                                        "data": {
+                                            "id": id,
+                                            "status": "rejected",
+                                            "retirement_reason": "Out of scope for current architecture"
+                                        }
+                                    }
+                                }
+                            }));
+                        }
+                    }
+                }
+
                 // REQ-AXO-901962 — the EFFECTIVE status written by the UPDATE is the
                 // supplied one (validated above) OR, when the caller edits only
                 // title/description, the row's PRE-EXISTING status. A legacy
@@ -1674,6 +1814,37 @@ impl McpServer {
 
                     meta["updated_at"] = json!(crate::clock::now_unix_ms());
 
+                    if status == "superseded" {
+                        let superseded_by = data
+                            .get("superseded_by")
+                            .or_else(|| data.get("replacement_id"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+                        if let Some(replacement) = superseded_by {
+                            meta["superseded_by"] = json!(replacement);
+                            let edge_sql = format!(
+                                "INSERT INTO soll.Edge (source_id, target_id, relation_type, project_code) \
+                                 VALUES ('{}', '{}', 'SUPERSEDES', '{}') \
+                                 ON CONFLICT (source_id, target_id, relation_type) DO NOTHING",
+                                escape_sql(replacement),
+                                escape_sql(id),
+                                escape_sql(project_code.as_deref().unwrap_or("")),
+                            );
+                            self.graph_store.execute(&edge_sql)?;
+                        }
+                    }
+                    if let Some(reason) = data
+                        .get("retirement_reason")
+                        .or_else(|| data.get("rationale"))
+                        .or_else(|| data.get("rejection_reason"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        meta["retirement_reason"] = json!(reason);
+                    }
+
                     // REQ-AXO-902425 — journaliser AVANT d'écraser. L'ordre est
                     // le contrat : si l'audit échoue, la mutation n'a pas lieu.
                     let revision_id = self.record_node_revision(
@@ -1741,7 +1912,8 @@ impl McpServer {
                             // pire qu'un rapport muet.
                             let champs_envoyes: Vec<&str> = {
                                 let mut v: Vec<&str> = ["title", "description", "status",
-                                    "priority", "tags", "acceptance_criteria", "code_exempt", "exempt", "exemption_reason", "metadata"]
+                                    "priority", "tags", "acceptance_criteria", "code_exempt", "exempt", "exemption_reason",
+                                    "superseded_by", "retirement_reason", "rationale", "metadata"]
                                     .into_iter()
                                     .filter(|c| data.get(*c).is_some())
                                     .collect();
@@ -1750,7 +1922,7 @@ impl McpServer {
                                 // l'a touché.
                                 if !v.contains(&"metadata")
                                     && v.iter().any(|c| {
-                                        matches!(*c, "priority" | "tags" | "acceptance_criteria" | "code_exempt" | "exempt" | "exemption_reason")
+                                        matches!(*c, "priority" | "tags" | "acceptance_criteria" | "code_exempt" | "exempt" | "exemption_reason" | "superseded_by" | "retirement_reason" | "rationale")
                                     })
                                 {
                                     v.push("metadata");
