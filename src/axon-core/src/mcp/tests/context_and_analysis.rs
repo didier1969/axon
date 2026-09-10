@@ -7856,3 +7856,99 @@ fn req_902647_ist_snapshot_evict_mcp_tool_releases_ram_and_reports_state() {
     assert!(ev_all["data"]["evicted_count"].as_u64().unwrap_or(0) >= 1);
     assert!(!crate::ist_snapshot::process_view().is_warm("EV2"));
 }
+
+#[test]
+fn test_req_902546_project_status_freshness_reconciliation_and_actionable_recovery() {
+    let server = create_test_server();
+    let now_ms = crate::clock::now_unix_ms();
+
+    // 1. Projet 'FSF' entièrement indexé et à jour
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-FSF-001', 'Vision', 'FSF', 'Fiscaly Vision', 'Core tax engine', 'current', '{}')").unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/lib.rs', 'FSF', 'h1', {now_ms})")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('src/calc.rs', 'FSF', 'h2', {now_ms})")).unwrap();
+    server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('c1', 'file', 'src/lib.rs', 'FSF', 'src/lib.rs', 'h1')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Chunk (id, source_type, source_id, project_code, file_path, content_hash) VALUES ('c2', 'file', 'src/calc.rs', 'FSF', 'src/calc.rs', 'h2')").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/lib.rs', 'fsf::lib', 'CONTAINS', 'FSF', 0)").unwrap();
+    server.graph_store.execute("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('src/calc.rs', 'fsf::calc', 'CONTAINS', 'FSF', 0)").unwrap();
+
+    let response_fsf = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_status",
+                "arguments": { "project_code": "FSF", "mode": "brief" }
+            })),
+            id: Some(json!(9025461)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data_fsf = response_fsf.get("data").unwrap();
+    let cockpit_fsf = &data_fsf["truth_cockpit"];
+
+    // REQ-AXO-902546: Pour un projet dont l'index est 100% frais et en phase avec la source,
+    // project_status ne doit PAS bloquer avec current_blocker=indexed_projections_not_fresh.
+    assert_ne!(
+        cockpit_fsf["current_blocker"].as_str(),
+        Some("indexed_projections_not_fresh"),
+        "A project with fresh indexed files and zero modified lag must not report indexed_projections_not_fresh as current_blocker"
+    );
+    assert!(
+        cockpit_fsf["current_blocker"].is_null(),
+        "Expected current_blocker to be null for fully indexed in-sync project, got {:?}",
+        cockpit_fsf["current_blocker"]
+    );
+    assert_eq!(
+        cockpit_fsf["freshness"]["state"].as_str(),
+        Some("fresh"),
+        "Expected freshness state to be fresh for in-sync project"
+    );
+
+    // REQ-AXO-902546: next_best_action ne doit JAMAIS pointer vers `status` (boucle récursive interdite)
+    let next_tool = cockpit_fsf["next_best_action"]["tool"].as_str().unwrap_or("");
+    assert_ne!(
+        next_tool,
+        "status",
+        "next_best_action must never point back recursively to status"
+    );
+
+    // 2. Projet 'EMP' sans aucun fichier indexé
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-EMP-001', 'Vision', 'EMP', 'Empty Vision', 'Empty project', 'current', '{}')").unwrap();
+
+    let response_emp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_status",
+                "arguments": { "project_code": "EMP", "mode": "brief" }
+            })),
+            id: Some(json!(9025462)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data_emp = response_emp.get("data").unwrap();
+    let cockpit_emp = &data_emp["truth_cockpit"];
+
+    // Sur un projet sans fichiers indexés, un blocker clair et un recovery_hint exécutable sont requis
+    assert!(cockpit_emp["current_blocker"].is_string());
+    assert_ne!(
+        cockpit_emp["next_best_action"]["tool"].as_str().unwrap_or(""),
+        "status",
+        "recovery action for empty/degraded project must not be recursive status"
+    );
+    assert!(
+        cockpit_emp["recovery_hint"].is_object(),
+        "Expected executable recovery_hint in truth_cockpit for degraded project"
+    );
+    assert!(
+        cockpit_emp["recovery_hint"]["action"].is_string()
+            && (cockpit_emp["recovery_hint"]["command"].is_string()
+                || cockpit_emp["recovery_hint"]["tool"].is_string())
+    );
+}
+

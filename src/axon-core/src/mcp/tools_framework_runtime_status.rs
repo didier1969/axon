@@ -119,11 +119,16 @@ impl McpServer {
     pub(super) fn axon_status_status_impl(&self, args: &Value) -> Option<Value> {
         let mode = args.get("mode").and_then(|value| value.as_str());
         let now_ms = crate::clock::now_unix_ms();
-        // REQ-AXO-902523 — status is cached on a shared brain. Resolve the
-        // caller exactly once and bind the whole response/cache entry to it;
+        // REQ-AXO-902523 / REQ-AXO-902546 — status is cached on a shared brain. Resolve the
+        // caller or explicit project_code argument and bind the whole response/cache entry to it;
         // otherwise the first client in the TTL window lends its tenant scope
         // to every following client.
-        let status_project = self.auto_resolve_project_code_str();
+        let status_project = args
+            .get("project_code")
+            .or_else(|| args.get("project"))
+            .and_then(|value| value.as_str())
+            .map(String::from)
+            .or_else(|| self.auto_resolve_project_code_str());
         let runtime_mode = AxonRuntimeMode::from_env();
         let runtime_shadow_role = current_runtime_shadow_role();
         let split_runtime_is_indexer = matches!(
@@ -596,7 +601,8 @@ impl McpServer {
         // status calls stay zero-cost. Falls back to Null on query
         // failure (the rest of the response remains useful).
         let staleness = if !indexed_projection_fresh {
-            self.compute_staleness_snapshot().unwrap_or(Value::Null)
+            self.compute_staleness_snapshot_for_project(status_project.as_deref())
+                .unwrap_or(Value::Null)
         } else {
             Value::Null
         };
@@ -1874,15 +1880,34 @@ impl McpServer {
     /// when IndexedFile keeps pace (pipeline writes in-line ; the legacy
     /// "modified files since last publish" decoupling is gone).
     pub(crate) fn compute_staleness_snapshot(&self) -> Result<Value, String> {
-        let sql = "SELECT \
-                     COALESCE(MAX(last_seen_ms), 0)::text AS last_publish_ts_ms, \
-                     '0'::text AS modified_count, \
-                     '0'::text AS oldest_age_secs, \
-                     ''::text AS sample_paths_pipe \
-                   FROM ist.IndexedFile";
+        self.compute_staleness_snapshot_for_project(None)
+    }
+
+    pub(crate) fn compute_staleness_snapshot_for_project(
+        &self,
+        project: Option<&str>,
+    ) -> Result<Value, String> {
+        let sql = match project {
+            Some(p) if !p.trim().is_empty() && p != "*" => format!(
+                "SELECT \
+                   COALESCE(MAX(last_seen_ms), 0)::text AS last_publish_ts_ms, \
+                   '0'::text AS modified_count, \
+                   '0'::text AS oldest_age_secs, \
+                   ''::text AS sample_paths_pipe \
+                 FROM ist.IndexedFile WHERE project_code = '{}'",
+                p.replace('\'', "''")
+            ),
+            _ => "SELECT \
+                   COALESCE(MAX(last_seen_ms), 0)::text AS last_publish_ts_ms, \
+                   '0'::text AS modified_count, \
+                   '0'::text AS oldest_age_secs, \
+                   ''::text AS sample_paths_pipe \
+                 FROM ist.IndexedFile"
+                .to_string(),
+        };
         let json = self
             .graph_store
-            .query_json(sql)
+            .query_json(&sql)
             .map_err(|e| format!("staleness query failed: {e}"))?;
         let rows: Vec<Vec<String>> =
             serde_json::from_str(&json).map_err(|e| format!("staleness parse failed: {e}"))?;

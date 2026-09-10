@@ -183,7 +183,10 @@ impl McpServer {
         // ~11.5s driven by rare ~60s runs, while each sub-call is individually
         // fast). Observability before optimization (PIL-AXO-9006, TOC discipline).
         let t_status = std::time::Instant::now();
-        let status = self.axon_status(&json!({ "mode": mode.unwrap_or("brief") }))?;
+        let status = self.axon_status(&json!({
+            "mode": mode.unwrap_or("brief"),
+            "project_code": project_code
+        }))?;
         let ms_status = t_status.elapsed().as_millis() as u64;
         let status_data = status.get("data").cloned().unwrap_or_else(|| json!({}));
 
@@ -253,6 +256,14 @@ impl McpServer {
             .unwrap_or(0);
         let ms_validation = t_validation.elapsed().as_millis() as u64;
 
+        let fichiers_indexes = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM ist.indexedfile WHERE project_code = '{}'",
+                project_code.replace('\'', "''")
+            ))
+            .unwrap_or(0);
+
         let anomaly_summary = anomalies_data
             .get("summary")
             .cloned()
@@ -266,7 +277,8 @@ impl McpServer {
         let generated_at = crate::clock::now_unix_ms();
         let delta_vs_previous =
             Self::build_project_status_delta(previous_summary, &anomaly_summary);
-        let degraded_notes = status_data
+
+        let runtime_degraded_notes = status_data
             .pointer("/availability/degraded_notes")
             .and_then(|value| value.as_array())
             .cloned()
@@ -274,6 +286,52 @@ impl McpServer {
             .into_iter()
             .filter_map(|value| value.as_str().map(ToString::to_string))
             .collect::<Vec<_>>();
+
+        let modified_since = status_data
+            .pointer("/truth_cockpit/staleness/modified_files_since")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+
+        let ist_writer_unhealthy = runtime_degraded_notes
+            .iter()
+            .any(|note| note.starts_with("ist_writer_"));
+
+        // REQ-AXO-902546: réconcilier project_status avec la fraîcheur réelle du projet.
+        // Si le projet a des fichiers indexés (fichiers_indexes > 0), 0 fichier modifié (modified_since == 0)
+        // et qu'aucun échec d'écrivain n'est en cours, le snapshot IST est synchronisé avec le code source
+        // ("snapshot in sync with source"). La note globale runtime `indexed_projections_not_fresh`
+        // (qui signale simplement que le démon indexeur n'est pas en écoute continue de fond) ne bloque
+        // PAS les lectures ni les conclusions de ce projet.
+        let snapshot_in_sync = fichiers_indexes > 0 && modified_since == 0 && !ist_writer_unhealthy;
+
+        let mut project_blockers = Vec::<String>::new();
+        let mut degraded_notes = Vec::<String>::new();
+
+        let is_indexer_idle_note = |note: &str| {
+            note == "indexed_projections_not_fresh"
+                || note == "indexer_feed_degraded"
+                || note == "indexer_heartbeat_absent"
+                || note == "runtime_authority_not_converged"
+        };
+
+        if fichiers_indexes == 0 {
+            let empty_note = "aucun fichier indexe pour ce projet — les metriques derivees du code ne sont PAS mesurees ; voir `diagnose_indexing`".to_string();
+            project_blockers.push(empty_note.clone());
+            degraded_notes.push(empty_note);
+        } else if !snapshot_in_sync {
+            for note in &runtime_degraded_notes {
+                project_blockers.push(note.clone());
+                degraded_notes.push(note.clone());
+            }
+        } else {
+            for note in &runtime_degraded_notes {
+                if !is_indexer_idle_note(note) {
+                    project_blockers.push(note.clone());
+                    degraded_notes.push(note.clone());
+                }
+            }
+        }
+
         let snapshot_record = json!({
             "snapshot_id": snapshot_id,
             "generated_at": generated_at,
@@ -295,14 +353,15 @@ impl McpServer {
                 "persisted": true
             }),
             Err(error) => {
-                let mut notes = degraded_notes.clone();
-                notes.push(format!("snapshot_persistence_failed:{error}"));
+                let note = format!("snapshot_persistence_failed:{error}");
+                project_blockers.push(note.clone());
+                degraded_notes.push(note.clone());
                 json!({
                     "scope": "derived_non_canonical",
                     "path": structural_history_path(project_code).to_string_lossy().to_string(),
                     "persisted": false,
                     "error": error,
-                    "degraded_notes": notes
+                    "degraded_notes": degraded_notes.clone()
                 })
             }
         };
@@ -319,11 +378,35 @@ impl McpServer {
             "total": ms_total
         });
         let operator_guidance =
-            project_status_operator_guidance(&degraded_notes, &snapshot_storage, &vision);
+            project_status_operator_guidance(&degraded_notes, &snapshot_storage, &vision, project_code);
         let next_best_action = operator_guidance
             .get("next_action")
             .cloned()
             .unwrap_or(Value::Null);
+
+        let status_recovery_hint = status_data
+            .pointer("/truth_cockpit/recovery_hint")
+            .cloned()
+            .unwrap_or(Value::Null);
+
+        let recovery_hint = if fichiers_indexes == 0 {
+            json!({
+                "action": "diagnose_indexing",
+                "command": format!("diagnose_indexing project={project_code}"),
+                "reason": "aucun fichier indexe pour ce projet",
+                "verification": "fichiers_indexes > 0"
+            })
+        } else if !project_blockers.is_empty() {
+            if !status_recovery_hint.is_null() {
+                status_recovery_hint
+            } else {
+                let (_, hint) = crate::mcp::tools_framework_runtime_status::derive_recovery_action(&project_blockers);
+                hint
+            }
+        } else {
+            Value::Null
+        };
+
         let mut proof_gaps = Vec::<Value>::new();
         if anomaly_summary.get("validation_coverage_score").is_none()
             && canonical_validation_count == 0
@@ -346,15 +429,16 @@ impl McpServer {
             proof_gaps.push(json!("snapshot_storage_not_persisted"));
         }
         let truth_cockpit = json!({
-            "current_blocker": degraded_notes
+            "current_blocker": project_blockers
                 .first()
                 .cloned()
                 .map(Value::String)
                 .unwrap_or(Value::Null),
             "next_best_action": next_best_action,
+            "recovery_hint": recovery_hint,
             "confidence": "high",
             "freshness": {
-                "state": if degraded_notes.is_empty() { "fresh" } else { "degraded" },
+                "state": if project_blockers.is_empty() { "fresh" } else { "degraded" },
                 "degraded_notes": degraded_notes,
                 "runtime_truth_status": status_data.get("truth_status").cloned().unwrap_or(Value::Null)
             },
@@ -415,22 +499,7 @@ impl McpServer {
                 }
             });
 
-        // REQ-AXO-902409 (doleance DVM #255) — lire la couverture d'index AVANT de
-        // publier des metriques derivees du CODE.
-        //
-        // Le rapporteur proposait de lire `eligible` ET `indexed`. `eligible` exige un
-        // parcours DISQUE — mesure a 3,1 s pour le seul depot AXO, sur un chemin appele
-        // a chaque ouverture de session : le mettre ici serait un mauvais echange, et
-        // c'est deja tranche ailleurs. Mais `indexed` seul SUFFIT et ne coute qu'un
-        // COUNT : si aucun fichier n'est indexe, aucune metrique derivee du code ne
-        // peut avoir ete mesuree, quel que soit le nombre de fichiers sur le disque.
-        let fichiers_indexes = self
-            .graph_store
-            .query_count(&format!(
-                "SELECT count(*) FROM ist.indexedfile WHERE project_code = '{}'",
-                project_code.replace('\'', "''")
-            ))
-            .unwrap_or(0);
+
 
         // Trois etats, jamais deux. Deux lectures distinctes, parce que les grandeurs
         // n'ont pas la meme source — le rapporteur le releve lui-meme et exclut

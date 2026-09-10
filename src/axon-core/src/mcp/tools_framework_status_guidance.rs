@@ -4,15 +4,38 @@ pub(super) fn project_status_operator_guidance(
     degraded_notes: &[String],
     snapshot_storage: &Value,
     vision: &Value,
+    project_code: &str,
 ) -> Value {
     let mut blocking_factors = Vec::<Value>::new();
 
     for note in degraded_notes {
+        let (factor, action) = if note == "indexed_projections_not_fresh" {
+            (
+                "indexed_projections_not_fresh",
+                "start indexer via `axon-live start --indexer-graph` to maintain realtime freshness (CPT-AXO-029)".to_string(),
+            )
+        } else if note.contains("aucun fichier indexe") || note == "no_indexed_files_for_project" {
+            (
+                "no_indexed_files",
+                format!("run `diagnose_indexing project={project_code}` to inspect ingestion state"),
+            )
+        } else if note.starts_with("ist_writer_") {
+            (
+                "ist_writer_degraded",
+                "inspect `status mode=verbose` and verify ist_writer subsystem health".to_string(),
+            )
+        } else {
+            (
+                "runtime_degraded_note",
+                format!("address runtime degradation: {note}"),
+            )
+        };
+
         blocking_factors.push(json!({
-            "factor": "runtime_degraded_note",
+            "factor": factor,
             "severity": "high",
             "detail": note,
-            "recommended_action": "inspect `status` and clear degraded runtime conditions before relying on project-wide conclusions"
+            "recommended_action": action
         }));
     }
 
@@ -57,46 +80,85 @@ pub(super) fn project_status_operator_guidance(
         })
         .collect::<Vec<_>>();
 
-    let recommended_next_step = if !degraded_notes.is_empty() {
-        "inspect_runtime_status_then_refresh_project_status"
+    // REQ-AXO-902546 — next_action must be concrete and actionable, NEVER recursively
+    // pointing back to `status` without parameters (which led LLMs into an infinite loop).
+    let (recommended_next_step, next_action) = if let Some(ist_note) = degraded_notes.iter().find(|n| n.starts_with("ist_writer_")) {
+        (
+            "inspect_ist_writer",
+            json!({
+                "kind": "inspect_ist_writer",
+                "tool": "status",
+                "arguments": { "mode": "verbose" },
+                "reason": ist_note,
+                "when": "now"
+            }),
+        )
+    } else if degraded_notes.iter().any(|n| n.contains("aucun fichier indexe") || n == "no_indexed_files_for_project") {
+        (
+            "diagnose_indexing",
+            json!({
+                "kind": "diagnose_indexing",
+                "tool": "diagnose_indexing",
+                "arguments": { "project": project_code },
+                "when": "now"
+            }),
+        )
+    } else if degraded_notes.iter().any(|n| n == "indexed_projections_not_fresh") {
+        (
+            "start_indexer",
+            json!({
+                "kind": "start_indexer",
+                "tool": "axon-live",
+                "arguments": { "command": "start --indexer-graph" },
+                "when": "now"
+            }),
+        )
     } else if snapshot_storage
         .get("persisted")
         .and_then(|value| value.as_bool())
         == Some(false)
     {
-        "repair_snapshot_storage_then_refresh_project_status"
+        (
+            "repair_snapshot_storage_then_refresh_project_status",
+            json!({
+                "kind": "repair_snapshot_storage",
+                "tool": "project_status",
+                "when": "after_storage_fix"
+            }),
+        )
     } else if vision
         .get("id")
         .and_then(|value| value.as_str())
         .unwrap_or("unavailable")
         == "unavailable"
     {
-        "refresh_soll_context_then_reassess_project_status"
+        (
+            "refresh_soll_context_then_reassess_project_status",
+            json!({
+                "kind": "refresh_soll_context",
+                "tool": "soll_query_context",
+                "when": "now"
+            }),
+        )
+    } else if !degraded_notes.is_empty() {
+        (
+            "inspect_project_indexing",
+            json!({
+                "kind": "inspect_project_indexing",
+                "tool": "diagnose_indexing",
+                "arguments": { "project": project_code },
+                "when": "now"
+            }),
+        )
     } else {
-        "run_anomalies_explicitly_then_follow_with_why_or_path"
-    };
-
-    let next_action = match recommended_next_step {
-        "inspect_runtime_status_then_refresh_project_status" => json!({
-            "kind": "inspect_runtime_status",
-            "tool": "status",
-            "when": "now"
-        }),
-        "repair_snapshot_storage_then_refresh_project_status" => json!({
-            "kind": "repair_snapshot_storage",
-            "tool": "project_status",
-            "when": "after_storage_fix"
-        }),
-        "refresh_soll_context_then_reassess_project_status" => json!({
-            "kind": "refresh_soll_context",
-            "tool": "soll_query_context",
-            "when": "now"
-        }),
-        _ => json!({
-            "kind": "expand_structural_findings",
-            "tool": "anomalies",
-            "when": "now"
-        }),
+        (
+            "run_anomalies_explicitly_then_follow_with_why_or_path",
+            json!({
+                "kind": "expand_structural_findings",
+                "tool": "anomalies",
+                "when": "now"
+            }),
+        )
     };
 
     json!({
