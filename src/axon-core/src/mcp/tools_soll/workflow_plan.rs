@@ -1657,6 +1657,7 @@ const MULTI_GET_TEXT_BUDGET: usize = 32_000;
             .map(str::trim)
             .filter(|f| !f.is_empty());
 
+        let mut section_match_franc = false;
         let corps_rendu: String = if veut_sommaire {
             format!(
                 "**{} section(s)** — passe `section=\"<fragment du titre>\"` pour en lire une :\n{}",
@@ -1697,7 +1698,10 @@ const MULTI_GET_TEXT_BUDGET: usize = 32_000;
                 }
             }
             match trouve {
-                Some(sec) => sec,
+                Some(sec) => {
+                    section_match_franc = true;
+                    sec
+                }
                 // Un fragment qui ne matche pas ne doit PAS coûter un aller-retour à
                 // l'aveugle : on rend les titres disponibles avec le refus.
                 None => format!(
@@ -1778,16 +1782,24 @@ const MULTI_GET_TEXT_BUDGET: usize = 32_000;
         let texte =
             format!("## {id} — {title}\n_{node_type} · {status} · {project}_\n\n{corps_rendu}");
 
+        let mut data = json!({
+            "status": "ok",
+            "id": id, "type": node_type, "title": title,
+            "node_status": status, "project_code": project,
+            "description": corps_rendu,
+            "next_action": { "kind": "continue_with_follow_up_tool", "tool": "soll_query_context", "when": "if_more_context_needed" }
+        });
+        // REQ-AXO-902648 (Feedback #437) — omettre `section_titles` de `data` en cas de match
+        // franc sur `section=`. La liste complète ne sert qu'à orienter un choix
+        // (`sections=true`, non-match, ou vue d'ensemble) ; la renvoyer quand la
+        // section exacte est livrée charge inutilement le payload de 400+ titres.
+        if !section_match_franc {
+            data["section_titles"] = json!(titres);
+        }
+
         Some(json!({
             "content": [{ "type": "text", "text": texte }],
-            "data": {
-                "status": "ok",
-                "id": id, "type": node_type, "title": title,
-                "node_status": status, "project_code": project,
-                "section_titles": titres,
-                "description": corps_rendu,
-                "next_action": { "kind": "continue_with_follow_up_tool", "tool": "soll_query_context", "when": "if_more_context_needed" }
-            }
+            "data": data
         }))
     }
 

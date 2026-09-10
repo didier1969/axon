@@ -7959,17 +7959,35 @@ fn test_soll_get_sections_and_section_truncate_the_structured_body() {
         "sans parametre, le corps entier reste du (non-regression), got: {body}"
     );
 
-    // (4) `section_titles` reste rendu dans les trois cas.
-    for reponse in [&sommaire, &une, &entier] {
-        let titres = reponse["data"]["section_titles"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0);
-        assert_eq!(
-            titres, 3,
-            "section_titles doit rester rendu dans les trois cas"
-        );
-    }
+    // (4) REQ-AXO-902648 (Feedback #437) : `section_titles` est omis de data
+    // en cas de match franc sur `section=` pour ne pas polluer le payload avec
+    // des centaines de titres inutiles. Il reste rendu sur `sections=true`, sans
+    // paramètre, et en cas de non-match (pour guider l'appelant).
+    assert_eq!(
+        sommaire["data"]["section_titles"].as_array().map(|a| a.len()),
+        Some(3),
+        "`sections=true` doit rendre section_titles"
+    );
+    assert_eq!(
+        entier["data"]["section_titles"].as_array().map(|a| a.len()),
+        Some(3),
+        "sans parametre, section_titles doit rester rendu"
+    );
+    assert!(
+        une["data"]["section_titles"].is_null(),
+        "en cas de match franc sur `section=`, section_titles doit etre OMIS de data (got: {:?})",
+        une["data"]["section_titles"]
+    );
+
+    // (5) En cas de non-match sur `section=`, `section_titles` reste rendu pour guider l'appelant.
+    let non_trouve = server
+        .axon_soll_get(&json!({ "id": "CPT-SGT-010", "section": "Inexistante" }))
+        .expect("soll_get must answer");
+    assert_eq!(
+        non_trouve["data"]["section_titles"].as_array().map(|a| a.len()),
+        Some(3),
+        "en cas de non-match sur `section=`, section_titles doit rester rendu pour orienter le choix"
+    );
 }
 
 /// REQ-AXO-902288 — a single-legal pair (`REQ → PIL` admits only `BELONGS_TO`)
