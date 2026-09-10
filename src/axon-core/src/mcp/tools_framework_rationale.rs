@@ -11,6 +11,7 @@ use super::McpServer;
 use crate::mcp::format::Compte;
 
 fn compact_project_status_brief_data(data: &Value) -> Value {
+    let project_code = data.get("project_code").cloned().unwrap_or(Value::Null);
     let conception = data.get("conception").unwrap_or(&Value::Null);
     let soll = data.get("soll_context").unwrap_or(&Value::Null);
     let list_count = |key: &str| {
@@ -20,12 +21,44 @@ fn compact_project_status_brief_data(data: &Value) -> Value {
             .unwrap_or(0)
     };
 
+    let vision_raw = data.get("vision").cloned().unwrap_or(Value::Null);
+    let compact_vision = if let Some(obj) = vision_raw.as_object() {
+        let id = obj.get("id").and_then(Value::as_str).unwrap_or("unavailable");
+        let title = obj.get("title").and_then(Value::as_str).unwrap_or("unavailable");
+        let status = obj.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        let desc = obj.get("description").and_then(Value::as_str).unwrap_or("");
+        let summary = if desc.is_empty() || desc == "unavailable" {
+            desc.to_string()
+        } else {
+            let first = desc.split(['.', '\n']).next().unwrap_or(desc).trim();
+            if first.len() > 140 {
+                format!("{}…", &first[..137])
+            } else {
+                first.to_string()
+            }
+        };
+        json!({
+            "id": id,
+            "title": title,
+            "status": status,
+            "source": obj.get("source").and_then(Value::as_str).unwrap_or("SOLL"),
+            "summary": summary,
+            "body_chars": desc.chars().count(),
+            "expand_with": {
+                "tool": "soll_get",
+                "arguments": { "id": id }
+            }
+        })
+    } else {
+        vision_raw
+    };
+
     json!({
-        "project_code": data.get("project_code").cloned().unwrap_or(Value::Null),
+        "project_code": project_code,
         "snapshot_id": data.get("snapshot_id").cloned().unwrap_or(Value::Null),
         "generated_at": data.get("generated_at").cloned().unwrap_or(Value::Null),
         "delta_vs_previous": data.get("delta_vs_previous").cloned().unwrap_or(Value::Null),
-        "vision": data.get("vision").cloned().unwrap_or(Value::Null),
+        "vision": compact_vision,
         "conception_summary": {
             "module_count": conception.get("module_count").cloned().unwrap_or(Value::Null),
             "interface_count": conception.get("interface_count").cloned().unwrap_or(Value::Null),
@@ -45,16 +78,29 @@ fn compact_project_status_brief_data(data: &Value) -> Value {
             "revisions": list_count("revisions"),
         },
         "stage_timings_ms": data.get("stage_timings_ms").cloned().unwrap_or(Value::Null),
+        "expand_anomalies": {
+            "tool": "anomalies",
+            "arguments": { "project": project_code.clone(), "mode": "verbose" }
+        },
+        "expand_conception": {
+            "tool": "conception_view",
+            "arguments": { "project": project_code.clone() }
+        },
+        "expand_soll_context": {
+            "tool": "soll_query_context",
+            "arguments": { "project_code": project_code.clone() }
+        },
         "omitted_in_brief": [
             "conception.modules", "conception.interfaces", "conception.contracts",
             "conception.flows", "anomalies.findings", "anomalies.recommendations",
             "soll_context.visions", "soll_context.requirements",
-            "soll_context.decisions", "soll_context.revisions"
+            "soll_context.decisions", "soll_context.revisions",
+            "vision.description"
         ],
         "detail_continuation": {
             "tool": "project_status",
             "arguments": {
-                "project_code": data.get("project_code").cloned().unwrap_or(Value::Null),
+                "project_code": project_code,
                 "mode": "verbose"
             }
         }

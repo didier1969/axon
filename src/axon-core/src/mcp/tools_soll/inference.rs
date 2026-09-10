@@ -399,7 +399,11 @@ pub(super) fn blocker_to_json(blocker: &WorkPlanBlocker) -> Value {
     json!({
         "id": blocker.id,
         "entity_type": blocker.entity_type,
-        "reason": blocker.reason
+        "reason": blocker.reason,
+        "expand_with": {
+            "tool": "soll_get",
+            "arguments": { "id": blocker.id }
+        }
     })
 }
 
@@ -422,7 +426,11 @@ pub(super) fn wave_to_json(wave: &WorkPlanWave) -> Value {
                 "reasons": item.reasons,
                 "validation_gates": item.validation_gates,
                 "ist_signals": item.ist_signals,
-                "breadcrumb": item.breadcrumb
+                "breadcrumb": item.breadcrumb,
+                "expand_with": {
+                    "tool": "soll_get",
+                    "arguments": { "id": item.id }
+                }
             })
         }).collect::<Vec<_>>()
     })

@@ -439,3 +439,5 @@ mod soll_criteria_satisfaction;
 mod soll_children_tests;
 /// REQ-AXO-902548 — wake observable et traçabilité quadri-état dans la mailbox.
 mod mailbox_wake_tests;
+/// REQ-AXO-902537 — modes brief/json compacts bornés avec pointeurs de détail et RRF lisible.
+mod compact_payload_bounds_tests;

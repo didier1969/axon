@@ -221,7 +221,11 @@ pub(super) fn build_top_recommendations(waves: &[WorkPlanWave], top: usize) -> V
                 "wave_index": wave.wave_index,
                 "kind": recommendation_kind(item),
                 "reason": recommendation_reason(item),
-                "validation_gates": item.validation_gates
+                "validation_gates": item.validation_gates,
+                "expand_with": {
+                    "tool": "soll_get",
+                    "arguments": { "id": item.id }
+                }
             }));
             if recommendations.len() >= top {
                 return recommendations;

@@ -1059,12 +1059,18 @@ fn compact_requirement_verification(data: &Value) -> Value {
         })
         .take(20)
         .map(|entry| {
+            let id = entry.get("id").cloned().unwrap_or(Value::Null);
+            let id_str = id.as_str().unwrap_or("");
             json!({
-                "id": entry.get("id").cloned().unwrap_or(Value::Null),
+                "id": id,
                 "state": entry.get("state").cloned().unwrap_or(Value::Null),
                 "status": entry.get("status").cloned().unwrap_or(Value::Null),
                 "missing_dimensions": entry.get("missing_dimensions").cloned().unwrap_or_else(|| json!([])),
-                "suggested_next_actions": entry.get("suggested_next_actions").cloned().unwrap_or_else(|| json!([]))
+                "suggested_next_actions": entry.get("suggested_next_actions").cloned().unwrap_or_else(|| json!([])),
+                "expand_with": {
+                    "tool": "soll_get",
+                    "arguments": { "id": id_str }
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -1442,20 +1448,99 @@ impl McpServer {
         });
         fused.truncate(top_k.max(1));
 
+        let snap_opt = self.soll_cache().snapshot(project_code).ok();
+        let mut missing_ids = Vec::new();
+        let mut node_meta: HashMap<String, (String, String, String)> = HashMap::new();
+
+        for (id, _) in &fused {
+            if let Some(snap) = snap_opt.as_ref() {
+                if let Some(n) = snap.nodes.get(id) {
+                    node_meta.insert(id.clone(), (n.entity_type.clone(), n.title.clone(), n.status.clone()));
+                    continue;
+                }
+            }
+            missing_ids.push(id.clone());
+        }
+
+        if !missing_ids.is_empty() {
+            let quoted = missing_ids
+                .iter()
+                .map(|id| format!("'{}'", escape_sql(id)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT id, type, title, status FROM soll.Node WHERE id IN ({quoted})"
+            );
+            if let Ok(raw) = self.graph_store.query_json(&sql) {
+                if let Ok(rows) = serde_json::from_str::<Vec<Vec<Value>>>(&raw) {
+                    for r in rows {
+                        if r.len() >= 4 {
+                            let id = r[0].as_str().unwrap_or("").to_string();
+                            let ty = r[1].as_str().unwrap_or("Node").to_string();
+                            let title = r[2].as_str().unwrap_or("").to_string();
+                            let st = r[3].as_str().unwrap_or("unknown").to_string();
+                            node_meta.insert(id, (ty, title, st));
+                        }
+                    }
+                }
+            }
+        }
+
         let results: Vec<Value> = fused
             .iter()
-            .map(|(id, s)| json!({ "id": id, "rrf_score": (s * 1000.0).round() / 1000.0 }))
+            .map(|(id, s)| {
+                let (entity_type, title, status) = node_meta
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| ("Node".to_string(), String::new(), "unknown".to_string()));
+                let rrf_score = (s * 1000.0).round() / 1000.0;
+                json!({
+                    "id": id,
+                    "entity_type": entity_type,
+                    "title": title,
+                    "status": status,
+                    "rrf_score": rrf_score,
+                    "expand_with": {
+                        "tool": "soll_get",
+                        "arguments": { "id": id }
+                    }
+                })
+            })
             .collect();
+
+        let mut text_lines = Vec::new();
+        text_lines.push(format!(
+            "Tri-modal RRF around {seed}: {} related node(s) [lanes ann={} fts={} graph={}]",
+            results.len(),
+            if lanes_present[0] { "on" } else { "off" },
+            if lanes_present[1] { "on" } else { "off" },
+            if lanes_present[2] { "on" } else { "off" }
+        ));
+
+        if !results.is_empty() {
+            text_lines.push("\nTop related nodes:".to_string());
+            for (idx, r) in results.iter().take(5).enumerate() {
+                let id = r["id"].as_str().unwrap_or("");
+                let ty = r["entity_type"].as_str().unwrap_or("Node");
+                let title = r["title"].as_str().unwrap_or("");
+                let status = r["status"].as_str().unwrap_or("unknown");
+                let score = r["rrf_score"].as_f64().unwrap_or(0.0);
+                if title.is_empty() {
+                    text_lines.push(format!("  {}. {} [{} · {}] (score: {:.3})", idx + 1, id, ty, status, score));
+                } else {
+                    text_lines.push(format!("  {}. {} [{} · {}] {} (score: {:.3})", idx + 1, id, ty, status, title, score));
+                }
+            }
+            if results.len() > 5 {
+                text_lines.push(format!("  ... and {} more results in structuredContent.results", results.len() - 5));
+            }
+            text_lines.push("\nUse `soll_get(id=\"<ID>\")` to inspect node bodies.".to_string());
+        }
+
         Some(json!({
             "content": [{
                 "type": "text",
-                "text": format!(
-                    "Tri-modal RRF around {seed}: {} related node(s) [lanes ann={} fts={} graph={}]",
-                    results.len(),
-                    if lanes_present[0] { "on" } else { "off" },
-                    if lanes_present[1] { "on" } else { "off" },
-                    if lanes_present[2] { "on" } else { "off" }
-                )
+                "text": text_lines.join("\n")
             }],
             "data": {
                 "status": "ok",
