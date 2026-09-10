@@ -313,10 +313,79 @@ impl McpServer {
                 String::new()
             } else {
                 format!(
-                    " ⚠️ {} item(s) WILL FAIL at commit (missing attach_to/relation_type or non-existent parent) — see data.commit_blockers; fix before dry_run=false.",
+                    " ⚠️ {} item(s) WILL FAIL at commit (missing attach_to/relation_type, non-existent parent, or duplicate title) — see data.commit_blockers; fix before dry_run=false.",
                     commit_blockers.len()
                 )
             };
+
+            // REQ-AXO-902474 — rend, pour chaque nœud créé du plan, les nœuds vivants les plus proches (titre + distance)
+            let mut plan_nearby_nodes = Vec::new();
+            for op in &operations {
+                let entity = op.get("entity").and_then(Value::as_str).unwrap_or("");
+                if entity == "relation" {
+                    continue;
+                }
+                let logical_key = op.get("logical_key").and_then(Value::as_str).unwrap_or("");
+                let payload = op.get("payload");
+                let title = payload
+                    .and_then(|p| p.get("title").or_else(|| p.get("name")))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                if title.is_empty() {
+                    continue;
+                }
+                let nearby_query = format!(
+                    "SELECT id, title, type, status, similarity(LOWER(title), LOWER('{}')) AS sim \
+                     FROM soll.Node \
+                     WHERE project_code = '{}' \
+                       AND status NOT IN ('superseded', 'rejected', 'archived') \
+                       AND similarity(LOWER(title), LOWER('{}')) >= 0.3 \
+                     ORDER BY sim DESC, length(title), title \
+                     LIMIT 5",
+                    escape_sql(title),
+                    escape_sql(&canonical_project_code),
+                    escape_sql(title)
+                );
+                let (status, candidates) = match self.graph_store.query_json(&nearby_query) {
+                    Ok(raw) => {
+                        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+                        let mut cand = Vec::new();
+                        for row in rows {
+                            if let (Some(id), Some(t), Some(tp), Some(st)) = (
+                                row.get(0).and_then(|v| v.as_str()),
+                                row.get(1).and_then(|v| v.as_str()),
+                                row.get(2).and_then(|v| v.as_str()),
+                                row.get(3).and_then(|v| v.as_str()),
+                            ) {
+                                let sim = row.get(4).and_then(|v| {
+                                    v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                                }).unwrap_or(0.0);
+                                cand.push(json!({
+                                    "id": id,
+                                    "title": t,
+                                    "type": tp,
+                                    "status": st,
+                                    "similarity": sim
+                                }));
+                            }
+                        }
+                        if cand.is_empty() {
+                            ("none", vec![])
+                        } else {
+                            ("found", cand)
+                        }
+                    }
+                    Err(_) => ("search_unavailable", vec![])
+                };
+                plan_nearby_nodes.push(json!({
+                    "logical_key": logical_key,
+                    "title": title,
+                    "status": status,
+                    "candidates": candidates
+                }));
+            }
+
             return Some(json!({
                 "content": [{"type":"text","text": format!("SOLL apply_plan DRY-RUN ready (NO mutations applied). preview_id={} (create={}, update={}, link={}).{} To commit, call soll_commit_revision(preview_id=\"{}\") or re-call soll_apply_plan with dry_run=false.", preview_id, counts.0, counts.1, counts.2, blocker_note, preview_id)}],
                 "data": {
@@ -325,6 +394,7 @@ impl McpServer {
                     "dry_run": true,
                     "counts": {"create": counts.0, "update": counts.1, "link": counts.2},
                     "commit_blockers": commit_blockers,
+                    "nearby_nodes": plan_nearby_nodes,
                     "operations": operations,
                     "result_contract": result_contract,
                     "next_action": {
@@ -407,6 +477,71 @@ impl McpServer {
                     "attach_to": attach_to,
                     "reason": "attach_to target does not exist — it must be an already-persisted canonical id (persist the parent first, or wire same-plan nodes via top-level `relations`)"
                 }));
+            }
+        }
+
+        // REQ-AXO-902474 / GUI-PRO-121: Reject duplicate titles at plan validation time
+        let mut seen_titles: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for op in operations {
+            let entity = op.get("entity").and_then(Value::as_str).unwrap_or("");
+            if entity == "relation" {
+                continue;
+            }
+            let logical_key = op.get("logical_key").and_then(Value::as_str).unwrap_or("");
+            let payload = op.get("payload");
+            let title = payload
+                .and_then(|p| p.get("title").or_else(|| p.get("name")))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if title.is_empty() {
+                continue;
+            }
+            let norm_title = title.to_lowercase();
+            // 1) Intra-plan duplicate
+            if let Some(other_key) = seen_titles.get(&norm_title) {
+                if other_key != logical_key {
+                    blockers.push(json!({
+                        "logical_key": logical_key,
+                        "entity": entity,
+                        "title": title,
+                        "problem_class": "duplicate_title_rejected",
+                        "conflicting_logical_key": other_key,
+                        "reason": format!("Duplicate title within same plan rejected by GUI-PRO-121: logical_key `{}` shares the same title", other_key)
+                    }));
+                }
+            } else {
+                seen_titles.insert(norm_title, logical_key.to_string());
+            }
+
+            // 2) DB live-node duplicate
+            let check_sql = format!(
+                "SELECT id, title, type, status, metadata->>'logical_key' FROM soll.Node \
+                 WHERE status NOT IN ('superseded', 'rejected', 'archived') \
+                   AND LOWER(TRIM(title)) = LOWER(TRIM('{}')) \
+                 LIMIT 1",
+                escape_sql(title)
+            );
+            if let Ok(raw) = self.graph_store.query_json(&check_sql) {
+                let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+                if let Some(row) = rows.first() {
+                    let existing_id = row.get(0).and_then(|v| v.as_str()).unwrap_or("");
+                    let existing_lk = row.get(4).and_then(|v| v.as_str());
+                    let is_same_node = match existing_lk {
+                        Some(lk) => lk == logical_key,
+                        None => false,
+                    };
+                    if !is_same_node {
+                        blockers.push(json!({
+                            "logical_key": logical_key,
+                            "entity": entity,
+                            "title": title,
+                            "conflicting_node": existing_id,
+                            "problem_class": "duplicate_title_rejected",
+                            "reason": format!("Duplicate title rejected by GUI-PRO-121: live node `{}` already carries this title", existing_id)
+                        }));
+                    }
+                }
             }
         }
         blockers

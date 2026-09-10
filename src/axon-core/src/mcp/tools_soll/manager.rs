@@ -740,6 +740,115 @@ impl McpServer {
                     }
                 };
                 let before_snapshot = self.soll_completeness_snapshot(Some(&project_code)).ok();
+
+                let title_candidate = data
+                    .get("title")
+                    .or_else(|| data.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+
+                // REQ-AXO-902474 / GUI-PRO-121: Reject exact duplicate title on live node BEFORE allocating an ID
+                if !title_candidate.is_empty() {
+                    let check_dup_sql = format!(
+                        "SELECT id, title, type, status FROM soll.Node \
+                         WHERE project_code = '{}' \
+                           AND status NOT IN ('superseded', 'rejected', 'archived') \
+                           AND LOWER(TRIM(title)) = LOWER(TRIM('{}')) \
+                         LIMIT 1",
+                        escape_sql(&project_code),
+                        escape_sql(title_candidate)
+                    );
+                    if let Ok(raw) = self.graph_store.query_json(&check_dup_sql) {
+                        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+                        if let Some(row) = rows.first() {
+                            let existing_id = row.get(0).and_then(|v| v.as_str()).unwrap_or("");
+                            let existing_title = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                            let existing_type = row.get(2).and_then(|v| v.as_str()).unwrap_or("");
+                            let existing_status = row.get(3).and_then(|v| v.as_str()).unwrap_or("");
+                            return Some(json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!(
+                                        "Duplicate title rejected by GUI-PRO-121: a live node `{}` ({}, status `{}`) in project `{}` already has the title \"{}\". Two live nodes cannot share the same title. Either reuse `{}` via soll_get/link, choose a distinct title, or supersede the older node if it is obsolete.",
+                                        existing_id, existing_type, existing_status, project_code, existing_title, existing_id
+                                    )
+                                }],
+                                "isError": true,
+                                "data": {
+                                    "status": "duplicate_title_rejected",
+                                    "operator_guidance": {
+                                        "problem_class": "duplicate_title_rejected",
+                                        "duplicate_node_id": existing_id,
+                                        "duplicate_title": existing_title,
+                                        "rule": "GUI-PRO-121",
+                                        "follow_up_tools": ["soll_get", "soll_manager"],
+                                        "confidence": "high"
+                                    },
+                                    "parameter_repair": {
+                                        "tool": "soll_manager",
+                                        "category": "duplicate_title",
+                                        "invalid_field": "data.title",
+                                        "supplied_value": title_candidate,
+                                        "conflicting_node": existing_id,
+                                        "hint": format!("live node `{}` already carries this title; disambiguate title or supersede `{}`", existing_id, existing_id),
+                                        "canonical_source": "GUI-PRO-121"
+                                    }
+                                }
+                            }));
+                        }
+                    }
+                }
+
+                // REQ-AXO-902474: 3-state nearby similarity check (none / found / search_unavailable)
+                let (nearby_status, nearby_candidates) = if !title_candidate.is_empty() {
+                    let nearby_query = format!(
+                        "SELECT id, title, type, status, similarity(LOWER(title), LOWER('{}')) AS sim \
+                         FROM soll.Node \
+                         WHERE project_code = '{}' \
+                           AND status NOT IN ('superseded', 'rejected', 'archived') \
+                           AND similarity(LOWER(title), LOWER('{}')) >= 0.3 \
+                         ORDER BY sim DESC, length(title), title \
+                         LIMIT 5",
+                        escape_sql(title_candidate),
+                        escape_sql(&project_code),
+                        escape_sql(title_candidate)
+                    );
+                    match self.graph_store.query_json(&nearby_query) {
+                        Ok(raw) => {
+                            let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+                            let mut candidates = Vec::new();
+                            for row in rows {
+                                if let (Some(id), Some(t), Some(tp), Some(st)) = (
+                                    row.get(0).and_then(|v| v.as_str()),
+                                    row.get(1).and_then(|v| v.as_str()),
+                                    row.get(2).and_then(|v| v.as_str()),
+                                    row.get(3).and_then(|v| v.as_str()),
+                                ) {
+                                    let sim = row.get(4).and_then(|v| {
+                                        v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                                    }).unwrap_or(0.0);
+                                    candidates.push(json!({
+                                        "id": id,
+                                        "title": t,
+                                        "type": tp,
+                                        "status": st,
+                                        "similarity": sim
+                                    }));
+                                }
+                            }
+                            if candidates.is_empty() {
+                                ("none", vec![])
+                            } else {
+                                ("found", candidates)
+                            }
+                        }
+                        Err(_) => ("search_unavailable", vec![])
+                    }
+                } else {
+                    ("none", vec![])
+                };
+
                 let reserved_id = args.get("reserved_id").and_then(|value| value.as_str());
                 let (_requested_code, canonical_code, formatted_id) = if let Some(reserved_id) =
                     reserved_id
@@ -1440,6 +1549,21 @@ impl McpServer {
                                  data={id, acceptance_criteria:[\"...\"]}).",
                             );
                         }
+                        if nearby_status == "found" && !nearby_candidates.is_empty() {
+                            let list: Vec<String> = nearby_candidates
+                                .iter()
+                                .filter_map(|c| {
+                                    let id = c.get("id")?.as_str()?;
+                                    let t = c.get("title")?.as_str()?;
+                                    let sim = c.get("similarity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    Some(format!("`{id}` (sim: {sim:.2}) \"{t}\""))
+                                })
+                                .collect();
+                            report.push_str(&format!(
+                                "\nℹ️ Nœuds vivants voisins trouvés (titre proche) :\n  • {}",
+                                list.join("\n  • ")
+                            ));
+                        }
                         let mut response_data = json!({
                             "created_id": created_id,
                             "entity_type": entity_type_cap,
@@ -1452,11 +1576,12 @@ impl McpServer {
                             "attach_status": "attached",
                             "project_code_inferred_from_parent": project_code_inferred,
                             "relation_type_inferred": relation_type_inferred,
-                            // REQ-AXO-902583 — même champ, même sens que `action=link`.
-                            // `null` quand la relation fournie a été appliquée telle quelle :
-                            // un signal permanent n'est plus un signal.
                             "auto_canonized_from": auto_canonized_from,
-                            "acceptance_criteria_warning": missing_acceptance_criteria
+                            "acceptance_criteria_warning": missing_acceptance_criteria,
+                            "nearby_nodes": {
+                                "status": nearby_status,
+                                "candidates": nearby_candidates
+                            }
                         });
 
                         if let (Some(before), Ok(after)) = (

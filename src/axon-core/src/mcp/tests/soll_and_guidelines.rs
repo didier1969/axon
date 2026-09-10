@@ -17421,3 +17421,166 @@ mod bundle_serves_only_living_nodes_tests {
         );
     }
 }
+
+#[test]
+fn req_902474_soll_manager_create_rejects_exact_duplicate_title_and_surfaces_nearby() {
+    let server = create_test_server();
+    seed_pillar(&server, "TST", "PIL-TST-901", "Pilier de test");
+
+    // 1. Première création : titre original
+    let first = create_call(
+        &server,
+        json!({
+            "title": "Gestion du débit des requêtes clients",
+            "description": "Première version",
+            "attach_to": "PIL-TST-901"
+        }),
+    );
+    assert_ne!(first["isError"].as_bool(), Some(true));
+    let first_id = first["data"]["created_id"].as_str().unwrap().to_string();
+    let nearby_first = &first["data"]["nearby_nodes"];
+    assert!(
+        nearby_first["status"].as_str() == Some("none")
+            || nearby_first["status"].as_str() == Some("found")
+            || nearby_first["status"].as_str() == Some("search_unavailable"),
+        "nearby_nodes status must be one of the three canonical states: {nearby_first:?}"
+    );
+
+    // 2. Doublon strict (trimmed, case-insensitive) sur un nœud vivant -> REFUS IMMÉDIAT
+    let dup = create_call(
+        &server,
+        json!({
+            "title": "  gestion du débit des requêtes clients  ",
+            "description": "Tentative de doublon strict",
+            "attach_to": "PIL-TST-901"
+        }),
+    );
+    assert_eq!(
+        dup["isError"].as_bool(),
+        Some(true),
+        "Exact duplicate title on live node must be rejected at create time: {dup:?}"
+    );
+    assert_eq!(
+        dup["data"]["status"].as_str(),
+        Some("duplicate_title_rejected")
+    );
+    let dup_text = dup["content"][0]["text"].as_str().unwrap();
+    assert!(
+        dup_text.contains("GUI-PRO-121"),
+        "Rejection message must cite GUI-PRO-121: {dup_text}"
+    );
+    assert!(
+        dup_text.contains(&first_id),
+        "Rejection message must name the conflicting live node: {dup_text}"
+    );
+
+    // 3. Titre proche (synonymie / variante non identique) -> CRÉATION ACCEPTÉE mais surfaces nearby
+    let near = create_call(
+        &server,
+        json!({
+            "title": "Gestion de débit des requêtes",
+            "description": "Variante proche",
+            "attach_to": "PIL-TST-901"
+        }),
+    );
+    assert_ne!(near["isError"].as_bool(), Some(true));
+    let nearby_near = &near["data"]["nearby_nodes"];
+    if nearby_near["status"].as_str() == Some("found") {
+        let candidates = nearby_near["candidates"].as_array().unwrap();
+        assert!(
+            candidates.iter().any(|c| c["id"].as_str() == Some(&first_id)),
+            "Candidates must include first_id `{first_id}`: {candidates:?}"
+        );
+    }
+
+    // 4. soll_apply_plan (dry_run) signale les doublons comme commit blockers
+    let plan_resp = server
+        .execute_tool_direct(
+            "soll_apply_plan",
+            &json!({
+                "project_code": "TST",
+                "dry_run": true,
+                "plan": {
+                    "requirements": [
+                        {
+                            "logical_key": "req_dup_test",
+                            "title": "Gestion du débit des requêtes clients",
+                            "attach_to": "PIL-TST-901",
+                            "relation_type": "BELONGS_TO"
+                        }
+                    ]
+                }
+            }),
+        )
+        .expect("soll_apply_plan returns a result");
+    let blockers = plan_resp["data"]["commit_blockers"].as_array().unwrap();
+    assert!(
+        blockers.iter().any(|b| b["problem_class"].as_str() == Some("duplicate_title_rejected")),
+        "soll_apply_plan dry_run must surface duplicate_title_rejected in commit_blockers: {blockers:?}"
+    );
+
+    // Vérification que nearby_nodes est présent dans la réponse dry_run pour chaque élément
+    let plan_nearby = plan_resp["data"]["nearby_nodes"].as_array().unwrap();
+    assert_eq!(plan_nearby.len(), 1);
+    assert_eq!(plan_nearby[0]["logical_key"].as_str(), Some("req_dup_test"));
+    assert!(
+        plan_nearby[0]["status"].as_str() == Some("found")
+            || plan_nearby[0]["status"].as_str() == Some("none")
+            || plan_nearby[0]["status"].as_str() == Some("search_unavailable")
+    );
+
+    // 5. Doublon INTRA-PLAN : deux exigences avec le même titre dans le même plan
+    let intra_dup_plan = server
+        .execute_tool_direct(
+            "soll_apply_plan",
+            &json!({
+                "project_code": "TST",
+                "dry_run": true,
+                "plan": {
+                    "requirements": [
+                        {
+                            "logical_key": "req_a",
+                            "title": "Titre unique intra 1",
+                            "attach_to": "PIL-TST-901",
+                            "relation_type": "BELONGS_TO"
+                        },
+                        {
+                            "logical_key": "req_b",
+                            "title": "  titre unique INTRA 1  ",
+                            "attach_to": "PIL-TST-901",
+                            "relation_type": "BELONGS_TO"
+                        }
+                    ]
+                }
+            }),
+        )
+        .expect("intra dup plan response");
+    let intra_blockers = intra_dup_plan["data"]["commit_blockers"].as_array().unwrap();
+    assert!(
+        intra_blockers.iter().any(|b| b["problem_class"].as_str() == Some("duplicate_title_rejected")),
+        "Intra-plan duplicate title must be surfaced as duplicate_title_rejected: {intra_blockers:?}"
+    );
+
+    // 6. Un nœud obsolète (superseded/rejected) ne bloque pas la réutilisation légitime du titre
+    server
+        .graph_store
+        .execute(&format!(
+            "UPDATE soll.Node SET status = 'superseded' WHERE id = '{first_id}'"
+        ))
+        .unwrap();
+    let re_create = create_call(
+        &server,
+        json!({
+            "title": "Gestion du débit des requêtes clients",
+            "description": "Nouvelle version remplaçant l'ancienne superseded",
+            "attach_to": "PIL-TST-901"
+        }),
+    );
+    assert_ne!(
+        re_create["isError"].as_bool(),
+        Some(true),
+        "Title of a superseded node can be reused: {re_create:?}"
+    );
+}
+
+
