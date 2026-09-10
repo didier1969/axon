@@ -399,31 +399,43 @@ impl ElixirParser {
 
         let mut properties = HashMap::new();
 
-        if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
-            properties.insert(
-                "header_end_line".to_string(),
-                do_block.start_position().row.saturating_add(1).to_string(),
-            );
-            properties.insert(
-                "body_start_line".to_string(),
-                do_block.start_position().row.saturating_add(1).to_string(),
-            );
-            properties.insert(
-                "body_end_line".to_string(),
-                do_block.end_position().row.saturating_add(1).to_string(),
-            );
-            let split_lines = Self::do_block_split_lines(do_block);
-            if split_lines.len() > 1 {
+        if let Some((body_node, is_block)) = Self::find_function_body_node(node, source_bytes) {
+            if is_block {
                 properties.insert(
-                    "body_split_lines".to_string(),
-                    split_lines
-                        .into_iter()
-                        .map(|line| line.to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
+                    "header_end_line".to_string(),
+                    body_node.start_position().row.saturating_add(1).to_string(),
+                );
+                properties.insert(
+                    "body_start_line".to_string(),
+                    body_node.start_position().row.saturating_add(1).to_string(),
+                );
+                properties.insert(
+                    "body_end_line".to_string(),
+                    body_node.end_position().row.saturating_add(1).to_string(),
+                );
+                let split_lines = Self::do_block_split_lines(body_node);
+                if split_lines.len() > 1 {
+                    properties.insert(
+                        "body_split_lines".to_string(),
+                        split_lines
+                            .into_iter()
+                            .map(|line| line.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    );
+                }
+            } else {
+                properties.insert("header_end_line".to_string(), start_line.to_string());
+                properties.insert(
+                    "body_start_line".to_string(),
+                    body_node.start_position().row.saturating_add(1).to_string(),
+                );
+                properties.insert(
+                    "body_end_line".to_string(),
+                    body_node.end_position().row.saturating_add(1).to_string(),
                 );
             }
-            let complexity = 1 + Self::count_branches(do_block, source_bytes);
+            let complexity = 1 + Self::count_branches(body_node, source_bytes);
             properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
         }
 
@@ -465,8 +477,8 @@ impl ElixirParser {
             embedding: None,
         });
 
-        if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
-            Self::extract_calls_from_block(do_block, source_bytes, result, &full_name, aliases);
+        if let Some((body_node, _)) = Self::find_function_body_node(node, source_bytes) {
+            Self::extract_calls_from_expression(body_node, source_bytes, result, &full_name, aliases);
         }
     }
 
@@ -537,8 +549,8 @@ impl ElixirParser {
             embedding: None,
         });
 
-        if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
-            Self::extract_calls_from_block(do_block, source_bytes, result, &full_name, aliases);
+        if let Some((body_node, _)) = Self::find_function_body_node(node, source_bytes) {
+            Self::extract_calls_from_expression(body_node, source_bytes, result, &full_name, aliases);
         }
     }
 
@@ -591,85 +603,151 @@ impl ElixirParser {
     // god_objects AND-classification and the GOD_OBJECT_* constants).
     const BRANCHING_FORMS: &[&str] = &["case", "cond", "with", "if", "unless", "for"];
 
-    fn count_branches<'a>(node: Node<'a>, source_bytes: &[u8]) -> i32 {
-        let mut count = 0i32;
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            if child.kind() == "call" {
-                if let Some(ident) = Self::call_identifier(child, source_bytes) {
-                    if Self::BRANCHING_FORMS.contains(&ident.as_str()) {
-                        count += 1;
+    /// REQ-AXO-902450 — retrieve the body node of a function or macro clause.
+    /// Supports both multiline `do ... end` blocks and inline `, do: <expr>` syntax.
+    fn find_function_body_node<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+    ) -> Option<(Node<'a>, bool)> {
+        if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
+            return Some((do_block, true));
+        }
+        if let Some(args) = Self::find_child_by_type(node, "arguments") {
+            let mut cursor = args.walk();
+            for child in args.named_children(&mut cursor) {
+                if child.kind() == "keywords" {
+                    let mut kw_cursor = child.walk();
+                    for pair in child.named_children(&mut kw_cursor) {
+                        if pair.kind() == "pair" {
+                            if let Some(val) = Self::extract_pair_do_value(pair, source_bytes) {
+                                return Some((val, false));
+                            }
+                        }
                     }
-                    // A nested `def`/`defp`/`defmacro`/`defmacrop` gets its own
-                    // complexity count when `walk` visits it separately (same
-                    // discipline as Rust's nested `function_item` exclusion) —
-                    // never inflate the enclosing function's count with it.
-                    if matches!(ident.as_str(), "def" | "defp" | "defmacro" | "defmacrop") {
-                        continue;
+                } else if child.kind() == "pair" {
+                    if let Some(val) = Self::extract_pair_do_value(child, source_bytes) {
+                        return Some((val, false));
                     }
                 }
             }
+        }
+        None
+    }
+
+    fn extract_pair_do_value<'a>(pair: Node<'a>, source_bytes: &[u8]) -> Option<Node<'a>> {
+        let mut cursor = pair.walk();
+        let mut is_do = false;
+        let mut value_node = None;
+        for child in pair.named_children(&mut cursor) {
+            if child.kind() == "keyword" {
+                let text = child.utf8_text(source_bytes).unwrap_or("");
+                if text.trim().trim_end_matches(':') == "do" {
+                    is_do = true;
+                }
+            } else {
+                value_node = Some(child);
+            }
+        }
+        if is_do {
+            value_node
+        } else {
+            None
+        }
+    }
+
+    fn count_branches<'a>(node: Node<'a>, source_bytes: &[u8]) -> i32 {
+        let mut count = 0i32;
+        if node.kind() == "call" {
+            if let Some(ident) = Self::call_identifier(node, source_bytes) {
+                if Self::BRANCHING_FORMS.contains(&ident.as_str()) {
+                    count += 1;
+                }
+                // A nested `def`/`defp`/`defmacro`/`defmacrop` gets its own
+                // complexity count when `walk` visits it separately (same
+                // discipline as Rust's nested `function_item` exclusion) —
+                // never inflate the enclosing function's count with it.
+                if matches!(ident.as_str(), "def" | "defp" | "defmacro" | "defmacrop") {
+                    return 0;
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
             count += Self::count_branches(child, source_bytes);
         }
         count
     }
 
-    fn extract_calls_from_block<'a>(
+    /// REQ-AXO-902450 / REQ-AXO-901969 — extract calls from ANY expression node
+    /// (either a `do_block` or a one-line `, do: <expr>` body or sub-expression).
+    fn extract_calls_from_expression<'a>(
         node: Node<'a>,
         source_bytes: &[u8],
         result: &mut ExtractionResult,
-        module_name: &str,
+        caller_name: &str,
         aliases: &HashMap<String, String>,
     ) {
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            if child.kind() == "call" {
-                if let Some(ident) = Self::call_identifier(child, source_bytes) {
-                    if [
-                        "def",
-                        "defp",
-                        "defmodule",
-                        "defmacro",
-                        "defmacrop",
-                        "defstruct",
-                    ]
-                    .contains(&ident.as_str())
-                    {
-                        continue;
-                    }
-                    if IMPORT_DIRECTIVES.contains(&ident.as_str()) {
-                        continue;
-                    }
-                    // REQ-AXO-901969 — control-flow special form: not a call.
-                    // Don't emit a bogus edge; descend into its clauses/body so
-                    // the calls nested inside (the real callees) are captured.
-                    if CONTROL_FLOW_FORMS.contains(&ident.as_str()) {
-                        Self::extract_calls_from_block(
+        if node.kind() == "call" {
+            if let Some(ident) = Self::call_identifier(node, source_bytes) {
+                if [
+                    "def",
+                    "defp",
+                    "defmodule",
+                    "defmacro",
+                    "defmacrop",
+                    "defstruct",
+                ]
+                .contains(&ident.as_str())
+                {
+                    return;
+                }
+                if IMPORT_DIRECTIVES.contains(&ident.as_str()) {
+                    return;
+                }
+                // Control-flow special forms: descend into body/clauses without emitting a fake call.
+                if CONTROL_FLOW_FORMS.contains(&ident.as_str()) {
+                    let mut cursor = node.walk();
+                    for child in node.named_children(&mut cursor) {
+                        Self::extract_calls_from_expression(
                             child,
                             source_bytes,
                             result,
-                            module_name,
+                            caller_name,
                             aliases,
                         );
-                        continue;
                     }
+                    return;
                 }
-                Self::extract_generic_call(child, source_bytes, result, module_name, aliases);
-                // REQ-AXO-901969 — recurse into the call's arguments so calls
-                // passed as arguments or wrapped in anonymous functions
-                // (e.g. `Enum.map(xs, fn x -> prepare_dataset(x) end)`) are not
-                // lost. extract_generic_call only handles the call head.
-                if let Some(args) = Self::find_child_by_type(child, "arguments") {
-                    Self::extract_calls_from_block(
-                        args,
-                        source_bytes,
-                        result,
-                        module_name,
-                        aliases,
-                    );
-                }
-            } else {
-                Self::extract_calls_from_block(child, source_bytes, result, module_name, aliases);
+            }
+            Self::extract_generic_call(node, source_bytes, result, caller_name, aliases);
+            if let Some(args) = Self::find_child_by_type(node, "arguments") {
+                Self::extract_calls_from_expression(
+                    args,
+                    source_bytes,
+                    result,
+                    caller_name,
+                    aliases,
+                );
+            }
+            if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
+                Self::extract_calls_from_expression(
+                    do_block,
+                    source_bytes,
+                    result,
+                    caller_name,
+                    aliases,
+                );
+            }
+        } else {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                Self::extract_calls_from_expression(
+                    child,
+                    source_bytes,
+                    result,
+                    caller_name,
+                    aliases,
+                );
             }
         }
     }
@@ -1523,4 +1601,41 @@ mod tests {
             result.relations
         );
     }
+
+    #[test]
+    fn req_902450_multi_clause_and_one_line_do_extracts_calls_and_callers() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule T do
+          def entry(x), do: pick(x)
+          defp pick(%{a: _} = x), do: alpha(x)
+          defp pick(x), do: beta(x)
+          defp alpha(_), do: :a
+          defp beta(_), do: :b
+        end
+        "#;
+        let result = parser.parse(content);
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "T.entry"
+                && rel.to == "T.pick"
+                && rel.rel_type == "CALLS"),
+            "entry -> pick missing; got: {:?}",
+            result.relations
+        );
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "T.pick"
+                && rel.to == "T.alpha"
+                && rel.rel_type == "CALLS"),
+            "pick -> alpha missing; got: {:?}",
+            result.relations
+        );
+        assert!(
+            result.relations.iter().any(|rel| rel.from == "T.pick"
+                && rel.to == "T.beta"
+                && rel.rel_type == "CALLS"),
+            "pick -> beta missing; got: {:?}",
+            result.relations
+        );
+    }
 }
+
