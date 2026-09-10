@@ -418,7 +418,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                                     // — five SHAs sent as `file`, five rejections).
                                     "artifact_type": { "type": "string", "enum": crate::mcp::tools_soll::all_accepted_evidence_artifact_types(), "description": "Kind of evidence (aliases: kind, type). Inferred from artifact_ref when omitted — a bare 7-40 hex ref types itself as `commit`. The enum above is the UNION over every entity kind; the set actually accepted NARROWS by `entity_type` (REQ-AXO-902102). `commit`, `sollref` and `url` are accepted for every kind. On rejection the handler returns `accepted_artifact_schema` — the exact list for THAT entity — so read it rather than guess; do not re-derive the per-entity sets from this description." },
                                     "artifact_ref": { "type": "string", "description": "Pointer to the evidence: file path | symbol id `module::fn` | test path `module::tests::name` | `VAL-CODE-NNN` | metric name/URL | commit SHA. Aliases: path, uri." },
-                                    "note": { "type": "string", "description": "Optional human-readable note." }
+                                    "note": { "type": "string", "description": "Optional human-readable note." },
+                                    "verdict": { "type": "string", "description": "Optional verdict for falsification or verification (e.g. 'falsified', 'falsification_failed', 'verified')." }
                                 },
                                 "required": ["artifact_ref"]
                             }

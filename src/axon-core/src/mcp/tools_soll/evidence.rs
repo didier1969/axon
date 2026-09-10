@@ -69,6 +69,46 @@ fn build_evidence_metadata(art_metadata: Option<&Value>, role: Option<&str>) -> 
     metadata
 }
 
+/// REQ-AXO-902447 — enrich evidence metadata with note and verdict if supplied
+/// at artifact root level and not already present in metadata.
+fn enrich_evidence_metadata(
+    mut metadata: Value,
+    note: Option<&str>,
+    verdict: Option<&str>,
+) -> Value {
+    if let Some(note) = note {
+        let note = note.trim();
+        if !note.is_empty() {
+            match metadata.as_object_mut() {
+                Some(obj) => {
+                    if !obj.contains_key("note") {
+                        obj.insert("note".to_string(), json!(note));
+                    }
+                }
+                None => {
+                    metadata = json!({ "note": note });
+                }
+            }
+        }
+    }
+    if let Some(verdict) = verdict {
+        let verdict = verdict.trim();
+        if !verdict.is_empty() {
+            match metadata.as_object_mut() {
+                Some(obj) => {
+                    if !obj.contains_key("verdict") {
+                        obj.insert("verdict".to_string(), json!(verdict));
+                    }
+                }
+                None => {
+                    metadata = json!({ "verdict": verdict });
+                }
+            }
+        }
+    }
+    metadata
+}
+
 /// REQ-AXO-902213 — rejection response when `role` is supplied with an
 /// out-of-vocabulary value. Mirrors the `soll_remove_evidence` error shape
 /// (`isError` + `data.status` + `parameter_repair`) for a one-round-trip fix.
@@ -413,8 +453,15 @@ impl McpServer {
             // REQ-AXO-902213 — inject the validated `role` into this row's
             // metadata when declared; otherwise a pure passthrough of the
             // artifact's own `metadata` (pre-REQ behaviour, byte-identical).
-            let metadata =
-                build_evidence_metadata(art.get("metadata"), declared_role.as_deref()).to_string();
+            // REQ-AXO-902447 — enrich with note and verdict if supplied at root.
+            let note = art.get("note").and_then(Value::as_str);
+            let verdict = art.get("verdict").and_then(Value::as_str);
+            let metadata = enrich_evidence_metadata(
+                build_evidence_metadata(art.get("metadata"), declared_role.as_deref()),
+                note,
+                verdict,
+            )
+            .to_string();
             let trace_id = format!("TRC-{}-{}-{}", entity_id, now, idx);
 
             if self.graph_store.execute_param(

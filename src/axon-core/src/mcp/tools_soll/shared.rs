@@ -615,6 +615,7 @@ pub(super) fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'stat
             "metric",
             "validation",
             "rationale",
+            "falsification", // REQ-AXO-902447
         ],
         "decision" => vec![
             "document",
@@ -623,12 +624,34 @@ pub(super) fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'stat
             "rationale",
             "diff",
             "validation",
+            "falsification", // REQ-AXO-902447
         ],
-        "validation" => vec!["document", "file", "symbol", "test", "metric", "diff"],
+        "validation" => vec![
+            "document",
+            "file",
+            "symbol",
+            "test",
+            "metric",
+            "diff",
+            "falsification", // REQ-AXO-902447
+        ],
         "concept" => vec!["document", "file", "symbol", "rationale"],
         "guideline" => vec!["document", "file", "symbol", "diff"],
-        "skill" => vec!["document", "file", "symbol", "test", "diff"], // REQ-AXO-91578
-        "prompt_template" => vec!["document", "file", "symbol", "test"], // REQ-AXO-91579
+        "skill" => vec![
+            "document",
+            "file",
+            "symbol",
+            "test",
+            "diff",
+            "falsification", // REQ-AXO-902447
+        ], // REQ-AXO-91578
+        "prompt_template" => vec![
+            "document",
+            "file",
+            "symbol",
+            "test",
+            "falsification", // REQ-AXO-902447
+        ], // REQ-AXO-91579
         "vision" | "pillar" | "milestone" | "stakeholder" => {
             vec!["document", "file", "symbol", "metric"]
         }
@@ -888,6 +911,7 @@ pub(super) fn normalize_evidence_artifact_type(raw: &str, artifact_ref: &str) ->
         "validation" => "Validation".to_string(),
         "rationale" => "Rationale".to_string(),
         "diff" => "Diff".to_string(),
+        "falsification" => "Falsification".to_string(),
         other => {
             let mut chars = other.chars();
             if let Some(first) = chars.next() {
@@ -974,6 +998,9 @@ pub(super) fn required_field_hint_for_artifact_kind(kind: &str) -> &'static str 
         "Validation" => "supply a canonical validation id (`VAL-CODE-NNN`) in `artifact_ref`",
         "Rationale" => "supply rationale text or a document reference in `artifact_ref`",
         "Diff" => "supply a commit SHA or a path to a `.diff` artifact in `artifact_ref`",
+        "Falsification" => {
+            "supply the falsified evidence reference or test target in `artifact_ref` (with details/neutralization in `note` or metadata)"
+        }
         _ => "supply a non-empty `artifact_ref` value matching the artifact_type",
     }
 }

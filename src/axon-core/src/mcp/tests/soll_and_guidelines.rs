@@ -18974,3 +18974,80 @@ fn test_req_902416_milestone_ordering_precedes_blocked_by_and_decision_governanc
     assert_eq!(dec_link_resp["isError"].as_bool(), None, "Linking DEC -SOLVES-> MIL must succeed");
 }
 
+#[test]
+fn test_req_902447_falsification_evidence_attachment_and_metadata() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-902447', 'Requirement', 'AXO', 'Falsification evidence', 'falsification proof support', 'current', '{\"acceptance_criteria\":\"proven\"}')")
+        .unwrap();
+
+    // 1. Attach falsification evidence on a requirement with note and verdict
+    let res = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "requirement",
+                    "entity_id": "REQ-AXO-902447",
+                    "artifacts": [{
+                        "artifact_type": "falsification",
+                        "artifact_ref": "crate::mcp::tests::test_req_902447_falsification",
+                        "note": "neutralized feature gate -> 5 red tests observed",
+                        "verdict": "falsified"
+                    }]
+                }
+            })),
+            id: Some(json!(9024471)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(res["data"]["attached"].as_u64(), Some(1), "Falsification attach must succeed: {res}");
+
+    // Verify row in soll.Traceability
+    let raw = server
+        .graph_store
+        .query_json(
+            "SELECT artifact_type, artifact_ref, metadata->>'note', metadata->>'verdict' \
+             FROM soll.Traceability WHERE soll_entity_id = 'REQ-AXO-902447'",
+        )
+        .unwrap();
+    let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+    assert_eq!(rows.len(), 1, "Exactly one traceability row expected");
+    assert_eq!(rows[0][0].as_str(), Some("Falsification"));
+    assert_eq!(rows[0][1].as_str(), Some("crate::mcp::tests::test_req_902447_falsification"));
+    assert_eq!(rows[0][2].as_str(), Some("neutralized feature gate -> 5 red tests observed"));
+    assert_eq!(rows[0][3].as_str(), Some("falsified"));
+
+    // 2. Falsification on concept is rejected (concept does not accept falsification)
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-902447', 'Concept', 'AXO', 'Concept node', 'concept', 'current', '{}')")
+        .unwrap();
+    let cpt_res = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "concept",
+                    "entity_id": "CPT-AXO-902447",
+                    "artifacts": [{
+                        "artifact_type": "falsification",
+                        "artifact_ref": "crate::mcp::tests::some_test"
+                    }]
+                }
+            })),
+            id: Some(json!(9024472)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(cpt_res["data"]["status"].as_str(), Some("rejected_all"));
+}
+
