@@ -26,6 +26,7 @@ fn c1_repro_ink_scope_completeness_surfaces_excluded_rust_files() {
         pending_reasons: Vec::new(),
         excluded_source_files: 18,
         excluded_extensions: ".rs: 18".to_string(),
+        unchunked_files: 0,
     };
 
     let note = project_scope_truth_note_pure("INK", &summary);
@@ -59,6 +60,7 @@ fn c2_polyglot_unsupported_language_cannot_display_green_live_without_mention() 
         pending_reasons: Vec::new(),
         excluded_source_files: 18,
         excluded_extensions: ".rs: 18".to_string(),
+        unchunked_files: 0,
     };
 
     // symbol_coverage_is_trustworthy DOIT être false car un langage entier est absent
@@ -93,6 +95,7 @@ fn c3_nominal_project_without_excluded_source_stays_live() {
         pending_reasons: Vec::new(),
         excluded_source_files: 0,
         excluded_extensions: String::new(),
+        unchunked_files: 0,
     };
 
     assert!(summary.symbol_coverage_is_trustworthy());
@@ -127,6 +130,7 @@ fn c5_empty_code_intel_signals_fail_open_for_guard() {
         pending_reasons: Vec::new(),
         excluded_source_files: 0,
         excluded_extensions: String::new(),
+        unchunked_files: 0,
     };
     assert_eq!(empty_summary.completed_files, 0);
 
@@ -140,9 +144,60 @@ fn c5_empty_code_intel_signals_fail_open_for_guard() {
         pending_reasons: Vec::new(),
         excluded_source_files: 0,
         excluded_extensions: String::new(),
+        unchunked_files: 0,
     };
     let is_live_empty = live_summary.total_files <= 0 || live_summary.completed_files <= 0;
     assert!(!is_live_empty, "live project scope must resolve is_empty=false");
     assert!(live_summary.symbol_coverage_is_trustworthy());
+}
+
+#[test]
+fn c6_repro_kki_unchunked_files_blocks_trustworthy_and_warns_on_empty() {
+    // Repro KKI mesuré dans REQ-AXO-902511 :
+    // Dépôt KIE de 17 318 fichiers enrôlés, 16 460 portant des symboles (95 % global),
+    // mais 103 fichiers SANS CHUNK (dont les 96 fichiers du code applicatif kki-domain-vertical-slice).
+    let summary = ProjectScopeSummary {
+        total_files: 17318,
+        completed_files: 16460,
+        backlog_files: 858,
+        pending_reasons: Vec::new(),
+        excluded_source_files: 0,
+        excluded_extensions: String::new(),
+        unchunked_files: 103,
+    };
+
+    // 1. Même avec un ratio global de 95 %, symbol_coverage_is_trustworthy DOIT être false
+    // car des fichiers enrôlés sont sans chunk.
+    assert!(
+        !summary.symbol_coverage_is_trustworthy(),
+        "un projet avec fichiers sans chunk ne peut pas être trustworthy (REQ-AXO-902511)"
+    );
+
+    // 2. Le bandeau de status DOIT basculer en PARTIAL
+    let status_line = ligne_code_intel(Some("KKI"), Some(&summary));
+    assert!(
+        status_line.starts_with("**Code-intel:** PARTIAL"),
+        "status doit être PARTIAL et non LIVE: {status_line}"
+    );
+    assert!(
+        status_line.contains("103 fichier(s) enrôlé(s) sans aucun chunk"),
+        "status doit expliciter le gap d'indexation: {status_line}"
+    );
+
+    // 3. La note de portée de query/inspect DOIT expliciter le gap et avertir
+    // qu'un résultat vide ne prouve pas l'absence sur une zone locale.
+    let note = project_scope_truth_note_pure("KKI", &summary);
+    assert!(
+        note.contains("103 fichier(s) sans chunk (gap indexation)"),
+        "la note doit nommer les fichiers sans chunk: {note}"
+    );
+    assert!(
+        note.contains("ne garantit pas la couverture d'une zone locale"),
+        "la note doit avertir contre l'illusion de l'agrégat global: {note}"
+    );
+    assert!(
+        note.contains("ne prouve PAS l'absence d'un symbole"),
+        "un résultat vide ne doit pas être pris pour une preuve d'inexistence: {note}"
+    );
 }
 

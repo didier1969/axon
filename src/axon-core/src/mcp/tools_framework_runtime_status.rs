@@ -97,6 +97,14 @@ pub(crate) fn ligne_code_intel(
             portee.completed_files,
             portee.total_files,
         )
+    } else if portee.unchunked_files > 0 {
+        format!(
+            "**Code-intel:** PARTIAL — `{}` {} fichier(s) enrôlé(s) sans aucun chunk (gap indexation); {}/{} fichier(s) portent des symboles. Un résultat VIDE de `query`/`inspect` ne prouve PAS l'absence : voir `diagnose_indexing`.\n",
+            projet,
+            portee.unchunked_files,
+            portee.completed_files,
+            portee.total_files,
+        )
     } else {
         format!(
             "**Code-intel:** PARTIAL — `{}` seulement {}/{} fichier(s) enrole(s) portent des symboles ({:.0} % sans). Un resultat VIDE de `query`/`inspect` ne prouve PAS l'absence : recouper par `retrieve_context`, et voir `diagnose_indexing`.\n",
@@ -1346,7 +1354,7 @@ impl McpServer {
                     // true if code-intel is absent/empty on the resolved project.
                     "code_intel_empty": code_intel_scope.as_ref().map(|s| s.total_files <= 0 || s.completed_files <= 0).unwrap_or(true)
                 },
-                // REQ-AXO-902406 — structured code_intel payload for the active project
+                // REQ-AXO-902406 / REQ-AXO-902511 — structured code_intel payload for the active project
                 "code_intel": match &code_intel_scope {
                     Some(s) => json!({
                         "status": if s.total_files <= 0 || s.completed_files <= 0 {
@@ -1358,12 +1366,14 @@ impl McpServer {
                         },
                         "total_files": s.total_files,
                         "completed_files": s.completed_files,
+                        "unchunked_files": s.unchunked_files,
                         "trustworthy": s.symbol_coverage_is_trustworthy(),
                     }),
                     None => json!({
                         "status": if status_project.is_none() { "unknown_scope" } else { "unmeasured" },
                         "total_files": 0,
                         "completed_files": 0,
+                        "unchunked_files": 0,
                         "trustworthy": false,
                     }),
                 },
@@ -2295,6 +2305,7 @@ mod tests_ligne_code_intel {
             pending_reasons: Vec::new(),
             excluded_source_files: 0,
             excluded_extensions: String::new(),
+            unchunked_files: 0,
         }
     }
 

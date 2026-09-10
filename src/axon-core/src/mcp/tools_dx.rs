@@ -23,6 +23,8 @@ pub(crate) struct ProjectScopeSummary {
     pub(crate) excluded_source_files: i64,
     /// REQ-AXO-902352 — détail des extensions source écartées (ex: ".rs: 18").
     pub(crate) excluded_extensions: String,
+    /// REQ-AXO-902511 — nombre de fichiers enrôlés sans aucun chunk (gap d'indexation).
+    pub(crate) unchunked_files: i64,
 }
 
 impl ProjectScopeSummary {
@@ -35,7 +37,7 @@ impl ProjectScopeSummary {
         (self.total_files - self.completed_files) as f64 / self.total_files as f64
     }
 
-    /// REQ-AXO-902424 / REQ-AXO-902352 — l'index de symboles peut-il porter un NÉGATIF ?
+    /// REQ-AXO-902424 / REQ-AXO-902352 / REQ-AXO-902511 — l'index de symboles peut-il porter un NÉGATIF ?
     ///
     /// Le seuil est un jugement, assumé comme tel, et il vit ICI pour que les
     /// deux surfaces qui l'appliquent — le bandeau de `status` et la note de
@@ -50,8 +52,14 @@ impl ProjectScopeSummary {
     /// REQ-AXO-902352 : si des fichiers de CODE SOURCE sont écartés (ex: 18 fichiers .rs
     /// d'un projet polyglotte INK), l'index ne peut JAMAIS être certifié trustworthy —
     /// un résultat vide sur le projet ne prouve rien pour ces langages.
+    ///
+    /// REQ-AXO-902511 : si des fichiers enrôlés n'ont AUCUN chunk (gap d'indexation),
+    /// l'index ne peut pas être certifié trustworthy sans avertissement car une zone
+    /// entière (ex: 96 fichiers d'un slice applicatif) peut être à 0 sans bouger le ratio global.
     pub(crate) fn symbol_coverage_is_trustworthy(&self) -> bool {
-        self.excluded_source_files == 0 && self.symbol_shortfall_ratio() < 0.25
+        self.excluded_source_files == 0
+            && self.unchunked_files == 0
+            && self.symbol_shortfall_ratio() < 0.25
     }
 }
 
@@ -80,15 +88,29 @@ pub(crate) fn project_scope_truth_note_pure(
         String::new()
     };
 
-    // REQ-AXO-902424 / REQ-AXO-902352 — quand une part importante des fichiers enrôlés ne
-    // porte AUCUN symbole, ou que des fichiers source sont écartés par le scanner,
-    // un résultat vide de `query` ne prouve rien.
+    let unchunked_mention = if summary.unchunked_files > 0 {
+        format!(
+            "; {} fichier(s) sans chunk (gap indexation)",
+            summary.unchunked_files
+        )
+    } else {
+        String::new()
+    };
+
+    // REQ-AXO-902424 / REQ-AXO-902352 / REQ-AXO-902511 — quand une part importante des fichiers enrôlés ne
+    // porte AUCUN symbole, ou que des fichiers source sont écartés par le scanner, ou que des fichiers
+    // enrôlés n'ont aucun chunk, un résultat vide de `query` ne prouve rien.
     let shortfall_ratio = summary.symbol_shortfall_ratio();
     let unreliable_note = if !summary.symbol_coverage_is_trustworthy() {
         if summary.excluded_source_files > 0 {
             format!(
                 "\n⚠️ **{} fichier(s) source écarté(s) ({}).** Un résultat VIDE de `query`/`inspect` sur ce projet ne prouve PAS l'absence pour ces langages — recouper par `retrieve_context` (contenu) avant de conclure, et voir `diagnose_indexing`.",
                 summary.excluded_source_files, summary.excluded_extensions
+            )
+        } else if summary.unchunked_files > 0 {
+            format!(
+                "\n⚠️ **{} fichier(s) enrôlé(s) sans aucun chunk (gap indexation).** L'agrégat d'enrôlement global ne garantit pas la couverture d'une zone locale ou sous-répertoire (REQ-AXO-902511) : un résultat VIDE de `query`/`inspect` ne prouve PAS l'absence d'un symbole — voir `diagnose_indexing`.",
+                summary.unchunked_files
             )
         } else {
             format!(
@@ -104,11 +126,12 @@ pub(crate) fn project_scope_truth_note_pure(
     };
 
     format!(
-        "**Scope completeness `{}`:** {}/{} fichier(s) enrôlé(s) portent des symboles extraits; sans symbole: {}{}.{}{}\n",
+        "**Scope completeness `{}`:** {}/{} fichier(s) enrôlé(s) portent des symboles extraits; sans symbole: {}{}{}.{}{}\n",
         project,
         summary.completed_files,
         summary.total_files,
         summary.backlog_files,
+        unchunked_mention,
         excluded_mention,
         reason_note,
         unreliable_note
@@ -366,6 +389,16 @@ impl McpServer {
             _ => (0, String::new()),
         };
 
+        // REQ-AXO-902511 — count files enrolled in IndexedFile that have no chunks in Chunk.
+        let files_with_chunks = self
+            .graph_store
+            .query_count_param(
+                "SELECT count(DISTINCT file_path) FROM ist.Chunk WHERE project_code = $project",
+                &params,
+            )
+            .unwrap_or(0);
+        let unchunked_files = (enrolled_files - files_with_chunks).max(0);
+
         Some(ProjectScopeSummary {
             total_files,
             completed_files,
@@ -373,6 +406,7 @@ impl McpServer {
             pending_reasons,
             excluded_source_files,
             excluded_extensions,
+            unchunked_files,
         })
     }
 
@@ -878,9 +912,10 @@ impl McpServer {
             ));
         }
         steps.push(
-            "`status mode=brief` — read `Scope completeness N/N`. A visible backlog \
-             means the symbol may exist on disk and not yet in the index; that is a \
-             different answer from `it does not exist`."
+            "`diagnose_indexing` — check for unchunked files or indexing gaps. \
+             A high global enrollment ratio (e.g. 95 %) does NOT guarantee coverage of local sub-trees \
+             or newly created modules (REQ-AXO-902511). If the symbol is absent from `query`, verify \
+             with `diagnose_indexing` or `AXON_OK=1 grep` before concluding it does not exist."
                 .to_string(),
         );
 
