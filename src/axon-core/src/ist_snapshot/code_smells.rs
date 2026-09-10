@@ -1213,9 +1213,14 @@ pub struct WiringOrphan {
 /// Matches the parser's `ELIXIR_ENTRY_POINTS` (single shared const, no dup). An
 /// Elixir symbol name is dotted-qualified (`Nexus.Foo.handle_call`) so the
 /// callback is the final `.` segment.
-fn is_inferred_entry(name: &str, path: &str) -> bool {
+pub(crate) fn is_inferred_entry(name: &str, path: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    if n.contains("main") || n.contains("handler") || n.contains("nif_") {
+    if n.contains("main")
+        || n.contains("handler")
+        || n.contains("handle_request")
+        || n.contains("handle_notification")
+        || n.contains("nif_")
+    {
         return true;
     }
     if is_elixir_path(path) {
@@ -1661,6 +1666,7 @@ pub fn orphan_clusters(
     project: &str,
     declared_entries: &HashSet<String>,
 ) -> OrphanClusterReport {
+    let index_declare = DeclaredSymbolRefs::from_set(declared_entries);
     let file_map = build_file_path_map(graph);
     let mut roots: Vec<u32> = Vec::new();
     let mut candidates: Vec<u32> = Vec::new();
@@ -1711,11 +1717,13 @@ pub fn orphan_clusters(
         }
         candidates.push(idx);
         let name = name_from_id(graph.id_of(idx));
-        // REQ-AXO-902227 — is_entry_point (@impl / framework callback / NIF) seeds a
-        // reachability root: the runtime invokes it, so its callees are reachable.
+        // REQ-AXO-902227 / REQ-AXO-902562 — is_entry_point (@impl / framework callback / NIF
+        // / handle_request) seeds a reachability root: the runtime invokes it, so its callees
+        // are reachable. Also recognize qualified SOLL entry declarations via DeclaredSymbolRefs.
         if is_inferred_entry(name, path)
             || NodeFlags(flags.0).entry()
             || declared_entries.contains(&name.to_ascii_lowercase())
+            || index_declare.designe(graph.id_of(idx))
         {
             roots.push(idx);
         }

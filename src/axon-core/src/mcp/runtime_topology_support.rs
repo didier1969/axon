@@ -61,6 +61,9 @@ pub(crate) const INDEXER_LIFECYCLE_NEVER_LAUNCHED: &str = "never_launched";
 /// battement s'est tu. `exited_clean` demande une OBSERVATION du superviseur.
 pub(crate) const INDEXER_LIFECYCLE_STOPPED_OR_IDLE: &str = "stopped_or_idle";
 pub(crate) const INDEXER_LIFECYCLE_EXITED_CLEAN: &str = "exited_clean";
+/// REQ-AXO-902562 — l'indexeur n'est pas activé par ce mode de runtime (superviseur `Disabled`).
+/// Configuration délibérée, jamais un crash ni un abandon.
+pub(crate) const INDEXER_LIFECYCLE_DISABLED_FOR_MODE: &str = "disabled_for_runtime_mode";
 
 /// REQ-AXO-902581 — degré de certitude du verdict, dit dans la réponse. Une
 /// inférence présentée comme une observation est le mode d'échec exact que ce REQ
@@ -124,6 +127,9 @@ pub(crate) fn resolve_indexer_liveness(
                     // panne que ce verdict décrivait.
                     match supervisor {
                         None => INDEXER_LIFECYCLE_STOPPED_OR_IDLE,
+                        Some(o) if o.status.eq_ignore_ascii_case("disabled") => {
+                            INDEXER_LIFECYCLE_DISABLED_FOR_MODE
+                        }
                         Some(o) if !o.is_running && o.exit_code == 0 => {
                             INDEXER_LIFECYCLE_EXITED_CLEAN
                         }
@@ -138,21 +144,28 @@ pub(crate) fn resolve_indexer_liveness(
                 feed,
             }
         }
-        None => IndexerLiveness {
-            feed: RuntimeTruthFeed::from_observed_times(
-                0,
-                None,
-                None,
-                window,
-                Some("indexer_heartbeat_absent".to_string()),
-            ),
-            ready: false,
-            source: "no_heartbeat",
-            lifecycle: INDEXER_LIFECYCLE_NEVER_LAUNCHED,
-            // L'absence de LIGNE est un fait, pas une inférence : personne n'a
-            // jamais publié de battement.
-            certainty: LIFECYCLE_CERTAINTY_OBSERVED,
-        },
+        None => {
+            let (lifecycle, source) = match supervisor {
+                Some(o) if o.status.eq_ignore_ascii_case("disabled") => (
+                    INDEXER_LIFECYCLE_DISABLED_FOR_MODE,
+                    "supervisor_disabled",
+                ),
+                _ => (INDEXER_LIFECYCLE_NEVER_LAUNCHED, "no_heartbeat"),
+            };
+            IndexerLiveness {
+                feed: RuntimeTruthFeed::from_observed_times(
+                    0,
+                    None,
+                    None,
+                    window,
+                    Some("indexer_heartbeat_absent".to_string()),
+                ),
+                ready: false,
+                source,
+                lifecycle,
+                certainty: LIFECYCLE_CERTAINTY_OBSERVED,
+            }
+        }
     }
 }
 

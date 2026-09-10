@@ -453,3 +453,5 @@ mod registry_hot_reload_tests;
 mod session_pointer_mutation_tests;
 /// REQ-AXO-902559 — division du budget VRAM entre les sessions ORT d'un même processus.
 mod vram_budget_division_tests;
+/// REQ-AXO-902562 — reachability dispatch par trait et indexer_lifecycle désactivé par mode de runtime.
+mod reachability_and_lifecycle_tests;

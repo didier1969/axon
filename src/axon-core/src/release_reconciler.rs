@@ -418,11 +418,18 @@ pub fn evaluate_liveness_gates(l: &LivenessFacts) -> Vec<Gate> {
 /// au bit près : `CutoverFacts::new_healthy()` en dépend, et un `Unknown` glissé là
 /// enverrait chaque cutover en auto-rollback.
 fn indexer_alive_gate(l: &LivenessFacts) -> Gate {
-    if !l.indexer_expected {
+    if !l.indexer_expected
+        || l.indexer_lifecycle == "disabled_for_runtime_mode"
+        || l.indexer_lifecycle == "disabled"
+    {
         return Gate::binary(
             "indexer_alive",
             true,
-            "no separate indexer in runtime_contract — gate N/A".to_string(),
+            if !l.indexer_expected {
+                "no separate indexer in runtime_contract — gate N/A".to_string()
+            } else {
+                "indexer disabled for this runtime mode (supervisor Disabled) — gate N/A".to_string()
+            },
         );
     }
     if l.indexer_ready && l.ist_ownership.label(l.supervised_pid) == "diverged" {
@@ -461,7 +468,11 @@ pub fn liveness_phase(l: &LivenessFacts) -> Option<&'static str> {
     } else if l.accept_queue_depth.is_some_and(|depth| depth > ACCEPT_QUEUE_MAX_HEALTHY_DEPTH) {
         Some("brain_accept_queue_saturated")
     } else if l.indexer_expected && !l.indexer_ready {
-        Some("indexer_down")
+        if l.indexer_lifecycle == "disabled_for_runtime_mode" || l.indexer_lifecycle == "disabled" {
+            None
+        } else {
+            Some("indexer_down")
+        }
     } else {
         None
     }
@@ -485,6 +496,7 @@ pub fn liveness_next_action(l: &LivenessFacts) -> Option<String> {
     }
     if l.indexer_expected && !l.indexer_ready {
         return Some(match l.indexer_lifecycle.as_str() {
+            "disabled_for_runtime_mode" | "disabled" => "l'indexeur n'est pas activé par ce mode de runtime (`Disabled` dans le superviseur) — configuration normale, pas une panne. Lancer une passe ponctuelle au besoin : `curl -X POST :8080/process/start/axon-indexer`.".to_string(),
             "crashed_or_abandoned" => "indexer heartbeat went stale — restart the indexer only (`curl -X POST :8080/process/restart/axon-indexer`), NOT the whole stack: a full restart takes the brain down with it (PIL-AXO-008, REQ-AXO-902256). Then re-check.".to_string(),
             "never_launched" => "no indexer heartbeat — the split indexer was never started; start the full runtime (`./scripts/axon-live start full`).".to_string(),
             // REQ-AXO-902581 — ces deux verdicts remplacent l'inférence « périmé

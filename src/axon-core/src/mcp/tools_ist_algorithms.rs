@@ -1867,6 +1867,8 @@ impl McpServer {
                 "total_available": n_symbols + n_clusters,
                 "unwired_symbols": n_symbols,
                 "dead_clusters": n_clusters,
+                "exclusions": "test files, test-only private helpers, and SOLL role=entry declared symbols",
+                "counts_definition": "unwired_symbols: public callables with 0 prod callers; dead_clusters: groups unreachable from roots or dispatch entries",
                 "offenders": offenders
             }));
         }
