@@ -225,9 +225,7 @@ impl GraphStore {
         self.pool
             .native
             .run_bootstrap_global_ddl(&statements)
-            .map_err(|err| {
-                anyhow!("PostgreSQL global schema bootstrap failed — {err}")
-            })?;
+            .map_err(|err| anyhow!("PostgreSQL global schema bootstrap failed — {err}"))?;
 
         if let Ok(seed_path) = std::env::var("AXON_SOLL_SEED_PATH") {
             if !seed_path.trim().is_empty() {
@@ -531,41 +529,65 @@ impl GraphStore {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
+        self.sync_project_registry_entry_with_commands(
+            &normalized_code,
+            Some(&normalized_name),
+            normalized_path.as_deref(),
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn sync_project_registry_entry_with_commands(
+        &self,
+        project_code: &str,
+        project_name: Option<&str>,
+        project_path: Option<&str>,
+        oracle_command: Option<&str>,
+        formatter_command: Option<&str>,
+    ) -> Result<()> {
+        let normalized_code = project_code.trim().to_ascii_uppercase();
+        let normalized_name = project_name
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                project_path
+                    .and_then(|path| std::path::Path::new(path).file_name())
+                    .map(|value| value.to_string_lossy().trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| normalized_code.clone());
+        if normalized_code.is_empty()
+            || !crate::project_meta::is_valid_project_code(&normalized_code)
+        {
+            return Ok(());
+        }
+
+        let normalized_path = project_path
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+
         self.execute_param(
-            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_name, project_path) VALUES (?, ?, ?) ON CONFLICT (project_code) DO UPDATE SET project_name = EXCLUDED.project_name, project_path = EXCLUDED.project_path",
-            &serde_json::json!([normalized_code, normalized_name, normalized_path]),
+            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_name, project_path, oracle_command, formatter_command) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT (project_code) DO UPDATE SET \
+                 project_name = EXCLUDED.project_name, \
+                 project_path = EXCLUDED.project_path, \
+                 oracle_command = COALESCE(EXCLUDED.oracle_command, soll.ProjectCodeRegistry.oracle_command), \
+                 formatter_command = COALESCE(EXCLUDED.formatter_command, soll.ProjectCodeRegistry.formatter_command)",
+            &serde_json::json!([normalized_code, normalized_name, normalized_path, oracle_command, formatter_command]),
         )?;
 
         // REQ-AXO-902626 — écrire le PARENT FK, pas seulement le registre.
-        //
-        // `ist.IndexedFile.project_code` est une FK NOT NULL vers `axon.Project(code)`.
-        // Le seul écrivain de production était l'UPSERT de REQ-AXO-901860 dans
-        // `bulk_writer` ; `c72cd227` (2026-08-28) l'a retiré au nom de REQ-AXO-902541
-        // — « ProjectCodeRegistry owns tenant creation » — SANS donner cette charge au
-        // registre. Le retrait était juste (le rétablir rouvrirait le bucket UNK et la
-        // cascade 25P02) ; c'est ici que l'écriture manquait. Mesuré le 2026-09-06 :
-        // dernier enrôlement réussi le 2026-08-26, 20 codes au registre sans parent,
-        // dont 7 tenants vivants dont A3 refusait 100 % des lots.
-        //
-        // Non best-effort, contrairement au NOTIFY ci-dessous : un registre écrit sans
-        // son parent FK est exactement l'état que ceci répare.
         self.ensure_project_fk_parent(
             &normalized_code,
             &normalized_name,
             normalized_path.as_deref().unwrap_or(""),
         )?;
 
-        // REQ-AXO-901985 — ring the live-enrolment bell. A running indexer's
-        // `axon_registry_changed` LISTENer (watchman_source::spawn_registry_discovery)
-        // resolves the project_path into a Watchman root and starts indexing the
-        // new project LIVE. Without this NOTIFY the listener never wakes for a
-        // freshly-registered project — the original emit was lost in the
-        // ingress_buffer purge (REQ-AXO-901893 / regression noted in REQ-AXO-901899),
-        // so `axon_init_project` registered the project but nothing got indexed.
-        // Best-effort: a NOTIFY failure must NOT fail registration. No-op without a
-        // path (the listener requires a non-empty project_path). When the runtime
-        // is brain_only (no indexer), the NOTIFY simply has no consumer — the init
-        // response tells the caller to start an indexer.
+        // REQ-AXO-901985 — ring the live-enrolment bell.
         if let Some(path) = normalized_path.as_deref() {
             let payload = serde_json::json!({
                 "op": "registry_sync",
@@ -585,6 +607,20 @@ impl GraphStore {
             }
         }
 
+        Ok(())
+    }
+
+    pub(crate) fn record_project_oracle_run(
+        &self,
+        project_code: &str,
+        run_ms: u64,
+        verdict: &str,
+    ) -> Result<()> {
+        let normalized = project_code.trim().to_ascii_uppercase();
+        self.execute_param(
+            "UPDATE soll.ProjectCodeRegistry SET last_oracle_run_ms = ?, last_oracle_verdict = ? WHERE project_code = ?",
+            &serde_json::json!([run_ms as i64, verdict, normalized]),
+        )?;
         Ok(())
     }
 
@@ -647,7 +683,11 @@ impl GraphStore {
             .query_json("SELECT code FROM axon.Project")
             .ok()
             .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
-            .map(|rows| rows.into_iter().filter_map(|r| r.into_iter().next()).collect())
+            .map(|rows| {
+                rows.into_iter()
+                    .filter_map(|r| r.into_iter().next())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let mut repares: Vec<String> = Vec::new();

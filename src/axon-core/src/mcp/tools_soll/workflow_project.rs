@@ -201,7 +201,11 @@ fn commit_git_checked(
     args: &[&str],
 ) -> anyhow::Result<std::process::Output> {
     let out = commit_git_command(project_dir, index).args(args).output()?;
-    anyhow::ensure!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    anyhow::ensure!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     Ok(out)
 }
 
@@ -210,8 +214,11 @@ fn commit_git_paths(
     args: &[&str],
 ) -> anyhow::Result<Vec<String>> {
     let out = commit_git_checked(project_dir, None, args)?;
-    out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty())
-        .map(|p| Ok(std::str::from_utf8(p)?.to_owned())).collect()
+    out.stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| Ok(std::str::from_utf8(p)?.to_owned()))
+        .collect()
 }
 
 /// Own only the lock we successfully created. Git clients respect index.lock;
@@ -246,8 +253,11 @@ fn commit_scoped_index(
     message: &str,
 ) -> anyhow::Result<ScopedCommitResult> {
     let git_path = |name: &str| -> anyhow::Result<std::path::PathBuf> {
-        let out = commit_git_checked(project_dir, None,
-            &["rev-parse", "--path-format=absolute", "--git-path", name])?;
+        let out = commit_git_checked(
+            project_dir,
+            None,
+            &["rev-parse", "--path-format=absolute", "--git-path", name],
+        )?;
         let raw = out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout);
         Ok(std::path::PathBuf::from(std::str::from_utf8(raw)?))
     };
@@ -256,27 +266,52 @@ fn commit_scoped_index(
         if git_path(state)?.exists() {
             let (_, excluded) = McpServer::partition_staged_by_declaration(declared, project_dir)?;
             let output = commit_git_command(project_dir, None)
-                .args(["commit", "--only", "-m", message, "--"]).args(declared).output()?;
-            anyhow::ensure!(!output.status.success(), "Unexpected partial commit during {state}; inspect HEAD before retrying");
-            return Ok(ScopedCommitResult { output, committed: vec![], excluded, sha: None });
+                .args(["commit", "--only", "-m", message, "--"])
+                .args(declared)
+                .output()?;
+            anyhow::ensure!(
+                !output.status.success(),
+                "Unexpected partial commit during {state}; inspect HEAD before retrying"
+            );
+            return Ok(ScopedCommitResult {
+                output,
+                committed: vec![],
+                excluded,
+                sha: None,
+            });
         }
     }
     let index = git_path("index")?;
     let mut lock_name = index.as_os_str().to_owned();
     lock_name.push(".lock");
     let lock_path = std::path::PathBuf::from(lock_name);
-    std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path)?;
-    let mut lock = CommitIndexLock { path: lock_path, owned: true };
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)?;
+    let mut lock = CommitIndexLock {
+        path: lock_path,
+        owned: true,
+    };
     let (expected, excluded) = McpServer::partition_staged_by_declaration(declared, project_dir)?;
-    let temporary = tempfile::Builder::new().prefix("axon-commit-index-")
-        .tempfile_in(index.parent().ok_or_else(|| anyhow::anyhow!("index has no parent"))?)?;
+    let temporary = tempfile::Builder::new()
+        .prefix("axon-commit-index-")
+        .tempfile_in(
+            index
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("index has no parent"))?,
+        )?;
     std::fs::copy(&index, temporary.path())?;
     let head = commit_git_command(project_dir, None)
-        .args(["rev-parse", "--verify", "--quiet", "HEAD"]).output()?;
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .output()?;
     let before = if head.status.success() {
         Some(String::from_utf8(head.stdout)?.trim().to_owned())
     } else {
-        anyhow::ensure!(head.status.code() == Some(1), "Cannot determine HEAD before commit");
+        anyhow::ensure!(
+            head.status.code() == Some(1),
+            "Cannot determine HEAD before commit"
+        );
         None
     };
     if !excluded.is_empty() {
@@ -292,21 +327,51 @@ fn commit_scoped_index(
             prune.args(["rm", "-r", "--cached", "--force", "--ignore-unmatch", "--"]);
         }
         let out = prune.args(&excluded).output()?;
-        anyhow::ensure!(out.status.success(), "Cannot isolate declared paths: {}", String::from_utf8_lossy(&out.stderr));
+        anyhow::ensure!(
+            out.status.success(),
+            "Cannot isolate declared paths: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     let output = commit_git_command(project_dir, Some(temporary.path()))
-        .args(["commit", "-m", message]).output()?;
+        .args(["commit", "-m", message])
+        .output()?;
     if !output.status.success() {
-        return Ok(ScopedCommitResult { output, committed: vec![], excluded, sha: None });
+        return Ok(ScopedCommitResult {
+            output,
+            committed: vec![],
+            excluded,
+            sha: None,
+        });
     }
-    let sha = String::from_utf8(commit_git_checked(project_dir, None,
-        &["rev-parse", "--verify", "HEAD"])?.stdout)?.trim().to_owned();
-    let parents = String::from_utf8(commit_git_checked(project_dir, None,
-        &["rev-list", "--parents", "-n", "1", &sha])?.stdout)?;
+    let sha = String::from_utf8(
+        commit_git_checked(project_dir, None, &["rev-parse", "--verify", "HEAD"])?.stdout,
+    )?
+    .trim()
+    .to_owned();
+    let parents = String::from_utf8(
+        commit_git_checked(
+            project_dir,
+            None,
+            &["rev-list", "--parents", "-n", "1", &sha],
+        )?
+        .stdout,
+    )?;
     let actual_parents: Vec<_> = parents.split_whitespace().skip(1).collect();
-    anyhow::ensure!(actual_parents == before.as_deref().into_iter().collect::<Vec<_>>(),
-        "Commit {sha} has an unexpected parent; inspect concurrent HEAD changes before retrying");
-    let mut args = vec!["diff-tree", "--root", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", &sha];
+    anyhow::ensure!(
+        actual_parents == before.as_deref().into_iter().collect::<Vec<_>>(),
+        "Commit {sha} has an unexpected parent; inspect concurrent HEAD changes before retrying"
+    );
+    let mut args = vec![
+        "diff-tree",
+        "--root",
+        "--no-commit-id",
+        "--name-only",
+        "--no-renames",
+        "-r",
+        "-z",
+        &sha,
+    ];
     let committed = commit_git_paths(project_dir, &args)?;
     args.push("--");
     args.extend(declared.iter().map(String::as_str));
@@ -314,8 +379,15 @@ fn commit_scoped_index(
     // Hooks are not bypassed. If one changes the promised scope or stages new
     // work after committing, retain its index for recovery, never discard it.
     let after_tree = commit_git_checked(project_dir, Some(temporary.path()), &["write-tree"])?;
-    let committed_tree = commit_git_checked(project_dir, None, &["rev-parse", &format!("{sha}^{{tree}}")])?;
-    if committed != allowed || after_tree.stdout != committed_tree.stdout || expected.iter().any(|p| !committed.contains(p)) {
+    let committed_tree = commit_git_checked(
+        project_dir,
+        None,
+        &["rev-parse", &format!("{sha}^{{tree}}")],
+    )?;
+    if committed != allowed
+        || after_tree.stdout != committed_tree.stdout
+        || expected.iter().any(|p| !committed.contains(p))
+    {
         let retained = temporary.into_temp_path().keep()?;
         anyhow::bail!("Commit {sha} exists but a hook changed its scope, omitted staged paths, or left new staged work. \
             Retained index: {}. Inspect HEAD and this index before retrying; no success is certified", retained.display());
@@ -326,12 +398,23 @@ fn commit_scoped_index(
     if !committed.is_empty() {
         let out = commit_git_command(project_dir, Some(&lock.path))
             .env("GIT_LITERAL_PATHSPECS", "1")
-            .args(["reset", "-q", &sha, "--"]).args(&committed).output()?;
-        anyhow::ensure!(out.status.success(), "Commit {sha} exists, but index synchronization failed: {}", String::from_utf8_lossy(&out.stderr));
+            .args(["reset", "-q", &sha, "--"])
+            .args(&committed)
+            .output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "Commit {sha} exists, but index synchronization failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     std::fs::rename(&lock.path, &index)?;
     lock.owned = false;
-    Ok(ScopedCommitResult { output, committed, excluded, sha: Some(sha) })
+    Ok(ScopedCommitResult {
+        output,
+        committed,
+        excluded,
+        sha: Some(sha),
+    })
 }
 
 /// REQ-AXO-902624 / REQ-AXO-902619 — les trois régimes du bundle d'ouverture.
@@ -470,18 +553,380 @@ impl McpServer {
         declared: &[String],
         project_dir: Option<&std::path::PathBuf>,
     ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-        let all_staged: std::collections::BTreeSet<_> =
-            commit_git_paths(project_dir, &["diff", "--cached", "--name-only", "--no-renames", "-z"])?
-                .into_iter().collect();
+        let all_staged: std::collections::BTreeSet<_> = commit_git_paths(
+            project_dir,
+            &["diff", "--cached", "--name-only", "--no-renames", "-z"],
+        )?
+        .into_iter()
+        .collect();
         if all_staged.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
-        let mut covering = vec!["diff", "--cached", "--name-only", "--no-renames", "-z", "--"];
+        let mut covering = vec![
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "--",
+        ];
         covering.extend(declared.iter().map(String::as_str));
-        let covered: std::collections::BTreeSet<_> =
-            commit_git_paths(project_dir, &covering)?.into_iter().collect();
+        let covered: std::collections::BTreeSet<_> = commit_git_paths(project_dir, &covering)?
+            .into_iter()
+            .collect();
         let outside = all_staged.difference(&covered).cloned().collect();
         Ok((covered.into_iter().collect(), outside))
+    }
+
+    /// REQ-AXO-902451 (Volet 1) — Formateur déclaré / dérivé sur les diff_paths.
+    ///
+    /// Lance le formateur déclaré par le projet (au registre, dans meta.json, ou en argument)
+    /// ou dérivé de l'écosystème sur les fichiers modifiés de `diff_paths` existant sur disque,
+    /// et échoue si un fichier n'est pas formaté.
+    fn validate_diff_paths_formatting(
+        project_dir: &std::path::Path,
+        project_code: Option<&str>,
+        diff_paths: &[String],
+        explicit_formatter_cmd: Option<&str>,
+        graph_store: &crate::graph::GraphStore,
+    ) -> Option<serde_json::Value> {
+        let mut resolved_cmd = explicit_formatter_cmd
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        if resolved_cmd.is_none() {
+            if let Some(code) = project_code {
+                if let Ok(raw) = graph_store.query_json(&format!(
+                "SELECT COALESCE(formatter_command, '') FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
+                escape_sql(code)
+            )) {
+                let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+                if let Some(cmd) = rows.first().and_then(|r| r.first()) {
+                    let trimmed = cmd.trim();
+                    if !trimmed.is_empty() {
+                        resolved_cmd = Some(trimmed.to_string());
+                    }
+                }
+            }
+            }
+        }
+
+        if resolved_cmd.is_none() {
+            let meta_file = project_dir.join(".axon").join("meta.json");
+            if let Ok(content) = std::fs::read_to_string(&meta_file) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(cmd) = val.get("formatter_command").and_then(|v| v.as_str()) {
+                        let trimmed = cmd.trim();
+                        if !trimmed.is_empty() {
+                            resolved_cmd = Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        let is_explicit = resolved_cmd.is_some();
+
+        if resolved_cmd.is_none() {
+            let has_rs = diff_paths.iter().any(|p| p.ends_with(".rs"));
+            let has_ex = diff_paths
+                .iter()
+                .any(|p| p.ends_with(".ex") || p.ends_with(".exs"));
+            let has_py = diff_paths.iter().any(|p| p.ends_with(".py"));
+
+            if has_rs && project_dir.join("Cargo.toml").is_file() {
+                resolved_cmd = Some("rustfmt --check".to_string());
+            } else if has_ex && project_dir.join("mix.exs").is_file() {
+                resolved_cmd = Some("mix format --check-formatted".to_string());
+            } else if has_py
+                && (project_dir.join("pyproject.toml").is_file()
+                    || project_dir.join("ruff.toml").is_file())
+            {
+                resolved_cmd = Some("ruff format --check".to_string());
+            }
+        }
+
+        let Some(cmd_str) = resolved_cmd else {
+            return None;
+        };
+
+        let target_files: Vec<String> = diff_paths
+            .iter()
+            .filter(|p| {
+                let path = project_dir.join(p);
+                path.is_file()
+            })
+            .cloned()
+            .collect();
+
+        if target_files.is_empty() {
+            return None;
+        }
+
+        let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let prog = parts[0];
+        let mut cmd = std::process::Command::new(prog);
+        cmd.current_dir(project_dir);
+        for arg in &parts[1..] {
+            cmd.arg(arg);
+        }
+        for file in &target_files {
+            cmd.arg(file);
+        }
+
+        match cmd.output() {
+            Ok(output) => {
+                if !output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let detail = if !stderr.trim().is_empty() {
+                        stderr.trim().to_string()
+                    } else if !stdout.trim().is_empty() {
+                        stdout.trim().to_string()
+                    } else {
+                        format!("exit code {:?}", output.status.code())
+                    };
+                    Some(serde_json::json!({
+                        "rule": "GUI-PRO-003 / Formatter - unformatted files in diff_paths",
+                        "diagnostic": format!(
+                            "Project formatter '{}' failed on modified file(s):\n{}",
+                            cmd_str, detail
+                        ),
+                        "remediation_plan": format!(
+                            "Format the modified file(s) ({}) using '{}' before committing.",
+                            target_files.join(", "),
+                            cmd_str
+                        )
+                    }))
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                if is_explicit {
+                    Some(serde_json::json!({
+                        "rule": "GUI-PRO-003 / Formatter - declared formatter command execution failed",
+                        "diagnostic": format!(
+                            "Declared formatter '{}' could not be executed: {}",
+                            cmd_str, e
+                        ),
+                        "remediation_plan": format!(
+                            "Ensure the formatter '{}' is installed and available in PATH.",
+                            cmd_str
+                        )
+                    }))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// REQ-AXO-902451 (Volet 2) — Oracle du projet & contrôle de fraîcheur.
+    ///
+    /// Si une commande d'oracle est déclarée pour le projet (au registre, dans meta.json,
+    /// ou en argument), exige la PREUVE d'une exécution réussie (verdict=pass) et
+    /// FRAÎCHE (postérieure au mtime du fichier le plus récemment modifié parmi les diff_paths).
+    fn validate_project_oracle_freshness(
+        project_dir: &std::path::Path,
+        project_code: Option<&str>,
+        diff_paths: &[String],
+        explicit_oracle_cmd: Option<&str>,
+        explicit_proof: Option<&serde_json::Value>,
+        graph_store: &crate::graph::GraphStore,
+    ) -> Option<serde_json::Value> {
+        let mut resolved_cmd = explicit_oracle_cmd
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        let mut db_last_run_ms: Option<u64> = None;
+        let mut db_last_verdict: Option<String> = None;
+
+        if let Some(code) = project_code {
+            if let Ok(raw) = graph_store.query_json(&format!(
+            "SELECT COALESCE(oracle_command, ''), last_oracle_run_ms, COALESCE(last_oracle_verdict, '') \
+             FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
+            escape_sql(code)
+        )) {
+            let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+            if let Some(first_row) = rows.first() {
+                if resolved_cmd.is_none() {
+                    if let Some(cmd) = first_row.first().and_then(|v| v.as_str()) {
+                        let trimmed = cmd.trim();
+                        if !trimmed.is_empty() {
+                            resolved_cmd = Some(trimmed.to_string());
+                        }
+                    }
+                }
+                if let Some(run_val) = first_row.get(1) {
+                    if let Some(ms) = run_val.as_i64() {
+                        if ms > 0 {
+                            db_last_run_ms = Some(ms as u64);
+                        }
+                    } else if let Some(ms_str) = run_val.as_str() {
+                        if let Ok(ms) = ms_str.parse::<u64>() {
+                            db_last_run_ms = Some(ms);
+                        }
+                    }
+                }
+                if let Some(verdict) = first_row.get(2).and_then(|v| v.as_str()) {
+                    let trimmed = verdict.trim();
+                    if !trimmed.is_empty() {
+                        db_last_verdict = Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        }
+
+        if resolved_cmd.is_none() {
+            let meta_file = project_dir.join(".axon").join("meta.json");
+            if let Ok(content) = std::fs::read_to_string(&meta_file) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(cmd) = val.get("oracle_command").and_then(|v| v.as_str()) {
+                        let trimmed = cmd.trim();
+                        if !trimmed.is_empty() {
+                            resolved_cmd = Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        let Some(oracle_cmd) = resolved_cmd else {
+            return None;
+        };
+
+        let mut max_diff_mtime_ms: u64 = 0;
+        let mut most_recent_file: String = String::new();
+        for p in diff_paths {
+            let full_path = project_dir.join(p);
+            if let Ok(meta) = std::fs::metadata(&full_path) {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        let ms = dur.as_millis() as u64;
+                        if ms > max_diff_mtime_ms {
+                            max_diff_mtime_ms = ms;
+                            most_recent_file = p.clone();
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut proof_executed_at_ms: Option<u64> = None;
+        let mut proof_verdict: Option<String> = None;
+
+        let explicit_proof_obj = explicit_proof.filter(|v| v.is_object());
+        if let Some(proof) = explicit_proof_obj {
+            if let Some(verdict) = proof.get("verdict").and_then(|v| v.as_str()) {
+                proof_verdict = Some(verdict.to_ascii_lowercase());
+            }
+            if let Some(ms) = proof.get("executed_at_ms").and_then(|v| v.as_u64()) {
+                proof_executed_at_ms = Some(ms);
+            } else if let Some(ms) = proof.get("timestamp_ms").and_then(|v| v.as_u64()) {
+                proof_executed_at_ms = Some(ms);
+            } else if let Some(ms) = proof.get("timestamp").and_then(|v| v.as_u64()) {
+                proof_executed_at_ms = Some(ms);
+            } else if proof_verdict.is_some() {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                proof_executed_at_ms = Some(now_ms);
+            }
+
+            if let (Some(code), Some(run_ms), Some(v)) =
+                (project_code, proof_executed_at_ms, proof_verdict.as_deref())
+            {
+                let _ = graph_store.record_project_oracle_run(code, run_ms, v);
+            }
+        }
+
+        if proof_executed_at_ms.is_none() {
+            for filename in [".axon/oracle_run.json", ".axon/oracle_result.json"] {
+                let file_path = project_dir.join(filename);
+                if let Ok(content) = std::fs::read_to_string(&file_path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(verdict) = val.get("verdict").and_then(|v| v.as_str()) {
+                            proof_verdict = Some(verdict.to_ascii_lowercase());
+                        }
+                        if let Some(ms) = val.get("executed_at_ms").and_then(|v| v.as_u64()) {
+                            proof_executed_at_ms = Some(ms);
+                        } else if let Some(ms) = val.get("timestamp_ms").and_then(|v| v.as_u64()) {
+                            proof_executed_at_ms = Some(ms);
+                        }
+                        if proof_executed_at_ms.is_some() {
+                            if let (Some(code), Some(run_ms), Some(v)) =
+                                (project_code, proof_executed_at_ms, proof_verdict.as_deref())
+                            {
+                                let _ = graph_store.record_project_oracle_run(code, run_ms, v);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if proof_executed_at_ms.is_none() {
+            proof_executed_at_ms = db_last_run_ms;
+            if proof_verdict.is_none() {
+                proof_verdict = db_last_verdict;
+            }
+        }
+
+        let Some(executed_ms) = proof_executed_at_ms else {
+            return Some(serde_json::json!({
+                "rule": "oracle_freshness - missing oracle execution proof",
+                "diagnostic": format!(
+                    "Project has declared oracle command '{}' but no execution proof was found.",
+                    oracle_cmd
+                ),
+                "remediation_plan": format!(
+                    "Run '{}' and provide execution proof (via `oracle_proof` argument, .axon/oracle_run.json, or record_oracle_run) before committing.",
+                    oracle_cmd
+                )
+            }));
+        };
+
+        let verdict = proof_verdict.unwrap_or_else(|| "unknown".to_string());
+        if verdict != "pass" && verdict != "ok" && verdict != "green" {
+            return Some(serde_json::json!({
+                "rule": "oracle_verdict - project oracle failed",
+                "diagnostic": format!(
+                    "Last execution of oracle '{}' failed with verdict '{}'.",
+                    oracle_cmd, verdict
+                ),
+                "remediation_plan": format!(
+                    "Fix failing tests and rerun oracle '{}' until green.",
+                    oracle_cmd
+                )
+            }));
+        }
+
+        if max_diff_mtime_ms > 0 && executed_ms < max_diff_mtime_ms {
+            let diff_sec = (max_diff_mtime_ms - executed_ms) as f64 / 1000.0;
+            return Some(serde_json::json!({
+                "rule": "oracle_freshness - stale oracle execution",
+                "diagnostic": format!(
+                    "Project oracle execution is STALE: oracle ran at {} ms, but file '{}' was modified afterwards at {} ms (antérieure de {:.1}s).",
+                    executed_ms, most_recent_file, max_diff_mtime_ms, diff_sec
+                ),
+                "remediation_plan": format!(
+                    "Rerun project oracle '{}' after modifying files to validate changes before committing.",
+                    oracle_cmd
+                )
+            }));
+        }
+
+        None
     }
 
     pub(crate) fn axon_commit_work(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
@@ -633,8 +1078,7 @@ impl McpServer {
         if let Some(project) = effective_project_code.as_deref() {
             let view = crate::ist_snapshot::process_view();
             if let Some(snapshot) = view.cache_handle().get(project) {
-                let file_paths: Vec<&str> =
-                    diff_paths.iter().filter_map(|p| p.as_str()).collect();
+                let file_paths: Vec<&str> = diff_paths.iter().filter_map(|p| p.as_str()).collect();
                 if !file_paths.is_empty() {
                     let deliverable_raw = self
                         .graph_store
@@ -670,9 +1114,13 @@ impl McpServer {
                         for path in &file_paths {
                             let normalized = path.to_ascii_lowercase();
                             for id in crate::ist_snapshot::code_smells::symbols_in_matching_files(
-                                &snapshot, project, &normalized, "",
+                                &snapshot,
+                                project,
+                                &normalized,
+                                "",
                             ) {
-                                let name = id.rsplit("::").next().unwrap_or(&id).to_ascii_lowercase();
+                                let name =
+                                    id.rsplit("::").next().unwrap_or(&id).to_ascii_lowercase();
                                 if deliverable_names.contains(&name) {
                                     candidate_ids.insert(id);
                                 }
@@ -700,6 +1148,49 @@ impl McpServer {
                         }
                     }
                 }
+            }
+        }
+
+        // REQ-AXO-902451 — Formateur sur les diff_paths & Contrôle de fraîcheur de l'oracle
+        let target_project_dir: Option<std::path::PathBuf> = resolved_project_path
+            .clone()
+            .or_else(|| {
+                effective_project_code
+                    .as_deref()
+                    .and_then(|code| self.lookup_project_path_by_code(code))
+            })
+            .or_else(|| std::env::current_dir().ok());
+
+        if let Some(target_dir) = target_project_dir.as_deref() {
+            let paths: Vec<String> = diff_paths
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            let explicit_fmt = args.get("formatter_command").and_then(|v| v.as_str());
+            if let Some(fmt_violation) = Self::validate_diff_paths_formatting(
+                target_dir,
+                effective_project_code.as_deref(),
+                &paths,
+                explicit_fmt,
+                &self.graph_store,
+            ) {
+                violations.push(fmt_violation);
+            }
+
+            let explicit_orc = args.get("oracle_command").and_then(|v| v.as_str());
+            let explicit_proof = args
+                .get("oracle_proof")
+                .or_else(|| args.get("oracle_run"))
+                .filter(|v| v.is_object());
+            if let Some(orc_violation) = Self::validate_project_oracle_freshness(
+                target_dir,
+                effective_project_code.as_deref(),
+                &paths,
+                explicit_orc,
+                explicit_proof,
+                &self.graph_store,
+            ) {
+                violations.push(orc_violation);
             }
         }
 
@@ -861,37 +1352,37 @@ impl McpServer {
             }
         };
         if let Some(add_out) = add_out.as_ref() {
-        if !add_out.status.success() {
-            let stderr = String::from_utf8_lossy(&add_out.stderr);
-            let stdout = String::from_utf8_lossy(&add_out.stdout);
-            return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!(
-                    "Git add failed (exit {}). Refusing to commit a partial diff. stderr: {}",
-                    add_out.status.code().unwrap_or(-1),
-                    stderr.trim()
-                )}],
-                "isError": true,
-                "data": {
-                    "status": "input_invalid",
-                    "git_add_exit_code": add_out.status.code(),
-                    "git_add_stderr": stderr,
-                    "git_add_stdout": stdout,
-                    "next_action": {
-                        "kind": "fix_path_then_retry",
-                        "tool": "axon_commit_work",
-                        "when": "after_paths_resolved"
-                    },
-                    "operator_guidance": {
-                        "problem_class": "git_add_rejected_paths",
-                        "follow_up_tools": ["axon_pre_flight_check"],
-                    },
-                    "parameter_repair": {
-                        "invalid_field": "diff_paths",
-                        "hint": "verify each path exists relative to repo root and is not gitignored, then retry"
+            if !add_out.status.success() {
+                let stderr = String::from_utf8_lossy(&add_out.stderr);
+                let stdout = String::from_utf8_lossy(&add_out.stdout);
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!(
+                        "Git add failed (exit {}). Refusing to commit a partial diff. stderr: {}",
+                        add_out.status.code().unwrap_or(-1),
+                        stderr.trim()
+                    )}],
+                    "isError": true,
+                    "data": {
+                        "status": "input_invalid",
+                        "git_add_exit_code": add_out.status.code(),
+                        "git_add_stderr": stderr,
+                        "git_add_stdout": stdout,
+                        "next_action": {
+                            "kind": "fix_path_then_retry",
+                            "tool": "axon_commit_work",
+                            "when": "after_paths_resolved"
+                        },
+                        "operator_guidance": {
+                            "problem_class": "git_add_rejected_paths",
+                            "follow_up_tools": ["axon_pre_flight_check"],
+                        },
+                        "parameter_repair": {
+                            "invalid_field": "diff_paths",
+                            "hint": "verify each path exists relative to repo root and is not gitignored, then retry"
+                        }
                     }
-                }
-            }));
-        }
+                }));
+            }
         }
 
         // REQ-AXO-902417 — everything below this line exists because the commit
@@ -906,7 +1397,12 @@ impl McpServer {
             .map(str::to_string)
             .collect();
         match commit_scoped_index(resolved_project_path.as_ref(), &declared, message) {
-            Ok(ScopedCommitResult { output, committed, excluded, sha }) => {
+            Ok(ScopedCommitResult {
+                output,
+                committed,
+                excluded,
+                sha,
+            }) => {
                 if !output.status.success() {
                     return Some(Self::commit_failure_response(&output, &declared, &excluded));
                 }
@@ -1907,7 +2403,9 @@ impl McpServer {
             let _ = tx.send(child.wait_with_output());
         });
         match rx.recv_timeout(timeout) {
-            Ok(Ok(o)) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+            Ok(Ok(o)) if o.status.success() => {
+                Some(String::from_utf8_lossy(&o.stdout).into_owned())
+            }
             Ok(_) => None,
             Err(_) => {
                 // Timed out — best-effort kill ; the dangling thread exits when
@@ -2058,10 +2556,17 @@ impl McpServer {
         if ip_brief.is_empty() {
             summary.push_str(" · no REQ in progress");
         } else {
-            summary.push_str(&format!(" · {} REQ in progress: {}", ip.len(), ip_brief.join("; ")));
+            summary.push_str(&format!(
+                " · {} REQ in progress: {}",
+                ip.len(),
+                ip_brief.join("; ")
+            ));
         }
         if !commit_brief.is_empty() {
-            summary.push_str(&format!(" · recent REQ commits: {}", commit_brief.join(", ")));
+            summary.push_str(&format!(
+                " · recent REQ commits: {}",
+                commit_brief.join(", ")
+            ));
         }
         if let Some(id) = explicit_ref.get("value").and_then(|v| v.as_str()) {
             summary.push_str(&format!(" · explicit pointer: {id}"));
@@ -2109,8 +2614,14 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("none");
         if sp_kind != "none" {
-            let val = sp.and_then(|v| v.get("value")).and_then(|v| v.as_str()).unwrap_or("");
-            let label = sp.and_then(|v| v.get("label")).and_then(|v| v.as_str()).unwrap_or("");
+            let val = sp
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let label = sp
+                .and_then(|v| v.get("label"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             // REQ-AXO-902422 — the node's CURRENT title wins over the label
             // frozen when the pointer was registered. The label is kept only
             // when it says something the title does not, and it is then marked
@@ -2127,7 +2638,9 @@ impl McpServer {
                 (true, false) => format!(" — {label}"),
                 (true, true) => String::new(),
             };
-            out.push_str(&format!("**Session pointer** (`{sp_kind}`): `{val}`{suffix}\n"));
+            out.push_str(&format!(
+                "**Session pointer** (`{sp_kind}`): `{val}`{suffix}\n"
+            ));
         }
         if let Some(summary) = bundle
             .get("derived_session_pointer")
@@ -2182,7 +2695,10 @@ impl McpServer {
                 })
                 .collect();
             if !items.is_empty() {
-                out.push_str(&format!("**Derniers commits REQ:** {}\n", items.join(" · ")));
+                out.push_str(&format!(
+                    "**Derniers commits REQ:** {}\n",
+                    items.join(" · ")
+                ));
             }
         }
 
@@ -2209,11 +2725,20 @@ impl McpServer {
                     .filter(|s| !s.trim().is_empty())
                     .map(|s| s.to_string())
             };
-            let node_parts = |n: &serde_json::Value| -> (String, String, Option<String>, Option<String>) {
-                let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-                let title = n.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                (id, title, texte(n, "body"), texte(n, "summary"))
-            };
+            let node_parts =
+                |n: &serde_json::Value| -> (String, String, Option<String>, Option<String>) {
+                    let id = n
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let title = n
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    (id, title, texte(n, "body"), texte(n, "summary"))
+                };
 
             // Vision — full body, unconditional (one mandatory node).
             if let Some(vision) = sk.get("vision").and_then(|v| v.as_array()) {
@@ -2320,7 +2845,10 @@ impl McpServer {
                 } else {
                     lines.len().to_string()
                 };
-                out.push_str(&format!("\n**{label} ({compte}):** {}\n", lines.join(" · ")));
+                out.push_str(&format!(
+                    "\n**{label} ({compte}):** {}\n",
+                    lines.join(" · ")
+                ));
             };
             index_block(
                 "guidelines_index",
@@ -2533,10 +3061,7 @@ impl McpServer {
         // une session est le PREMIER geste, pas la liste. Les COMPTES restent entiers,
         // et `debt_digest top=N` rend la profondeur. Le handoff, lui, garde ses dix
         // (`debt_digest_kickoff`) : il ferme sur une punch-list, il n'ouvre pas.
-        let debt_digest = self.debt_digest_avec_plafond(
-            project_code,
-            if bref { 3 } else { 10 },
-        );
+        let debt_digest = self.debt_digest_avec_plafond(project_code, if bref { 3 } else { 10 });
         serde_json::json!({
             "kickoff_prompt": kickoff_prompt,
             "kickoff_prompt_source": "soll://Node/DEC-PRO-001",
@@ -2650,7 +3175,6 @@ impl McpServer {
         })
     }
 
-
     /// REQ-AXO-902507 — un TERRITOIRE ne se prend pas en silence.
     ///
     /// `axon_init_project` acceptait n'importe quel chemin et dérivait le nom du dernier
@@ -2759,7 +3283,10 @@ impl McpServer {
             .ok()
             .and_then(|r| serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&r).ok())
             .and_then(|rows| rows.first().and_then(|r| r.first().cloned()))
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .map(|n| n == 0)
             .unwrap_or(true) // en cas de doute, RENDRE le digest : taire est pire
     }
@@ -3199,7 +3726,10 @@ impl McpServer {
         } else {
             // Continuation : une LIGNE, pas un digest. Le contenu reste atteignable par
             // `soll_get`, exactement comme les Decisions le sont déjà.
-            let nb_regles = rules_text.lines().filter(|l| l.trim_start().starts_with("- **")).count();
+            let nb_regles = rules_text
+                .lines()
+                .filter(|l| l.trim_start().starts_with("- **"))
+                .count();
             response_text.push_str(&format!(
                 "{nb_regles} règle(s) globale(s) active(s) — `soll_get(id='GUI-PRO-…')` pour \
                  un corps, `axon_apply_guidelines` pour changer la sélection. \
@@ -3232,9 +3762,16 @@ impl McpServer {
         // 2. Si l'appel tente d'effacer le pointeur (null ou kind="none"), vérifier qu'aucun
         //    nœud SOLL session_pointer n'est actif (status='current') pour refuser la contradiction.
         // 3. Rendre la mutation explicite : traçabilité de prior_pointer dans `data` et message dans `response_text`.
-        let mut session_pointer_mutation_info: Option<(serde_json::Value, Option<serde_json::Value>)> = None;
+        let mut session_pointer_mutation_info: Option<(
+            serde_json::Value,
+            Option<serde_json::Value>,
+        )> = None;
         if let Some(pointer_arg) = args.get("session_pointer") {
-            let prior_pointer = self.graph_store.read_session_pointer(&project_code).ok().flatten();
+            let prior_pointer = self
+                .graph_store
+                .read_session_pointer(&project_code)
+                .ok()
+                .flatten();
             if !pointer_arg.is_null() {
                 let canonical = match Self::validate_session_pointer(pointer_arg) {
                     Ok(value) => value,
@@ -3252,7 +3789,9 @@ impl McpServer {
 
                 // REQ-AXO-902510 — Contradiction guard : si kind="none", refuser si un nœud SOLL session_pointer actif existe
                 if canonical.get("kind").and_then(|v| v.as_str()) == Some("none") {
-                    if let Some((active_id, active_title)) = self.active_soll_session_pointer_node(&project_code) {
+                    if let Some((active_id, active_title)) =
+                        self.active_soll_session_pointer_node(&project_code)
+                    {
                         return Some(project_workflow_error(
                             "session_pointer",
                             Some("none"),
@@ -3283,7 +3822,9 @@ impl McpServer {
                 session_pointer_mutation_info = Some((canonical, prior_pointer));
             } else {
                 // REQ-AXO-902510 — Contradiction guard : si null (effacement), refuser si un nœud SOLL session_pointer actif existe
-                if let Some((active_id, active_title)) = self.active_soll_session_pointer_node(&project_code) {
+                if let Some((active_id, active_title)) =
+                    self.active_soll_session_pointer_node(&project_code)
+                {
                     return Some(project_workflow_error(
                         "session_pointer",
                         Some("null"),
@@ -3329,7 +3870,9 @@ impl McpServer {
                 .as_ref()
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "(none)".to_string());
-            if current_sp.is_null() || current_sp.get("kind").and_then(|v| v.as_str()) == Some("none") {
+            if current_sp.is_null()
+                || current_sp.get("kind").and_then(|v| v.as_str()) == Some("none")
+            {
                 response_text.push_str(&format!(
                     "\n\n⚠️  MUTATION: session_pointer was CLEARED (previous value: `{}`). (REQ-AXO-902510)",
                     prior_str
@@ -3357,8 +3900,11 @@ impl McpServer {
             "kickoff_bundle": bundle
         });
         if let Some((current_sp, prior_sp)) = session_pointer_mutation_info {
-            data_obj["previous_session_pointer"] = prior_sp.clone().unwrap_or(serde_json::Value::Null);
-            let action = if current_sp.is_null() || current_sp.get("kind").and_then(|v| v.as_str()) == Some("none") {
+            data_obj["previous_session_pointer"] =
+                prior_sp.clone().unwrap_or(serde_json::Value::Null);
+            let action = if current_sp.is_null()
+                || current_sp.get("kind").and_then(|v| v.as_str()) == Some("none")
+            {
                 "cleared"
             } else {
                 "updated"
@@ -3764,10 +4310,19 @@ mod derive_session_pointer_tests {
         let summary = d.get("summary").and_then(|v| v.as_str()).unwrap();
         assert!(summary.contains("HEAD 65c69de"), "summary: {summary}");
         assert!(summary.contains("(main)"), "branch extracted: {summary}");
-        assert!(summary.contains("2 REQ in progress"), "in-progress count: {summary}");
-        assert!(summary.contains("REQ-AXO-902160"), "first REQ id: {summary}");
+        assert!(
+            summary.contains("2 REQ in progress"),
+            "in-progress count: {summary}"
+        );
+        assert!(
+            summary.contains("REQ-AXO-902160"),
+            "first REQ id: {summary}"
+        );
         assert!(summary.contains("recent REQ commits"), "commits: {summary}");
-        assert!(summary.contains("explicit pointer: CPT-AXO-052"), "explicit: {summary}");
+        assert!(
+            summary.contains("explicit pointer: CPT-AXO-052"),
+            "explicit: {summary}"
+        );
         assert_eq!(d["head"]["branch"], "main");
         assert_eq!(d["in_progress_count"], 2);
         assert_eq!(d["explicit"]["value"], "CPT-AXO-052");
@@ -3817,7 +4372,10 @@ mod continuation_block_tests {
         assert!(b.contains("CPT-AXO-052"), "explicit pointer: {b}");
         assert!(b.contains("active pointer"), "pointer label: {b}");
         assert!(b.contains("HEAD 78145526"), "derived summary: {b}");
-        assert!(b.contains("REQ-AXO-902165") && b.contains("[P1]"), "wave-1 + priority: {b}");
+        assert!(
+            b.contains("REQ-AXO-902165") && b.contains("[P1]"),
+            "wave-1 + priority: {b}"
+        );
         assert!(b.contains("`78145526`"), "recent commit sha: {b}");
     }
 
@@ -3842,8 +4400,13 @@ mod continuation_block_tests {
         };
 
         let seed = IstSeed::new().node(
-            SollNodeFixture::new("CPT-TST-052", "Concept", "TST", "Session 121 close — mesuré")
-                .status("current"),
+            SollNodeFixture::new(
+                "CPT-TST-052",
+                "Concept",
+                "TST",
+                "Session 121 close — mesuré",
+            )
+            .status("current"),
         );
         let harness = create_test_server_with_ist_seed(seed).expect("serveur de test");
 
@@ -3933,7 +4496,10 @@ mod continuation_block_tests {
         });
         let b = McpServer::render_continuation_block(&bundle);
         assert!(b.contains("Continuation"), "header present: {b}");
-        assert!(!b.contains("Session pointer** (`none`"), "no explicit pointer line: {b}");
+        assert!(
+            !b.contains("Session pointer** (`none`"),
+            "no explicit pointer line: {b}"
+        );
         assert!(b.contains("no git HEAD"), "derived summary shown: {b}");
     }
 
@@ -4023,11 +4589,23 @@ mod continuation_block_tests {
             },
         });
         let b = McpServer::render_continuation_block(&bundle);
-        assert!(b.contains("VIS-VPC-001") && b.contains("VISION BODY TEXT"), "vision inlined: {b}");
-        assert!(b.contains("PIL-VPC-001") && b.contains("PILLAR ONE BODY"), "pillar 1 inlined: {b}");
-        assert!(b.contains("PIL-VPC-002") && b.contains("PILLAR TWO BODY"), "pillar 2 inlined: {b}");
+        assert!(
+            b.contains("VIS-VPC-001") && b.contains("VISION BODY TEXT"),
+            "vision inlined: {b}"
+        );
+        assert!(
+            b.contains("PIL-VPC-001") && b.contains("PILLAR ONE BODY"),
+            "pillar 1 inlined: {b}"
+        );
+        assert!(
+            b.contains("PIL-VPC-002") && b.contains("PILLAR TWO BODY"),
+            "pillar 2 inlined: {b}"
+        );
         // Everything fit → no truncation notice.
-        assert!(!b.contains("indexé(s) seulement"), "no budget notice when all fit: {b}");
+        assert!(
+            !b.contains("indexé(s) seulement"),
+            "no budget notice when all fit: {b}"
+        );
     }
 
     // REQ-AXO-902355 — over budget, the remainder must degrade to a LOUD id+title
@@ -4050,9 +4628,18 @@ mod continuation_block_tests {
         assert!(2 * 5000 <= McpServer::PILLAR_INLINE_BUDGET_BYTES);
         assert!(3 * 5000 > McpServer::PILLAR_INLINE_BUDGET_BYTES);
         let b = McpServer::render_continuation_block(&bundle);
-        assert!(b.contains("#### PIL-AXO-001") && b.contains("#### PIL-AXO-002"), "first two inlined: {b}");
-        assert!(b.contains("indexé(s) seulement"), "loud budget notice present: {b}");
-        assert!(b.contains("PIL-AXO-003"), "overflow pillar id listed in index: {b}");
+        assert!(
+            b.contains("#### PIL-AXO-001") && b.contains("#### PIL-AXO-002"),
+            "first two inlined: {b}"
+        );
+        assert!(
+            b.contains("indexé(s) seulement"),
+            "loud budget notice present: {b}"
+        );
+        assert!(
+            b.contains("PIL-AXO-003"),
+            "overflow pillar id listed in index: {b}"
+        );
         assert!(b.contains("soll_get"), "index carries a pull hint: {b}");
     }
 
@@ -4067,7 +4654,10 @@ mod continuation_block_tests {
         });
         let b = McpServer::render_continuation_block(&bundle);
         assert!(b.contains("Continuation"), "base block still renders: {b}");
-        assert!(!b.contains("Pillars (PUSH)"), "no dangling pillars header: {b}");
+        assert!(
+            !b.contains("Pillars (PUSH)"),
+            "no dangling pillars header: {b}"
+        );
     }
 
     // REQ-AXO-902355 — a pillar whose body is absent/empty must fall to the index,
@@ -4085,9 +4675,18 @@ mod continuation_block_tests {
             },
         });
         let b = McpServer::render_continuation_block(&bundle);
-        assert!(b.contains("indexé(s) seulement"), "bodyless pillars degrade to index: {b}");
-        assert!(b.contains("PIL-AXO-009") && b.contains("PIL-AXO-010"), "both listed in index: {b}");
-        assert!(!b.contains("#### PIL-AXO-009"), "no empty inline block for bodyless pillar: {b}");
+        assert!(
+            b.contains("indexé(s) seulement"),
+            "bodyless pillars degrade to index: {b}"
+        );
+        assert!(
+            b.contains("PIL-AXO-009") && b.contains("PIL-AXO-010"),
+            "both listed in index: {b}"
+        );
+        assert!(
+            !b.contains("#### PIL-AXO-009"),
+            "no empty inline block for bodyless pillar: {b}"
+        );
     }
 }
 
@@ -4128,34 +4727,63 @@ mod kickoff_identity_tests {
     /// Un corps VOLUMINEUX, dont la première phrase est courte. C'est la forme
     /// réelle d'un pilier : une thèse, puis des pages de justification.
     fn gros_corps(marqueur: &str) -> String {
-        format!("{marqueur} en une phrase. {}", "PADDING-QUE-NUL-NE-LIT ".repeat(400))
+        format!(
+            "{marqueur} en une phrase. {}",
+            "PADDING-QUE-NUL-NE-LIT ".repeat(400)
+        )
     }
 
     fn parc_des_piliers() -> SollSnapshot {
         snapshot(vec![
             noeud("VIS-TST-001", "Vision", "current", &gros_corps("LA-VISION")),
             noeud("PIL-TST-001", "Pillar", "current", &gros_corps("PILIER-UN")),
-            noeud("PIL-TST-002", "Pillar", "current", &gros_corps("PILIER-DEUX")),
-            noeud("PIL-TST-003", "Pillar", "current", &gros_corps("PILIER-TROIS")),
+            noeud(
+                "PIL-TST-002",
+                "Pillar",
+                "current",
+                &gros_corps("PILIER-DEUX"),
+            ),
+            noeud(
+                "PIL-TST-003",
+                "Pillar",
+                "current",
+                &gros_corps("PILIER-TROIS"),
+            ),
             // Un mort : il ne doit sortir sous AUCUN mode (REQ-AXO-902619, 1re tranche).
-            noeud("PIL-TST-904", "Pillar", "rejected", &gros_corps("PILIER-MORT")),
+            noeud(
+                "PIL-TST-904",
+                "Pillar",
+                "rejected",
+                &gros_corps("PILIER-MORT"),
+            ),
         ])
     }
 
     #[test]
     fn le_defaut_ne_pousse_aucun_corps_de_pilier_et_rend_l_identite() {
         let skeleton = McpServer::shape_skeleton(&parc_des_piliers(), KickoffMode::Brief);
-        let pillars = skeleton["pillars"].as_array().expect("pillars reste un tableau");
-        assert_eq!(pillars.len(), 3, "les trois piliers VIVANTS sont servis : {pillars:?}");
+        let pillars = skeleton["pillars"]
+            .as_array()
+            .expect("pillars reste un tableau");
+        assert_eq!(
+            pillars.len(),
+            3,
+            "les trois piliers VIVANTS sont servis : {pillars:?}"
+        );
         for p in pillars {
             assert!(
                 p.get("body").is_none(),
                 "le défaut ne pousse aucun corps de pilier : {p}"
             );
-            assert!(p["id"].is_string() && p["title"].is_string(), "identité complète : {p}");
+            assert!(
+                p["id"].is_string() && p["title"].is_string(),
+                "identité complète : {p}"
+            );
             assert_eq!(p["status"], "current", "le statut reste servi : {p}");
             assert!(
-                p["summary"].as_str().is_some_and(|s| s.ends_with("en une phrase.")),
+                p["summary"]
+                    .as_str()
+                    .is_some_and(|s| s.ends_with("en une phrase.")),
                 "la première phrase, et elle seule : {p}"
             );
             assert!(
@@ -4170,12 +4798,23 @@ mod kickoff_identity_tests {
             "aucun corps de pilier ne doit atteindre le défaut : {rendu}"
         );
         // La Vision suit la même règle (coupe 4).
-        let vision = skeleton["vision"].as_array().expect("vision reste un tableau");
+        let vision = skeleton["vision"]
+            .as_array()
+            .expect("vision reste un tableau");
         assert_eq!(vision.len(), 1);
-        assert!(vision[0].get("body").is_none(), "vision en identité : {}", vision[0]);
-        assert!(vision[0]["summary"].as_str().is_some_and(|s| s.starts_with("LA-VISION")));
+        assert!(
+            vision[0].get("body").is_none(),
+            "vision en identité : {}",
+            vision[0]
+        );
+        assert!(vision[0]["summary"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("LA-VISION")));
         // Le nœud mort ne passe sous aucun prétexte.
-        assert!(!rendu.contains("PIL-TST-904"), "un nœud rejeté reste dehors : {rendu}");
+        assert!(
+            !rendu.contains("PIL-TST-904"),
+            "un nœud rejeté reste dehors : {rendu}"
+        );
     }
 
     #[test]
@@ -4184,8 +4823,13 @@ mod kickoff_identity_tests {
         let pillars = skeleton["pillars"].as_array().unwrap();
         assert_eq!(pillars.len(), 3);
         for p in pillars {
-            let body = p["body"].as_str().expect("mode=full pousse le corps entier");
-            assert!(body.contains("PADDING-QUE-NUL-NE-LIT"), "corps ENTIER, pas résumé : {p}");
+            let body = p["body"]
+                .as_str()
+                .expect("mode=full pousse le corps entier");
+            assert!(
+                body.contains("PADDING-QUE-NUL-NE-LIT"),
+                "corps ENTIER, pas résumé : {p}"
+            );
         }
         assert!(
             skeleton["vision"][0]["body"]
@@ -4199,15 +4843,28 @@ mod kickoff_identity_tests {
         // Le mort reste dehors même en `full` : la coupe de volume n'a pas
         // desserré le filtre de statut.
         let rendu = serde_json::to_string(&skeleton).unwrap();
-        assert!(!rendu.contains("PILIER-MORT"), "filtre de statut conservé : {rendu}");
+        assert!(
+            !rendu.contains("PILIER-MORT"),
+            "filtre de statut conservé : {rendu}"
+        );
     }
 
     #[test]
     fn les_index_bornes_disent_leur_total_exact_et_nomment_ce_qu_ils_omettent() {
         let mut noeuds = vec![noeud("VIS-TST-001", "Vision", "current", "V.")];
         for i in 1..=30 {
-            noeuds.push(noeud(&format!("DEC-TST-{i:03}"), "Decision", "current", "D."));
-            noeuds.push(noeud(&format!("GUI-TST-{i:03}"), "Guideline", "current", "G."));
+            noeuds.push(noeud(
+                &format!("DEC-TST-{i:03}"),
+                "Decision",
+                "current",
+                "D.",
+            ));
+            noeuds.push(noeud(
+                &format!("GUI-TST-{i:03}"),
+                "Guideline",
+                "current",
+                "G.",
+            ));
         }
         // Deux morts, pour que le TOTAL soit celui des VIVANTS et pas celui des lignes.
         noeuds.push(noeud("DEC-TST-901", "Decision", "superseded", "D."));
@@ -4245,7 +4902,12 @@ mod kickoff_identity_tests {
             &snapshot({
                 let mut n = vec![];
                 for i in 1..=30 {
-                    n.push(noeud(&format!("DEC-TST-{i:03}"), "Decision", "current", "D."));
+                    n.push(noeud(
+                        &format!("DEC-TST-{i:03}"),
+                        "Decision",
+                        "current",
+                        "D.",
+                    ));
                 }
                 n
             }),
@@ -4261,7 +4923,12 @@ mod kickoff_identity_tests {
     #[test]
     fn le_defaut_pese_au_moins_cinq_fois_moins_que_full() {
         let parc = snapshot({
-            let mut n = vec![noeud("VIS-TST-001", "Vision", "current", &gros_corps("LA-VISION"))];
+            let mut n = vec![noeud(
+                "VIS-TST-001",
+                "Vision",
+                "current",
+                &gros_corps("LA-VISION"),
+            )];
             for i in 1..=14 {
                 n.push(noeud(
                     &format!("PIL-TST-{i:03}"),
@@ -4308,7 +4975,10 @@ mod kickoff_identity_tests {
             "la borne s'applique même sans phrase à couper : {} caractères",
             resume.chars().count()
         );
-        assert!(resume.ends_with('…'), "et la coupe est VISIBLE, jamais muette : {resume}");
+        assert!(
+            resume.ends_with('…'),
+            "et la coupe est VISIBLE, jamais muette : {resume}"
+        );
     }
 
     #[test]
@@ -4343,7 +5013,10 @@ mod kickoff_identity_tests {
             },
         });
         let rendu = McpServer::render_continuation_block(&bundle);
-        assert!(rendu.contains("LA-VISION-EN-UNE-PHRASE."), "vision en identité : {rendu}");
+        assert!(
+            rendu.contains("LA-VISION-EN-UNE-PHRASE."),
+            "vision en identité : {rendu}"
+        );
         assert!(
             rendu.contains("#### PIL-TST-001") && rendu.contains("PILIER-UN-EN-UNE-PHRASE."),
             "l'identité d'un pilier est INLINE, pas reléguée : {rendu}"
@@ -4416,20 +5089,35 @@ mod kickoff_identity_tests {
             },
         });
         let rendu = McpServer::render_continuation_block(&bundle);
-        assert!(rendu.contains("(1):"), "compte simple quand aucun total n'est donné : {rendu}");
-        assert!(!rendu.contains(" sur "), "pas de mention d'omission inventée : {rendu}");
+        assert!(
+            rendu.contains("(1):"),
+            "compte simple quand aucun total n'est donné : {rendu}"
+        );
+        assert!(
+            !rendu.contains(" sur "),
+            "pas de mention d'omission inventée : {rendu}"
+        );
     }
 
     #[test]
     fn le_mode_se_lit_dans_les_arguments_et_le_defaut_est_bref() {
-        assert_eq!(KickoffMode::depuis_arguments(&json!({})), KickoffMode::Brief);
+        assert_eq!(
+            KickoffMode::depuis_arguments(&json!({})),
+            KickoffMode::Brief
+        );
         assert_eq!(
             KickoffMode::depuis_arguments(&json!({"mode": "fulll"})),
             KickoffMode::Brief,
             "une faute de frappe retombe sur le défaut, qui porte toutes les clés"
         );
-        assert_eq!(KickoffMode::depuis_arguments(&json!({"mode": "FULL"})), KickoffMode::Full);
-        assert_eq!(KickoffMode::depuis_arguments(&json!({"mode": "resume"})), KickoffMode::Resume);
+        assert_eq!(
+            KickoffMode::depuis_arguments(&json!({"mode": "FULL"})),
+            KickoffMode::Full
+        );
+        assert_eq!(
+            KickoffMode::depuis_arguments(&json!({"mode": "resume"})),
+            KickoffMode::Resume
+        );
         assert_eq!(KickoffMode::Brief.as_str(), "brief");
         assert!(KickoffMode::Brief.identity_only());
         assert!(!KickoffMode::Full.identity_only());
@@ -4439,7 +5127,10 @@ mod kickoff_identity_tests {
     #[test]
     fn la_carte_des_capacites_garde_son_compte_exact() {
         let plein = McpServer::capabilities_map(KickoffMode::Full);
-        let total = plein.as_array().expect("mode=full rend la liste entière").len();
+        let total = plein
+            .as_array()
+            .expect("mode=full rend la liste entière")
+            .len();
         let bref = McpServer::capabilities_map(KickoffMode::Brief);
         assert_eq!(
             bref["count"].as_u64(),
@@ -4447,8 +5138,14 @@ mod kickoff_identity_tests {
             "le COMPTE reste exact — c'est lui qui oriente : {bref}"
         );
         let echantillon = bref["sample"].as_array().unwrap();
-        assert_eq!(echantillon.len(), McpServer::KICKOFF_BRIEF_CAPABILITIES_SAMPLE);
-        assert!(echantillon.iter().all(Value::is_string), "des NOMS, pas des objets : {bref}");
+        assert_eq!(
+            echantillon.len(),
+            McpServer::KICKOFF_BRIEF_CAPABILITIES_SAMPLE
+        );
+        assert!(
+            echantillon.iter().all(Value::is_string),
+            "des NOMS, pas des objets : {bref}"
+        );
         assert_eq!(bref["detail_continuation"]["tool"], "help");
         // Et le gain est réel, pas décoratif.
         let poids_plein = serde_json::to_string(&plein).unwrap().len();
@@ -4468,7 +5165,8 @@ mod commit_req_id_tests {
 
     #[test]
     fn extracts_multiple_distinct_ids_in_order() {
-        let msg = "feat(x): do thing (REQ-AXO-159)\n\nAlso closes REQ-AXO-902041 and REQ-AXO-159 again.";
+        let msg =
+            "feat(x): do thing (REQ-AXO-159)\n\nAlso closes REQ-AXO-902041 and REQ-AXO-159 again.";
         assert_eq!(
             parse_commit_req_ids(msg),
             vec!["REQ-AXO-159".to_string(), "REQ-AXO-902041".to_string()]
@@ -4536,7 +5234,10 @@ mod commit_req_id_tests {
                 "a staged deletion must not be rejected — the commit already carries it: {rejected:?}"
             );
             assert_eq!(already_staged, vec!["kept.txt".to_string()]);
-            assert!(stageable.is_empty(), "nothing left to add for a staged deletion");
+            assert!(
+                stageable.is_empty(),
+                "nothing left to add for a staged deletion"
+            );
         }
 
         #[test]
@@ -4550,7 +5251,11 @@ mod commit_req_id_tests {
                 Some(&owned),
             );
 
-            assert_eq!(stageable, vec!["new.rs".to_string()], "the good path is still recognised");
+            assert_eq!(
+                stageable,
+                vec!["new.rs".to_string()],
+                "the good path is still recognised"
+            );
             let named: Vec<&str> = rejected.iter().map(|(p, _)| p.as_str()).collect();
             assert_eq!(
                 named,
@@ -4595,7 +5300,8 @@ mod commit_req_id_tests {
             git(dir.path(), &["add", "-A", "."]);
 
             let (covered, outside) =
-                McpServer::partition_staged_by_declaration(&["sub".to_string()], Some(&owned)).unwrap();
+                McpServer::partition_staged_by_declaration(&["sub".to_string()], Some(&owned))
+                    .unwrap();
 
             assert_eq!(
                 covered,

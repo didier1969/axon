@@ -43,8 +43,7 @@ mod tests {
                 &serde_json::json!([code]),
             )
             .expect("compter les lignes parentes");
-        let rows: Vec<Vec<serde_json::Value>> =
-            serde_json::from_str(&raw).unwrap_or_default();
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         rows.first()
             .and_then(|row| row.first())
             .map(|cell| match cell {
@@ -159,8 +158,7 @@ mod tests {
                 &serde_json::json!([code]),
             )
             .expect("compter les IndexedFile du tenant");
-        let rows: Vec<Vec<serde_json::Value>> =
-            serde_json::from_str(&lignes).unwrap_or_default();
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&lignes).unwrap_or_default();
         let n = rows
             .first()
             .and_then(|r| r.first())
@@ -209,10 +207,14 @@ mod tests {
             code: code.clone(),
             project_path: root.clone(),
             meta_path: root.join(".axon").join("meta.json"),
+            ..Default::default()
         }];
         let enroles = store.reconcile_project_fk_parents(&identities);
 
-        assert_eq!(enroles, 1, "la réconciliation doit compter le parent qu'elle écrit");
+        assert_eq!(
+            enroles, 1,
+            "la réconciliation doit compter le parent qu'elle écrit"
+        );
         assert_eq!(
             parent_rows(&store, &code),
             1,
@@ -260,10 +262,14 @@ mod tests {
             code: code.clone(),
             project_path: disparu,
             meta_path: std::path::PathBuf::from("/nonexistent/.axon/meta.json"),
+            ..Default::default()
         }];
         let enroles = store.reconcile_project_fk_parents(&identities);
 
-        assert_eq!(enroles, 0, "aucun parent ne doit être écrit pour un chemin disparu");
+        assert_eq!(
+            enroles, 0,
+            "aucun parent ne doit être écrit pour un chemin disparu"
+        );
         assert_eq!(
             parent_rows(&store, &code),
             0,

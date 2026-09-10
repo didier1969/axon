@@ -9,16 +9,18 @@
 //! 3. Un projet retiré du registre n'est plus attribué après rafraîchissement (évite les 96 lignes orphelines de KKD).
 //! 4. Le payload de notification `axon_registry_changed` supporte l'opération `delete`.
 
-use std::path::{Path, PathBuf};
 use crate::pipeline::project_resolver::{ProjectCodeResolver, ProjectRegistrySnapshot};
 use crate::project_meta::CanonicalProjectIdentity;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn c1_resolver_hot_reload_recognizes_newly_registered_project() {
     // Situation mesurée sur OPR : au boot, seul PRP est connu
-    let initial_snapshot = ProjectRegistrySnapshot::from_rows(vec![
-        ("PRP".to_string(), "/home/dstadel/projects/opv".to_string()),
-    ]).unwrap();
+    let initial_snapshot = ProjectRegistrySnapshot::from_rows(vec![(
+        "PRP".to_string(),
+        "/home/dstadel/projects/opv".to_string(),
+    )])
+    .unwrap();
 
     let resolver = ProjectCodeResolver::from_snapshot(initial_snapshot);
     let opr_file = Path::new("/home/dstadel/projects/opv-rd/src/main.rs");
@@ -38,16 +40,19 @@ fn c1_resolver_hot_reload_recognizes_newly_registered_project() {
             project_path: PathBuf::from("/home/dstadel/projects/opv"),
             name: Some("opv".to_string()),
             meta_path: PathBuf::from("/home/dstadel/projects/opv/axon.json"),
+            ..Default::default()
         },
         CanonicalProjectIdentity {
             code: "OPR".to_string(),
             project_path: PathBuf::from("/home/dstadel/projects/opv-rd"),
             name: Some("opv-rd".to_string()),
             meta_path: PathBuf::from("/home/dstadel/projects/opv-rd/axon.json"),
+            ..Default::default()
         },
     ];
 
-    let count = resolver.refresh_from_identities(updated_identities)
+    let count = resolver
+        .refresh_from_identities(updated_identities)
         .expect("refresh should succeed");
     assert_eq!(count, 2);
 
@@ -63,7 +68,8 @@ fn c2_resolver_hot_reload_removes_deleted_project() {
     let initial_snapshot = ProjectRegistrySnapshot::from_rows(vec![
         ("KKD".to_string(), "/home/dstadel/projects/kkd".to_string()),
         ("AXO".to_string(), "/home/dstadel/projects/axon".to_string()),
-    ]).unwrap();
+    ])
+    .unwrap();
 
     let resolver = ProjectCodeResolver::from_snapshot(initial_snapshot);
     let kkd_file = Path::new("/home/dstadel/projects/kkd/lib/app.ex");
@@ -72,16 +78,16 @@ fn c2_resolver_hot_reload_removes_deleted_project() {
     assert_eq!(resolver.resolve(kkd_file).unwrap().as_str(), "KKD");
 
     // À 08h14, KKD est retiré du registre
-    let updated_identities = vec![
-        CanonicalProjectIdentity {
-            code: "AXO".to_string(),
-            project_path: PathBuf::from("/home/dstadel/projects/axon"),
-            name: Some("axon".to_string()),
-            meta_path: PathBuf::from("/home/dstadel/projects/axon/axon.json"),
-        },
-    ];
+    let updated_identities = vec![CanonicalProjectIdentity {
+        code: "AXO".to_string(),
+        project_path: PathBuf::from("/home/dstadel/projects/axon"),
+        name: Some("axon".to_string()),
+        meta_path: PathBuf::from("/home/dstadel/projects/axon/axon.json"),
+        ..Default::default()
+    }];
 
-    resolver.refresh_from_identities(updated_identities)
+    resolver
+        .refresh_from_identities(updated_identities)
         .expect("refresh should succeed");
 
     // Après rafraîchissement, KKD n'est plus attribué

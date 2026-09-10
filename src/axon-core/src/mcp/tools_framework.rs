@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use super::format::{evidence_by_mode, format_standard_contract};
+use super::tools_context::ScopedSymbolResolution;
 use super::tools_framework_change_safety::{
     change_safety_operator_guidance, summarize_change_safety,
 };
 use super::tools_framework_surface::axon_mcp_surface_diagnostics_impl;
 use super::tools_framework_validation::linked_validations_from_intentions;
-use super::tools_context::ScopedSymbolResolution;
 use super::McpServer;
 
 type FrameworkCache = HashMap<String, (i64, Value)>;
@@ -290,7 +290,11 @@ impl McpServer {
                 "message": message,
                 "project_code": args.get("project_code"),
                 "project_path": args.get("project_path"),
-                "dry_run": true
+                "dry_run": true,
+                "oracle_proof": args.get("oracle_proof"),
+                "oracle_run": args.get("oracle_run"),
+                "oracle_command": args.get("oracle_command"),
+                "formatter_command": args.get("formatter_command"),
             }))?;
             if let Some(data) = response.get_mut("data") {
                 if let Some(lp) = &legacy_proximity_value {
@@ -320,7 +324,11 @@ impl McpServer {
                 "message": message,
                 "project_code": args.get("project_code"),
                 "project_path": args.get("project_path"),
-                "dry_run": true
+                "dry_run": true,
+                "oracle_proof": args.get("oracle_proof"),
+                "oracle_run": args.get("oracle_run"),
+                "oracle_command": args.get("oracle_command"),
+                "formatter_command": args.get("formatter_command"),
             }));
             let mut entry = json!({ "ok": true, "violations": [] });
             if let Some(value) = result.as_ref() {
@@ -422,7 +430,11 @@ impl McpServer {
 
         // 2. branch pushed (no upstream => undetermined, treated as pass)
         let unpushed = git(&["log", "--oneline", "@{u}.."]).unwrap_or_default();
-        let n_unpushed = if unpushed.is_empty() { 0 } else { unpushed.lines().count() };
+        let n_unpushed = if unpushed.is_empty() {
+            0
+        } else {
+            unpushed.lines().count()
+        };
         if n_unpushed > 0 {
             warns += 1;
         }
@@ -786,12 +798,19 @@ impl McpServer {
         // REQ-AXO-902360 — mirror the structural debt digest at handoff (counts + pointer,
         // the same RAM-native surface init shows in kickoff_bundle.debt_digest). ADVISORY:
         // >0 debt = warn, never fail — a release is not blocked on latent duplication/orphans.
-        let debt_project = args.get("project_code").and_then(Value::as_str).unwrap_or("");
+        let debt_project = args
+            .get("project_code")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let debt = self.debt_digest_kickoff(debt_project);
-        let debt_available = debt.get("available").and_then(Value::as_bool).unwrap_or(false);
+        let debt_available = debt
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let debt_counts = debt.get("counts").cloned().unwrap_or_else(|| json!({}));
         let n_of = |k: &str| debt_counts.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let debt_total = n_of("dry") + n_of("unlinked_soll") + n_of("unlinked_code") + n_of("stubs");
+        let debt_total =
+            n_of("dry") + n_of("unlinked_soll") + n_of("unlinked_code") + n_of("stubs");
         if debt_available && debt_total > 0 {
             warns += 1;
         }
@@ -1269,14 +1288,19 @@ impl McpServer {
                     let view = crate::ist_snapshot::process_view();
                     let is_covered = id_opt
                         .and_then(|id| {
-                            Some(view.node_tested(project_code, id)? || view.node_covered(project_code, id)?)
+                            Some(
+                                view.node_tested(project_code, id)?
+                                    || view.node_covered(project_code, id)?,
+                            )
                         })
                         .unwrap_or(false);
 
                     if is_covered {
                         (json!(true), None)
                     } else if let Some(id) = id_opt {
-                        if let Some(reason) = view.undecidable_test_coverage_reason(project_code, id) {
+                        if let Some(reason) =
+                            view.undecidable_test_coverage_reason(project_code, id)
+                        {
                             (Value::Null, Some(reason))
                         } else {
                             (json!(false), None)

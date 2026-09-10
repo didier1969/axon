@@ -11,12 +11,29 @@ pub struct CanonicalProjectIdentity {
     pub code: String,
     pub project_path: PathBuf,
     pub meta_path: PathBuf,
+    pub oracle_command: Option<String>,
+    pub formatter_command: Option<String>,
+}
+
+impl Default for CanonicalProjectIdentity {
+    fn default() -> Self {
+        Self {
+            name: None,
+            code: String::new(),
+            project_path: PathBuf::new(),
+            meta_path: PathBuf::new(),
+            oracle_command: None,
+            formatter_command: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct RawProjectMeta {
     code: Option<String>,
     name: Option<String>,
+    oracle_command: Option<String>,
+    formatter_command: Option<String>,
 }
 
 fn is_repo_root(path: &Path) -> bool {
@@ -133,6 +150,14 @@ pub fn discover_project_identities() -> Vec<CanonicalProjectIdentity> {
                 code,
                 project_path,
                 meta_path,
+                oracle_command: raw
+                    .oracle_command
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                formatter_command: raw
+                    .formatter_command
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
             });
         }
     }
@@ -177,6 +202,14 @@ pub fn resolve_canonical_project_identity(project_code: &str) -> Result<Canonica
                 code,
                 project_path: dir.clone(),
                 meta_path,
+                oracle_command: raw
+                    .oracle_command
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                formatter_command: raw
+                    .formatter_command
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
             });
         }
     }
@@ -215,7 +248,8 @@ pub fn registered_project_identities(
     graph: &crate::graph::GraphStore,
 ) -> Result<Vec<CanonicalProjectIdentity>> {
     let raw = graph.query_json(
-        "SELECT COALESCE(project_code, ''), COALESCE(project_name, ''), COALESCE(project_path, '') \
+        "SELECT COALESCE(project_code, ''), COALESCE(project_name, ''), COALESCE(project_path, ''), \
+                COALESCE(oracle_command, ''), COALESCE(formatter_command, '') \
          FROM soll.ProjectCodeRegistry \
          WHERE project_code NOT IN ('', 'PRO')",
     )?;
@@ -234,6 +268,15 @@ pub fn registered_project_identities(
             continue;
         }
 
+        let oracle_command = row
+            .get(3)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let formatter_command = row
+            .get(4)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         let project_path_buf = canonicalize_lossy(Path::new(&project_path));
         let meta_path = project_path_buf.join(".axon").join("meta.json");
         let name = (!project_name.is_empty())
@@ -250,6 +293,8 @@ pub fn registered_project_identities(
             code,
             project_path: project_path_buf,
             meta_path,
+            oracle_command,
+            formatter_command,
         });
     }
 

@@ -141,7 +141,10 @@ fn test_mcp_call_telemetry_aggregates_per_call_with_latency() {
             "SELECT tool||'|'||status||'|'||call_count||'|'||latency_sum_ms FROM axon.mcp_call_stat WHERE project_code='{proj}'"
         ))
         .unwrap();
-    assert!(!dump.contains("SUPER_SECRET"), "no arg content may be stored: {dump}");
+    assert!(
+        !dump.contains("SUPER_SECRET"),
+        "no arg content may be stored: {dump}"
+    );
 
     // ok bucket aggregates: 2 calls, sum=20 (avg=10), max=15.
     let avg_ok = server
@@ -167,7 +170,10 @@ fn test_mcp_call_telemetry_aggregates_per_call_with_latency() {
              WHERE project_code='{proj}' AND tool='{tool}' AND status='error'"
         ))
         .unwrap();
-    assert_eq!(err_count, 1, "the error call is recorded under status=error");
+    assert_eq!(
+        err_count, 1,
+        "the error call is recorded under status=error"
+    );
 
     // REQ-AXO-902621 — le POIDS est alimenté, dans les DEUX sens. C'est le
     // câblage qui est testé ici, pas la fonction de mesure : une colonne qui
@@ -230,7 +236,10 @@ fn test_mcp_call_telemetry_aggregates_per_call_with_latency() {
         .result
         .unwrap();
     let text = report["content"][0]["text"].as_str().unwrap_or("");
-    assert!(text.contains(tool), "report must list the probed tool: {text}");
+    assert!(
+        text.contains(tool),
+        "report must list the probed tool: {text}"
+    );
     assert!(
         report["data"]["total_calls"].as_i64() == Some(3),
         "report aggregates the 3 calls: {}",
@@ -280,7 +289,10 @@ fn test_mcp_call_stat_retention_prunes_stale_buckets_on_telemetry_report() {
             "SELECT count(*) FROM axon.mcp_call_stat WHERE project_code='{proj}' AND tool='stale_probe'"
         ))
         .unwrap();
-    assert_eq!(stale, 0, "bucket older than the retention window must be pruned");
+    assert_eq!(
+        stale, 0,
+        "bucket older than the retention window must be pruned"
+    );
     let fresh = server
         .graph_store
         .query_count(&format!(
@@ -333,7 +345,10 @@ fn test_mcp_call_telemetry_client_attribution_and_discipline_ratios_902555() {
             "SELECT count(*) FROM axon.mcp_call_stat WHERE project_code='{proj}' AND tool='{tool}'"
         ))
         .unwrap();
-    assert_eq!(row_count, 2, "claude and codex must have distinct buckets in mcp_call_stat without PK collision");
+    assert_eq!(
+        row_count, 2,
+        "claude and codex must have distinct buckets in mcp_call_stat without PK collision"
+    );
 
     let claude_calls = server
         .graph_store
@@ -341,7 +356,10 @@ fn test_mcp_call_telemetry_client_attribution_and_discipline_ratios_902555() {
             "SELECT call_count FROM axon.mcp_call_stat WHERE project_code='{proj}' AND tool='{tool}' AND client='claude_code'"
         ))
         .unwrap();
-    assert_eq!(claude_calls, 4, "claude_code must record 4 calls for the tool");
+    assert_eq!(
+        claude_calls, 4,
+        "claude_code must record 4 calls for the tool"
+    );
 
     let codex_calls = server
         .graph_store
@@ -383,21 +401,45 @@ fn test_mcp_call_telemetry_client_attribution_and_discipline_ratios_902555() {
         .unwrap();
 
     let text_all = report_all["content"][0]["text"].as_str().unwrap_or("");
-    assert!(text_all.contains("claude_code"), "report must show claude_code discipline");
-    assert!(text_all.contains("codex"), "report must show codex discipline");
+    assert!(
+        text_all.contains("claude_code"),
+        "report must show claude_code discipline"
+    );
+    assert!(
+        text_all.contains("codex"),
+        "report must show codex discipline"
+    );
 
-    let discipline = report_all["data"]["discipline_by_client"].as_array().expect("discipline_by_client array");
-    assert_eq!(discipline.len(), 2, "must have discipline stats for both clients");
+    let discipline = report_all["data"]["discipline_by_client"]
+        .as_array()
+        .expect("discipline_by_client array");
+    assert_eq!(
+        discipline.len(),
+        2,
+        "must have discipline stats for both clients"
+    );
 
-    let claude_stat = discipline.iter().find(|c| c["client"] == "claude_code").expect("claude_code stats");
+    let claude_stat = discipline
+        .iter()
+        .find(|c| c["client"] == "claude_code")
+        .expect("claude_code stats");
     assert_eq!(claude_stat["commits"].as_i64(), Some(1));
     assert_eq!(claude_stat["total_calls"].as_i64(), Some(5));
-    assert_eq!(claude_stat["tool_ratios"]["soll_query_context"].as_f64(), Some(4.0));
+    assert_eq!(
+        claude_stat["tool_ratios"]["soll_query_context"].as_f64(),
+        Some(4.0)
+    );
 
-    let codex_stat = discipline.iter().find(|c| c["client"] == "codex").expect("codex stats");
+    let codex_stat = discipline
+        .iter()
+        .find(|c| c["client"] == "codex")
+        .expect("codex stats");
     assert_eq!(codex_stat["commits"].as_i64(), Some(2));
     assert_eq!(codex_stat["total_calls"].as_i64(), Some(4));
-    assert_eq!(codex_stat["tool_ratios"]["soll_query_context"].as_f64(), Some(1.0));
+    assert_eq!(
+        codex_stat["tool_ratios"]["soll_query_context"].as_f64(),
+        Some(1.0)
+    );
 }
 
 #[test]
@@ -472,7 +514,9 @@ fn test_sql_tool_is_read_only_rejects_mutations() {
     );
     let n = server
         .graph_store
-        .query_count("SELECT count(*) FROM axon.llm_feedback WHERE problem='UNIQ_SHOULD_NOT_PERSIST'")
+        .query_count(
+            "SELECT count(*) FROM axon.llm_feedback WHERE problem='UNIQ_SHOULD_NOT_PERSIST'",
+        )
         .unwrap();
     assert_eq!(n, 0, "the INSERT must NOT have executed");
 
@@ -716,7 +760,8 @@ fn test_mcp_feedback_report_lists_filters_and_resolves() {
     assert!(
         items
             .iter()
-            .any(|f| f["severity"] == "blocking" && f["problem"].as_str().unwrap().contains("inspect")),
+            .any(|f| f["severity"] == "blocking"
+                && f["problem"].as_str().unwrap().contains("inspect")),
         "content-rich row carries severity + problem"
     );
 
@@ -732,7 +777,9 @@ fn test_mcp_feedback_report_lists_filters_and_resolves() {
 
     // Resolve the blocking probe → open-only report drops it; include_resolved keeps it.
     let blocking_id = blk_probe[0]["id"].as_i64().unwrap();
-    let _ = report(json!({ "mark_resolved": { "id": blocking_id, "resolved_by_req": "REQ-AXO-902020" } }));
+    let _ = report(
+        json!({ "mark_resolved": { "id": blocking_id, "resolved_by_req": "REQ-AXO-902020" } }),
+    );
 
     let open_only = report(json!({ "project_code": "AXO" }));
     assert!(
@@ -841,7 +888,11 @@ fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
     server.record_mcp_friction(tool, &json!({}), &problematic);
     server.record_mcp_friction(tool, &json!({}), &problematic);
     // A terse success (no problem_class) must NOT be captured.
-    server.record_mcp_friction(tool, &json!({}), &json!({ "data": { "project_code": proj } }));
+    server.record_mcp_friction(
+        tool,
+        &json!({}),
+        &json!({ "data": { "project_code": proj } }),
+    );
 
     // Privacy: the secret value must appear NOWHERE in the table.
     let dump = server
@@ -882,7 +933,10 @@ fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
         .expect("captured signature present");
     assert_eq!(sig["field_in_error"], json!("target"));
     assert_eq!(
-        sig["occurrence_count"].as_str().or_else(|| None).unwrap_or("2"),
+        sig["occurrence_count"]
+            .as_str()
+            .or_else(|| None)
+            .unwrap_or("2"),
         "2",
         "two observations must aggregate into occurrence_count=2: {sig}"
     );
@@ -892,15 +946,26 @@ fn test_mcp_friction_closed_loop_capture_report_resolve_regress() {
         .expect("signature id");
 
     // Resolve: link the SOLL REQ that fixed it.
-    let r2 = report(Some(json!({ "id": id, "resolved_by_req": "REQ-AXO-901957" })));
+    let r2 = report(Some(
+        json!({ "id": id, "resolved_by_req": "REQ-AXO-901957" }),
+    ));
     let still_open = r2["data"]["open_frictions"]
         .as_array()
-        .map(|a| a.iter().any(|f| f["id"].as_i64() == Some(id) || f["id"].as_str().and_then(|s| s.parse::<i64>().ok()) == Some(id)))
+        .map(|a| {
+            a.iter().any(|f| {
+                f["id"].as_i64() == Some(id)
+                    || f["id"].as_str().and_then(|s| s.parse::<i64>().ok()) == Some(id)
+            })
+        })
         .unwrap_or(false);
     assert!(!still_open, "resolved signature must leave the open list");
-    let resolved = r2["data"]["resolved_frictions"].as_array().expect("resolved");
+    let resolved = r2["data"]["resolved_frictions"]
+        .as_array()
+        .expect("resolved");
     assert!(
-        resolved.iter().any(|f| f["resolved_by_req"] == json!("REQ-AXO-901957")),
+        resolved
+            .iter()
+            .any(|f| f["resolved_by_req"] == json!("REQ-AXO-901957")),
         "resolved signature must carry the REQ link: {:?}",
         r2["data"]["resolved_frictions"]
     );
@@ -966,7 +1031,10 @@ fn a_filtered_friction_report_discloses_the_unattributed_backlog() {
         .unwrap();
 
     let text = server
-        .execute_tool_direct("mcp_friction_report", &json!({ "project_code": "FRIC902309B" }))
+        .execute_tool_direct(
+            "mcp_friction_report",
+            &json!({ "project_code": "FRIC902309B" }),
+        )
         .expect("report")["content"][0]["text"]
         .as_str()
         .expect("texte")
@@ -1136,7 +1204,10 @@ fn create_infers_project_and_relation_from_the_named_parent() {
     );
     assert_eq!(res["data"]["project_code"], json!("TST"));
     assert_eq!(res["data"]["applied_relation"], json!("BELONGS_TO"));
-    assert_eq!(res["data"]["project_code_inferred_from_parent"], json!(true));
+    assert_eq!(
+        res["data"]["project_code_inferred_from_parent"],
+        json!(true)
+    );
     assert_eq!(res["data"]["relation_type_inferred"], json!(true));
 
     // Et la déduction est ANNONCÉE : un champ que l'appelant n'a pas écrit est un
@@ -1271,7 +1342,11 @@ fn create_ne_declare_aucune_substitution_quand_la_relation_fournie_est_canonique
                 "attach_to": "PIL-TST-904", "relation_type": "BELONGS_TO" }),
     );
 
-    assert_ne!(res["isError"].as_bool(), Some(true), "création simple : {res}");
+    assert_ne!(
+        res["isError"].as_bool(),
+        Some(true),
+        "création simple : {res}"
+    );
     assert_eq!(res["data"]["applied_relation"], json!("BELONGS_TO"));
     assert_eq!(
         res["data"]["auto_canonized_from"],
@@ -1339,11 +1414,17 @@ fn an_invalid_argument_is_named_not_bucketed_under_arguments() {
     let (field, reason) =
         first_schema_mismatch(&schema, &json!({ "mode": "bavard" })).expect("enum violation");
     assert_eq!(field, "mode");
-    assert!(reason.contains("brief") && reason.contains("verbose"), "{reason}");
+    assert!(
+        reason.contains("brief") && reason.contains("verbose"),
+        "{reason}"
+    );
 
     let (field, reason) =
         first_schema_mismatch(&schema, &json!({ "porject": "AXO" })).expect("unknown property");
-    assert_eq!(field, "porject", "un nom mal orthographié doit être nommé tel quel");
+    assert_eq!(
+        field, "porject",
+        "un nom mal orthographié doit être nommé tel quel"
+    );
     assert_eq!(reason, "unknown_property");
 
     // Le cas qui doit RESTER sans nom : les arguments satisfont le schéma. C'est
@@ -1552,8 +1633,16 @@ fn a_by_design_refusal_leaves_the_fix_me_list_without_faking_a_fix() {
         )
         .expect("report");
 
-    assert_eq!(res["data"]["total_open"].as_i64(), Some(0), "hors priorités : {res}");
-    assert_eq!(res["data"]["total_resolved"].as_i64(), Some(0), "et surtout PAS résolu : {res}");
+    assert_eq!(
+        res["data"]["total_open"].as_i64(),
+        Some(0),
+        "hors priorités : {res}"
+    );
+    assert_eq!(
+        res["data"]["total_resolved"].as_i64(),
+        Some(0),
+        "et surtout PAS résolu : {res}"
+    );
     assert_eq!(res["data"]["total_by_design"].as_i64(), Some(1));
 
     // Visible, avec sa raison : « par conception » doit rester contestable.
@@ -1630,7 +1719,10 @@ fn an_unknown_entity_type_is_refused_instead_of_written_through() {
         )
         .expect("result");
     assert_eq!(res["isError"].as_bool(), Some(true), "{res}");
-    assert_eq!(res["data"]["parameter_repair"]["invalid_field"], json!("entity_type"));
+    assert_eq!(
+        res["data"]["parameter_repair"]["invalid_field"],
+        json!("entity_type")
+    );
 
     let written = server
         .graph_store
@@ -1639,7 +1731,10 @@ fn an_unknown_entity_type_is_refused_instead_of_written_through() {
         )
         .unwrap()
         .unwrap_or(0);
-    assert_eq!(written, 0, "aucune ligne hors vocabulaire ne doit être écrite");
+    assert_eq!(
+        written, 0,
+        "aucune ligne hors vocabulaire ne doit être écrite"
+    );
 }
 
 #[test]
@@ -1701,7 +1796,10 @@ fn a_closed_enum_nested_in_a_one_of_is_still_a_closed_enum() {
 
     // Une branche SANS enum rend l'union ouverte : pas de vocabulaire fermé.
     let open = json!({ "oneOf": [{ "enum": ["a"] }, { "type": "string" }] });
-    assert!(closed_enum_values(&open).is_none(), "une union ouverte n'est pas un enum fermé");
+    assert!(
+        closed_enum_values(&open).is_none(),
+        "une union ouverte n'est pas un enum fermé"
+    );
 
     let schema = json!({ "type": "object", "properties": { "action": spec }, "required": [] });
     let (field, reason) =
@@ -2167,7 +2265,10 @@ fn test_soll_manager_link_supersedes_is_expressible_between_any_two_soll_nodes()
             "SELECT count(*) FROM soll.Edge WHERE source_id='MIL-{code}-901' AND target_id='REQ-{code}-903' AND relation_type='TARGETS'"
         ))
         .unwrap();
-    assert_eq!(targets, 1, "le defaut TARGETS de MIL -> REQ doit etre intact");
+    assert_eq!(
+        targets, 1,
+        "le defaut TARGETS de MIL -> REQ doit etre intact"
+    );
     let still_open = server
         .graph_store
         .query_count(&format!(
@@ -4935,9 +5036,9 @@ fn test_a_decision_attached_via_refines_is_not_reported_as_unlinked() {
     // mesurant rien. C'est exactement la classe de defaut que cette session
     // corrige ailleurs (REQ-AXO-902384) ; elle vaut aussi pour mes tests.
     assert!(
-        unlinked
-            .iter()
-            .any(|v| v.as_str().is_some_and(|line| line.contains(orphan_id.as_str()))),
+        unlinked.iter().any(|v| v
+            .as_str()
+            .is_some_and(|line| line.contains(orphan_id.as_str()))),
         "controle positif en echec : {orphan_id} n'a AUCUNE arete et n'est pas \
          signalee. La regle ne s'execute pas sur cette base, ou le chemin \
          `/data/violations/declarative_rule_violations` a change — le verdict \
@@ -4945,9 +5046,9 @@ fn test_a_decision_attached_via_refines_is_not_reported_as_unlinked() {
     );
 
     assert!(
-        !unlinked
-            .iter()
-            .any(|v| v.as_str().is_some_and(|line| line.contains(dec_id.as_str()))),
+        !unlinked.iter().any(|v| v
+            .as_str()
+            .is_some_and(|line| line.contains(dec_id.as_str()))),
         "{dec_id} a ete rattachee par `REFINES`, une relation que l'outil \
          d'ecriture declare legale pour DEC -> REQ, et le validateur la compte \
          pourtant comme « sans lien ». Le validateur doit lire la POLITIQUE, \
@@ -6820,13 +6921,19 @@ fn test_soll_query_context_changed_since_returns_delta_and_cursor() {
     let reqs_contain = |resp: &serde_json::Value, id: &str| -> bool {
         resp["data"]["requirements"]
             .as_array()
-            .map(|a| a.iter().any(|v| v.as_str().map(|s| s.contains(id)).unwrap_or(false)))
+            .map(|a| {
+                a.iter()
+                    .any(|v| v.as_str().map(|s| s.contains(id)).unwrap_or(false))
+            })
             .unwrap_or(false)
     };
 
     // changed_since before the node's updated_at → included.
     let before = call(Some(1000), 1);
-    assert!(reqs_contain(&before, &req_id), "delta must include newer node");
+    assert!(
+        reqs_contain(&before, &req_id),
+        "delta must include newer node"
+    );
     assert!(
         before["data"]["cursor"].as_i64().unwrap_or(0) > 0,
         "a fresh cursor must be returned"
@@ -6839,7 +6946,10 @@ fn test_soll_query_context_changed_since_returns_delta_and_cursor() {
     );
     // no cursor → full (node present).
     let full = call(None, 3);
-    assert!(reqs_contain(&full, &req_id), "full query must include the node");
+    assert!(
+        reqs_contain(&full, &req_id),
+        "full query must include the node"
+    );
 }
 
 #[test]
@@ -7160,12 +7270,18 @@ fn test_link_has_remnant_to_file_with_explicit_kind() {
     seed_tech_debt_fixture(&server);
 
     let response = server
-        .handle_request(link_remnant_request("src/legacy/duck.rs", Some("ist:indexed_file")))
+        .handle_request(link_remnant_request(
+            "src/legacy/duck.rs",
+            Some("ist:indexed_file"),
+        ))
         .unwrap()
         .result
         .unwrap();
     assert_eq!(response["data"]["status"].as_str(), Some("ok"));
-    assert_eq!(response["data"]["target_kind"].as_str(), Some("ist:indexed_file"));
+    assert_eq!(
+        response["data"]["target_kind"].as_str(),
+        Some("ist:indexed_file")
+    );
 }
 
 // REQ-AXO-902030 — source that is not a TechnologyMigration is rejected.
@@ -7213,7 +7329,10 @@ fn test_tech_debt_inventory_lists_migrations_and_remnants() {
         .handle_request(link_remnant_request("AXO::resid::duck_fn", None))
         .unwrap();
     server
-        .handle_request(link_remnant_request("src/legacy/duck.rs", Some("ist:indexed_file")))
+        .handle_request(link_remnant_request(
+            "src/legacy/duck.rs",
+            Some("ist:indexed_file"),
+        ))
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -7234,7 +7353,10 @@ fn test_tech_debt_inventory_lists_migrations_and_remnants() {
     assert_eq!(migration["from_tech"].as_str(), Some("DuckDB"));
     assert_eq!(migration["remnant_count"].as_i64(), Some(2));
     assert_eq!(migration["by_target_kind"]["ist:symbol"].as_i64(), Some(1));
-    assert_eq!(migration["by_target_kind"]["ist:indexed_file"].as_i64(), Some(1));
+    assert_eq!(
+        migration["by_target_kind"]["ist:indexed_file"].as_i64(),
+        Some(1)
+    );
 }
 
 // REQ-AXO-902331 (résidu final) — a TEST function whose name carries the legacy
@@ -7307,11 +7429,18 @@ fn test_migrations_with_remnant_path_resolves_residue() {
     let server = create_test_server();
     seed_tech_debt_fixture(&server);
     server
-        .handle_request(link_remnant_request("src/legacy/duck.rs", Some("ist:indexed_file")))
+        .handle_request(link_remnant_request(
+            "src/legacy/duck.rs",
+            Some("ist:indexed_file"),
+        ))
         .unwrap();
 
     let hits = server.migrations_with_remnant_path(&["src/legacy/duck.rs".to_string()]);
-    assert_eq!(hits.len(), 1, "edited residue file resolves to its migration");
+    assert_eq!(
+        hits.len(),
+        1,
+        "edited residue file resolves to its migration"
+    );
     assert_eq!(hits[0]["migration_id"].as_str(), Some("TMG-AXO-001"));
     assert_eq!(hits[0]["debt_policy"].as_str(), Some("full_clean"));
 
@@ -7556,8 +7685,14 @@ fn test_soll_manager_create_milestone_autocanonizes_wrong_relation_to_targets() 
         .into_iter()
         .filter_map(|r| r.into_iter().next())
         .collect();
-    assert!(rels.contains(&"TARGETS".to_string()), "the edge must be TARGETS, got {rels:?}");
-    assert!(!rels.contains(&"REFINES".to_string()), "REFINES must NOT be created, got {rels:?}");
+    assert!(
+        rels.contains(&"TARGETS".to_string()),
+        "the edge must be TARGETS, got {rels:?}"
+    );
+    assert!(
+        !rels.contains(&"REFINES".to_string()),
+        "REFINES must NOT be created, got {rels:?}"
+    );
 }
 
 /// REQ-AXO-902283 (Lot F) — a MIL→PIL create has no legal relation (a milestone TARGETS REQs,
@@ -7592,7 +7727,10 @@ fn test_soll_manager_create_milestone_to_pillar_rejects_with_guidance() {
         id: Some(json!(9_022_831)),
     };
     let response = server.handle_request(req).unwrap().result.unwrap();
-    assert_eq!(response.get("isError").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        response.get("isError").and_then(|v| v.as_bool()),
+        Some(true)
+    );
     let guidance = response["data"]["parameter_repair"]["milestone_guidance"].as_str();
     assert!(
         guidance.is_some_and(|g| g.contains("TARGETS") && g.contains("REQUIREMENT")),
@@ -7635,7 +7773,11 @@ fn test_soll_children_traverses_both_directions_and_filters_relation() {
         .axon_soll_children(&json!({ "id": "REQ-CHD-100" }))
         .expect("must answer");
     let got = ids(&all);
-    assert_eq!(got, vec!["REQ-CHD-101".to_string()], "only semantic children expected");
+    assert_eq!(
+        got,
+        vec!["REQ-CHD-101".to_string()],
+        "only semantic children expected"
+    );
 
     // incoming (physical): both edges pointing AT the umbrella.
     let incoming = server
@@ -7643,7 +7785,8 @@ fn test_soll_children_traverses_both_directions_and_filters_relation() {
         .expect("must answer");
     let got_inc = ids(&incoming);
     assert!(
-        got_inc.contains(&"REQ-CHD-101".to_string()) && got_inc.contains(&"REQ-CHD-102".to_string()),
+        got_inc.contains(&"REQ-CHD-101".to_string())
+            && got_inc.contains(&"REQ-CHD-102".to_string()),
         "both incoming edges expected, got {got_inc:?}"
     );
 
@@ -7683,7 +7826,10 @@ fn test_soll_children_zero_names_the_other_direction() {
     let children = server
         .axon_soll_children(&json!({ "id": "MIL-CHZ-001" }))
         .expect("must answer");
-    assert_eq!(children["data"]["count"], 1, "soll_children traverse sémantiquement TARGETS");
+    assert_eq!(
+        children["data"]["count"], 1,
+        "soll_children traverse sémantiquement TARGETS"
+    );
 
     // direction=parents sur ce jalon est vide et nomme la direction opposée (children).
     let empty = server
@@ -7738,7 +7884,11 @@ fn test_soll_get_returns_node_body_and_repairs_unknown_id() {
     assert_eq!(miss["data"]["status"].as_str(), Some("not_found"));
     let nearby: Vec<String> = miss["data"]["parameter_repair"]["nearby_ids"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     assert!(
         nearby.contains(&"GUI-SGT-001".to_string()),
@@ -7872,8 +8022,10 @@ fn test_soll_manager_create_auto_canonizes_single_legal_relation() {
         .query_json("SELECT relation_type FROM soll.Edge WHERE target_id = 'PIL-AXO-002'")
         .unwrap();
     let rows: Vec<Vec<String>> = serde_json::from_str(&rows_json).unwrap();
-    let relations: Vec<String> =
-        rows.into_iter().filter_map(|r| r.into_iter().next()).collect();
+    let relations: Vec<String> = rows
+        .into_iter()
+        .filter_map(|r| r.into_iter().next())
+        .collect();
     assert!(
         relations.iter().any(|r| r == "BELONGS_TO"),
         "the created edge must be auto-canonized to BELONGS_TO, got {relations:?}"
@@ -7917,10 +8069,16 @@ fn test_soll_manager_forbidden_relation_omits_corrected_call_when_ambiguous() {
         id: Some(json!(902_248)),
     };
     let response = server.handle_request(req).unwrap().result.unwrap();
-    assert_eq!(response.get("isError").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        response.get("isError").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 
     let repair = &response["data"]["parameter_repair"];
-    let accepted = repair["accepted_values"].as_array().cloned().unwrap_or_default();
+    let accepted = repair["accepted_values"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert!(
         accepted.len() > 1,
         "fixture assumes an ambiguous pair; got {accepted:?}"
@@ -8287,7 +8445,9 @@ fn test_axon_soll_manager_link_decision_supersedes_concept() {
     assert_eq!(
         server
             .graph_store
-            .query_count("SELECT count(*) FROM soll.Node WHERE id='CPT-AXO-002' AND status='superseded'")
+            .query_count(
+                "SELECT count(*) FROM soll.Node WHERE id='CPT-AXO-002' AND status='superseded'"
+            )
             .unwrap(),
         1,
         "le retrait doit avoir eu lieu — c'est ce que GUI-PRO-125 lit : {content}"
@@ -8356,7 +8516,10 @@ fn test_axon_soll_manager_link_same_type_supersedes_allowed() {
         let revision_id = result["data"]["revision_id"]
             .as_str()
             .unwrap_or_else(|| panic!("SUPERSEDES doit annoncer sa revision : {result}"));
-        assert!(revision_id.starts_with("link-"), "revision_id: {revision_id}");
+        assert!(
+            revision_id.starts_with("link-"),
+            "revision_id: {revision_id}"
+        );
         assert_eq!(
             server
                 .graph_store
@@ -8912,7 +9075,11 @@ fn test_soll_attach_evidence_role_entry_writes_metadata_role() {
         )
         .unwrap();
     let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
-    assert_eq!(rows.len(), 1, "exactly one traceability row expected: {raw}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly one traceability row expected: {raw}"
+    );
     assert_eq!(rows[0][0].as_str(), Some("entry"), "{raw}");
 }
 
@@ -8961,7 +9128,11 @@ fn test_soll_attach_evidence_no_role_leaves_metadata_role_absent() {
         )
         .unwrap();
     let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
-    assert_eq!(rows.len(), 1, "exactly one traceability row expected: {raw}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly one traceability row expected: {raw}"
+    );
     let metadata_text = rows[0][0].as_str().unwrap_or_default();
     assert!(
         !metadata_text.contains("role"),
@@ -9510,10 +9681,7 @@ fn test_soll_verify_requirements_names_broken_file_evidence_offenders() {
     assert_eq!(offenders.len(), 1, "exactly one broken offender");
     let offender = &offenders[0];
     assert_eq!(offender["path"].as_str(), Some(broken_path));
-    assert_eq!(
-        offender["traceability_id"].as_str(),
-        Some("TRC-AXO-902337")
-    );
+    assert_eq!(offender["traceability_id"].as_str(), Some("TRC-AXO-902337"));
 
     // The path must also appear in the human/LLM text surface, so no raw
     // SQL is needed to identify what to purge.
@@ -11349,7 +11517,10 @@ fn test_axon_commit_work_delivers_pure_file_deletion() {
         .unwrap();
 
     assert!(
-        !result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false),
+        !result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         "a pure deletion must NOT be refused: {content}"
     );
     assert!(
@@ -11913,7 +12084,11 @@ fn test_axon_commit_work_refuses_partial_diff_when_git_add_fails() {
         .and_then(|pr| pr.get("rejected_paths"))
         .and_then(|v| v.as_array())
         .expect("the rejected paths must be enumerated for repair");
-    assert_eq!(rejected.len(), 1, "exactly one path was impossible: {rejected:?}");
+    assert_eq!(
+        rejected.len(),
+        1,
+        "exactly one path was impossible: {rejected:?}"
+    );
     assert_eq!(
         rejected[0].get("path").and_then(|v| v.as_str()),
         Some("this/path/definitely/does/not/exist.rs"),
@@ -12023,28 +12198,64 @@ mod commit_is_bounded_to_the_declaration {
         let excluded_before = git_stdout(repo, &["ls-files", "--stage", "--", "unrelated.txt"]);
         let before = git_stdout(repo, &["rev-parse", "HEAD"]);
         let paths = if include_content {
-            std::fs::write(repo.join("content.txt"), "a new file beside the mode-only change").unwrap();
+            std::fs::write(
+                repo.join("content.txt"),
+                "a new file beside the mode-only change",
+            )
+            .unwrap();
             json!(["declared.txt", "content.txt"])
         } else {
             json!(["declared.txt"])
         };
-        let result = commit_via_tool(&server, repo, paths, "fix: preserve staged executable metadata");
+        let result = commit_via_tool(
+            &server,
+            repo,
+            paths,
+            "fix: preserve staged executable metadata",
+        );
         let after = git_stdout(repo, &["rev-parse", "HEAD"]);
-        assert_ne!(before, after, "the mode-only change must create a commit: {result}");
+        assert_ne!(
+            before, after,
+            "the mode-only change must create a commit: {result}"
+        );
         let tree = git_stdout(repo, &["ls-tree", "HEAD", "--", "declared.txt"]);
-        assert!(tree.starts_with("100755 "), "the reported commit must contain the staged mode: {tree}; {result}");
+        assert!(
+            tree.starts_with("100755 "),
+            "the reported commit must contain the staged mode: {tree}; {result}"
+        );
         assert_ne!(result["isError"], json!(true), "{result}");
-        assert_eq!(git_stdout(repo, &["config", "core.filemode"]).trim(), "false");
-        assert_eq!(git_stdout(repo, &["ls-files", "--stage", "--", "unrelated.txt"]), excluded_before,
-            "both the content AND mode of excluded staged work must survive");
-        assert_eq!(git_stdout(repo, &["diff", "--cached", "--name-only"]).trim(), "unrelated.txt");
-        let committed = git_stdout(repo, &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]);
+        assert_eq!(
+            git_stdout(repo, &["config", "core.filemode"]).trim(),
+            "false"
+        );
+        assert_eq!(
+            git_stdout(repo, &["ls-files", "--stage", "--", "unrelated.txt"]),
+            excluded_before,
+            "both the content AND mode of excluded staged work must survive"
+        );
+        assert_eq!(
+            git_stdout(repo, &["diff", "--cached", "--name-only"]).trim(),
+            "unrelated.txt"
+        );
+        let committed = git_stdout(
+            repo,
+            &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+        );
         assert!(committed.lines().any(|p| p == "declared.txt"));
         assert!(!committed.lines().any(|p| p == "unrelated.txt"));
-        assert_eq!(committed.lines().count(), if include_content { 2 } else { 1 });
+        assert_eq!(
+            committed.lines().count(),
+            if include_content { 2 } else { 1 }
+        );
         assert_eq!(result["data"]["commit_sha"], json!(after.trim()));
-        assert_eq!(result["data"]["committed_paths"], json!(committed.lines().collect::<Vec<_>>()));
-        assert_eq!(result["data"]["measurement"], json!("post_commit_diff_tree"));
+        assert_eq!(
+            result["data"]["committed_paths"],
+            json!(committed.lines().collect::<Vec<_>>())
+        );
+        assert_eq!(
+            result["data"]["measurement"],
+            json!("post_commit_diff_tree")
+        );
     }
 
     #[test]
@@ -12067,10 +12278,18 @@ mod commit_is_bounded_to_the_declaration {
         std::fs::write(repo.join(name), "new").unwrap();
         std::fs::write(repo.join("unrelated.txt"), "later").unwrap();
         git(repo, &["add", "--", "unrelated.txt"]);
-        let result = commit_via_tool(&server, repo, json!(["sub"]), "fix: commit a directory with unusual names");
+        let result = commit_via_tool(
+            &server,
+            repo,
+            json!(["sub"]),
+            "fix: commit a directory with unusual names",
+        );
         assert_ne!(result["isError"], json!(true), "{result}");
         assert_eq!(result["data"]["committed_paths"], json!([name]));
-        assert_eq!(git_stdout(repo, &["diff", "--cached", "--name-only"]).trim(), "unrelated.txt");
+        assert_eq!(
+            git_stdout(repo, &["diff", "--cached", "--name-only"]).trim(),
+            "unrelated.txt"
+        );
     }
 
     #[test]
@@ -12085,12 +12304,26 @@ mod commit_is_bounded_to_the_declaration {
         std::fs::write(repo.join("unrelated.txt"), "staged version").unwrap();
         git(repo, &["add", "--", "unrelated.txt"]);
         std::fs::write(repo.join("unrelated.txt"), "unstaged version").unwrap();
-        let result = commit_via_tool(&server, repo, json!(["declared.txt"]), "fix: initial bounded commit");
+        let result = commit_via_tool(
+            &server,
+            repo,
+            json!(["declared.txt"]),
+            "fix: initial bounded commit",
+        );
         assert_ne!(result["isError"], json!(true), "{result}");
         assert_eq!(result["data"]["committed_paths"], json!(["declared.txt"]));
-        assert_eq!(git_stdout(repo, &["show", ":unrelated.txt"]), "staged version");
-        assert_eq!(std::fs::read_to_string(repo.join("unrelated.txt")).unwrap(), "unstaged version");
-        assert_eq!(git_stdout(repo, &["ls-tree", "--name-only", "HEAD"]).trim(), "declared.txt");
+        assert_eq!(
+            git_stdout(repo, &["show", ":unrelated.txt"]),
+            "staged version"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("unrelated.txt")).unwrap(),
+            "unstaged version"
+        );
+        assert_eq!(
+            git_stdout(repo, &["ls-tree", "--name-only", "HEAD"]).trim(),
+            "declared.txt"
+        );
     }
 
     #[test]
@@ -12101,10 +12334,18 @@ mod commit_is_bounded_to_the_declaration {
         let before = git_stdout(repo, &["rev-parse", "HEAD"]);
         std::fs::write(repo.join("declared.txt"), "new").unwrap();
         std::fs::write(repo.join(".git/index.lock"), "another client's lock").unwrap();
-        let result = commit_via_tool(&server, repo, json!(["declared.txt"]), "fix: respect another index lock");
+        let result = commit_via_tool(
+            &server,
+            repo,
+            json!(["declared.txt"]),
+            "fix: respect another index lock",
+        );
         assert_eq!(result["isError"], json!(true), "{result}");
         assert_eq!(git_stdout(repo, &["rev-parse", "HEAD"]), before);
-        assert_eq!(std::fs::read_to_string(repo.join(".git/index.lock")).unwrap(), "another client's lock");
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".git/index.lock")).unwrap(),
+            "another client's lock"
+        );
     }
 
     #[cfg(unix)]
@@ -12124,11 +12365,26 @@ mod commit_is_bounded_to_the_declaration {
         std::fs::write(repo.join("declared.txt"), "requested").unwrap();
         std::fs::write(repo.join("unrelated.txt"), "later").unwrap();
         git(repo, &["add", "--", "unrelated.txt"]);
-        install_commit_hook(repo, "pre-commit", "printf hook-version > declared.txt\ngit add -- declared.txt");
-        let result = commit_via_tool(&server, repo, json!(["declared.txt"]), "fix: preserve formatting hooks");
+        install_commit_hook(
+            repo,
+            "pre-commit",
+            "printf hook-version > declared.txt\ngit add -- declared.txt",
+        );
+        let result = commit_via_tool(
+            &server,
+            repo,
+            json!(["declared.txt"]),
+            "fix: preserve formatting hooks",
+        );
         assert_ne!(result["isError"], json!(true), "{result}");
-        assert_eq!(git_stdout(repo, &["show", "HEAD:declared.txt"]), "hook-version");
-        assert_eq!(git_stdout(repo, &["diff", "--cached", "--name-only"]).trim(), "unrelated.txt");
+        assert_eq!(
+            git_stdout(repo, &["show", "HEAD:declared.txt"]),
+            "hook-version"
+        );
+        assert_eq!(
+            git_stdout(repo, &["diff", "--cached", "--name-only"]).trim(),
+            "unrelated.txt"
+        );
         assert!(!repo.join(".git/index.lock").exists());
     }
 
@@ -12141,7 +12397,12 @@ mod commit_is_bounded_to_the_declaration {
         let before = git_stdout(repo, &["rev-parse", "HEAD"]);
         std::fs::write(repo.join("declared.txt"), "requested").unwrap();
         install_commit_hook(repo, "pre-commit", "exit 37");
-        let result = commit_via_tool(&server, repo, json!(["declared.txt"]), "fix: respect hook refusal");
+        let result = commit_via_tool(
+            &server,
+            repo,
+            json!(["declared.txt"]),
+            "fix: respect hook refusal",
+        );
         assert_eq!(result["isError"], json!(true), "{result}");
         assert_eq!(git_stdout(repo, &["rev-parse", "HEAD"]), before);
         assert_eq!(git_stdout(repo, &["show", ":declared.txt"]), "requested");
@@ -12158,16 +12419,41 @@ mod commit_is_bounded_to_the_declaration {
         std::fs::write(repo.join("declared.txt"), "requested").unwrap();
         std::fs::write(repo.join("unrelated.txt"), "user staged").unwrap();
         git(repo, &["add", "--", "unrelated.txt"]);
-        install_commit_hook(repo, "post-commit", "printf hook-staged > unrelated.txt\ngit add -- unrelated.txt");
-        let result = commit_via_tool(&server, repo, json!(["declared.txt"]), "fix: preserve post-commit staging evidence");
+        install_commit_hook(
+            repo,
+            "post-commit",
+            "printf hook-staged > unrelated.txt\ngit add -- unrelated.txt",
+        );
+        let result = commit_via_tool(
+            &server,
+            repo,
+            json!(["declared.txt"]),
+            "fix: preserve post-commit staging evidence",
+        );
         assert_eq!(result["isError"], json!(true), "{result}");
         assert_eq!(result["data"]["status"], json!("commit_state_unverified"));
-        assert_ne!(git_stdout(repo, &["rev-parse", "HEAD"]), before, "the error must not pretend no commit exists");
+        assert_ne!(
+            git_stdout(repo, &["rev-parse", "HEAD"]),
+            before,
+            "the error must not pretend no commit exists"
+        );
         assert_eq!(git_stdout(repo, &["show", ":unrelated.txt"]), "user staged");
-        let retained = std::fs::read_dir(repo.join(".git")).unwrap().filter_map(Result::ok)
-            .find(|entry| entry.file_name().to_string_lossy().starts_with("axon-commit-index-")).unwrap();
-        let out = std::process::Command::new("git").current_dir(repo)
-            .env("GIT_INDEX_FILE", retained.path()).args(["show", ":unrelated.txt"]).output().unwrap();
+        let retained = std::fs::read_dir(repo.join(".git"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("axon-commit-index-")
+            })
+            .unwrap();
+        let out = std::process::Command::new("git")
+            .current_dir(repo)
+            .env("GIT_INDEX_FILE", retained.path())
+            .args(["show", ":unrelated.txt"])
+            .output()
+            .unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8(out.stdout).unwrap(), "hook-staged");
         assert!(!repo.join(".git/index.lock").exists());
@@ -12276,7 +12562,9 @@ mod commit_is_bounded_to_the_declaration {
              creating a file is broken.\n  commit: {committed:?}\n  tool said: {content}"
         );
         assert!(
-            git_stdout(repo, &["status", "--porcelain"]).trim().is_empty(),
+            git_stdout(repo, &["status", "--porcelain"])
+                .trim()
+                .is_empty(),
             "nothing must be left behind: {:?}",
             git_stdout(repo, &["status", "--porcelain"])
         );
@@ -12537,24 +12825,39 @@ fn test_work_plan_separates_belonging_to_a_live_milestone_from_being_blocked() {
 
     let seed = IstSeed::new()
         .node(SollNodeFixture::new("PIL-XON-001", "Pillar", "XON", "Axe").status("current"))
-        .node(SollNodeFixture::new("MIL-XON-100", "Milestone", "XON", "Jalon EN COURS").status("current"))
-        .node(SollNodeFixture::new("MIL-XON-200", "Milestone", "XON", "Jalon PAS COMMENCE").status("planned"))
+        .node(
+            SollNodeFixture::new("MIL-XON-100", "Milestone", "XON", "Jalon EN COURS")
+                .status("current"),
+        )
+        .node(
+            SollNodeFixture::new("MIL-XON-200", "Milestone", "XON", "Jalon PAS COMMENCE")
+                .status("planned"),
+        )
         // Rattachée au jalon EN COURS : c'est du travail à faire, pas un blocage.
         .node(
-            SollNodeFixture::new("REQ-XON-801", "Requirement", "XON", "Dans le jalon en cours")
-                .status("current"),
+            SollNodeFixture::new(
+                "REQ-XON-801",
+                "Requirement",
+                "XON",
+                "Dans le jalon en cours",
+            )
+            .status("current"),
         )
         // Rattachée à un jalon PAS COMMENCÉ : là on attend vraiment.
         .node(
-            SollNodeFixture::new("REQ-XON-802", "Requirement", "XON", "Attend un jalon a venir")
-                .status("current"),
+            SollNodeFixture::new(
+                "REQ-XON-802",
+                "Requirement",
+                "XON",
+                "Attend un jalon a venir",
+            )
+            .status("current"),
         )
         // LIVRÉE, et portant encore l'arête. Un travail terminé ne bloque rien.
         .node(
             SollNodeFixture::new("REQ-XON-803", "Requirement", "XON", "Deja livree")
                 .status("delivered"),
-        )
-        ;
+        );
     let harness = create_test_server_with_ist_seed(seed).expect("serveur de test");
 
     // Les arêtes SOLL vivent dans `soll.Edge`. `EdgeFixture` écrit dans
@@ -12650,12 +12953,45 @@ fn test_supersedes_retires_the_target_without_reopening_the_source() {
     };
 
     let seed = IstSeed::new()
-        .node(SollNodeFixture::new("REQ-CCL-901", "Requirement", "CCL", "Remplacante livree").status("delivered"))
-        .node(SollNodeFixture::new("REQ-CCL-902", "Requirement", "CCL", "Remplacee").status("current"))
-        .node(SollNodeFixture::new("REQ-CCL-903", "Requirement", "CCL", "Retiree sans remplacant").status("superseded"))
-        .node(SollNodeFixture::new("REQ-CCL-904", "Requirement", "CCL", "Autre remplacante").status("current"))
-        .node(SollNodeFixture::new("REQ-CCL-905", "Requirement", "CCL", "Retiree AVEC remplacant").status("superseded"))
-        .node(SollNodeFixture::new("REQ-CCL-906", "Requirement", "CCL", "Le remplacant deja enregistre").status("current"));
+        .node(
+            SollNodeFixture::new("REQ-CCL-901", "Requirement", "CCL", "Remplacante livree")
+                .status("delivered"),
+        )
+        .node(
+            SollNodeFixture::new("REQ-CCL-902", "Requirement", "CCL", "Remplacee")
+                .status("current"),
+        )
+        .node(
+            SollNodeFixture::new(
+                "REQ-CCL-903",
+                "Requirement",
+                "CCL",
+                "Retiree sans remplacant",
+            )
+            .status("superseded"),
+        )
+        .node(
+            SollNodeFixture::new("REQ-CCL-904", "Requirement", "CCL", "Autre remplacante")
+                .status("current"),
+        )
+        .node(
+            SollNodeFixture::new(
+                "REQ-CCL-905",
+                "Requirement",
+                "CCL",
+                "Retiree AVEC remplacant",
+            )
+            .status("superseded"),
+        )
+        .node(
+            SollNodeFixture::new(
+                "REQ-CCL-906",
+                "Requirement",
+                "CCL",
+                "Le remplacant deja enregistre",
+            )
+            .status("current"),
+        );
     let harness = create_test_server_with_ist_seed(seed).expect("serveur de test");
 
     // 905 a DÉJÀ son remplaçant enregistré — c'est le cas où refuser est le bon
@@ -12741,7 +13077,9 @@ fn test_supersedes_retires_the_target_without_reopening_the_source() {
     // que l'ancien message décrivait avant de refuser de le combler.
     let recovered = link("REQ-CCL-904", "REQ-CCL-903");
     assert_ne!(
-        recovered.get("isError").and_then(serde_json::Value::as_bool),
+        recovered
+            .get("isError")
+            .and_then(serde_json::Value::as_bool),
         Some(true),
         "un nœud retiré dont le remplaçant n'est PAS enregistré doit pouvoir le \
          recevoir : refuser, c'est refuser de combler le trou qu'on signale \
@@ -13650,7 +13988,11 @@ fn test_soll_remove_evidence_drops_only_broken_file_refs_by_default() {
         .unwrap()
         .result
         .unwrap();
-    assert_eq!(applied["data"]["removed_count"].as_u64(), Some(2), "{applied}");
+    assert_eq!(
+        applied["data"]["removed_count"].as_u64(),
+        Some(2),
+        "{applied}"
+    );
 
     let response2 = server
         .handle_request(JsonRpcRequest {
@@ -13694,8 +14036,18 @@ fn test_soll_remove_evidence_explicit_mode_reaches_non_file_artifact_types() {
             .unwrap();
     };
     seed("TRC-902265-TEST", "Test", "tests::some_dead_test", 1);
-    seed("TRC-902265-METRIC", "Metric", "bench/scratch-never-committed.json", 2);
-    seed("TRC-902265-FILE", "file", "/tmp/does-not-exist-902265.rs", 3);
+    seed(
+        "TRC-902265-METRIC",
+        "Metric",
+        "bench/scratch-never-committed.json",
+        2,
+    );
+    seed(
+        "TRC-902265-FILE",
+        "file",
+        "/tmp/does-not-exist-902265.rs",
+        3,
+    );
 
     // Explicit mode targeting ONLY the two non-file rows: they must now be reachable.
     let data = server
@@ -13797,7 +14149,9 @@ fn test_soll_remove_evidence_explicit_mode_reaches_non_file_artifact_types() {
     );
     let survivors: String = server
         .graph_store
-        .query_json("SELECT artifact_ref FROM soll.Traceability WHERE soll_entity_id = 'REQ-AXO-9022650'")
+        .query_json(
+            "SELECT artifact_ref FROM soll.Traceability WHERE soll_entity_id = 'REQ-AXO-9022650'",
+        )
         .unwrap();
     assert!(
         survivors.contains("/tmp/does-not-exist-902265.rs"),
@@ -13858,7 +14212,9 @@ fn test_soll_remove_evidence_broken_only_still_ignores_non_file_types() {
     assert!(data["unmatched_refs"].as_array().unwrap().is_empty());
     let survivors: String = server
         .graph_store
-        .query_json("SELECT artifact_ref FROM soll.Traceability WHERE soll_entity_id = 'REQ-AXO-9022651'")
+        .query_json(
+            "SELECT artifact_ref FROM soll.Traceability WHERE soll_entity_id = 'REQ-AXO-9022651'",
+        )
         .unwrap();
     assert!(
         survivors.contains("tests::not_a_path_at_all"),
@@ -14207,7 +14563,9 @@ fn test_skill_entity_type_create_with_canonical_inherit_from_guideline() {
     );
     server
         .graph_store
-        .execute("DELETE FROM soll.Edge WHERE source_id LIKE 'SKI-TSK-%' OR target_id LIKE 'SKI-TSK-%'")
+        .execute(
+            "DELETE FROM soll.Edge WHERE source_id LIKE 'SKI-TSK-%' OR target_id LIKE 'SKI-TSK-%'",
+        )
         .unwrap();
     server
         .graph_store
@@ -14387,7 +14745,11 @@ fn test_skill_list_and_invoke_round_trip() {
     );
     let listed = list_result["data"]["skills"]
         .as_array()
-        .and_then(|skills| skills.iter().find(|skill| skill["id"] == json!("SKI-PRO-998")))
+        .and_then(|skills| {
+            skills
+                .iter()
+                .find(|skill| skill["id"] == json!("SKI-PRO-998"))
+        })
         .expect("seeded current skill in structured list");
     assert_eq!(listed["invocation_mode"], json!("MANDATED"));
     assert_eq!(listed["applicable_to"], json!(["delivery"]));
@@ -14472,7 +14834,10 @@ fn re_anchor_without_mandated_skills_routes_directly_to_work_plan() {
     let content = response["content"][0]["text"].as_str().unwrap_or_default();
     assert!(!content.contains("skill_invoke"), "{content}");
     assert_eq!(response["data"]["mandated_skills"], json!([]));
-    assert_eq!(response["data"]["next_action"]["tool"], json!("soll_work_plan"));
+    assert_eq!(
+        response["data"]["next_action"]["tool"],
+        json!("soll_work_plan")
+    );
 }
 
 // REQ-AXO-91581 slice 2 — prompt_template_get applies Mustache substitution
@@ -15335,17 +15700,35 @@ fn test_axon_commit_work_blocks_deliverable_symbol_never_wired_to_production() {
 
     // 1) deliverable + test_only (orphan_tagged) in the diff → BLOCKED.
     let blocked = commit("src/lib.rs", 9021921);
-    assert_eq!(blocked["isError"].as_bool(), Some(true), "deliverable test_only symbol must block: {blocked:?}");
-    let violations = blocked["data"]["violations"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        blocked["isError"].as_bool(),
+        Some(true),
+        "deliverable test_only symbol must block: {blocked:?}"
+    );
+    let violations = blocked["data"]["violations"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert!(
-        violations.iter().any(|v| v["diagnostic"].as_str().unwrap_or("").contains("orphan_tagged")),
+        violations.iter().any(|v| v["diagnostic"]
+            .as_str()
+            .unwrap_or("")
+            .contains("orphan_tagged")),
         "violation must name orphan_tagged: {violations:?}"
     );
 
     // 2) Remove the blocking symbol; only the untagged orphan + the prod-wired
     // deliverable symbol remain in the diff's file → must NOT block.
-    server.graph_store.execute(&format!("DELETE FROM Symbol WHERE id = '{orphan_tagged}'")).unwrap();
-    server.graph_store.execute(&format!("DELETE FROM ist.Edge WHERE target_id = '{orphan_tagged}'")).unwrap();
+    server
+        .graph_store
+        .execute(&format!("DELETE FROM Symbol WHERE id = '{orphan_tagged}'"))
+        .unwrap();
+    server
+        .graph_store
+        .execute(&format!(
+            "DELETE FROM ist.Edge WHERE target_id = '{orphan_tagged}'"
+        ))
+        .unwrap();
     crate::ist_snapshot::evict_process_snapshot(&code);
     assert!(server.ensure_ram_snapshot_warm(&code));
 
@@ -15580,18 +15963,14 @@ fn test_auto_evidence_attaches_the_subject_requirement_not_the_ones_merely_cited
     // for them at all, and said nothing about it. That is why the fixture above
     // deliberately uses `ZZ7` rather than a letters-only code.
     assert!(
-        !crate::mcp::tools_soll::parse_commit_req_ids_for_tests(
-            "fix(x): thing (REQ-TE2-154)"
-        )
-        .is_empty(),
+        !crate::mcp::tools_soll::parse_commit_req_ids_for_tests("fix(x): thing (REQ-TE2-154)")
+            .is_empty(),
         "a project code carrying a digit must parse"
     );
     // …and a malformed segment still must not.
     assert!(
-        crate::mcp::tools_soll::parse_commit_req_ids_for_tests(
-            "fix(x): thing (REQ-TOOLONG-154)"
-        )
-        .is_empty(),
+        crate::mcp::tools_soll::parse_commit_req_ids_for_tests("fix(x): thing (REQ-TOOLONG-154)")
+            .is_empty(),
         "a segment that is not a canonical 3-char code is not an id"
     );
 }
@@ -15683,7 +16062,12 @@ fn test_a_digit_bearing_tenant_really_gets_a_traceability_row_end_to_end() {
 fn attach_required_proposes_only_parents_the_source_kind_can_actually_reach() {
     let server = create_test_server();
     // Pas d'apostrophe : `seed_pillar` interpole le titre sans échapper.
-    seed_pillar(&server, "TSA", "PIL-TSA-901", "Pilier inatteignable depuis un jalon");
+    seed_pillar(
+        &server,
+        "TSA",
+        "PIL-TSA-901",
+        "Pilier inatteignable depuis un jalon",
+    );
     server
         .graph_store
         .execute(
@@ -15856,8 +16240,7 @@ fn soll_validate_enforces_the_supersedes_rules_carried_as_data_not_as_code() {
     // Les règles LIVRÉES, pas des règles fabriquées par le test.
     let rules = server.load_soll_rules("TSC");
     assert!(
-        rules.iter().any(|r| r.id == "GUI-PRO-119")
-            && rules.iter().any(|r| r.id == "GUI-PRO-120"),
+        rules.iter().any(|r| r.id == "GUI-PRO-119") && rules.iter().any(|r| r.id == "GUI-PRO-120"),
         "le seed doit livrer les deux règles ; chargées : {:?}",
         rules.iter().map(|r| &r.id).collect::<Vec<_>>()
     );
@@ -15964,7 +16347,10 @@ fn soll_validate_names_both_nodes_when_two_living_ones_share_a_title() {
     }
 
     assert!(
-        server.load_soll_rules("TSF").iter().any(|r| r.id == "GUI-PRO-121"),
+        server
+            .load_soll_rules("TSF")
+            .iter()
+            .any(|r| r.id == "GUI-PRO-121"),
         "le seed doit livrer GUI-PRO-121"
     );
 
@@ -16067,7 +16453,10 @@ fn soll_validate_flags_an_open_requirement_that_reaches_no_vision() {
     }
 
     assert!(
-        server.load_soll_rules("TSG").iter().any(|r| r.id == "GUI-PRO-122"),
+        server
+            .load_soll_rules("TSG")
+            .iter()
+            .any(|r| r.id == "GUI-PRO-122"),
         "le seed doit livrer GUI-PRO-122"
     );
 
@@ -16142,7 +16531,10 @@ fn soll_validate_flags_a_project_that_grew_a_second_living_vision() {
         .unwrap();
 
     assert!(
-        server.load_soll_rules("TSH").iter().any(|r| r.id == "GUI-PRO-123"),
+        server
+            .load_soll_rules("TSH")
+            .iter()
+            .any(|r| r.id == "GUI-PRO-123"),
         "le seed doit livrer GUI-PRO-123"
     );
 
@@ -16315,7 +16707,11 @@ fn soll_validate_flags_an_open_requirement_with_no_acceptance_criteria() {
     seed_pillar(&server, "TSJ", "PIL-TSJ-901", "Ancre criteres");
     for (id, status, meta) in [
         // Critères présents — le contrôle positif.
-        ("REQ-TSJ-901", "planned", r#"{"acceptance_criteria": ["le test X passe"]}"#),
+        (
+            "REQ-TSJ-901",
+            "planned",
+            r#"{"acceptance_criteria": ["le test X passe"]}"#,
+        ),
         // Absents — la violation attendue.
         ("REQ-TSJ-902", "planned", "{}"),
         // Présents mais VIDES : une liste vide est une absence, pas une valeur.
@@ -16335,7 +16731,10 @@ fn soll_validate_flags_an_open_requirement_with_no_acceptance_criteria() {
     }
 
     assert!(
-        server.load_soll_rules("TSJ").iter().any(|r| r.id == "GUI-PRO-126"),
+        server
+            .load_soll_rules("TSJ")
+            .iter()
+            .any(|r| r.id == "GUI-PRO-126"),
         "le seed doit livrer GUI-PRO-126"
     );
 
@@ -16407,12 +16806,12 @@ fn the_three_attachment_rules_replaced_the_hardcoded_checks_without_losing_cover
     let server = create_test_server();
     seed_pillar(&server, "TSK", "PIL-TSK-901", "Ancre rattachement");
     for (id, kind, status) in [
-        ("REQ-TSK-901", "Requirement", "planned"),  // relié à rien
-        ("REQ-TSK-902", "Requirement", "planned"),  // relié — contrôle positif
-        ("VAL-TSK-901", "Validation", "passed"),    // sans VERIFIES
-        ("VAL-TSK-902", "Validation", "passed"),    // avec VERIFIES — contrôle
-        ("DEC-TSK-901", "Decision", "current"),     // relié à rien
-        ("DEC-TSK-902", "Decision", "current"),     // relié — contrôle positif
+        ("REQ-TSK-901", "Requirement", "planned"), // relié à rien
+        ("REQ-TSK-902", "Requirement", "planned"), // relié — contrôle positif
+        ("VAL-TSK-901", "Validation", "passed"),   // sans VERIFIES
+        ("VAL-TSK-902", "Validation", "passed"),   // avec VERIFIES — contrôle
+        ("DEC-TSK-901", "Decision", "current"),    // relié à rien
+        ("DEC-TSK-902", "Decision", "current"),    // relié — contrôle positif
     ] {
         server
             .graph_store
@@ -16471,9 +16870,24 @@ fn the_three_attachment_rules_replaced_the_hardcoded_checks_without_losing_cover
     };
 
     for (header, rule, offender, innocent) in [
-        ("Orphan requirements", "GUI-PRO-127", "REQ-TSK-901", "REQ-TSK-902"),
-        ("Validations without VERIFIES link", "GUI-PRO-128", "VAL-TSK-901", "VAL-TSK-902"),
-        ("Decisions sans aucune relation", "GUI-PRO-129", "DEC-TSK-901", "DEC-TSK-902"),
+        (
+            "Orphan requirements",
+            "GUI-PRO-127",
+            "REQ-TSK-901",
+            "REQ-TSK-902",
+        ),
+        (
+            "Validations without VERIFIES link",
+            "GUI-PRO-128",
+            "VAL-TSK-901",
+            "VAL-TSK-902",
+        ),
+        (
+            "Decisions sans aucune relation",
+            "GUI-PRO-129",
+            "DEC-TSK-901",
+            "DEC-TSK-902",
+        ),
     ] {
         let legacy = section(header);
         let migrated = rule_lines(rule);
@@ -17024,7 +17438,9 @@ fn la_porte_compte_les_recouvrements_mais_pas_ceux_qui_sont_declares() {
             .and_then(|checks| {
                 checks
                     .iter()
-                    .find(|c| c.get("check").and_then(|v| v.as_str()) == Some("registry_territories"))
+                    .find(|c| {
+                        c.get("check").and_then(|v| v.as_str()) == Some("registry_territories")
+                    })
                     .cloned()
             })
             .unwrap_or_else(|| panic!("le check registry_territories doit exister : {r}"))
@@ -17047,7 +17463,10 @@ fn la_porte_compte_les_recouvrements_mais_pas_ceux_qui_sont_declares() {
         detail.contains("SUB") && detail.contains("MEG"),
         "et il doit NOMMER les deux projets — un compteur seul n'ouvre aucune action : {detail}"
     );
-    let remede = avant.get("remediation").and_then(|v| v.as_str()).unwrap_or("");
+    let remede = avant
+        .get("remediation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     assert!(
         remede.contains("parent_project_code"),
         "la remédiation exacte doit être donnée, pas décrite : {remede}"
@@ -17202,16 +17621,15 @@ fn le_retrait_d_un_projet_refuse_par_defaut_et_dit_pourquoi() {
         .graph_store
         .query_count("SELECT count(*) FROM soll.ProjectCodeRegistry WHERE project_code='GHO'")
         .unwrap();
-    assert_eq!(encore, 1, "une simulation qui supprime n'est pas une simulation");
+    assert_eq!(
+        encore, 1,
+        "une simulation qui supprime n'est pas une simulation"
+    );
 
     // Chemin nominal.
     let fait = appel(serde_json::json!({ "project_code": "GHO", "confirm": true }));
     assert_ne!(fait["isError"], serde_json::json!(true), "{fait}");
-    for table in [
-        "soll.ProjectCodeRegistry",
-        "soll.Node",
-        "ist.IndexedFile",
-    ] {
+    for table in ["soll.ProjectCodeRegistry", "soll.Node", "ist.IndexedFile"] {
         let n = server
             .graph_store
             .query_count(&format!(
@@ -17275,7 +17693,10 @@ fn sql_dit_son_compte_de_lignes_au_lieu_de_rendre_une_enveloppe_muette() {
     );
 
     // Et la requête qui N'A PAS tourné reste distincte — c'est tout l'objet.
-    let erreur = appel_sql(&server, "SELECT colonne_absente FROM pg_catalog.pg_namespace");
+    let erreur = appel_sql(
+        &server,
+        "SELECT colonne_absente FROM pg_catalog.pg_namespace",
+    );
     assert_eq!(
         erreur["isError"].as_bool(),
         Some(true),
@@ -17496,7 +17917,9 @@ fn req_902474_soll_manager_create_rejects_exact_duplicate_title_and_surfaces_nea
     if nearby_near["status"].as_str() == Some("found") {
         let candidates = nearby_near["candidates"].as_array().unwrap();
         assert!(
-            candidates.iter().any(|c| c["id"].as_str() == Some(&first_id)),
+            candidates
+                .iter()
+                .any(|c| c["id"].as_str() == Some(&first_id)),
             "Candidates must include first_id `{first_id}`: {candidates:?}"
         );
     }
@@ -17563,7 +17986,9 @@ fn req_902474_soll_manager_create_rejects_exact_duplicate_title_and_surfaces_nea
             }),
         )
         .expect("intra dup plan response");
-    let intra_blockers = intra_dup_plan["data"]["commit_blockers"].as_array().unwrap();
+    let intra_blockers = intra_dup_plan["data"]["commit_blockers"]
+        .as_array()
+        .unwrap();
     assert!(
         intra_blockers.iter().any(|b| b["problem_class"].as_str() == Some("duplicate_title_rejected")),
         "Intra-plan duplicate title must be surfaced as duplicate_title_rejected: {intra_blockers:?}"
@@ -17599,10 +18024,16 @@ fn test_req_902482_sql_undefined_table_suggests_nearby_tables() {
 
     // 1. Quoted identifier with case mismatch: soll."Node" -> suggests soll.node with PG quoting note
     let res = server
-        .execute_tool_direct("sql", &json!({ "sql": r#"SELECT id FROM soll."Node" LIMIT 1"# }))
+        .execute_tool_direct(
+            "sql",
+            &json!({ "sql": r#"SELECT id FROM soll."Node" LIMIT 1"# }),
+        )
         .expect("sql response");
 
-    assert_eq!(res["isError"], true, "soll.\"Node\" must error under PG: {res}");
+    assert_eq!(
+        res["isError"], true,
+        "soll.\"Node\" must error under PG: {res}"
+    );
     let text = res["content"][0]["text"].as_str().expect("text response");
     assert!(
         text.contains("soll.Node does not exist — did you mean soll.node?"),
@@ -17616,17 +18047,25 @@ fn test_req_902482_sql_undefined_table_suggests_nearby_tables() {
     let tables = res["data"]["parameter_repair"]["referenced_relations"]
         .as_array()
         .expect("referenced_relations array");
-    let node_entry = tables.iter().find(|t| t["relation"] == "soll.Node").expect("soll.Node entry");
+    let node_entry = tables
+        .iter()
+        .find(|t| t["relation"] == "soll.Node")
+        .expect("soll.Node entry");
     assert_eq!(node_entry["exists"], false);
     assert_eq!(node_entry["nearby_tables"], json!(["soll.node"]));
 
     // 2. Typo / plural table name: soll.nodes -> suggests soll.node
     let res_typo = server
-        .execute_tool_direct("sql", &json!({ "sql": "SELECT id FROM soll.nodes LIMIT 1" }))
+        .execute_tool_direct(
+            "sql",
+            &json!({ "sql": "SELECT id FROM soll.nodes LIMIT 1" }),
+        )
         .expect("sql response");
 
     assert_eq!(res_typo["isError"], true);
-    let text_typo = res_typo["content"][0]["text"].as_str().expect("text response");
+    let text_typo = res_typo["content"][0]["text"]
+        .as_str()
+        .expect("text response");
     assert!(
         text_typo.contains("soll.nodes does not exist — did you mean soll.node?"),
         "error text must suggest soll.node for plural typo: {text_typo}"
@@ -17638,13 +18077,16 @@ fn test_req_902482_sql_undefined_table_suggests_nearby_tables() {
 fn test_req_902449_soll_multi_get_and_type_filter() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    let _ = server.graph_store.execute(
-        "INSERT INTO axon.Project (code) VALUES ('M49') ON CONFLICT (code) DO NOTHING"
-    );
-    server.graph_store.execute(
-        "INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) \
-         VALUES ('M49', '/tmp/m49', 'm49') ON CONFLICT (project_code) DO NOTHING"
-    ).expect("insert registry");
+    let _ = server
+        .graph_store
+        .execute("INSERT INTO axon.Project (code) VALUES ('M49') ON CONFLICT (code) DO NOTHING");
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) \
+         VALUES ('M49', '/tmp/m49', 'm49') ON CONFLICT (project_code) DO NOTHING",
+        )
+        .expect("insert registry");
     server.graph_store.execute(
         "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
          VALUES ('GUI-M49-001', 'Guideline', 'M49', 'Règle Alpha', 'Corps de la règle alpha pour le test', 'current', '{}') \
@@ -17667,9 +18109,17 @@ fn test_req_902449_soll_multi_get_and_type_filter() {
         .expect("soll_get must answer multi");
     assert_ne!(multi.get("isError").and_then(Value::as_bool), Some(true));
     let text = multi["content"][0]["text"].as_str().unwrap_or_default();
-    assert!(text.contains("Règle Alpha"), "multi text must contain node 1: {text}");
-    assert!(text.contains("Règle Beta"), "multi text must contain node 2: {text}");
-    let nodes = multi["data"]["nodes"].as_array().expect("nodes array in data");
+    assert!(
+        text.contains("Règle Alpha"),
+        "multi text must contain node 1: {text}"
+    );
+    assert!(
+        text.contains("Règle Beta"),
+        "multi text must contain node 2: {text}"
+    );
+    let nodes = multi["data"]["nodes"]
+        .as_array()
+        .expect("nodes array in data");
     assert_eq!(nodes.len(), 2);
     assert_eq!(nodes[0]["id"], "GUI-M49-001");
     assert_eq!(nodes[1]["id"], "GUI-M49-002");
@@ -17681,10 +18131,15 @@ fn test_req_902449_soll_multi_get_and_type_filter() {
     assert_ne!(partiel.get("isError").and_then(Value::as_bool), Some(true));
     let nodes_p = partiel["data"]["nodes"].as_array().expect("nodes array");
     assert_eq!(nodes_p.len(), 1);
-    let missing = partiel["data"]["missing_ids"].as_array().expect("missing_ids array");
+    let missing = partiel["data"]["missing_ids"]
+        .as_array()
+        .expect("missing_ids array");
     assert_eq!(missing, &vec![json!("GUI-M49-404")]);
     let text_p = partiel["content"][0]["text"].as_str().unwrap_or_default();
-    assert!(text_p.contains("GUI-M49-404"), "text must mention missing id: {text_p}");
+    assert!(
+        text_p.contains("GUI-M49-404"),
+        "text must mention missing id: {text_p}"
+    );
 
     // 3. soll_get rétrocompatibilité id singulier
     let single = server
@@ -17704,7 +18159,9 @@ fn test_req_902449_soll_multi_get_and_type_filter() {
 
     // 5. soll_query_context avec `search` ET `kind`
     let q_fts = server
-        .axon_soll_query_context(&json!({ "project_code": "M49", "search": "alpha", "kind": "guideline" }))
+        .axon_soll_query_context(
+            &json!({ "project_code": "M49", "search": "alpha", "kind": "guideline" }),
+        )
         .expect("soll_query_context FTS must answer");
     assert_ne!(q_fts.get("isError").and_then(Value::as_bool), Some(true));
     let text_fts = q_fts["content"][0]["text"].as_str().unwrap_or_default();
@@ -17714,7 +18171,10 @@ fn test_req_902449_soll_multi_get_and_type_filter() {
     let empty_ids = server
         .axon_soll_get(&json!({ "ids": [] }))
         .expect("soll_get must answer empty ids");
-    assert_eq!(empty_ids.get("isError").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        empty_ids.get("isError").and_then(Value::as_bool),
+        Some(true)
+    );
 
     // 7. soll_query_context avec kind inexistant
     let q_none = server
@@ -17731,8 +18191,260 @@ fn test_req_902449_soll_multi_get_and_type_filter() {
     assert_ne!(q_case.get("isError").and_then(Value::as_bool), Some(true));
     assert_eq!(q_case["data"]["count"], 2);
 
-    let _ = server.graph_store.execute("DELETE FROM soll.Node WHERE id IN ('GUI-M49-001', 'GUI-M49-002', 'REQ-M49-001')");
-    let _ = server.graph_store.execute("DELETE FROM soll.ProjectCodeRegistry WHERE project_code = 'M49'");
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id IN ('GUI-M49-001', 'GUI-M49-002', 'REQ-M49-001')");
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.ProjectCodeRegistry WHERE project_code = 'M49'");
 }
 
+/// ── REQ-AXO-902451 — axon_pre_flight_check : formateur et oracle du projet ───
+///
+/// 1. Formateur sur diff_paths : exécuter le formateur déclaré (ou dérivé) sur
+///    les fichiers modifiés existants et échouer si un fichier n'est pas formaté.
+/// 2. Oracle du projet : si une commande d'oracle est déclarée, exiger la PREUVE
+///    d'une exécution réussie (verdict=pass) et FRAÎCHE (postérieure au mtime du
+///    fichier le plus récemment modifié parmi les diff_paths).
+#[test]
+fn test_req_902451_pre_flight_checks_formatter_and_oracle_freshness() {
+    let server = create_test_server();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let proj_dir = temp.path().join("proj_pfc");
+    std::fs::create_dir_all(proj_dir.join("src")).expect("mkdir src");
+    std::fs::create_dir_all(proj_dir.join(".axon")).expect("mkdir .axon");
 
+    let src_file = proj_dir.join("src/lib.rs");
+    std::fs::write(&src_file, "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").expect("write src");
+
+    let proj_path_str = proj_dir.to_string_lossy().to_string();
+
+    // 1. Enregistrer le projet PFC dans le registre
+    server
+        .graph_store
+        .execute_param(
+            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_name, project_path) \
+             VALUES ('PFC', 'PreFlightProject', ?) \
+             ON CONFLICT (project_code) DO UPDATE SET project_path = EXCLUDED.project_path",
+            &json!([proj_path_str]),
+        )
+        .expect("register project PFC");
+
+    // ── Volet 1 : Formateur ──
+    // Déclarer un formateur qui échoue (commande `false`)
+    server
+        .graph_store
+        .execute(
+            "UPDATE soll.ProjectCodeRegistry SET formatter_command = 'false' WHERE project_code = 'PFC'",
+        )
+        .expect("set failing formatter");
+
+    let req_fail_fmt = json!({
+        "project_code": "PFC",
+        "project_path": proj_path_str,
+        "diff_paths": ["src/lib.rs"]
+    });
+    let res_fail_fmt = server
+        .axon_pre_flight_check(&req_fail_fmt)
+        .expect("pre-flight check should respond");
+    assert_eq!(
+        res_fail_fmt.get("isError").and_then(Value::as_bool),
+        Some(true),
+        "pre-flight must FAIL when project formatter fails on diff_paths: {:?}",
+        res_fail_fmt
+    );
+    let violations = res_fail_fmt
+        .pointer("/data/violations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        violations.iter().any(|v| {
+            let rule = v["rule"].as_str().unwrap_or_default().to_lowercase();
+            rule.contains("formatter") || rule.contains("format")
+        }),
+        "violation must explicitly identify formatter failure: {:?}",
+        violations
+    );
+
+    // Déclarer un formateur qui réussit (commande `true`)
+    server
+        .graph_store
+        .execute(
+            "UPDATE soll.ProjectCodeRegistry SET formatter_command = 'true' WHERE project_code = 'PFC'",
+        )
+        .expect("set passing formatter");
+
+    let res_pass_fmt = server
+        .axon_pre_flight_check(&req_fail_fmt)
+        .expect("pre-flight check should respond");
+    assert_ne!(
+        res_pass_fmt.get("isError").and_then(Value::as_bool),
+        Some(true),
+        "pre-flight must PASS when formatter succeeds (and no oracle declared yet): {:?}",
+        res_pass_fmt
+    );
+
+    // ── Volet 2 : Oracle du projet ──
+    // Déclarer un oracle de projet
+    server
+        .graph_store
+        .execute(
+            "UPDATE soll.ProjectCodeRegistry SET oracle_command = 'cargo test --lib' WHERE project_code = 'PFC'",
+        )
+        .expect("set oracle command");
+
+    // Cas A : Aucune preuve d'oracle -> DOIT ÉCHOUER
+    let res_no_proof = server
+        .axon_pre_flight_check(&req_fail_fmt)
+        .expect("pre-flight check should respond");
+    assert_eq!(
+        res_no_proof.get("isError").and_then(Value::as_bool),
+        Some(true),
+        "pre-flight must FAIL when declared oracle has never run (no proof): {:?}",
+        res_no_proof
+    );
+    let violations_no_proof = res_no_proof
+        .pointer("/data/violations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        violations_no_proof.iter().any(|v| {
+            let rule = v["rule"].as_str().unwrap_or_default().to_lowercase();
+            let diag = v["diagnostic"].as_str().unwrap_or_default().to_lowercase();
+            rule.contains("oracle") || diag.contains("oracle")
+        }),
+        "violation must identify missing oracle proof: {:?}",
+        violations_no_proof
+    );
+
+    // Cas B : Preuve avec verdict 'fail' -> DOIT ÉCHOUER
+    let req_fail_verdict = json!({
+        "project_code": "PFC",
+        "project_path": proj_path_str,
+        "diff_paths": ["src/lib.rs"],
+        "oracle_proof": {
+            "executed_at_ms": 2000000000000u64,
+            "verdict": "fail"
+        }
+    });
+    let res_fail_verdict = server
+        .axon_pre_flight_check(&req_fail_verdict)
+        .expect("pre-flight check should respond");
+    assert_eq!(
+        res_fail_verdict.get("isError").and_then(Value::as_bool),
+        Some(true),
+        "pre-flight must FAIL when oracle execution failed: {:?}",
+        res_fail_verdict
+    );
+
+    // Obtenir le mtime de src/lib.rs
+    let mtime = std::fs::metadata(&src_file)
+        .expect("metadata")
+        .modified()
+        .expect("modified");
+    let mtime_ms = mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("duration")
+        .as_millis() as u64;
+
+    // Cas C : Preuve périmée (antérieure au mtime du fichier) -> DOIT ÉCHOUER
+    let stale_time_ms = mtime_ms.saturating_sub(60_000); // 60s avant
+    let req_stale = json!({
+        "project_code": "PFC",
+        "project_path": proj_path_str,
+        "diff_paths": ["src/lib.rs"],
+        "oracle_proof": {
+            "executed_at_ms": stale_time_ms,
+            "verdict": "pass"
+        }
+    });
+    let res_stale = server
+        .axon_pre_flight_check(&req_stale)
+        .expect("pre-flight check should respond");
+    assert_eq!(
+        res_stale.get("isError").and_then(Value::as_bool),
+        Some(true),
+        "pre-flight must FAIL when oracle execution is STALE (prior to file edit): {:?}",
+        res_stale
+    );
+    let violations_stale = res_stale
+        .pointer("/data/violations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        violations_stale.iter().any(|v| {
+            let diag = v["diagnostic"].as_str().unwrap_or_default().to_lowercase();
+            diag.contains("stale") || diag.contains("modified after") || diag.contains("antérieure")
+        }),
+        "violation must identify stale oracle: {:?}",
+        violations_stale
+    );
+
+    // Cas D : Preuve fraîche (postérieure au mtime du fichier) et pass -> DOIT RÉUSSIR
+    let fresh_time_ms = mtime_ms + 5_000;
+    let req_fresh = json!({
+        "project_code": "PFC",
+        "project_path": proj_path_str,
+        "diff_paths": ["src/lib.rs"],
+        "oracle_proof": {
+            "executed_at_ms": fresh_time_ms,
+            "verdict": "pass"
+        }
+    });
+    let res_fresh = server
+        .axon_pre_flight_check(&req_fresh)
+        .expect("pre-flight check should respond");
+    assert_ne!(
+        res_fresh.get("isError").and_then(Value::as_bool),
+        Some(true),
+        "pre-flight must PASS when oracle proof is fresh and pass: {:?}",
+        res_fresh
+    );
+
+    // Cas E : Lecture automatique depuis `.axon/oracle_run.json` sur disque
+    // Réécrire un nouveau fichier plus récent pour invalider la preuve en DB
+    let new_src = proj_dir.join("src/lib2.rs");
+    std::fs::write(&new_src, "pub fn mul(a: i32, b: i32) -> i32 { a * b }\n").expect("write src2");
+    let mtime2 = std::fs::metadata(&new_src)
+        .expect("metadata2")
+        .modified()
+        .expect("modified2");
+    let mtime2_ms = mtime2
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("duration2")
+        .as_millis() as u64;
+
+    let oracle_run_json = json!({
+        "command": "cargo test --lib",
+        "executed_at_ms": mtime2_ms + 10_000,
+        "verdict": "pass"
+    });
+    std::fs::write(
+        proj_dir.join(".axon/oracle_run.json"),
+        serde_json::to_string(&oracle_run_json).unwrap(),
+    )
+    .expect("write oracle_run.json");
+
+    let req_disk = json!({
+        "project_code": "PFC",
+        "project_path": proj_path_str,
+        "diff_paths": ["src/lib2.rs"]
+    });
+    let res_disk = server
+        .axon_pre_flight_check(&req_disk)
+        .expect("pre-flight check should respond");
+    assert_ne!(
+        res_disk.get("isError").and_then(Value::as_bool),
+        Some(true),
+        "pre-flight must PASS when fresh proof is read from .axon/oracle_run.json: {:?}",
+        res_disk
+    );
+
+    // Nettoyage
+    let _ = server
+        .graph_store
+        .execute("DELETE FROM soll.ProjectCodeRegistry WHERE project_code = 'PFC'");
+}

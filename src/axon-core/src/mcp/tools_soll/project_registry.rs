@@ -59,10 +59,12 @@ impl McpServer {
     pub(super) fn sync_project_code_registry_from_meta(&self) -> anyhow::Result<()> {
         for identity in discover_project_identities() {
             let project_path = identity.project_path.to_string_lossy().to_string();
-            self.graph_store.sync_project_registry_entry(
+            self.graph_store.sync_project_registry_entry_with_commands(
                 &identity.code,
                 identity.name.as_deref(),
                 Some(&project_path),
+                identity.oracle_command.as_deref(),
+                identity.formatter_command.as_deref(),
             )?;
         }
         Ok(())
@@ -861,7 +863,10 @@ impl McpServer {
                 .and_then(|r| serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&r).ok())
                 .and_then(|rows| rows.into_iter().next())
                 .and_then(|row| row.into_iter().next())
-                .and_then(|c| c.as_i64().or_else(|| c.as_str().and_then(|s| s.parse().ok())))
+                .and_then(|c| {
+                    c.as_i64()
+                        .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
+                })
                 .unwrap_or(-1)
         };
         let refus = |raison: String, remede: &str| -> Option<serde_json::Value> {

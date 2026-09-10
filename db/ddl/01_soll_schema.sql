@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (
 -- ne cree pas la hierarchie — elle rend explicite celle qui existe deja dans les chemins.
 SELECT public.add_column_if_absent('soll', 'projectcoderegistry', 'parent_project_code', 'TEXT');
 
+-- REQ-AXO-902451 — formateur et oracle du projet
+SELECT public.add_column_if_absent('soll', 'projectcoderegistry', 'oracle_command', 'TEXT');
+SELECT public.add_column_if_absent('soll', 'projectcoderegistry', 'last_oracle_run_ms', 'BIGINT');
+SELECT public.add_column_if_absent('soll', 'projectcoderegistry', 'last_oracle_verdict', 'TEXT');
+SELECT public.add_column_if_absent('soll', 'projectcoderegistry', 'formatter_command', 'TEXT');
+
 -- Per-project canonical-ID counter. One row per project_code; counters
 -- bumped atomically by soll.allocate_node_id (VIS/PIL/REQ/CPT/DEC/MIL/VAL/
 -- STK/GUI/SKI/PRT) and directly by storage.rs for PRV/REV. ALL 15 columns

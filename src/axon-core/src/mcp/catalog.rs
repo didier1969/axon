@@ -212,14 +212,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "message": { "type": "string", "description": "Commit message (Conventional Commits)." },
                         "dry_run": { "type": "boolean", "description": "If true, validates only without committing." },
                         "project_path": { "type": "string", "description": "REQ-AXO-191: absolute path of the project to commit in. When set, git commands run with this directory as cwd. Required for cross-project commits; otherwise the brain's cwd (typically the Axon repo) is used and the commit lands in the wrong tree." },
-                        "project_code": { "type": "string", "description": "REQ-AXO-191: alternative to project_path — server resolves the path via the registry. Falls back to brain cwd when neither is supplied." }
+                        "project_code": { "type": "string", "description": "REQ-AXO-191: alternative to project_path — server resolves the path via the registry. Falls back to brain cwd when neither is supplied." },
+                        "oracle_proof": { "type": "object", "description": "REQ-AXO-902451: execution proof for declared project oracle ({ executed_at_ms: number, verdict: 'pass'|'fail' })." },
+                        "oracle_command": { "type": "string", "description": "REQ-AXO-902451: optional override/declaration of project oracle command." },
+                        "formatter_command": { "type": "string", "description": "REQ-AXO-902451: optional override/declaration of project formatter command." }
                     },
                     "required": ["diff_paths", "message"]
                 }
             },
             {
                 "name": "axon_pre_flight_check",
-                "description": "[DX/SOLL] Dry-run gate before commit: evaluates the modified files against the project's SOLL Guidelines (and the commit message form) without creating a commit. REQ-AXO-902451 — what it does NOT do, stated because 'mandatory validation' made LLMs stop looking: it runs NO formatter, NO tests, and NOT the project's own oracle. A green pre-flight does NOT mean the repo would accept the commit. Run your formatter and your test gate yourself; declare the project oracle in a Guideline so a future slice can check its freshness.",
+                "description": "[DX/SOLL] Dry-run gate before commit: evaluates modified files against SOLL Guidelines, runs project formatter on diff_paths, and verifies project oracle freshness (if declared). What it does NOT do: it runs NO full integration test suite (does not execute a long test suite during pre-flight); it requires proof of a fresh, passing oracle execution. Pass `oracle_proof` with verdict='pass' after running your test gate.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -229,7 +232,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                             "description": "List of modified file paths."
                         },
                         "message": { "type": "string", "description": "Optional message to log the validation. Default: 'pre-flight-check'." },
-                        "incremental": { "type": "boolean", "description": "If true (default false), validate each file individually and return per-file violations. Use to detect a TDD-gate failure on file 1 without first authoring files 2..N." }
+                        "incremental": { "type": "boolean", "description": "If true (default false), validate each file individually and return per-file violations. Use to detect a TDD-gate failure on file 1 without first authoring files 2..N." },
+                        "project_path": { "type": "string", "description": "Absolute path of the project." },
+                        "project_code": { "type": "string", "description": "Canonical project code." },
+                        "oracle_proof": { "type": "object", "description": "REQ-AXO-902451: execution proof for declared project oracle ({ executed_at_ms: number, verdict: 'pass'|'fail' })." },
+                        "oracle_command": { "type": "string", "description": "REQ-AXO-902451: optional override/declaration of project oracle command." },
+                        "formatter_command": { "type": "string", "description": "REQ-AXO-902451: optional override/declaration of project formatter command." }
                     },
                     "required": ["diff_paths"]
                 }
