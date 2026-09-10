@@ -964,6 +964,7 @@ impl SemanticWorkerPool {
     }
 
     fn build_text_embedding_model(lane: &str, worker_idx: usize) -> Option<TextEmbedding> {
+        enforce_passive_ort_runtime_env();
         let options = InitOptions::new(fastembed_model())
             .with_cache_dir(embedding_model_cache_dir())
             .with_show_download_progress(embedding_download_progress_enabled())
@@ -1097,6 +1098,29 @@ fn current_cpu_fallback_query_sender() -> Option<Sender<QueryEmbeddingRequest>> 
         .clone()
 }
 
+/// REQ-AXO-902645 — force passive OpenMP wait policy and bounded thread count
+/// before initializing any ONNX Runtime C-FFI session to eliminate idle CPU spinning.
+pub fn enforce_passive_ort_runtime_env() {
+    let allow_spinning = gpu_backend::ort_allow_spinning_from_env(
+        std::env::var("AXON_ORT_ALLOW_SPINNING").ok().as_deref(),
+    );
+    unsafe {
+        if !allow_spinning {
+            std::env::set_var("OMP_WAIT_POLICY", "PASSIVE");
+        }
+        if std::env::var("OMP_NUM_THREADS").as_deref().unwrap_or("").trim().is_empty() {
+            std::env::set_var("OMP_NUM_THREADS", "1");
+        }
+        if std::env::var("AXON_QUERY_ORT_INTRA_THREADS").as_deref().unwrap_or("").trim().is_empty() {
+            std::env::set_var("AXON_QUERY_ORT_INTRA_THREADS", "1");
+        }
+        if std::env::var("AXON_ORT_INTRA_THREADS").as_deref().unwrap_or("").trim().is_empty() {
+            let val = std::env::var("AXON_QUERY_ORT_INTRA_THREADS").unwrap_or_else(|_| "1".into());
+            std::env::set_var("AXON_ORT_INTRA_THREADS", val);
+        }
+    }
+}
+
 /// REQ-AXO-902134 — spawn (once) the always-CPU fallback query worker. It runs
 /// the same `query_worker_loop_lane` as the primary worker but pinned to the
 /// `query_cpu_fallback` lane (always CPU, never CUDA), so a punctual query embed
@@ -1105,6 +1129,7 @@ fn current_cpu_fallback_query_sender() -> Option<Sender<QueryEmbeddingRequest>> 
 /// resident while queries actually arrive under GPU pressure — and never in the
 /// common case (GPU idle → primary lane serves everything).
 fn ensure_cpu_fallback_query_worker() {
+    enforce_passive_ort_runtime_env();
     CPU_FALLBACK_WORKER_SPAWNED.call_once(|| {
         let (tx, rx) = bounded(CPU_FALLBACK_QUERY_QUEUE_DEPTH);
         {

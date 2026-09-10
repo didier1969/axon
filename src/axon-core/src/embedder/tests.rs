@@ -2095,3 +2095,64 @@ fn test_ort_tensorrt_provider_library_available_distingue_absence_nominale_et_de
         "sans ORT_DYLIB_PATH le provider n'est pas découvrable, donc pas exigible"
     );
 }
+
+/// REQ-AXO-902645 — le runtime d'embedding doit forcer OMP_WAIT_POLICY=PASSIVE,
+/// OMP_NUM_THREADS=1 et AXON_QUERY_ORT_INTRA_THREADS=1 avant l'initialisation ONNX C-FFI
+/// pour éliminer tout spinning CPU OpenMP / ORT au repos.
+#[test]
+fn test_enforce_passive_ort_runtime_env_eradicates_idle_spinning() {
+    let _env = lock_env_guard();
+    unsafe {
+        std::env::remove_var("OMP_WAIT_POLICY");
+        std::env::remove_var("OMP_NUM_THREADS");
+        std::env::remove_var("AXON_QUERY_ORT_INTRA_THREADS");
+        std::env::remove_var("AXON_ORT_INTRA_THREADS");
+        std::env::remove_var("AXON_ORT_ALLOW_SPINNING");
+    }
+
+    super::enforce_passive_ort_runtime_env();
+
+    assert_eq!(
+        std::env::var("OMP_WAIT_POLICY").as_deref(),
+        Ok("PASSIVE"),
+        "OMP_WAIT_POLICY must be PASSIVE by default"
+    );
+    assert_eq!(
+        std::env::var("OMP_NUM_THREADS").as_deref(),
+        Ok("1"),
+        "OMP_NUM_THREADS must default to 1"
+    );
+    assert_eq!(
+        std::env::var("AXON_QUERY_ORT_INTRA_THREADS").as_deref(),
+        Ok("1"),
+        "AXON_QUERY_ORT_INTRA_THREADS must default to 1"
+    );
+    assert_eq!(
+        std::env::var("AXON_ORT_INTRA_THREADS").as_deref(),
+        Ok("1"),
+        "AXON_ORT_INTRA_THREADS must be synchronized to 1"
+    );
+
+    // Contre-exemple / override benchmark : si AXON_ORT_ALLOW_SPINNING=1 et que l'opérateur
+    // a explicitement positionné OMP_WAIT_POLICY=ACTIVE, on ne l'écrase pas.
+    unsafe {
+        std::env::set_var("AXON_ORT_ALLOW_SPINNING", "1");
+        std::env::set_var("OMP_WAIT_POLICY", "ACTIVE");
+    }
+    super::enforce_passive_ort_runtime_env();
+    assert_eq!(
+        std::env::var("OMP_WAIT_POLICY").as_deref(),
+        Ok("ACTIVE"),
+        "explicit benchmark spinning override must be respected"
+    );
+
+    // Nettoyage
+    unsafe {
+        std::env::remove_var("OMP_WAIT_POLICY");
+        std::env::remove_var("OMP_NUM_THREADS");
+        std::env::remove_var("AXON_QUERY_ORT_INTRA_THREADS");
+        std::env::remove_var("AXON_ORT_INTRA_THREADS");
+        std::env::remove_var("AXON_ORT_ALLOW_SPINNING");
+    }
+}
+

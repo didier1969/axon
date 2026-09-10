@@ -122,6 +122,7 @@ pub(super) struct EmbeddingBatchStats {
 
 impl OrtGpuFirstTextEmbedding {
     pub(crate) fn try_new(lane: &str, worker_idx: usize, use_cuda: bool) -> AnyhowResult<Self> {
+        super::enforce_passive_ort_runtime_env();
         // REQ-AXO-902576 — jalonner l'init GPU. Le témoin est écrit AVANT chaque
         // étape susceptible de tuer le processus en code natif, et relu au
         // démarrage suivant : c'est la seule façon de nommer une mort qui ne

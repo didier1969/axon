@@ -21,7 +21,6 @@ use ort::{
 };
 #[cfg(feature = "hf-hub")]
 use std::path::PathBuf;
-use std::thread::available_parallelism;
 use tokenizers::{Encoding, Tokenizer};
 
 #[cfg(feature = "hf-hub")]
@@ -38,7 +37,21 @@ fn resolved_intra_threads() -> Result<usize> {
     {
         return Ok(threads);
     }
-    Ok(available_parallelism()?.get())
+    if let Some(threads) = std::env::var("AXON_QUERY_ORT_INTRA_THREADS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+    {
+        return Ok(threads);
+    }
+    if let Some(threads) = std::env::var("OMP_NUM_THREADS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+    {
+        return Ok(threads);
+    }
+    Ok(1)
 }
 
 impl TextEmbedding {
@@ -178,6 +191,8 @@ impl TextEmbedding {
             .with_execution_providers(execution_providers)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(threads)?
+            .with_intra_op_spinning(false)?
+            .with_inter_op_spinning(false)?
             .with_memory_pattern(false)?
             .commit_from_file(model_file_reference)?;
 
@@ -210,6 +225,8 @@ impl TextEmbedding {
                 .with_execution_providers(execution_providers)?
                 .with_optimization_level(GraphOptimizationLevel::Level3)?
                 .with_intra_threads(threads)?
+                .with_intra_op_spinning(false)?
+                .with_inter_op_spinning(false)?
                 .with_memory_pattern(false)?;
 
             for external_initializer_file in model.external_initializers {

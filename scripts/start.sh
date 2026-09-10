@@ -155,6 +155,9 @@ elif [[ "$RUNTIME_MODE" == indexer_full || "$RUNTIME_MODE" == indexer_vector ]];
     export OMP_WAIT_POLICY=PASSIVE
 else
     export AXON_EMBEDDING_PROVIDER="${_provider_override:-cpu}"
+    # REQ-AXO-902645 — force passive OpenMP wait policy and single thread to eliminate idle CPU spinning
+    export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+    export OMP_WAIT_POLICY="${OMP_WAIT_POLICY:-PASSIVE}"
 fi
 if [[ -n "$_provider_override" ]]; then
     echo "   embedding provider pinned by operator: $AXON_EMBEDDING_PROVIDER" >&2

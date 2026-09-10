@@ -80,3 +80,21 @@ if grep -Eq 'AXON_A2_WORKERS=12|AXON_A3_WORKERS=16' "$LIVE_YAML"; then
     exit 1
 fi
 echo 'PASS  live indexer resource envelope preserves Brain headroom'
+
+# REQ-AXO-902645 — axon-brain must systematically configure passive OpenMP wait policy
+# and bounded single thread in live and dev process-compose manifests.
+DEV_YAML="$ROOT_DIR/process-compose.dev.yaml"
+for yaml_file in "$LIVE_YAML" "$DEV_YAML"; do
+    for expected in \
+        'OMP_WAIT_POLICY=${OMP_WAIT_POLICY:-PASSIVE}' \
+        'OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}' \
+        'AXON_QUERY_ORT_INTRA_THREADS=${AXON_QUERY_ORT_INTRA_THREADS:-1}'
+    do
+        if ! grep -Fq "$expected" "$yaml_file"; then
+            printf 'FAIL  %s missing passive OpenMP/ORT directive: %s\n' "$yaml_file" "$expected" >&2
+            exit 1
+        fi
+    done
+done
+echo 'PASS  axon-brain exports passive OpenMP and thread bounds in dev and live manifests (REQ-AXO-902645)'
+
