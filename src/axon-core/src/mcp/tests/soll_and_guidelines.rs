@@ -8850,9 +8850,12 @@ fn test_soll_attach_evidence_normalizes_entity_type_for_requirement_verification
         .unwrap();
 
     let data = result["data"].clone();
-    assert_eq!(data["done"].as_u64(), Some(1));
+    // REQ-AXO-902595: criteria declared with supporting evidence on current status is criteria_declared, not done.
+    assert_eq!(data["criteria_declared"].as_u64(), Some(1));
+    assert_eq!(data["done"].as_u64(), Some(0));
     assert_eq!(data["partial"].as_u64(), Some(0));
     assert_eq!(data["missing"].as_u64(), Some(0));
+    assert_eq!(data["details"][0]["evidence_count"].as_u64(), Some(1));
 }
 
 // REQ-AXO-902213 — the optional `role` parameter writes `metadata.role` on the
