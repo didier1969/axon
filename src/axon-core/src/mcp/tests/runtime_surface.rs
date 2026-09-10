@@ -5920,3 +5920,66 @@ fn test_req_902515_schema_overview_with_unknown_arg_discloses_ignored_and_not_id
         json!(["table"])
     );
 }
+
+/// REQ-AXO-902654 (Feedback #426 DVM) — diagnose_indexing must not contradict itself:
+/// 1. When indexer_truth reports `indexer_full`, responding process's brain_only env must not trigger `runtime_mode_excludes_indexing`.
+/// 2. When project is absent from axon.project, emit sole cause `project_not_enrolled_in_runtime_registry` without spurious causes.
+/// 3. Verdict must never advise "wait an indexer cycle" when enrolled/indexed == 0.
+/// 4. Metric names distinguish `gap_within_enrolled` from `gap_eligible_vs_indexed`.
+#[test]
+fn diagnose_indexing_non_enrolled_project_has_no_contradictions_and_reads_indexer_truth() {
+    let server = create_test_server();
+    // Simuler un indexeur actif en mode indexer_full
+    server.graph_store.execute(
+        "INSERT INTO axon.indexer_runtime_truth (process_role, heartbeat_ms, runtime_mode, semantic_workers_enabled, vector_workers_configured, vector_workers_active_current, vector_workers_started_total, vector_worker_admission_reason, allowed_gpu_workers) \
+         VALUES ('indexer', 1789000000000, 'indexer_full', true, 5, 1, 1, 'semantic_workers_enabled', 5) \
+         ON CONFLICT (process_role) DO UPDATE SET runtime_mode = 'indexer_full', heartbeat_ms = 1789000000000"
+    ).unwrap();
+
+    // S'assurer que le projet PGT_UNENROLLED n'existe pas dans axon.project
+    server.graph_store.execute("DELETE FROM axon.project WHERE code = 'PGT_UNENROLLED'").unwrap();
+
+    let report = server
+        .axon_diagnose_indexing(&json!({"project": "PGT_UNENROLLED"}))
+        .unwrap();
+    let text = report["content"][0]["text"].as_str().unwrap();
+
+    // Cause fausse proscrite
+    assert!(
+        !text.contains("runtime_mode_excludes_indexing"),
+        "must NOT claim runtime_mode_excludes_indexing when indexer reports indexer_full: {text}"
+    );
+
+    // Cause exacte exigée
+    assert!(
+        text.contains("project_not_enrolled_in_runtime_registry"),
+        "must report project_not_enrolled_in_runtime_registry when absent from axon.project: {text}"
+    );
+
+    // Le verdict ne doit jamais conseiller d'attendre un cycle quand rien n'est enrôlé
+    assert!(
+        !text.contains("wait an indexer cycle"),
+        "verdict must not tell operator to wait an indexer cycle when 0 files are enrolled: {text}"
+    );
+
+    // Métrique non ambiguë
+    assert!(
+        text.contains("gap_within_enrolled"),
+        "enrolled files gap must be explicitly named gap_within_enrolled: {text}"
+    );
+}
+
+#[test]
+fn indexing_verdict_zero_indexed_does_not_prescribe_waiting_cycle() {
+    // 327 fichiers éligibles, 0 indexé (cas d'un projet pas encore enrôlé)
+    let v = crate::mcp::tools_governance::indexing_verdict(327, 0, 0, 0, 0, 0, &[]);
+    assert!(
+        !v.contains("wait an indexer cycle"),
+        "verdict must never tell to wait an indexer cycle when indexed == 0: {v}"
+    );
+    assert!(
+        v.starts_with("⛔"),
+        "verdict must be a blocker (⛔) when indexed == 0: {v}"
+    );
+}
+

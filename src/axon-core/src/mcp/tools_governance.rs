@@ -149,7 +149,7 @@ impl FileCoverage {
 ///   APS:  716 discovered, ~all with chunks →   0 blocking (fixed)
 ///
 /// Pure free fn (no `&self`, no filesystem) so the whole verdict matrix is unit-testable.
-fn indexing_verdict(
+pub(crate) fn indexing_verdict(
     eligible: i64,
     indexed: i64,
     discovered: i64,
@@ -246,7 +246,11 @@ fn indexing_verdict(
     if gap == 0 {
         "✅ every eligible source file is indexed AND parsed (chunk coverage confirmed, no `discovered` backlog); the wider on-disk population is fully accounted for by the exclusion reasons below (assert: all relevant source is indexed).".to_string()
     } else if gap > 0 {
-        "⏳ indexing incomplete: eligible source files are not yet all enrolled — wait an indexer cycle or check pipeline A health.".to_string()
+        if indexed == 0 {
+            "⛔ 0 eligible files are enrolled in the index: the project is not enrolled in the runtime registry or has not been scanned yet. Do not wait for an indexer cycle: check registration via `axon_init_project` or inspect indexer health.".to_string()
+        } else {
+            "⏳ indexing incomplete: eligible source files are not yet all enrolled — wait an indexer cycle or check pipeline A health.".to_string()
+        }
     } else {
         "ℹ️ more indexed rows than currently-eligible files: stale IndexedFile rows for paths now removed/ignored (purged on next full walk).".to_string()
     }
@@ -481,109 +485,126 @@ impl McpServer {
             .ok()
             .flatten();
 
-        // REQ-AXO-212 — sub-causes carry ADR-2026-04-18-aligned
+        // REQ-AXO-212 / REQ-AXO-902654 — sub-causes carry ADR-2026-04-18-aligned
         // vocabulary so the LLM gets a single actionable next step
         // instead of the historical generic "scope_mismatch" message.
         // Each cause is (machine_id, human_explanation, remediation).
         let mut causes = coverage.causes();
-        let runtime_mode = std::env::var("AXON_RUNTIME_MODE").unwrap_or_default();
         let watch_root_set = std::env::var("AXON_WATCH_DIR")
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false);
 
+        // REQ-AXO-902654 (Feedback #426) — Check project enrollment in runtime registry
+        let is_registered_in_axon_project = if project == "*" {
+            true
+        } else {
+            let escaped = project.replace('\'', "''");
+            self.sql_scalar(&format!(
+                "SELECT count(*)::BIGINT FROM axon.project WHERE code = '{escaped}'"
+            )) > 0
+        };
+
         if enrolled == 0 {
-            if !watch_root_set {
+            if project != "*" && !is_registered_in_axon_project {
+                // Short-circuit: when project is absent from axon.project, emit sole definitive cause.
+                causes.clear();
+                causes.push((
+                    "project_not_enrolled_in_runtime_registry",
+                    format!(
+                        "project '{project}' is not registered in axon.project; the indexer does not monitor or index it"
+                    ),
+                    "run `axon_init_project(project_path=<absolute path of the project>)` to register \
+                     the project in the runtime registry and trigger indexing",
+                ));
+            } else if !watch_root_set {
                 causes.push((
                     "watch_root_unconfigured",
                     "no AXON_WATCH_DIR configured for this runtime; the indexer has no roots to scan"
                         .to_string(),
                     "set AXON_WATCH_DIR or watch_root in .axon/config.json then restart axon-indexer",
                 ));
-            } else if runtime_mode == "brain_only" {
-                causes.push((
-                    "runtime_mode_excludes_indexing",
-                    "current runtime mode is brain_only; the indexer process is intentionally not running"
-                        .to_string(),
-                    "switch to indexer_full (or indexer_graph) via `axon-{live,dev} start --indexer-full`",
-                ));
-            } else if project != "*" && global_known > 0 && enrolled == 0 {
-                // REQ-AXO-902254 — `enrolled == 0` is what "not registered" actually means.
-                // Without it this fired for any project with 0 CHUNKED files, telling the
-                // operator to re-register a project that was enrolled all along — the
-                // remediation would have been a no-op and the real gap stayed hidden.
-                causes.push((
-                    "path_not_in_runtime_registry",
-                    "the workspace contains indexed files, but none for this project_code; \
-                     the project may not be registered yet"
-                        .to_string(),
-                    "run `axon_init_project(project_path=<absolute path of the project>)` to register \
-                     the project_code in the runtime registry",
-                ));
+            } else if let Some(truth) = indexer_truth.as_ref() {
+                if truth.runtime_mode == "brain_only" {
+                    causes.push((
+                        "runtime_mode_excludes_indexing",
+                        "current indexer runtime mode is brain_only; the indexer process is intentionally not indexing"
+                            .to_string(),
+                        "switch to indexer_full (or indexer_graph) via `axon-{live,dev} start --indexer-full`",
+                    ));
+                } else if project != "*" && global_known > 0 {
+                    causes.push((
+                        "path_not_in_runtime_registry",
+                        format!(
+                            "the workspace contains indexed files, but none for '{project}'; \
+                             the project root_path/watch_root may not match filesystem paths"
+                        ),
+                        "run `axon_init_project(project_path=<absolute path of the project>)` or `rescan_project(project_code='<project>')`",
+                    ));
+                } else {
+                    causes.push((
+                        "discovery_absent_or_filtered",
+                        "no files discovered under the configured watch root \
+                         (filter, .axonignore, .gitignore, or permissions)"
+                            .to_string(),
+                        "edit .axonignore to re-include relevant paths via `+pattern`, or verify \
+                         filesystem permissions on the watch root",
+                    ));
+                }
             } else {
+                // No indexer truth available: do NOT guess brain_only based on the responding brain's env
                 causes.push((
-                    "discovery_absent_or_filtered",
-                    "no files discovered under the configured watch root \
-                     (filter, .axonignore, .gitignore, or permissions)"
+                    "indexer_runtime_truth_unavailable",
+                    "no indexer-owned runtime truth is readable; the indexer process may not be running or reachable"
                         .to_string(),
-                    "edit .axonignore to re-include relevant paths via `+pattern`, or verify \
-                     filesystem permissions on the watch root",
+                    "verify axon-indexer liveness and its PostgreSQL heartbeat; restart it through the controlled live path if absent",
                 ));
             }
         }
-        // REQ-AXO-902275 — cause `file_too_large_for_budget` SUPPRIMÉE. Elle était morte
-        // deux fois : sa condition était `if 0 > 0` depuis REQ-AXO-901653 slice-5c (le
-        // statut `oversized_for_current_budget` était une enum `public.File`, et la
-        // pipeline applique désormais son budget par back-pressure de stage, sans flag
-        // persisté) — et le remède qu'elle affichait, « increase
-        // AXON_QUEUE_MEMORY_BUDGET_BYTES », désigne une variable RETIRÉE par
-        // REQ-AXO-290 S3, que `axonctl preflight` rejette activement.
-        //
-        // Un conseil produit qui ne peut pas fonctionner est du même ordre que le
-        // `POST /process/start` inerte de REQ-AXO-902271 : l'opérateur suit l'indication,
-        // elle ne marche pas, et il en déduit que le diagnostic ment.
-        if known > 0 && symbols == 0 && coverage.count(|g| g.has_file_chunks && !g.has_symbol_chunks) < known {
-            causes.push((
-                "parser_extraction_gap",
-                "files known but 0 symbols extracted (unsupported language or parse failure)"
-                    .to_string(),
-                "verify tree-sitter grammar coverage for the file extensions; inspect \
-                 persisted `skip_reason` for parser-side failures",
-            ));
-        }
-        // Classified failures already have a targeted remediation. Do not also
-        // suggest a generic restart for the same hash-preserved timeout.
-        if let Some(cause) = Self::chunk_coverage_cause(
-            coverage.count(|g| !g.policy_excluded() && !g.failed() && !g.unqualified_skip() && g.has_chunks),
-            coverage.count(|g| !g.policy_excluded() && !g.failed() && !g.unqualified_skip()),
-        ) {
-            causes.push(cause);
-        }
-        if let Some(truth) = indexer_truth.as_ref() {
-            if let Some(cause) = Self::semantic_vector_cause(
-                pending_embeddings,
-                &truth.runtime_mode,
-                truth.semantic_workers_enabled,
-                truth.vector_workers_configured,
-                truth.vector_workers_active_current,
-                &truth.vector_worker_admission_reason,
+        if is_registered_in_axon_project || enrolled > 0 {
+            if known > 0 && symbols == 0 && coverage.count(|g| g.has_file_chunks && !g.has_symbol_chunks) < known {
+                causes.push((
+                    "parser_extraction_gap",
+                    "files known but 0 symbols extracted (unsupported language or parse failure)"
+                        .to_string(),
+                    "verify tree-sitter grammar coverage for the file extensions; inspect \
+                     persisted `skip_reason` for parser-side failures",
+                ));
+            }
+            // Classified failures already have a targeted remediation. Do not also
+            // suggest a generic restart for the same hash-preserved timeout.
+            if let Some(cause) = Self::chunk_coverage_cause(
+                coverage.count(|g| !g.policy_excluded() && !g.failed() && !g.unqualified_skip() && g.has_chunks),
+                coverage.count(|g| !g.policy_excluded() && !g.failed() && !g.unqualified_skip()),
             ) {
                 causes.push(cause);
             }
-        } else if pending_embeddings > 0 {
-            causes.push((
-                "indexer_runtime_truth_unavailable",
-                format!(
-                    "{pending_embeddings} chunk embedding(s) are pending, but no indexer-owned runtime truth is readable"
-                ),
-                "verify axon-indexer liveness and its PostgreSQL heartbeat; restart it through the controlled live path if the heartbeat remains absent",
-            ));
-        }
-        if symbols > 0 && (calls_direct + calls_nif) == 0 {
-            causes.push((
-                "call_graph_gap",
-                "symbols present but call graph empty for this scope".to_string(),
-                "run bridge refinement; inspect FFI / NIF boundaries for cross-module calls",
-            ));
+            if let Some(truth) = indexer_truth.as_ref() {
+                if let Some(cause) = Self::semantic_vector_cause(
+                    pending_embeddings,
+                    &truth.runtime_mode,
+                    truth.semantic_workers_enabled,
+                    truth.vector_workers_configured,
+                    truth.vector_workers_active_current,
+                    &truth.vector_worker_admission_reason,
+                ) {
+                    causes.push(cause);
+                }
+            } else if pending_embeddings > 0 && !causes.iter().any(|(id, _, _)| *id == "indexer_runtime_truth_unavailable") {
+                causes.push((
+                    "indexer_runtime_truth_unavailable",
+                    format!(
+                        "{pending_embeddings} chunk embedding(s) are pending, but no indexer-owned runtime truth is readable"
+                    ),
+                    "verify axon-indexer liveness and its PostgreSQL heartbeat; restart it through the controlled live path if the heartbeat remains absent",
+                ));
+            }
+            if symbols > 0 && (calls_direct + calls_nif) == 0 {
+                causes.push((
+                    "call_graph_gap",
+                    "symbols present but call graph empty for this scope".to_string(),
+                    "run bridge refinement; inspect FFI / NIF boundaries for cross-module calls",
+                ));
+            }
         }
         if causes.is_empty() {
             causes.push((
@@ -653,7 +674,7 @@ impl McpServer {
             "### 🔎 Day-1 Indexing Diagnosis ({})\n\n\
              **Scope facts**\n\
              * enrolled files: {}\n\
-             * files WITH chunks (retrievable): {} — coverage {:.1}%, gap {}\n\
+             * files WITH chunks (retrievable): {} — coverage {:.1}%, gap_within_enrolled: {}\n\
              {population_section}\
              * pipeline A queue/inflight: not measured by this file snapshot\n\
              * symbols: {}\n\
@@ -802,7 +823,7 @@ impl McpServer {
              * eligible (would be indexed): {eligible}\n\
              * indexed (ist.IndexedFile rows present): {indexed}\n\
              * rows carrying discovered status (not proof of missing chunks): {discovered}\n\
-             * gap (eligible − indexed): {gap}\n\
+             * gap_eligible_vs_indexed (eligible − indexed): {gap}\n\
              * files walked (build/dependency/VCS dirs pruned at descent): {walked}\n\n\
              **Excluded files by reason** (out-of-ecosystem = data/CSV/JSON/binary/docs):\n{reason_lines}\n\n\
              **Verdict:** {verdict}",
