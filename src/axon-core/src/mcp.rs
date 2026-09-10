@@ -573,12 +573,7 @@ impl McpServer {
     ///   divulgue déjà par sa propre note.
     ///
     /// Rend une liste VIDE plutôt qu'un verdict quand le contrat de l'outil est
-    /// introuvable : une surface n'affirme jamais plus qu'elle ne sait.
-    fn parameters_outside_the_schema(
-        normalized_name: &str,
-        original: &Value,
-        normalised: &Value,
-    ) -> Vec<String> {
+    pub(crate) fn tool_accepted_fields(normalized_name: &str) -> Option<&'static [String]> {
         // COÛT, dit franchement : ce contrôle est sur le chemin de CHAQUE appel
         // d'outil. `tool_input_contract_for` reconstruit `tools_catalog(true)` — les
         // 114 schémas — à chaque invocation ; l'y appeler directement aurait fait
@@ -608,17 +603,25 @@ impl McpServer {
                 })
                 .unwrap_or_default()
         });
-        let Some((_, accepted)) = table.iter().find(|(name, _)| {
-            // REQ-AXO-902434 — même prédicat que le routeur, pas une recopie.
-            crate::mcp::catalog::tool_names_denote_the_same_tool(name, normalized_name)
-        }) else {
+        table
+            .iter()
+            .find(|(name, _)| {
+                // REQ-AXO-902434 — même prédicat que le routeur, pas une recopie.
+                crate::mcp::catalog::tool_names_denote_the_same_tool(name, normalized_name)
+            })
+            .map(|(_, accepted)| accepted.as_slice())
+    }
+
+    /// REQ-AXO-902583 / REQ-AXO-902515 — paramètres passés à l'outil qui ne
+    /// figurent PAS dans son schéma déclaré (properties du inputSchema).
+    fn parameters_outside_the_schema(
+        normalized_name: &str,
+        original: &Value,
+        normalised: &Value,
+    ) -> Vec<String> {
+        let Some(accepted) = Self::tool_accepted_fields(normalized_name) else {
             return Vec::new();
         };
-        // Un schéma sans propriété déclarée ne prouve pas qu'il n'en accepte aucune :
-        // ne rien conclure.
-        if accepted.is_empty() {
-            return Vec::new();
-        }
         let (Some(original), Some(normalised)) = (original.as_object(), normalised.as_object())
         else {
             return Vec::new();
@@ -2644,15 +2647,21 @@ impl McpServer {
                 .map(|p| format!("`{p}`"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            result = Self::append_disclosure(
-                result,
-                &format!(
+            let explication = if Self::tool_accepted_fields(normalized_name).is_some_and(|f| f.is_empty()) {
+                format!(
+                    "\n\n_↳ paramètre(s) {noms} ignoré(s) — cet outil n'en prend aucun (REQ-AXO-902515). \
+                     Votre appel n'est pas malformé — cet outil s'appelle sans argument ; \
+                     `help` ou `tools/list` confirme son schéma._"
+                )
+            } else {
+                format!(
                     "\n\n_↳ paramètre(s) reçu(s) mais INCONNU(S) de cet outil, donc sans \
                      effet sur cette réponse : {noms} (REQ-AXO-902583). Votre appel n'est \
                      pas malformé — ces noms n'existent simplement pas dans son schéma ; \
                      `help` ou `tools/list` donne les noms acceptés._"
-                ),
-            );
+                )
+            };
+            result = Self::append_disclosure(result, &explication);
         }
         if !inert_parameters.is_empty() {
             // Phrase DISTINCTE de la précédente, et le contraire de son conseil :

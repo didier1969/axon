@@ -5820,3 +5820,60 @@ fn test_req_902561_lane_authority_governance_truth() {
     assert_eq!(pipe_b["b3_workers"].as_u64(), Some(real_counts_b.b3 as u64));
     assert!(pipe_b["drain_reservoir"].as_u64().unwrap_or(0) > 0);
 }
+
+// ── REQ-AXO-902515 — paramètre sur un outil sans argument (schema_overview) ──
+
+#[test]
+fn test_req_902515_parameters_outside_schema_detects_args_on_zero_param_tool() {
+    let args = json!({ "table": "ist.symbol" });
+    let ignores = McpServer::parameters_outside_the_schema("schema_overview", &args, &args);
+    assert_eq!(
+        ignores,
+        vec!["table".to_string()],
+        "un outil sans paramètre doit signaler tout argument reçu comme ignoré"
+    );
+}
+
+#[test]
+fn test_req_902515_schema_overview_with_unknown_arg_discloses_ignored_and_not_identical_to_bare_call() {
+    let server = create_test_server();
+
+    // 1. Appel nu (bare call)
+    let bare_resp = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "schema_overview",
+            "arguments": {}
+        })),
+        id: Some(json!(1)),
+    }).unwrap().result.unwrap();
+
+    assert!(bare_resp["data"].get("ignored_parameters").is_none());
+
+    // 2. Appel avec argument inventé (ex: table="ist.symbol")
+    let with_arg_resp = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "schema_overview",
+            "arguments": { "table": "ist.symbol" }
+        })),
+        id: Some(json!(2)),
+    }).unwrap().result.unwrap();
+
+    // Critère 3 : La réponse n'est PAS identique à l'appel nu (garde falsifiée)
+    assert_ne!(bare_resp, with_arg_resp);
+
+    // Critère 1 : Le paramètre inconnu est nommé et dit que l'outil n'en prend aucun
+    let text = with_arg_resp["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("table") && text.contains("cet outil n'en prend aucun"),
+        "la mention doit nommer le paramètre et préciser que l'outil n'en prend aucun : {text}"
+    );
+
+    assert_eq!(
+        with_arg_resp["data"]["ignored_parameters"],
+        json!(["table"])
+    );
+}
