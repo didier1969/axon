@@ -18306,6 +18306,51 @@ fn test_req_902482_sql_undefined_table_suggests_nearby_tables() {
     );
 }
 
+/// REQ-AXO-902652 — `sql` sur une table inexistante (ex: soll.project)
+/// suggère les tables proches par préfixe (soll.projectcoderegistry)
+/// et peuple data.parameter_repair.nearby_tables.
+#[test]
+fn test_req_902652_sql_undefined_table_suggests_prefix_and_nearby_field() {
+    let server = create_test_server();
+
+    let res = server
+        .execute_tool_direct(
+            "sql",
+            &json!({ "sql": "SELECT * FROM soll.project LIMIT 1" }),
+        )
+        .expect("sql response");
+
+    assert_eq!(res["isError"], true, "soll.project must error: {res}");
+    let text = res["content"][0]["text"].as_str().expect("text response");
+    assert!(
+        text.contains("soll.project does not exist — did you mean soll.projectcoderegistry?"),
+        "error text must suggest soll.projectcoderegistry: {text}"
+    );
+
+    let nearby_tables = res["data"]["parameter_repair"]["nearby_tables"]
+        .as_array()
+        .expect("parameter_repair.nearby_tables array");
+    assert!(
+        nearby_tables
+            .iter()
+            .any(|t| t.as_str() == Some("soll.projectcoderegistry")),
+        "parameter_repair.nearby_tables must contain soll.projectcoderegistry: {nearby_tables:?}"
+    );
+
+    let tables = res["data"]["parameter_repair"]["referenced_relations"]
+        .as_array()
+        .expect("referenced_relations array");
+    let proj_entry = tables
+        .iter()
+        .find(|t| t["relation"] == "soll.project")
+        .expect("soll.project entry");
+    assert_eq!(proj_entry["exists"], false);
+    assert_eq!(
+        proj_entry["nearby_tables"],
+        json!(["soll.projectcoderegistry"])
+    );
+}
+
 /// REQ-AXO-902449 — soll_get(ids=[...]) et soll_query_context(kind="...")
 #[test]
 fn test_req_902449_soll_multi_get_and_type_filter() {

@@ -608,6 +608,31 @@ impl McpServer {
         })
     }
 
+    /// REQ-AXO-902652 — fallback query looking for close matches via ILIKE on project_code and project_name.
+    /// Pure SQL generator so the contract is unit testable without a database.
+    pub(super) fn fallback_suggestions_sql(terms: &[&str]) -> Option<String> {
+        let ilike_clauses: Vec<String> = terms
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|q| {
+                let esc = escape_sql(q);
+                format!("(project_code ILIKE '%{esc}%' OR project_name ILIKE '%{esc}%')")
+            })
+            .collect();
+        if ilike_clauses.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "SELECT project_code, COALESCE(project_name,''), COALESCE(project_path,'') \
+             FROM soll.ProjectCodeRegistry \
+             WHERE {} \
+             ORDER BY project_code ASC \
+             LIMIT 5",
+            ilike_clauses.join(" OR ")
+        ))
+    }
+
     pub(crate) fn axon_project_registry_lookup(
         &self,
         args: &serde_json::Value,
@@ -705,6 +730,47 @@ impl McpServer {
                 }
             }
         }
+
+        // REQ-AXO-902652 — fallback suggestions via ILIKE when no exact/ancestor match
+        let mut suggested_projects: Vec<serde_json::Value> = Vec::new();
+        if rows.is_empty() {
+            let mut query_terms: Vec<&str> = Vec::new();
+            if let Some(code) = project_code {
+                query_terms.push(code);
+            }
+            if let Some(name) = project_name {
+                if !query_terms.contains(&name) {
+                    query_terms.push(name);
+                }
+            }
+            if query_terms.is_empty() {
+                if let Some(path) = project_path {
+                    let base = std::path::Path::new(path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(path);
+                    query_terms.push(base);
+                }
+            }
+            if let Some(suggest_sql) = Self::fallback_suggestions_sql(&query_terms) {
+                if let Ok(raw_sug) = self.graph_store.query_json(&suggest_sql) {
+                    if let Ok(sug_rows) = serde_json::from_str::<Vec<Vec<String>>>(&raw_sug) {
+                        suggested_projects = sug_rows
+                            .into_iter()
+                            .filter(|r| r.len() >= 3)
+                            .map(|r| {
+                                serde_json::json!({
+                                    "project_code": r[0],
+                                    "project_name": r[1],
+                                    "project_path": r[2]
+                                })
+                            })
+                            .collect();
+                    }
+                }
+            }
+        }
+
         let matches: Vec<serde_json::Value> = rows
             .iter()
             .filter(|row| row.len() >= 3)
@@ -741,77 +807,120 @@ impl McpServer {
                     .and_then(|value| value.as_str())
                     .unwrap_or("")
             )
+        } else if !suggested_projects.is_empty() {
+            let suggestions_text = suggested_projects
+                .iter()
+                .filter_map(|p| {
+                    let code = p.get("project_code").and_then(serde_json::Value::as_str)?;
+                    let name = p.get("project_name").and_then(serde_json::Value::as_str).unwrap_or("");
+                    if name.is_empty() {
+                        Some(code.to_string())
+                    } else {
+                        Some(format!("{name} ({code})"))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "No canonical project found in ProjectCodeRegistry for the given criteria. Did you mean: {}?",
+                suggestions_text
+            )
         } else {
             "No canonical project found in ProjectCodeRegistry for the given criteria.".to_string()
         };
 
-        Some(serde_json::json!({
-            "content": [{ "type": "text", "text": content }],
-            "data": {
-                "found": found,
-                "resolved_by_ancestor_path": path_resolved_by_ancestor,
-                "ambiguous": matches.len() > 1,
-                "project_code": first.get("project_code").cloned().unwrap_or(serde_json::json!(null)),
-                "project_name": first.get("project_name").cloned().unwrap_or(serde_json::json!(null)),
-                "project_path": first.get("project_path").cloned().unwrap_or(serde_json::json!(null)),
-                "matches": matches,
-                "operator_guidance": if found {
-                    serde_json::json!({
-                        "actionable_now": true,
-                        "blocking_factors": if matches.len() > 1 {
-                            vec![serde_json::json!({
-                                "factor": "registry_match_ambiguous",
-                                "severity": "medium",
-                                "recommended_action": "prefer the exact canonical project_code from the returned matches before mutating"
-                            })]
-                        } else {
-                            Vec::<serde_json::Value>::new()
-                        },
-                        "remediation_actions": if matches.len() > 1 {
-                            vec!["prefer the exact canonical project_code from the returned matches before mutating"]
-                        } else {
-                            Vec::<&str>::new()
-                        },
-                        "follow_up_tools": ["project_status", "soll_query_context"],
-                        "next_action": {
-                            "kind": "use_canonical_project_code",
-                            "tool": "project_status",
-                            "when": "now"
-                        }
-                    })
-                } else {
-                    serde_json::json!({
-                        "actionable_now": false,
-                        "blocking_factors": [{
-                            "factor": "project_not_found_in_registry",
-                            "severity": "high",
-                            "recommended_action": "use axon_init_project or retry with the exact canonical code, name, or path"
-                        }],
-                        "remediation_actions": [
-                            "use axon_init_project or retry with the exact canonical code, name, or path"
-                        ],
-                        "follow_up_tools": ["axon_init_project", "project_registry_lookup"],
-                        "next_action": {
-                            "kind": "initialize_or_retry_project_identity",
-                            "tool": "axon_init_project",
-                            "when": "after_identity_confirmation"
-                        }
-                    })
-                },
-                "next_action": if found {
-                    serde_json::json!({
+        let suggestions_hint = if !suggested_projects.is_empty() {
+            let suggestions_text = suggested_projects
+                .iter()
+                .filter_map(|p| {
+                    let code = p.get("project_code").and_then(serde_json::Value::as_str)?;
+                    let name = p.get("project_name").and_then(serde_json::Value::as_str).unwrap_or("");
+                    if name.is_empty() {
+                        Some(code.to_string())
+                    } else {
+                        Some(format!("{name} ({code})"))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("retry with suggested project: {}", suggestions_text)
+        } else {
+            "use axon_init_project or retry with the exact canonical code, name, or path".to_string()
+        };
+
+        let mut data = serde_json::json!({
+            "found": found,
+            "resolved_by_ancestor_path": path_resolved_by_ancestor,
+            "ambiguous": matches.len() > 1,
+            "project_code": first.get("project_code").cloned().unwrap_or(serde_json::json!(null)),
+            "project_name": first.get("project_name").cloned().unwrap_or(serde_json::json!(null)),
+            "project_path": first.get("project_path").cloned().unwrap_or(serde_json::json!(null)),
+            "matches": matches,
+            "operator_guidance": if found {
+                serde_json::json!({
+                    "actionable_now": true,
+                    "blocking_factors": if matches.len() > 1 {
+                        vec![serde_json::json!({
+                            "factor": "registry_match_ambiguous",
+                            "severity": "medium",
+                            "recommended_action": "prefer the exact canonical project_code from the returned matches before mutating"
+                        })]
+                    } else {
+                        Vec::<serde_json::Value>::new()
+                    },
+                    "remediation_actions": if matches.len() > 1 {
+                        vec!["prefer the exact canonical project_code from the returned matches before mutating"]
+                    } else {
+                        Vec::<&str>::new()
+                    },
+                    "follow_up_tools": ["project_status", "soll_query_context"],
+                    "next_action": {
                         "kind": "use_canonical_project_code",
                         "tool": "project_status",
                         "when": "now"
-                    })
-                } else {
-                    serde_json::json!({
+                    }
+                })
+            } else {
+                serde_json::json!({
+                    "actionable_now": false,
+                    "blocking_factors": [{
+                        "factor": "project_not_found_in_registry",
+                        "severity": "high",
+                        "recommended_action": suggestions_hint.clone()
+                    }],
+                    "remediation_actions": [
+                        suggestions_hint
+                    ],
+                    "follow_up_tools": ["axon_init_project", "project_registry_lookup"],
+                    "next_action": {
                         "kind": "initialize_or_retry_project_identity",
                         "tool": "axon_init_project",
                         "when": "after_identity_confirmation"
-                    })
-                }
+                    }
+                })
+            },
+            "next_action": if found {
+                serde_json::json!({
+                    "kind": "use_canonical_project_code",
+                    "tool": "project_status",
+                    "when": "now"
+                })
+            } else {
+                serde_json::json!({
+                    "kind": "initialize_or_retry_project_identity",
+                    "tool": "axon_init_project",
+                    "when": "after_identity_confirmation"
+                })
             }
+        });
+
+        if !found {
+            data["suggested_projects"] = serde_json::json!(suggested_projects);
+        }
+
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": content }],
+            "data": data
         }))
     }
 
@@ -1219,5 +1328,39 @@ mod req_902368_ancestor_path_tests {
         // résolution, il ne la rend pas complaisante.
         let roots = ["/home/dstadel/projects/axon"];
         assert_eq!(deepest("/var/tmp/ailleurs", &roots), None);
+    }
+}
+
+#[cfg(test)]
+mod req_902652_fallback_suggestions_tests {
+    use crate::mcp::McpServer;
+
+    #[test]
+    fn single_term_generates_ilike_clauses_for_code_and_name() {
+        let sql = McpServer::fallback_suggestions_sql(&["vpc"]).expect("sql generated");
+        assert!(sql.contains("(project_code ILIKE '%vpc%' OR project_name ILIKE '%vpc%')"));
+        assert!(sql.contains("FROM soll.ProjectCodeRegistry"));
+        assert!(sql.contains("ORDER BY project_code ASC"));
+        assert!(sql.contains("LIMIT 5"));
+    }
+
+    #[test]
+    fn multiple_terms_joined_with_or() {
+        let sql = McpServer::fallback_suggestions_sql(&["vpc", "control"]).expect("sql generated");
+        assert!(sql.contains("(project_code ILIKE '%vpc%' OR project_name ILIKE '%vpc%')"));
+        assert!(sql.contains("(project_code ILIKE '%control%' OR project_name ILIKE '%control%')"));
+        assert!(sql.contains(" OR "));
+    }
+
+    #[test]
+    fn empty_and_whitespace_terms_return_none() {
+        assert_eq!(McpServer::fallback_suggestions_sql(&[]), None);
+        assert_eq!(McpServer::fallback_suggestions_sql(&["", "   "]), None);
+    }
+
+    #[test]
+    fn single_quotes_are_escaped_safely() {
+        let sql = McpServer::fallback_suggestions_sql(&["O'Brian"]).expect("sql generated");
+        assert!(sql.contains("O''Brian"));
     }
 }

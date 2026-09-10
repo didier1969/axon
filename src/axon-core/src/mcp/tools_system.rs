@@ -1624,13 +1624,33 @@ impl McpServer {
             tables.push(table_entry);
         }
 
-        Some(json!({
+        let mut repair = json!({
             "problem_class": problem_class,
             "referenced_relations": tables,
             "hint": "Use only `real_columns` for each relation; re-run `sql` with the corrected names. \
                      `schema_overview` lists every table if a relation is missing.",
             "follow_up_tools": ["schema_overview", "query_examples"]
-        }))
+        });
+
+        let mut all_nearby: Vec<String> = Vec::new();
+        if let Some(tbls) = repair["referenced_relations"].as_array() {
+            for t in tbls {
+                if let Some(arr) = t.get("nearby_tables").and_then(Value::as_array) {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            if !all_nearby.iter().any(|existing| existing == s) {
+                                all_nearby.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !all_nearby.is_empty() {
+            repair["nearby_tables"] = json!(all_nearby);
+        }
+
+        Some(repair)
     }
 
     pub(crate) fn axon_batch(&self, args: &Value) -> Option<Value> {

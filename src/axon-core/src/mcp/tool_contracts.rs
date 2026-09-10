@@ -612,6 +612,9 @@ pub(crate) fn edit_distance(left: &str, right: &str) -> usize {
 /// REQ-AXO-902482 — suggest closest real tables for an undefined relation.
 /// Matches case differences first (0 distance in lowercase), then typo / plural
 /// differences, prioritizing tables within the same schema if specified.
+/// REQ-AXO-902652 — suggest tables from the same schema whose name starts with
+/// target_table (when target_table.len() >= 3) or contains target_table (when
+/// target_table.len() >= 4).
 pub(crate) fn find_nearby_tables(
     target_schema: &str,
     target_table: &str,
@@ -638,12 +641,24 @@ pub(crate) fn find_nearby_tables(
             if same_schema {
                 scored.push((0, full_name));
             } else {
-                scored.push((2, full_name));
+                scored.push((30, full_name));
             }
             continue;
         }
 
-        // 2. Levenshtein on table name (if in same schema or no schema given)
+        // 2. REQ-AXO-902652: Prefix or substring match within same schema
+        if same_schema {
+            if target_table_lower.len() >= 3 && cand_table_lower.starts_with(&target_table_lower) {
+                scored.push((1, full_name));
+                continue;
+            }
+            if target_table_lower.len() >= 4 && cand_table_lower.contains(&target_table_lower) {
+                scored.push((2, full_name));
+                continue;
+            }
+        }
+
+        // 3. Levenshtein on table name (if in same schema or no schema given)
         if same_schema {
             let dist = edit_distance(&target_table_lower, &cand_table_lower);
             let max_allowed = if target_table_lower.len() <= 4 {
@@ -659,22 +674,28 @@ pub(crate) fn find_nearby_tables(
             }
         }
 
-        // 3. Full name distance (e.g. if schema was slightly mistyped)
+        // 4. Full name distance (e.g. if schema was slightly mistyped)
         if !target_schema_lower.is_empty() {
             let full_target = format!("{target_schema_lower}.{target_table_lower}");
             let full_cand = format!("{cand_schema_lower}.{cand_table_lower}");
             let dist = edit_distance(&full_target, &full_cand);
             if dist <= 2 {
-                scored.push((20 + dist, full_name));
+                scored.push((40 + dist, full_name));
             }
         }
     }
 
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.len().cmp(&b.1.len())).then_with(|| a.1.cmp(&b.1)));
     scored.dedup_by(|a, b| a.1 == b.1);
     if let Some(&(best_score, _)) = scored.first() {
         // Keep only candidates close to the best match to avoid noise
-        let cutoff = if best_score == 0 { 0 } else { best_score + 1 };
+        let cutoff = match best_score {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            30 => 30,
+            _ => best_score + 1,
+        };
         scored.retain(|(s, _)| *s <= cutoff);
     }
     scored.into_iter().take(4).map(|(_, name)| name).collect()
@@ -2693,5 +2714,33 @@ mod tests {
         let text = render_pg_repair_text(&repair);
         assert!(text.contains("soll.Node does not exist — did you mean soll.node?"), "got: {text}");
         assert!(text.contains("PostgreSQL folds UNQUOTED identifiers"), "got: {text}");
+    }
+
+    #[test]
+    fn test_req_902652_find_nearby_tables_prefix_and_substring() {
+        let available = vec![
+            ("soll".to_string(), "projectcoderegistry".to_string()),
+            ("soll".to_string(), "node".to_string()),
+            ("ist".to_string(), "project_symbol".to_string()),
+        ];
+
+        // 1. Prefix match in same schema: "project" -> suggests "soll.projectcoderegistry"
+        let nearby = find_nearby_tables("soll", "project", &available);
+        assert_eq!(nearby, vec!["soll.projectcoderegistry".to_string()]);
+
+        // 2. Substring match in same schema when len >= 4: "registry" (len 8) -> suggests "soll.projectcoderegistry"
+        let nearby_sub = find_nearby_tables("soll", "registry", &available);
+        assert_eq!(nearby_sub, vec!["soll.projectcoderegistry".to_string()]);
+
+        // 3. Substring match does NOT trigger when len < 4: "cod" (len 3) does not match projectcoderegistry
+        let nearby_short = find_nearby_tables("soll", "cod", &available);
+        assert!(
+            !nearby_short.contains(&"soll.projectcoderegistry".to_string()),
+            "len < 4 substring must not match projectcoderegistry: {nearby_short:?}"
+        );
+
+        // 4. Schema scoping: target_schema "ist" must not suggest table from "soll"
+        let nearby_other = find_nearby_tables("ist", "project", &available);
+        assert_eq!(nearby_other, vec!["ist.project_symbol".to_string()]);
     }
 }

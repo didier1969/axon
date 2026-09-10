@@ -1134,6 +1134,49 @@ fn test_project_registry_lookup_finds_project_by_path_name_and_code() {
     }
 }
 
+/// REQ-AXO-902652 — Feedback #424: project_registry_lookup suggère les projets
+/// approchants par ILIKE quand aucun match exact n'est trouvé.
+#[test]
+fn test_req_902652_project_registry_lookup_suggests_approximations() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry(
+            "VPC",
+            Some("vps-control"),
+            Some("/home/dstadel/projects/vps-control"),
+        )
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "project_registry_lookup",
+            "arguments": {
+                "project_name": "vpc"
+            }
+        })),
+        id: Some(json!(5020)),
+    };
+    let response = server.handle_request(req).unwrap();
+    let result = response.result.unwrap();
+
+    assert_eq!(result["data"]["found"].as_bool(), Some(false));
+    let suggested = result["data"]["suggested_projects"]
+        .as_array()
+        .expect("suggested_projects array");
+    assert!(
+        suggested.iter().any(|p| p["project_code"] == "VPC" && p["project_name"] == "vps-control"),
+        "must suggest VPC / vps-control: {suggested:?}"
+    );
+    let text = result["content"][0]["text"].as_str().expect("text");
+    assert!(
+        text.contains("vps-control (VPC)") || text.contains("VPC"),
+        "text must mention suggested project: {text}"
+    );
+}
+
 #[test]
 fn test_soll_apply_plan_accepts_freshly_initialized_project_code_across_runtime_boundary() {
     // REQ-AXO-902026 — isolate this test on its own ephemeral DB (cloned from
