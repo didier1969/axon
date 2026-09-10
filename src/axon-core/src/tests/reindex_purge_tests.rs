@@ -303,4 +303,188 @@ mod tests {
         }];
         quarantine_hung_batch(None, &batch).await; // must not panic
     }
+
+    /// REQ-AXO-902586 — Cascade file deletion must purge ALL edges involving the
+    /// deleted file and its contained symbols (both inbound and outbound), leaving
+    /// zero orphaned edges in ist.Edge.
+    ///
+    /// The real defect found in LLL:
+    /// `examples/tmph5laa9_f.lll` was deleted from disk, but its outbound call edge
+    /// `…fulfill --CALLS--> …stock_reserve` survived indefinitely in `ist.Edge`
+    /// because `delete_file_cascade` never purged edges where the deleted file's
+    /// symbols were the SOURCE (or incoming caller edges to the deleted symbols).
+    #[test]
+    fn delete_file_cascade_purges_all_contained_symbol_edges() {
+        let store = create_test_db().unwrap();
+        let path = "/tmp/delete_cascade_test_file.rs";
+        let caller_external = "/tmp/external_caller.rs";
+
+        // 1. Seed the file to delete with two internal symbols: `fulfill` and `stock_reserve`
+        store
+            .upsert_graph_batch(
+                &[parsed_file(
+                    path,
+                    "fn fulfill() { stock_reserve(); } fn stock_reserve() {}",
+                    vec![sym("fulfill"), sym("stock_reserve")],
+                )],
+                "AXO",
+            )
+            .unwrap();
+
+        // 2. Add an internal CALLS edge between the file's symbols: fulfill --CALLS--> stock_reserve
+        // and an external inbound CALLS edge: external_caller --CALLS--> fulfill
+        // and an external outbound CALLS edge: stock_reserve --CALLS--> std::alloc
+        store
+            .execute(&format!(
+                "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+                 SELECT s1.id, s2.id, 'CALLS', 'AXO', 0 \
+                 FROM ist.Symbol s1, ist.Symbol s2 \
+                 WHERE s1.name = 'fulfill' AND s2.name = 'stock_reserve'; \
+                 \
+                 INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+                 SELECT '{caller_external}::caller_fn', id, 'CALLS', 'AXO', 0 \
+                 FROM ist.Symbol WHERE name = 'fulfill'; \
+                 \
+                 INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+                 SELECT id, 'std::alloc::alloc', 'CALLS', 'AXO', 0 \
+                 FROM ist.Symbol WHERE name = 'stock_reserve';"
+            ))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM ist.Edge WHERE project_code = 'AXO' AND relation_type = 'CALLS'"
+                )
+                .unwrap(),
+            3,
+            "3 CALLS edges seeded (internal, inbound from external, outbound to external)"
+        );
+
+        // 3. Delete the file via delete_file_cascade
+        store.delete_file_cascade(path).unwrap();
+
+        // 4. Assertions:
+        // - IndexedFile must be gone
+        assert_eq!(
+            store
+                .query_count(&format!("SELECT count(*) FROM ist.IndexedFile WHERE path = '{path}'"))
+                .unwrap(),
+            0,
+            "IndexedFile must be purged"
+        );
+        // - Symbols must be gone
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM ist.Symbol WHERE name IN ('fulfill', 'stock_reserve')"
+                )
+                .unwrap(),
+            0,
+            "Contained symbols must be purged"
+        );
+        // - Chunks must be gone
+        assert_eq!(
+            store
+                .query_count(&format!("SELECT count(*) FROM ist.Chunk WHERE file_path = '{path}'"))
+                .unwrap(),
+            0,
+            "Chunks must be purged"
+        );
+        // - ALL edges referencing the file OR its contained symbols must be gone!
+        assert_eq!(
+            store
+                .query_count(&format!(
+                    "SELECT count(*) FROM ist.Edge WHERE source_id = '{path}' OR target_id = '{path}'"
+                ))
+                .unwrap(),
+            0,
+            "File edges must be purged"
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM ist.Edge WHERE project_code = 'AXO' AND relation_type = 'CALLS'"
+                )
+                .unwrap(),
+            0,
+            "ALL 3 CALLS edges referencing deleted symbols must be completely purged from ist.Edge"
+        );
+    }
+
+    /// REQ-AXO-902586 — Deleting a symbol-less file or data artifact must succeed cleanly
+    /// and purge its IndexedFile and file edges without error.
+    #[test]
+    fn delete_file_cascade_symbolless_file_succeeds_cleanly() {
+        let store = create_test_db().unwrap();
+        let path = "/tmp/empty_manifest.json";
+
+        store
+            .upsert_graph_batch(
+                &[parsed_file(
+                    path,
+                    "{}",
+                    vec![],
+                )],
+                "AXO",
+            )
+            .unwrap();
+
+        store.delete_file_cascade(path).unwrap();
+
+        assert_eq!(
+            store
+                .query_count(&format!("SELECT count(*) FROM ist.IndexedFile WHERE path = '{path}'"))
+                .unwrap(),
+            0,
+            "IndexedFile must be purged for empty/data file"
+        );
+    }
+
+    /// REQ-AXO-902586 — audit_stale_edge_residues correctly categorizes unindexed targets
+    /// into stale residues (belonging to deleted files) vs legitimate unindexed calls
+    /// (belonging to existing indexed files), and prune_stale_edge_residues purges only the residues.
+    #[test]
+    fn test_audit_and_prune_stale_edge_residues() {
+        let store = create_test_db().unwrap();
+        let alive_path = "/tmp/repo/src/alive.rs";
+
+        // Seed an indexed alive file with one symbol
+        store
+            .upsert_graph_batch(
+                &[parsed_file(
+                    alive_path,
+                    "pub fn alive_fn() {}",
+                    vec![sym("alive_fn")],
+                )],
+                "AXO",
+            )
+            .unwrap();
+
+        // Seed two edges:
+        // 1. Legitimate unindexed: callee in alive.rs (e.g. macro or local item without symbol row)
+        // 2. Stale residue: callee in deleted file examples/ghost.rs (which has no IndexedFile)
+        store
+            .execute(
+                "INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) \
+                 VALUES \
+                 ('AXO::src::alive.rs::alive_fn', 'AXO::src::alive.rs::helper_macro', 'CALLS', 'AXO', 0), \
+                 ('AXO::src::alive.rs::alive_fn', 'AXO::examples::ghost.rs::ghost_fn', 'CALLS', 'AXO', 0);"
+            )
+            .unwrap();
+
+        let (stale, legitimate) = store.audit_stale_edge_residues(Some("AXO")).unwrap();
+        assert_eq!(stale, 1, "Expected 1 stale residue for deleted examples/ghost.rs");
+        assert_eq!(legitimate, 1, "Expected 1 legitimate unindexed call in existing src/alive.rs");
+
+        // Prune the residues
+        let purged = store.prune_stale_edge_residues(Some("AXO")).unwrap();
+        assert_eq!(purged, 1, "Expected exactly 1 edge purged");
+
+        // Re-audit to verify clean state
+        let (stale_after, legitimate_after) = store.audit_stale_edge_residues(Some("AXO")).unwrap();
+        assert_eq!(stale_after, 0, "No stale residues should remain");
+        assert_eq!(legitimate_after, 1, "Legitimate unindexed call must be preserved intact");
+    }
 }
+

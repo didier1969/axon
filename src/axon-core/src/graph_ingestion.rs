@@ -1050,9 +1050,9 @@ impl GraphStore {
         Ok(deleted)
     }
 
-    /// REQ-AXO-901893 — cascade-delete a single file's entire IST footprint:
-    /// embeddings, chunks, contained symbols, edges (both directions of the
-    /// CONTAINS fan-out), and the IndexedFile row. This is the atomic DELETE
+    /// REQ-AXO-901893 / REQ-AXO-902586 — cascade-delete a single file's entire IST footprint:
+    /// embeddings, chunks, contained symbols, all edges involving the file or its symbols
+    /// (both inbound callers and outbound callees), and the IndexedFile row. This is the atomic DELETE
     /// half of the Watchman feed — `exists=false` events (a genuine deletion,
     /// or the old side of a rename). Shared with [`delete_stale_indexed_files`]
     /// so the cascade SQL lives in exactly ONE place (no drift between the
@@ -1064,19 +1064,154 @@ impl GraphStore {
     /// here.
     pub fn delete_file_cascade(&self, path: &str) -> Result<()> {
         let safe = path.replace('\'', "''");
+        // Evict from in-RAM cache if running in indexer process
+        if let Some(cache) = crate::pipeline::IndexedFileCache::global() {
+            cache.forget(path);
+        }
         self.execute(&format!(
-            "DELETE FROM ChunkEmbedding WHERE chunk_id IN \
-                (SELECT id FROM Chunk WHERE file_path = '{safe}'); \
-             DELETE FROM Chunk WHERE file_path = '{safe}'; \
-             DELETE FROM Symbol WHERE id IN \
-                (SELECT target_id FROM Edge WHERE source_id = '{safe}' AND relation_type = 'CONTAINS'); \
-             DELETE FROM Edge WHERE source_id = '{safe}' OR target_id IN \
-                (SELECT target_id FROM Edge e2 WHERE e2.source_id = '{safe}' AND e2.relation_type = 'CONTAINS'); \
-             DELETE FROM Edge WHERE target_id = '{safe}'; \
-             DELETE FROM DataArtifact WHERE id = '{safe}'; \
-             DELETE FROM Symbol WHERE id = '{safe}'; \
-             DELETE FROM IndexedFile WHERE path = '{safe}';"
+            "WITH contained_symbols AS MATERIALIZED (\
+                 SELECT target_id AS id \
+                 FROM ist.Edge \
+                 WHERE source_id = '{safe}' AND relation_type = 'CONTAINS'\
+             ), \
+             del_edges AS (\
+                 DELETE FROM ist.Edge \
+                 WHERE source_id = '{safe}' \
+                    OR target_id = '{safe}' \
+                    OR source_id IN (SELECT id FROM contained_symbols) \
+                    OR target_id IN (SELECT id FROM contained_symbols)\
+             ), \
+             del_symbols AS (\
+                 DELETE FROM ist.Symbol \
+                 WHERE id IN (SELECT id FROM contained_symbols) OR id = '{safe}'\
+             ), \
+             del_data_artifacts AS (\
+                 DELETE FROM ist.DataArtifact \
+                 WHERE id = '{safe}'\
+             ), \
+             del_chunk_embeddings AS (\
+                 DELETE FROM ist.ChunkEmbedding \
+                 WHERE chunk_id IN (SELECT id FROM ist.Chunk WHERE file_path = '{safe}')\
+             ), \
+             del_chunks AS (\
+                 DELETE FROM ist.Chunk \
+                 WHERE file_path = '{safe}'\
+             ), \
+             del_indexed_file AS (\
+                 DELETE FROM ist.IndexedFile \
+                 WHERE path = '{safe}'\
+             ) \
+             SELECT 1;"
         ))
+    }
+
+    /// REQ-AXO-902586 — audit the two distinct populations of unindexed edge targets:
+    /// 1. `stale_file_residues`: edges whose endpoint refers to a file path absent from `ist.IndexedFile` (phantom residue).
+    /// 2. `legitimate_unindexed`: edges whose callee is not a declared symbol, but whose containing file is alive and indexed.
+    pub fn audit_stale_edge_residues(
+        &self,
+        project_code_opt: Option<&str>,
+    ) -> Result<(usize, usize)> {
+        use serde_json::Value;
+        let project_filter = if let Some(pc) = project_code_opt {
+            format!("AND e.project_code = '{}'", pc.replace('\'', "''"))
+        } else {
+            String::new()
+        };
+
+        let sql = format!(
+            "SELECT count(*) FILTER (WHERE NOT EXISTS (\
+                 SELECT 1 FROM ist.IndexedFile f \
+                 WHERE f.project_code = e.project_code \
+                   AND f.path LIKE '%' || replace(regexp_replace(regexp_replace(e.target_id, '^[^:]+::', ''), '::[^:]+$', ''), '::', '/')\
+             )) AS stale_residues, \
+             count(*) FILTER (WHERE EXISTS (\
+                 SELECT 1 FROM ist.IndexedFile f \
+                 WHERE f.project_code = e.project_code \
+                   AND f.path LIKE '%' || replace(regexp_replace(regexp_replace(e.target_id, '^[^:]+::', ''), '::[^:]+$', ''), '::', '/')\
+             )) AS legitimate_unindexed \
+             FROM ist.Edge e \
+             WHERE e.relation_type = 'CALLS' \
+               AND e.target_id LIKE e.project_code || '::%' \
+               AND NOT EXISTS (SELECT 1 FROM ist.Symbol s WHERE s.id = e.target_id) \
+               {project_filter}"
+        );
+
+        let raw = self.query_json_writer(&sql)?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let parse_u64 = |val: Option<&Value>| -> usize {
+            val.and_then(|v| {
+                v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            })
+            .unwrap_or(0) as usize
+        };
+        if let Some(first_row) = rows.first() {
+            let stale = parse_u64(first_row.get(0));
+            let legitimate = parse_u64(first_row.get(1));
+            Ok((stale, legitimate))
+        } else {
+            Ok((0, 0))
+        }
+    }
+
+    /// REQ-AXO-902586 — purge stale edge residues whose file no longer exists in `ist.IndexedFile`.
+    pub fn prune_stale_edge_residues(&self, project_code_opt: Option<&str>) -> Result<usize> {
+        use serde_json::Value;
+        let project_filter = if let Some(pc) = project_code_opt {
+            format!("AND e.project_code = '{}'", pc.replace('\'', "''"))
+        } else {
+            String::new()
+        };
+
+        let sql = format!(
+            "WITH stale_edges AS (\
+                 SELECT e.source_id, e.target_id, e.relation_type, e.project_code \
+                 FROM ist.Edge e \
+                 WHERE e.relation_type <> 'CONTAINS' \
+                   {project_filter} \
+                   AND (\
+                       (\
+                           e.source_id LIKE e.project_code || '::%' \
+                           AND NOT EXISTS (\
+                               SELECT 1 FROM ist.IndexedFile f \
+                               WHERE f.project_code = e.project_code \
+                                 AND f.path LIKE '%' || replace(regexp_replace(regexp_replace(e.source_id, '^[^:]+::', ''), '::[^:]+$', ''), '::', '/')\
+                           )\
+                       )\
+                       OR \
+                       (\
+                           e.target_id LIKE e.project_code || '::%' \
+                           AND NOT EXISTS (SELECT 1 FROM ist.Symbol s WHERE s.id = e.target_id) \
+                           AND NOT EXISTS (\
+                               SELECT 1 FROM ist.IndexedFile f \
+                               WHERE f.project_code = e.project_code \
+                                 AND f.path LIKE '%' || replace(regexp_replace(regexp_replace(e.target_id, '^[^:]+::', ''), '::[^:]+$', ''), '::', '/')\
+                           )\
+                       )\
+                   )\
+             ), \
+             deleted AS (\
+                 DELETE FROM ist.Edge e \
+                 USING stale_edges s \
+                 WHERE e.source_id = s.source_id \
+                   AND e.target_id = s.target_id \
+                   AND e.relation_type = s.relation_type \
+                   AND e.project_code = s.project_code \
+                 RETURNING 1\
+             ) \
+             SELECT count(*) FROM deleted"
+        );
+
+        let raw = self.query_json_writer(&sql)?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let count = rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|v| {
+                v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            })
+            .unwrap_or(0) as usize;
+        Ok(count)
     }
 
     /// Chunk, IndexedFile) or `ON CONFLICT DO NOTHING` (relations).
