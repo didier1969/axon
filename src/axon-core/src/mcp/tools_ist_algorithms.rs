@@ -1125,6 +1125,7 @@ impl McpServer {
         let orphans =
             crate::ist_snapshot::code_smells::wiring_orphans(&snapshot, &project, &declared, top);
         let test_only = orphans.iter().filter(|o| o.category == "test_only").count();
+        let dynamic_dispatch = orphans.iter().filter(|o| o.category == "dynamic_dispatch").count();
         let isolated = orphans.iter().filter(|o| o.category == "isolated").count();
         let items: Vec<Value> = orphans
             .iter()
@@ -1178,9 +1179,14 @@ impl McpServer {
                 sample_identities("ambiguous declarations", &audit.declarations_matching_many, 8)
             )
         };
+        let phrase_dynamic = if dynamic_dispatch > 0 {
+            format!(" + {} dynamic_dispatch (unreachable by static call graph)", dynamic_dispatch)
+        } else {
+            String::new()
+        };
         let summary = format!(
-            "wiring {} : {} orphan(s) — {} test_only (delivered+tested but NO prod caller — the OPV class) + {} isolated (no caller at all, advisory). A test_only symbol tagged deliverable = must be wired before delivery (gate S3, axon_pre_flight_check).{}{}{}{}",
-            project, orphans.len(), test_only, isolated, orphan_phrase, phrase_exemption, phrase_mortes, phrase_ambigues
+            "wiring {} : {} orphan(s) — {} test_only (delivered+tested but NO prod caller — the OPV class){}{} + {} isolated (no caller at all, advisory). A test_only symbol tagged deliverable = must be wired before delivery (gate S3, axon_pre_flight_check).{}{}{}{}",
+            project, orphans.len(), test_only, phrase_dynamic, "", isolated, orphan_phrase, phrase_exemption, phrase_mortes, phrase_ambigues
         );
         Some(json!({
             "content": [{ "type": "text", "text": summary }],
@@ -1189,6 +1195,7 @@ impl McpServer {
                 "project_code": project,
                 "orphans": items,
                 "test_only_count": test_only,
+                "dynamic_dispatch_count": dynamic_dispatch,
                 "isolated_count": isolated,
                 "soll_declared_symbols": declared.len(),
                 "exemption_policy": politique,
@@ -1196,7 +1203,7 @@ impl McpServer {
                 "exempted_count": audit.exempted.len(),
                 "declarations_matching_nothing": audit.declarations_matching_nothing,
                 "declarations_matching_many": audit.declarations_matching_many,
-                "note": "REQ-AXO-902192 volet 1a+S2 — test_only = high-confidence unwired deliverable (0 prod caller, ≥1 test); isolated = advisory (may be an undetected entry). Symbols with a SOLL traceability edge are EXEMPT (declared intent — covers dispatch-dynamic/lazy-import/hook entries the static CALLS graph misses). Gate in axon_pre_flight_check = slice S3."
+                "note": "REQ-AXO-902192 volet 1a+S2 / REQ-AXO-902421 — test_only = high-confidence unwired deliverable (0 prod caller, ≥1 test); isolated = advisory (may be an undetected entry); dynamic_dispatch = callable in a trait/behaviour implementation unreachable by static call graph. Symbols with a SOLL traceability edge are EXEMPT (declared intent). Gate in axon_pre_flight_check = slice S3."
             }
         }))
     }

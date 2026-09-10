@@ -1407,6 +1407,10 @@ const SOLL_GET_DISPOSITIONS: &[ParameterDeclaration] = &[
         disposition: ParameterDisposition::Honoured,
     },
     ParameterDeclaration {
+        name: "ids",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
         name: "sections",
         disposition: ParameterDisposition::Honoured,
     },

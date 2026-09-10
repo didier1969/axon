@@ -1403,18 +1403,34 @@ fn wiring_classify_node(
     // (the "faux wired massif"). NOT a general lazy-import fix: a lazy-imported
     // FREE function lands in a non-trait file with NO phantom and stays isolated
     // BY DESIGN; its escape hatch is the SOLL `declared` guard above.
+    let has_trait_impl = file_has_trait_impl(graph, idx);
+    let mut phantom_bridged = false;
     if prod_callers == 0 {
         if let Some(&(phantom_prod, phantom_test)) = phantom_callers.get(name) {
-            if file_has_trait_impl(graph, idx) {
+            if has_trait_impl {
                 prod_callers += phantom_prod;
                 test_callers += phantom_test;
+                phantom_bridged = true;
             }
         }
     }
     if prod_callers > 0 {
         return None; // wired in prod — not an orphan
     }
-    let category = if test_callers > 0 { "test_only" } else { "isolated" };
+    // REQ-AXO-902421 — Séparer « non atteint par le graphe statique » de « sans appelant de production ».
+    // Un symbole dans un fichier implémentant un trait/behaviour (ex: Indicators.{RSI,MACD,Bollinger}.update
+    // sous @behaviour Indicator, appelé par mod.update(...) depuis IndicatorSet) sans aucun appelant
+    // statique de production ET sans pont fantôme ne doit pas être confondu avec un livrable oublié (test_only)
+    // qui bloque la porte de livraison S3 : il relève du dispatch dynamique hors de portée de l'analyse statique.
+    let category = if test_callers > 0 {
+        if has_trait_impl && !phantom_bridged {
+            "dynamic_dispatch"
+        } else {
+            "test_only"
+        }
+    } else {
+        "isolated"
+    };
     Some(WiringOrphan {
         id: graph.id_of(idx).to_string(),
         name: name.to_string(),
@@ -1459,10 +1475,15 @@ pub fn wiring_orphans(
             out.push(orphan);
         }
     }
-    // test_only first (highest confidence), then most-nearly-wired (test_callers desc).
+    // REQ-AXO-902421: test_only first (highest confidence), then dynamic_dispatch, then isolated (least urgent).
+    let category_rank = |cat: &str| match cat {
+        "test_only" => 0,
+        "dynamic_dispatch" => 1,
+        _ => 2,
+    };
     out.sort_by(|a, b| {
-        (a.category == "isolated")
-            .cmp(&(b.category == "isolated"))
+        category_rank(a.category)
+            .cmp(&category_rank(b.category))
             .then(b.test_callers.cmp(&a.test_callers))
             .then(a.id.cmp(&b.id))
     });
@@ -3508,5 +3529,67 @@ mod tests {
                 "`{impl_id}` : appariement attendu = {doit_apparier}, obtenu {paires:?}"
             );
         }
+    }
+
+    #[test]
+    fn req_902421_dynamic_dispatch_trait_impl_surfaces_in_distinct_category() {
+        // REQ-AXO-902421 / TE2:
+        // Criterion 2: True orphans without trait/behaviour impl (e.g. ModelVersioning.register)
+        // must remain classified as `test_only`.
+        // Criterion 3: Callables in a trait/behaviour impl without static prod callers
+        // (e.g. Indicators.{RSI,MACD,Bollinger}.update dispatched via `mod.update`)
+        // must surface in a DISTINCT category `dynamic_dispatch` rather than `test_only`.
+        let a_test = NodeRecord {
+            id: "AXO::test.rs::test_all".to_string(),
+            name: "test_all".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::new(true, false, false, false),
+            complexity: None,
+        };
+        let nodes = vec![
+            func("AXO::app.rs::run_main", true),
+            a_test,
+            node("AXO::rsi.rs::RSI", NodeKind::Struct, true),
+            node("AXO::rsi.rs::update", NodeKind::Method, true),
+            node("AXO::traits.rs::Indicator", NodeKind::Trait, true),
+            file("AXO::rsi.rs"),
+            node("AXO::orphan.rs::register", NodeKind::Function, true),
+            file("AXO::orphan.rs"),
+            node("AXO::isolated.rs::lonely", NodeKind::Function, true),
+            file("AXO::isolated.rs"),
+        ];
+        let edges = vec![
+            // a_test calls rsi.update directly
+            edge("AXO::test.rs::test_all", "AXO::rsi.rs::update", RelationType::Calls),
+            edge("AXO::rsi.rs", "AXO::rsi.rs::RSI", RelationType::Contains),
+            edge("AXO::rsi.rs", "AXO::rsi.rs::update", RelationType::Contains),
+            edge("AXO::rsi.rs::RSI", "AXO::traits.rs::Indicator", RelationType::Implements),
+            // a_test calls register directly
+            edge("AXO::test.rs::test_all", "AXO::orphan.rs::register", RelationType::Calls),
+            edge("AXO::orphan.rs", "AXO::orphan.rs::register", RelationType::Contains),
+            // lonely has no callers
+            edge("AXO::isolated.rs", "AXO::isolated.rs::lonely", RelationType::Contains),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let orphans = wiring_orphans(&g, "AXO", &HashSet::new(), 50);
+
+        let register = orphans.iter().find(|o| o.name == "register").expect("register must be reported");
+        assert_eq!(
+            register.category, "test_only",
+            "true orphan without trait-impl must remain test_only (criterion 2)"
+        );
+
+        let lonely = orphans.iter().find(|o| o.name == "lonely").expect("lonely must be reported");
+        assert_eq!(
+            lonely.category, "isolated",
+            "callable with no callers must remain isolated"
+        );
+
+        let update = orphans.iter().find(|o| o.name == "update").expect("update must be reported");
+        assert_eq!(
+            update.category, "dynamic_dispatch",
+            "callable in trait/behaviour impl with no phantom bridge must be dynamic_dispatch, NOT test_only (criterion 3)"
+        );
     }
 }

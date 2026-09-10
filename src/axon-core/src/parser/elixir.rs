@@ -1722,6 +1722,84 @@ mod tests {
             result.relations
         );
     }
+
+    #[test]
+    fn req_902421_calls_inside_macro_block_with_arguments_without_parens_are_extracted() {
+        // REQ-AXO-902421 / TE2 #182: Calls inside macro do-blocks where arguments have no parens
+        // (e.g. `Tracer.with_span "order_execution" do ... ExecutionRouter.open_position(...) end`)
+        // must be extracted and resolve aliases properly.
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule TraderElixirV2.Agents.CryptoAgent do
+          alias TraderElixirV2.Trading.ExecutionRouter
+
+          def executing(:internal, :execute_order, data) do
+            Tracer.with_span "order_execution" do
+              Logger.info("[#{data.symbol}] Executing order via ExecutionRouter...")
+              side = data.last_signal[:side] || :buy
+              sent_at_us = System.monotonic_time(:microsecond)
+              emit_decision_to_send(data, sent_at_us)
+
+              result =
+                ExecutionRouter.open_position(
+                  data.paper_trading_id,
+                  data.symbol,
+                  side,
+                  data.last_signal.size,
+                  data.last_signal.price,
+                  decided_at_us: data.last_signal[:decided_at_us],
+                  sent_at_us: sent_at_us,
+                  reference_price: data.last_signal.price,
+                  campaign_id: optional_config([:trading, :campaign_id]),
+                  strategy_version: optional_config([:trading, :strategy_version]),
+                  hypothesis_id: data.last_signal[:hypothesis_id],
+                  regime: data.macro_regime,
+                  admission: data.last_signal[:admission],
+                  sizing_policy: data.last_signal[:sizing_policy]
+                )
+
+              case result do
+                :ok -> :ok
+              end
+            end
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+        assert!(
+            result.relations.iter().any(|r| r.from == "TraderElixirV2.Agents.CryptoAgent.executing"
+                && r.to == "TraderElixirV2.Trading.ExecutionRouter.open_position"
+                && r.rel_type == "CALLS"),
+            "ExecutionRouter.open_position inside Tracer.with_span do-block missing; got: {:?}",
+            result.relations
+        );
+    }
+
+    #[test]
+    fn req_902421_moduledoc_examples_are_never_counted_as_calls() {
+        // REQ-AXO-902421 criterion 4: An occurrence in a @moduledoc is NEVER counted
+        // as a caller (trap reported by TE2 on ModelVersioning.register).
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule TraderElixirV2.ML.ModelVersioning do
+          @moduledoc """
+          Example:
+            ModelVersioning.register(model_id, weights)
+            register(foo)
+          """
+
+          def register(model_id, weights) do
+            :ok
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+        assert!(
+            !result.relations.iter().any(|r| r.to.contains("register") && r.rel_type == "CALLS"),
+            "Calls inside @moduledoc must never be emitted; got: {:?}",
+            result.relations
+        );
+    }
 }
 
 
