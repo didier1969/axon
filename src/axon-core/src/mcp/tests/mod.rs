@@ -451,3 +451,5 @@ mod rescan_project_wipe_failure_tests;
 mod registry_hot_reload_tests;
 /// REQ-AXO-902510 — non-silence de la mutation et garde anti-contradiction sur session_pointer.
 mod session_pointer_mutation_tests;
+/// REQ-AXO-902559 — division du budget VRAM entre les sessions ORT d'un même processus.
+mod vram_budget_division_tests;

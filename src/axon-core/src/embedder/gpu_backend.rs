@@ -744,15 +744,44 @@ pub(super) fn tensorrt_execution_provider_dispatch() -> AnyhowResult<ExecutionPr
     Ok(ExecutionProviderDispatch::from(provider).error_on_failure())
 }
 
-pub(crate) fn cuda_memory_limit_bytes() -> usize {
-    (std::env::var("AXON_CUDA_MEMORY_LIMIT_MB")
+/// REQ-AXO-902559 — Nombre de sessions GPU concurrentes attendues dans ce processus.
+/// Dérive de AXON_GPU_CONCURRENT_SESSIONS ou AXON_B2_WORKERS (défaut 1).
+pub(crate) fn concurrent_gpu_sessions_count() -> usize {
+    if let Ok(v) = std::env::var("AXON_GPU_CONCURRENT_SESSIONS").and_then(|raw| {
+        raw.trim().parse::<usize>().map_err(|_| std::env::VarError::NotPresent)
+    }) {
+        if v > 0 {
+            return v;
+        }
+    }
+    if let Ok(v) = std::env::var("AXON_B2_WORKERS").and_then(|raw| {
+        raw.trim().parse::<usize>().map_err(|_| std::env::VarError::NotPresent)
+    }) {
+        if v > 0 {
+            return v;
+        }
+    }
+    1
+}
+
+/// REQ-AXO-902559 — Calcule la limite VRAM par session ORT en divisant le budget
+/// total du processus par le nombre de sessions concurrentes, avec un floor de 512 Mo.
+pub(crate) fn cuda_memory_limit_bytes_for_workers(concurrent_workers: usize) -> usize {
+    let workers = concurrent_workers.max(1);
+    let total_mb = std::env::var("AXON_CUDA_MEMORY_LIMIT_MB")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value >= 512)
         .map(|value| value as u64)
         .unwrap_or_else(gpu_memory_soft_limit_mb)
-        .max(512) as usize)
-        .saturating_mul(1024 * 1024)
+        .max(512);
+
+    let per_worker_mb = (total_mb / workers as u64).max(512);
+    (per_worker_mb as usize).saturating_mul(1024 * 1024)
+}
+
+pub(crate) fn cuda_memory_limit_bytes() -> usize {
+    cuda_memory_limit_bytes_for_workers(concurrent_gpu_sessions_count())
 }
 
 pub(super) fn cuda_tf32_enabled() -> bool {
@@ -811,7 +840,7 @@ pub(super) fn ort_tensorrt_provider_library_path() -> Option<PathBuf> {
 ///
 /// Le pendant CUDA (`ort_cuda_provider_library_available`) existait déjà ; celui-ci
 /// permet de ne crier que lorsque le provider est FOURNI et échoue quand même.
-pub(super) fn ort_tensorrt_provider_library_available() -> bool {
+pub(crate) fn ort_tensorrt_provider_library_available() -> bool {
     ort_tensorrt_provider_library_path()
         .map(|path| path.is_file())
         .unwrap_or(false)

@@ -234,12 +234,21 @@ fn gpu_libraries_to_check() -> Vec<(&'static str, PathBuf, ProbeMode)> {
             ProbeMode::TolerateUndefinedSymbols,
         ));
     }
-    if let Some(trt) = super::gpu_backend::ort_tensorrt_provider_library_path() {
-        out.push((
-            "onnxruntime TensorRT provider",
-            trt,
-            ProbeMode::TolerateUndefinedSymbols,
-        ));
+    // REQ-AXO-902559 — TensorRT is optional on a CUDA-only artifact (where only
+    // libonnxruntime_providers_cuda.so is provided). Probing for its absence generates
+    // a false ERROR and sends diagnostic sessions on wild goose chases. Only probe
+    // when TensorRT is available on disk or explicitly requested via AXON_TENSORRT_ENABLED.
+    let trt_explicitly_requested = std::env::var("AXON_TENSORRT_ENABLED")
+        .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
+        .unwrap_or(false);
+    if trt_explicitly_requested || super::gpu_backend::ort_tensorrt_provider_library_available() {
+        if let Some(trt) = super::gpu_backend::ort_tensorrt_provider_library_path() {
+            out.push((
+                "onnxruntime TensorRT provider",
+                trt,
+                ProbeMode::TolerateUndefinedSymbols,
+            ));
+        }
     }
     out
 }

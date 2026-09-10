@@ -425,7 +425,12 @@ pub fn spawn_pipeline_indexer(
         // is genuinely corrupt it crashes there, but this log already named the
         // culprit instead of leaving only a dmesg trace.
         if let Err(reason) = crate::embedder::gpu_preflight::preflight_gpu_libraries() {
-            tracing::error!(reason = %reason, "pipeline: GPU library pre-flight flagged a lib — proceeding to GPU init anyway; if the process crashes during init, THIS names the culprit");
+            tracing::error!(reason = %reason, "pipeline: GPU library pre-flight flagged a lib (REQ-AXO-902559)");
+            if gpu_provider_explicitly_requested() {
+                return Err(anyhow!(
+                    "pipeline: aborting GPU init because preflight failed for required library: {reason} (REQ-AXO-902559)"
+                ));
+            }
         }
         // REQ-AXO-901748 — one ORT session per B2 worker (AXON_B2_WORKERS>1
         // gives true CUDA double-buffering, each session with its own TensorRT
