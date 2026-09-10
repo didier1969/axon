@@ -195,7 +195,11 @@ fn unrendered_item_arrays(response: &Value, promises_enumeration: bool) -> Vec<S
                 .is_some_and(|segment| text.contains(segment))
         });
         let counted = text.contains(&array.items.len().to_string());
-        let satisfied = if promises_enumeration { named } else { named || counted };
+        let satisfied = if promises_enumeration {
+            named
+        } else {
+            named || counted
+        };
         if !satisfied {
             violations.push(format!(
                 "{} porte {} élément(s) identifiable(s) — dont `{}` — et le \
@@ -248,7 +252,6 @@ fn seed_listable_content(server: &McpServer) {
     // n'y trouvent rien, et sortent du balayage comme « non exercés ».
     crate::ist_snapshot::evict_process_snapshot("RLC");
 
-
     let exec = |sql: &str| {
         let _ = server.graph_store.execute(sql);
     };
@@ -270,7 +273,7 @@ fn seed_listable_content(server: &McpServer) {
              VALUES ('RLC', 'contexte {n}', 'pratique de contrat {n}', 0.8, {n}, 'active')"
         ));
     }
-// Le CHAUFFER — APRES l'enregistrement du projet : `resolve_project_code_value`
+    // Le CHAUFFER — APRES l'enregistrement du projet : `resolve_project_code_value`
     // refuse un code absent du registre, et le warm sortait donc en
     // `wrong_project_scope` sans que rien ne le dise. Huit outils IST
     // (`wiring`, `orphan_clusters`, `structural_health_*`, `debt_digest`,
@@ -636,7 +639,11 @@ fn every_tool_that_returns_items_names_them_in_the_text() {
             unexercised_no_args.push(tool.clone());
             continue; // pas de réponse exploitable : non exercé
         };
-        if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+        if result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             // La RAISON, pas seulement le fait : « non exercé » sans cause
             // n'indique pas quoi enrichir — c'est le verdict sans dénominateur
             // que ce module combat, appliqué à son propre appareil de mesure.

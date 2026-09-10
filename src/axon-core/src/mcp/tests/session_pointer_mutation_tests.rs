@@ -62,7 +62,10 @@ fn c1_rejects_clearing_session_pointer_when_active_soll_node_exists() {
         .handle_request(serde_json::from_value(req_null).unwrap())
         .unwrap();
     let res_null = resp_null.result.unwrap();
-    assert_eq!(res_null.get("isError").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        res_null.get("isError").and_then(|v| v.as_bool()),
+        Some(true)
+    );
     let text_null = res_null["content"][0]["text"].as_str().unwrap();
     assert!(text_null.contains("Contradiction detected") || text_null.contains("CPT-SP1-001"));
 
@@ -84,7 +87,10 @@ fn c1_rejects_clearing_session_pointer_when_active_soll_node_exists() {
         .handle_request(serde_json::from_value(req_none).unwrap())
         .unwrap();
     let res_none = resp_none.result.unwrap();
-    assert_eq!(res_none.get("isError").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        res_none.get("isError").and_then(|v| v.as_bool()),
+        Some(true)
+    );
     let text_none = res_none["content"][0]["text"].as_str().unwrap();
     assert!(text_none.contains("Contradiction detected") || text_none.contains("CPT-SP1-001"));
 }
@@ -126,7 +132,10 @@ fn c2_reports_previous_session_pointer_on_update_and_clear() {
         .handle_request(serde_json::from_value(req_update).unwrap())
         .unwrap();
     let res_update = resp_update.result.unwrap();
-    assert_ne!(res_update.get("isError").and_then(|v| v.as_bool()), Some(true));
+    assert_ne!(
+        res_update.get("isError").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 
     // data.previous_session_pointer doit contenir l'ancien pointeur
     let prev = res_update["data"]["previous_session_pointer"].clone();
@@ -134,7 +143,10 @@ fn c2_reports_previous_session_pointer_on_update_and_clear() {
     assert_eq!(prev["value"].as_str(), Some("docs/handoff-1.md"));
 
     let text_update = res_update["content"][0]["text"].as_str().unwrap();
-    assert!(text_update.contains("MUTATION: session_pointer was UPDATED") || text_update.contains("docs/handoff-1.md"));
+    assert!(
+        text_update.contains("MUTATION: session_pointer was UPDATED")
+            || text_update.contains("docs/handoff-1.md")
+    );
 
     // Maintenant effacer (null) puisqu'aucun nœud SOLL n'existe
     let req_clear = json!({
@@ -154,11 +166,17 @@ fn c2_reports_previous_session_pointer_on_update_and_clear() {
         .handle_request(serde_json::from_value(req_clear).unwrap())
         .unwrap();
     let res_clear = resp_clear.result.unwrap();
-    assert_ne!(res_clear.get("isError").and_then(|v| v.as_bool()), Some(true));
+    assert_ne!(
+        res_clear.get("isError").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 
     let prev_clear = res_clear["data"]["previous_session_pointer"].clone();
     assert_eq!(prev_clear["value"].as_str(), Some("docs/handoff-2.md"));
 
     let text_clear = res_clear["content"][0]["text"].as_str().unwrap();
-    assert!(text_clear.contains("MUTATION: session_pointer was CLEARED") || text_clear.contains("docs/handoff-2.md"));
+    assert!(
+        text_clear.contains("MUTATION: session_pointer was CLEARED")
+            || text_clear.contains("docs/handoff-2.md")
+    );
 }

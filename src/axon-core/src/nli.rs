@@ -68,6 +68,12 @@ impl NliClassifier {
     /// the ORT dynamic library to be initialised process-wide (the brain already
     /// loads it for the embedder).
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self> {
+        if std::env::var("AXON_NLI_FORCE_CPU")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            return Self::load_cpu(model_dir);
+        }
         let dir = model_dir.as_ref();
         let model_path = dir.join("model.onnx");
         let tok_path = dir.join("tokenizer.json");
@@ -91,6 +97,30 @@ impl NliClassifier {
         // REQ-AXO-902103 — cap pair length so each judgement is bounded (long SOLL
         // chunks would otherwise blow up inference time). LongestFirst truncates the
         // longer of (premise, hypothesis), preserving the short candidate.
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: 512,
+                strategy: tokenizers::TruncationStrategy::LongestFirst,
+                stride: 0,
+                direction: tokenizers::TruncationDirection::Right,
+            }))
+            .map_err(|e| anyhow!("NLI tokenizer truncation: {e}"))?;
+        Ok(Self { session, tokenizer })
+    }
+
+    /// Load NLI model using CPU execution provider (used for evaluation/tests or when GPU VRAM is saturated).
+    pub fn load_cpu(model_dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = model_dir.as_ref();
+        let model_path = dir.join("model.onnx");
+        let tok_path = dir.join("tokenizer.json");
+        let session = Session::builder()
+            .map_err(|e| anyhow!("ORT session builder: {e}"))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow!("ORT optimization level: {e}"))?
+            .commit_from_file(&model_path)
+            .with_context(|| format!("loading NLI ONNX on CPU {}", model_path.display()))?;
+        let mut tokenizer = Tokenizer::from_file(&tok_path)
+            .map_err(|e| anyhow!("loading NLI tokenizer {}: {e}", tok_path.display()))?;
         tokenizer
             .with_truncation(Some(tokenizers::TruncationParams {
                 max_length: 512,
@@ -149,6 +179,31 @@ use std::sync::{Mutex, OnceLock};
 
 static NLI_GLOBAL: OnceLock<Mutex<Option<NliClassifier>>> = OnceLock::new();
 
+/// Résout le chemin du modèle NLI en tenant compte du working directory (repo root ou crate dir en test).
+pub fn resolve_nli_model_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("AXON_NLI_MODEL_DIR") {
+        let p = std::path::PathBuf::from(dir);
+        if p.exists() {
+            return p;
+        }
+    }
+    let p_rel = std::path::PathBuf::from(NLI_MODEL_DIR);
+    if p_rel.exists() {
+        return p_rel;
+    }
+    let p_crate_rel = std::path::PathBuf::from("../../").join(NLI_MODEL_DIR);
+    if p_crate_rel.exists() {
+        return p_crate_rel;
+    }
+    let p_manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../")
+        .join(NLI_MODEL_DIR);
+    if p_manifest.exists() {
+        return p_manifest;
+    }
+    p_rel
+}
+
 /// Lazy process-global NLI judge for `contradiction_check` (REQ-AXO-902096). The
 /// 599 MB model loads on first use (~seconds) then is reused; inference is
 /// serialised via the `Mutex` (the veto is low-volume — top-K re-rank per query).
@@ -160,7 +215,8 @@ pub fn judge_global(premise: &str, hypothesis: &str) -> Result<NliScores> {
         .lock()
         .map_err(|_| anyhow!("NLI global mutex poisoned"))?;
     if guard.is_none() {
-        *guard = Some(NliClassifier::load(NLI_MODEL_DIR)?);
+        let model_dir = resolve_nli_model_dir();
+        *guard = Some(NliClassifier::load(&model_dir)?);
     }
     let classifier = guard
         .as_mut()

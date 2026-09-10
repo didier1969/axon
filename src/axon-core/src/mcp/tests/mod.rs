@@ -425,35 +425,37 @@ fn graph_embedding_sql(seed: &[f32]) -> String {
     format!("'[{literal}]'::vector")
 }
 
+/// REQ-AXO-902537 — modes brief/json compacts bornés avec pointeurs de détail et RRF lisible.
+mod compact_payload_bounds_tests;
 mod context_and_analysis;
 mod guidance_contract;
 mod mailbox_conformance;
 mod mailbox_reactivity;
-/// REQ-AXO-902409 — garde de classe « N éléments soumis ⇒ N éléments rendus ».
-mod rendered_lists_contract;
-mod runtime_surface;
-mod soll_and_guidelines;
-/// REQ-AXO-902595 — critères d'acceptation satisfaits vs déclarés.
-mod soll_criteria_satisfaction;
-/// REQ-AXO-902642 — traversée sémantique et directions physiques dans soll_children.
-mod soll_children_tests;
 /// REQ-AXO-902548 — wake observable et traçabilité quadri-état dans la mailbox.
 mod mailbox_wake_tests;
-/// REQ-AXO-902537 — modes brief/json compacts bornés avec pointeurs de détail et RRF lisible.
-mod compact_payload_bounds_tests;
-/// REQ-AXO-902429 — gouvernance du retrait d'un nœud SOLL et obligation de remplaçant / raison.
-mod soll_retirement_supersedes_tests;
-/// REQ-AXO-902352 — Scope completeness distingue le dénominateur indexé du code source.
-mod scope_completeness_tests;
-/// REQ-AXO-902491 — rescan_project ne doit pas rendre status=ok si le wipe de cache a échoué.
-mod rescan_project_wipe_failure_tests;
-/// REQ-AXO-902508 — rafraîchissement à chaud du registre de projets dans l'indexeur sans redémarrage.
-mod registry_hot_reload_tests;
-/// REQ-AXO-902510 — non-silence de la mutation et garde anti-contradiction sur session_pointer.
-mod session_pointer_mutation_tests;
-/// REQ-AXO-902559 — division du budget VRAM entre les sessions ORT d'un même processus.
-mod vram_budget_division_tests;
+/// REQ-AXO-902514 — mesure empirique du comportement NLI sur affirmations fausses de technologies retirées.
+mod nli_retirements_measurement_tests;
 /// REQ-AXO-902562 — reachability dispatch par trait et indexer_lifecycle désactivé par mode de runtime.
 mod reachability_and_lifecycle_tests;
+/// REQ-AXO-902508 — rafraîchissement à chaud du registre de projets dans l'indexeur sans redémarrage.
+mod registry_hot_reload_tests;
+/// REQ-AXO-902409 — garde de classe « N éléments soumis ⇒ N éléments rendus ».
+mod rendered_lists_contract;
+/// REQ-AXO-902491 — rescan_project ne doit pas rendre status=ok si le wipe de cache a échoué.
+mod rescan_project_wipe_failure_tests;
+mod runtime_surface;
+/// REQ-AXO-902352 — Scope completeness distingue le dénominateur indexé du code source.
+mod scope_completeness_tests;
+/// REQ-AXO-902510 — non-silence de la mutation et garde anti-contradiction sur session_pointer.
+mod session_pointer_mutation_tests;
+mod soll_and_guidelines;
+/// REQ-AXO-902642 — traversée sémantique et directions physiques dans soll_children.
+mod soll_children_tests;
+/// REQ-AXO-902595 — critères d'acceptation satisfaits vs déclarés.
+mod soll_criteria_satisfaction;
+/// REQ-AXO-902429 — gouvernance du retrait d'un nœud SOLL et obligation de remplaçant / raison.
+mod soll_retirement_supersedes_tests;
 /// REQ-AXO-902513 — garde générique : tout état énuméré rendu par le code doit être annoncé dans la description publiée.
 mod tool_enum_catalog_contract;
+/// REQ-AXO-902559 — division du budget VRAM entre les sessions ORT d'un même processus.
+mod vram_budget_division_tests;

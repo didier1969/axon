@@ -120,7 +120,12 @@ fn assert_code_states_announced_in_description(
 fn test_req_902513_generic_guard_contradiction_check_verdicts() {
     let source = include_str!("../tools_nli.rs");
     let verdicts = extract_literals_in_block(source, "let verdict = if", "\n        };");
-    let mut expected = vec!["contradicts", "neutral_borderline", "neutral", "inconclusive"];
+    let mut expected = vec![
+        "contradicts",
+        "neutral_borderline",
+        "neutral",
+        "inconclusive",
+    ];
     let mut actual = verdicts.clone();
     expected.sort();
     actual.sort();
@@ -157,11 +162,8 @@ fn test_req_902513_generic_guard_promote_status_phases() {
 #[test]
 fn test_req_902513_generic_guard_change_safety_states() {
     let source = include_str!("../tools_framework_change_safety.rs");
-    let states = extract_literals_in_block(
-        source,
-        "let safety = if tested.is_none() {",
-        "\n    };",
-    );
+    let states =
+        extract_literals_in_block(source, "let safety = if tested.is_none() {", "\n    };");
     assert_code_states_announced_in_description("change_safety", "safety", &states);
 }
 
@@ -169,7 +171,8 @@ fn test_req_902513_generic_guard_change_safety_states() {
 fn test_req_902513_falsification_reports_missing_state() {
     // Falsification explicite : si un état réel n'est pas dans une fausse description,
     // l'assertion de présence échoue immédiatement en nommant l'état manquant.
-    let fake_description = "phase ∈ {brain_down, indexer_down, staged, drift, uninitialized, clean}";
+    let fake_description =
+        "phase ∈ {brain_down, indexer_down, staged, drift, uninitialized, clean}";
     let states = vec!["brain_down", "brain_accept_queue_saturated", "clean"];
 
     let muets: Vec<&&str> = states

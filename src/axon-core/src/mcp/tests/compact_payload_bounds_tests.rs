@@ -31,7 +31,11 @@ fn test_project_status_brief_bounds_content_and_structured_content() {
         })),
         id: Some(json!(1)),
     };
-    let res_brief = server.handle_request(req_brief).unwrap().result.expect("brief result");
+    let res_brief = server
+        .handle_request(req_brief)
+        .unwrap()
+        .result
+        .expect("brief result");
     let content_text = res_brief["content"][0]["text"].as_str().unwrap();
     let data_brief = &res_brief["data"];
 
@@ -64,17 +68,19 @@ fn test_project_status_brief_bounds_content_and_structured_content() {
 
     // 4. Detail continuation and omitted subtrees are present
     assert!(data_brief["omitted_in_brief"].as_array().is_some());
+    assert_eq!(data_brief["detail_continuation"]["tool"], "project_status");
     assert_eq!(
-        data_brief["detail_continuation"]["tool"], "project_status"
-    );
-    assert_eq!(
-        data_brief["detail_continuation"]["arguments"]["mode"], "verbose"
+        data_brief["detail_continuation"]["arguments"]["mode"],
+        "verbose"
     );
 
     // 5. Expand pointers for sub-sections
     assert_eq!(data_brief["expand_anomalies"]["tool"], "anomalies");
     assert_eq!(data_brief["expand_conception"]["tool"], "conception_view");
-    assert_eq!(data_brief["expand_soll_context"]["tool"], "soll_query_context");
+    assert_eq!(
+        data_brief["expand_soll_context"]["tool"],
+        "soll_query_context"
+    );
 
     // Verbose mode call for size comparison
     let req_verbose = JsonRpcRequest {
@@ -86,7 +92,11 @@ fn test_project_status_brief_bounds_content_and_structured_content() {
         })),
         id: Some(json!(2)),
     };
-    let res_verbose = server.handle_request(req_verbose).unwrap().result.expect("verbose result");
+    let res_verbose = server
+        .handle_request(req_verbose)
+        .unwrap()
+        .result
+        .expect("verbose result");
     let serialized_verbose = serde_json::to_vec(&res_verbose["data"]).unwrap();
 
     // Regression check: brief must be strictly more compact than verbose
@@ -112,8 +122,10 @@ fn test_soll_work_plan_compact_omits_long_descriptions_and_provides_pointers() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
-             VALUES ('DEC-AXO-101', 'Decision', 'AXO', 'Wake signal', '', 'current', '{}')")
+        .execute(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('DEC-AXO-101', 'Decision', 'AXO', 'Wake signal', '', 'current', '{}')",
+        )
         .unwrap();
     server
         .graph_store
@@ -129,7 +141,11 @@ fn test_soll_work_plan_compact_omits_long_descriptions_and_provides_pointers() {
         })),
         id: Some(json!(3)),
     };
-    let res = server.handle_request(req).unwrap().result.expect("soll_work_plan result");
+    let res = server
+        .handle_request(req)
+        .unwrap()
+        .result
+        .expect("soll_work_plan result");
     let data = &res["data"];
 
     // 1. Items in waves have executable detail pointers and no long descriptions
@@ -137,7 +153,10 @@ fn test_soll_work_plan_compact_omits_long_descriptions_and_provides_pointers() {
     assert!(!waves.is_empty());
     for wave in waves {
         for item in wave["items"].as_array().unwrap() {
-            assert!(item.get("description").is_none(), "item must not inline raw description");
+            assert!(
+                item.get("description").is_none(),
+                "item must not inline raw description"
+            );
             assert_eq!(
                 item["expand_with"]["tool"], "soll_get",
                 "item must have expand_with -> soll_get"
@@ -147,7 +166,9 @@ fn test_soll_work_plan_compact_omits_long_descriptions_and_provides_pointers() {
     }
 
     // 2. Top recommendations have executable detail pointers
-    let top = data["top_recommendations"].as_array().expect("top_recommendations");
+    let top = data["top_recommendations"]
+        .as_array()
+        .expect("top_recommendations");
     assert!(!top.is_empty());
     for item in top {
         assert_eq!(
@@ -199,7 +220,11 @@ fn test_soll_rrf_trimodal_names_top_results_in_text_without_replicating_bodies()
         })),
         id: Some(json!(4)),
     };
-    let res = server.handle_request(req).unwrap().result.expect("rrf_trimodal result");
+    let res = server
+        .handle_request(req)
+        .unwrap()
+        .result
+        .expect("rrf_trimodal result");
     let content_text = res["content"][0]["text"].as_str().unwrap();
     let data = &res["data"];
 
@@ -234,5 +259,8 @@ fn test_soll_rrf_trimodal_names_top_results_in_text_without_replicating_bodies()
     assert!(first.get("rrf_score").is_some());
     assert_eq!(first["expand_with"]["tool"], "soll_get");
     assert_eq!(first["expand_with"]["arguments"]["id"], "REQ-AXO-201");
-    assert!(first.get("description").is_none(), "structured result must not duplicate body");
+    assert!(
+        first.get("description").is_none(),
+        "structured result must not duplicate body"
+    );
 }

@@ -31,7 +31,11 @@ fn send_one(server: &McpServer, idem: &str, subject: &str) {
             "subject": subject, "body_dense": "ref SOLL-X"
         }),
     );
-    assert_eq!(sent["data"]["status"].as_str(), Some("ok"), "send must succeed");
+    assert_eq!(
+        sent["data"]["status"].as_str(),
+        Some("ok"),
+        "send must succeed"
+    );
 }
 
 // ── R1 / R2 / R3 — targeting + signal-only ─────────────────────────────────
@@ -52,11 +56,18 @@ fn r1_r2_r3_banner_targets_recipient_signal_only() {
     let banner = server
         .mailbox_unread_banner(TO)
         .expect("recipient with mail must get a banner");
-    assert_eq!(banner["unread"].as_i64(), Some(2), "counts both unread messages");
+    assert_eq!(
+        banner["unread"].as_i64(),
+        Some(2),
+        "counts both unread messages"
+    );
     let from = banner["from"].as_array().expect("from is an array");
     assert_eq!(from.len(), 1, "one distinct sender");
     assert_eq!(from[0].as_str(), Some(FROM));
-    assert!(banner["latest_id"].as_i64().unwrap_or(0) > 0, "pointer carries newest id");
+    assert!(
+        banner["latest_id"].as_i64().unwrap_or(0) > 0,
+        "pointer carries newest id"
+    );
     assert_eq!(
         banner["pointer"]["tool"].as_str(),
         Some("mcp_inbox_read"),
@@ -66,11 +77,17 @@ fn r1_r2_r3_banner_targets_recipient_signal_only() {
     // recovery for a stale client binding (the read tool missing from the
     // session's catalogue) so "N non-lus" is never a terminal state.
     assert!(
-        banner["on_tool_absent"].as_str().unwrap_or("").contains("reconnect"),
+        banner["on_tool_absent"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reconnect"),
         "banner must tell a stale client how to recover (reconnect MCP)"
     );
     assert!(
-        banner["banner"].as_str().unwrap_or("").contains("reconnecte"),
+        banner["banner"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reconnecte"),
         "human banner line must name the reconnect recovery"
     );
     // SIGNAL ONLY — the body must never leak into the banner.
@@ -105,8 +122,14 @@ fn r4_r5_attach_injects_generic_envelope_and_skips_surfaces() {
     let injected = server.attach_mailbox_unread_banner("query", &args, base());
     assert_eq!(injected["data"]["mailbox"]["unread"].as_i64(), Some(1));
     let text = injected["content"][0]["text"].as_str().unwrap();
-    assert!(text.starts_with("original tool output"), "original text preserved");
-    assert!(text.contains("📬"), "banner line appended to the text channel");
+    assert!(
+        text.starts_with("original tool output"),
+        "original text preserved"
+    );
+    assert!(
+        text.contains("📬"),
+        "banner line appended to the text channel"
+    );
 
     // R5 — surfaces that already show the inbox keep a clean envelope.
     for skip in ["status", "mcp_inbox_read", "mailbox_render"] {
@@ -135,11 +158,17 @@ fn r4_r5_attach_injects_generic_envelope_and_skips_surfaces() {
 fn r6_banner_clears_after_read_advances_cursor() {
     let server = create_test_server();
     send_one(&server, "r6-k1", "hello");
-    assert!(server.mailbox_unread_banner(TO).is_some(), "mail present before read");
+    assert!(
+        server.mailbox_unread_banner(TO).is_some(),
+        "mail present before read"
+    );
 
     // Pull the inbox in `unread` mode → cursor advances past the message.
     let read = server
-        .execute_tool_direct("mcp_inbox_read", &json!({ "project": TO, "mode": "unread" }))
+        .execute_tool_direct(
+            "mcp_inbox_read",
+            &json!({ "project": TO, "mode": "unread" }),
+        )
         .expect("inbox_read returns a result");
 
     // REQ-AXO-902145 — the explicit pull MUST deliver bodies in the TEXT channel

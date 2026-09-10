@@ -60,8 +60,7 @@ async fn vpc_campaign_active_session_wakes_and_tracks_quad_state() {
         .await
         .expect("active session connect to PG");
 
-    let (notify_tx, mut notify_rx) =
-        tokio::sync::mpsc::channel::<tokio_postgres::Notification>(64);
+    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<tokio_postgres::Notification>(64);
 
     let driver = tokio::spawn(async move {
         let stream = futures_util::stream::poll_fn(move |cx| connection.poll_message(cx));
@@ -111,7 +110,8 @@ async fn vpc_campaign_active_session_wakes_and_tracks_quad_state() {
     let wake_start = std::time::Instant::now();
     let mut received_wake_payload: Option<Value> = None;
 
-    while let Ok(Some(notif)) = tokio::time::timeout(Duration::from_secs(3), notify_rx.recv()).await {
+    while let Ok(Some(notif)) = tokio::time::timeout(Duration::from_secs(3), notify_rx.recv()).await
+    {
         let parsed: Value = serde_json::from_str(notif.payload()).unwrap_or(Value::Null);
         if parsed.get("to").and_then(Value::as_str) == Some(active_recipient) {
             received_wake_payload = Some(parsed);
@@ -144,8 +144,13 @@ async fn vpc_campaign_active_session_wakes_and_tracks_quad_state() {
     assert_eq!(pre_data["acknowledged_count"].as_i64(), Some(0));
 
     // 5. Active session wakes up and reads its inbox.
-    let vpc_inbox = read(&server, json!({ "project": active_recipient, "mode": "unread" }));
-    let vpc_msgs = vpc_inbox["data"]["messages"].as_array().expect("messages array");
+    let vpc_inbox = read(
+        &server,
+        json!({ "project": active_recipient, "mode": "unread" }),
+    );
+    let vpc_msgs = vpc_inbox["data"]["messages"]
+        .as_array()
+        .expect("messages array");
     assert_eq!(vpc_msgs.len(), 1);
     let vpc_msg_id = vpc_msgs[0]["id"].as_i64().expect("message id");
 
@@ -179,24 +184,41 @@ async fn vpc_campaign_active_session_wakes_and_tracks_quad_state() {
     assert_eq!(post_ack_data["acknowledged_count"].as_i64(), Some(1));
 
     // Check recipients breakdown:
-    let recs = post_ack_data["recipients"].as_array().expect("recipients breakdown array");
+    let recs = post_ack_data["recipients"]
+        .as_array()
+        .expect("recipients breakdown array");
     assert_eq!(recs.len(), 2);
-    let vpc_rec = recs.iter().find(|r| r["to_project"].as_str() == Some(active_recipient)).expect("vpc recipient");
+    let vpc_rec = recs
+        .iter()
+        .find(|r| r["to_project"].as_str() == Some(active_recipient))
+        .expect("vpc recipient");
     assert_eq!(vpc_rec["status"].as_str(), Some("acknowledged"));
     assert!(vpc_rec["notified_at"].as_str().is_some());
     assert!(vpc_rec["read_at"].as_str().is_some());
     assert!(vpc_rec["acknowledged_at"].as_str().is_some());
 
-    let aps_rec = recs.iter().find(|r| r["to_project"].as_str() == Some(inactive_recipient)).expect("aps recipient");
+    let aps_rec = recs
+        .iter()
+        .find(|r| r["to_project"].as_str() == Some(inactive_recipient))
+        .expect("aps recipient");
     assert_eq!(aps_rec["status"].as_str(), Some("notified"));
     assert!(aps_rec["notified_at"].as_str().is_some());
     assert!(aps_rec["read_at"].is_null());
     assert!(aps_rec["acknowledged_at"].is_null());
 
     // 7. Acceptance Criterion 3: Inactive session preserves message without loss and discovers it on next read.
-    let aps_inbox = read(&server, json!({ "project": inactive_recipient, "mode": "unread" }));
-    let aps_msgs = aps_inbox["data"]["messages"].as_array().expect("aps messages array");
-    assert_eq!(aps_msgs.len(), 1, "inactive session must find its message preserved without loss");
+    let aps_inbox = read(
+        &server,
+        json!({ "project": inactive_recipient, "mode": "unread" }),
+    );
+    let aps_msgs = aps_inbox["data"]["messages"]
+        .as_array()
+        .expect("aps messages array");
+    assert_eq!(
+        aps_msgs.len(),
+        1,
+        "inactive session must find its message preserved without loss"
+    );
     assert_eq!(aps_msgs[0]["context_id"].as_str(), Some(campaign_context));
 
     // Cleanup client connection
@@ -295,7 +317,10 @@ fn quad_state_full_lifecycle_progression() {
     assert_eq!(tap1["data"]["notified_count"].as_i64(), Some(1));
     assert_eq!(tap1["data"]["read_count"].as_i64(), Some(0));
     assert_eq!(tap1["data"]["acknowledged_count"].as_i64(), Some(0));
-    assert_eq!(tap1["data"]["recipients"][0]["status"].as_str(), Some("notified"));
+    assert_eq!(
+        tap1["data"]["recipients"][0]["status"].as_str(),
+        Some("notified")
+    );
 
     // 2. State 2: Read
     let read_res = read(&server, json!({ "project": "PJB", "mode": "unread" }));
@@ -307,7 +332,10 @@ fn quad_state_full_lifecycle_progression() {
     assert_eq!(tap2["data"]["notified_count"].as_i64(), Some(1));
     assert_eq!(tap2["data"]["read_count"].as_i64(), Some(1));
     assert_eq!(tap2["data"]["acknowledged_count"].as_i64(), Some(0));
-    assert_eq!(tap2["data"]["recipients"][0]["status"].as_str(), Some("read"));
+    assert_eq!(
+        tap2["data"]["recipients"][0]["status"].as_str(),
+        Some("read")
+    );
 
     // 3. State 3: Acknowledged
     let ack_res = ack(
@@ -324,5 +352,8 @@ fn quad_state_full_lifecycle_progression() {
     assert_eq!(tap3["data"]["notified_count"].as_i64(), Some(1));
     assert_eq!(tap3["data"]["read_count"].as_i64(), Some(1));
     assert_eq!(tap3["data"]["acknowledged_count"].as_i64(), Some(1));
-    assert_eq!(tap3["data"]["recipients"][0]["status"].as_str(), Some("acknowledged"));
+    assert_eq!(
+        tap3["data"]["recipients"][0]["status"].as_str(),
+        Some("acknowledged")
+    );
 }

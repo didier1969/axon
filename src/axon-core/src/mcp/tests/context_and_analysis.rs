@@ -1191,14 +1191,23 @@ fn test_json_data_artifact_resolves_by_path_and_inherits_consumer_tests() {
     let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(
         crate::test_support::ist_fixtures::IstSeed::new()
             .symbol(crate::test_support::ist_fixtures::SymbolFixture::new(
-                artifact, "validation_corpus.json", "data_artifact", project,
+                artifact,
+                "validation_corpus.json",
+                "data_artifact",
+                project,
             ))
             .symbol(crate::test_support::ist_fixtures::SymbolFixture::new(
-                consumer, "Fiscaly.Corpus.cases!", "function", project,
+                consumer,
+                "Fiscaly.Corpus.cases!",
+                "function",
+                project,
             ))
             .symbol(
                 crate::test_support::ist_fixtures::SymbolFixture::new(
-                    test, "loads_validation_corpus", "function", project,
+                    test,
+                    "loads_validation_corpus",
+                    "function",
+                    project,
                 )
                 .tested(true),
             )
@@ -1209,10 +1218,16 @@ fn test_json_data_artifact_resolves_by_path_and_inherits_consumer_tests() {
                 project,
             ))
             .node(crate::test_support::ist_fixtures::SollNodeFixture::new(
-                "REQ-TST-902603", "Requirement", project, "Validated corpus",
+                "REQ-TST-902603",
+                "Requirement",
+                project,
+                "Validated corpus",
             ))
             .edge(crate::test_support::ist_fixtures::EdgeFixture::new(
-                "READS_ARTIFACT", consumer, artifact, project,
+                "READS_ARTIFACT",
+                consumer,
+                artifact,
+                project,
             ))
             .call(crate::test_support::ist_fixtures::CallFixture::canonical(
                 test, consumer, project,
@@ -1226,12 +1241,17 @@ fn test_json_data_artifact_resolves_by_path_and_inherits_consumer_tests() {
     )).unwrap();
 
     let call = |name: &str, arguments: Value, id: i64| {
-        harness.server.handle_request(JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "tools/call".to_string(),
-            params: Some(json!({ "name": name, "arguments": arguments })),
-            id: Some(json!(id)),
-        }).unwrap().result.unwrap()
+        harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({ "name": name, "arguments": arguments })),
+                id: Some(json!(id)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
     };
 
     let impact = call(
@@ -1239,7 +1259,11 @@ fn test_json_data_artifact_resolves_by_path_and_inherits_consumer_tests() {
         json!({"project": project, "symbol": relative, "depth": 3, "mode": "verbose"}),
         90260301,
     );
-    assert_ne!(impact["data"]["impact_available"].as_bool(), Some(false), "{impact:?}");
+    assert_ne!(
+        impact["data"]["impact_available"].as_bool(),
+        Some(false),
+        "{impact:?}"
+    );
     let rendered = impact["content"][0]["text"].as_str().unwrap_or("");
     assert!(rendered.contains("Fiscaly.Corpus.cases!"), "{rendered}");
     assert!(!rendered.contains("symbol not found"), "{rendered}");
@@ -1249,15 +1273,27 @@ fn test_json_data_artifact_resolves_by_path_and_inherits_consumer_tests() {
         json!({"project_code": project, "target": relative, "target_type": "file"}),
         90260302,
     );
-    assert_eq!(safety["data"]["coverage_signals"]["tested"], json!(true), "{safety:?}");
-    assert_eq!(safety["data"]["traceability_signals"]["traceability_links"], json!(1), "{safety:?}");
+    assert_eq!(
+        safety["data"]["coverage_signals"]["tested"],
+        json!(true),
+        "{safety:?}"
+    );
+    assert_eq!(
+        safety["data"]["traceability_signals"]["traceability_links"],
+        json!(1),
+        "{safety:?}"
+    );
 
     let tests = call(
         "test_impact",
         json!({"project_code": project, "symbols": [relative], "radius": 4}),
         90260303,
     );
-    assert_eq!(tests["data"]["minimal_test_set"], json!([test]), "{tests:?}");
+    assert_eq!(
+        tests["data"]["minimal_test_set"],
+        json!([test]),
+        "{tests:?}"
+    );
 
     crate::ist_snapshot::evict_process_snapshot(project);
     harness.server.soll_cache().invalidate(project);
@@ -1693,7 +1729,10 @@ fn test_path_uses_ram_snapshot_when_warm() {
     );
     // REQ-AXO-902019 — a single linear route reports multiplicity 1, no detours.
     assert_eq!(data["multiplicity"]["route_count"].as_u64(), Some(1));
-    assert_eq!(data["multiplicity"]["has_independent_alternates"].as_bool(), Some(false));
+    assert_eq!(
+        data["multiplicity"]["has_independent_alternates"].as_bool(),
+        Some(false)
+    );
     assert_eq!(data["detours"].as_array().map(|a| a.len()), Some(0));
 }
 
@@ -2020,7 +2059,10 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
     // that DO have inbound CALLS (foreign_a/foreign_b/bridge/sink); only `source`
     // and `entry` are orphans (2/7) → alignment (7-2)/7 = 71.4. The prior 0.0
     // reflected the legacy PG path flagging all 7 (it ignored the CALLS edges).
-    assert_eq!(data["summary"]["alignment_proxy_score"].as_f64(), Some(71.4));
+    assert_eq!(
+        data["summary"]["alignment_proxy_score"].as_f64(),
+        Some(71.4)
+    );
     assert_eq!(
         data["summary"]["rectitude_proxy_score"].as_f64(),
         Some(57.1)
@@ -2416,7 +2458,9 @@ fn test_soll_work_plan_default_limit_is_small_and_marks_truncated() {
         .result
         .expect("result");
     let data = response.get("data").expect("data");
-    let returned = data["summary"]["returned_items"].as_u64().expect("returned");
+    let returned = data["summary"]["returned_items"]
+        .as_u64()
+        .expect("returned");
     assert!(
         returned <= 12,
         "default wave listing must be small (<=12), got {returned}"
@@ -3055,8 +3099,7 @@ fn test_axon_query_mode_gates_graph_r1_expansion() {
 
     // Verbose: the CALLS neighbour `callee_fn` surfaces in the expansion.
     let verbose = run(Some("verbose"));
-    let verbose_neighbours: Vec<String> = verbose["data"]["context"]
-        ["related_symbols_via_graph"]
+    let verbose_neighbours: Vec<String> = verbose["data"]["context"]["related_symbols_via_graph"]
         .as_array()
         .map(|a| {
             a.iter()
@@ -3126,18 +3169,24 @@ fn query_graph_r1_neighbors_ram_excludes_files_and_anchor() {
         },
     ];
     evict_process_snapshot(code);
-    publish_process_snapshot(code.to_string(), std::sync::Arc::new(IstGraph::build(nodes, edges)));
+    publish_process_snapshot(
+        code.to_string(),
+        std::sync::Arc::new(IstGraph::build(nodes, edges)),
+    );
 
     let server = create_test_server();
     let direct: HashSet<String> = ["target".to_string()].into_iter().collect();
     let result = server.query_graph_r1_neighbors(&direct, code, 10);
 
-    let names: Vec<&str> = result
-        .iter()
-        .filter_map(|v| v["name"].as_str())
-        .collect();
-    assert!(names.contains(&"caller"), "reverse CALLS caller must surface: {names:?}");
-    assert!(!names.contains(&"target"), "anchor name must be excluded: {names:?}");
+    let names: Vec<&str> = result.iter().filter_map(|v| v["name"].as_str()).collect();
+    assert!(
+        names.contains(&"caller"),
+        "reverse CALLS caller must surface: {names:?}"
+    );
+    assert!(
+        !names.contains(&"target"),
+        "anchor name must be excluded: {names:?}"
+    );
     assert!(
         !names.iter().any(|n| n.contains("f.rs")),
         "file endpoint must be excluded: {names:?}"
@@ -3628,7 +3677,8 @@ fn test_axon_inspect_zero_says_when_the_kind_is_out_of_the_call_graph() {
         seed = seed.symbol(SymbolFixture::new(id, name, kind, "CGR"));
         seed = seed.edge(EdgeFixture::new("CONTAINS", "/p/Multi.java", id, "CGR"));
     }
-    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(seed).unwrap();
+    let harness =
+        crate::test_support::ist_fixtures::create_test_server_with_ist_seed(seed).unwrap();
 
     let inspect = |symbol: &str| -> String {
         harness
@@ -4128,7 +4178,9 @@ fn test_axon_why_prioritizes_explicit_soll_id_and_keeps_tenant_scope() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO axon.Project (code) VALUES ('DGD'), ('OTH') ON CONFLICT (code) DO NOTHING")
+        .execute(
+            "INSERT INTO axon.Project (code) VALUES ('DGD'), ('OTH') ON CONFLICT (code) DO NOTHING",
+        )
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('DGD::acquerir', 'acquerir', 'function', true, true, false, 'DGD')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-DGD-002', 'Requirement', 'DGD', 'Weak correlated requirement', 'acquerir legacy correlation', 'current', '{}'), ('REQ-DGD-009', 'Requirement', 'DGD', 'Explicit acquisition contract', 'the exact requested rationale', 'current', '{}'), ('REQ-OTH-009', 'Requirement', 'OTH', 'Other tenant contract', 'must never cross the boundary', 'current', '{}')").unwrap();
@@ -4884,10 +4936,16 @@ fn test_axon_audit_dgd_candidates_are_inconclusive_not_fake_zero_scores() {
         .unwrap();
     let content = result["content"][0]["text"].as_str().unwrap();
     assert!(content.contains("Security: inconclusive"), "{content}");
-    assert!(content.contains("not labelled vulnerabilities"), "{content}");
+    assert!(
+        content.contains("not labelled vulnerabilities"),
+        "{content}"
+    );
     assert!(!content.contains("Potential vulnerabilities"), "{content}");
     assert!(content.contains("Quality & Tests: n/a"), "{content}");
-    assert!(content.contains("Telemetry & Observability: n/a"), "{content}");
+    assert!(
+        content.contains("Telemetry & Observability: n/a"),
+        "{content}"
+    );
     assert!(content.contains("raw-log call candidate"), "{content}");
     assert!(!content.contains("Use structured telemetry"), "{content}");
     assert!(result["data"]["security_score"].is_null());
@@ -4914,7 +4972,9 @@ fn test_axon_audit_cross_language_taint() {
     let (api, dummy) = (format!("{code}/api.ex"), format!("{code}/api_dummy.ex"));
     server
         .graph_store
-        .execute(&format!("INSERT INTO axon.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"))
+        .execute(&format!(
+            "INSERT INTO axon.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"
+        ))
         .unwrap();
     server.graph_store.execute(&format!("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('{api}', '{code}', 'hash-{api}', 0), ('{dummy}', '{code}', 'hash-{dummy}', 0) ON CONFLICT (path) DO NOTHING")).unwrap();
     server
@@ -5187,9 +5247,9 @@ fn batch_publie_ses_resultats_dans_les_deux_canaux_et_dit_son_verdict() {
     let structured = result
         .get("structuredContent")
         .expect("structuredContent doit exister (REQ-AXO-902517)");
-    let resultats = structured["results"]
-        .as_array()
-        .unwrap_or_else(|| panic!("les résultats doivent atteindre le canal structuré : {structured}"));
+    let resultats = structured["results"].as_array().unwrap_or_else(|| {
+        panic!("les résultats doivent atteindre le canal structuré : {structured}")
+    });
     assert_eq!(resultats.len(), 2, "un résultat par appel : {structured}");
     assert_eq!(structured["status"], json!("ok"));
     assert_eq!(structured["call_count"], json!(2));
@@ -5818,7 +5878,11 @@ fn test_structural_health_index_persists_delta_and_re_surfaces_stagnant_axes() {
     };
 
     let first = call(90218701);
-    assert_eq!(first["data"]["delta_vs_previous"], Value::Null, "no prior snapshot yet: {first:?}");
+    assert_eq!(
+        first["data"]["delta_vs_previous"],
+        Value::Null,
+        "no prior snapshot yet: {first:?}"
+    );
     let coverage_of = |resp: &Value| -> Value {
         resp["data"]["below_target"]
             .as_array()
@@ -5829,15 +5893,25 @@ fn test_structural_health_index_persists_delta_and_re_surfaces_stagnant_axes() {
 
     let second = call(90218702);
     let delta = &second["data"]["delta_vs_previous"];
-    assert!(!delta.is_null(), "second call must diff against the first snapshot: {second:?}");
+    assert!(
+        !delta.is_null(),
+        "second call must diff against the first snapshot: {second:?}"
+    );
     assert_eq!(
         delta["aggregate_delta"].as_f64().unwrap_or(f64::NAN),
         0.0,
         "unchanged snapshot data must yield a zero aggregate delta: {delta:?}"
     );
     let cov2 = coverage_of(&second);
-    assert!(!cov2.is_null(), "weighted_coverage must still be below target: {second:?}");
-    assert_eq!(cov2["re_surfaced"].as_bool(), Some(true), "stagnant (delta=0) axis must re-surface: {cov2:?}");
+    assert!(
+        !cov2.is_null(),
+        "weighted_coverage must still be below target: {second:?}"
+    );
+    assert_eq!(
+        cov2["re_surfaced"].as_bool(),
+        Some(true),
+        "stagnant (delta=0) axis must re-surface: {cov2:?}"
+    );
 
     // Now cover `target` via a #[test] fn reachable through CALLS, re-warm, and re-measure.
     let test_fn = format!("{module}::covers_target");
@@ -5855,7 +5929,11 @@ fn test_structural_health_index_persists_delta_and_re_surfaces_stagnant_axes() {
     );
     let cov3 = coverage_of(&third);
     if !cov3.is_null() {
-        assert_eq!(cov3["re_surfaced"].as_bool(), Some(false), "improving axis must NOT re-surface: {cov3:?}");
+        assert_eq!(
+            cov3["re_surfaced"].as_bool(),
+            Some(false),
+            "improving axis must NOT re-surface: {cov3:?}"
+        );
     }
 
     std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
@@ -5933,31 +6011,57 @@ fn test_structural_health_worklist_ranks_all_categories_by_roi() {
         .result
         .unwrap();
 
-    let worklist = response["data"]["worklist"].as_array().cloned().unwrap_or_default();
-    assert!(!worklist.is_empty(), "worklist must not be empty: {response:?}");
+    let worklist = response["data"]["worklist"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !worklist.is_empty(),
+        "worklist must not be empty: {response:?}"
+    );
 
-    let categories: std::collections::HashSet<&str> =
-        worklist.iter().filter_map(|c| c["category"].as_str()).collect();
-    assert!(categories.contains("coverage"), "expected a coverage candidate: {worklist:?}");
-    assert!(categories.contains("acyclicity"), "expected an acyclicity candidate (cyc_a<->cyc_b): {worklist:?}");
-    assert!(categories.contains("resilience"), "expected a resilience candidate (art_b is an articulation point): {worklist:?}");
+    let categories: std::collections::HashSet<&str> = worklist
+        .iter()
+        .filter_map(|c| c["category"].as_str())
+        .collect();
+    assert!(
+        categories.contains("coverage"),
+        "expected a coverage candidate: {worklist:?}"
+    );
+    assert!(
+        categories.contains("acyclicity"),
+        "expected an acyclicity candidate (cyc_a<->cyc_b): {worklist:?}"
+    );
+    assert!(
+        categories.contains("resilience"),
+        "expected a resilience candidate (art_b is an articulation point): {worklist:?}"
+    );
     assert!(
         worklist.iter().all(|c| c["target"]["module"].as_str() != Some(code.as_str())),
         "the bare project-code fallback module (from a non-source id) must never surface as a coupling candidate: {worklist:?}"
     );
 
     for c in &worklist {
-        assert!(c["blast_radius"].as_u64().unwrap_or(0) >= 1, "blast_radius must be >= 1: {c:?}");
+        assert!(
+            c["blast_radius"].as_u64().unwrap_or(0) >= 1,
+            "blast_radius must be >= 1: {c:?}"
+        );
         let roi = c["roi"].as_f64().unwrap();
         let delta = c["expected_delta_shi"].as_f64().unwrap();
         let blast = c["blast_radius"].as_u64().unwrap() as f64;
-        assert!((roi - delta / blast).abs() < 1e-9, "roi must equal expected_delta_shi/blast_radius: {c:?}");
+        assert!(
+            (roi - delta / blast).abs() < 1e-9,
+            "roi must equal expected_delta_shi/blast_radius: {c:?}"
+        );
     }
     // Ranked strictly non-increasing by ROI.
     for pair in worklist.windows(2) {
         let a = pair[0]["roi"].as_f64().unwrap();
         let b = pair[1]["roi"].as_f64().unwrap();
-        assert!(a >= b, "worklist must be ranked by descending ROI: {a} then {b} in {worklist:?}");
+        assert!(
+            a >= b,
+            "worklist must be ranked by descending ROI: {a} then {b} in {worklist:?}"
+        );
     }
 
     std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
@@ -6019,21 +6123,41 @@ fn test_debt_digest_orchestrates_ranked_sections_and_filter() {
 
     let resp = call(json!({ "project_code": code, "top": 10 }));
     let counts = &resp["data"]["counts"];
-    assert!(counts["dry"].as_u64().unwrap_or(0) >= 1, "SIMILAR_TO pair must be counted: {resp:?}");
-    assert!(counts["unlinked_code"].as_u64().unwrap_or(0) >= 1, "isolated symbol must be counted: {resp:?}");
-    assert!(counts["unlinked_soll"].as_u64().unwrap_or(0) >= 1, "orphan requirement must be counted: {resp:?}");
-    assert!(counts["stubs"].as_u64().unwrap_or(0) >= 1, "todo!() stub must be counted: {resp:?}");
+    assert!(
+        counts["dry"].as_u64().unwrap_or(0) >= 1,
+        "SIMILAR_TO pair must be counted: {resp:?}"
+    );
+    assert!(
+        counts["unlinked_code"].as_u64().unwrap_or(0) >= 1,
+        "isolated symbol must be counted: {resp:?}"
+    );
+    assert!(
+        counts["unlinked_soll"].as_u64().unwrap_or(0) >= 1,
+        "orphan requirement must be counted: {resp:?}"
+    );
+    assert!(
+        counts["stubs"].as_u64().unwrap_or(0) >= 1,
+        "todo!() stub must be counted: {resp:?}"
+    );
 
-    let sections = resp["data"]["sections"].as_array().cloned().unwrap_or_default();
+    let sections = resp["data"]["sections"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let keys: std::collections::HashSet<&str> =
         sections.iter().filter_map(|s| s["key"].as_str()).collect();
     assert!(
         keys.contains("dry") && keys.contains("unlinked_soll") && keys.contains("unlinked_code"),
         "all three sections present: {keys:?}"
     );
-    let dry = sections.iter().find(|s| s["key"] == "dry").expect("dry section");
+    let dry = sections
+        .iter()
+        .find(|s| s["key"] == "dry")
+        .expect("dry section");
     assert!(
-        dry["offenders"][0]["pair"].as_array().map_or(false, |p| p.len() == 2),
+        dry["offenders"][0]["pair"]
+            .as_array()
+            .map_or(false, |p| p.len() == 2),
         "dry offender carries a 2-symbol pair: {dry:?}"
     );
 
@@ -6047,25 +6171,60 @@ fn test_debt_digest_orchestrates_ranked_sections_and_filter() {
         .as_array()
         .map(|a| a.iter().filter_map(|o| o["id"].as_str()).collect())
         .unwrap_or_default();
-    assert!(usoll_ids.contains(format!("REQ-{code}-001").as_str()), "open REQ must be actionable: {usoll:?}");
-    assert!(usoll_ids.contains(format!("VAL-{code}-001").as_str()), "current Validation must be actionable: {usoll:?}");
-    assert!(usoll_ids.contains(format!("VAL-{code}-002").as_str()), "planned Validation (missing check) must be included: {usoll:?}");
-    assert!(!usoll_ids.contains(format!("DEC-{code}-001").as_str()), "Decision (doc) must be excluded: {usoll:?}");
-    assert!(!usoll_ids.contains(format!("REQ-{code}-002").as_str()), "rejected REQ (terminal) must be excluded: {usoll:?}");
+    assert!(
+        usoll_ids.contains(format!("REQ-{code}-001").as_str()),
+        "open REQ must be actionable: {usoll:?}"
+    );
+    assert!(
+        usoll_ids.contains(format!("VAL-{code}-001").as_str()),
+        "current Validation must be actionable: {usoll:?}"
+    );
+    assert!(
+        usoll_ids.contains(format!("VAL-{code}-002").as_str()),
+        "planned Validation (missing check) must be included: {usoll:?}"
+    );
+    assert!(
+        !usoll_ids.contains(format!("DEC-{code}-001").as_str()),
+        "Decision (doc) must be excluded: {usoll:?}"
+    );
+    assert!(
+        !usoll_ids.contains(format!("REQ-{code}-002").as_str()),
+        "rejected REQ (terminal) must be excluded: {usoll:?}"
+    );
 
     // REQ-AXO-902361 — the stubs section lists the todo!() placeholder.
-    let stubs = sections.iter().find(|s| s["key"] == "stubs").expect("stubs section");
+    let stubs = sections
+        .iter()
+        .find(|s| s["key"] == "stubs")
+        .expect("stubs section");
     let has_stub = stubs["offenders"]
         .as_array()
-        .map(|a| a.iter().any(|o| o["id"].as_str().map_or(false, |id| id.contains("stub_fn"))))
+        .map(|a| {
+            a.iter()
+                .any(|o| o["id"].as_str().map_or(false, |id| id.contains("stub_fn")))
+        })
         .unwrap_or(false);
-    assert!(has_stub, "todo!() stub must be listed in the stubs section: {stubs:?}");
+    assert!(
+        has_stub,
+        "todo!() stub must be listed in the stubs section: {stubs:?}"
+    );
 
     // `sections=` filter — only `dry` is computed.
     let filtered = call(json!({ "project_code": code, "sections": ["dry"] }));
-    let fsections = filtered["data"]["sections"].as_array().cloned().unwrap_or_default();
-    assert_eq!(fsections.len(), 1, "filter yields exactly one section: {fsections:?}");
-    assert_eq!(fsections[0]["key"].as_str(), Some("dry"), "filtered section is dry: {fsections:?}");
+    let fsections = filtered["data"]["sections"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        fsections.len(),
+        1,
+        "filter yields exactly one section: {fsections:?}"
+    );
+    assert_eq!(
+        fsections[0]["key"].as_str(),
+        Some("dry"),
+        "filtered section is dry: {fsections:?}"
+    );
 }
 
 // REQ-AXO-902185 slice 1 — the `duplication` sub-score must read `SIMILAR_TO` edges
@@ -6115,14 +6274,20 @@ fn test_duplication_score_reads_similar_to_edges_from_ram() {
         .result
         .unwrap();
 
-    let sub_scores = response["data"]["sub_scores"].as_array().cloned().unwrap_or_default();
+    let sub_scores = response["data"]["sub_scores"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let dup = sub_scores
         .iter()
         .find(|s| s["name"] == "duplication")
         .cloned()
         .unwrap_or_else(|| panic!("duplication sub-score missing: {response:?}"));
     assert!(
-        dup["detail"].as_str().unwrap_or("").contains("1 near-duplicate pair"),
+        dup["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("1 near-duplicate pair"),
         "expected exactly 1 clone pair counted: {dup:?}"
     );
     assert_eq!(response["data"]["dimensions_wired"].as_u64(), Some(9));
@@ -6155,7 +6320,10 @@ fn test_reconcile_duplication_edges_persists_similar_to_and_replaces_stale() {
         }
         format!(
             "[{}]",
-            v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         )
     };
     let vec_a = vector_literal(&[(0, 1.0), (1, 0.001)]);
@@ -6180,9 +6348,18 @@ fn test_reconcile_duplication_edges_persists_similar_to_and_replaces_stale() {
     // is what guarantees this gets cleaned up).
     server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{dup_a}', '{unrelated}', 'SIMILAR_TO', '{code}', 0)")).unwrap();
 
-    let report = server.graph_store.reconcile_duplication_edges(&code).unwrap();
-    assert_eq!(report.symbols_scanned, 3, "must scan all 3 representative-chunk symbols");
-    assert_eq!(report.pairs_found, 1, "only dup_a<->dup_b are within threshold: {report:?}");
+    let report = server
+        .graph_store
+        .reconcile_duplication_edges(&code)
+        .unwrap();
+    assert_eq!(
+        report.symbols_scanned, 3,
+        "must scan all 3 representative-chunk symbols"
+    );
+    assert_eq!(
+        report.pairs_found, 1,
+        "only dup_a<->dup_b are within threshold: {report:?}"
+    );
 
     let rows = server
         .graph_store
@@ -6191,14 +6368,30 @@ fn test_reconcile_duplication_edges_persists_similar_to_and_replaces_stale() {
         ))
         .unwrap();
     let edges: Vec<Vec<Value>> = serde_json::from_str(&rows).unwrap();
-    assert_eq!(edges.len(), 1, "stale dup_a<->unrelated edge must be gone: {edges:?}");
+    assert_eq!(
+        edges.len(),
+        1,
+        "stale dup_a<->unrelated edge must be gone: {edges:?}"
+    );
     let pair = [edges[0][0].as_str().unwrap(), edges[0][1].as_str().unwrap()];
-    assert!(pair.contains(&dup_a.as_str()) && pair.contains(&dup_b.as_str()), "surviving edge must be dup_a<->dup_b: {edges:?}");
-    assert!(!pair.contains(&unrelated.as_str()), "unrelated must not appear: {edges:?}");
+    assert!(
+        pair.contains(&dup_a.as_str()) && pair.contains(&dup_b.as_str()),
+        "surviving edge must be dup_a<->dup_b: {edges:?}"
+    );
+    assert!(
+        !pair.contains(&unrelated.as_str()),
+        "unrelated must not appear: {edges:?}"
+    );
 
     // Idempotent re-run: same inputs, same edge set (no duplicate rows, no drift).
-    let report2 = server.graph_store.reconcile_duplication_edges(&code).unwrap();
-    assert_eq!(report2.pairs_found, 1, "re-run with unchanged embeddings must reproduce the same pair count");
+    let report2 = server
+        .graph_store
+        .reconcile_duplication_edges(&code)
+        .unwrap();
+    assert_eq!(
+        report2.pairs_found, 1,
+        "re-run with unchanged embeddings must reproduce the same pair count"
+    );
 }
 
 // REQ-AXO-902185 — module_depth (interface/impl ratio, APoSD) + impact_radius (bounded
@@ -6252,7 +6445,10 @@ fn test_module_depth_and_impact_radius_scores_wire_from_ram() {
         .result
         .unwrap();
 
-    let sub_scores = response["data"]["sub_scores"].as_array().cloned().unwrap_or_default();
+    let sub_scores = response["data"]["sub_scores"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let find = |name: &str| -> Value {
         sub_scores
             .iter()
@@ -6266,7 +6462,13 @@ fn test_module_depth_and_impact_radius_scores_wire_from_ram() {
         (depth["value"].as_f64().unwrap() - 0.5).abs() < 1e-6,
         "2/4 public symbols → depth score 0.5: {depth:?}"
     );
-    assert!(depth["detail"].as_str().unwrap_or("").contains("ratio=0.500"), "{depth:?}");
+    assert!(
+        depth["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("ratio=0.500"),
+        "{depth:?}"
+    );
 
     let radius = find("impact_radius");
     assert!(
@@ -6274,7 +6476,10 @@ fn test_module_depth_and_impact_radius_scores_wire_from_ram() {
         "p95=2 / total_nodes=4 → 1-2/4=0.5: {radius:?}"
     );
     assert!(
-        radius["detail"].as_str().unwrap_or("").contains("median impact radius=0")
+        radius["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("median impact radius=0")
             && radius["detail"].as_str().unwrap_or("").contains("p95=2"),
         "{radius:?}"
     );
@@ -6335,7 +6540,10 @@ fn test_god_objects_score_reads_complexity_and_fanout_from_ram() {
         .result
         .unwrap();
 
-    let sub_scores = response["data"]["sub_scores"].as_array().cloned().unwrap_or_default();
+    let sub_scores = response["data"]["sub_scores"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let god_score = sub_scores
         .iter()
         .find(|s| s["name"] == "god_objects")
@@ -6346,7 +6554,10 @@ fn test_god_objects_score_reads_complexity_and_fanout_from_ram() {
         "1 god-object / 3 real functions → score 1-1/3=0.667: {god_score:?}"
     );
     assert!(
-        god_score["detail"].as_str().unwrap_or("").contains("1 god-object"),
+        god_score["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("1 god-object"),
         "{god_score:?}"
     );
 
@@ -6377,9 +6588,10 @@ fn suggests_a_shorter_symbol_when_the_needle_has_an_extra_character() {
     .unwrap();
 
     // Trailing "s" the caller did not mean to type.
-    let raw = harness
-        .server
-        .suggest_scoped_symbols_canonical("reject_body_less_sends", Some("AXO"), 8);
+    let raw =
+        harness
+            .server
+            .suggest_scoped_symbols_canonical("reject_body_less_sends", Some("AXO"), 8);
     let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
     let names: Vec<&str> = rows
         .iter()
@@ -6435,9 +6647,10 @@ fn an_unrelated_needle_suggests_nothing_rather_than_a_random_neighbour() {
     )
     .unwrap();
 
-    let raw = harness
-        .server
-        .suggest_scoped_symbols_canonical("zzzzzzzzzzzzzzzzzzzzzz", Some("AXO"), 8);
+    let raw =
+        harness
+            .server
+            .suggest_scoped_symbols_canonical("zzzzzzzzzzzzzzzzzzzzzz", Some("AXO"), 8);
     let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
 
     assert!(
@@ -6607,7 +6820,10 @@ fn test_inspect_source_without_exact_proof_is_explicitly_lossy() {
 fn test_project_status_labels_snapshot_notes_without_denying_global_runtime_health() {
     let clean = McpServer::project_status_degradation_display_for_tests(1, &[]);
     assert!(clean.contains("none in this snapshot"), "{clean}");
-    assert!(clean.contains("`status` is the runtime authority"), "{clean}");
+    assert!(
+        clean.contains("`status` is the runtime authority"),
+        "{clean}"
+    );
 
     let degraded = McpServer::project_status_degradation_display_for_tests(
         1,
@@ -6641,7 +6857,10 @@ fn test_inspect_source_window_reaches_the_middle_of_a_long_symbol() {
     // first rendered line.
     let (start, end, missed) = McpServer::source_window_for(&lines, Some("commit_cmd"), 0);
     assert!(!missed);
-    assert!(start < 460 && end > 460, "window {start}..{end} must span 460");
+    assert!(
+        start < 460 && end > 460,
+        "window {start}..{end} must span 460"
+    );
     assert!(lines[start..end].iter().any(|l| l.contains("commit_cmd")));
 
     // `offset` continues where the previous window stopped.
@@ -6685,7 +6904,12 @@ fn test_inspect_says_when_a_short_name_carries_more_than_one_definition() {
     let mut seed = IstSeed::new()
         .symbol(SymbolFixture::new(LIVE, "load_registry", "function", "HOM"))
         .symbol(SymbolFixture::new(DEAD, "load_registry", "function", "HOM"))
-        .symbol(SymbolFixture::new(SOLO, "only_one_of_me", "function", "HOM"));
+        .symbol(SymbolFixture::new(
+            SOLO,
+            "only_one_of_me",
+            "function",
+            "HOM",
+        ));
     // Trois appelants sur la définition VIVANTE, aucun sur la morte. Le tri
     // lexicographique retient `a_dead` : c'est le pire cas, pas le plus commode.
     for i in 0..3 {
@@ -6715,7 +6939,8 @@ fn test_inspect_says_when_a_short_name_carries_more_than_one_definition() {
             "HOM",
         ));
 
-    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(seed).unwrap();
+    let harness =
+        crate::test_support::ist_fixtures::create_test_server_with_ist_seed(seed).unwrap();
     let inspect = |symbol: &str| -> String {
         harness
             .server
@@ -6990,11 +7215,17 @@ fn orphan_clusters_mcp_expose_un_statut_non_concluant_sous_la_majorite() {
         .unwrap();
     assert_eq!(boundary["data"]["wiring_coverage"], json!(0.5));
     assert_eq!(boundary["data"]["cluster_count"], json!(1));
-    assert_eq!(boundary["data"]["status"], json!("unreached_clusters_detected"));
+    assert_eq!(
+        boundary["data"]["status"],
+        json!("unreached_clusters_detected")
+    );
     assert_eq!(boundary["data"]["conclusive"], json!(true));
     assert_eq!(boundary["data"]["dead_code_proven"], json!(false));
     let rendered = boundary["content"][0]["text"].as_str().unwrap_or("");
-    assert!(rendered.contains("n'est pas une preuve de code mort"), "{rendered}");
+    assert!(
+        rendered.contains("n'est pas une preuve de code mort"),
+        "{rendered}"
+    );
     assert!(!rendered.contains("dead cluster"), "{rendered}");
 
     // Une vraie arete depuis la racine rend les quatre candidats atteints. Le canal
@@ -7025,7 +7256,10 @@ fn orphan_clusters_mcp_expose_un_statut_non_concluant_sous_la_majorite() {
     assert_eq!(reached["data"]["conclusive"], json!(true));
     assert_eq!(reached["data"]["dead_code_proven"], json!(false));
     let rendered = reached["content"][0]["text"].as_str().unwrap_or("");
-    assert!(rendered.contains("n'est pas une preuve de code mort"), "{rendered}");
+    assert!(
+        rendered.contains("n'est pas une preuve de code mort"),
+        "{rendered}"
+    );
 
     crate::ist_snapshot::evict_process_snapshot(project);
 }
@@ -7202,7 +7436,9 @@ def test_undecidable_dynamic():
         }),
         90258204,
     );
-    let safety_val = undecidable_safety["data"]["change_safety"].as_str().unwrap_or("");
+    let safety_val = undecidable_safety["data"]["change_safety"]
+        .as_str()
+        .unwrap_or("");
     assert_ne!(
         safety_val, "unsafe",
         "change_safety must NEVER be unsafe on undecidable test coverage: {:?}",
@@ -7231,7 +7467,11 @@ fn test_data_catalog_action_read_reports_ist_persistence_without_sql_902487() {
 
     server
         .graph_store
-        .sync_project_registry_entry(project_code, Some("dgd-test"), Some(project_dir.to_str().unwrap()))
+        .sync_project_registry_entry(
+            project_code,
+            Some("dgd-test"),
+            Some(project_dir.to_str().unwrap()),
+        )
         .unwrap();
 
     let data_dir = project_dir.join("data");
@@ -7259,26 +7499,50 @@ fn test_data_catalog_action_read_reports_ist_persistence_without_sql_902487() {
 
     // Before indexing: action=read must report ist_indexed=false and ist_persisted_count=0
     let read_before = call(json!({ "project_code": project_code, "action": "read" }));
-    assert_ne!(read_before["isError"].as_bool(), Some(true), "{read_before:?}");
+    assert_ne!(
+        read_before["isError"].as_bool(),
+        Some(true),
+        "{read_before:?}"
+    );
     let data_before = &read_before["structuredContent"];
-    assert_eq!(data_before["ist_indexed"].as_bool(), Some(false), "Must report ist_indexed=false before indexing: {read_before:?}");
+    assert_eq!(
+        data_before["ist_indexed"].as_bool(),
+        Some(false),
+        "Must report ist_indexed=false before indexing: {read_before:?}"
+    );
     assert_eq!(data_before["ist_persisted_count"].as_i64(), Some(0));
     let text_before = read_before["content"][0]["text"].as_str().unwrap_or("");
-    assert!(text_before.contains("not indexed"), "Text must surface not indexed status: {text_before}");
-    assert!(text_before.contains("ist.dataartifact"), "Text must cite lowercase ist.dataartifact: {text_before}");
+    assert!(
+        text_before.contains("not indexed"),
+        "Text must surface not indexed status: {text_before}"
+    );
+    assert!(
+        text_before.contains("ist.dataartifact"),
+        "Text must cite lowercase ist.dataartifact: {text_before}"
+    );
 
     // Index the catalog
     let index_res = call(json!({ "project_code": project_code, "action": "index" }));
     assert_ne!(index_res["isError"].as_bool(), Some(true), "{index_res:?}");
-    assert_eq!(index_res["structuredContent"]["artifacts_upserted"].as_i64(), Some(2));
+    assert_eq!(
+        index_res["structuredContent"]["artifacts_upserted"].as_i64(),
+        Some(2)
+    );
 
     // After indexing: action=read must report ist_indexed=true and ist_persisted_count=2
     let read_after = call(json!({ "project_code": project_code, "action": "read" }));
     let data_after = &read_after["structuredContent"];
-    assert_eq!(data_after["ist_indexed"].as_bool(), Some(true), "Must report ist_indexed=true after indexing: {read_after:?}");
+    assert_eq!(
+        data_after["ist_indexed"].as_bool(),
+        Some(true),
+        "Must report ist_indexed=true after indexing: {read_after:?}"
+    );
     assert_eq!(data_after["ist_persisted_count"].as_i64(), Some(2));
     let text_after = read_after["content"][0]["text"].as_str().unwrap_or("");
-    assert!(text_after.contains("indexed"), "Text must surface indexed status: {text_after}");
+    assert!(
+        text_after.contains("indexed"),
+        "Text must surface indexed status: {text_after}"
+    );
 
     // REQ-AXO-902487 invariant: tool catalog description must cite lowercase table name `ist.dataartifact`
     let tools_resp = server
@@ -7322,7 +7586,8 @@ fn test_req_axo_902560_generic_envelope_converts_empty_payload_ok_to_degraded() 
         "content": [],
         "data": { "status": "ok" }
     });
-    let result_1 = server.attach_default_tool_guidance("surface_vide_1", &json!({}), empty_envelope_1);
+    let result_1 =
+        server.attach_default_tool_guidance("surface_vide_1", &json!({}), empty_envelope_1);
     assert_eq!(
         result_1["data"]["status"].as_str(),
         Some("degraded"),
@@ -7357,7 +7622,8 @@ fn test_req_axo_902560_generic_envelope_converts_empty_payload_ok_to_degraded() 
         "content": [{ "type": "text", "text": "   \n\t  " }],
         "data": {}
     });
-    let result_2 = server.attach_default_tool_guidance("surface_vide_2", &json!({}), empty_envelope_2);
+    let result_2 =
+        server.attach_default_tool_guidance("surface_vide_2", &json!({}), empty_envelope_2);
     assert_eq!(
         result_2["data"]["status"].as_str(),
         Some("degraded"),
@@ -7374,7 +7640,8 @@ fn test_req_axo_902560_generic_envelope_converts_empty_payload_ok_to_degraded() 
         "content": [{ "type": "text", "text": "Charge utile réelle" }],
         "data": { "status": "ok" }
     });
-    let result_3 = server.attach_default_tool_guidance("surface_saine_3", &json!({}), ok_with_content);
+    let result_3 =
+        server.attach_default_tool_guidance("surface_saine_3", &json!({}), ok_with_content);
     assert_eq!(
         result_3["data"]["status"].as_str(),
         Some("ok"),
@@ -7399,7 +7666,8 @@ fn test_req_axo_902560_generic_envelope_converts_empty_payload_ok_to_degraded() 
         "content": [],
         "data": { "status": "failed" }
     });
-    let result_5 = server.attach_default_tool_guidance("surface_erreur_5", &json!({}), error_envelope);
+    let result_5 =
+        server.attach_default_tool_guidance("surface_erreur_5", &json!({}), error_envelope);
     assert_eq!(result_5["isError"].as_bool(), Some(true));
     assert_ne!(
         result_5["data"]["status"].as_str(),
@@ -7424,10 +7692,20 @@ fn test_req_axo_902560_inspect_mode_source_explains_missing_source() {
     // Symbol semé dans l'IST mais SANS aucun chunk dans ist.chunk
     let seed = IstSeed::new()
         .symbol(SymbolFixture::new(SYM, "orphan_fn", "function", "INSP"))
-        .symbol(SymbolFixture::new("INSP::caller.rs::caller_fn", "caller_fn", "function", "INSP"))
-        .call(CallFixture::canonical("INSP::caller.rs::caller_fn", SYM, "INSP"));
+        .symbol(SymbolFixture::new(
+            "INSP::caller.rs::caller_fn",
+            "caller_fn",
+            "function",
+            "INSP",
+        ))
+        .call(CallFixture::canonical(
+            "INSP::caller.rs::caller_fn",
+            SYM,
+            "INSP",
+        ));
 
-    let harness = crate::test_support::ist_fixtures::create_test_server_with_ist_seed(seed).unwrap();
+    let harness =
+        crate::test_support::ist_fixtures::create_test_server_with_ist_seed(seed).unwrap();
 
     // 1. Appel normal : chunks absents
     let resp = harness
@@ -7447,7 +7725,8 @@ fn test_req_axo_902560_inspect_mode_source_explains_missing_source() {
 
     let text = resp["content"][0]["text"].as_str().unwrap_or("");
     assert!(
-        text.contains("Source body unavailable") || text.contains("Lossy source reconstruction withheld"),
+        text.contains("Source body unavailable")
+            || text.contains("Lossy source reconstruction withheld"),
         "La section source ne doit PAS être muette : {text}"
     );
     assert!(
@@ -7515,7 +7794,10 @@ fn req_902647_ist_snapshot_evict_mcp_tool_releases_ram_and_reports_state() {
         .result
         .expect("rpc result");
     assert_eq!(err_resp["isError"].as_bool(), Some(true));
-    assert_eq!(err_resp["data"]["status"].as_str(), Some("missing_parameter"));
+    assert_eq!(
+        err_resp["data"]["status"].as_str(),
+        Some("missing_parameter")
+    );
 
     // 2. Éviction d'un projet spécifique EV1
     let ev1_resp = server
@@ -7574,4 +7856,3 @@ fn req_902647_ist_snapshot_evict_mcp_tool_releases_ram_and_reports_state() {
     assert!(ev_all["data"]["evicted_count"].as_u64().unwrap_or(0) >= 1);
     assert!(!crate::ist_snapshot::process_view().is_warm("EV2"));
 }
-

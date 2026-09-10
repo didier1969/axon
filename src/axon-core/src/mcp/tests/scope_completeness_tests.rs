@@ -10,9 +10,9 @@
 //! 2. Un projet polyglotte dont un langage n'est pas supporté ne peut pas afficher N/N sans mention.
 //! 3. Repro INK : la réponse mentionne les 18 fichiers .rs non couverts.
 
+use crate::mcp::tools_dx::project_scope_truth_note_pure;
 use crate::mcp::tools_dx::ProjectScopeSummary;
 use crate::mcp::tools_framework_runtime_status::ligne_code_intel;
-use crate::mcp::tools_dx::project_scope_truth_note_pure;
 use crate::scanner::ScopeBreakdown;
 
 #[test]
@@ -147,7 +147,10 @@ fn c5_empty_code_intel_signals_fail_open_for_guard() {
         unchunked_files: 0,
     };
     let is_live_empty = live_summary.total_files <= 0 || live_summary.completed_files <= 0;
-    assert!(!is_live_empty, "live project scope must resolve is_empty=false");
+    assert!(
+        !is_live_empty,
+        "live project scope must resolve is_empty=false"
+    );
     assert!(live_summary.symbol_coverage_is_trustworthy());
 }
 
@@ -200,4 +203,3 @@ fn c6_repro_kki_unchunked_files_blocks_trustworthy_and_warns_on_empty() {
         "un résultat vide ne doit pas être pris pour une preuve d'inexistence: {note}"
     );
 }
-

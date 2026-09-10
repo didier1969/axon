@@ -8,17 +8,19 @@
 //! 3. indexer_lifecycle porte un état distinct pour « non activé par le mode de runtime »,
 //!    et promote_status cesse de rendre crashed_or_abandoned dans ce cas.
 
-use std::collections::HashSet;
 use crate::ist_snapshot::code_smells::{is_inferred_entry, orphan_clusters};
-use crate::ist_snapshot::snapshot::{EdgeTriple, IstGraph, NodeFlags, NodeKind, NodeRecord, RelationType};
+use crate::ist_snapshot::snapshot::{
+    EdgeTriple, IstGraph, NodeFlags, NodeKind, NodeRecord, RelationType,
+};
 use crate::mcp::runtime_topology_support::{
     resolve_indexer_liveness, IndexerSupervisorObservation,
-    INDEXER_LIFECYCLE_DISABLED_FOR_MODE, LIFECYCLE_CERTAINTY_OBSERVED,
-    EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+    EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS, INDEXER_LIFECYCLE_DISABLED_FOR_MODE,
+    LIFECYCLE_CERTAINTY_OBSERVED,
 };
 use crate::release_reconciler::{
     evaluate_liveness_gates, liveness_next_action, liveness_phase, LivenessFacts,
 };
+use std::collections::HashSet;
 
 fn file(id: &str) -> NodeRecord {
     NodeRecord {
@@ -75,7 +77,10 @@ fn c1_orphan_clusters_recognizes_qualified_soll_declared_entry() {
     // Un graphe avec mcp.rs qui contient handle_request et une fonction interne install.
     let nodes = vec![
         file("/proj/src/mcp.rs"),
-        func("AXO::axon::src::axon-core::src::mcp.rs::handle_request", true),
+        func(
+            "AXO::axon::src::axon-core::src::mcp.rs::handle_request",
+            true,
+        ),
         func("AXO::axon::src::axon-core::src::mcp.rs::install", false),
     ];
     let edges = vec![
@@ -178,7 +183,9 @@ fn c3_promote_status_indexer_disabled_does_not_fail_gates_or_declare_indexer_dow
             "next action must not diagnose a crash: {msg}"
         );
         assert!(
-            msg.contains("mode de runtime") || msg.contains("Disabled") || msg.contains("configuration"),
+            msg.contains("mode de runtime")
+                || msg.contains("Disabled")
+                || msg.contains("configuration"),
             "next action must explain the runtime mode configuration: {msg}"
         );
     }

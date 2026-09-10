@@ -18,7 +18,8 @@ use crate::mcp::tools_system::rescan_format_cache_wipe_failure;
 fn c1_failed_full_wipe_never_returns_status_ok() {
     // Repro mesuré le 2026-08-26 sur ELE :
     // cache_invalidation = "wipe_failed: Writer Error: 55000: attempted to delete invisible tuple..."
-    let cache_invalidation = "wipe_failed: Writer Error: 55000: attempted to delete invisible tuple";
+    let cache_invalidation =
+        "wipe_failed: Writer Error: 55000: attempted to delete invisible tuple";
     let notify_outcome = "enrolled:867";
 
     let status = rescan_compute_overall_status(cache_invalidation, notify_outcome);
@@ -77,7 +78,8 @@ fn c6_wipe_failure_message_explains_consequences_to_caller() {
     assert!(formatted.contains(raw_pg_error));
     // Doit expliquer la conséquence : cache non effacé
     assert!(
-        formatted.contains("cache n'a pas été effacé") || formatted.contains("cache n'a pas ete efface"),
+        formatted.contains("cache n'a pas été effacé")
+            || formatted.contains("cache n'a pas ete efface"),
         "doit mentionner que le cache n'a pas été effacé: {formatted}"
     );
     // Doit mentionner que l'indexeur considérera les fichiers comme inchangés
