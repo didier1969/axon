@@ -932,5 +932,65 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// REQ-AXO-902655 (Feedback #425 DVM) — rescan_project must:
+    /// 1. Auto-repair missing parent in axon.Project so ist.IndexedFile FK constraint is satisfied.
+    /// 2. Measure actual persisted files: scanner must not report `enrolled:N` when DB insertion fails.
+    #[test]
+    fn rescan_project_ensures_axon_project_parent_exists_and_measures_enrolled_count() {
+        let store = Arc::new(create_test_db().expect("create test db"));
+        let server = McpServer::new(store.clone());
+
+        let (root, files) = make_temp_project("fk_parent", 3);
+        let scope = unique_test_scope("rpfk");
+        let code = three_char_code_from_scope(&scope);
+        let project_path = root.to_string_lossy().to_string();
+
+        // 1. Enregistrer dans soll.ProjectCodeRegistry
+        store
+            .sync_project_registry_entry(
+                &code,
+                Some("rescan-fk-parent-fixture"),
+                Some(&project_path),
+            )
+            .expect("register project");
+
+        // Neutraliser l'auto-seed du harnais de test pour refléter la stricte réalité de production
+        crate::test_support::test_db::neutraliser_autoseed_des_parents_fk(&store).unwrap();
+
+        // 2. Simuler la désynchronisation : supprimer le parent dans axon.Project
+        // (comme c'était le cas pour DVM, SWT, MRG, OPO avant la réconciliation).
+        store.execute(&format!("DELETE FROM axon.Project WHERE code = '{code}'")).unwrap();
+
+        let count_before = store.query_count(&format!("SELECT count(*) FROM axon.Project WHERE code = '{code}'")).unwrap();
+        assert_eq!(count_before, 0, "parent must be absent before rescan");
+
+        // 3. Appeler axon_rescan_project
+        let args = serde_json::json!({
+            "project_code": code,
+            "full": true,
+        });
+
+        let envelope = server
+            .axon_rescan_project(&args)
+            .expect("rescan_project must return Some envelope");
+
+        let payload = parse_structured(&envelope);
+        assert_eq!(payload.get("status").and_then(|v| v.as_str()), Some("ok"));
+
+        // Critère 1 : Le parent axon.Project DOIT avoir été restauré
+        let count_parent = store.query_count(&format!("SELECT count(*) FROM axon.Project WHERE code = '{code}'")).unwrap();
+        assert_eq!(count_parent, 1, "axon.Project parent row must be ensured by rescan_project");
+
+        // Critère 2 : Les fichiers doivent être réellement présents dans ist.IndexedFile
+        let indexed_count = store.query_count(&format!("SELECT count(*) FROM ist.IndexedFile WHERE project_code = '{code}'")).unwrap();
+        assert_eq!(indexed_count as usize, files.len(), "actual rows in ist.IndexedFile must match files count");
+
+        // Critère 3 : notify_outcome doit rapporter la vérité mesurée
+        let notify_outcome = payload.get("notify_outcome").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(notify_outcome, format!("enrolled:{}", files.len()));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 

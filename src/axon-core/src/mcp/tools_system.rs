@@ -1925,6 +1925,19 @@ impl McpServer {
             )),
         };
 
+        // REQ-AXO-902655 (Feedback #425) — Ensure axon.Project parent row exists
+        // before scanning. ist.IndexedFile has a NOT NULL FK to axon.Project(code).
+        // If the parent was lost or out-of-sync, ensure it now so the scan's batch
+        // persistence does not fail on fk_indexedfile_project.
+        let project_name = self
+            .derive_project_name_from_path(&project_path)
+            .unwrap_or_else(|_| project_code.clone());
+        let _ = self.graph_store.ensure_project_fk_parent(
+            &project_code,
+            &project_name,
+            &project_path,
+        );
+
         // REQ-AXO-902613: Validate targeted paths if supplied (fail-closed, bounded, under project root).
         let targeted_paths = match paths_arg {
             Some(ref raw) => {

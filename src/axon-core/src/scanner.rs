@@ -590,9 +590,12 @@ impl Scanner {
                 batch.push((path_str, project_name, size, mtime));
 
                 if batch.len() >= SCANNER_BATCH_SIZE {
-                    total_files += batch.len();
-                    if !dispatch_scanner_batch(&graph, &batch) {
-                        error!("Scanner batch dispatch failed");
+                    // REQ-AXO-902655 (Feedback #425) — Mesurer l'enrôlement réel :
+                    // N'incrémenter total_files que si la persistance dans ist.IndexedFile réussit.
+                    if dispatch_scanner_batch(&graph, &batch) {
+                        total_files += batch.len();
+                    } else {
+                        error!("Scanner: durable discovery batch dispatch failed for {} files", batch.len());
                     }
                     batch.clear();
                     info!("... {} files mapped", total_files);
@@ -608,8 +611,11 @@ impl Scanner {
         }
 
         if !batch.is_empty() {
-            total_files += batch.len();
-            let _ = dispatch_scanner_batch(&graph, &batch);
+            if dispatch_scanner_batch(&graph, &batch) {
+                total_files += batch.len();
+            } else {
+                error!("Scanner: durable discovery batch dispatch failed for remaining {} files", batch.len());
+            }
         }
 
         total_files
@@ -1901,5 +1907,28 @@ mod invalidation_des_regles_tests {
                 "le repertoire porteur de {suffixe} est la racine, pas un intermediaire"
             );
         }
+    }
+
+    /// REQ-AXO-902655 (Feedback #425 DVM) — scan_subtree ne doit PAS comptabiliser
+    /// les fichiers comme enrôlés si la persistance dans ist.IndexedFile échoue.
+    #[test]
+    fn scan_subtree_ne_compte_pas_les_fichiers_si_le_dispatch_echoue() {
+        let store = crate::tests::test_helpers::create_test_db().expect("create test db");
+        // Neutraliser l'auto-seed pour que la FK indexedfile_project_code_fkey s'applique
+        crate::test_support::test_db::neutraliser_autoseed_des_parents_fk(&store).unwrap();
+
+        let parc = tempfile::tempdir().unwrap();
+        let racine = parc.path();
+        let fichier = racine.join("main.rs");
+        std::fs::write(&fichier, "fn main() {}\n").unwrap();
+
+        // Project code inconnu dans axon.Project : le dispatch de persistance échouera sur la FK
+        let scanner = Scanner::new(racine.to_str().unwrap(), "UNKNOWN_UNENROLLED_CODE");
+        let enrolled = scanner.scan_subtree(std::sync::Arc::new(store), racine);
+
+        assert_eq!(
+            enrolled, 0,
+            "scan_subtree ne doit pas compter comme enrôlé un fichier dont l'insertion a échoué"
+        );
     }
 }

@@ -302,7 +302,7 @@ impl McpServer {
         ))
     }
 
-    pub(super) fn derive_project_name_from_path(
+    pub(crate) fn derive_project_name_from_path(
         &self,
         project_path: &str,
     ) -> anyhow::Result<String> {
