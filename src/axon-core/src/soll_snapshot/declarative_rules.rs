@@ -200,6 +200,10 @@ pub enum RulePredicate {
     /// régulière de l'utilisateur serait le langage de requête que
     /// `DEC-AXO-901673` continue d'interdire.
     BodyContainsAny { fragments: Vec<String> },
+    /// REQ-AXO-902578 — Prédicat de corps négatif symétrique : le corps ne DOIT PAS
+    /// contenir l'un de ces fragments (sans casse). Permet de flaguer un nœud planned
+    /// dont le corps affirme être livré ou supersédé.
+    BodyContainsNone { fragments: Vec<String> },
     /// Axe 8 — le sous-graphe formé par `relations` ne contient aucun cycle.
     /// Forme de `DEC-AXO-098`, dont le validateur n'a jamais pu être activé :
     /// `soll_acyclic_audit` mesure 3 cycles sur AXO et dit lui-même qu'il
@@ -287,7 +291,7 @@ impl RulePredicate {
             Self::UniqueBy { .. } => PredicateKind::Uniqueness,
             Self::AtMost { .. } => PredicateKind::Aggregate,
             Self::Reaches { .. } => PredicateKind::Reachability,
-            Self::BodyContainsAny { .. } => PredicateKind::BodyContent,
+            Self::BodyContainsAny { .. } | Self::BodyContainsNone { .. } => PredicateKind::BodyContent,
             Self::Acyclic { .. } => PredicateKind::Acyclicity,
         }
     }
@@ -376,6 +380,7 @@ pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<S
     let at_most = v.get("at_most").and_then(|x| x.as_u64());
     let reaches = v.get("reaches").and_then(|x| x.as_bool()).unwrap_or(false);
     let body_fragments = string_list("body_contains_any");
+    let body_none_fragments = string_list("body_contains_none");
     let acyclic = v.get("acyclic").and_then(|x| x.as_bool()).unwrap_or(false);
     let declared = [
         !evidence_statuses.is_empty(),
@@ -384,6 +389,7 @@ pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<S
         at_most.is_some(),
         reaches,
         !body_fragments.is_empty(),
+        !body_none_fragments.is_empty(),
         acyclic,
     ];
     if declared.iter().filter(|d| **d).count() > 1 {
@@ -414,6 +420,10 @@ pub fn parse_soll_rule(id: &str, title: &str, v: &serde_json::Value) -> Option<S
     } else if !body_fragments.is_empty() {
         RulePredicate::BodyContainsAny {
             fragments: body_fragments,
+        }
+    } else if !body_none_fragments.is_empty() {
+        RulePredicate::BodyContainsNone {
+            fragments: body_none_fragments,
         }
     } else if acyclic {
         RulePredicate::Acyclic {
@@ -848,6 +858,21 @@ fn evaluate_rule_with_facts(
                 }
             }
         }
+        RulePredicate::BodyContainsNone { fragments } => {
+            if rule.subject.is_unconstrained() {
+                return out;
+            }
+            let needles: Vec<String> = fragments.iter().map(|f| f.to_lowercase()).collect();
+            for id in subjects(snapshot, rule, facts) {
+                let Some(node) = snapshot.nodes.get(id) else {
+                    continue;
+                };
+                let body = node.description.to_lowercase();
+                if needles.iter().any(|needle| body.contains(needle.as_str())) {
+                    out.push(violation(rule, id));
+                }
+            }
+        }
         RulePredicate::Acyclic { relations } => {
             // Un cycle n'appartient à aucun nœud en particulier : chaque membre
             // est nommé, parce qu'un compteur de cycles n'ouvre aucune action
@@ -1067,6 +1092,91 @@ mod tests {
             vec!["REQ-TST-202"],
             "seul le nœud retiré SANS marqueur est fautif ; la comparaison ignore \
              la casse, et un nœud vivant n'est pas sujet.\n{found:?}"
+        );
+    }
+
+    /// REQ-AXO-902578 — prédicat négatif de corps `body_contains_none`.
+    /// Critère 1 : accepté seul, rejeté si combiné à un autre prédicat.
+    /// Critère 2 : sur la fixture LLL (« planned dont le corps contient LIVRÉ »),
+    ///             rend exactement les nœuds fautifs, et zéro sur un graphe sain.
+    /// Critère 3 : un test épingle les deux verdicts.
+    #[test]
+    fn body_contains_none_predicate_parses_alone_rejects_combinations_and_flags_deviations() {
+        // 1. Rejet si combiné avec un autre prédicat (ex: body_contains_any ou metadata_required)
+        let combined = parse_soll_rule(
+            "GUI-TST-022",
+            "Règle invalide combinant deux prédicats",
+            &json!({
+                "subject_status_in": ["planned"],
+                "body_contains_none": ["livré"],
+                "body_contains_any": ["en cours"],
+            }),
+        );
+        assert!(
+            combined.is_none(),
+            "parse_soll_rule doit refuser une règle combinant body_contains_none et body_contains_any"
+        );
+
+        let combined_meta = parse_soll_rule(
+            "GUI-TST-022",
+            "Règle invalide combinant deux prédicats",
+            &json!({
+                "subject_status_in": ["planned"],
+                "body_contains_none": ["livré"],
+                "metadata_required": ["acceptance_criteria"],
+            }),
+        );
+        assert!(
+            combined_meta.is_none(),
+            "parse_soll_rule doit refuser une règle combinant body_contains_none et metadata_required"
+        );
+
+        // 2. Acceptation valide isolée
+        let rule = parse_soll_rule(
+            "GUI-TST-023",
+            "Un nœud planned ne doit pas annoncer être livré dans son corps",
+            &json!({
+                "subject_kind": "Requirement",
+                "subject_status_in": ["planned"],
+                "body_contains_none": ["LIVRÉ", "LIVRÉE", "delivered"],
+                "message": "statut planned mais le corps prétend être livré"
+            }),
+        )
+        .expect("parse_soll_rule doit accepter body_contains_none valide");
+
+        assert_eq!(rule.predicate.kind(), PredicateKind::BodyContent);
+
+        // 3. Évaluation sur graphe avec dérive (fixture LLL)
+        let mut deviating = node("REQ-TST-301", "Requirement", "planned");
+        deviating.description = "Travail prévu. LIVRÉ le 2026-07-12 via commit f6ef28c.".to_string();
+
+        let mut planned_clean = node("REQ-TST-302", "Requirement", "planned");
+        planned_clean.description = "Travail en attente d'arbitrage. Aucune mention prématurée.".to_string();
+
+        let mut delivered_legit = node("REQ-TST-303", "Requirement", "delivered");
+        delivered_legit.description = "LIVRÉ en production et qualifié.".to_string();
+
+        let snap_deviating = snapshot(vec![deviating, planned_clean.clone(), delivered_legit.clone()], vec![]);
+        let violations = evaluate_rule(&snap_deviating, &rule);
+
+        assert_eq!(
+            violations.len(),
+            1,
+            "Exactement un nœud fautif doit être signalé: {violations:?}"
+        );
+        assert_eq!(violations[0].source_id, "REQ-TST-301");
+        assert_eq!(violations[0].predicate, PredicateKind::BodyContent);
+        assert_eq!(violations[0].rule_id, "GUI-TST-023");
+
+        // 4. Évaluation sur un graphe sain -> ZÉRO violation
+        let mut planned_healthy = node("REQ-TST-304", "Requirement", "planned");
+        planned_healthy.description = "Spécification en cours de rédaction.".to_string();
+
+        let snap_healthy = snapshot(vec![planned_clean, delivered_legit, planned_healthy], vec![]);
+        let zero_violations = evaluate_rule(&snap_healthy, &rule);
+        assert!(
+            zero_violations.is_empty(),
+            "Un graphe sain doit produire exactement zéro violation: {zero_violations:?}"
         );
     }
 
