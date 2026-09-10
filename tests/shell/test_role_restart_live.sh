@@ -180,8 +180,8 @@ fi
 PRE_STATUS="$(_axon_role_field "$PC_PORT" "$PROC" status)"
 PRE_READY="$(_axon_role_field "$PC_PORT" "$PROC" is_ready)"
 PRE_PID="$(_axon_role_field "$PC_PORT" "$PROC" pid)"
-if [[ "$PRE_STATUS" != "Running" || "$PRE_READY" != "Ready" ]]; then
-    skip "$PROC is status='$PRE_STATUS' ready='$PRE_READY' — needs Running+Ready to be a meaningful test"
+if [[ "$PRE_STATUS" != "Running" || "$PRE_READY" != "Ready" ]] && ! _axon_role_serving "$INSTANCE" "$PROC"; then
+    skip "$PROC is status='$PRE_STATUS' ready='$PRE_READY' and not serving — needs Running+Ready or active /readyz to be a meaningful test"
     printf '\n%d passed, %d failed (SKIPPED — nothing was measured)\n' "$PASS" "$FAIL"; exit 77
 fi
 if ! axon_brain_healthy "$BRAIN_PORT"; then
@@ -275,6 +275,10 @@ else
 fi
 
 # --- The hard invariant: the brain never flinched ----------------------------
+# Ensure at least 5 samples were observed if the restart was sub-second
+while (( $(wc -l < "$BRAIN_SAMPLES" 2>/dev/null || echo 0) < 5 && SECONDS - T0 < 8 )); do
+    sleep 1
+done
 kill "$SAMPLER_PID" 2>/dev/null; wait "$SAMPLER_PID" 2>/dev/null; SAMPLER_PID=""
 N_SAMPLES="$(wc -l < "$BRAIN_SAMPLES" 2>/dev/null | tr -d ' ')"; N_SAMPLES="${N_SAMPLES:-0}"
 N_DOWN="$(awk '$2 == "down"' "$BRAIN_SAMPLES" 2>/dev/null | wc -l | tr -d ' ')"; N_DOWN="${N_DOWN:-0}"
