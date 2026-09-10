@@ -767,6 +767,21 @@ impl McpServer {
                      WHERE id=?",
                     &json!([req, note, id]),
                 );
+                // REQ-AXO-902448 — mark_resolved ne re-rend pas le rapport entier (confirmation concise d'une ligne au lieu des ~4000 tokens).
+                let text = format!(
+                    "Feedback item #{} marked resolved{}.",
+                    id,
+                    if req.is_empty() { String::new() } else { format!(" by {}", req) }
+                );
+                return Some(json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "data": {
+                        "status": "ok",
+                        "resolved_id": id,
+                        "resolved_by_req": req,
+                        "resolution_note": note,
+                    }
+                }));
             }
         }
         // REQ-AXO-902439 — read ONE item (or a few) in full.

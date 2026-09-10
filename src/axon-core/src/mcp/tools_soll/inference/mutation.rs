@@ -164,28 +164,58 @@ impl McpServer {
             .collect::<Vec<_>>();
         let remaining_blockers = after_blockers.into_iter().collect::<Vec<_>>();
 
-        json!({
+        let comp_before = (
+            before.concept_complete(),
+            before.implementation_complete(),
+            before.structurally_connected(),
+            before.evidence_ready(),
+            before.duplicate_free(),
+        );
+        let comp_after = (
+            after.concept_complete(),
+            after.implementation_complete(),
+            after.structurally_connected(),
+            after.evidence_ready(),
+            after.duplicate_free(),
+        );
+
+        let mut payload = json!({
             "changed_entities": changed_entities,
             "topology_delta": topology_delta,
             "newly_unblocked": newly_unblocked,
             "remaining_blockers": remaining_blockers,
             "next_best_actions": self.derive_next_best_actions_from_snapshot(after),
-            "completeness_before": {
-                "concept_completeness": before.concept_complete(),
-                "implementation_completeness": before.implementation_complete(),
-                "structurally_connected": before.structurally_connected(),
-                "evidence_ready": before.evidence_ready(),
-                "duplicate_free": before.duplicate_free()
-            },
-            "completeness_after": {
-                "concept_completeness": after.concept_complete(),
-                "implementation_completeness": after.implementation_complete(),
-                "structurally_connected": after.structurally_connected(),
-                "evidence_ready": after.evidence_ready(),
-                "duplicate_free": after.duplicate_free()
-            },
             "guidance_source": "server-side canonical soll mutation feedback"
-        })
+        });
+
+        // REQ-AXO-902448 — un delta de complétude VIDE n'est pas rendu en 10 booléens.
+        // completeness_before et completeness_after sont omis quand ils sont identiques.
+        if comp_before != comp_after {
+            if let Some(map) = payload.as_object_mut() {
+                map.insert(
+                    "completeness_before".to_string(),
+                    json!({
+                        "concept_completeness": comp_before.0,
+                        "implementation_completeness": comp_before.1,
+                        "structurally_connected": comp_before.2,
+                        "evidence_ready": comp_before.3,
+                        "duplicate_free": comp_before.4,
+                    }),
+                );
+                map.insert(
+                    "completeness_after".to_string(),
+                    json!({
+                        "concept_completeness": comp_after.0,
+                        "implementation_completeness": comp_after.1,
+                        "structurally_connected": comp_after.2,
+                        "evidence_ready": comp_after.3,
+                        "duplicate_free": comp_after.4,
+                    }),
+                );
+            }
+        }
+
+        payload
     }
 
     fn infer_soll_mutation_internal(

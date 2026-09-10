@@ -18541,3 +18541,181 @@ fn test_req_902544_axon_commit_work_returns_verdict_committed_sha_and_correct_ne
     assert_eq!(head_after_fail, head_before_fail, "git HEAD must remain unchanged on commit failure");
 }
 
+#[test]
+fn test_req_902448_empty_completeness_delta_omits_ten_booleans() {
+    let server = create_test_server();
+    let code = "TST";
+    let pillar_id = "PIL-TST-948";
+    seed_pillar(&server, code, pillar_id, "Test Pillar");
+
+    // 1. Create requirement
+    let resp_create = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "create",
+                    "entity": "requirement",
+                    "project_code": code,
+                    "data": {
+                        "project_code": code,
+                        "title": "Title 1",
+                        "description": "Desc 1",
+                        "attach_to": pillar_id,
+                        "relation_type": "BELONGS_TO"
+                    }
+                }
+            })),
+            id: Some(json!(1)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let created_id = resp_create["data"]["created_id"].as_str().unwrap().to_string();
+
+    // 2. Update without changing completeness (just title)
+    let resp_update = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "update",
+                    "entity": "requirement",
+                    "project_code": code,
+                    "data": {
+                        "id": created_id,
+                        "title": "Title Updated Without Completeness Change"
+                    }
+                }
+            })),
+            id: Some(json!(2)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let feedback = &resp_update["data"]["mutation_feedback"];
+    assert!(feedback.is_object(), "mutation_feedback must be present");
+    // Critère 2 : Le delta vide n'émet pas les 10 booléens
+    assert!(
+        feedback.get("completeness_before").is_none(),
+        "empty completeness delta must omit completeness_before: {:?}",
+        feedback
+    );
+    assert!(
+        feedback.get("completeness_after").is_none(),
+        "empty completeness delta must omit completeness_after: {:?}",
+        feedback
+    );
+}
+
+#[test]
+fn test_req_902448_mcp_feedback_report_mark_resolved_returns_concise_confirmation() {
+    let server = create_test_server();
+    let proj = "FBR_CONCISE";
+    let probe = "FBR_CONCISE test problem";
+
+    server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "mcp_feedback",
+            "arguments": {
+                "problem": probe,
+                "severity": "minor",
+                "category": "ux",
+                "tool": "mcp_feedback_report",
+                "project_code": proj
+            }
+        })),
+        id: Some(json!(1)),
+    }).unwrap();
+
+    let raw_list = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "mcp_feedback_report",
+            "arguments": { "project_code": proj }
+        })),
+        id: Some(json!(2)),
+    }).unwrap().result.unwrap();
+
+    let list = raw_list["data"]["feedback"].as_array().expect("feedback list");
+    let item_id = list[0]["id"].as_i64().expect("item id");
+
+    // Appel mark_resolved : Critère 3 — ne doit PAS re-rendre le rapport entier
+    let raw_resolved = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "mcp_feedback_report",
+            "arguments": {
+                "mark_resolved": {
+                    "id": item_id,
+                    "resolved_by_req": "REQ-AXO-902448",
+                    "note": "closed concisely"
+                }
+            }
+        })),
+        id: Some(json!(3)),
+    }).unwrap().result.unwrap();
+
+    // Doit contenir une confirmation concise
+    assert_eq!(raw_resolved["data"]["status"], json!("ok"));
+    assert_eq!(raw_resolved["data"]["resolved_id"], json!(item_id));
+    assert_eq!(raw_resolved["data"]["resolved_by_req"], json!("REQ-AXO-902448"));
+    // Ne doit PAS contenir la liste feedback du rapport complet
+    assert!(
+        raw_resolved["data"].get("feedback").is_none(),
+        "mark_resolved must not re-render the full feedback report: {:?}",
+        raw_resolved
+    );
+}
+
+#[test]
+fn test_req_902448_batch_deduplicates_identical_fields_across_calls() {
+    let mut lot = vec![
+        json!({
+            "name": "soll_manager",
+            "result": { "data": {
+                "id": "REQ-TST-001",
+                "mutation_feedback": {
+                    "remaining_blockers": ["REQ-A"],
+                    "newly_unblocked": [],
+                    "guidance_source": "server-side canonical soll mutation feedback",
+                    "topology_delta": { "edges": 1 }
+                }
+            }}
+        }),
+        json!({
+            "name": "soll_manager",
+            "result": { "data": {
+                "id": "REQ-TST-002",
+                "mutation_feedback": {
+                    "remaining_blockers": ["REQ-A"],
+                    "newly_unblocked": [],
+                    "guidance_source": "server-side canonical soll mutation feedback",
+                    "topology_delta": { "edges": 2 }
+                }
+            }}
+        }),
+    ];
+    let commun = McpServer::facteur_commun_du_lot(&mut lot);
+    assert_eq!(commun["guidance_source"], json!("server-side canonical soll mutation feedback"));
+    assert_eq!(commun["newly_unblocked"], json!([]));
+    assert_eq!(commun["remaining_blockers"], json!(["REQ-A"]));
+
+    for r in &lot {
+        let f = &r["result"]["data"]["mutation_feedback"];
+        assert!(f.get("guidance_source").is_none());
+        assert!(f.get("newly_unblocked").is_none());
+        assert!(f.get("remaining_blockers").is_none());
+        assert!(f.get("topology_delta").is_some());
+    }
+}

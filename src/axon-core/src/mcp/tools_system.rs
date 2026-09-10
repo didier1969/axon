@@ -1763,12 +1763,14 @@ impl McpServer {
     /// et un lecteur ne saurait plus si un résultat porte la valeur ou l'a héritée.
     /// Ces quatre clés-là sont du contexte de PROJET, pas du résultat d'appel : elles
     /// décrivent l'état du monde après la mutation, identique par construction.
-    fn facteur_commun_du_lot(resultats: &mut [Value]) -> Value {
-        const CLES: [&str; 4] = [
+    pub(crate) fn facteur_commun_du_lot(resultats: &mut [Value]) -> Value {
+        const CLES: [&str; 6] = [
             "remaining_blockers",
             "next_best_actions",
             "completeness_before",
             "completeness_after",
+            "guidance_source",
+            "newly_unblocked",
         ];
         // Il faut au moins deux résultats pour qu'une répétition existe.
         if resultats.len() < 2 {
