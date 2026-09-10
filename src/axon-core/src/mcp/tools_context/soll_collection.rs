@@ -195,15 +195,21 @@ impl McpServer {
                         WHEN n.type = 'Decision' THEN 80 \
                         WHEN n.type = 'Requirement' THEN 70 \
                         ELSE 50 \
+                    END \
+                    + CASE \
+                        WHEN n.status = 'current' THEN 15 \
+                        WHEN n.status = 'delivered' THEN 10 \
+                        WHEN n.status IN ('superseded', 'obsolete', 'rejected') THEN -30 \
+                        ELSE 0 \
                     END AS ranking_score \
              FROM soll.Traceability t \
              JOIN soll.Node n ON n.id = t.soll_entity_id \
              LEFT JOIN soll.Edge e ON e.source_id = n.id \
              WHERE ({predicates}){project_filter} \
-             ORDER BY ranking_score DESC, n.type DESC, n.id ASC \
+             ORDER BY ranking_score DESC, n.type DESC, n.id DESC \
              LIMIT {limit}",
             predicates = predicates.join(" OR "),
-            limit = top_k.min(2),
+            limit = top_k,
         );
         let raw = self
             .graph_store
@@ -281,7 +287,7 @@ impl McpServer {
                     END AS ranking_score
              FROM soll.Node n
              WHERE ({lexical_predicate}){project_filter}
-             ORDER BY ranking_score DESC, n.id ASC
+             ORDER BY ranking_score DESC, n.id DESC
              LIMIT {limit}",
             limit = top_k.min(4),
         );

@@ -126,7 +126,7 @@ impl McpServer {
         if let Some(proj) = project {
             if let Ok(snap) = self.soll_cache().snapshot(proj) {
                 let mut selected =
-                    Self::collect_soll_traceability_ram(&snap, entry_candidates, top_k);
+                    Self::collect_soll_traceability_ram(&snap, entry_candidates, terms, top_k);
                 Self::expand_concept_governing_entities_ram(&snap, &mut selected, top_k);
                 if !selected.is_empty() {
                     crate::soll_snapshot::record_fusion_read(true);
@@ -139,15 +139,16 @@ impl McpServer {
         self.collect_soll_entities_pg(entry_candidates, project, terms, top_k)
     }
 
-    /// REQ-AXO-902039 element 2 — RAM reimplementation of the traceability branch
-    /// of `collect_soll_entities`. Faithful to the PG query (Symbol→100 /
-    /// File→95 ranking; ORDER score DESC, type DESC, id ASC; LIMIT min(top_k,2))
-    /// but deterministic: the PG `LEFT JOIN soll.Edge` multiplied rows per
-    /// outgoing edge with a score independent of the edge, so here each governing
-    /// node yields one row, preferring a `SOLVES` relation_type when present.
+    /// REQ-AXO-902039 element 2 / REQ-AXO-902659 (DEC-AXO-901705) — RAM
+    /// implementation of the traceability branch of `collect_soll_entities`.
+    /// Evaluates base artifact type (Symbol→100, File→95), node status bonus
+    /// (current→+15, delivered→+10, obsolete→-30), lexical query overlap (+15 title/id,
+    /// +8 description, capped at +40), and attached validation/test traces (+10).
+    /// Tie-breaker prefers active status then descending ID. Uncapped selection up to top_k.
     pub(super) fn collect_soll_traceability_ram(
         snap: &crate::soll_snapshot::SollSnapshot,
         entry_candidates: &[EntryCandidate],
+        terms: &[String],
         top_k: usize,
     ) -> Vec<Value> {
         use std::collections::HashSet;
@@ -167,7 +168,7 @@ impl McpServer {
         let mut seen: HashSet<String> = HashSet::new();
         let mut scored: Vec<(i64, String, String, Value)> = Vec::new();
         for t in &snap.traceability {
-            let (artifact_type, score, reason) = if t.artifact_type == "Symbol"
+            let (artifact_type, base_score, base_reason) = if t.artifact_type == "Symbol"
                 && symbol_names.contains(&t.artifact_ref.to_ascii_lowercase())
             {
                 ("Symbol", 100i64, "direct_symbol_traceability")
@@ -192,6 +193,65 @@ impl McpServer {
                     relation_type = rel.to_string();
                 }
             }
+
+            let mut score = base_score;
+            let mut ranking_reasons = vec![base_reason.to_string()];
+
+            // (b) Statut du noeud SOLL (DEC-AXO-901705)
+            match node.status.to_ascii_lowercase().as_str() {
+                "current" => {
+                    score += 15;
+                    ranking_reasons.push("status_current".to_string());
+                }
+                "delivered" => {
+                    score += 10;
+                    ranking_reasons.push("status_delivered".to_string());
+                }
+                "superseded" | "obsolete" | "rejected" => {
+                    score -= 30;
+                    ranking_reasons.push("status_penalized".to_string());
+                }
+                _ => {}
+            }
+
+            // (c) Correspondance lexicale des termes de la requête (DEC-AXO-901705)
+            let mut lexical_boost = 0i64;
+            let title_lower = node.title.to_ascii_lowercase();
+            let id_lower = node.id.to_ascii_lowercase();
+            let desc_lower = node.description.to_ascii_lowercase();
+            for term in terms {
+                let term_clean = term.trim().to_ascii_lowercase();
+                if term_clean.len() >= 3 {
+                    if title_lower.contains(&term_clean) || id_lower.contains(&term_clean) {
+                        lexical_boost += 15;
+                    } else if desc_lower.contains(&term_clean) {
+                        lexical_boost += 8;
+                    }
+                }
+            }
+            lexical_boost = lexical_boost.min(40);
+            if lexical_boost > 0 {
+                score += lexical_boost;
+                ranking_reasons.push("lexical_match".to_string());
+            }
+
+            // (d) Présence de preuves de validation/tests attachées (DEC-AXO-901705)
+            let has_validation_evidence = snap
+                .traceability_rows_for(&node.entity_type.to_ascii_lowercase(), &node.id)
+                .any(|tr| {
+                    tr.artifact_type.eq_ignore_ascii_case("test")
+                        || tr.artifact_type.eq_ignore_ascii_case("validation")
+                })
+                || snap.traceability.iter().any(|tr| {
+                    tr.soll_entity_id == node.id
+                        && (tr.artifact_type.eq_ignore_ascii_case("test")
+                            || tr.artifact_type.eq_ignore_ascii_case("validation"))
+                });
+            if has_validation_evidence {
+                score += 10;
+                ranking_reasons.push("validation_evidence".to_string());
+            }
+
             scored.push((
                 score,
                 node.entity_type.clone(),
@@ -203,7 +263,7 @@ impl McpServer {
                     "relation_type": relation_type,
                     "source_symbol": t.artifact_ref.clone(),
                     "artifact_type": artifact_type,
-                    "ranking_reasons": [reason],
+                    "ranking_reasons": ranking_reasons,
                     "ranking_score": score,
                     "evidence_class": "soll_traceability",
                 }),
@@ -212,11 +272,11 @@ impl McpServer {
         scored.sort_by(|a, b| {
             b.0.cmp(&a.0)
                 .then_with(|| b.1.cmp(&a.1))
-                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| b.2.cmp(&a.2))
         });
         scored
             .into_iter()
-            .take(top_k.min(2))
+            .take(top_k)
             .map(|(_, _, _, v)| v)
             .collect()
     }

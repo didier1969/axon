@@ -463,3 +463,5 @@ mod soll_retirement_supersedes_tests;
 mod tool_enum_catalog_contract;
 /// REQ-AXO-902559 — division du budget VRAM entre les sessions ORT d'un même processus.
 mod vram_budget_division_tests;
+/// REQ-AXO-902659 (Feedback #421) — ranking contextuel multivarié et déplafonnement de sélection why/traceability.
+mod why_traceability_ranking_tests;

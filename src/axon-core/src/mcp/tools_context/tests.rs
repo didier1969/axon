@@ -236,12 +236,12 @@ fn fusion_snapshot() -> crate::soll_snapshot::SollSnapshot {
 fn collect_soll_traceability_ram_resolves_governing_req() {
     let snap = fusion_snapshot();
     let cands = vec![fusion_entry("render", "function", "")];
-    let rows = McpServer::collect_soll_traceability_ram(&snap, &cands, 5);
+    let rows = McpServer::collect_soll_traceability_ram(&snap, &cands, &[], 5);
     assert_eq!(rows.len(), 1, "one governing node for the `render` symbol");
     assert_eq!(rows[0]["id"], "DEC-TSF-001");
     assert_eq!(rows[0]["type"], "Decision");
     assert_eq!(rows[0]["artifact_type"], "Symbol");
-    assert_eq!(rows[0]["ranking_score"], 100);
+    assert_eq!(rows[0]["ranking_score"], 115);
     // SOLVES preferred among the node's outgoing edges (deterministic).
     assert_eq!(rows[0]["relation_type"], "SOLVES");
     assert_eq!(rows[0]["evidence_class"], "soll_traceability");
@@ -249,12 +249,12 @@ fn collect_soll_traceability_ram_resolves_governing_req() {
     // Case-insensitive symbol match (PG used lower(artifact_ref)).
     let upper = vec![fusion_entry("RENDER", "function", "")];
     assert_eq!(
-        McpServer::collect_soll_traceability_ram(&snap, &upper, 5).len(),
+        McpServer::collect_soll_traceability_ram(&snap, &upper, &[], 5).len(),
         1
     );
     // No match → empty (no governing intent).
     let none = vec![fusion_entry("absent_symbol", "function", "")];
-    assert!(McpServer::collect_soll_traceability_ram(&snap, &none, 5).is_empty());
+    assert!(McpServer::collect_soll_traceability_ram(&snap, &none, &[], 5).is_empty());
 }
 
 #[test]
@@ -333,6 +333,7 @@ fn soll_and_ist_ram_mirrors_are_coresident_for_one_project() {
     let intent = McpServer::collect_soll_traceability_ram(
         &snap,
         &[fusion_entry("render", "function", "")],
+        &[],
         5,
     );
     assert_eq!(
