@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use super::catalog::tools_catalog;
 use super::format::{evidence_by_mode, format_standard_contract};
 use super::tools_framework::{STATUS_CACHE_TTL_MS, STATUS_FULL_CACHE_TTL_MS};
-use super::tools_framework_support::{cache_read, cache_write};
+use super::tools_framework_support::{cache_read_with_ts, cache_write};
 use super::McpServer;
 
 /// REQ-AXO-902196 — in a SPLIT live deployment the MCP brain runs in
@@ -160,12 +160,23 @@ impl McpServer {
             "verbose" => STATUS_FULL_CACHE_TTL_MS,
             _ => STATUS_CACHE_TTL_MS,
         };
-        if let Some(cached) = cache_read(
+        if let Some((stored_at, mut cached)) = cache_read_with_ts(
             Self::status_cache(),
             &cache_key,
             now_ms,
             status_cache_ttl_ms,
         ) {
+            if let Some(data) = cached.get_mut("data").and_then(Value::as_object_mut) {
+                data.insert(
+                    "cache_meta".to_string(),
+                    json!({
+                        "is_cached": true,
+                        "epoch_ms": stored_at,
+                        "cache_age_ms": now_ms.saturating_sub(stored_at),
+                        "ttl_ms": status_cache_ttl_ms,
+                    }),
+                );
+            }
             return Some(cached);
         }
         let public_tools = tools_catalog(false)
@@ -1610,6 +1621,15 @@ impl McpServer {
                 methodology_drift
             };
             data.insert("methodology_drift_warnings".to_string(), methodology_drift);
+            data.insert(
+                "cache_meta".to_string(),
+                json!({
+                    "is_cached": false,
+                    "epoch_ms": now_ms,
+                    "cache_age_ms": 0,
+                    "ttl_ms": status_cache_ttl_ms,
+                }),
+            );
         }
         cache_write(Self::status_cache(), cache_key, now_ms, &response);
         Some(response)
@@ -1757,6 +1777,7 @@ fn compact_status_brief_data(data: &Value) -> Value {
     json!({
         "truth_status": data.get("truth_status").cloned().unwrap_or(Value::Null),
         "truth_cockpit": data.get("truth_cockpit").cloned().unwrap_or(Value::Null),
+        "cache_meta": data.get("cache_meta").cloned().unwrap_or(Value::Null),
         "canonical_sources": data.get("canonical_sources").cloned().unwrap_or(Value::Null),
         "next_action": data.get("next_action").cloned().unwrap_or(Value::Null),
         "runtime_mode": data.get("runtime_mode").cloned().unwrap_or(Value::Null),

@@ -6,28 +6,46 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 #[cfg(not(test))]
+pub(super) fn cache_read_with_ts(
+    cache: &'static Mutex<HashMap<String, (i64, Value)>>,
+    key: &str,
+    now_ms: i64,
+    ttl_ms: i64,
+) -> Option<(i64, Value)> {
+    let guard = cache.lock().ok()?;
+    let (stored_at, value) = guard.get(key)?;
+    if now_ms.saturating_sub(*stored_at) > ttl_ms {
+        return None;
+    }
+    Some((*stored_at, value.clone()))
+}
+
+#[cfg(test)]
+pub(super) fn cache_read_with_ts(
+    cache: &'static Mutex<HashMap<String, (i64, Value)>>,
+    key: &str,
+    now_ms: i64,
+    ttl_ms: i64,
+) -> Option<(i64, Value)> {
+    if std::env::var("AXON_ENABLE_TEST_CACHE").map(|v| v == "1").unwrap_or(false) {
+        let guard = cache.lock().ok()?;
+        let (stored_at, value) = guard.get(key)?;
+        if now_ms.saturating_sub(*stored_at) > ttl_ms {
+            return None;
+        }
+        Some((*stored_at, value.clone()))
+    } else {
+        None
+    }
+}
+
 pub(super) fn cache_read(
     cache: &'static Mutex<HashMap<String, (i64, Value)>>,
     key: &str,
     now_ms: i64,
     ttl_ms: i64,
 ) -> Option<Value> {
-    let guard = cache.lock().ok()?;
-    let (stored_at, value) = guard.get(key)?;
-    if now_ms.saturating_sub(*stored_at) > ttl_ms {
-        return None;
-    }
-    Some(value.clone())
-}
-
-#[cfg(test)]
-pub(super) fn cache_read(
-    _cache: &'static Mutex<HashMap<String, (i64, Value)>>,
-    _key: &str,
-    _now_ms: i64,
-    _ttl_ms: i64,
-) -> Option<Value> {
-    None
+    cache_read_with_ts(cache, key, now_ms, ttl_ms).map(|(_, val)| val)
 }
 
 #[cfg(not(test))]
@@ -44,11 +62,24 @@ pub(super) fn cache_write(
 
 #[cfg(test)]
 pub(super) fn cache_write(
-    _cache: &'static Mutex<HashMap<String, (i64, Value)>>,
-    _key: String,
-    _now_ms: i64,
-    _value: &Value,
+    cache: &'static Mutex<HashMap<String, (i64, Value)>>,
+    key: String,
+    now_ms: i64,
+    value: &Value,
 ) {
+    if std::env::var("AXON_ENABLE_TEST_CACHE").map(|v| v == "1").unwrap_or(false) {
+        if let Ok(mut guard) = cache.lock() {
+            guard.insert(key, (now_ms, value.clone()));
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(super) fn cache_clear(cache: &'static Mutex<HashMap<String, (i64, Value)>>) {
+    if let Ok(mut guard) = cache.lock() {
+        guard.clear();
+    }
 }
 
 pub(super) fn structural_history_dir() -> PathBuf {

@@ -22,7 +22,7 @@ static WHY_CACHE: OnceLock<Mutex<FrameworkCache>> = OnceLock::new();
 #[allow(dead_code)]
 const FRAMEWORK_CACHE_TTL_MS: i64 = 5_000;
 pub(super) const CONCEPTION_CACHE_TTL_MS: i64 = 60_000;
-pub(super) const STATUS_CACHE_TTL_MS: i64 = 180_000;
+pub(super) const STATUS_CACHE_TTL_MS: i64 = 5_000;
 pub(super) const STATUS_FULL_CACHE_TTL_MS: i64 = 1_000;
 pub(super) const WHY_CACHE_TTL_MS: i64 = 180_000;
 pub(super) const ANOMALIES_CACHE_TTL_MS: i64 = 180_000;

@@ -428,6 +428,20 @@ impl McpServer {
         {
             proof_gaps.push(json!("snapshot_storage_not_persisted"));
         }
+        let status_cache_meta = status_data.get("cache_meta").cloned().unwrap_or_else(|| {
+            let now = crate::clock::now_unix_ms();
+            json!({
+                "is_cached": false,
+                "epoch_ms": now,
+                "cache_age_ms": 0,
+                "ttl_ms": super::tools_framework::STATUS_CACHE_TTL_MS,
+            })
+        });
+        let authority_epoch_ms = status_cache_meta
+            .get("epoch_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(crate::clock::now_unix_ms);
+
         let truth_cockpit = json!({
             "current_blocker": project_blockers
                 .first()
@@ -440,7 +454,9 @@ impl McpServer {
             "freshness": {
                 "state": if project_blockers.is_empty() { "fresh" } else { "degraded" },
                 "degraded_notes": degraded_notes,
-                "runtime_truth_status": status_data.get("truth_status").cloned().unwrap_or(Value::Null)
+                "runtime_truth_status": status_data.get("truth_status").cloned().unwrap_or(Value::Null),
+                "epoch_ms": authority_epoch_ms,
+                "cache_meta": status_cache_meta,
             },
             "proof_gaps": proof_gaps,
             "llm_instruction": "Use `next_best_action` first; if freshness is degraded, label project-wide conclusions partial and follow the named MCP tool."

@@ -7952,3 +7952,115 @@ fn test_req_902546_project_status_freshness_reconciliation_and_actionable_recove
     );
 }
 
+#[test]
+fn test_req_902538_status_and_project_status_cache_epoch_and_degraded_to_fresh_transition() {
+    let _guard = env_lock();
+    let _cache_env = crate::test_support::EnvVarGuard::set("AXON_ENABLE_TEST_CACHE", "1");
+    let server = create_test_server();
+
+    // Vider le cache de statut avant de tester
+    crate::mcp::tools_framework_support::cache_clear(crate::mcp::McpServer::status_cache());
+
+    // Invariant 1: STATUS_CACHE_TTL_MS must be aligned to indexer heartbeat cycle (5s), NEVER 180s.
+    assert_eq!(
+        crate::mcp::tools_framework::STATUS_CACHE_TTL_MS,
+        5_000,
+        "Brief status cache TTL must be 5000ms to eliminate the 3-minute contradiction window (REQ-AXO-902538)"
+    );
+
+    // Setup a registered project
+    server
+        .graph_store
+        .sync_project_registry_entry("OPV", Some("opv-proj"), Some("/home/test/opv-proj"))
+        .unwrap();
+
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('VIS-OPV-001', 'Vision', 'OPV', 'OPV Vision', 'OPV Test', 'current', '{}')"
+    ).unwrap();
+
+    // Phase 1: Initial degraded state (0 indexed files)
+    // 1. Call status(mode=brief)
+    let status_brief_resp = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "status",
+            "arguments": { "mode": "brief", "project_code": "OPV" }
+        })),
+        id: Some(json!(9025381)),
+    }).unwrap().result.unwrap();
+
+    let status_data = status_brief_resp.get("data").expect("status data missing");
+    let cache_meta = &status_data["cache_meta"];
+    assert!(cache_meta.is_object(), "status must explicitly declare cache_meta (REQ-AXO-902538)");
+    assert_eq!(cache_meta["is_cached"], false, "first call must be a cache miss");
+    assert!(cache_meta["epoch_ms"].is_i64(), "cache_meta must have epoch_ms");
+    assert!(cache_meta["cache_age_ms"].is_i64(), "cache_meta must have cache_age_ms");
+    assert_eq!(cache_meta["ttl_ms"], json!(5000), "ttl_ms must be 5000ms");
+
+    // 2. Call project_status(project_code=OPV)
+    let proj_status_resp = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "project_status",
+            "arguments": { "project_code": "OPV", "mode": "brief" }
+        })),
+        id: Some(json!(9025382)),
+    }).unwrap().result.unwrap();
+
+    let proj_data = proj_status_resp.get("data").expect("project_status data missing");
+    let proj_freshness = &proj_data["truth_cockpit"]["freshness"];
+    assert_eq!(proj_freshness["state"], "degraded", "initial state must be degraded");
+    assert!(
+        proj_freshness["cache_meta"].is_object(),
+        "project_status freshness must explicitly expose cache_meta (REQ-AXO-902538)"
+    );
+    assert_eq!(proj_freshness["cache_meta"]["is_cached"], true, "status called by project_status must hit the brief cache");
+    assert!(
+        proj_freshness["epoch_ms"].is_i64(),
+        "project_status freshness must expose epoch_ms"
+    );
+
+    // 3. Both surfaces must agree on the same epoch
+    let status_epoch = cache_meta["epoch_ms"].as_i64().unwrap();
+    let proj_epoch = proj_freshness["epoch_ms"].as_i64().unwrap();
+    assert_eq!(
+        status_epoch, proj_epoch,
+        "status and project_status must expose the exact same authority epoch"
+    );
+
+    // Phase 2: Transition degraded -> fresh
+    // Indexer indexed the file:
+    server.graph_store.execute(
+        "INSERT INTO ist.indexedfile (path, project_code, last_seen_ms, status) \
+         VALUES ('/home/test/opv-proj/main.rs', 'OPV', 1, 'indexed')"
+    ).unwrap();
+
+    // Clear cache to simulate expiry/invalidation on transition
+    crate::mcp::tools_framework_support::cache_clear(crate::mcp::McpServer::status_cache());
+
+    let proj_fresh_resp = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "project_status",
+            "arguments": { "project_code": "OPV", "mode": "brief" }
+        })),
+        id: Some(json!(9025383)),
+    }).unwrap().result.unwrap();
+
+    let proj_fresh_data = proj_fresh_resp.get("data").expect("project_status data missing");
+    let proj_fresh_freshness = &proj_fresh_data["truth_cockpit"]["freshness"];
+    assert_eq!(
+        proj_fresh_freshness["state"], "fresh",
+        "after files indexed, state must transition degraded -> fresh"
+    );
+    assert!(
+        proj_fresh_data["truth_cockpit"]["current_blocker"].is_null(),
+        "blocker must be cleared on fresh transition"
+    );
+}
+
+
