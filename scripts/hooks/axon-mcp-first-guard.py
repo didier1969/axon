@@ -130,7 +130,36 @@ def _axon_can_answer_code_search() -> bool:
             continue
         visible = _dig(doc, "availability", "advanced_indexed_surfaces_visible")
         if isinstance(visible, bool):
-            return visible
+            if not visible:
+                return False
+            # REQ-AXO-902406: Fail-open if project code-intel is empty or unmeasured,
+            # so grep is permitted instead of blocking the only tool that can answer.
+            ci_status = _dig(doc, "code_intel", "status")
+            if ci_status in ("empty", "unknown_scope", "unmeasured"):
+                return False
+            ci_completed = _dig(doc, "code_intel", "completed_files")
+            if isinstance(ci_completed, (int, float)) and ci_completed <= 0:
+                return False
+
+            text_content = _dig(doc, "content")
+            empty_markers = (
+                "**Code-intel:** VIDE",
+                "Code-intel: VIDE",
+                "**Code-intel:** portee INCONNUE",
+                "Code-intel: portee INCONNUE",
+                "**Code-intel:** NON MESUREE",
+                "Code-intel: NON MESUREE",
+            )
+            if isinstance(text_content, list):
+                for item in text_content:
+                    if isinstance(item, dict):
+                        t = item.get("text", "")
+                        if any(marker in t for marker in empty_markers):
+                            return False
+            elif isinstance(text_content, str):
+                if any(marker in text_content for marker in empty_markers):
+                    return False
+            return True
     # Champ introuvable : on ne sait pas, donc on ne bloque pas.
     return False
 

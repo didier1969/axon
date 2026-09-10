@@ -1341,7 +1341,31 @@ impl McpServer {
                     // `ist_projection_fresh`.
                     "ist_projection_fresh": indexed_projection_fresh,
                     "advanced_indexed_surfaces_visible": indexed_projection_fresh,
-                    "degraded_notes": degraded_notes
+                    "degraded_notes": degraded_notes,
+                    // REQ-AXO-902406 — machine-readable flag for MCP-first guard:
+                    // true if code-intel is absent/empty on the resolved project.
+                    "code_intel_empty": code_intel_scope.as_ref().map(|s| s.total_files <= 0 || s.completed_files <= 0).unwrap_or(true)
+                },
+                // REQ-AXO-902406 — structured code_intel payload for the active project
+                "code_intel": match &code_intel_scope {
+                    Some(s) => json!({
+                        "status": if s.total_files <= 0 || s.completed_files <= 0 {
+                            "empty"
+                        } else if s.symbol_coverage_is_trustworthy() {
+                            "live"
+                        } else {
+                            "partial"
+                        },
+                        "total_files": s.total_files,
+                        "completed_files": s.completed_files,
+                        "trustworthy": s.symbol_coverage_is_trustworthy(),
+                    }),
+                    None => json!({
+                        "status": if status_project.is_none() { "unknown_scope" } else { "unmeasured" },
+                        "total_files": 0,
+                        "completed_files": 0,
+                        "trustworthy": false,
+                    }),
                 },
                 // REQ-AXO-098 / DEC-AXO-062 — subsystem-tagged tristate
                 // readiness. `subsystems[]` carries one entry per

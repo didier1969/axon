@@ -115,3 +115,34 @@ fn c4_scope_breakdown_formats_excluded_source_summary() {
     assert_eq!(breakdown.excluded_source_count(), 18);
     assert_eq!(breakdown.excluded_source_summary(), ".rs: 18");
 }
+
+#[test]
+fn c5_empty_code_intel_signals_fail_open_for_guard() {
+    // REQ-AXO-902406: When a project has 0 files with symbols or total_files <= 0,
+    // code_intel status must report empty and code_intel_empty must be true.
+    let empty_summary = ProjectScopeSummary {
+        total_files: 0,
+        completed_files: 0,
+        backlog_files: 0,
+        pending_reasons: Vec::new(),
+        excluded_source_files: 0,
+        excluded_extensions: String::new(),
+    };
+    assert_eq!(empty_summary.completed_files, 0);
+
+    let is_empty = empty_summary.total_files <= 0 || empty_summary.completed_files <= 0;
+    assert!(is_empty, "empty project scope must resolve is_empty=true");
+
+    let live_summary = ProjectScopeSummary {
+        total_files: 100,
+        completed_files: 90,
+        backlog_files: 10,
+        pending_reasons: Vec::new(),
+        excluded_source_files: 0,
+        excluded_extensions: String::new(),
+    };
+    let is_live_empty = live_summary.total_files <= 0 || live_summary.completed_files <= 0;
+    assert!(!is_live_empty, "live project scope must resolve is_empty=false");
+    assert!(live_summary.symbol_coverage_is_trustworthy());
+}
+

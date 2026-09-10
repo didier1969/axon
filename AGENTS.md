@@ -26,6 +26,7 @@ Ne pas dériver en boucles opportunistes patch / test / rapport.
 ## Navigation de code
 
 `query` → `inspect` → `why` / `impact` / `path` **avant** tout grep. `retrieve_context` pour un dossier de preuve.
+Pour une recherche littérale légitime ou si le code-intel du projet est vide, préfixer par `AXON_OK=1` (échappatoire officielle du garde MCP-first `GUI-PRO-112`, `REQ-AXO-902406`).
 Une note « l'outil X est cassé » est une **hypothèse à falsifier** par un appel-test, pas un fait.
 
 ## Livraison

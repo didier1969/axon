@@ -26,6 +26,7 @@ Live 44127-44132 / dev 44137-44142. Brain = MCP + SOLL writer. Indexer = IST wri
 | Task | Tool |
 |---|---|
 | Symbol / inspect / evidence | `query` → `inspect` → `retrieve_context` |
+| Code search bypass (literal / empty code-intel) | Prefix command with `AXON_OK=1` (e.g. `AXON_OK=1 grep -rn ...`) — escape for MCP-first guard (`GUI-PRO-112`, `REQ-AXO-902406`). |
 | Blast radius / why / flow / risks | `impact` / `why` / `path` / `anomalies` |
 | Runtime / project state | `status mode=brief` / `project_status` |
 | SOLL intent / relation | `soll_query_context` / `soll_relation_schema` |
@@ -102,6 +103,7 @@ Snapshot / async / `soll_work_plan` scoring → `references/graphrag-and-soll-in
 | "Status looks fine, IST is probably fresh enough" | `trust:degraded` or `freshness:stale` → frozen snapshot. Restart indexer-graph or qualify before trusting `inspect` / `impact`. |
 | "I'll delete the bad SOLL node and recreate clean" | SOLL is preserve-always (PIL-AXO-003). Use `soll_rollback_revision`. Mass-deletes destroy intent history. |
 | "I'll log a CPT-AXO-025 issue without picking a branch" | REQ-AXO-129 corrupted CPT-AXO-021 exactly this way. Pick 1 / 2 / 3 first. |
+| "The MCP-first guard blocked grep on a literal search or an empty code-intel project" | Prefix command with `AXON_OK=1`. Hook allows literal search and fails open when code-intel is empty (`GUI-PRO-112`, `REQ-AXO-902406`). |
 
 ## Examples
 
