@@ -201,7 +201,8 @@ impl McpServer {
         // Pure view: id-ordered, archived excluded, NO cursor read or write.
         let sql = format!(
             "SELECT id, message_id, context_id, from_project, to_project, kind, idempotency_key, \
-                    in_reply_to, subject, body_dense, sig, created_at, priority \
+                    in_reply_to, subject, body_dense, sig, created_at, priority, \
+                    notified_at, read_at, acknowledged_at \
              FROM axon.mailbox_message WHERE archived_at IS NULL{filters} \
              ORDER BY id ASC LIMIT {limit}",
         );
@@ -225,6 +226,22 @@ impl McpServer {
             // REQ-AXO-902117 (MBX-5) — resolve the sender's per-project stored
             // token (else derived fallback) so stored-token signatures verify here.
             let verified = self.mailbox_verify(from_p, &canonical, sig);
+            let is_set = |s: &str| !s.is_empty() && s != "null";
+            let notif_str = g(13);
+            let read_str = g(14);
+            let ack_str = g(15);
+            let notif_opt = if is_set(notif_str) { Some(notif_str) } else { None };
+            let read_opt = if is_set(read_str) { Some(read_str) } else { None };
+            let ack_opt = if is_set(ack_str) { Some(ack_str) } else { None };
+            let status = if ack_opt.is_some() {
+                "acknowledged"
+            } else if read_opt.is_some() {
+                "read"
+            } else if notif_opt.is_some() {
+                "notified"
+            } else {
+                "delivered"
+            };
             messages.push(json!({
                 "id": id,
                 "message_id": message_id,
@@ -237,24 +254,98 @@ impl McpServer {
                 "body_dense": body,
                 "priority": g(12),
                 "created_at": g(11),
+                "notified_at": notif_opt,
+                "read_at": read_opt,
+                "acknowledged_at": ack_opt,
+                "status": status,
                 "signature_verified": verified,
             }));
         }
 
-        let report = format!(
+        let mut data = json!({
+            "status": "ok",
+            "count": messages.len(),
+            "messages": messages,
+        });
+
+        let mut report = format!(
             "### 👁️ mailbox_tap (observation, no cursor advanced)\n\n{} message(s){}{}{}",
             messages.len(),
             context_id.map(|c| format!(" · thread=`{c}`")).unwrap_or_default(),
             from.map(|f| format!(" · from=`{f}`")).unwrap_or_default(),
             to.map(|t| format!(" · to=`{t}`")).unwrap_or_default(),
         );
+
+        if let Some(c) = context_id {
+            // REQ-AXO-902548 — métriques quadri-état agrégées pour ce context_id
+            let counts_sql = format!(
+                "SELECT count(*), count(notified_at), count(read_at), count(acknowledged_at) \
+                 FROM axon.mailbox_message WHERE context_id = '{c}'"
+            );
+            let (delivered, notified, read_cnt, acked) = match self.graph_store.query_json(&counts_sql) {
+                Ok(s) => {
+                    let parsed: Vec<Vec<Value>> = serde_json::from_str(&s).unwrap_or_default();
+                    if let Some(first) = parsed.first() {
+                        let to_i64 = |idx: usize| {
+                            first.get(idx).and_then(|v| {
+                                v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                            }).unwrap_or(0)
+                        };
+                        (to_i64(0), to_i64(1), to_i64(2), to_i64(3))
+                    } else {
+                        (0, 0, 0, 0)
+                    }
+                }
+                Err(_) => (0, 0, 0, 0),
+            };
+
+            let recs_sql = format!(
+                "SELECT to_project, notified_at, read_at, acknowledged_at \
+                 FROM axon.mailbox_message WHERE context_id = '{c}' ORDER BY id ASC"
+            );
+            let mut recipients: Vec<Value> = Vec::new();
+            if let Ok(s) = self.graph_store.query_json(&recs_sql) {
+                let parsed: Vec<Vec<Value>> = serde_json::from_str(&s).unwrap_or_default();
+                let is_set = |s: &str| !s.is_empty() && s != "null";
+                for r in parsed {
+                    let to_p = r.first().and_then(Value::as_str).unwrap_or("").to_string();
+                    let notif_opt = r.get(1).and_then(Value::as_str).filter(|s| is_set(s));
+                    let read_opt = r.get(2).and_then(Value::as_str).filter(|s| is_set(s));
+                    let ack_opt = r.get(3).and_then(Value::as_str).filter(|s| is_set(s));
+                    let rec_status = if ack_opt.is_some() {
+                        "acknowledged"
+                    } else if read_opt.is_some() {
+                        "read"
+                    } else if notif_opt.is_some() {
+                        "notified"
+                    } else {
+                        "delivered"
+                    };
+                    recipients.push(json!({
+                        "to_project": to_p,
+                        "status": rec_status,
+                        "notified_at": notif_opt,
+                        "read_at": read_opt,
+                        "acknowledged_at": ack_opt,
+                    }));
+                }
+            }
+
+            data["context_id"] = json!(c);
+            data["delivered_count"] = json!(delivered);
+            data["notified_count"] = json!(notified);
+            data["read_count"] = json!(read_cnt);
+            data["acknowledged_count"] = json!(acked);
+            data["recipients"] = json!(recipients);
+
+            report.push_str(&format!(
+                "\n\n**Quadri-état context `{c}`** : livré={delivered} · notifié={notified} · lu={read_cnt} · acquitté={acked}"
+            ));
+        }
+
         Some(json!({
             "content": [{ "type": "text", "text": report }],
-            "data": {
-                "status": "ok",
-                "count": messages.len(),
-                "messages": messages,
-            }
+            "data": data,
         }))
     }
 }

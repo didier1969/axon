@@ -512,8 +512,8 @@ impl McpServer {
 
         let sql = format!(
             "INSERT INTO axon.mailbox_message \
-             (message_id, context_id, from_project, to_project, kind, subject, body_dense, envelope, idempotency_key, in_reply_to, priority, sig, topic, room_id, ttl_at) \
-             VALUES ('{mid}','{ctx}','{from}','{to}','{kind}','{subj}','{body}','{env}'::jsonb,'{idem}','{irt}','{prio}','{sig}',NULLIF('{topic}','')::text,NULLIF('{room}','')::text,{ttl}) \
+             (message_id, context_id, from_project, to_project, kind, subject, body_dense, envelope, idempotency_key, in_reply_to, priority, sig, topic, room_id, ttl_at, notified_at) \
+             VALUES ('{mid}','{ctx}','{from}','{to}','{kind}','{subj}','{body}','{env}'::jsonb,'{idem}','{irt}','{prio}','{sig}',NULLIF('{topic}','')::text,NULLIF('{room}','')::text,{ttl},now()) \
              ON CONFLICT (from_project, to_project, idempotency_key) DO NOTHING RETURNING id",
             mid = esc(&message_id),
             ctx = esc(&context_id),
@@ -664,7 +664,8 @@ impl McpServer {
             // faisait dessus et la valeur restait invisible. Le champ gouverne aussi
             // l'archivage (`priority='high'` échappe à l'archivage auto et au
             // balayage TTL) — un champ qui décide du comportement doit être lisible.
-            "SELECT id, message_id, context_id, from_project, kind, idempotency_key, in_reply_to, subject, body_dense, sig, created_at, priority \
+            // REQ-AXO-902548 — sélection des horodatages quadri-état (notified_at, read_at, acknowledged_at).
+            "SELECT id, message_id, context_id, from_project, kind, idempotency_key, in_reply_to, subject, body_dense, sig, created_at, priority, notified_at, read_at, acknowledged_at \
              FROM axon.mailbox_message WHERE to_project='{}' AND id > {} AND archived_at IS NULL{} {} LIMIT {}",
             esc(&project),
             floor,
@@ -727,6 +728,9 @@ impl McpServer {
             let canonical =
                 mailbox::canonical(from, &project, context_id, message_id, kind, idem, irt, subject, body);
             let verified = self.mailbox_verify(from, &canonical, sig);
+            let notif_s = g(12);
+            let read_s = g(13);
+            let ack_s = g(14);
             messages.push(json!({
                 "id": id,
                 "message_id": message_id,
@@ -741,6 +745,9 @@ impl McpServer {
                 // l'archivage, il n'était pas publié. Sans lui un automate ne peut
                 // que tout notifier (interdit) ou deviner l'urgence par mots-clés.
                 "priority": g(11),
+                "notified_at": if notif_s.is_empty() || notif_s == "null" { Value::Null } else { json!(notif_s) },
+                "read_at": if read_s.is_empty() || read_s == "null" { Value::Null } else { json!(read_s) },
+                "acknowledged_at": if ack_s.is_empty() || ack_s == "null" { Value::Null } else { json!(ack_s) },
                 "signature_verified": verified,
             }));
             // REQ-AXO-902145 — render each body into the TEXT channel (content[0].text),
@@ -759,6 +766,23 @@ impl McpServer {
             };
             body_lines.push_str(&format!(
                 "\n\n**[{id}] {from} → {subject}** ({kind}, {sig_mark}{reply}{prio})\n{body}"
+            ));
+        }
+
+        // REQ-AXO-902548 — marquer read_at = now() pour tous les messages renvoyés au destinataire
+        let returned_ids: Vec<i64> = messages
+            .iter()
+            .filter_map(|m| m.get("id").and_then(Value::as_i64))
+            .filter(|id| *id > 0)
+            .collect();
+        if !returned_ids.is_empty() {
+            let id_list = returned_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let _ = self.graph_store.execute(&format!(
+                "UPDATE axon.mailbox_message SET read_at = COALESCE(read_at, now()) WHERE id IN ({id_list})"
             ));
         }
 
@@ -1124,6 +1148,7 @@ impl McpServer {
             // just changed; stapling "📬 N non-lu(s) — relève avec mcp_inbox_read"
             // onto it would invite the caller straight back into a destructive read.
             "mcp_inbox_archive",
+            "mcp_inbox_ack",
             "mailbox_render",
             "mailbox_tap",
         ];
@@ -1374,6 +1399,137 @@ impl McpServer {
                 "archived": archived,
                 "already_archived": already,
                 "message_ids": ids,
+            }
+        }))
+    }
+
+    /// REQ-AXO-902548 — acknowledge messages delivered to this project's inbox.
+    ///
+    /// Quad-state cycle: delivered -> notified -> read -> acknowledged.
+    /// Marks `acknowledged_at = now()` (and stamps `read_at = COALESCE(read_at, now())`
+    /// if not already marked).
+    pub(crate) fn axon_mcp_inbox_ack(&self, args: &Value) -> Option<Value> {
+        let project = args
+            .get("project")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| self.auto_resolve_project_code_str())
+            .unwrap_or_default();
+        if project.is_empty() {
+            return Some(mbx_err("inbox project unresolved — pass `project`.", "input_invalid"));
+        }
+
+        let raw = args.get("message_ids").or_else(|| args.get("ids"));
+        let ids: Vec<i64> = match raw {
+            Some(Value::Array(items)) => items.iter().filter_map(Value::as_i64).collect(),
+            Some(Value::Number(n)) => n.as_i64().into_iter().collect(),
+            Some(Value::String(s)) => s.parse::<i64>().ok().into_iter().collect(),
+            _ => Vec::new(),
+        };
+        let context_id = args
+            .get("context_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        if ids.is_empty() && context_id.is_none() {
+            return Some(mbx_err(
+                "mcp_inbox_ack requires `message_ids` and/or `context_id`.",
+                "input_invalid",
+            ));
+        }
+
+        let ack_note = args
+            .get("ack_note")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+
+        if !ids.is_empty() {
+            let id_list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+            let owned: Vec<Vec<Value>> = match self.graph_store.query_json_writer(&format!(
+                "SELECT id FROM axon.mailbox_message WHERE id IN ({id_list}) AND to_project='{p}'",
+                p = esc(&project)
+            )) {
+                Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+                Err(e) => return Some(mbx_err(&format!("inbox ack query failed: {e}"), "degraded")),
+            };
+            let owned_ids: Vec<i64> = owned
+                .iter()
+                .filter_map(|r| r.first())
+                .map(entier_json)
+                .filter(|id| *id > 0)
+                .collect();
+            let foreign: Vec<i64> = ids.iter().copied().filter(|i| !owned_ids.contains(i)).collect();
+            if !foreign.is_empty() {
+                let listed = foreign.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+                return Some(mbx_err(
+                    &format!(
+                        "these ids are not in `{project}`'s inbox (unknown, or addressed to another \
+                         project): {listed}. Nothing was acknowledged."
+                    ),
+                    "input_invalid",
+                ));
+            }
+        }
+
+        let mut conds = vec![format!("to_project = '{}'", esc(&project))];
+        if !ids.is_empty() {
+            let id_list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+            conds.push(format!("id IN ({id_list})"));
+        }
+        if let Some(ctx) = context_id {
+            conds.push(format!("context_id = '{}'", esc(ctx)));
+        }
+        let where_clause = conds.join(" AND ");
+
+        let matched: Vec<Vec<Value>> = match self.graph_store.query_json_writer(&format!(
+            "SELECT id FROM axon.mailbox_message WHERE {where_clause} ORDER BY id ASC"
+        )) {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Err(e) => return Some(mbx_err(&format!("inbox ack find failed: {e}"), "degraded")),
+        };
+        let matched_ids: Vec<i64> = matched
+            .iter()
+            .filter_map(|r| r.first())
+            .map(entier_json)
+            .filter(|id| *id > 0)
+            .collect();
+
+        if let Err(e) = self.graph_store.execute(&format!(
+            "UPDATE axon.mailbox_message \
+             SET acknowledged_at = COALESCE(acknowledged_at, now()), \
+                 read_at = COALESCE(read_at, now()) \
+             WHERE {where_clause}"
+        )) {
+            return Some(mbx_err(&format!("inbox ack update failed: {e}"), "degraded"));
+        }
+
+        let count = matched_ids.len();
+        let report = format!(
+            "### ✅ mcp_inbox_ack\n\n`{project}` · {count} message(s) acquitté(s){}{}{}",
+            if let Some(ctx) = context_id {
+                format!(" · context=`{ctx}`")
+            } else {
+                String::new()
+            },
+            if !ack_note.is_empty() {
+                format!("\n\nNote d'acquittement : {ack_note}")
+            } else {
+                String::new()
+            },
+            "\n\nHorodatage quadri-état : `acknowledged_at` marqué."
+        );
+
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "status": "ok",
+                "project": project,
+                "acknowledged_count": count,
+                "message_ids": matched_ids,
+                "context_id": context_id.map(str::to_string),
+                "ack_note": if ack_note.is_empty() { Value::Null } else { json!(ack_note) }
             }
         }))
     }

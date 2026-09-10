@@ -124,7 +124,7 @@ pub(crate) fn delete_fixture_symbols(server: &McpServer, ids: &[&str]) {
         .execute(&format!("DELETE FROM ist.Symbol WHERE id IN ({list})"));
 }
 
-fn create_test_server() -> McpServer {
+pub(crate) fn create_test_server_with_url() -> (McpServer, String) {
     let temp = tempdir().unwrap();
     let db_root = temp.path().to_str().unwrap().to_string();
     test_db_roots()
@@ -142,7 +142,11 @@ fn create_test_server() -> McpServer {
     let store = Arc::new(GraphStore::new_with_database(&db_root, &db_url).unwrap());
     let server = McpServer::new(store);
     evict_test_snapshots();
-    server
+    (server, db_url)
+}
+
+fn create_test_server() -> McpServer {
+    create_test_server_with_url().0
 }
 
 /// REQ-AXO-902001 — the IST RAM snapshot cache is process-global keyed by
@@ -433,3 +437,5 @@ mod soll_and_guidelines;
 mod soll_criteria_satisfaction;
 /// REQ-AXO-902642 — traversée sémantique et directions physiques dans soll_children.
 mod soll_children_tests;
+/// REQ-AXO-902548 — wake observable et traçabilité quadri-état dans la mailbox.
+mod mailbox_wake_tests;

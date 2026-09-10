@@ -53,8 +53,16 @@ CREATE TABLE IF NOT EXISTS axon.mailbox_message (
     sig             TEXT        NOT NULL DEFAULT '',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- Optional retention horizon (TTL / dead-letter sweep); NULL = keep.
-    ttl_at          TIMESTAMPTZ
+    ttl_at          TIMESTAMPTZ,
+    notified_at     TIMESTAMPTZ,
+    read_at         TIMESTAMPTZ,
+    acknowledged_at TIMESTAMPTZ
 );
+
+-- REQ-AXO-902548 — quadri-état de traçabilité mailbox (notified_at, read_at, acknowledged_at)
+SELECT public.add_column_if_absent('axon', 'mailbox_message', 'notified_at',     'TIMESTAMPTZ');
+SELECT public.add_column_if_absent('axon', 'mailbox_message', 'read_at',         'TIMESTAMPTZ');
+SELECT public.add_column_if_absent('axon', 'mailbox_message', 'acknowledged_at', 'TIMESTAMPTZ');
 
 -- Idempotent dedup: a re-sent message (same sender + key + recipient) is a no-op
 -- (ON CONFLICT DO NOTHING at the writer). Anchors at-least-once delivery.
@@ -91,21 +99,23 @@ CREATE TABLE IF NOT EXISTS axon.mailbox_cursor (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- MBX-3 — signal on arrival. Notify the recipient's channel so a live brain can
--- surface inbox_unread without polling. Payload is signature-only metadata (no
--- body): { to, from, message_id, context_id, id }.
+-- MBX-3 / REQ-AXO-902548 — signal on arrival & wake. Notify the recipient's channel
+-- so active sessions wake up without polling (<5s p95). Payload is signature-only
+-- metadata: { to, from, message_id, context_id, id, priority }.
 CREATE OR REPLACE FUNCTION axon.mailbox_notify() RETURNS trigger AS $$
+DECLARE
+    payload text;
 BEGIN
-    PERFORM pg_notify(
-        'axon_mailbox',
-        json_build_object(
-            'to', NEW.to_project,
-            'from', NEW.from_project,
-            'message_id', NEW.message_id,
-            'context_id', NEW.context_id,
-            'id', NEW.id
-        )::text
-    );
+    payload := json_build_object(
+        'to', NEW.to_project,
+        'from', NEW.from_project,
+        'message_id', NEW.message_id,
+        'context_id', NEW.context_id,
+        'id', NEW.id,
+        'priority', NEW.priority
+    )::text;
+    PERFORM pg_notify('axon_mailbox', payload);
+    PERFORM pg_notify('axon_mailbox_wake', payload);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

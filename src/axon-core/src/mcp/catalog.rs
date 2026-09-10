@@ -1039,6 +1039,20 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "mcp_inbox_ack",
+                "description": "[MAILBOX] REQ-AXO-902548 — acknowledge messages delivered to THIS project's inbox. Stamps `acknowledged_at = now()`. Accepts `message_ids` (row ids) and/or `context_id` (thread/campaign id). Optional `ack_note` for traceability.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "message_ids": { "type": "array", "items": { "type": "integer" }, "description": "Inbox row ids to acknowledge." },
+                        "context_id": { "type": "string", "description": "Context / thread id to acknowledge for this project." },
+                        "project": { "type": "string", "description": "Recipient project owning these messages. Default: cwd-resolved." },
+                        "ack_note": { "type": "string", "description": "Optional acknowledgment note / response text." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "mcp_agent_card",
                 "description": "[MAILBOX] REQ-AXO-902118 (MBX-6) — A2A capability discovery. A project publishes its A2A AgentCard, peers read it + discover by skill. action=set (OWNER publishes its own card — owner-write ACL, project resolved from `from`/cwd; signed via HMAC over a deterministic key-sorted canonicalisation), get (fetch one project's card + `signature_verified`), list (discover cards, optional `skill` tag filter via GIN containment on card->'skills'). A2A well-known path = /.well-known/agent-card.json. Signature reuses the internal mailbox HMAC for interop; true A2A integrity is JWS (deliberate MVP gap, sig column is forward-compatible).",
                 "inputSchema": {
