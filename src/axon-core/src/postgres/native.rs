@@ -95,6 +95,15 @@ impl Drop for NativePgCtx {
     }
 }
 
+/// Query execution result with explicit column names, raw row values, serialized JSON, and row count.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QueryTableOutput {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub rows_json: String,
+    pub row_count: usize,
+}
+
 impl NativePgCtx {
     /// Build a native context against `database_url`, optionally pinning a
     /// validated `search_path` schema. Mirrors the plugin's `pg_init_db`:
@@ -148,10 +157,10 @@ impl NativePgCtx {
         })
     }
 
-    /// Run a query and render the result as the canonical `Vec<Vec<String>>`
-    /// JSON. On error returns the REQ-AXO-129 envelope string (leading `{`)
-    /// so `query_on_ctx` converts it to `Err`. Non-row statements return `[]`.
-    pub fn run_query_json(&self, sql: &str) -> String {
+    /// Run a query and render the result as a `QueryTableOutput` struct carrying
+    /// columns, rendered rows, serialized JSON, and row count.
+    /// On error returns the REQ-AXO-129 envelope string (leading `{`).
+    pub fn run_query_table(&self, sql: &str) -> Result<QueryTableOutput, String> {
         let returns_rows = query_returns_rows(sql);
         let pool = self.pool.clone();
         let schema = self.schema_search_path.clone();
@@ -159,37 +168,77 @@ impl NativePgCtx {
         run_blocking(async move {
             let conn = match pool.get().await {
                 Ok(c) => c,
-                Err(e) => return error_envelope("acquire", &sql, &e.to_string()),
+                Err(e) => return Err(error_envelope("acquire", &sql, &e.to_string())),
             };
             if let Err(e) = apply_session_setup(&conn, &schema).await {
-                rollback_or_evict(conn, "query_json_session_setup").await;
-                return db_error_envelope("set_search_path", &sql, &e);
+                rollback_or_evict(conn, "query_table_session_setup").await;
+                return Err(db_error_envelope("set_search_path", &sql, &e));
             }
             if !returns_rows {
                 return match conn.batch_execute(&sql).await {
-                    Ok(_) => "[]".to_string(),
+                    Ok(_) => Ok(QueryTableOutput {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        rows_json: "[]".to_string(),
+                        row_count: 0,
+                    }),
                     Err(e) => {
                         let envelope = db_error_envelope("execute", &sql, &e);
-                        rollback_or_evict(conn, "query_json_execute").await;
-                        envelope
+                        rollback_or_evict(conn, "query_table_execute").await;
+                        Err(envelope)
                     }
                 };
             }
             match conn.query(&sql, &[]).await {
                 Ok(rows) => {
-                    let mut out: Vec<Vec<String>> = Vec::with_capacity(rows.len());
-                    for row in &rows {
-                        let mut rendered = Vec::with_capacity(row.len());
-                        for col in 0..row.len() {
-                            rendered.push(render_pg_value(row, col));
+                    let (columns, out) = if rows.is_empty() {
+                        let cols = match conn.prepare(&sql).await {
+                            Ok(stmt) => stmt
+                                .columns()
+                                .iter()
+                                .map(|c| c.name().to_string())
+                                .collect(),
+                            Err(_) => Vec::new(),
+                        };
+                        (cols, Vec::new())
+                    } else {
+                        let cols: Vec<String> = rows[0]
+                            .columns()
+                            .iter()
+                            .map(|c| c.name().to_string())
+                            .collect();
+                        let mut out: Vec<Vec<String>> = Vec::with_capacity(rows.len());
+                        for row in &rows {
+                            let mut rendered = Vec::with_capacity(row.len());
+                            for col in 0..row.len() {
+                                rendered.push(render_pg_value(row, col));
+                            }
+                            out.push(rendered);
                         }
-                        out.push(rendered);
-                    }
-                    serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
+                        (cols, out)
+                    };
+                    let row_count = out.len();
+                    let rows_json = serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string());
+                    Ok(QueryTableOutput {
+                        columns,
+                        rows: out,
+                        rows_json,
+                        row_count,
+                    })
                 }
-                Err(e) => db_error_envelope("query", &sql, &e),
+                Err(e) => Err(db_error_envelope("query", &sql, &e)),
             }
         })
+    }
+
+    /// Run a query and render the result as the canonical `Vec<Vec<String>>`
+    /// JSON. On error returns the REQ-AXO-129 envelope string (leading `{`)
+    /// so `query_on_ctx` converts it to `Err`. Non-row statements return `[]`.
+    pub fn run_query_json(&self, sql: &str) -> String {
+        match self.run_query_table(sql) {
+            Ok(table) => table.rows_json,
+            Err(envelope) => envelope,
+        }
     }
 
     /// REQ-AXO-901883 — ANN (HNSW) read path for the `retrieve_context` /

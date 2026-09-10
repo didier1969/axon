@@ -1345,7 +1345,7 @@ impl McpServer {
         // so recurring raw-SQL patterns can be mined and promoted to commands.
         // Best-effort: a telemetry write never affects the tool response.
         let _sql_t0 = std::time::Instant::now();
-        let outcome = self.graph_store.query_json(q);
+        let outcome = self.graph_store.query_table(q);
         let _sql_latency_ms = _sql_t0.elapsed().as_millis() as i64;
         self.record_sql_shape(
             q,
@@ -1353,60 +1353,40 @@ impl McpServer {
             _sql_latency_ms,
         );
         match outcome {
-            Ok(result) => {
-                // REQ-AXO-901949 inv.5 — auto-continue: surface the valid next
-                // moves from the single-source tool_routing record.
-                let next = super::tool_contracts::next_links("sql");
-                // REQ-AXO-902583 — COMPTER, au lieu de rendre une enveloppe qu'on
-                // peut lire comme « vide ». Avant, zéro ligne rendait le texte `[]`
-                // et un `data` qui ne portait que `next` : un appelant programmatique
-                // ne pouvait pas distinguer « la requête a tourné et n'a rien trouvé »
-                // de « il ne s'est rien passé », et le silence le désignait comme
-                // fautif — il reformulait, et payait deux fois (NEX, CSAT 2026-08-31).
-                //
-                // COÛT, dit franchement : un second passage sur la sortie déjà
-                // sérialisée. Il est borné par `RawValue`, qui DÉLIMITE les lignes
-                // sans désérialiser leur contenu — pas d'allocation par cellule. Le
-                // cas vide court-circuite même ce passage. `sql` est une surface
-                // « advanced read », jamais un chemin chaud RAM-first.
-                let row_count: Option<usize> = if result.trim() == "[]" {
-                    Some(0)
+            Ok(table) => {
+                // REQ-AXO-902583 / REQ-AXO-902568 — COMPTER et nommer les COLONNES.
+                // 0 ligne rend le statut `ok_empty`, prouve la planification de la requête
+                // en restituant ses colonnes typées, et n'accuse JAMAIS le schéma.
+                let row_count = table.row_count;
+                let status = if row_count == 0 {
+                    "ok_empty"
                 } else {
-                    serde_json::from_str::<Vec<&serde_json::value::RawValue>>(&result)
-                        .ok()
-                        .map(|rows| rows.len())
+                    "ok"
                 };
-                // Une sortie qu'on n'a pas su délimiter ne se compte PAS à zéro :
-                // fabriquer un 0 la rendrait identique au résultat vide.
-                let status = match row_count {
-                    Some(0) => "ok_empty",
-                    Some(_) => "ok",
-                    None => "ok_uncounted",
-                };
-                let texte = if result.trim() == "[]" && ql.contains("match") {
-                    "[]\n\nStatus: ok_empty — 0 ligne. La requête a bien tourné.\nHint: Cypher-style query detected. `sql` is read-only SQL over canonical tables; multi-hop CALLS traversal is NOT done in SQL (REQ-AXO-901952 retired the `ist.path` PG functions — graph traversal is RAM-only now). Use the structural tools `path`, `impact`, `bidi_trace` or `query` instead.".to_string()
-                } else if row_count == Some(0) {
-                    // Le vide se DIT dans le texte aussi : beaucoup de clients ne
-                    // rendent que `content[0].text` (REQ-AXO-901949 inv.2).
-                    "[]\n\nStatus: ok_empty — 0 ligne. La requête a bien tourné ; \
-                     c'est le prédicat qui ne ramène rien, pas l'outil qui s'est tu."
-                        .to_string()
+                let texte = if row_count == 0 && ql.contains("match") {
+                    format!(
+                        "[]\n\nStatus: ok_empty — 0 ligne pour colonnes {:?}. La requête a bien tourné.\nHint: Cypher-style query detected. `sql` is read-only SQL over canonical tables; multi-hop CALLS traversal is NOT done in SQL (REQ-AXO-901952 retired the `ist.path` PG functions — graph traversal is RAM-only now). Use the structural tools `path`, `impact`, `bidi_trace` or `query` instead.",
+                        table.columns
+                    )
+                } else if row_count == 0 {
+                    let cols_rendered = table.columns.join(", ");
+                    format!(
+                        "[]\n\nStatus: ok_empty — 0 ligne pour colonnes [{}]. La requête a bien tourné ; \
+                         c'est le prédicat qui ne ramène rien, pas l'outil qui s'est tu.",
+                        cols_rendered
+                    )
                 } else {
-                    result
+                    table.rows_json
                 };
                 // REQ-AXO-902621 (suite) — la borne, posée APRÈS le comptage :
                 // `row_count` reste le total réel, et le texte dit ce qu'il porte.
                 let (texte, lignes_rendues, tronque) =
                     Self::borner_lignes_sql(&texte, SEUIL_RENDU_SQL_CHARS);
-                // Deux coupes, deux statuts. Sur une sortie qu'on n'a pas su délimiter,
-                // le texte rendu est PLAT et incomplet : l'annoncer `ok_truncated` avec
-                // `rows_rendered: 0` ferait lire « bornée à zéro ligne » là où il faut
-                // lire « bornée, et pas comptable ». `row_count` y vaut déjà `null`.
                 let status = Self::statut_apres_borne(status, lignes_rendues, tronque);
                 Some(json!({
                     "content": [{ "type": "text", "text": texte }],
                     "data": {
-                        "next": next,
+                        "columns": table.columns,
                         "row_count": row_count,
                         "status": status,
                         // Dits SEULEMENT quand la borne a mordu : les poser toujours
@@ -1415,7 +1395,13 @@ impl McpServer {
                             Some(n) => json!(n),
                             None => Value::Null,
                         },
-                        "truncated": if tronque { json!(true) } else { Value::Null }
+                        "truncated": if tronque { json!(true) } else { Value::Null },
+                        // REQ-AXO-902568: un succès n'accuse JAMAIS le schéma.
+                        "next_action": {
+                            "kind": "query_completed",
+                            "when": "now"
+                        },
+                        "follow_up_tools": []
                     }
                 }))
             }
@@ -1442,17 +1428,7 @@ impl McpServer {
                 };
                 // REQ-AXO-902323 — `pg_error_repair` has ALREADY classified this
                 // error precisely (`undefined_column` / `undefined_table`), and the
-                // class is rendered in the text above. Hardcoding `input_invalid`
-                // here threw that class away for the one consumer that needs it: the
-                // friction signature keys on `(project, tool, problem_class, field)`,
-                // and `sql` never carries a `field`. So EVERY input error on the
-                // most-called tool collapsed into ONE signature — a wrong table name,
-                // a wrong column name and a genuine contract defect all bumping the
-                // same counter, and any caller typo "regressing" a signature that was
-                // legitimately resolved. Observed 2026-08-15 on signature #3187.
-                //
-                // Computed, rendered, then discarded before the surface that decides
-                // rollout priorities. Same shape as REQ-AXO-902244.
+                // class is rendered in the text above.
                 let problem_class = repair
                     .as_ref()
                     .and_then(|r| r.get("problem_class"))
@@ -1462,7 +1438,8 @@ impl McpServer {
                     "content": [{ "type": "text", "text": text }],
                     "isError": true,
                     "data": {
-                        "status": "input_invalid",
+                        "status": "error",
+                        "error": raw.clone(),
                         "operator_guidance": {
                             "problem_class": problem_class,
                             "follow_up_tools": ["schema_overview", "query_examples"],

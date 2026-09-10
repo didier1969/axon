@@ -27,6 +27,8 @@ pub mod native;
 pub mod seed;
 pub mod vector;
 
+pub use native::QueryTableOutput;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result};

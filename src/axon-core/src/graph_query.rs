@@ -79,6 +79,16 @@ impl GraphStore {
         self.execute(&expanded)
     }
 
+    pub fn query_table(&self, query: &str) -> Result<crate::postgres::native::QueryTableOutput> {
+        match self.pool.native.run_query_table(query) {
+            Ok(table) => Ok(table),
+            Err(envelope) => {
+                let _ = Self::decode_native_envelope(envelope)?;
+                anyhow::bail!("Query execution failed: {query}")
+            }
+        }
+    }
+
     pub fn query_json(&self, query: &str) -> Result<String> {
         self.query_json_on_writer(query)
     }

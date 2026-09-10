@@ -248,6 +248,8 @@ impl McpServer {
         "row_count",
         "rows_rendered",
         "truncated",
+        "columns",
+        "error",
         "ignored_parameters",
         "call_count",
         "failed_count",

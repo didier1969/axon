@@ -158,3 +158,146 @@ fn MUTANT_la_fixture_reproduit_bien_le_volume_que_la_borne_supprime() {
         borne.chars().count()
     );
 }
+
+// ---------------------------------------------------------------------------------
+// REQ-AXO-902568 — Contrat du tool `sql` : colonnes, comptage, erreur et schéma.
+// ---------------------------------------------------------------------------------
+
+#[test]
+fn sql_reponse_vide_rend_colonnes_statut_ok_empty_et_zero_ligne() {
+    use crate::mcp::protocol::JsonRpcRequest;
+    use crate::mcp::tests::create_test_server;
+    use serde_json::json;
+
+    let server = create_test_server();
+    let resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "sql",
+                "arguments": {
+                    "sql": "SELECT 1 AS count_col, 'test' AS text_col WHERE 1=0"
+                }
+            })),
+            id: Some(json!(902568_1)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = &resp["data"];
+    assert_eq!(
+        data["status"], "ok_empty",
+        "une requête sans ligne doit porter status: ok_empty"
+    );
+    assert_eq!(
+        data["row_count"], 0,
+        "row_count explicite à 0 (information essentielle, pas un champ absent)"
+    );
+    assert_eq!(
+        data["columns"],
+        json!(["count_col", "text_col"]),
+        "les colonnes doivent être restituées même si aucune ligne n'est retournée"
+    );
+
+    // Le texte content[0].text doit expliciter le vide et nommer les colonnes
+    let text = resp["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("ok_empty") && text.contains("count_col, text_col"),
+        "le texte doit nommer le statut ok_empty et les colonnes : {text}"
+    );
+
+    // Un succès ne doit JAMAIS accuser le schéma
+    assert_eq!(
+        data["next_action"]["kind"], "query_completed",
+        "next_action ne doit pas être continue_with_follow_up_tool"
+    );
+    assert!(
+        data.get("next").is_none(),
+        "data.next ne doit pas pointer vers schema_overview sur succès"
+    );
+    if let Some(tool) = data["next_action"].get("tool").and_then(|t| t.as_str()) {
+        assert_ne!(tool, "schema_overview");
+    }
+}
+
+#[test]
+fn sql_succes_rend_colonnes_lignes_et_n_accuse_pas_schema() {
+    use crate::mcp::protocol::JsonRpcRequest;
+    use crate::mcp::tests::create_test_server;
+    use serde_json::json;
+
+    let server = create_test_server();
+    let resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "sql",
+                "arguments": {
+                    "sql": "SELECT 42 AS reponse, 'ok' AS message"
+                }
+            })),
+            id: Some(json!(902568_2)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = &resp["data"];
+    assert_eq!(data["status"], "ok");
+    assert_eq!(data["row_count"], 1);
+    assert_eq!(data["columns"], json!(["reponse", "message"]));
+
+    // structuredContent et data doivent porter ces champs
+    assert_eq!(
+        data["next_action"]["kind"], "query_completed",
+        "next_action ne doit pas accuser le schéma"
+    );
+    assert!(
+        data.get("next").is_none(),
+        "aucun next vers schema_overview sur succès"
+    );
+}
+
+#[test]
+fn sql_erreur_rend_statut_error_et_message_brut_et_accuse_schema() {
+    use crate::mcp::protocol::JsonRpcRequest;
+    use crate::mcp::tests::create_test_server;
+    use serde_json::json;
+
+    let server = create_test_server();
+    let resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "sql",
+                "arguments": {
+                    "sql": "SELECT 1/0"
+                }
+            })),
+            id: Some(json!(902568_3)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = &resp["data"];
+    assert_eq!(
+        data["status"], "error",
+        "une erreur PG doit porter status: error"
+    );
+    let raw_error = data["error"]
+        .as_str()
+        .expect("data.error doit porter le message brut du moteur");
+    assert!(
+        raw_error.to_lowercase().contains("division by zero"),
+        "message brut de division par zéro attendu dans data.error: {raw_error}"
+    );
+
+    // Sur erreur, l'orientation vers schema_overview est attendue
+    assert_eq!(data["next_action"]["tool"], "schema_overview");
+}
+

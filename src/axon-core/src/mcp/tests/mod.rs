@@ -145,7 +145,7 @@ pub(crate) fn create_test_server_with_url() -> (McpServer, String) {
     (server, db_url)
 }
 
-fn create_test_server() -> McpServer {
+pub(crate) fn create_test_server() -> McpServer {
     create_test_server_with_url().0
 }
 
