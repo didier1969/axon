@@ -84,31 +84,91 @@ impl WorkerConnection {
 pub(super) fn spawn_supervisor(
     requests: Receiver<QueryEmbeddingRequest>,
 ) -> io::Result<JoinHandle<()>> {
-    thread::Builder::new()
-        .name("axon-query-supervisor".into())
-        .spawn(move || supervise(requests))
+    spawn_supervisor_kind(QueryWorkerSupervisorKind::Primary, requests)
 }
 
-fn supervise(requests: Receiver<QueryEmbeddingRequest>) {
+pub(super) fn spawn_fallback_supervisor(
+    requests: Receiver<QueryEmbeddingRequest>,
+) -> io::Result<JoinHandle<()>> {
+    spawn_supervisor_kind(QueryWorkerSupervisorKind::CpuFallback, requests)
+}
+
+fn spawn_supervisor_kind(
+    kind: QueryWorkerSupervisorKind,
+    requests: Receiver<QueryEmbeddingRequest>,
+) -> io::Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name(kind.thread_name().into())
+        .spawn(move || supervise(kind, requests))
+}
+
+/// REQ-AXO-902646 — supervisor kind: primary (GPU or auto) or fallback (always CPU).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QueryWorkerSupervisorKind {
+    Primary,
+    CpuFallback,
+}
+
+impl QueryWorkerSupervisorKind {
+    pub(super) fn socket_path(&self) -> PathBuf {
+        match self {
+            Self::Primary => query_socket_path(),
+            Self::CpuFallback => query_cpu_fallback_socket_path(),
+        }
+    }
+
+    pub(super) fn provider(&self) -> String {
+        match self {
+            Self::Primary => query_embed_effective_provider(),
+            Self::CpuFallback => "cpu".to_string(),
+        }
+    }
+
+    pub(super) fn thread_name(&self) -> &'static str {
+        match self {
+            Self::Primary => "axon-query-supervisor",
+            Self::CpuFallback => "axon-query-fallback-supervisor",
+        }
+    }
+
+    pub(super) fn reports_readiness(&self) -> bool {
+        matches!(self, Self::Primary)
+    }
+
+    pub(super) fn updates_global_compute_label(&self) -> bool {
+        matches!(self, Self::Primary)
+    }
+}
+
+fn supervise(kind: QueryWorkerSupervisorKind, requests: Receiver<QueryEmbeddingRequest>) {
     let mut observed_reload_generation = query_reload_generation();
-    let mut worker = match start_worker() {
-        Ok(worker) => {
-            crate::runtime_readiness::report_subsystem_state(
-                crate::runtime_readiness::Subsystem::Embedder,
-                crate::runtime_readiness::SubsystemState::Ready,
-            );
-            Some(worker)
+    // Primary worker prewarms at boot; fallback worker starts lazily on the first request under GPU pressure.
+    let mut worker = if kind == QueryWorkerSupervisorKind::Primary {
+        match start_worker(kind) {
+            Ok(worker) => {
+                if kind.reports_readiness() {
+                    crate::runtime_readiness::report_subsystem_state(
+                        crate::runtime_readiness::Subsystem::Embedder,
+                        crate::runtime_readiness::SubsystemState::Ready,
+                    );
+                }
+                Some(worker)
+            }
+            Err(error) => {
+                tracing::warn!("query embedding worker did not prewarm: {error:#}");
+                if kind.reports_readiness() {
+                    crate::runtime_readiness::report_subsystem_state(
+                        crate::runtime_readiness::Subsystem::Embedder,
+                        crate::runtime_readiness::SubsystemState::Failed {
+                            reason: "isolated_query_worker_start_failed".to_string(),
+                        },
+                    );
+                }
+                None
+            }
         }
-        Err(error) => {
-            tracing::warn!("query embedding worker did not prewarm: {error:#}");
-            crate::runtime_readiness::report_subsystem_state(
-                crate::runtime_readiness::Subsystem::Embedder,
-                crate::runtime_readiness::SubsystemState::Failed {
-                    reason: "isolated_query_worker_start_failed".to_string(),
-                },
-            );
-            None
-        }
+    } else {
+        None
     };
 
     while let Ok(request) = requests.recv() {
@@ -118,22 +178,26 @@ fn supervise(requests: Receiver<QueryEmbeddingRequest>) {
             if let Some(active) = worker.take() {
                 active.shutdown();
             }
-            worker = match start_worker() {
+            worker = match start_worker(kind) {
                 Ok(started) => {
-                    crate::runtime_readiness::report_subsystem_state(
-                        crate::runtime_readiness::Subsystem::Embedder,
-                        crate::runtime_readiness::SubsystemState::Ready,
-                    );
+                    if kind.reports_readiness() {
+                        crate::runtime_readiness::report_subsystem_state(
+                            crate::runtime_readiness::Subsystem::Embedder,
+                            crate::runtime_readiness::SubsystemState::Ready,
+                        );
+                    }
                     Some(started)
                 }
                 Err(error) => {
                     tracing::warn!("query embedding worker reload failed: {error:#}");
-                    crate::runtime_readiness::report_subsystem_state(
-                        crate::runtime_readiness::Subsystem::Embedder,
-                        crate::runtime_readiness::SubsystemState::Failed {
-                            reason: "isolated_query_worker_reload_failed".to_string(),
-                        },
-                    );
+                    if kind.reports_readiness() {
+                        crate::runtime_readiness::report_subsystem_state(
+                            crate::runtime_readiness::Subsystem::Embedder,
+                            crate::runtime_readiness::SubsystemState::Failed {
+                                reason: "isolated_query_worker_reload_failed".to_string(),
+                            },
+                        );
+                    }
                     None
                 }
             };
@@ -152,7 +216,7 @@ fn supervise(requests: Receiver<QueryEmbeddingRequest>) {
             continue;
         }
 
-        let result = dispatch_with_one_retry(&mut worker, request.texts, request.deadline);
+        let result = dispatch_with_one_retry(kind, &mut worker, request.texts, request.deadline);
         let _ = request.reply.send(result);
     }
 
@@ -162,6 +226,7 @@ fn supervise(requests: Receiver<QueryEmbeddingRequest>) {
 }
 
 fn dispatch_with_one_retry(
+    kind: QueryWorkerSupervisorKind,
     worker: &mut Option<WorkerConnection>,
     texts: Vec<String>,
     deadline: Instant,
@@ -186,22 +251,35 @@ fn dispatch_with_one_retry(
                 "MCP real-time embedding timed out before attempt {attempt}. Use structural search."
             ));
         }
+        // REQ-AXO-902646: Proactive detection of natural exit (e.g. idle_drop timeout) or unexpected exit,
+        // avoiding wasting the single retry on a BrokenPipe round-trip write attempt.
+        if let Some(active) = worker.as_mut() {
+            if let Ok(Some(_)) = active.child.try_wait() {
+                if let Some(stale) = worker.take() {
+                    stale.shutdown();
+                }
+            }
+        }
         if worker.is_none() {
-            match start_worker() {
+            match start_worker(kind) {
                 Ok(started) => {
-                    crate::runtime_readiness::report_subsystem_state(
-                        crate::runtime_readiness::Subsystem::Embedder,
-                        crate::runtime_readiness::SubsystemState::Ready,
-                    );
+                    if kind.reports_readiness() {
+                        crate::runtime_readiness::report_subsystem_state(
+                            crate::runtime_readiness::Subsystem::Embedder,
+                            crate::runtime_readiness::SubsystemState::Ready,
+                        );
+                    }
                     *worker = Some(started);
                 }
                 Err(error) => {
-                    crate::runtime_readiness::report_subsystem_state(
-                        crate::runtime_readiness::Subsystem::Embedder,
-                        crate::runtime_readiness::SubsystemState::Failed {
-                            reason: "isolated_query_worker_start_failed".to_string(),
-                        },
-                    );
+                    if kind.reports_readiness() {
+                        crate::runtime_readiness::report_subsystem_state(
+                            crate::runtime_readiness::Subsystem::Embedder,
+                            crate::runtime_readiness::SubsystemState::Failed {
+                                reason: "isolated_query_worker_start_failed".to_string(),
+                            },
+                        );
+                    }
                     return Err(error);
                 }
             }
@@ -233,7 +311,9 @@ fn dispatch_with_one_retry(
                     response.request_id
                 ));
             }
-            set_query_worker_compute_gpu(response.provider.eq_ignore_ascii_case("GPU"));
+            if kind.updates_global_compute_label() {
+                set_query_worker_compute_gpu(response.provider.eq_ignore_ascii_case("GPU"));
+            }
             match (response.embeddings, response.error) {
                 (Some(embeddings), None) => Ok(embeddings),
                 (_, Some(error)) => Err(anyhow!(error)),
@@ -245,10 +325,12 @@ fn dispatch_with_one_retry(
             Ok(value) => {
                 // REQ-AXO-902547: refresh the observed state on inference,
                 // including successes on an already-running connection.
-                crate::runtime_readiness::report_subsystem_state(
-                    crate::runtime_readiness::Subsystem::Embedder,
-                    crate::runtime_readiness::SubsystemState::Ready,
-                );
+                if kind.reports_readiness() {
+                    crate::runtime_readiness::report_subsystem_state(
+                        crate::runtime_readiness::Subsystem::Embedder,
+                        crate::runtime_readiness::SubsystemState::Ready,
+                    );
+                }
                 return Ok(value);
             }
             Err(error) if attempt == 0 && Instant::now() < deadline => {
@@ -260,12 +342,14 @@ fn dispatch_with_one_retry(
             Err(error) => {
                 // A successful startup handshake does not prove inference
                 // availability. Invalidate it before potentially slow cleanup.
-                crate::runtime_readiness::report_subsystem_state(
-                    crate::runtime_readiness::Subsystem::Embedder,
-                    crate::runtime_readiness::SubsystemState::Failed {
-                        reason: "isolated_query_worker_inference_failed".to_string(),
-                    },
-                );
+                if kind.reports_readiness() {
+                    crate::runtime_readiness::report_subsystem_state(
+                        crate::runtime_readiness::Subsystem::Embedder,
+                        crate::runtime_readiness::SubsystemState::Failed {
+                            reason: "isolated_query_worker_inference_failed".to_string(),
+                        },
+                    );
+                }
                 if let Some(stale) = worker.take() {
                     stale.shutdown();
                 }
@@ -276,24 +360,21 @@ fn dispatch_with_one_retry(
     unreachable!()
 }
 
-fn start_worker() -> anyhow::Result<WorkerConnection> {
+fn start_worker(kind: QueryWorkerSupervisorKind) -> anyhow::Result<WorkerConnection> {
     // REQ-AXO-902566 — résolu EN PREMIER : on échoue avant de créer un répertoire
     // ou de lier une socket, et le chemin est ensuite disponible pour tout le
     // contexte. Le message d'absence est déjà structuré ; c'est le reste que
     // `with_context` habille.
     let binary = query_worker_binary()?;
-    start_worker_with(&binary).with_context(|| worker_unavailable_message(&binary))
+    start_worker_with(&binary, kind).with_context(|| worker_unavailable_message(&binary))
 }
 
-/// REQ-AXO-902566 — enveloppé par `start_worker`. C'est ICI, et pas dans
-/// `dispatch_with_one_retry` ni dans `supervise`, que l'erreur doit être
-/// structurée : seul ce site connaît le chemin résolu (le REQ exige de le
-/// nommer), et il couvre d'un coup les trois appelants — préchauffage, rechargement
-/// et dispatch. `supervise` serait le pire choix : il mélange les échecs de
-/// démarrage et ceux de round-trip, et y coller « worker unavailable » serait faux
-/// la moitié du temps.
-fn start_worker_with(binary: &Path) -> anyhow::Result<WorkerConnection> {
-    let socket_path = query_socket_path();
+/// REQ-AXO-902566 / REQ-AXO-902646 — enveloppé par `start_worker`.
+fn start_worker_with(
+    binary: &Path,
+    kind: QueryWorkerSupervisorKind,
+) -> anyhow::Result<WorkerConnection> {
+    let socket_path = kind.socket_path();
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create query worker run dir {}", parent.display()))?;
@@ -309,7 +390,7 @@ fn start_worker_with(binary: &Path) -> anyhow::Result<WorkerConnection> {
         .context("restrict query worker socket permissions")?;
     listener.set_nonblocking(true)?;
 
-    let provider = query_embed_effective_provider();
+    let provider = kind.provider();
     let mut child = Command::new(binary)
         .arg("--socket")
         .arg(&socket_path)
@@ -371,8 +452,11 @@ fn start_worker_with(binary: &Path) -> anyhow::Result<WorkerConnection> {
             hello.error.unwrap_or_else(|| "missing ready marker".into())
         ));
     }
-    set_query_worker_compute_gpu(hello.provider.eq_ignore_ascii_case("GPU"));
+    if kind.updates_global_compute_label() {
+        set_query_worker_compute_gpu(hello.provider.eq_ignore_ascii_case("GPU"));
+    }
     tracing::info!(
+        role = kind.thread_name(),
         pid = child.id(),
         provider = %hello.provider,
         rss_mb = hello.rss_bytes / 1024 / 1024,
@@ -490,7 +574,7 @@ pub fn run_worker(socket_path: &Path) -> anyhow::Result<()> {
     }
 }
 
-fn query_socket_path() -> PathBuf {
+fn query_socket_path_for(file_name: &str) -> PathBuf {
     let run_root = std::env::var_os("AXON_RUN_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".axon/run-brain"));
@@ -501,7 +585,15 @@ fn query_socket_path() -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(run_root)
     };
-    root.join("query-embed.sock")
+    root.join(file_name)
+}
+
+pub(super) fn query_socket_path() -> PathBuf {
+    query_socket_path_for("query-embed.sock")
+}
+
+pub(super) fn query_cpu_fallback_socket_path() -> PathBuf {
+    query_socket_path_for("query-embed-cpu-fallback.sock")
 }
 
 const WORKER_BIN_NAME: &str = "axon-query-embed-worker";
@@ -707,6 +799,26 @@ mod tests {
         assert_eq!(DEFAULT_IDLE_SECS, 300);
         assert_eq!(DEFAULT_QUERY_RSS_LIMIT_MB, 2_200);
         assert_eq!(DEFAULT_QUERY_GPU_LIMIT_MB, 2_200);
+    }
+
+    #[test]
+    fn supervisor_kinds_have_distinct_sockets_and_roles() {
+        let primary = QueryWorkerSupervisorKind::Primary;
+        let fallback = QueryWorkerSupervisorKind::CpuFallback;
+
+        assert_ne!(primary.socket_path(), fallback.socket_path());
+        assert!(primary.socket_path().ends_with("query-embed.sock"));
+        assert!(fallback.socket_path().ends_with("query-embed-cpu-fallback.sock"));
+
+        assert_eq!(fallback.provider(), "cpu");
+        assert_eq!(primary.thread_name(), "axon-query-supervisor");
+        assert_eq!(fallback.thread_name(), "axon-query-fallback-supervisor");
+
+        assert!(primary.reports_readiness());
+        assert!(!fallback.reports_readiness());
+
+        assert!(primary.updates_global_compute_label());
+        assert!(!fallback.updates_global_compute_label());
     }
 
     // ── REQ-AXO-902566 ──────────────────────────────────────────────────────

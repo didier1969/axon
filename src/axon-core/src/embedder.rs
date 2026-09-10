@@ -1091,7 +1091,7 @@ fn cpu_fallback_query_sender_slot() -> &'static Mutex<Option<Sender<QueryEmbeddi
     QUERY_EMBEDDING_FALLBACK_SENDER.get_or_init(|| Mutex::new(None))
 }
 
-fn current_cpu_fallback_query_sender() -> Option<Sender<QueryEmbeddingRequest>> {
+pub(crate) fn current_cpu_fallback_query_sender() -> Option<Sender<QueryEmbeddingRequest>> {
     cpu_fallback_query_sender_slot()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
@@ -1121,15 +1121,14 @@ pub fn enforce_passive_ort_runtime_env() {
     }
 }
 
-/// REQ-AXO-902134 — spawn (once) the always-CPU fallback query worker. It runs
-/// the same `query_worker_loop_lane` as the primary worker but pinned to the
-/// `query_cpu_fallback` lane (always CPU, never CUDA), so a punctual query embed
-/// can be served on the CPU while the indexer saturates the GPU. The model is
-/// idle-dropped like the primary worker, so the ~1.3 GB CPU model is only
-/// resident while queries actually arrive under GPU pressure — and never in the
-/// common case (GPU idle → primary lane serves everything).
-fn ensure_cpu_fallback_query_worker() {
-    enforce_passive_ort_runtime_env();
+/// REQ-AXO-902134 / REQ-AXO-902646 — spawn (once) the CPU fallback query supervisor.
+/// Rather than instantiating ONNX Runtime / fastembed in-process in axon-brain,
+/// it delegates to an out-of-process `axon-query-embed-worker` pinned to CPU provider
+/// via a dedicated Unix socket (`query-embed-cpu-fallback.sock`).
+/// Under GPU memory pressure, punctual query embeds are served out-of-process on CPU.
+/// When idle for `AXON_QUERY_EMBED_IDLE_SECS` (default 300s), the worker process exits
+/// and releases 100% of its virtual memory to the OS.
+pub(crate) fn ensure_cpu_fallback_query_worker() {
     CPU_FALLBACK_WORKER_SPAWNED.call_once(|| {
         let (tx, rx) = bounded(CPU_FALLBACK_QUERY_QUEUE_DEPTH);
         {
@@ -1138,10 +1137,8 @@ fn ensure_cpu_fallback_query_worker() {
                 .unwrap_or_else(|poison| poison.into_inner());
             *slot = Some(tx);
         }
-        thread::Builder::new()
-            .name("axon-cpu-query-embed-fallback".into())
-            .spawn(move || SemanticWorkerPool::query_worker_loop_lane("query_cpu_fallback", 0, rx))
-            .expect("failed to spawn CPU fallback query embedding worker (REQ-AXO-902134)");
+        query_embed_service::spawn_fallback_supervisor(rx)
+            .expect("failed to spawn out-of-process CPU fallback query supervisor (REQ-AXO-902646)");
     });
 }
 

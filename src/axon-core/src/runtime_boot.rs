@@ -893,14 +893,14 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
         effective_lane_sizing.graph_batch_size
     );
 
-    // REQ-AXO-128 / DEC-AXO-061 — spawn the in-process CPU query
-    // embedding worker when the runtime profile does not own a GPU
-    // subprocess (brain_only, indexer_graph). The worker registers
-    // itself as the canonical query_embedding_sender so batch_embed
-    // routes through it transparently. No-op for indexer_vector /
-    // indexer_full where the SemanticWorkerPool spawns its own
-    // GPU-backed worker via the canonical pipeline.
-    crate::embedder::spawn_brain_query_worker_if_needed(runtime_mode);
+    // REQ-AXO-128 / DEC-AXO-061 / REQ-AXO-902646 — spawn the isolated query
+    // embedding worker service for brain role (or non-semantic indexer profiles).
+    // All vector embeddings in axon-brain are strictly delegated to axon-query-embed-worker.
+    if profile.role == RuntimeBootRole::Brain {
+        crate::embedder::spawn_brain_query_worker_if_needed(AxonRuntimeMode::BrainOnly);
+    } else {
+        crate::embedder::spawn_brain_query_worker_if_needed(runtime_mode);
+    }
 
     // REQ-AXO-098 / DEC-AXO-062 — initial subsystem readiness
     // reports. Each role declares its primary subsystem(s) Ready at
@@ -1098,6 +1098,11 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     // Pipeline_v2 (REQ-AXO-289) writes via GraphStore directly.
     let indexer_health = if profile.start_mcp_http {
         let options = match runtime_mode {
+            _ if profile.role == RuntimeBootRole::Brain => {
+                // REQ-AXO-902646: axon-brain must NEVER spawn in-process semantic workers;
+                // all vector embeddings are delegated out-of-process to axon-query-embed-worker.
+                main_services::RuntimeServiceOptions::brain_only()
+            }
             AxonRuntimeMode::BrainOnly => main_services::RuntimeServiceOptions::brain_only(),
             AxonRuntimeMode::IndexerGraph => main_services::RuntimeServiceOptions::indexer_graph(),
             AxonRuntimeMode::IndexerVector => {

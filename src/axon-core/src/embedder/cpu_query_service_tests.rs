@@ -73,3 +73,18 @@ fn spawn_for_brain_only_makes_batch_embed_either_succeed_or_fail_with_structured
         }
     }
 }
+
+#[test]
+fn cpu_fallback_query_worker_spawns_out_of_process_supervisor() {
+    // REQ-AXO-902646: Under GPU pressure or CPU fallback routing, the worker is
+    // supervised out-of-process via socket, not in-process via SemanticWorkerPool.
+    crate::embedder::ensure_cpu_fallback_query_worker();
+    let sender = crate::embedder::current_cpu_fallback_query_sender();
+    assert!(sender.is_some(), "Fallback worker sender must be registered in slot");
+
+    let fallback_socket = crate::embedder::query_embed_service::query_cpu_fallback_socket_path();
+    assert!(
+        fallback_socket.ends_with("query-embed-cpu-fallback.sock"),
+        "CPU fallback must target query-embed-cpu-fallback.sock"
+    );
+}
