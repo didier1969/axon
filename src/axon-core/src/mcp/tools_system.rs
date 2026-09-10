@@ -1482,22 +1482,63 @@ impl McpServer {
     /// `schema.table` relations named in the query, and inlines their real
     /// columns from `information_schema` so the agent self-corrects in one shot
     /// instead of guessing a second time. Returns `None` for unrelated errors
+    /// REQ-AXO-901949 — turn an opaque PG execution error into repair-as-data.
+    ///
+    /// Detects undefined-column (42703) / undefined-table (42P01), extracts the
+    /// `schema.table` relations named in the query, and inlines their real
+    /// columns from `information_schema` so the agent self-corrects in one shot
+    /// instead of guessing a second time. Returns `None` for unrelated errors
     /// (the raw `SQL Error` text already carries those).
+    /// REQ-AXO-902482 — when a relation is undefined, suggests closest real
+    /// tables from product schemas (case fixes like soll."Node" -> soll.node,
+    /// typos, missing schema prefixes).
     fn pg_error_repair(&self, sql: &str, raw: &str) -> Option<Value> {
-        use super::tool_contracts::{classify_pg_undefined, extract_sql_relations};
+        use super::tool_contracts::{
+            classify_pg_undefined, extract_sql_relations, find_nearby_tables,
+        };
         let problem_class = classify_pg_undefined(raw)?;
-        let relations = extract_sql_relations(sql);
+        let mut relations = extract_sql_relations(sql);
+
+        // REQ-AXO-902482 — If extract_sql_relations found nothing (e.g. bare table or complex syntax)
+        // and error is undefined_table, extract the missing relation directly from raw error text:
+        // e.g. `relation "soll.Node" does not exist` or `relation "node" does not exist`.
+        if relations.is_empty() && problem_class == "undefined_table" {
+            if let Ok(re) = regex::Regex::new(r#"(?i)relation\s+"([^"]+)"\s+does not exist"#) {
+                if let Some(cap) = re.captures(raw) {
+                    if let Some(m) = cap.get(1) {
+                        let full = m.as_str();
+                        if let Some((s, t)) = full.split_once('.') {
+                            relations.push((s.to_string(), t.to_string()));
+                        } else {
+                            relations.push((String::new(), full.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Lazy-loaded product tables from information_schema.tables to suggest nearby tables on undefined_table.
+        let mut product_tables_cache: Option<Vec<(String, String)>> = None;
 
         let mut tables = Vec::new();
         for (schema, table) in &relations {
-            let probe = format!(
-                "SELECT column_name FROM information_schema.columns \
-                 WHERE table_schema = '{}' AND lower(table_name) = '{}' \
-                 ORDER BY ordinal_position",
-                schema.replace('\'', "''"),
-                table.replace('\'', "''")
-            );
-            let columns: Vec<String> = self
+            let probe = if schema.is_empty() {
+                format!(
+                    "SELECT column_name FROM information_schema.columns \
+                     WHERE table_name = '{}' \
+                     ORDER BY ordinal_position",
+                    table.replace('\'', "''")
+                )
+            } else {
+                format!(
+                    "SELECT column_name FROM information_schema.columns \
+                     WHERE table_schema = '{}' AND table_name = '{}' \
+                     ORDER BY ordinal_position",
+                    schema.replace('\'', "''"),
+                    table.replace('\'', "''")
+                )
+            };
+            let mut columns: Vec<String> = self
                 .graph_store
                 .query_json(&probe)
                 .ok()
@@ -1514,11 +1555,96 @@ impl McpServer {
                         .collect()
                 })
                 .unwrap_or_default();
-            tables.push(json!({
-                "relation": format!("{}.{}", schema, table),
+
+            // For undefined_column, if exact case didn't match, try lowercased probe
+            if columns.is_empty() && problem_class == "undefined_column" {
+                let lower_probe = if schema.is_empty() {
+                    format!(
+                        "SELECT column_name FROM information_schema.columns \
+                         WHERE lower(table_name) = '{}' \
+                         ORDER BY ordinal_position",
+                        table.to_ascii_lowercase().replace('\'', "''")
+                    )
+                } else {
+                    format!(
+                        "SELECT column_name FROM information_schema.columns \
+                         WHERE table_schema = '{}' AND lower(table_name) = '{}' \
+                         ORDER BY ordinal_position",
+                        schema.to_ascii_lowercase().replace('\'', "''"),
+                        table.to_ascii_lowercase().replace('\'', "''")
+                    )
+                };
+                columns = self
+                    .graph_store
+                    .query_json(&lower_probe)
+                    .ok()
+                    .and_then(|json| serde_json::from_str::<Value>(&json).ok())
+                    .and_then(|v| v.as_array().cloned())
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|r| {
+                                r.as_array()
+                                    .and_then(|c| c.first())
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+
+            let exists = !columns.is_empty();
+            let mut nearby_tables = Vec::new();
+
+            if !exists && problem_class == "undefined_table" {
+                if product_tables_cache.is_none() {
+                    const PRODUCT_SCHEMAS: &str =
+                        "table_schema NOT IN ('pg_catalog', 'information_schema') \
+                         AND table_schema NOT LIKE 'pg_toast%' AND table_schema NOT LIKE 'pg_temp%'";
+                    let query = format!(
+                        "SELECT table_schema, table_name \
+                         FROM information_schema.tables \
+                         WHERE table_type = 'BASE TABLE' AND {PRODUCT_SCHEMAS} \
+                         ORDER BY table_schema, table_name"
+                    );
+                    let fetched: Vec<(String, String)> = self
+                        .graph_store
+                        .query_json(&query)
+                        .ok()
+                        .and_then(|json| serde_json::from_str::<Vec<Vec<Value>>>(&json).ok())
+                        .map(|rows| {
+                            rows.into_iter()
+                                .filter_map(|r| {
+                                    let s = r.first().and_then(Value::as_str)?.to_string();
+                                    let t = r.get(1).and_then(Value::as_str)?.to_string();
+                                    Some((s, t))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    product_tables_cache = Some(fetched);
+                }
+
+                if let Some(avail) = &product_tables_cache {
+                    nearby_tables = find_nearby_tables(schema, table, avail);
+                }
+            }
+
+            let rel_name = if schema.is_empty() {
+                table.clone()
+            } else {
+                format!("{}.{}", schema, table)
+            };
+
+            let mut table_entry = json!({
+                "relation": rel_name,
                 "real_columns": columns,
-                "exists": !columns.is_empty()
-            }));
+                "exists": exists
+            });
+            if !nearby_tables.is_empty() {
+                table_entry["nearby_tables"] = json!(nearby_tables);
+            }
+            tables.push(table_entry);
         }
 
         Some(json!({

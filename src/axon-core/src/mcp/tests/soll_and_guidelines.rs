@@ -17591,4 +17591,46 @@ fn req_902474_soll_manager_create_rejects_exact_duplicate_title_and_surfaces_nea
     );
 }
 
+/// REQ-AXO-902482 — `sql` sur une table inexistante (ou mauvaise casse avec guillemets)
+/// propose les tables voisines au lieu de renvoyer à l'aveugle vers schema_overview.
+#[test]
+fn test_req_902482_sql_undefined_table_suggests_nearby_tables() {
+    let server = create_test_server();
+
+    // 1. Quoted identifier with case mismatch: soll."Node" -> suggests soll.node with PG quoting note
+    let res = server
+        .execute_tool_direct("sql", &json!({ "sql": r#"SELECT id FROM soll."Node" LIMIT 1"# }))
+        .expect("sql response");
+
+    assert_eq!(res["isError"], true, "soll.\"Node\" must error under PG: {res}");
+    let text = res["content"][0]["text"].as_str().expect("text response");
+    assert!(
+        text.contains("soll.Node does not exist — did you mean soll.node?"),
+        "error text must suggest soll.node: {text}"
+    );
+    assert!(
+        text.contains("PostgreSQL folds UNQUOTED identifiers"),
+        "error text must explain quoting rules: {text}"
+    );
+
+    let tables = res["data"]["parameter_repair"]["referenced_relations"]
+        .as_array()
+        .expect("referenced_relations array");
+    let node_entry = tables.iter().find(|t| t["relation"] == "soll.Node").expect("soll.Node entry");
+    assert_eq!(node_entry["exists"], false);
+    assert_eq!(node_entry["nearby_tables"], json!(["soll.node"]));
+
+    // 2. Typo / plural table name: soll.nodes -> suggests soll.node
+    let res_typo = server
+        .execute_tool_direct("sql", &json!({ "sql": "SELECT id FROM soll.nodes LIMIT 1" }))
+        .expect("sql response");
+
+    assert_eq!(res_typo["isError"], true);
+    let text_typo = res_typo["content"][0]["text"].as_str().expect("text response");
+    assert!(
+        text_typo.contains("soll.nodes does not exist — did you mean soll.node?"),
+        "error text must suggest soll.node for plural typo: {text_typo}"
+    );
+}
+
 

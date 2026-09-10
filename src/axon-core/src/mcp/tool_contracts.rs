@@ -588,18 +588,121 @@ pub(crate) fn classify_pg_undefined(raw: &str) -> Option<&'static str> {
     None
 }
 
+/// Levenshtein distance, iterative two-row form. Pure and deterministic.
+pub(crate) fn edit_distance(left: &str, right: &str) -> usize {
+    let right_chars: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right_chars.len()).collect();
+    let mut current = vec![0usize; right_chars.len() + 1];
+    for (i, lc) in left.chars().enumerate() {
+        current[0] = i + 1;
+        for (j, rc) in right_chars.iter().enumerate() {
+            let substitution = previous[j] + usize::from(lc != *rc);
+            current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right_chars.len()]
+}
+
+/// REQ-AXO-902482 — suggest closest real tables for an undefined relation.
+/// Matches case differences first (0 distance in lowercase), then typo / plural
+/// differences, prioritizing tables within the same schema if specified.
+pub(crate) fn find_nearby_tables(
+    target_schema: &str,
+    target_table: &str,
+    available_tables: &[(String, String)],
+) -> Vec<String> {
+    if available_tables.is_empty() || target_table.is_empty() {
+        return Vec::new();
+    }
+    let target_schema_lower = target_schema.to_ascii_lowercase();
+    let target_table_lower = target_table.to_ascii_lowercase();
+
+    let mut scored: Vec<(usize, String)> = Vec::new();
+
+    for (cand_schema, cand_table) in available_tables {
+        let cand_schema_lower = cand_schema.to_ascii_lowercase();
+        let cand_table_lower = cand_table.to_ascii_lowercase();
+        let same_schema =
+            target_schema_lower.is_empty() || cand_schema_lower == target_schema_lower;
+
+        let full_name = format!("{cand_schema}.{cand_table}");
+
+        // 1. Exact case-insensitive match on table name
+        if cand_table_lower == target_table_lower {
+            if same_schema {
+                scored.push((0, full_name));
+            } else {
+                scored.push((2, full_name));
+            }
+            continue;
+        }
+
+        // 2. Levenshtein on table name (if in same schema or no schema given)
+        if same_schema {
+            let dist = edit_distance(&target_table_lower, &cand_table_lower);
+            let max_allowed = if target_table_lower.len() <= 4 {
+                1
+            } else if target_table_lower.len() <= 7 {
+                2
+            } else {
+                3
+            };
+            if dist <= max_allowed {
+                scored.push((10 + dist, full_name));
+                continue;
+            }
+        }
+
+        // 3. Full name distance (e.g. if schema was slightly mistyped)
+        if !target_schema_lower.is_empty() {
+            let full_target = format!("{target_schema_lower}.{target_table_lower}");
+            let full_cand = format!("{cand_schema_lower}.{cand_table_lower}");
+            let dist = edit_distance(&full_target, &full_cand);
+            if dist <= 2 {
+                scored.push((20 + dist, full_name));
+            }
+        }
+    }
+
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    scored.dedup_by(|a, b| a.1 == b.1);
+    if let Some(&(best_score, _)) = scored.first() {
+        // Keep only candidates close to the best match to avoid noise
+        let cutoff = if best_score == 0 { 0 } else { best_score + 1 };
+        scored.retain(|(s, _)| *s <= cutoff);
+    }
+    scored.into_iter().take(4).map(|(_, name)| name).collect()
+}
+
 /// REQ-AXO-901949 — extract the `schema.table` relations named in a `FROM` /
 /// `JOIN` clause so the repair can inline each one's real columns. De-duplicated,
-/// lower-cased, capped at 4. Pure (no DB) so the parsing is unit-testable.
+/// capped at 4. Pure (no DB) so the parsing is unit-testable.
+/// REQ-AXO-902482 — accept quoted identifiers ("Node", "soll") as well as bare ones.
+/// Preserves case for double-quoted identifiers (PG case-sensitive when quoted),
+/// folds unquoted identifiers to lower case per PostgreSQL standard folding rules.
 pub(crate) fn extract_sql_relations(sql: &str) -> Vec<(String, String)> {
-    let Ok(re) = regex::Regex::new(r"(?i)\b(?:from|join)\s+([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)")
-    else {
+    let Ok(re) = regex::Regex::new(
+        r#"(?i)\b(?:from|join)\s+(?:"([^"]+)"|([a-z_][a-z0-9_]*))\.(?:"([^"]+)"|([a-z_][a-z0-9_]*))"#
+    ) else {
         return Vec::new();
     };
     let mut relations: Vec<(String, String)> = Vec::new();
     for cap in re.captures_iter(sql) {
-        let schema = cap[1].to_ascii_lowercase();
-        let table = cap[2].to_ascii_lowercase();
+        let schema = if let Some(q) = cap.get(1) {
+            q.as_str().to_string()
+        } else if let Some(u) = cap.get(2) {
+            u.as_str().to_ascii_lowercase()
+        } else {
+            continue;
+        };
+        let table = if let Some(q) = cap.get(3) {
+            q.as_str().to_string()
+        } else if let Some(u) = cap.get(4) {
+            u.as_str().to_ascii_lowercase()
+        } else {
+            continue;
+        };
         if !relations.iter().any(|(s, t)| s == &schema && t == &table) {
             relations.push((schema, table));
         }
@@ -645,12 +748,20 @@ pub(crate) fn render_pg_repair_text(repair: &Value) -> String {
                     .get("exists")
                     .and_then(Value::as_bool)
                     .unwrap_or(!cols.is_empty());
+                let nearby: Vec<&str> = rel
+                    .get("nearby_tables")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
                 if exists && !cols.is_empty() {
                     out.push_str(&format!("\n  {name} columns: {}", cols.join(", ")));
                 } else {
-                    out.push_str(&format!(
-                        "\n  {name} does not exist — run `schema_overview` for the table list"
-                    ));
+                    out.push_str(&format!("\n  {name} does not exist"));
+                    if !nearby.is_empty() {
+                        out.push_str(&format!(" — did you mean {}?", nearby.join(", ")));
+                    } else {
+                        out.push_str(" — run `schema_overview` for the table list");
+                    }
                     // REQ-AXO-902444 — VPC (llm_feedback #221) filed a bug
                     // report against GUI-PRO-028 saying "the prescribed SQL
                     // does not run", then retracted it: the guideline was
@@ -673,9 +784,23 @@ pub(crate) fn render_pg_repair_text(repair: &Value) -> String {
                 }
             }
         }
-        _ => out.push_str(
-            "\n  (no schema-qualified relation parsed — run `schema_overview` for the table list)",
-        ),
+        _ => {
+            let nearby: Vec<&str> = repair
+                .get("nearby_tables")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if !nearby.is_empty() {
+                out.push_str(&format!(
+                    "\n  (no schema-qualified relation parsed — did you mean {}?)",
+                    nearby.join(", ")
+                ));
+            } else {
+                out.push_str(
+                    "\n  (no schema-qualified relation parsed — run `schema_overview` for the table list)",
+                );
+            }
+        }
     }
 
     if let Some(hint) = repair.get("hint").and_then(Value::as_str) {
@@ -2414,5 +2539,65 @@ mod tests {
         );
         // Empty form → empty string (no spurious header).
         assert_eq!(render_parameter_form(&[]), "");
+    }
+
+    #[test]
+    fn test_req_902482_extract_sql_relations_handles_quoted_identifiers() {
+        // Quoted table identifier with uppercase: case preserved.
+        let rels = extract_sql_relations(r#"SELECT n.id FROM soll."Node" n"#);
+        assert_eq!(rels, vec![("soll".to_string(), "Node".to_string())]);
+
+        // Both schema and table quoted.
+        let rels2 = extract_sql_relations(r#"SELECT n.id FROM "soll"."Node" n"#);
+        assert_eq!(rels2, vec![("soll".to_string(), "Node".to_string())]);
+
+        // Schema quoted, table unquoted.
+        let rels3 = extract_sql_relations(r#"SELECT n.id FROM "soll".node n"#);
+        assert_eq!(rels3, vec![("soll".to_string(), "node".to_string())]);
+
+        // Both unquoted with uppercase: unquoted identifier folds to lowercase per PG rules.
+        let rels4 = extract_sql_relations(r#"SELECT n.id FROM soll.Node n"#);
+        assert_eq!(rels4, vec![("soll".to_string(), "node".to_string())]);
+    }
+
+    #[test]
+    fn test_req_902482_find_nearby_tables() {
+        let available = vec![
+            ("soll".to_string(), "node".to_string()),
+            ("soll".to_string(), "edge".to_string()),
+            ("ist".to_string(), "symbol".to_string()),
+            ("ist".to_string(), "indexedfile".to_string()),
+        ];
+
+        // Exact match except casing
+        let nearby = find_nearby_tables("soll", "Node", &available);
+        assert_eq!(nearby, vec!["soll.node".to_string()]);
+
+        // Plural / typo distance
+        let nearby = find_nearby_tables("soll", "nodes", &available);
+        assert_eq!(nearby, vec!["soll.node".to_string()]);
+
+        let nearby = find_nearby_tables("soll", "edgess", &available);
+        assert_eq!(nearby, vec!["soll.edge".to_string()]);
+
+        // Empty schema prefix matches table name
+        let nearby = find_nearby_tables("", "node", &available);
+        assert_eq!(nearby, vec!["soll.node".to_string()]);
+    }
+
+    #[test]
+    fn test_req_902482_render_repair_suggests_nearby_tables() {
+        let repair = serde_json::json!({
+            "problem_class": "undefined_table",
+            "referenced_relations": [{
+                "relation": "soll.Node",
+                "real_columns": [],
+                "exists": false,
+                "nearby_tables": ["soll.node"]
+            }]
+        });
+        let text = render_pg_repair_text(&repair);
+        assert!(text.contains("soll.Node does not exist — did you mean soll.node?"), "got: {text}");
+        assert!(text.contains("PostgreSQL folds UNQUOTED identifiers"), "got: {text}");
     }
 }
