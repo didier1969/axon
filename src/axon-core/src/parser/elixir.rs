@@ -720,6 +720,20 @@ impl ElixirParser {
                 }
             }
             Self::extract_generic_call(node, source_bytes, result, caller_name, aliases);
+            if let Some(dot_node) = Self::find_child_by_type(node, "dot") {
+                let mut cursor = dot_node.walk();
+                for child in dot_node.named_children(&mut cursor) {
+                    if child.kind() != "identifier" && child.kind() != "alias" && child.kind() != "atom" {
+                        Self::extract_calls_from_expression(
+                            child,
+                            source_bytes,
+                            result,
+                            caller_name,
+                            aliases,
+                        );
+                    }
+                }
+            }
             if let Some(args) = Self::find_child_by_type(node, "arguments") {
                 Self::extract_calls_from_expression(
                     args,
@@ -765,14 +779,20 @@ impl ElixirParser {
 
             let mut cursor = dot_node.walk();
             for child in dot_node.named_children(&mut cursor) {
-                if child.kind() == "alias" {
+                if child.kind() == "alias" || child.kind() == "atom" {
                     receiver = child.utf8_text(source_bytes).unwrap_or("").to_string();
                 } else if child.kind() == "identifier" {
                     func_name = child.utf8_text(source_bytes).unwrap_or("").to_string();
                 }
             }
 
-            if !func_name.is_empty() {
+            // REQ-AXO-902376 — A dot expression is only a function call if it has
+            // an explicit module or atom receiver (e.g. `Module.func` or `:atom.func`).
+            // A bare field access (`map.id`, `socket.assigns`, `user.current_org_id`)
+            // has identifier-only operands and an empty receiver: emitting a CALLS edge
+            // to `.{field}` fabricated tens of thousands of spurious edges across
+            // Elixir projects (e.g. 11,040 on APS, 9,540 on TE2).
+            if !receiver.is_empty() && !func_name.is_empty() {
                 // REQ-AXO-901953 — resolve the receiver short-name through the
                 // module's alias map to the fully-qualified module, so the
                 // CALLS edge targets the callee's canonical Symbol.id instead
@@ -817,6 +837,9 @@ impl ElixirParser {
                     if is_genserver {
                         props.insert("otp_boundary".to_string(), "true".to_string());
                         props.insert("call_type".to_string(), func_name.clone());
+                    }
+                    if receiver.starts_with(':') {
+                        props.insert("external".to_string(), "true".to_string());
                     }
 
                     result.relations.push(Relation {
@@ -1637,5 +1660,68 @@ mod tests {
             result.relations
         );
     }
+
+    #[test]
+    fn req_902376_field_access_is_not_emitted_as_calls_edge() {
+        // REQ-AXO-902376 — field accesses (e.g. data.id, socket.assigns, user.current_org_id)
+        // must NOT be emitted as CALLS edges (.id, .assigns, etc.).
+        // Real remote function calls (Accounts.notify) and Erlang calls (:crypto.strong_rand_bytes)
+        // must still be properly extracted.
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Sample do
+          def process(socket, user, data) do
+            assigns = socket.assigns
+            user_id = user.id
+            status = data.status
+            current_org_id = user.current_org_id
+
+            token = :crypto.strong_rand_bytes(16)
+            Accounts.notify(user_id, status)
+            handle_status(status)
+          end
+
+          def handle_status(s), do: s
+        end
+        "#;
+        let result = parser.parse(content);
+
+        // No CALLS edge should target a bare leading dot (field access)
+        let spurious_field_calls: Vec<&str> = result
+            .relations
+            .iter()
+            .filter(|r| r.rel_type == "CALLS" && r.to.starts_with('.'))
+            .map(|r| r.to.as_str())
+            .collect();
+        assert!(
+            spurious_field_calls.is_empty(),
+            "spurious field accesses emitted as CALLS edges: {:?}",
+            spurious_field_calls
+        );
+
+        // Real calls must be present
+        assert!(
+            result.relations.iter().any(|r| r.from == "Sample.process"
+                && r.to == "Accounts.notify"
+                && r.rel_type == "CALLS"),
+            "Accounts.notify call missing; got: {:?}",
+            result.relations
+        );
+        assert!(
+            result.relations.iter().any(|r| r.from == "Sample.process"
+                && r.to == ":crypto.strong_rand_bytes"
+                && r.rel_type == "CALLS"),
+            ":crypto.strong_rand_bytes call missing; got: {:?}",
+            result.relations
+        );
+        assert!(
+            result.relations.iter().any(|r| r.from == "Sample.process"
+                && r.to == "Sample.handle_status"
+                && r.rel_type == "CALLS"),
+            "Sample.handle_status call missing; got: {:?}",
+            result.relations
+        );
+    }
 }
+
 
