@@ -20,24 +20,35 @@ use super::McpServer;
 
 /// REQ-AXO-902196 — in a SPLIT live deployment the MCP brain runs in
 /// `brain_only` mode BY DESIGN while a SEPARATE `axon-indexer` process owns
-/// ingestion. `status` labelled "Runtime mode: brain_only" with no hint the
-/// indexer was alive, so operators/LLMs read it as "indexing is off" and
-/// distrusted IST reads (documented lie — MEMORY s96: "status/embedding_status
-/// mentent en brain_only"). When this brain is `brain_only` AND a peer indexer
-/// heartbeat is fresh (canonical PG liveness), surface the SYSTEM-level truth
-/// explicitly. Pure so it unit-tests without a live runtime.
-fn system_indexer_topology_note(
+/// ingestion.
+/// REQ-AXO-902656 (Feedback #427) — l'observation du superviseur prime : une boucle
+/// de relance active (statut Restarting ou restarts élevés à bas âge) alerte
+/// bruyamment que l'indexation est compromise, même en cas de battement résiduel.
+pub(crate) fn system_indexer_topology_note(
     process_role: &str,
     brain_is_brain_only: bool,
     peer_indexer_ready: bool,
+    supervisor_obs: Option<&crate::mcp::runtime_topology_support::IndexerSupervisorObservation>,
 ) -> Option<String> {
-    if process_role == "brain" && brain_is_brain_only && peer_indexer_ready {
-        Some(
-            "**Indexeur (système) :** vivant — heartbeat PG frais ; le système tourne en `indexer_full`. \
+    if process_role == "brain" && brain_is_brain_only {
+        if let Some(obs) = supervisor_obs {
+            if obs.is_restart_loop() {
+                return Some(format!(
+                    "**Indexeur (système) :** ⚠️ INSTABLE — boucle de redémarrage détectée par le superviseur ({} relances, up {} ms, statut {}) ; consulter /tmp/axon-live-indexer.log. L'indexation autonome est interrompue.\n",
+                    obs.restarts, obs.age_ms, obs.status
+                ));
+            }
+        }
+        if peer_indexer_ready {
+            Some(
+                "**Indexeur (système) :** vivant — heartbeat PG frais ; le système tourne en `indexer_full`. \
 Ce process brain est `brain_only` PAR DESIGN (déploiement live split : brain MCP + indexeur séparé) — \
 le label « Runtime mode: brain_only » ci-dessus est le rôle de CE process, PAS un arrêt de l'indexation.\n"
-                .to_string(),
-        )
+                    .to_string(),
+            )
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -553,27 +564,40 @@ impl McpServer {
         // REQ-AXO-902196 — canonical peer-indexer liveness (the SAME PG-heartbeat
         // authority `promote_status` / `runtime_topology_snapshot` trust,
         // PIL-AXO-001). Lets `status` surface that a split live deployment's
-        // separate indexer is alive even though THIS brain process is brain_only.
-        let peer_indexer_ready = {
+        // REQ-AXO-902196 / REQ-AXO-902656 (Feedback #427) — canonical peer-indexer liveness
+        // Interroge le superviseur pour observer l'état réel du processus axon-indexer.
+        // Si le superviseur détecte une boucle de redémarrage (Restarting ou restarts élevés à bas âge),
+        // l'indexeur n'est PAS prêt, et l'alerte prime sur un éventuel battement résiduel.
+        let (peer_indexer_ready, supervisor_obs) = {
             let hb = self
                 .graph_store
                 .latest_lifecycle_heartbeat("indexer")
                 .ok()
                 .flatten();
-            super::runtime_topology_support::resolve_indexer_liveness(
+            let sup_facts = self.collect_supervisor_facts(hb.as_ref().map(|row| now_ms - row.heartbeat_ms));
+            let observation = if sup_facts.reachable && sup_facts.role_found {
+                Some(super::runtime_topology_support::IndexerSupervisorObservation {
+                    status: sup_facts.status,
+                    exit_code: sup_facts.exit_code,
+                    is_running: sup_facts.is_running,
+                    restarts: sup_facts.restarts,
+                    age_ms: sup_facts.age_ms,
+                })
+            } else {
+                None
+            };
+            let liveness = super::runtime_topology_support::resolve_indexer_liveness(
                 now_ms,
                 hb.as_ref().map(|row| row.heartbeat_ms),
                 super::runtime_topology_support::EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
-                // REQ-AXO-902581 — cet appelant ne lit que `.ready`, que
-                // l'observation du superviseur ne change pas. `None` plutôt qu'une
-                // sonde HTTP de plus sur le chemin synchrone de `status`.
-                None,
-            )
-            .ready
+                observation.as_ref(),
+            );
+            (liveness.ready, observation)
         };
         let indexed_projection_fresh = indexer_feed_state == "fresh"
             && indexer_feed_reason.is_none()
-            && runtime_authority_converged;
+            && runtime_authority_converged
+            && !supervisor_obs.as_ref().map(|o| o.is_restart_loop()).unwrap_or(false);
         let standalone_brain_only =
             process_role == "brain" && runtime_mode == AxonRuntimeMode::BrainOnly;
         let indexer_feed_degraded = !standalone_brain_only
@@ -586,7 +610,7 @@ impl McpServer {
         // plus à écrire.
         let (readiness_snapshot, subsystem_reports) =
             crate::runtime_readiness::snapshot_runtime_readiness();
-        let degraded_notes = compute_degraded_notes(
+        let mut degraded_notes = compute_degraded_notes(
             indexed_projection_fresh,
             indexer_feed_degraded,
             indexer_feed_reason,
@@ -594,6 +618,11 @@ impl McpServer {
             standalone_brain_only,
             &subsystem_reports,
         );
+        if let Some(obs) = supervisor_obs.as_ref() {
+            if obs.is_restart_loop() {
+                degraded_notes.push("indexer_supervisor_restart_loop".to_string());
+            }
+        }
         let truth_status = if degraded_notes.is_empty() {
             "canonical"
         } else {
@@ -650,12 +679,14 @@ impl McpServer {
             utility_scheduler.reason,
             drain_state,
         );
-        // REQ-AXO-902196 — kill the "brain_only ⇒ indexing off" misread: when a
+        // REQ-AXO-902196 / REQ-AXO-902656 — kill the "brain_only ⇒ indexing off" misread: when a
         // peer indexer heartbeat is fresh, say so right under the mode line.
+        // If a restart loop is detected by supervisor, warn loudly.
         if let Some(note) = system_indexer_topology_note(
             process_role,
             runtime_mode == AxonRuntimeMode::BrainOnly,
             peer_indexer_ready,
+            supervisor_obs.as_ref(),
         ) {
             evidence.push_str(&note);
         }
@@ -1394,6 +1425,15 @@ impl McpServer {
                 // rule documented in CPT-AXO-023.
                 "readiness": readiness_json,
                 "subsystems": subsystems_json,
+                // REQ-AXO-902656 (Feedback #427) — expose supervisor observation of axon-indexer
+                "indexer_supervisor": supervisor_obs.as_ref().map(|obs| json!({
+                    "status": obs.status,
+                    "exit_code": obs.exit_code,
+                    "is_running": obs.is_running,
+                    "restarts": obs.restarts,
+                    "age_ms": obs.age_ms,
+                    "restart_loop": obs.is_restart_loop(),
+                })).unwrap_or(Value::Null),
                 "canonical_sources": Self::canonical_sources_snapshot(),
                 "instance_identity": {
                     "instance_kind": instance_kind,
@@ -2053,6 +2093,20 @@ pub(crate) fn derive_recovery_action(degraded_notes: &[String]) -> (Value, Value
                 "verification": "readiness.subsystems.ist_writer must read `ready` before the served truth is canonical again"
             }),
         ),
+        // REQ-AXO-902656 (Feedback #427) — boucle de redémarrage de l'indexeur sous superviseur.
+        "indexer_supervisor_restart_loop" => (
+            json!({
+                "kind": "inspect_indexer_crash",
+                "tool": "diagnose_indexing",
+                "when": "now"
+            }),
+            json!({
+                "action": "inspect_indexer_crash",
+                "command": "tail -n 50 /tmp/axon-live-indexer.log",
+                "reason": "axon-indexer is crash-looping under supervisor (process-compose)",
+                "verification": "fix root cause (e.g. database URL or env) and verify supervisor restarts stabilize"
+            }),
+        ),
         _ => (
             json!({
                 "kind": "inspect_runtime_status",
@@ -2305,7 +2359,7 @@ mod tests {
     fn system_indexer_note_surfaces_when_brain_only_with_live_peer() {
         // The exact production case: this brain runs brain_only, a SEPARATE
         // indexer heartbeat is fresh → we must announce the system is indexer_full.
-        let note = system_indexer_topology_note("brain", true, true).expect("note expected");
+        let note = system_indexer_topology_note("brain", true, true, None).expect("note expected");
         assert!(note.contains("indexer_full"));
         assert!(note.contains("PAR DESIGN"));
     }
@@ -2314,15 +2368,15 @@ mod tests {
     fn system_indexer_note_silent_when_no_live_peer() {
         // brain_only AND no fresh peer heartbeat = genuinely standalone → no note
         // (the plain "brain_only" line is then the whole truth).
-        assert!(system_indexer_topology_note("brain", true, false).is_none());
+        assert!(system_indexer_topology_note("brain", true, false, None).is_none());
     }
 
     #[test]
     fn system_indexer_note_silent_when_not_brain_only_or_not_brain() {
         // A unified/indexer process is not the split-live case → never annotate.
-        assert!(system_indexer_topology_note("brain", false, true).is_none());
-        assert!(system_indexer_topology_note("indexer", true, true).is_none());
-        assert!(system_indexer_topology_note("unknown", true, true).is_none());
+        assert!(system_indexer_topology_note("brain", false, true, None).is_none());
+        assert!(system_indexer_topology_note("indexer", true, true, None).is_none());
+        assert!(system_indexer_topology_note("unknown", true, true, None).is_none());
     }
 }
 

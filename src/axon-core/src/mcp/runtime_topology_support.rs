@@ -64,6 +64,8 @@ pub(crate) const INDEXER_LIFECYCLE_EXITED_CLEAN: &str = "exited_clean";
 /// REQ-AXO-902562 — l'indexeur n'est pas activé par ce mode de runtime (superviseur `Disabled`).
 /// Configuration délibérée, jamais un crash ni un abandon.
 pub(crate) const INDEXER_LIFECYCLE_DISABLED_FOR_MODE: &str = "disabled_for_runtime_mode";
+/// REQ-AXO-902656 (Feedback #427) — l'indexeur est en boucle de relance sous superviseur.
+pub(crate) const INDEXER_LIFECYCLE_RESTART_LOOP: &str = "restart_loop";
 
 /// REQ-AXO-902581 — degré de certitude du verdict, dit dans la réponse. Une
 /// inférence présentée comme une observation est le mode d'échec exact que ce REQ
@@ -75,11 +77,21 @@ pub(crate) const LIFECYCLE_CERTAINTY_INFERRED: &str = "inferred";
 /// demander. `process-compose` distingue `Completed` (sortie 0, normale) de
 /// `Failed` / `Restarting` : la source qui sait est joignable sur `:8080`, et
 /// l'inférence l'ignorait.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct IndexerSupervisorObservation {
     pub(crate) status: String,
     pub(crate) exit_code: i64,
     pub(crate) is_running: bool,
+    pub(crate) restarts: i64,
+    pub(crate) age_ms: i64,
+}
+
+impl IndexerSupervisorObservation {
+    pub(crate) fn is_restart_loop(&self) -> bool {
+        self.status.eq_ignore_ascii_case("Restarting")
+            || (self.restarts >= crate::supervisor_probe::SUPERVISOR_RESTART_LOOP_MIN_RESTARTS
+                && self.age_ms < crate::supervisor_probe::SUPERVISOR_YOUNG_PROCESS_MS)
+    }
 }
 
 /// Pure so the verdict is unit-tested without a live `GraphStore`.
@@ -90,6 +102,33 @@ pub(crate) fn resolve_indexer_liveness(
     supervisor: Option<&IndexerSupervisorObservation>,
 ) -> IndexerLiveness {
     let window = freshness_window_ms.max(0) as u64;
+
+    // REQ-AXO-902656 (Feedback #427) — si le superviseur observe une boucle de
+    // redémarrage active (restarts >= 3 && age_ms < 60s ou statut Restarting),
+    // l'indexeur N'EST PAS prêt, même si un battement résiduel d'une instance
+    // orpheline persiste en base de données.
+    if let Some(sup) = supervisor {
+        if sup.is_restart_loop() {
+            let (now_u, heartbeat_u_opt) = match indexer_heartbeat_ms {
+                Some(hb) => (now_ms.max(0) as u64, Some(hb.max(0) as u64)),
+                None => (0, None),
+            };
+            return IndexerLiveness {
+                ready: false,
+                source: "supervisor_restart_loop",
+                lifecycle: INDEXER_LIFECYCLE_RESTART_LOOP,
+                certainty: LIFECYCLE_CERTAINTY_OBSERVED,
+                feed: RuntimeTruthFeed::from_observed_times(
+                    now_u,
+                    heartbeat_u_opt,
+                    heartbeat_u_opt,
+                    window,
+                    Some("indexer_supervisor_restart_loop".to_string()),
+                ),
+            };
+        }
+    }
+
     match indexer_heartbeat_ms {
         Some(heartbeat_ms) => {
             let now_u = now_ms.max(0) as u64;
@@ -281,6 +320,7 @@ mod resolve_indexer_liveness_tests {
                 status: "Completed".to_string(),
                 exit_code: 0,
                 is_running: false,
+                ..Default::default()
             }),
         );
         assert_eq!(
@@ -298,6 +338,7 @@ mod resolve_indexer_liveness_tests {
                 status: "Failed".to_string(),
                 exit_code: 1,
                 is_running: false,
+                ..Default::default()
             }),
         );
         assert_eq!(
@@ -318,6 +359,8 @@ mod resolve_indexer_liveness_tests {
                 status: "Running".to_string(),
                 exit_code: 0,
                 is_running: true,
+                age_ms: 100_000,
+                ..Default::default()
             }),
         );
         assert_eq!(muet.lifecycle, INDEXER_LIFECYCLE_CRASHED_OR_ABANDONED);

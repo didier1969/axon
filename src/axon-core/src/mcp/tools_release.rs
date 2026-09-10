@@ -26,7 +26,7 @@ impl McpServer {
     ///
     /// L'échappatoire `AXON_PROMOTE_STATUS_SUPERVISOR_PROBE=0` désactive la sonde ;
     /// elle se déclare alors comme désactivée, donc impossible à lire comme saine.
-    fn collect_supervisor_facts(&self, heartbeat_age_ms: Option<i64>) -> SupervisorFacts {
+    pub(crate) fn collect_supervisor_facts(&self, heartbeat_age_ms: Option<i64>) -> SupervisorFacts {
         let mut facts = SupervisorFacts {
             heartbeat_age_ms,
             ..Default::default()
@@ -110,6 +110,8 @@ impl McpServer {
                 status: sup.status.clone(),
                 exit_code: sup.exit_code,
                 is_running: sup.is_running,
+                restarts: sup.restarts,
+                age_ms: sup.age_ms,
             })
         } else {
             None

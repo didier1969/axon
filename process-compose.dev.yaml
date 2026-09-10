@@ -22,6 +22,7 @@ processes:
       done
       echo "[postgres-check] TIMEOUT"
       exit 1
+    log_location: "/tmp/axon-dev-postgres-check.log"
     availability:
       restart: "no"
     is_daemon: false
@@ -30,6 +31,7 @@ processes:
   axon-brain:
     command: "${AXON_BRAIN_BIN:-.axon/cargo-target/debug/axon-brain}"
     working_dir: "."
+    log_location: "/tmp/axon-dev-brain.log"
     environment:
       - "AXON_RUNTIME_MODE=brain_only"
       - "AXON_INSTANCE_KIND=dev"
@@ -107,6 +109,10 @@ processes:
       # AXON_BUILD_ID instead of the binary it actually runs.
       - "AXON_ACTIVE_IDENTITY_FILE=.axon-dev/active-identity.env"
       - "AXON_RUN_ROOT=.axon-dev/run-indexer"
+      # REQ-AXO-902656 (Feedback #427) — Database URL explicitement déclarée pour survivre aux restarts sous --disable-dotenv
+      - "AXON_DEV_DATABASE_URL=${AXON_DEV_DATABASE_URL:-postgres://axon@127.0.0.1:44144/axon_dev}"
+      - "OMP_WAIT_POLICY=${OMP_WAIT_POLICY:-PASSIVE}"
+      - "OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}"
       # REQ-AXO-901835 — see brain block. Explicit indexer-named sockets
       # prevent collision with brain's listener.
       - "AXON_TELEMETRY_SOCK=/tmp/axon-dev-indexer-telemetry.sock"
@@ -169,6 +175,7 @@ processes:
         --cookie "${AXON_ERLANG_COOKIE}" \
         -S mix phx.server
     working_dir: "."
+    log_location: "/tmp/axon-dev-dashboard.log"
     environment:
       - "AXON_INSTANCE_KIND=dev"
       # REQ-AXO-901822 — canonical PHX_PORT comes from

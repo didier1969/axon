@@ -606,6 +606,31 @@ impl McpServer {
                 ));
             }
         }
+        // REQ-AXO-902656 (Feedback #427) — si le superviseur rapporte que l'indexeur est
+        // en boucle de redémarrage, cette alerte PRIME sur les autres causes.
+        let sup_facts = self.collect_supervisor_facts(None);
+        if sup_facts.reachable && sup_facts.role_found {
+            let obs = crate::mcp::runtime_topology_support::IndexerSupervisorObservation {
+                status: sup_facts.status,
+                exit_code: sup_facts.exit_code,
+                is_running: sup_facts.is_running,
+                restarts: sup_facts.restarts,
+                age_ms: sup_facts.age_ms,
+            };
+            if obs.is_restart_loop() {
+                causes.insert(
+                    0,
+                    (
+                        "indexer_supervisor_restart_loop",
+                        format!(
+                            "axon-indexer is crash-looping under supervisor ({} restarts, up {} ms, status '{}')",
+                            obs.restarts, obs.age_ms, obs.status
+                        ),
+                        "inspect /tmp/axon-live-indexer.log for crash cause (e.g. missing AXON_LIVE_DATABASE_URL or DB connection failure); fix configuration and verify restarts stabilize",
+                    ),
+                );
+            }
+        }
         if causes.is_empty() {
             causes.push((
                 "no_blocker_detected",

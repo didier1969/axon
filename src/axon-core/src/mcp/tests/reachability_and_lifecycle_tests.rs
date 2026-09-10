@@ -124,6 +124,7 @@ fn c3_indexer_liveness_disabled_for_runtime_mode_when_supervisor_disabled() {
         status: "Disabled".to_string(),
         exit_code: 0,
         is_running: false,
+        ..Default::default()
     };
 
     // Cas 1: avec battement périmé
@@ -190,3 +191,141 @@ fn c3_promote_status_indexer_disabled_does_not_fail_gates_or_declare_indexer_dow
         );
     }
 }
+
+/// REQ-AXO-902656 (Feedback #427) — l'indexeur en boucle de relance sous superviseur
+/// DOIT échouer bruyamment (ready=false, lifecycle=restart_loop) même si un battement
+/// PG résiduel d'une instance précédente/orpheline est encore frais.
+#[test]
+fn c4_indexer_supervisor_restart_loop_detection_fails_loudly() {
+    let now = 1_000_000;
+    // Simulation exacte de l'incident du 04.09.2026 (Feedback #427) :
+    // 2591 redémarrages, processus âgé de 30 ms.
+    let loop_obs = IndexerSupervisorObservation {
+        status: "Restarting".to_string(),
+        exit_code: 1,
+        is_running: false,
+        restarts: 2591,
+        age_ms: 30,
+    };
+
+    // Même avec un battement PG récent (ex: 2s) laissé par une instance orpheline
+    let live = resolve_indexer_liveness(
+        now,
+        Some(now - 2_000),
+        EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
+        Some(&loop_obs),
+    );
+
+    assert!(
+        !live.ready,
+        "un indexeur en boucle de restart sous superviseur NE DOIT JAMAIS être déclaré ready"
+    );
+    assert_eq!(
+        live.lifecycle,
+        crate::mcp::runtime_topology_support::INDEXER_LIFECYCLE_RESTART_LOOP,
+        "le lifecycle doit être explicitement restart_loop"
+    );
+    assert_eq!(
+        live.source, "supervisor_restart_loop",
+        "la source doit identifier la boucle de redémarrage du superviseur"
+    );
+    assert_eq!(
+        live.certainty, LIFECYCLE_CERTAINTY_OBSERVED,
+        "l'état est observé directement auprès du superviseur"
+    );
+}
+
+/// REQ-AXO-902656 (Feedback #427) — les manifestes process-compose doivent propager
+/// AXON_LIVE_DATABASE_URL / AXON_DEV_DATABASE_URL à axon-indexer et capturer les logs.
+#[test]
+fn c4_process_compose_manifests_declare_database_urls_and_log_locations() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let live_yaml = std::fs::read_to_string(root.join("process-compose.live.yaml"))
+        .expect("process-compose.live.yaml must exist");
+    let dev_yaml = std::fs::read_to_string(root.join("process-compose.dev.yaml"))
+        .expect("process-compose.dev.yaml must exist");
+
+    // 1. AXON_LIVE_DATABASE_URL dans process-compose.live.yaml pour axon-indexer
+    let live_indexer_sec = live_yaml
+        .split("axon-indexer:")
+        .nth(1)
+        .expect("axon-indexer section in live yaml");
+    assert!(
+        live_indexer_sec.contains("AXON_LIVE_DATABASE_URL"),
+        "axon-indexer in process-compose.live.yaml must declare AXON_LIVE_DATABASE_URL"
+    );
+
+    // 2. AXON_DEV_DATABASE_URL dans process-compose.dev.yaml pour axon-indexer
+    let dev_indexer_sec = dev_yaml
+        .split("axon-indexer:")
+        .nth(1)
+        .expect("axon-indexer section in dev yaml");
+    assert!(
+        dev_indexer_sec.contains("AXON_DEV_DATABASE_URL"),
+        "axon-indexer in process-compose.dev.yaml must declare AXON_DEV_DATABASE_URL"
+    );
+
+    // 3. log_location déclarés pour tous les services principaux
+    for (role, log_name) in &[
+        ("postgres-check", "postgres-check"),
+        ("axon-brain", "brain"),
+        ("axon-indexer", "indexer"),
+        ("dashboard", "dashboard"),
+    ] {
+        assert!(
+            live_yaml.contains(&format!("{role}:"))
+                && live_yaml.contains(&format!("/tmp/axon-live-{log_name}.log")),
+            "live yaml must declare log_location for {role}"
+        );
+        assert!(
+            dev_yaml.contains(&format!("{role}:"))
+                && dev_yaml.contains(&format!("/tmp/axon-dev-{log_name}.log")),
+            "dev yaml must declare log_location for {role}"
+        );
+    }
+}
+
+/// REQ-AXO-902656 (Feedback #427) — system_indexer_topology_note doit alerter bruyamment
+/// si le superviseur rapporte une boucle de redémarrage sur axon-indexer.
+#[test]
+fn c4_system_indexer_topology_note_warns_on_restart_loop() {
+    use crate::mcp::tools_framework_runtime_status::system_indexer_topology_note;
+
+    let loop_obs = IndexerSupervisorObservation {
+        status: "Restarting".to_string(),
+        exit_code: 1,
+        is_running: false,
+        restarts: 2591,
+        age_ms: 30,
+    };
+
+    // 1. En cas de boucle de restart, l'alerte prime même si un battement zombie traînait
+    let note_loop = system_indexer_topology_note("brain", true, false, Some(&loop_obs));
+    assert!(note_loop.is_some());
+    let txt = note_loop.unwrap();
+    assert!(
+        txt.contains("⚠️ INSTABLE") && txt.contains("boucle de redémarrage"),
+        "la note doit alerter sur l'instabilité du superviseur: {txt}"
+    );
+
+    // 2. En fonctionnement normal
+    let healthy_obs = IndexerSupervisorObservation {
+        status: "Running".to_string(),
+        exit_code: 0,
+        is_running: true,
+        restarts: 0,
+        age_ms: 100_000,
+    };
+    let note_healthy = system_indexer_topology_note("brain", true, true, Some(&healthy_obs));
+    assert!(note_healthy.is_some());
+    let txt_h = note_healthy.unwrap();
+    assert!(
+        txt_h.contains("vivant") && txt_h.contains("heartbeat PG frais"),
+        "la note saine doit confirmer l'indexeur vivant: {txt_h}"
+    );
+}
+
+

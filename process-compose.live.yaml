@@ -182,6 +182,10 @@ processes:
       # build_id, authoritative for both full and in-place restarts.
       - "AXON_ACTIVE_IDENTITY_FILE=.axon/live-release/active-identity.env"
       - "AXON_RUN_ROOT=.axon/run-indexer"
+      # REQ-AXO-902656 (Feedback #427) — Database URL explicitement déclarée pour survivre aux restarts sous --disable-dotenv
+      - "AXON_LIVE_DATABASE_URL=${AXON_LIVE_DATABASE_URL:-postgres://axon@127.0.0.1:44144/axon_live}"
+      - "OMP_WAIT_POLICY=${OMP_WAIT_POLICY:-PASSIVE}"
+      - "OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}"
       # REQ-AXO-901835 — explicit per-process sockets (cf. brain block).
       - "AXON_TELEMETRY_SOCK=/tmp/axon-live-indexer-telemetry.sock"
       - "AXON_MCP_SOCK=/tmp/axon-live-indexer-mcp.sock"
