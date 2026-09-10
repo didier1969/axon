@@ -3619,8 +3619,27 @@ impl McpServer {
         // data.warnings lets the LLM client (or operator) catch the typo at
         // registration time without breaking the legitimate "register a future
         // project" workflow.
+        // REQ-AXO-902658 (Feedback #428) — honor explicit `project_name` arg and preserve
+        // existing project_name in soll.ProjectCodeRegistry when omitted.
         let path_exists_on_disk = std::path::Path::new(project_path).is_dir();
-        let project_name = match self.derive_project_name_from_path(project_path) {
+        let explicit_name = args
+            .get("project_name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+
+        let existing_name_by_path = {
+            let escaped_path = escape_sql(project_path);
+            self.query_single_column(&format!(
+                "SELECT project_name FROM soll.ProjectCodeRegistry WHERE project_path = '{}' AND project_name IS NOT NULL AND project_name <> '' LIMIT 1",
+                escaped_path
+            ))
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+        };
+
+        let derived_name = match self.derive_project_name_from_path(project_path) {
             Ok(name) => name,
             Err(e) => {
                 return Some(project_workflow_error(
@@ -3630,10 +3649,16 @@ impl McpServer {
                     format!("Project error: {}", e),
                     "could not derive project_name from the supplied path; verify the path resolves to a directory with a sensible last segment",
                     Some(&e.to_string()),
-                ))
+                ));
             }
         };
-        let project_code = match self.assign_project_code_for_init(&project_name, project_path) {
+
+        let preliminary_name = explicit_name
+            .clone()
+            .or_else(|| existing_name_by_path.clone())
+            .unwrap_or_else(|| derived_name.clone());
+
+        let project_code = match self.assign_project_code_for_init(&preliminary_name, project_path) {
             Ok(code) => code,
             Err(e) => {
                 return Some(project_workflow_error(
@@ -3643,9 +3668,26 @@ impl McpServer {
                     format!("Canonical project error: {}", e),
                     "automatic project_code assignment failed; the registry may already contain an incompatible entry. Run `project_registry_lookup` to inspect, or supply an explicit `project_code`",
                     Some(&e.to_string()),
-                ))
+                ));
             }
         };
+
+        let existing_name_by_code = if explicit_name.is_none() && existing_name_by_path.is_none() {
+            let escaped_code = escape_sql(&project_code);
+            self.query_single_column(&format!(
+                "SELECT project_name FROM soll.ProjectCodeRegistry WHERE project_code = '{}' AND project_name IS NOT NULL AND project_name <> '' LIMIT 1",
+                escaped_code
+            ))
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+        } else {
+            None
+        };
+
+        let project_name = explicit_name
+            .or(existing_name_by_path)
+            .or(existing_name_by_code)
+            .unwrap_or(derived_name);
         if let Some(requested_code) = args.get("project_code").and_then(|value| value.as_str()) {
             let requested = match self
                 .validate_explicit_canonical_project_code(Some(requested_code), "axon_init_project")

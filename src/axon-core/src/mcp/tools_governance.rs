@@ -546,7 +546,7 @@ impl McpServer {
                         "no files discovered under the configured watch root \
                          (filter, .axonignore, .gitignore, or permissions)"
                             .to_string(),
-                        "edit .axonignore to re-include relevant paths via `+pattern`, or verify \
+                        "re-include gitignored or excluded paths using .axoninclude at the project root (e.g. 'pieces/**'), inspect .axonignore, or verify \
                          filesystem permissions on the watch root",
                     ));
                 }

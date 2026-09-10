@@ -441,6 +441,8 @@ mod nli_retirements_measurement_tests;
 mod reachability_and_lifecycle_tests;
 /// REQ-AXO-902508 — rafraîchissement à chaud du registre de projets dans l'indexeur sans redémarrage.
 mod registry_hot_reload_tests;
+/// REQ-AXO-902658 (Feedback #428) — gouvernance d'initialisation et préservation du project_name.
+mod project_init_governance_tests;
 /// REQ-AXO-902409 — garde de classe « N éléments soumis ⇒ N éléments rendus ».
 mod rendered_lists_contract;
 /// REQ-AXO-902491 — rescan_project ne doit pas rendre status=ok si le wipe de cache a échoué.

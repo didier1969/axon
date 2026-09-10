@@ -146,11 +146,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "axon_init_project",
-                "description": "[DX/SOLL] Initializes a new Axon project. The server assigns the canonical `project_code` and immediately returns `project_code`, `project_name`, and `project_path` in the same response.",
+                "description": "[DX/SOLL] REQ-AXO-902658 — Initializes or connects to an Axon project. The server assigns the canonical `project_code` and returns `project_code`, `project_name`, and `project_path`. Note: Axon indexes parseable source code and text documents (markdown, json, toml, yaml); binary formats (PDF, images) require companion .md files. Only directories under AXON_WATCH_DIR are watched automatically; directory symlinks are not traversed recursively.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_name": { "type": "string", "description": "Optional. Display name will be derived from the last segment of `project_path`." },
+                        "project_name": { "type": "string", "description": "Optional custom display name. When omitted on an already registered project, the existing custom project_name is preserved; on a new project, it defaults to the last segment of `project_path`." },
                         "project_code": { "type": "string", "description": "Optional, reserved for internal compatibility. In normal usage, omit it: the server assigns and returns the canonical code." },
                         "project_path": { "type": "string", "description": "Canonical absolute path of the project (e.g. /home/dstadel/projects/BookingSystem)." },
                         "concept_document_url_or_text": { "type": "string", "description": "Optional: text or link to the project vision." },
@@ -1236,7 +1236,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "diagnose_indexing",
-                "description": "[SYSTEM] Day-1 indexing diagnostic per project: probable causes, dominant reasons, parser/runtime errors, and remediations.",
+                "description": "[SYSTEM] REQ-AXO-902658 — Day-1 indexing diagnostic per project: probable causes, dominant reasons, parser/runtime errors, and remediations. Guides ignore resolution (.axonignore, .gitignore, and .axoninclude for gitignored paths).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1666,7 +1666,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             // (REQ-AXO-901675) so no indexer restart is required.
             json!({
                 "name": "rescan_project",
-                "description": "[SYSTEM] REQ-AXO-901676 — force a delta or full re-scan of a project's source tree. Use after git pull massif / backup restore / inotify drop / watcher crash. Returns `{status, files_scheduled, projection_eta_ms, project_code, mode}` in <500 ms ; enrols the subtree SYNCHRONOUSLY into `ist.indexedfile` (status='discovered'), which the DBQ-A claim feeder drains into pipeline A (REQ-AXO-901893). REQ-AXO-902634 — this description previously promised a `NOTIFY axon_registry_changed → record_subtree_hint` hop: that trajectory was ripped and `record_subtree_hint` never existed. `full=false` (default) keeps IndexedFile content_hash cache so only diffs are re-parsed ; `full=true` wipes IndexedFile rows for the project so every file is forced through A1/A2/A3 + B1/B2/B3 again.",
+                "description": "[SYSTEM] REQ-AXO-901676 / REQ-AXO-902658 — force a delta or full re-scan of a project's source tree. Use after git pull massif / backup restore / inotify drop / watcher crash. For gitignored paths that should be indexed anyway (private repos, uncommitted assets), place a standard .axoninclude file at the project root (e.g. 'pieces/**'); .axoninclude takes precedence over .gitignore. Symlinks outside the project or watch root are not traversed recursively. Axon indexes parseable source code and text documents (md, json, toml, yaml...); binary formats (PDF, images) are not extracted natively without companion .md files. Returns `{status, files_scheduled, projection_eta_ms, project_code, mode}` in <500 ms ; enrols the subtree SYNCHRONOUSLY into `ist.indexedfile` (status='discovered'), which the DBQ-A claim feeder drains into pipeline A (REQ-AXO-901893). `full=false` (default) keeps IndexedFile content_hash cache so only diffs are re-parsed ; `full=true` wipes IndexedFile rows for the project so every file is forced through A1/A2/A3 + B1/B2/B3 again.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
