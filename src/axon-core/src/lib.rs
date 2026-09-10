@@ -35,6 +35,7 @@ pub mod mailbox;
 pub mod practice_memory;
 pub mod mcp;
 pub mod mcp_http;
+pub mod metrics_exporter;
 pub mod nli;
 pub mod observed_gpu;
 pub mod optimizer;

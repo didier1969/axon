@@ -37,6 +37,9 @@ pub fn app_router(mcp_server: Arc<McpServer>) -> Router {
         // event the 1 Hz telemetry loop pushes on the broadcast channel ;
         // served from the in-memory cache populated by main_telemetry.
         .route("/dashboard/state", get(handle_dashboard_state))
+        // REQ-AXO-902392 — Prometheus metrics exporter endpoint. Aggregates brain,
+        // indexer heartbeat, B2/B3 pressure, and chunk queues.
+        .route("/metrics", get(handle_metrics))
         .layer(Extension(mcp_server))
 }
 
@@ -138,6 +141,50 @@ async fn handle_dashboard_state() -> Response {
                 "error": "dashboard_state_not_ready",
                 "hint": "Telemetry loop has not yet completed a tick. Retry after 1s.",
             })),
+        )
+            .into_response(),
+    }
+}
+
+// REQ-AXO-902392 — /metrics handler. Exposes Prometheus exposition format
+// for fleet metrics collectors (VPC / Prometheus / Grafana). Spawns probe
+// on an isolated OS thread to avoid starvations under heavy warming tasks.
+async fn handle_metrics(Extension(server): Extension<Arc<McpServer>>) -> Response {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let probe_server = server.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("axon-metrics-probe".to_string())
+        .spawn(move || {
+            let body = crate::metrics_exporter::render_prometheus_metrics(probe_server.graph_store());
+            let _ = tx.send(body);
+        });
+
+    if let Err(err) = spawn_result {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("content-type", "text/plain; charset=utf-8")],
+            format!("# Error spawning metrics probe: {err}\naxon_brain_up 1\nup 1\n"),
+        )
+            .into_response();
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(3), rx).await {
+        Ok(Ok(body)) => (
+            StatusCode::OK,
+            [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+            body,
+        )
+            .into_response(),
+        Ok(Err(_)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("content-type", "text/plain; charset=utf-8")],
+            "# Metrics probe thread panicked\naxon_brain_up 1\nup 1\n".to_string(),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            [("content-type", "text/plain; charset=utf-8")],
+            "# Metrics probe timed out\naxon_brain_up 1\nup 1\n".to_string(),
         )
             .into_response(),
     }
@@ -870,4 +917,47 @@ mod tests {
             "TCP socket must accept connections immediately upon return from spawn"
         );
     }
+
+    #[test]
+    fn test_metrics_endpoint_prometheus_exposition() {
+        use super::spawn_mcp_http_server;
+        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+
+        let store = Arc::new(
+            crate::tests::test_helpers::create_test_db()
+                .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_metrics_exposition").unwrap()),
+        );
+        let mcp_server = Arc::new(McpServer::new(store));
+
+        let bound = spawn_mcp_http_server(mcp_server, ([127, 0, 0, 1], port).into())
+            .expect("spawn_mcp_http_server must succeed");
+
+        let (head, body) = http_get_raw(bound, "/metrics");
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "/metrics must return 200 OK, got: {head}"
+        );
+        assert!(
+            head.to_lowercase().contains("content-type: text/plain"),
+            "content-type must be text/plain, got: {head}"
+        );
+
+        // Required Prometheus gauges and counters specified by REQ-AXO-902392
+        assert!(body.contains("axon_brain_up 1"), "missing axon_brain_up in: {body}");
+        assert!(body.contains("up 1"), "missing up 1 in: {body}");
+        assert!(body.contains("axon_indexer_alive "), "missing axon_indexer_alive in: {body}");
+        assert!(body.contains("axon_chunks_pending "), "missing axon_chunks_pending in: {body}");
+        assert!(body.contains("axon_chunks_embedded "), "missing axon_chunks_embedded in: {body}");
+        assert!(body.contains("axon_chunks_total "), "missing axon_chunks_total in: {body}");
+        assert!(body.contains("axon_coverage_pct "), "missing axon_coverage_pct in: {body}");
+
+        // Strict invariant: when not armed, b2_cpu_fallback_ratio MUST be -1, NEVER 0
+        assert!(body.contains("axon_b2_armed 0"), "b2 must be unarmed in fresh test db: {body}");
+        assert!(body.contains("axon_b2_cpu_fallback_ratio -1"), "unarmed ratio MUST be -1: {body}");
+        assert!(body.contains("axon_b2_degraded_threshold "), "missing degraded threshold: {body}");
+        assert!(body.contains("axon_b2_critical_threshold "), "missing critical threshold: {body}");
+    }
 }
+

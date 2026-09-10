@@ -283,6 +283,11 @@ impl McpServer {
         &self.soll_cache
     }
 
+    /// Access the underlying GraphStore.
+    pub fn graph_store(&self) -> &Arc<GraphStore> {
+        &self.graph_store
+    }
+
     fn public_tool_name_for(requested_name: &str, normalized_name: &str) -> String {
         if requested_name.trim().is_empty() {
             return normalized_name.to_string();
