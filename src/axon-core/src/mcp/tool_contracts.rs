@@ -1729,6 +1729,59 @@ const SOLL_MANAGER_DISPOSITIONS: &[ParameterDeclaration] = &[
                      `update`",
         },
     },
+    ParameterDeclaration {
+        name: "data.code_exempt",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update", "append_section"],
+            },
+            remedy: "les champs routés en métadonnées ne sont appliqués que par `create` et \
+                     `update`",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.exemption_reason",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update", "append_section"],
+            },
+            remedy: "les champs routés en métadonnées ne sont appliqués que par `create` et \
+                     `update`",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.rationale",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldOneOf {
+                field: "action",
+                values: &["create", "update", "append_section"],
+            },
+            remedy: "les champs routés en métadonnées ne sont appliqués que par `create` et \
+                     `update`",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.superseded_by",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldEquals {
+                field: "action",
+                value: "update",
+            },
+            remedy: "le remplacement automatique d'un nœud s'effectue lors d'un `update` vers le statut superseded",
+        },
+    },
+    ParameterDeclaration {
+        name: "data.retirement_reason",
+        disposition: ParameterDisposition::Conditional {
+            condition: ParameterCondition::FieldEquals {
+                field: "action",
+                value: "update",
+            },
+            remedy: "la raison de mise au rebut ou de rejet s'exprime lors d'un `update`",
+        },
+    },
 ];
 
 pub(crate) const SQL_DISPOSITIONS: &[ParameterDeclaration] = &[
@@ -1774,7 +1827,19 @@ pub(crate) const AXON_COMMIT_WORK_DISPOSITIONS: &[ParameterDeclaration] = &[
         disposition: ParameterDisposition::Honoured,
     },
     ParameterDeclaration {
+        name: "formatter_command",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
         name: "message",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "oracle_command",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "oracle_proof",
         disposition: ParameterDisposition::Honoured,
     },
     ParameterDeclaration {
@@ -1793,11 +1858,31 @@ pub(crate) const AXON_PRE_FLIGHT_CHECK_DISPOSITIONS: &[ParameterDeclaration] = &
         disposition: ParameterDisposition::Honoured,
     },
     ParameterDeclaration {
+        name: "formatter_command",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
         name: "incremental",
         disposition: ParameterDisposition::Honoured,
     },
     ParameterDeclaration {
         name: "message",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "oracle_command",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "oracle_proof",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "project_code",
+        disposition: ParameterDisposition::Honoured,
+    },
+    ParameterDeclaration {
+        name: "project_path",
         disposition: ParameterDisposition::Honoured,
     },
 ];

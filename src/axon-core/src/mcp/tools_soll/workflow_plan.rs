@@ -750,6 +750,68 @@ impl McpServer {
             }
         }
 
+        // REQ-AXO-902446 — Post-allocation pass: resolve remaining placeholders
+        // (forward references) in created/updated node descriptions now that all
+        // logical_keys in the plan have their canonical IDs allocated.
+        if !identity_mapping.is_empty() {
+            for op in &operations {
+                let kind = op.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if kind == "link" {
+                    continue;
+                }
+                let logical_key = op.get("logical_key").and_then(|v| v.as_str()).unwrap_or("");
+                let entity_id = match identity_mapping.get(logical_key) {
+                    Some(id) => id.clone(),
+                    None => {
+                        if let Some(id) = op.get("entity_id").and_then(|v| v.as_str()) {
+                            id.to_string()
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+                let current_raw = self.graph_store.query_json(&format!(
+                    "SELECT description FROM soll.Node WHERE id = '{}' LIMIT 1",
+                    escape_sql(&entity_id)
+                ));
+                if let Ok(raw) = current_raw {
+                    let rows: Vec<Vec<Option<String>>> = serde_json::from_str(&raw).unwrap_or_default();
+                    if let Some(row) = rows.first() {
+                        if let Some(Some(desc)) = row.first() {
+                            if desc.contains("{{") {
+                                let substituted = substitute_logical_keys_in_str(desc, &identity_mapping);
+                                if &substituted != desc {
+                                    let _ = self.graph_store.execute_param(
+                                        "UPDATE soll.Node SET description = ? WHERE id = ?",
+                                        &json!([substituted, entity_id]),
+                                    );
+                                    // REQ-AXO-902446 — Update audit row after_json if present
+                                    if let Ok(rev_raw) = self.graph_store.query_json(&format!(
+                                        "SELECT after_json FROM soll.RevisionChange WHERE revision_id = '{}' AND entity_id = '{}' LIMIT 1",
+                                        escape_sql(&revision_id),
+                                        escape_sql(&entity_id)
+                                    )) {
+                                        let rev_rows: Vec<Vec<Option<String>>> = serde_json::from_str(&rev_raw).unwrap_or_default();
+                                        if let Some(rev_row) = rev_rows.first() {
+                                            if let Some(Some(after_str)) = rev_row.first() {
+                                                if let Ok(mut after_val) = serde_json::from_str::<Value>(after_str) {
+                                                    substitute_logical_keys_in_value(&mut after_val, &identity_mapping);
+                                                    let _ = self.graph_store.execute_param(
+                                                        "UPDATE soll.RevisionChange SET after_json = ? WHERE revision_id = ? AND entity_id = ?",
+                                                        &json!([after_val.to_string(), revision_id, entity_id]),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let _ = self.graph_store.execute(&format!(
             "DELETE FROM soll.RevisionPreview WHERE preview_id = '{}'",
             escape_sql(preview_id)

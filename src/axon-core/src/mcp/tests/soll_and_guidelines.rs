@@ -18719,3 +18719,117 @@ fn test_req_902448_batch_deduplicates_identical_fields_across_calls() {
         assert!(f.get("topology_delta").is_some());
     }
 }
+
+#[test]
+fn test_req_902446_soll_apply_plan_substitutes_logical_key_placeholders_in_body() {
+    let _env = env_lock();
+    let _mj = crate::test_support::EnvVarGuard::unset("AXON_MCP_MUTATION_JOBS");
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Anchor pillar', '', 'current', '{}')")
+        .unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "author": "test_runner",
+                "dry_run": false,
+                "plan": {
+                    "requirements": [
+                        {
+                            "logical_key": "multi_venue",
+                            "title": "Ingestion multi-venue",
+                            "description": "Module ingestion",
+                            "status": "planned",
+                            "attach_to": "PIL-AXO-001",
+                            "relation_type": "BELONGS_TO"
+                        },
+                        {
+                            "logical_key": "routing",
+                            "title": "Routage inter-venues",
+                            "description": "Dépend de [[{{multi_venue}}]] pour avoir plusieurs destinations.",
+                            "status": "planned",
+                            "attach_to": "PIL-AXO-001",
+                            "relation_type": "BELONGS_TO"
+                        },
+                        {
+                            "logical_key": "consumer",
+                            "title": "Consommateur de flux",
+                            "description": "Écoute [[{{producer}}]] en amont.",
+                            "status": "planned",
+                            "attach_to": "PIL-AXO-001",
+                            "relation_type": "BELONGS_TO"
+                        },
+                        {
+                            "logical_key": "producer",
+                            "title": "Producteur de flux",
+                            "description": "Source primaire",
+                            "status": "planned",
+                            "attach_to": "PIL-AXO-001",
+                            "relation_type": "BELONGS_TO"
+                        }
+                    ]
+                }
+            }
+        },
+        "id": 1
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.expect("expected result");
+    assert_ne!(
+        result.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "apply_plan must succeed: {:?}",
+        result
+    );
+
+    // Vérification des IDs alloués
+    let mv_raw = server
+        .graph_store
+        .query_json("SELECT id, description FROM soll.Node WHERE title='Ingestion multi-venue' AND project_code='AXO' LIMIT 1")
+        .unwrap();
+    let mv_rows: Vec<Vec<String>> = serde_json::from_str(&mv_raw).unwrap();
+    assert_eq!(mv_rows.len(), 1);
+    let mv_id = &mv_rows[0][0];
+
+    let routing_raw = server
+        .graph_store
+        .query_json("SELECT id, description FROM soll.Node WHERE title='Routage inter-venues' AND project_code='AXO' LIMIT 1")
+        .unwrap();
+    let routing_rows: Vec<Vec<String>> = serde_json::from_str(&routing_raw).unwrap();
+    assert_eq!(routing_rows.len(), 1);
+    let routing_desc = &routing_rows[0][1];
+
+    // Vérification du remplacement backward (multi_venue créé avant routing)
+    let expected_routing_desc = format!("Dépend de [[{}]] pour avoir plusieurs destinations.", mv_id);
+    assert_eq!(routing_desc, &expected_routing_desc, "Backward placeholder must be substituted with canonical ID");
+
+    // Vérification du remplacement forward (consumer créé avant producer)
+    let prod_raw = server
+        .graph_store
+        .query_json("SELECT id, description FROM soll.Node WHERE title='Producteur de flux' AND project_code='AXO' LIMIT 1")
+        .unwrap();
+    let prod_rows: Vec<Vec<String>> = serde_json::from_str(&prod_raw).unwrap();
+    assert_eq!(prod_rows.len(), 1);
+    let prod_id = &prod_rows[0][0];
+
+    let consumer_raw = server
+        .graph_store
+        .query_json("SELECT id, description FROM soll.Node WHERE title='Consommateur de flux' AND project_code='AXO' LIMIT 1")
+        .unwrap();
+    let consumer_rows: Vec<Vec<String>> = serde_json::from_str(&consumer_raw).unwrap();
+    assert_eq!(consumer_rows.len(), 1);
+    let consumer_desc = &consumer_rows[0][1];
+
+    let expected_consumer_desc = format!("Écoute [[{}]] en amont.", prod_id);
+    assert_eq!(consumer_desc, &expected_consumer_desc, "Forward placeholder must be substituted with canonical ID");
+}
+

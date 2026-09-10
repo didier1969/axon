@@ -1,5 +1,58 @@
 use super::*;
 
+/// REQ-AXO-902446 — Substitutes `{{logical_key}}` (and `{{ logical_key }}`) placeholders
+/// with canonical IDs allocated in the same plan.
+pub(crate) fn substitute_logical_keys_in_str(
+    text: &str,
+    identity_mapping: &std::collections::HashMap<String, String>,
+) -> String {
+    if !text.contains("{{") || identity_mapping.is_empty() {
+        return text.to_string();
+    }
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"\{\{\s*([a-zA-Z0-9_\-\.]+)\s*\}\}").unwrap()
+    });
+
+    RE.replace_all(text, |caps: &regex::Captures| {
+        let key = &caps[1];
+        if let Some(canon_id) = identity_mapping.get(key) {
+            canon_id.clone()
+        } else {
+            caps[0].to_string()
+        }
+    })
+    .to_string()
+}
+
+/// REQ-AXO-902446 — Recursively traverses a JSON value and substitutes placeholders
+/// in all string values.
+pub(crate) fn substitute_logical_keys_in_value(
+    val: &mut Value,
+    identity_mapping: &std::collections::HashMap<String, String>,
+) {
+    if identity_mapping.is_empty() {
+        return;
+    }
+    match val {
+        Value::String(s) => {
+            if s.contains("{{") {
+                *s = substitute_logical_keys_in_str(s, identity_mapping);
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                substitute_logical_keys_in_value(item, identity_mapping);
+            }
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                substitute_logical_keys_in_value(v, identity_mapping);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl McpServer {
     pub(crate) fn axon_soll_rollback_revision(&self, args: &Value) -> Option<Value> {
         let revision_id = args.get("revision_id")?.as_str()?;
@@ -77,6 +130,9 @@ impl McpServer {
             .get("project_code")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
+
+        // REQ-AXO-902446 — substitute same-plan logical_key placeholders in payload
+        substitute_logical_keys_in_value(&mut payload, identity_mapping);
 
         if kind == "link" {
             if let Some(obj) = payload.as_object_mut() {

@@ -85,6 +85,7 @@ pub(crate) use completeness::classify_evidence_ref_against_root;
 #[cfg(test)]
 pub(crate) use workflow::parse_commit_req_ids as parse_commit_req_ids_for_tests;
 pub(crate) use shared::all_accepted_evidence_artifact_types;
+pub(crate) use planning::{substitute_logical_keys_in_str, substitute_logical_keys_in_value};
 
 #[allow(dead_code)]
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
