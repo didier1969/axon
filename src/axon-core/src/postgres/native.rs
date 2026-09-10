@@ -448,6 +448,100 @@ impl NativePgCtx {
         })
     }
 
+    /// REQ-AXO-902551 — Sérialise l'application du bootstrap DDL global entre
+    /// processus concurrents (Brain et Indexeur démarrant en même temps).
+    ///
+    /// Prend un verrou consultatif PostgreSQL (`pg_advisory_lock`) de niveau session
+    /// sur une connexion unique dédiée pendant toute la durée du passage des énoncés DDL.
+    /// Les processus concurrents attendent sur le verrou plutôt que d'entrer en collision
+    /// dans le catalogue système `pg_class` (qui produisait SQLSTATE 23505 sur
+    /// `pg_class_relname_nsp_index` malgré les `IF NOT EXISTS`).
+    pub fn run_bootstrap_global_ddl(&self, statements: &[String]) -> Result<(), String> {
+        let pool = self.pool.clone();
+        let schema = self.schema_search_path.clone();
+        let stmts = statements.to_vec();
+        run_blocking(async move {
+            let conn = match pool.get().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("native pg bootstrap: pool acquire failed: {e}");
+                    return Err(format!("pool acquire failed: {e}"));
+                }
+            };
+            if let Err(e) = apply_session_setup(&conn, &schema).await {
+                tracing::warn!("native pg bootstrap: set search_path failed: {e}");
+                rollback_or_evict(conn, "session_setup").await;
+                return Err(format!("set search_path failed: {e}"));
+            }
+
+            // Clé 64-bit déterministe dédiée au bootstrap DDL global ("AXON_DDL")
+            const DDL_BOOTSTRAP_LOCK_ID: i64 = 4708573981792617548; // 0x41584f4e5f44444c
+            if let Err(e) = conn
+                .batch_execute(&format!("SELECT pg_advisory_lock({DDL_BOOTSTRAP_LOCK_ID});"))
+                .await
+            {
+                tracing::warn!("native pg bootstrap: failed to acquire advisory lock: {e}");
+                rollback_or_evict(conn, "advisory_lock").await;
+                return Err(format!("failed to acquire ddl advisory lock: {e}"));
+            }
+
+            let mut result = Ok(());
+            for stmt in &stmts {
+                let trimmed = stmt.trim_start();
+                let is_optional_extension = trimmed
+                    .to_uppercase()
+                    .starts_with("CREATE EXTENSION IF NOT EXISTS");
+                match conn.batch_execute(stmt).await {
+                    Ok(_) => {}
+                    Err(e) if is_optional_extension => {
+                        tracing::warn!(
+                            statement = stmt.chars().take(80).collect::<String>().as_str(),
+                            error = %e,
+                            "PostgreSQL extension unavailable on this host; continuing without it."
+                        );
+                    }
+                    Err(e) => {
+                        let detail = e
+                            .as_db_error()
+                            .map(|db| {
+                                let mut s = format!("{}: {}", db.code().code(), db.message());
+                                if let Some(c) = db.constraint() {
+                                    s.push_str(&format!(" [constraint={c}]"));
+                                }
+                                s
+                            })
+                            .unwrap_or_else(|| e.to_string());
+
+                        // Idempotence additionnelle de sécurité pour les courses éventuelles
+                        // sur pg_class_relname_nsp_index
+                        if e.as_db_error()
+                            .map(|db| db.code().code() == "23505" && db.message().contains("pg_class"))
+                            .unwrap_or(false)
+                        {
+                            tracing::warn!("concurrent index creation detected and tolerated: {detail}");
+                            continue;
+                        }
+
+                        tracing::warn!("native pg bootstrap: {detail} | {stmt}");
+                        result = Err(detail);
+                        break;
+                    }
+                }
+            }
+
+            // Libère le verrou consultatif avant de restituer la connexion
+            let _ = conn
+                .batch_execute(&format!("SELECT pg_advisory_unlock({DDL_BOOTSTRAP_LOCK_ID});"))
+                .await;
+
+            if result.is_err() {
+                rollback_or_evict(conn, "bootstrap_ddl_failed").await;
+            }
+
+            result
+        })
+    }
+
     // ===================================================================
     // REQ-AXO-901884 Stage 0 — async-native typed core (ADDITIVE).
     //

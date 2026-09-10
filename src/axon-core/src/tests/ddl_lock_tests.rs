@@ -431,4 +431,41 @@ mod tests {
             );
         }
     }
+
+    /// REQ-AXO-902551 — Sérialiser le bootstrap DDL concurrent de Brain et de l'indexeur.
+    /// Simule un démarrage simultané de 4 instances (Brain, Indexeur, workers) exécutant
+    /// le bootstrap global sur une base PostgreSQL partagée sans aucun échec 23505 ni deadlock.
+    #[tokio::test]
+    async fn concurrent_bootstrap_ddl_runs_without_23505_or_deadlock() {
+        let db = TestDb::create();
+        let url = db.url();
+
+        let mut handles: Vec<tokio::task::JoinHandle<Result<(), String>>> = Vec::new();
+        for _ in 0..4 {
+            let u = url.clone();
+            handles.push(tokio::spawn(async move {
+                let native = crate::postgres::native::NativePgCtx::connect(&u, None)
+                    .map_err(|e| e.to_string())?;
+                let stmts = crate::postgres::ddl::generate_global_schema();
+                native.run_bootstrap_global_ddl(&stmts)
+            }));
+        }
+
+        for (idx, handle) in handles.into_iter().enumerate() {
+            let res = handle.await.expect("task join failed");
+            assert!(
+                res.is_ok(),
+                "La tâche concurrente {idx} de bootstrap DDL a échoué: {:?}",
+                res.err()
+            );
+        }
+
+        let client = connect(&url).await;
+        let table_count: i64 = client
+            .query_one("SELECT count(*) FROM pg_tables WHERE schemaname = 'axon'", &[])
+            .await
+            .expect("count axon tables")
+            .get(0);
+        assert!(table_count >= 5, "Les tables axon doivent être créées");
+    }
 }
