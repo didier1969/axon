@@ -266,7 +266,7 @@ impl RustParser {
         };
 
         result.symbols.push(Symbol {
-            name,
+            name: name.clone(),
             kind: kind.to_string(),
             start_line,
             end_line,
@@ -279,6 +279,16 @@ impl RustParser {
             properties: props,
             embedding: None,
         });
+
+        // REQ-AXO-902423 — emit Symbol -> Symbol CONTAINS relation (struct/trait -> method).
+        if !class_name.is_empty() {
+            result.relations.push(Relation {
+                from: class_name.to_string(),
+                to: name.clone(),
+                rel_type: "contains".to_string(),
+                properties: HashMap::new(),
+            });
+        }
 
         if let Some(block) = self.find_child_by_type(node, "block") {
             self.walk(block, source, result, class_name, &scope);
@@ -310,7 +320,7 @@ impl RustParser {
         }
 
         result.symbols.push(Symbol {
-            name,
+            name: name.clone(),
             kind: kind.to_string(),
             start_line: node.start_position().row + 1,
             end_line: node.end_position().row + 1,
@@ -323,6 +333,16 @@ impl RustParser {
             properties: props,
             embedding: None,
         });
+
+        // REQ-AXO-902423 — emit Symbol -> Symbol CONTAINS relation for trait method signature.
+        if !class_name.is_empty() {
+            result.relations.push(Relation {
+                from: class_name.to_string(),
+                to: name,
+                rel_type: "contains".to_string(),
+                properties: HashMap::new(),
+            });
+        }
     }
 
     fn extract_struct<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {
@@ -1378,6 +1398,39 @@ mod tests {
                 .get("cyclomatic_complexity")
                 .map(String::as_str),
             Some("2")
+        );
+    }
+
+    #[test]
+    fn test_req_902423_rust_contains_relations() {
+        let p = parser();
+        let code = r#"
+            struct Service;
+            impl Service {
+                pub fn run(&self) {}
+            }
+            trait Worker {
+                fn execute(&self);
+            }
+        "#;
+        let res = p.parse(code);
+        let contains_service_run = res
+            .relations
+            .iter()
+            .any(|r| r.rel_type == "contains" && r.from == "Service" && r.to == "run");
+        assert!(
+            contains_service_run,
+            "Service must contain run: {:?}",
+            res.relations
+        );
+        let contains_worker_execute = res
+            .relations
+            .iter()
+            .any(|r| r.rel_type == "contains" && r.from == "Worker" && r.to == "execute");
+        assert!(
+            contains_worker_execute,
+            "Worker must contain execute: {:?}",
+            res.relations
         );
     }
 }

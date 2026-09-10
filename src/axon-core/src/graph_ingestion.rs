@@ -390,6 +390,8 @@ impl GraphStore {
             "uses" => Some("USES"),
             "extends" => Some("EXTENDS"),
             "tests" => Some("TESTS"),
+            // REQ-AXO-902423 — Symbol -> Symbol CONTAINS edges.
+            "contains" => Some("CONTAINS"),
             _ => None,
         }
     }
@@ -1377,6 +1379,9 @@ impl GraphStore {
                         calls_nif_rows.push(row);
                     }
                 }
+                "CONTAINS" => {
+                    contains_rows.push(row);
+                }
                 // REQ-AXO-901493 — persist every other mapped edge kind
                 // (IMPLEMENTS/IMPORTS/USES/EXTENDS/READS/DECLARES/EXPOSES/TESTS)
                 // instead of dropping it.
@@ -1387,6 +1392,8 @@ impl GraphStore {
                 }
             }
         }
+        contains_rows.sort_unstable();
+        contains_rows.dedup();
 
         // PG-canonical: COPY BINARY path via bulk_writer.
         let batch = crate::postgres::bulk_writer::PgBulkBatch {
@@ -1723,6 +1730,9 @@ impl GraphStore {
                         if seen_calls_nif.insert(row.clone()) {
                             calls_nif_rows.push(row);
                         }
+                    }
+                    "CONTAINS" => {
+                        contains_rows.push(row);
                     }
                     // REQ-AXO-901493 — persist every other mapped edge kind
                     // (IMPLEMENTS/IMPORTS/USES/EXTENDS/...) instead of dropping.
@@ -2819,5 +2829,12 @@ mod req_axo_140_call_resolution {
             resolved, id_local,
             "un appel sans receveur dans le fichier définissant helper doit cibler sa définition locale"
         );
+    }
+
+    /// REQ-AXO-902423 — relation_table mappe "contains" vers Some("CONTAINS").
+    #[test]
+    fn relation_table_maps_contains() {
+        assert_eq!(GraphStore::relation_table("contains"), Some("CONTAINS"));
+        assert_eq!(GraphStore::relation_table("CONTAINS"), Some("CONTAINS"));
     }
 }

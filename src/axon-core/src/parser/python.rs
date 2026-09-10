@@ -262,6 +262,16 @@ impl PythonParser {
             embedding: None,
         });
 
+        // REQ-AXO-902423 — emit Symbol -> Symbol CONTAINS relation (class -> method).
+        if is_method {
+            result.relations.push(Relation {
+                from: scope.to_string(),
+                to: full_name.clone(),
+                rel_type: "contains".to_string(),
+                properties: HashMap::new(),
+            });
+        }
+
         // Link test function to original function if applicable
         if is_test {
             let target = func_name.trim_start_matches("test_").to_string();
@@ -724,6 +734,30 @@ def test_classify():
                 .get("receiver")
                 .map(String::as_str),
             Some("NA")
+        );
+    }
+
+    #[test]
+    fn test_req_902423_python_contains_relations() {
+        let p = parser();
+        let code = r#"
+class Agent:
+    def execute(self):
+        pass
+"#;
+        let result = p.parse(code);
+        if result.symbols.is_empty() {
+            eprintln!("python wasm grammar unavailable, skipping");
+            return;
+        }
+        let contains_agent_execute = result
+            .relations
+            .iter()
+            .any(|r| r.rel_type == "contains" && r.from == "Agent" && r.to == "Agent.execute");
+        assert!(
+            contains_agent_execute,
+            "Agent must contain Agent.execute: {:?}",
+            result.relations
         );
     }
 }

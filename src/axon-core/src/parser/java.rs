@@ -28,7 +28,7 @@ impl JavaParser {
                     self.extract_class(child, content, symbols);
                 }
                 "method_declaration" => {
-                    self.extract_method(child, content, symbols, class_name);
+                    self.extract_method(child, content, symbols, relations, class_name);
                 }
                 "import_declaration" => {
                     self.extract_import(child, content, relations);
@@ -121,6 +121,7 @@ impl JavaParser {
         node: Node,
         content: &[u8],
         symbols: &mut Vec<Symbol>,
+        relations: &mut Vec<Relation>,
         class_name: &str,
     ) {
         if let Some(name_node) = node.child_by_field_name("name") {
@@ -201,6 +202,16 @@ impl JavaParser {
                     properties,
                     embedding: None,
                 });
+
+                // REQ-AXO-902423 — emit Symbol -> Symbol CONTAINS relation (class -> method).
+                if !class_name.is_empty() {
+                    relations.push(Relation {
+                        from: class_name.to_string(),
+                        to: name.to_string(),
+                        rel_type: "contains".to_string(),
+                        properties: std::collections::HashMap::new(),
+                    });
+                }
             }
         }
     }
@@ -349,6 +360,28 @@ mod tests {
                 .get("cyclomatic_complexity")
                 .map(String::as_str),
             Some("1")
+        );
+    }
+
+    #[test]
+    fn test_req_902423_java_contains_relations() {
+        let result = parser().parse(
+            "class Calculator { \
+                public int add(int a, int b) { return a + b; } \
+            }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("java wasm grammar unavailable, skipping");
+            return;
+        }
+        let contains_calc_add = result
+            .relations
+            .iter()
+            .any(|r| r.rel_type == "contains" && r.from == "Calculator" && r.to == "add");
+        assert!(
+            contains_calc_add,
+            "Calculator must contain add: {:?}",
+            result.relations
         );
     }
 }
