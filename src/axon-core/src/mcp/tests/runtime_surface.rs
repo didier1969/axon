@@ -5456,3 +5456,30 @@ fn test_req_902637_status_ingress_does_not_render_orphaned_subtree_hints() {
     assert!(ingress.get("subtree_hint_blocked_total").is_none(), "subtree_hint_blocked_total must not be rendered: {ingress}");
     assert!(ingress.get("subtree_hint_suppressed_total").is_none(), "subtree_hint_suppressed_total must not be rendered: {ingress}");
 }
+
+/// REQ-AXO-902483 — practice_recall surfaces source_project provenance on global practices.
+#[test]
+fn test_req_902483_practice_recall_surfaces_source_project_provenance() {
+    let _guard = env_lock();
+    let server = create_test_server();
+    server.graph_store.execute(
+        "INSERT INTO axon.practice (scope, context, practice, dense, evidence, source_project, status, trust, stability, use_count) \
+         VALUES ('*', 'test context 902483', 'une pratique globale de test 902483', 'pratique 902483', 'ev 902483', 'LLL', 'active', 0.8, 10.0, 5)"
+    ).expect("insert practice 902483");
+
+    let res = server.execute_tool_direct("practice_recall", &json!({
+        "query": "pratique globale de test 902483",
+        "scope": "DVM",
+        "top_k": 5
+    })).expect("practice_recall response");
+
+    assert_ne!(res["isError"].as_bool(), Some(true));
+    let text = res["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("(origine: LLL)"), "recalled text must surface source_project provenance: {text}");
+
+    let practices = res["data"]["practices"].as_array().expect("practices array");
+    let target = practices.iter().find(|p| p["practice"].as_str().unwrap_or("").contains("902483")).expect("target practice in results");
+    assert_eq!(target["source_project"], "LLL");
+
+    let _ = server.graph_store.execute("DELETE FROM axon.practice WHERE practice = 'une pratique globale de test 902483'");
+}

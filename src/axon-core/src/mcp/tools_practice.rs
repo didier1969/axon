@@ -85,7 +85,7 @@ pub(crate) fn practice_selection_sql(
 ) -> String {
     const COLS: &str = "id, scope, COALESCE(NULLIF(dense,''), practice) AS practice, evidence, \
 trust, stability, EXTRACT(EPOCH FROM (now() - last_used_at))/86400.0 AS days_since";
-    const TAIL: &str = "tier, perishability, role, model";
+    const TAIL: &str = "tier, perishability, role, model, COALESCE(source_project, '') AS source_project";
     match lane {
         PracticeLane::Semantic => {
             let v = vec_lit.unwrap_or("NULL");
@@ -143,9 +143,15 @@ fn render_practice_list(practices: &[Value]) -> String {
             }
             let tier = s("tier");
             let tier = if tier.is_empty() { String::new() } else { format!(" · {tier}") };
+            let scope = s("scope");
+            let source_proj = s("source_project");
+            let origin_tag = if !source_proj.is_empty() && (scope == "*" || source_proj != scope) {
+                format!(" (origine: {source_proj})")
+            } else {
+                String::new()
+            };
             format!(
-                "- **[{id}]** `{}`{tier} · trust {:.2} · score {:.2}\n  {text}",
-                s("scope"),
+                "- **[{id}]** `{scope}`{origin_tag}{tier} · trust {:.2} · score {:.2}\n  {text}",
                 n("trust"),
                 n("score"),
             )
@@ -1122,7 +1128,8 @@ impl McpServer {
                     "perishability": g(9),
                     "role": g(10),
                     "model": g(11),
-                    "score": score
+                    "score": score,
+                    "source_project": g(12)
                 }))
             })
             .collect();
@@ -1484,6 +1491,38 @@ mod tests {
         let out = render_practice_list(&big);
         assert!(out.contains('…'), "over-long practice must be truncated: {out}");
         assert!(out.chars().count() < 600, "bounded length: {}", out.chars().count());
+    }
+
+    #[test]
+    fn test_req_902483_render_practice_list_surfaces_provenance_for_global_or_cross_scope() {
+        let practices = vec![
+            json!({
+                "id": 1141,
+                "scope": "*",
+                "source_project": "LLL",
+                "practice": "la voie Ash prod (NCR/REQ-473), petits defp",
+                "trust": 0.58,
+                "tier": "episode",
+                "score": 0.45,
+            }),
+            json!({
+                "id": 42,
+                "scope": "AXO",
+                "source_project": "AXO",
+                "practice": "toujours passer par promote_live_safe.sh",
+                "trust": 0.73,
+                "score": 0.61,
+            }),
+        ];
+        let body = render_practice_list(&practices);
+        assert!(
+            body.contains("`*` (origine: LLL) · episode"),
+            "global practice must surface source_project provenance: {body}"
+        );
+        assert!(
+            !body.contains("`AXO` (origine: AXO)"),
+            "redundant provenance matching scope must not be surfaced: {body}"
+        );
     }
 
     #[test]
