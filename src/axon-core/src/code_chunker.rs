@@ -573,6 +573,96 @@ const CHEAP_WINDOW_LINES: usize = 200;
 ///
 /// The line count stays as a second ceiling: on a file of very short lines the
 /// char budget alone would emit thousands of tiny segments.
+/// Maximum number of sampled slices measured by the tokenizer to calibrate the
+/// token density (chars per token) on coarse / fallback chunking paths.
+///
+/// REQ-AXO-902396 — a speed fallback must remain a correctness fallback. Sizing by
+/// a fixed constant (`FALLBACK_CHARS_PER_TOKEN = 3`) causes token-dense content
+/// (~1.1 chars/token: base64, hash-dense identifiers, minified payloads) to blow past
+/// `model_max_tokens` (512) and get quietly truncated at embed time. Sampling up to 8
+/// bounded slices bounds the extra cost to O(1) tokenizer encodes (≤ 8 encodes <<
+/// `ENCODE_STORM_CEILING`), while shrinking the byte/char window to fit the actual density.
+const MAX_DENSITY_SAMPLES: usize = 8;
+const DENSITY_SAMPLE_MAX_CHARS: usize = 150;
+
+fn calibrate_chars_per_token(lines: &[&str], start: usize, end: usize) -> f64 {
+    if start >= end || lines.is_empty() {
+        return FALLBACK_CHARS_PER_TOKEN as f64;
+    }
+    let total_lines = end - start;
+    let mut min_ratio = FALLBACK_CHARS_PER_TOKEN as f64;
+    let mut sampled = 0;
+
+    if total_lines == 1 {
+        let line = lines[start];
+        let total_chars = line.chars().count();
+        if total_chars < 30 {
+            return FALLBACK_CHARS_PER_TOKEN as f64;
+        }
+        let step_chars = (total_chars / MAX_DENSITY_SAMPLES).max(1);
+        let mut char_offset = 0;
+        while char_offset < total_chars && sampled < MAX_DENSITY_SAMPLES {
+            let sample_str: String = line
+                .chars()
+                .skip(char_offset)
+                .take(DENSITY_SAMPLE_MAX_CHARS)
+                .collect();
+            let char_count = sample_str.chars().count();
+            if char_count >= 20 {
+                let tokens = content_token_count(&sample_str);
+                if tokens > 0 {
+                    let ratio = char_count as f64 / tokens as f64;
+                    if ratio < min_ratio {
+                        min_ratio = ratio;
+                    }
+                    sampled += 1;
+                }
+            }
+            char_offset += step_chars;
+        }
+    } else {
+        let step = (total_lines / MAX_DENSITY_SAMPLES).max(1);
+        let mut cursor = start;
+        while cursor < end && sampled < MAX_DENSITY_SAMPLES {
+            let mut sample_str = String::with_capacity(DENSITY_SAMPLE_MAX_CHARS + 10);
+            let mut l_idx = cursor;
+            while l_idx < end
+                && l_idx < cursor + 5
+                && sample_str.chars().count() < DENSITY_SAMPLE_MAX_CHARS
+            {
+                if !sample_str.is_empty() {
+                    sample_str.push('\n');
+                }
+                let needed = DENSITY_SAMPLE_MAX_CHARS.saturating_sub(sample_str.chars().count());
+                sample_str.extend(lines[l_idx].chars().take(needed));
+                l_idx += 1;
+            }
+
+            let char_count = sample_str.chars().count();
+            if char_count >= 20 {
+                let tokens = content_token_count(&sample_str);
+                if tokens > 0 {
+                    let ratio = char_count as f64 / tokens as f64;
+                    if ratio < min_ratio {
+                        min_ratio = ratio;
+                    }
+                    sampled += 1;
+                }
+            }
+            cursor += step;
+        }
+    }
+
+    (min_ratio * 0.90).clamp(1.0, FALLBACK_CHARS_PER_TOKEN as f64)
+}
+
+/// Cheap O(N) fixed line-window segmentation (no tokenizer encodes). Contiguous,
+/// gap-free `[body_start, end)` in `window`-line slabs. The defense fallback for
+/// pathological bodies that slipped the upstream directory/minified/size filters.
+/// REQ-AXO-902364 — the deadline fallback, bounded by the TOKEN BUDGET as well as
+/// by a line count.
+/// REQ-AXO-902396 — bounded by measured token density calibration rather than a fixed
+/// 3-chars/token heuristic that blew past model_max_tokens on token-dense content.
 fn cheap_line_window_segments(
     body_start: usize,
     end: usize,
@@ -581,9 +671,9 @@ fn cheap_line_window_segments(
     body_budget_tokens: usize,
 ) -> Vec<BodySegment> {
     let window = window.max(1);
-    let char_budget = body_budget_tokens
-        .saturating_mul(FALLBACK_CHARS_PER_TOKEN)
-        .max(1);
+    let chars_per_token = calibrate_chars_per_token(lines, body_start, end);
+    let char_budget = ((body_budget_tokens as f64) * chars_per_token).floor() as usize;
+    let char_budget = char_budget.max(1);
     let mut segments = Vec::new();
     let mut cursor = body_start;
     while cursor < end {
@@ -658,7 +748,10 @@ fn dp_segment_body(
         .iter()
         .any(|line| line.chars().count() > giant_char_threshold);
     if n == 1 || any_giant_line {
-        return (split_giant_lines(body_lines, body_start, body_budget), false);
+        return (
+            split_giant_lines(body_lines, body_start, body_budget),
+            false,
+        );
     }
 
     // --- Per-line token costs: O(N) encodes (the core fix). The wall-clock
@@ -692,7 +785,10 @@ fn dp_segment_body(
     // window fits the budget. This makes the DP `!found` branch below pure
     // defense-in-depth (it can no longer fire for a reachable input).
     if line_costs.iter().any(|cost| *cost > body_budget) {
-        return (split_giant_lines(body_lines, body_start, body_budget), false);
+        return (
+            split_giant_lines(body_lines, body_start, body_budget),
+            false,
+        );
     }
 
     // Prefix sum P[k] = sum of line_costs[0..k]. body_cost(a,b) ≈
@@ -883,36 +979,39 @@ fn coarse_byte_window_chunks(
     end: usize,
     profile: EmbeddingChunkProfile,
 ) -> Vec<DerivedCodeChunk> {
+    coarse_byte_window_chunks_with_density(symbol, lines, start, end, profile, None)
+}
+
+fn coarse_byte_window_chunks_with_density(
+    symbol: &Symbol,
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    profile: EmbeddingChunkProfile,
+    calibrated_density: Option<f64>,
+) -> Vec<DerivedCodeChunk> {
     if start >= end {
         return Vec::new();
     }
     let body_bytes: usize = lines[start..end].iter().map(|l| l.len() + 1).sum();
     // REQ-AXO-902340 — ONE model window of bytes per chunk. Full stop.
+    // REQ-AXO-902396 — Calibrate window against measured token density.
     //
-    // This used to be `by_window.max(body_bytes / MAX_PRECISE_ENCODE_CHUNKS)`,
-    // so past 256 windows (~393 KB) the COUNT cap won and the chunk size grew
-    // linearly with the file. Measured on the live index: `model_b_9.txt`
-    // (3.4 MB) emitted 247 chunks of **4 934 tokens** against a 384-token
-    // window, and a 348 KB Swiss tax law 33 chunks of 3 744 — the embedder
-    // truncates at `model_max_tokens`, so **~90 % of those files was never
-    // vectorised** while `embedding_status` reported 100 % coverage.
-    //
-    // The count cap was bought with content, and the trade was never written
-    // down. Worse, it was borrowed: `MAX_PRECISE_ENCODE_CHUNKS` bounds encode
-    // TIME on the precise path, and this path runs no tokenizer at all
-    // (`fallback_estimated_token_count` is a byte estimate). It inherited a
-    // ceiling it never needed.
-    // Size the BODY so the ASSEMBLED chunk — prefix included — fits the window
-    // under the SAME estimator that will label it. Sizing the body alone, with a
-    // different chars-per-token than the estimator, is what left every chunk over
-    // its own target: `symbol:` / `kind:` / `part: i/N` are prepended afterwards
-    // and counted afterwards.
+    // Using a fixed chars-per-token constant (`FALLBACK_CHARS_PER_TOKEN = 3`)
+    // caused chunks on token-dense content (~1.1 chars/token: base64, hashes,
+    // minified data) to overflow `model_max_tokens` (512) and get quietly
+    // truncated at embed time. Calibrate the real density on a bounded sample
+    // (O(1) tokenizer encodes) and size the body budget using that density.
+    let chars_per_token =
+        calibrated_density.unwrap_or_else(|| calibrate_chars_per_token(lines, start, end));
     let overhead_chars = format_chunk_content(symbol, "", "", 1, 2).chars().count();
-    let bytes_per_chunk = profile
+    let overhead_tokens = (overhead_chars as f64 / chars_per_token).ceil() as usize;
+    let body_budget_tokens = profile
         .target_chunk_tokens
-        .saturating_mul(FALLBACK_CHARS_PER_TOKEN)
-        .saturating_sub(overhead_chars)
-        .max(1);
+        .saturating_sub(overhead_tokens)
+        .max(8);
+    let bytes_per_chunk = ((body_budget_tokens as f64) * chars_per_token).floor() as usize;
+    let bytes_per_chunk = bytes_per_chunk.max(1);
 
     // REQ-AXO-902340 — pack whole lines up to one window, and CHAR-WINDOW any
     // single line that alone exceeds it. Line packing cannot bound a body whose
@@ -947,15 +1046,15 @@ fn coarse_byte_window_chunks(
             acc = 0;
             continue;
         }
-        acc += line_bytes;
-        if acc >= bytes_per_chunk {
+        if acc > 0 && acc + line_bytes > bytes_per_chunk {
             ranges.push(BodySegment::LineRange {
                 start: seg_start,
-                end: cursor + 1,
+                end: cursor,
             });
-            seg_start = cursor + 1;
+            seg_start = cursor;
             acc = 0;
         }
+        acc += line_bytes;
     }
     if seg_start < end {
         ranges.push(BodySegment::LineRange {
@@ -1008,8 +1107,11 @@ fn coarse_byte_window_chunks(
             let part_index = i + 1;
             let snippet = seg.snippet(lines);
             let content = format_chunk_content(symbol, "", &snippet, part_index, part_count);
+            let estimated_tokens = (content.chars().count() as f64 / chars_per_token)
+                .ceil()
+                .max(1.0) as usize;
             DerivedCodeChunk {
-                estimated_tokens: fallback_estimated_token_count(&content),
+                estimated_tokens,
                 content,
                 part_index,
                 part_count,
@@ -1049,6 +1151,7 @@ pub fn build_file_chunks_with_budget(
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(budget_ms);
     let mut out: Vec<(usize, DerivedCodeChunk)> = Vec::new();
     let mut bailed = false;
+    let mut file_density: Option<f64> = None;
     for (i, sym) in symbols.iter().enumerate() {
         if !bailed && std::time::Instant::now() >= deadline {
             bailed = true;
@@ -1064,7 +1167,16 @@ pub fn build_file_chunks_with_budget(
         if bailed {
             let start = sym.start_line.saturating_sub(1).min(lines.len());
             let end = sym.end_line.min(lines.len()).max(start);
-            let mut coarse = coarse_byte_window_chunks(sym, &lines, start, end, profile);
+            let density = *file_density
+                .get_or_insert_with(|| calibrate_chars_per_token(&lines, 0, lines.len()));
+            let mut coarse = coarse_byte_window_chunks_with_density(
+                sym,
+                &lines,
+                start,
+                end,
+                profile,
+                Some(density),
+            );
             if coarse.is_empty() {
                 // single-line / empty-body symbol: emit one cheap byte-estimated
                 // chunk so the content is still indexed (coarse, not skipped).
@@ -1074,8 +1186,10 @@ pub fn build_file_chunks_with_budget(
                     String::new()
                 };
                 let content = format_chunk_content(sym, "", &snippet, 1, 1);
+                let estimated_tokens =
+                    (content.chars().count() as f64 / density).ceil().max(1.0) as usize;
                 coarse.push(DerivedCodeChunk {
-                    estimated_tokens: fallback_estimated_token_count(&content),
+                    estimated_tokens,
                     content,
                     part_index: 1,
                     part_count: 1,
@@ -1545,7 +1659,10 @@ mod req_902393_file_context_budget_tests {
     #[test]
     fn the_stored_token_count_is_the_measured_one() {
         let profile = active_chunk_profile();
-        for text in [dense_text(4_000), "petit fichier\nsur deux lignes\n".to_string()] {
+        for text in [
+            dense_text(4_000),
+            "petit fichier\nsur deux lignes\n".to_string(),
+        ] {
             let built = build_file_context_chunk("f.txt", &text, profile);
             assert_eq!(
                 built.token_count,
@@ -1555,28 +1672,14 @@ mod req_902393_file_context_budget_tests {
         }
     }
 
-    /// REQ-AXO-902396 — REPRODUCTION d'un défaut OUVERT, volontairement ignorée.
+    /// REQ-AXO-902396 — Le lane octets calibre sa fenêtre sur la densité mesurée.
     ///
     /// Le lane octets (ici forcé par un budget de 0 ms, le repli sur délai)
-    /// dimensionne avec `budget × FALLBACK_CHARS_PER_TOKEN` caractères. Cette
-    /// constante est une MOYENNE : sur du texte à ~1,2 caractère par jeton elle
-    /// n'est pas une borne. Ce test échoue en l'état — « morceau 1/22 de 969
-    /// jetons pour une fenêtre de 512 » — et c'est la mesure corpus : 5 064
-    /// morceaux sur 70 fichiers au-dessus de la fenêtre, jusqu'à 2 950 jetons,
-    /// embarqués queue coupée.
-    ///
-    /// Ignoré et NON corrigé parce que la correction évidente est fausse : faire
-    /// vérifier chaque segment assemblé par un encode réel fait passer le fichier
-    /// journal de 640 Ko de 256 à **1 639 encodes**, ce que
-    /// `log_file_shape_with_giant_line_does_not_encode_storm` refuse à juste
-    /// titre (~9 ms l'encode ⇒ ~15 s sur un seul fichier). Les deux invariants —
-    /// « aucun morceau au-dessus de la fenêtre » et « pas de tempête d'encodes »
-    /// — ne se satisfont pas par un patch : il faut un dimensionnement calibré
-    /// sur la densité réelle du fichier, mesurée sur un échantillon borné. Tant
-    /// que ce n'est pas conçu, le défaut est DÉCLARÉ ici plutôt que masqué.
+    /// calibre désormais sa fenêtre d'octets sur la densité réelle échantillonnée
+    /// (O(1) tokenizer encodes), ce qui garantit qu'aucun morceau ne dépasse
+    /// `model_max_tokens` même sur du texte à forte densité en jetons (~1,2 car/jeton).
     #[test]
-    #[ignore = "REQ-AXO-902396 — défaut ouvert : reproduction, pas une régression"]
-    fn the_byte_lane_still_emits_above_the_window() {
+    fn the_byte_lane_no_longer_emits_above_the_window() {
         let profile = active_chunk_profile();
         // ASCII dense en jetons : « zqxjv » se découpe en sous-mots, ~1,2
         // caractère par jeton — la densité mesurée sur les extraits PDF qui
@@ -1607,12 +1710,64 @@ mod req_902393_file_context_budget_tests {
         let chunks = build_file_chunks_with_budget(&[&symbol], &file_content, 0);
 
         assert!(!chunks.is_empty(), "le corps doit être couvert");
+        assert!(
+            chunks.len() > 1,
+            "un corps de 400 lignes denses doit être découpé"
+        );
         for chunk in &chunks {
             let measured = estimated_token_count(&chunk.1.content);
             assert!(
                 measured <= profile.model_max_tokens,
                 "morceau {} de {} jetons pour une fenêtre de {} — l'estimation par \
                  caractères a servi de borne",
+                chunk.1.chunk_path,
+                measured,
+                profile.model_max_tokens
+            );
+        }
+    }
+
+    /// REQ-AXO-902396 critère #3 — Un document non-source à ~1,1 caractère par
+    /// jeton (données textuelles/base64 denses) ne dépasse pas la fenêtre du modèle
+    /// sur le lane octets.
+    #[test]
+    fn dense_non_code_document_in_byte_lane_stays_under_model_max_tokens() {
+        let profile = active_chunk_profile();
+        // Données denses non-code : chaînes hex/base64 hachées sans structure de code
+        let non_code_body: String = (0..300)
+            .map(|i| {
+                format!("blob_{i}: 7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let symbol = crate::parser::Symbol {
+            name: "document_body".to_string(),
+            kind: "document".to_string(),
+            start_line: 1,
+            end_line: non_code_body.lines().count(),
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: Default::default(),
+            embedding: None,
+        };
+
+        // Budget 0 ms pour forcer le lane octets coarse
+        let chunks = build_file_chunks_with_budget(&[&symbol], &non_code_body, 0);
+        assert!(!chunks.is_empty(), "le corps doit être couvert");
+        assert!(
+            chunks.len() > 1,
+            "le document doit être découpé en plusieurs morceaux"
+        );
+
+        for chunk in &chunks {
+            let measured = estimated_token_count(&chunk.1.content);
+            assert!(
+                measured <= profile.model_max_tokens,
+                "morceau {} de {} jetons dépasse model_max_tokens ({})",
                 chunk.1.chunk_path,
                 measured,
                 profile.model_max_tokens
@@ -1693,7 +1848,11 @@ mod tests {
         let refs: Vec<&Symbol> = syms.iter().collect();
         let chunks = build_file_chunks(&refs, content);
         let covered: std::collections::HashSet<usize> = chunks.iter().map(|(i, _)| *i).collect();
-        assert_eq!(covered.len(), 3, "every symbol index produced ≥1 chunk: {chunks:?}");
+        assert_eq!(
+            covered.len(),
+            3,
+            "every symbol index produced ≥1 chunk: {chunks:?}"
+        );
         assert!(covered.contains(&0) && covered.contains(&1) && covered.contains(&2));
     }
 
@@ -2484,7 +2643,10 @@ mod tests {
             let mut line = String::with_capacity(1_500);
             let mut k = 0u64;
             while line.len() < 1_400 {
-                line.push_str(&format!("hdr{h}_{k}_{} ", k.wrapping_mul(2654435761) % 99991));
+                line.push_str(&format!(
+                    "hdr{h}_{k}_{} ",
+                    k.wrapping_mul(2654435761) % 99991
+                ));
                 k += 1;
             }
             content.push_str(&line);
@@ -2617,8 +2779,16 @@ mod tests {
                 .map(|s| s.snippet(&lines))
                 .collect()
         };
-        assert_eq!(reassembled(1), long_line, "line 0 windows must cover the line");
-        assert_eq!(reassembled(2), short_line, "line 1 windows must cover the line");
+        assert_eq!(
+            reassembled(1),
+            long_line,
+            "line 0 windows must cover the line"
+        );
+        assert_eq!(
+            reassembled(2),
+            short_line,
+            "line 1 windows must cover the line"
+        );
     }
 
     /// REQ-AXO-901895 item #2 — the measured-cost gate. A physical line SHORTER
@@ -2767,7 +2937,8 @@ mod req_902364_cheap_window_budget_tests {
         let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
         let body_budget = 350;
 
-        let segments = cheap_line_window_segments(0, lines.len(), CHEAP_WINDOW_LINES, &lines, body_budget);
+        let segments =
+            cheap_line_window_segments(0, lines.len(), CHEAP_WINDOW_LINES, &lines, body_budget);
 
         assert!(!segments.is_empty(), "le corps doit être couvert");
         for seg in &segments {
@@ -2796,8 +2967,13 @@ mod req_902364_cheap_window_budget_tests {
 
         let mut cursor = 0usize;
         for seg in &segments {
-            let BodySegment::LineRange { start, end } = seg else { unreachable!() };
-            assert_eq!(*start, cursor, "segments contigus, sans trou ni recouvrement");
+            let BodySegment::LineRange { start, end } = seg else {
+                unreachable!()
+            };
+            assert_eq!(
+                *start, cursor,
+                "segments contigus, sans trou ni recouvrement"
+            );
             assert!(end > start, "aucun segment vide (sinon boucle infinie)");
             cursor = *end;
         }
@@ -2811,10 +2987,13 @@ mod req_902364_cheap_window_budget_tests {
         // plafond de lignes reste la seconde borne.
         let owned = pdf_like_lines(1000, 1);
         let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
-        let segments = cheap_line_window_segments(0, lines.len(), CHEAP_WINDOW_LINES, &lines, 100_000);
+        let segments =
+            cheap_line_window_segments(0, lines.len(), CHEAP_WINDOW_LINES, &lines, 100_000);
 
         for seg in &segments {
-            let BodySegment::LineRange { start, end } = seg else { unreachable!() };
+            let BodySegment::LineRange { start, end } = seg else {
+                unreachable!()
+            };
             assert!(
                 end - start <= CHEAP_WINDOW_LINES,
                 "segment de {} lignes > plafond {CHEAP_WINDOW_LINES}",
@@ -2831,8 +3010,14 @@ mod req_902364_cheap_window_budget_tests {
         let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
         let segments = cheap_line_window_segments(0, 2, CHEAP_WINDOW_LINES, &lines, 100);
 
-        assert_eq!(segments.len(), 2, "la ligne géante est isolée : {segments:?}");
-        let BodySegment::LineRange { start, end } = &segments[0] else { unreachable!() };
+        assert_eq!(
+            segments.len(),
+            2,
+            "la ligne géante est isolée : {segments:?}"
+        );
+        let BodySegment::LineRange { start, end } = &segments[0] else {
+            unreachable!()
+        };
         assert_eq!((*start, *end), (0, 1));
     }
 }
