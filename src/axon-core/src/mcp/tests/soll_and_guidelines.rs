@@ -18448,3 +18448,96 @@ fn test_req_902451_pre_flight_checks_formatter_and_oracle_freshness() {
         .graph_store
         .execute("DELETE FROM soll.ProjectCodeRegistry WHERE project_code = 'PFC'");
 }
+
+#[test]
+fn test_req_902544_axon_commit_work_returns_verdict_committed_sha_and_correct_next_action() {
+    let server = create_test_server();
+    let sandbox = init_commit_work_sandbox();
+
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+         VALUES ('GUI-AXO-998', 'Guideline', 'AXO', 'Dummy998', 'Dummy998', 'active', '{\"trigger_path\":\"\",\"required_path\":\"\",\"enforcement\":\"strict\"}')"
+    ).unwrap();
+
+    // 1. Succès : commit d'une modification réelle
+    let req_ok = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_commit_work",
+            "arguments": {
+                "diff_paths": ["Cargo.toml"],
+                "project_path": sandbox.path().to_str().unwrap(),
+                "message": "feat(core): deliver REQ-AXO-902544 fix",
+                "dry_run": false
+            }
+        },
+        "id": 902544
+    });
+
+    let resp_ok = server
+        .handle_request(serde_json::from_value(req_ok).unwrap())
+        .expect("response from axon_commit_work");
+    let res_ok = resp_ok.result.expect("result from axon_commit_work");
+
+    assert_ne!(res_ok.get("isError").and_then(Value::as_bool), Some(true), "{:?}", res_ok);
+
+    // Critère 1 : Verdict 'committed' explicite dans data et structuredContent
+    assert_eq!(res_ok["data"]["status"], json!("committed"));
+    assert_eq!(res_ok["structuredContent"]["status"], json!("committed"));
+
+    // Critère 2 : Le commit SHA retourné correspond exactement à `git rev-parse HEAD` dans project_path
+    let head_output = std::process::Command::new("git")
+        .current_dir(sandbox.path())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git rev-parse HEAD");
+    let head_sha = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
+
+    assert_eq!(res_ok["data"]["commit_sha"], json!(head_sha));
+    assert_eq!(res_ok["structuredContent"]["commit_sha"], json!(head_sha));
+
+    // REQ-AXO-902544 : next_action ne doit JAMAIS pointer vers pre_flight_check après un commit réussi !
+    let next_tool_data = res_ok["data"]["next_action"]["tool"].as_str().unwrap_or_default();
+    let next_tool_structured = res_ok["structuredContent"]["next_action"]["tool"].as_str().unwrap_or_default();
+    assert_ne!(next_tool_data, "pre_flight_check", "next_action in data must not recommend pre_flight_check after successful commit");
+    assert_ne!(next_tool_structured, "pre_flight_check", "next_action in structuredContent must not recommend pre_flight_check after successful commit");
+    assert_eq!(next_tool_data, "soll_verify_requirements");
+    assert_eq!(next_tool_structured, "soll_verify_requirements");
+
+    // 2. Échec (Critère 3) : fichier inexistant, l'outil retourne une erreur explicite sans mutation
+    let head_before_fail = head_sha;
+    let req_fail = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_commit_work",
+            "arguments": {
+                "diff_paths": ["does_not_exist.txt"],
+                "project_path": sandbox.path().to_str().unwrap(),
+                "message": "fix(fail): should not commit",
+                "dry_run": false
+            }
+        },
+        "id": 902545
+    });
+
+    let resp_fail = server
+        .handle_request(serde_json::from_value(req_fail).unwrap())
+        .expect("response from failing axon_commit_work");
+    let res_fail = resp_fail.result.expect("result from failing axon_commit_work");
+
+    assert_eq!(res_fail.get("isError").and_then(Value::as_bool), Some(true));
+
+    let head_after_fail = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .current_dir(sandbox.path())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse HEAD")
+            .stdout
+    ).trim().to_string();
+
+    assert_eq!(head_after_fail, head_before_fail, "git HEAD must remain unchanged on commit failure");
+}
+

@@ -332,7 +332,7 @@ impl McpServer {
             "soll_attach_evidence" => &["soll_verify_requirements", "soll_query_context"],
             "soll_remove_evidence" => &["soll_verify_requirements", "soll_validate"],
             "init_project" | "apply_guidelines" => &["project_status", "soll_query_context"],
-            "commit_work" => &["pre_flight_check", "project_status"],
+            "commit_work" => &["soll_verify_requirements", "project_status"],
             "pre_flight_check" => &["commit_work", "project_status"],
             "soll_export" => &["soll_query_context", "soll_validate"],
             "soll_generate_docs" => &["soll_export", "project_status"],

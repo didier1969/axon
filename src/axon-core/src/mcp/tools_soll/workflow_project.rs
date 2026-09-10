@@ -1469,7 +1469,12 @@ impl McpServer {
                         "commit_sha": sha,
                         "committed_paths": committed,
                         "excluded_staged_paths": excluded,
-                        "measurement": "post_commit_diff_tree"
+                        "measurement": "post_commit_diff_tree",
+                        "next_action": {
+                            "kind": "continue_with_follow_up_tool",
+                            "tool": "soll_verify_requirements",
+                            "when": "after_commit"
+                        }
                     }
                 }))
             }
