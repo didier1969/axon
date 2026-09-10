@@ -776,40 +776,180 @@ impl McpServer {
                 } }
             }));
         };
-        // `children` = nodes pointing AT `id` (an umbrella's REFINES children are
-        // edges child -> umbrella). `parents` = the reverse. Naming follows the
-        // SOLL mental model, not the edge direction, because that is how the
-        // procedures phrase it.
-        let direction = args
+
+        let direction_str = args
             .get("direction")
             .and_then(Value::as_str)
             .unwrap_or("children");
+        let direction = match direction_str {
+            "children" => "children",
+            "parents" => "parents",
+            "incoming" => "incoming",
+            "outgoing" => "outgoing",
+            other => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Invalid direction `{other}`. Expected `children`, `parents`, `incoming`, or `outgoing`.") }],
+                    "isError": true,
+                    "data": { "status": "input_invalid", "parameter_repair": {
+                        "invalid_field": "direction",
+                        "corrected_call": { "name": "soll_children", "arguments": { "id": id, "direction": "children" } }
+                    } }
+                }));
+            }
+        };
+
         let rel = args
             .get("relation_type")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        let (match_col, other_col) = match direction {
-            "parents" => ("source_id", "target_id"),
-            _ => ("target_id", "source_id"),
+        // REQ-AXO-902642: If relation_type is specified and is non-hierarchical,
+        // it cannot be traversed under semantic filiation (`children` / `parents`).
+        if let Some(r) = rel {
+            if relation_traversal_semantics(r) == RelationTraversalSemantics::NonHierarchical
+                && (direction == "children" || direction == "parents")
+            {
+                let notice = format!(
+                    "`{r}` is a non-hierarchical relation (dependency or lateral link, not filiation). \
+                     For non-hierarchical relations, use `direction=\"incoming\"` or `direction=\"outgoing\"`."
+                );
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!(
+                        "{} of {} via {}: 0 found\n(none)\n\n_{}_",
+                        if direction == "parents" { "Parents" } else { "Children" },
+                        id, r, notice
+                    ) }],
+                    "data": {
+                        "status": "ok",
+                        "id": id,
+                        "direction": direction,
+                        "relation_type": rel,
+                        "count": 0,
+                        "capped": false,
+                        "nodes": []
+                    }
+                }));
+            }
+        }
+
+        let (sql, params) = match direction {
+            "incoming" => {
+                let sql = format!(
+                    "SELECT n.id, n.type, COALESCE(n.status,''), COALESCE(n.title,''), e.relation_type, e.source_id, e.target_id \
+                     FROM soll.Edge e JOIN soll.Node n ON n.id = e.source_id \
+                     WHERE e.target_id = ?{} ORDER BY n.id LIMIT 200",
+                    if rel.is_some() { " AND e.relation_type = ?" } else { "" }
+                );
+                let params = match rel {
+                    Some(r) => json!([id, r]),
+                    None => json!([id]),
+                };
+                (sql, params)
+            }
+            "outgoing" => {
+                let sql = format!(
+                    "SELECT n.id, n.type, COALESCE(n.status,''), COALESCE(n.title,''), e.relation_type, e.source_id, e.target_id \
+                     FROM soll.Edge e JOIN soll.Node n ON n.id = e.target_id \
+                     WHERE e.source_id = ?{} ORDER BY n.id LIMIT 200",
+                    if rel.is_some() { " AND e.relation_type = ?" } else { "" }
+                );
+                let params = match rel {
+                    Some(r) => json!([id, r]),
+                    None => json!([id]),
+                };
+                (sql, params)
+            }
+            "children" => {
+                match rel {
+                    Some(r) => {
+                        let sem = relation_traversal_semantics(r);
+                        let (match_col, other_col) = match sem {
+                            RelationTraversalSemantics::ParentToChild => ("source_id", "target_id"),
+                            RelationTraversalSemantics::ChildToParent => ("target_id", "source_id"),
+                            RelationTraversalSemantics::NonHierarchical => unreachable!(),
+                        };
+                        let sql = format!(
+                            "SELECT n.id, n.type, COALESCE(n.status,''), COALESCE(n.title,''), e.relation_type, e.source_id, e.target_id \
+                             FROM soll.Edge e JOIN soll.Node n ON n.id = e.{other_col} \
+                             WHERE e.{match_col} = ? AND e.relation_type = ? ORDER BY n.id LIMIT 200"
+                        );
+                        (sql, json!([id, r]))
+                    }
+                    None => {
+                        // Semantic children union:
+                        // 1. Incoming edges where relation is ChildToParent (BELONGS_TO, REFINES, EPITOMIZES), neighbor = source_id.
+                        // 2. Outgoing edges where relation is ParentToChild (TARGETS, SOLVES), neighbor = target_id.
+                        let sql = "SELECT id, type, status, title, relation_type, source_id, target_id FROM (\
+                                       SELECT n.id AS id, n.type AS type, COALESCE(n.status,'') AS status, COALESCE(n.title,'') AS title, e.relation_type AS relation_type, e.source_id AS source_id, e.target_id AS target_id \
+                                       FROM soll.Edge e JOIN soll.Node n ON n.id = e.source_id \
+                                       WHERE e.target_id = ? AND e.relation_type IN ('BELONGS_TO', 'REFINES', 'EPITOMIZES') \
+                                       UNION ALL \
+                                       SELECT n.id AS id, n.type AS type, COALESCE(n.status,'') AS status, COALESCE(n.title,'') AS title, e.relation_type AS relation_type, e.source_id AS source_id, e.target_id AS target_id \
+                                       FROM soll.Edge e JOIN soll.Node n ON n.id = e.target_id \
+                                       WHERE e.source_id = ? AND e.relation_type IN ('TARGETS', 'SOLVES') \
+                                   ) sub ORDER BY id LIMIT 200".to_string();
+                        (sql, json!([id, id]))
+                    }
+                }
+            }
+            "parents" => {
+                match rel {
+                    Some(r) => {
+                        let sem = relation_traversal_semantics(r);
+                        let (match_col, other_col) = match sem {
+                            RelationTraversalSemantics::ParentToChild => ("target_id", "source_id"),
+                            RelationTraversalSemantics::ChildToParent => ("source_id", "target_id"),
+                            RelationTraversalSemantics::NonHierarchical => unreachable!(),
+                        };
+                        let sql = format!(
+                            "SELECT n.id, n.type, COALESCE(n.status,''), COALESCE(n.title,''), e.relation_type, e.source_id, e.target_id \
+                             FROM soll.Edge e JOIN soll.Node n ON n.id = e.{other_col} \
+                             WHERE e.{match_col} = ? AND e.relation_type = ? ORDER BY n.id LIMIT 200"
+                        );
+                        (sql, json!([id, r]))
+                    }
+                    None => {
+                        // Semantic parents union:
+                        // 1. Outgoing edges where relation is ChildToParent (BELONGS_TO, REFINES, EPITOMIZES), neighbor = target_id.
+                        // 2. Incoming edges where relation is ParentToChild (TARGETS, SOLVES), neighbor = source_id.
+                        let sql = "SELECT id, type, status, title, relation_type, source_id, target_id FROM (\
+                                       SELECT n.id AS id, n.type AS type, COALESCE(n.status,'') AS status, COALESCE(n.title,'') AS title, e.relation_type AS relation_type, e.source_id AS source_id, e.target_id AS target_id \
+                                       FROM soll.Edge e JOIN soll.Node n ON n.id = e.target_id \
+                                       WHERE e.source_id = ? AND e.relation_type IN ('BELONGS_TO', 'REFINES', 'EPITOMIZES') \
+                                       UNION ALL \
+                                       SELECT n.id AS id, n.type AS type, COALESCE(n.status,'') AS status, COALESCE(n.title,'') AS title, e.relation_type AS relation_type, e.source_id AS source_id, e.target_id AS target_id \
+                                       FROM soll.Edge e JOIN soll.Node n ON n.id = e.source_id \
+                                       WHERE e.target_id = ? AND e.relation_type IN ('TARGETS', 'SOLVES') \
+                                   ) sub ORDER BY id LIMIT 200".to_string();
+                        (sql, json!([id, id]))
+                    }
+                }
+            }
+            _ => unreachable!(),
         };
-        let sql = format!(
-            "SELECT n.id, n.type, COALESCE(n.status,''), COALESCE(n.title,''), e.relation_type \
-             FROM soll.Edge e JOIN soll.Node n ON n.id = e.{other_col} \
-             WHERE e.{match_col} = ?{} ORDER BY n.id LIMIT 200",
-            if rel.is_some() { " AND e.relation_type = ?" } else { "" }
-        );
-        let params = match rel {
-            Some(r) => json!([id, r]),
-            None => json!([id]),
+
+        let raw = match self.graph_store.query_json_param(&sql, &params) {
+            Ok(r) => r,
+            Err(e) => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Database error while querying soll_children for `{id}`: {e}") }],
+                    "isError": true,
+                    "data": { "status": "backend_error", "id": id, "error": e.to_string() }
+                }));
+            }
         };
-        let rows: Vec<Vec<Value>> = self
-            .graph_store
-            .query_json_param(&sql, &params)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default();
+
+        let rows: Vec<Vec<Value>> = match serde_json::from_str(&raw) {
+            Ok(r) => r,
+            Err(e) => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Failed to decode query results for `{id}`: {e}") }],
+                    "isError": true,
+                    "data": { "status": "decode_error", "id": id, "error": e.to_string() }
+                }));
+            }
+        };
 
         let cell = |r: &[Value], i: usize| r.get(i).and_then(Value::as_str).unwrap_or("").to_string();
         let items: Vec<Value> = rows
@@ -818,35 +958,107 @@ impl McpServer {
                 "id": cell(r, 0), "type": cell(r, 1),
                 "status": cell(r, 2), "title": cell(r, 3),
                 "relation_type": cell(r, 4),
+                "source_id": cell(r, 5), "target_id": cell(r, 6),
             }))
             .collect();
 
         let lines: Vec<String> = rows
             .iter()
-            .map(|r| format!("- {} [{}] {} — {}", cell(r, 0), cell(r, 2), cell(r, 4), cell(r, 3)))
+            .map(|r| format!("- {} [{}] {} ({} -> {}) — {}", cell(r, 0), cell(r, 2), cell(r, 4), cell(r, 5), cell(r, 6), cell(r, 3)))
             .collect();
 
-        // REQ-AXO-902401 — a bare "0 found" is a vacuous verdict here, because
-        // SOLL's canonical orientation is NOT uniform: `BELONGS_TO`/`REFINES`
-        // point child → parent, while `TARGETS`/`SOLVES` point parent → child.
-        // So a milestone's targeted requirements answer to `direction=parents`,
-        // and `soll_children(id=MIL-KKI-005)` printed "0 found" while ten REQs
-        // hung off it. Reported by KKI (llm_feedback #171) as "only traverses
-        // BELONGS_TO/BLOCKED_BY" — there is no relation whitelist; the direction
-        // is what misses. Until the per-relation orientation lands, say where
-        // the edges actually are instead of implying there are none.
+        let capped = items.len() >= 200;
+
+        // REQ-AXO-902401, REQ-AXO-902642 — Opposite direction check.
+        // Takes relation_type into account when provided.
         let opposite_hint = if items.is_empty() {
-            let (o_match, _) = match direction {
-                "parents" => ("target_id", "source_id"),
-                _ => ("source_id", "target_id"),
+            let (other_dir, other_sql, other_params) = match direction {
+                "children" => {
+                    let other = "parents";
+                    let (q, p) = match rel {
+                        Some(r) => match relation_traversal_semantics(r) {
+                            RelationTraversalSemantics::ParentToChild => (
+                                "SELECT count(*) FROM soll.Edge WHERE target_id = ? AND relation_type = ?".to_string(),
+                                json!([id, r]),
+                            ),
+                            RelationTraversalSemantics::ChildToParent => (
+                                "SELECT count(*) FROM soll.Edge WHERE source_id = ? AND relation_type = ?".to_string(),
+                                json!([id, r]),
+                            ),
+                            RelationTraversalSemantics::NonHierarchical => (
+                                "SELECT 0".to_string(),
+                                json!([]),
+                            ),
+                        },
+                        None => (
+                            "SELECT count(*) FROM (\
+                                 SELECT source_id FROM soll.Edge WHERE source_id = ? AND relation_type IN ('BELONGS_TO', 'REFINES', 'EPITOMIZES') \
+                                 UNION ALL \
+                                 SELECT target_id FROM soll.Edge WHERE target_id = ? AND relation_type IN ('TARGETS', 'SOLVES')\
+                             ) sub".to_string(),
+                            json!([id, id]),
+                        ),
+                    };
+                    (other, q, p)
+                }
+                "parents" => {
+                    let other = "children";
+                    let (q, p) = match rel {
+                        Some(r) => match relation_traversal_semantics(r) {
+                            RelationTraversalSemantics::ParentToChild => (
+                                "SELECT count(*) FROM soll.Edge WHERE source_id = ? AND relation_type = ?".to_string(),
+                                json!([id, r]),
+                            ),
+                            RelationTraversalSemantics::ChildToParent => (
+                                "SELECT count(*) FROM soll.Edge WHERE target_id = ? AND relation_type = ?".to_string(),
+                                json!([id, r]),
+                            ),
+                            RelationTraversalSemantics::NonHierarchical => (
+                                "SELECT 0".to_string(),
+                                json!([]),
+                            ),
+                        },
+                        None => (
+                            "SELECT count(*) FROM (\
+                                 SELECT target_id FROM soll.Edge WHERE source_id = ? AND relation_type IN ('TARGETS', 'SOLVES') \
+                                 UNION ALL \
+                                 SELECT source_id FROM soll.Edge WHERE target_id = ? AND relation_type IN ('BELONGS_TO', 'REFINES', 'EPITOMIZES')\
+                             ) sub".to_string(),
+                            json!([id, id]),
+                        ),
+                    };
+                    (other, q, p)
+                }
+                "incoming" => {
+                    let other = "outgoing";
+                    let q = format!(
+                        "SELECT count(*) FROM soll.Edge WHERE source_id = ?{}",
+                        if rel.is_some() { " AND relation_type = ?" } else { "" }
+                    );
+                    let p = match rel {
+                        Some(r) => json!([id, r]),
+                        None => json!([id]),
+                    };
+                    (other, q, p)
+                }
+                "outgoing" => {
+                    let other = "incoming";
+                    let q = format!(
+                        "SELECT count(*) FROM soll.Edge WHERE target_id = ?{}",
+                        if rel.is_some() { " AND relation_type = ?" } else { "" }
+                    );
+                    let p = match rel {
+                        Some(r) => json!([id, r]),
+                        None => json!([id]),
+                    };
+                    (other, q, p)
+                }
+                _ => unreachable!(),
             };
-            let other = if direction == "parents" { "children" } else { "parents" };
+
             let count: i64 = self
                 .graph_store
-                .query_json_param(
-                    &format!("SELECT count(*) FROM soll.Edge WHERE {o_match} = ?"),
-                    &json!([id]),
-                )
+                .query_json_param(&other_sql, &other_params)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
                 .and_then(|rows| {
@@ -855,28 +1067,54 @@ impl McpServer {
                     })
                 })
                 .unwrap_or(0);
-            (count > 0).then(|| format!(
-                "\n\n_0 in this direction, but {count} edge(s) exist the other way: \
-                 `soll_children(id=\"{id}\", direction=\"{other}\")`. SOLL orientation is not \
-                 uniform — `BELONGS_TO`/`REFINES` point child→parent, `TARGETS`/`SOLVES` point \
-                 parent→child._"
-            ))
+
+            if count > 0 {
+                let rel_arg = rel.map(|r| format!(", relation_type=\"{r}\"")).unwrap_or_default();
+                Some(format!(
+                    "\n\n_0 in this direction, but {count} edge(s) exist the other way: \
+                     `soll_children(id=\"{id}\", direction=\"{other_dir}\"{rel_arg})`. SOLL orientation is not \
+                     uniform — `BELONGS_TO`/`REFINES` point child→parent, `TARGETS`/`SOLVES` point \
+                     parent→child._"
+                ))
+            } else {
+                None
+            }
         } else {
             None
         };
 
+        let direction_title = match direction {
+            "parents" => "Parents",
+            "incoming" => "Incoming edges",
+            "outgoing" => "Outgoing edges",
+            _ => "Children",
+        };
+        let capping_text = if capped {
+            "\n_Results capped at 200 nodes._"
+        } else {
+            ""
+        };
+
         Some(json!({
             "content": [{ "type": "text", "text": format!(
-                "{} of {}{}: {} found\n{}{}",
-                if direction == "parents" { "Parents" } else { "Children" },
+                "{} of {}{}: {} found\n{}{}{}",
+                direction_title,
                 id,
                 rel.map(|r| format!(" via {r}")).unwrap_or_default(),
                 items.len(),
                 if lines.is_empty() { "(none)".to_string() } else { lines.join("\n") },
+                capping_text,
                 opposite_hint.unwrap_or_default(),
             ) }],
-            "data": { "status": "ok", "id": id, "direction": direction,
-                      "relation_type": rel, "count": items.len(), "nodes": items }
+            "data": {
+                "status": "ok",
+                "id": id,
+                "direction": direction,
+                "relation_type": rel,
+                "count": items.len(),
+                "capped": capped,
+                "nodes": items,
+            }
         }))
     }
 

@@ -7630,14 +7630,21 @@ fn test_soll_children_traverses_both_directions_and_filters_relation() {
             .unwrap_or_default()
     };
 
-    // children (default): both edges pointing AT the umbrella.
+    // children (default semantic): REFINES child pointing AT the umbrella (BLOCKED_BY is a dependency, excluded).
     let all = server
         .axon_soll_children(&json!({ "id": "REQ-CHD-100" }))
         .expect("must answer");
     let got = ids(&all);
+    assert_eq!(got, vec!["REQ-CHD-101".to_string()], "only semantic children expected");
+
+    // incoming (physical): both edges pointing AT the umbrella.
+    let incoming = server
+        .axon_soll_children(&json!({ "id": "REQ-CHD-100", "direction": "incoming" }))
+        .expect("must answer");
+    let got_inc = ids(&incoming);
     assert!(
-        got.contains(&"REQ-CHD-101".to_string()) && got.contains(&"REQ-CHD-102".to_string()),
-        "both children expected, got {got:?}"
+        got_inc.contains(&"REQ-CHD-101".to_string()) && got_inc.contains(&"REQ-CHD-102".to_string()),
+        "both incoming edges expected, got {got_inc:?}"
     );
 
     // relation filter narrows to exactly one.
@@ -7657,13 +7664,11 @@ fn test_soll_children_traverses_both_directions_and_filters_relation() {
     );
 }
 
-/// REQ-AXO-902401 — signalé par KKI (llm_feedback #171). SOLL's canonical
-/// orientation is NOT uniform: `BELONGS_TO`/`REFINES` point child → parent,
-/// `TARGETS`/`SOLVES` point parent → child. So a Milestone's targeted
-/// Requirements answer to `direction=parents`, and the default `children` call
-/// printed a bare "0 found" while ten REQs hung off `MIL-KKI-005`. A zero with
-/// no denominator reads as "there are none" — the vacuous-verdict class of
-/// REQ-AXO-902384.
+/// REQ-AXO-902401, REQ-AXO-902642 — orientation sémantique unifiée et avertissement de direction opposée.
+/// Un Milestone cible des Requirements via TARGETS (parent→child).
+/// `direction="children"` trouve le requirement ciblé.
+/// `direction="parents"` est vide (un jalon n'a pas de parent ciblé) et indique
+/// que l'arête existe dans le sens `children`.
 #[test]
 fn test_soll_children_zero_names_the_other_direction() {
     let _runtime = RuntimeEnvGuard::full_autonomous();
@@ -7674,26 +7679,27 @@ fn test_soll_children_zero_names_the_other_direction() {
     exec("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-CHZ-010', 'Requirement', 'CHZ', 'vise par le jalon', 'x', 'planned', '{}')");
     exec("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('MIL-CHZ-001', 'REQ-CHZ-010', 'TARGETS')");
 
-    let empty = server
+    // REQ-AXO-902642 : children trouve désormais bien les exigences ciblées via TARGETS.
+    let children = server
         .axon_soll_children(&json!({ "id": "MIL-CHZ-001" }))
+        .expect("must answer");
+    assert_eq!(children["data"]["count"], 1, "soll_children traverse sémantiquement TARGETS");
+
+    // direction=parents sur ce jalon est vide et nomme la direction opposée (children).
+    let empty = server
+        .axon_soll_children(&json!({ "id": "MIL-CHZ-001", "direction": "parents" }))
         .expect("must answer");
     let text = empty["content"][0]["text"].as_str().unwrap_or_default();
 
     assert_eq!(empty["data"]["count"], 0, "cette direction est bien vide");
     assert!(
-        text.contains("direction=\\\"parents\\\"") || text.contains("direction=\"parents\""),
+        text.contains("direction=\\\"children\\\"") || text.contains("direction=\"children\""),
         "un zéro doit nommer la direction où les arêtes se trouvent.\n---\n{text}"
     );
     assert!(
         text.contains("1 edge(s) exist the other way"),
         "le dénominateur de l'autre direction doit être donné.\n---\n{text}"
     );
-
-    // Et l'autre direction les rend réellement.
-    let other = server
-        .axon_soll_children(&json!({ "id": "MIL-CHZ-001", "direction": "parents" }))
-        .expect("must answer");
-    assert_eq!(other["data"]["count"], 1);
 }
 
 /// REQ-AXO-902248 — `soll_get` replaces the single most-prescribed raw-SQL

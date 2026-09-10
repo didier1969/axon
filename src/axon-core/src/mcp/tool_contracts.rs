@@ -60,28 +60,35 @@ pub(crate) struct QueryInput {
 }
 
 /// Direction of a `soll_children` traversal.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum SollDirection {
-    /// Nodes attached BELOW this one (an umbrella's REFINES children).
+    /// Semantic children (e.g. child -> parent edges like REFINES/BELONGS_TO pointing at id,
+    /// and parent -> child edges like TARGETS/SOLVES originating from id).
     Children,
-    /// Nodes this one is attached to (its parents).
+    /// Semantic parents (e.g. child -> parent edges originating from id,
+    /// and parent -> child edges pointing at id).
     Parents,
+    /// Physical incoming edges (where target_id = id).
+    Incoming,
+    /// Physical outgoing edges (where source_id = id).
+    Outgoing,
 }
 
-/// `soll_children` — REQ-AXO-902249: traverse SOLL edges from one node, instead
-/// of hand-writing a `JOIN soll.Edge / soll.Node` (whose real columns are
-/// `source_id` / `target_id` — a classic mistyping).
+/// `soll_children` — REQ-AXO-902249, REQ-AXO-902642: traverse SOLL edges from one node.
+/// Supports semantic traversal (`children`, `parents`) unifying non-uniform edge orientations
+/// (TARGETS, BELONGS_TO, REFINES, SOLVES), and physical traversal (`incoming`, `outgoing`).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct SollChildrenInput {
-    /// Canonical SOLL id to traverse from, e.g. "REQ-AXO-902192".
+    /// Canonical SOLL id to traverse from, e.g. "REQ-AXO-902192", "MIL-AXO-054".
     pub id: String,
-    /// `children` (default) or `parents`.
+    /// Direction of traversal: `children` (default semantic), `parents` (semantic),
+    /// `incoming` (physical: target_id = id), or `outgoing` (physical: source_id = id).
     #[serde(default)]
     pub direction: Option<SollDirection>,
     /// Optional edge filter, e.g. "REFINES", "BELONGS_TO", "TARGETS". Omit for
-    /// every relation. Legal values depend on the (source, target) kind pair —
-    /// see `soll_relation_schema`.
+    /// all relations valid for the requested traversal. Legal values depend on
+    /// the (source, target) kind pair — see `soll_relation_schema`.
     #[serde(default)]
     pub relation_type: Option<String>,
 }
@@ -761,6 +768,9 @@ pub(crate) fn closed_enum_values(spec: &Value) -> Option<Vec<Value>> {
         let mut merged: Vec<Value> = Vec::new();
         let mut every_branch_closed = true;
         for branch in branches {
+            if branch.get("type").and_then(Value::as_str) == Some("null") {
+                continue;
+            }
             // A `const` branch is a one-value enum — that is how single alternatives
             // are spelled in these schemas.
             if let Some(c) = branch.get("const") {
@@ -768,6 +778,10 @@ pub(crate) fn closed_enum_values(spec: &Value) -> Option<Vec<Value>> {
                     merged.push(c.clone());
                     continue;
                 }
+            }
+            if let Some(nested) = closed_enum_values(branch) {
+                merged.extend(nested);
+                continue;
             }
             match branch.get("enum").and_then(Value::as_array) {
                 Some(arr) => merged.extend(arr.iter().filter(|v| !v.is_null()).cloned()),
@@ -1984,6 +1998,21 @@ mod tests {
         assert!(
             rendered.contains("brief") && rendered.contains("verbose"),
             "query.mode enum must be inline: {rendered}"
+        );
+    }
+
+    /// REQ-AXO-902642 — `soll_children` publishes the extended direction enum
+    /// (children, parents, incoming, outgoing).
+    #[test]
+    fn soll_children_derived_schema_publishes_extended_directions() {
+        let schema = derived_input_schema("soll_children").expect("soll_children schema");
+        let dir_spec = &schema["properties"]["direction"];
+        let values = closed_enum_values(dir_spec).expect("direction must be a closed enum");
+        let string_values: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(
+            string_values,
+            vec!["children", "parents", "incoming", "outgoing"],
+            "soll_children schema must publish all four direction variants"
         );
     }
 

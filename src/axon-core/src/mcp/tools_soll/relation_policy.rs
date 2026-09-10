@@ -32,6 +32,41 @@ impl ProjectionRole {
     }
 }
 
+/// REQ-AXO-902642 — Sémantique canonique de traversée hiérarchique par relation.
+/// Dans SOLL, l'orientation physique des arêtes n'est pas uniforme :
+/// - `ParentToChild` : `TARGETS` (source=MIL, target=REQ), `SOLVES` (source=DEC, target=REQ).
+/// - `ChildToParent` : `BELONGS_TO`, `REFINES`, `EPITOMIZES`.
+/// - `NonHierarchical` : liens latéraux / dépendances / remplacements (`BLOCKED_BY`, `SUPERSEDES`, etc.).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RelationTraversalSemantics {
+    ParentToChild,
+    ChildToParent,
+    NonHierarchical,
+}
+
+impl RelationTraversalSemantics {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::ParentToChild => "parent_to_child",
+            Self::ChildToParent => "child_to_parent",
+            Self::NonHierarchical => "non_hierarchical",
+        }
+    }
+}
+
+pub(crate) const CHILD_TO_PARENT_RELATIONS: &[&str] = &["BELONGS_TO", "REFINES", "EPITOMIZES"];
+pub(crate) const PARENT_TO_CHILD_RELATIONS: &[&str] = &["TARGETS", "SOLVES"];
+
+pub(crate) fn relation_traversal_semantics(relation_type: &str) -> RelationTraversalSemantics {
+    if PARENT_TO_CHILD_RELATIONS.contains(&relation_type) {
+        RelationTraversalSemantics::ParentToChild
+    } else if CHILD_TO_PARENT_RELATIONS.contains(&relation_type) {
+        RelationTraversalSemantics::ChildToParent
+    } else {
+        RelationTraversalSemantics::NonHierarchical
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct KindProjectionPolicy {
     pub(super) breadcrumb_eligible: bool,
@@ -191,6 +226,10 @@ pub(super) fn relation_matrix_version() -> String {
             for relation in policy.allowed {
                 avale(b":", &mut h);
                 avale(relation.as_bytes(), &mut h);
+                // REQ-AXO-902642: traversal semantics contributes to matrix identity
+                let sem = relation_traversal_semantics(relation);
+                avale(b"/", &mut h);
+                avale(sem.as_str().as_bytes(), &mut h);
             }
             if let Some(defaut) = policy.default {
                 avale(b"=", &mut h);
@@ -1348,5 +1387,21 @@ mod matrix_version_tests {
             "le sens inverse doit offrir autre chose qu'un blocage, sinon renoncer est la \
              seule issue honnête"
         );
+    }
+
+    /// REQ-AXO-902642 — la sémantique de traversée contribue à l'empreinte de la matrice.
+    #[test]
+    fn l_empreinte_change_si_la_semantique_de_traversee_change() {
+        let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut h2: u64 = 0xcbf2_9ce4_8422_2325;
+        let avale = |octets: &[u8], h: &mut u64| {
+            for b in octets {
+                *h ^= *b as u64;
+                *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        avale(b"TARGETS/parent_to_child", &mut h1);
+        avale(b"TARGETS/child_to_parent", &mut h2);
+        assert_ne!(h1, h2, "l'empreinte doit falsifier tout changement de sémantique de traversée");
     }
 }
