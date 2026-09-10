@@ -18833,3 +18833,144 @@ fn test_req_902446_soll_apply_plan_substitutes_logical_key_placeholders_in_body(
     assert_eq!(consumer_desc, &expected_consumer_desc, "Forward placeholder must be substituted with canonical ID");
 }
 
+#[test]
+fn test_req_902416_milestone_ordering_precedes_blocked_by_and_decision_governance() {
+    let server = create_test_server();
+
+    // 1. Discovery via soll_relation_schema for MIL -> MIL
+    let schema_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": { "source_type": "milestone", "target_type": "milestone" }
+            })),
+            id: Some(json!(9024161)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let allowed_rels = schema_resp["data"]["allowed_relation_types"]
+        .as_array()
+        .expect("allowed_relation_types must be array");
+    let allowed_str: Vec<&str> = allowed_rels.iter().filter_map(Value::as_str).collect();
+    assert!(
+        allowed_str.contains(&"PRECEDES"),
+        "MIL -> MIL must allow PRECEDES (REQ-AXO-902416), got: {:?}",
+        allowed_str
+    );
+    assert!(
+        allowed_str.contains(&"BLOCKED_BY"),
+        "MIL -> MIL must allow BLOCKED_BY (REQ-AXO-902416), got: {:?}",
+        allowed_str
+    );
+
+    // 2. Discovery via soll_relation_schema for DEC -> MIL
+    let dec_mil_resp = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": { "source_type": "decision", "target_type": "milestone" }
+            })),
+            id: Some(json!(9024162)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(
+        dec_mil_resp["data"]["pair_allowed"].as_bool(),
+        Some(true),
+        "DEC -> MIL must be an allowed pair (REQ-AXO-902416)"
+    );
+    let dec_mil_rels = dec_mil_resp["data"]["allowed_relation_types"]
+        .as_array()
+        .expect("allowed_relation_types must be array");
+    let dec_mil_str: Vec<&str> = dec_mil_rels.iter().filter_map(Value::as_str).collect();
+    assert!(
+        dec_mil_str.contains(&"SOLVES"),
+        "DEC -> MIL must allow SOLVES (REQ-AXO-902416), got: {:?}",
+        dec_mil_str
+    );
+
+    // 3. Setup nodes for live graph link testing
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('MIL-AXO-091', 'Milestone', 'AXO', 'Jalon 1', 'Premier', 'current', '{}')"
+    ).unwrap();
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('MIL-AXO-092', 'Milestone', 'AXO', 'Jalon 2', 'Second', 'planned', '{}')"
+    ).unwrap();
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+         VALUES ('DEC-AXO-091', 'Decision', 'AXO', 'Dec Phasing', 'Phasage', 'delivered', '{}')"
+    ).unwrap();
+
+    // 4. Link MIL-1 -PRECEDES-> MIL-2
+    let link_resp = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "milestone",
+                "data": {
+                    "source_id": "MIL-AXO-091",
+                    "target_id": "MIL-AXO-092",
+                    "relation_type": "PRECEDES"
+                }
+            }
+        })),
+        id: Some(json!(9024163)),
+    }).unwrap().result.unwrap();
+    assert_eq!(link_resp["isError"].as_bool(), None, "Linking PRECEDES must succeed");
+
+    // 5. Anti-cycle guard: attempt closing cycle MIL-2 -PRECEDES-> MIL-1 must be rejected
+    let cycle_resp = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "milestone",
+                "data": {
+                    "source_id": "MIL-AXO-092",
+                    "target_id": "MIL-AXO-091",
+                    "relation_type": "PRECEDES"
+                }
+            }
+        })),
+        id: Some(json!(9024164)),
+    }).unwrap().result.unwrap();
+    assert_eq!(cycle_resp["isError"].as_bool(), Some(true), "Closing cycle must be rejected");
+    assert_eq!(cycle_resp["data"]["status"].as_str(), Some("input_invalid"));
+    assert_eq!(cycle_resp["data"]["operator_guidance"]["problem_class"].as_str(), Some("cycle_detected"));
+
+    // 6. Link DEC-1 -SOLVES-> MIL-1
+    let dec_link_resp = server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "decision",
+                "data": {
+                    "source_id": "DEC-AXO-091",
+                    "target_id": "MIL-AXO-091",
+                    "relation_type": "SOLVES"
+                }
+            }
+        })),
+        id: Some(json!(9024165)),
+    }).unwrap().result.unwrap();
+    assert_eq!(dec_link_resp["isError"].as_bool(), None, "Linking DEC -SOLVES-> MIL must succeed");
+}
+

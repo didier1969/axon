@@ -2117,13 +2117,15 @@ impl McpServer {
                             "EXPLAINS",
                             "VERIFIES",
                         ];
-                        const NON_FILIATION_GUARDED: [&str; 6] = [
+                        const NON_FILIATION_GUARDED: [&str; 8] = [
                             "INHERITS_FROM",
                             "USES",
                             "USED_BY",
                             "EXTENDS",
                             "COMPLIES_WITH",
                             "ORIGINATES",
+                            "PRECEDES",
+                            "BLOCKED_BY",
                         ];
                         let cycle_set: Option<Vec<&str>> = if FILIATION.contains(&relation_type) {
                             Some(FILIATION.to_vec())

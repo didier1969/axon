@@ -397,6 +397,18 @@ pub(super) fn relation_policy_for_pair(
                 child_order_rank: 40,
             },
         }),
+        // REQ-AXO-902416 — Architecture decisions can govern, phase or solve
+        // milestones directly (e.g. engine milestone phasing DEC-KKI-009).
+        ("DEC", "MIL") => Some(RelationPolicy {
+            allowed: &["SOLVES", "REFINES"],
+            default: Some("SOLVES"),
+            allow_multiple_types: true,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 12,
+                child_order_rank: 45,
+            },
+        }),
         ("MIL", "REQ") => Some(RelationPolicy {
             allowed: &["TARGETS"],
             default: Some("TARGETS"),
@@ -654,9 +666,12 @@ pub(super) fn relation_policy_for_pair(
                 child_order_rank: 999,
             },
         }),
+        // REQ-AXO-902416 — Non-destructive sequencing of milestones: PRECEDES
+        // (execution order) and BLOCKED_BY (prerequisite milestone dependency).
+        // SUPERSEDES remains available for retirement / replacement.
         ("MIL", "MIL") => Some(RelationPolicy {
-            allowed: &["SUPERSEDES"],
-            default: None,
+            allowed: &["PRECEDES", "BLOCKED_BY", "SUPERSEDES"],
+            default: Some("PRECEDES"),
             allow_multiple_types: false,
             projection: RelationProjectionPolicy {
                 role: ProjectionRole::Lateral,
