@@ -248,21 +248,6 @@ pub(super) fn score_node(
     let mut reasons = vec![format!("unblocks {} descendant(s)", node.descendants)];
     let mut validation_gates = Vec::new();
 
-    // REQ-AXO-902282 (feedback #47) — score EVERY priority level through the shared
-    // `priority_level` vocabulary, not just P0/P1/P2. The old `_ => {}` gave P3 (and any
-    // legacy value) +0 and NO reason, so a P3 backlog was invisible and unranked. P0/P1/P2
-    // bonuses are preserved exactly; P3 now earns a monotone +4 and its own reason.
-    if let Some(level) = priority_level(&node.priority) {
-        let bonus = match level {
-            0 => 20,
-            1 => 15,
-            2 => 8,
-            _ => 4,
-        };
-        score += bonus;
-        reasons.push(format!("priority P{level}"));
-    }
-
     // REQ-AXO-902295 / DEC-AXO-901668 — the four blocks below feed
     // `proof_gap_score`, NOT `score`. They used to be worth up to +38 of
     // execution urgency, which inverted the incentive: attaching evidence
@@ -329,8 +314,6 @@ pub(super) fn score_node(
             ));
         }
     }
-
-    // REQ-AXO-144 — apply temporal decay so accepted Decisions and other
     // mature nodes without recent activity fall naturally out of wave 1
     // even when their structural score (descendants, evidence gaps, …)
     // would still rank them on top. Only nodes carrying an `updated_at`
@@ -344,6 +327,20 @@ pub(super) fn score_node(
         if decay < 0.5 {
             reasons.push(format!("decayed by age (factor {:.2})", decay));
         }
+    }
+
+    // REQ-AXO-902362 — Operator priority is added AFTER temporal decay (just like
+    // engagement bonus), so age cannot erode an operator's P0/P1 mandate below an
+    // incidental P2/P3.
+    if let Some(level) = priority_level(&node.priority) {
+        let bonus = match level {
+            0 => 80,
+            1 => 40,
+            2 => 15,
+            _ => 4,
+        };
+        score += bonus;
+        reasons.push(format!("priority P{level}"));
     }
 
     // REQ-AXO-902295 / DEC-AXO-901668 — engagement is added AFTER the decay
@@ -615,12 +612,35 @@ mod tests {
             p3_reasons.iter().any(|r| r == "priority P3"),
             "P3 must surface its priority reason: {p3_reasons:?}"
         );
-        // P0/P1/P2 canonical bonuses are preserved exactly (regression guard on the values).
-        assert_eq!(p0, 20);
-        assert_eq!(p1, 15);
-        assert_eq!(p2, 8);
+        // P0/P1/P2 canonical bonuses are preserved monotonically (REQ-AXO-902362).
+        assert_eq!(p0, 80);
+        assert_eq!(p1, 40);
+        assert_eq!(p2, 15);
         // Legacy vocabulary is scored like its canonical twin.
         assert_eq!(scored("high").0, p1, "legacy 'high' scores as P1");
+    }
+
+    /// REQ-AXO-902362 — Un P0 engagé ne doit pas se faire surclasser par un P2
+    /// engagé sous l'effet de la décroissance temporelle ou de la centralité PageRank.
+    #[test]
+    fn test_req_902362_p0_engaged_dominates_p2_engaged_despite_decay_and_centrality() {
+        // P0 engagé ayant subi une décroissance d'un demi-cycle (factor 0.50)
+        let mut p0_engaged = node("current", "P0");
+        p0_engaged.updated_at_ms = Some(0); // Ancien
+
+        // P2 engagé récent avec une forte centralité PageRank (0.25 -> +25 points)
+        let mut p2_engaged = node("current", "P2");
+        p2_engaged.centrality = Some(0.25);
+        p2_engaged.updated_at_ms = Some(30 * DAY_MS); // Récent (pas de decay)
+
+        let now_ms = 30 * DAY_MS;
+        let (p0_score, _, _, _) = super::score_node(&p0_engaged, false, true, 30.0, now_ms);
+        let (p2_score, _, _, _) = super::score_node(&p2_engaged, false, true, 30.0, now_ms);
+
+        assert!(
+            p0_score > p2_score,
+            "P0 engagé ({p0_score}) doit dominer P2 engagé ({p2_score}) malgré decay et centralité"
+        );
     }
 
     // --- REQ-AXO-902295 / DEC-AXO-901668 — execution urgency vs proof gap ----------------
