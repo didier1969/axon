@@ -567,6 +567,103 @@ impl McpServer {
         let mode = args.get("mode").and_then(Value::as_str).unwrap_or("unread");
         let since = args.get("since_id").and_then(Value::as_i64);
 
+        // REQ-AXO-902413 — non-destructive surveillance: peek mode (or peek: true / summary_only: true).
+        // Returns unread counts, unread high/urgent counts, oldest unread age in seconds, and the durable
+        // read cursor without advancing the cursor or returning message bodies.
+        let is_peek = mode == "peek"
+            || args.get("peek").and_then(Value::as_bool).unwrap_or(false)
+            || args.get("summary_only").and_then(Value::as_bool).unwrap_or(false);
+
+        let durable_cursor = self
+            .graph_store
+            .query_single_i64_writer(&format!(
+                "SELECT last_read_id FROM axon.mailbox_cursor WHERE project_code='{}'",
+                esc(&project)
+            ))
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+
+        if is_peek {
+            let kind_demande = args.get("kind").and_then(Value::as_str);
+            let masquer_infra = kind_demande.is_none();
+            let mut filters = String::new();
+            if masquer_infra {
+                filters.push_str(" AND COALESCE(kind,'message') <> 'infra'");
+            } else if let Some(k) = kind_demande {
+                filters.push_str(&format!(" AND COALESCE(kind,'message') = '{}'", esc(k)));
+            }
+            let thread = args.get("context_id").and_then(Value::as_str).filter(|s| !s.is_empty());
+            if let Some(t) = thread {
+                filters.push_str(&format!(" AND context_id = '{}'", esc(t)));
+            }
+            let search = args.get("search").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+            if let Some(q) = search {
+                filters.push_str(&format!(
+                    " AND to_tsvector('simple', subject || ' ' || body_dense) @@ plainto_tsquery('simple', '{}')",
+                    esc(q)
+                ));
+            }
+            let sql = format!(
+                "SELECT \
+                    COALESCE(count(*), 0), \
+                    COALESCE(count(*) FILTER (WHERE LOWER(COALESCE(priority,'')) IN ('high', 'urgent')), 0), \
+                    COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at)))::bigint, 0), \
+                    COALESCE(max(id), 0) \
+                 FROM axon.mailbox_message \
+                 WHERE to_project='{}' AND id > {} AND archived_at IS NULL{}",
+                esc(&project),
+                durable_cursor,
+                filters
+            );
+            let rows: Vec<Vec<Value>> = match self.graph_store.query_json(&sql) {
+                Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+                Err(e) => return Some(mbx_err(&format!("inbox peek failed: {e}"), "degraded")),
+            };
+            let (unread_count, unread_high_count, oldest_unread_age_s, max_unread_id) =
+                if let Some(first) = rows.first() {
+                    let count = first.get(0).map(entier_json).unwrap_or(0);
+                    let high = first.get(1).map(entier_json).unwrap_or(0);
+                    let age = first.get(2).map(entier_json).unwrap_or(0);
+                    let max_id = first.get(3).map(entier_json).unwrap_or(0);
+                    (count, high, age, max_id)
+                } else {
+                    (0, 0, 0, 0)
+                };
+
+            let report = if unread_count > 0 {
+                format!(
+                    "### 📥 mcp_inbox_read (peek)\n\n`{project}`{} · {unread_count} message(s) non-lu(s) (dont {unread_high_count} haute/urgente) · plus ancien: {oldest_unread_age_s}s · read_cursor_id={durable_cursor}",
+                    if project_inferred { " _(déduit du cwd — passe `project=` pour un autre)_" } else { "" }
+                )
+            } else {
+                format!(
+                    "### 📥 mcp_inbox_read (peek)\n\n`{project}`{} · 0 message non-lu · read_cursor_id={durable_cursor}",
+                    if project_inferred { " _(déduit du cwd — passe `project=` pour un autre)_" } else { "" }
+                )
+            };
+
+            return Some(json!({
+                "content": [{ "type": "text", "text": report }],
+                "data": {
+                    "status": "ok",
+                    "project": project,
+                    "mode": if mode == "peek" { "peek" } else { mode },
+                    "peek": true,
+                    "unread_count": unread_count,
+                    "unread_high_count": unread_high_count,
+                    "oldest_unread_age_s": oldest_unread_age_s,
+                    "last_read_id": durable_cursor,
+                    "read_cursor_id": durable_cursor,
+                    "cursor": durable_cursor,
+                    "max_id": max_unread_id.max(durable_cursor),
+                    "infra_masques": if masquer_infra { self.mailbox_infra_unread_count(&project) } else { 0 },
+                    "count": 0,
+                    "messages": []
+                }
+            }));
+        }
+
         // REQ-AXO-902116 (MBX-4) — searchable threads. `context_id` filters to one
         // thread; `search` is FTS over subject+body. Both are NON-DESTRUCTIVE views
         // across the whole inbox (ignore the cursor, never advance it).
@@ -579,14 +676,7 @@ impl McpServer {
         } else if let Some(s) = since {
             s
         } else {
-            self.graph_store
-                .query_single_i64_writer(&format!(
-                    "SELECT last_read_id FROM axon.mailbox_cursor WHERE project_code='{}'",
-                    esc(&project)
-                ))
-                .ok()
-                .flatten()
-                .unwrap_or(0)
+            durable_cursor
         };
 
         let mut filters = String::new();
@@ -652,10 +742,10 @@ impl McpServer {
         let order_clause = if cursor_advances {
             "ORDER BY id ASC".to_string()
         } else if recents_dabord {
-            "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, id DESC"
+            "ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, id DESC"
                 .to_string()
         } else {
-            "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, id ASC"
+            "ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, id ASC"
                 .to_string()
         };
         let sql = format!(
@@ -760,6 +850,7 @@ impl McpServer {
             // dessus, donc un lecteur qui ne la voit pas ne comprend pas l'ordre
             // qu'on lui sert.
             let prio = match g(11) {
+                "urgent" => " · 🚨 URGENTE",
                 "high" => " · ⚠️ HAUTE",
                 "low" => " · basse",
                 _ => "",
@@ -838,7 +929,7 @@ impl McpServer {
                     "SELECT id, COALESCE(subject,'(sans sujet)'), count(*) OVER () \
                      FROM axon.mailbox_message \
                      WHERE to_project='{p}' AND id <= {mid} AND id > {floor} \
-                       AND archived_at IS NULL AND COALESCE(priority,'') <> 'high' \
+                       AND archived_at IS NULL AND COALESCE(priority,'') NOT IN ('high', 'urgent') \
                      ORDER BY id DESC LIMIT 8",
                     p = esc(&project),
                     mid = max_id,
@@ -880,7 +971,7 @@ impl McpServer {
             let _ = self.graph_store.execute(&format!(
                 "UPDATE axon.mailbox_message SET archived_at = now() \
                  WHERE to_project='{p}' AND id <= {mid} AND id > {floor} \
-                   AND archived_at IS NULL AND COALESCE(priority,'') <> 'high'",
+                   AND archived_at IS NULL AND COALESCE(priority,'') NOT IN ('high', 'urgent')",
                 p = esc(&project),
                 mid = max_id,
                 floor = floor
@@ -968,6 +1059,11 @@ impl McpServer {
                     .ok()
                     .and_then(|r| serde_json::from_str::<Vec<Vec<Value>>>(&r).ok())
                     .and_then(|rows| rows.first().cloned());
+                let cursor_info = if mode == "since" || since.is_some() {
+                    format!(" · read_cursor={durable_cursor}")
+                } else {
+                    String::new()
+                };
                 match total_boite {
                     Some(r) if r.len() >= 2 => {
                         // REQ-AXO-902509 — c'est CE site qui n'avait pas le repli,
@@ -976,11 +1072,11 @@ impl McpServer {
                         let id_max = entier_json(&r[1]);
                         let restants = (total - messages.len() as i64).max(0);
                         format!(
-                            " · {} sur {total} · id max {id_max} · {restants} non listé(s)",
+                            " · {} sur {total} · id max {id_max}{cursor_info} · {restants} non listé(s)",
                             messages.len()
                         )
                     }
-                    _ => String::new(),
+                    _ => cursor_info,
                 }
             },
             if messages.is_empty() {
@@ -990,6 +1086,11 @@ impl McpServer {
             },
             note_budget
         );
+        let updated_last_read_id = if cursor_advances && max_id > floor {
+            max_id.max(durable_cursor)
+        } else {
+            durable_cursor
+        };
         Some(json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -1006,6 +1107,11 @@ impl McpServer {
                 // disparu. `kind="infra"` ou `mode=all` les rend.
                 "infra_masques": if masquer_infra { self.mailbox_infra_unread_count(&project) } else { 0 },
                 "cursor": max_id,
+                "max_id": max_id,
+                // REQ-AXO-902413 — le curseur de lecture persistant du destinataire
+                // est distinct du max_id du lot. Sans lui le retard de la boîte est invisible.
+                "last_read_id": updated_last_read_id,
+                "read_cursor_id": updated_last_read_id,
                 "messages": messages,
             }
         }))

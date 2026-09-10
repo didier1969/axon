@@ -998,7 +998,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "context_id": { "type": "string", "description": "Conversation/thread id (A2A contextId). Default: new thread." },
                         "in_reply_to": { "type": "string", "description": "messageId being replied to." },
                         "kind": { "type": "string", "description": "A2A kind. Default \"message\"." },
-                        "priority": { "type": "string", "description": "normal|high|low. Default normal." },
+                        "priority": { "type": "string", "description": "low|normal|high|urgent. Default normal." },
                         "ttl_hours": { "type": "integer", "description": "REQ-AXO-902304 — retention horizon in hours: `mailbox_sweep` archives the message once past it. Omit to keep it indefinitely (right default for anything actionable later). SET IT for time-bound notices — a 'maintenance in 3 minutes' broadcast is worthless an hour on, and 8217 such messages had accumulated unpurgeable before this existed. Especially on a fan-out (`to_project='*'`/topic/room), where one send lands in every project." }
                     },
                     "required": ["idempotency_key", "body_dense"]
@@ -1006,12 +1006,14 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "mcp_inbox_read",
-                "description": "[MAILBOX] REQ-AXO-902114 (MBX-1/2) — read THIS project's inbox. mode=unread (since the read cursor, ADVANCES it), since (since `since_id`, non-destructive), or all. Each message carries `signature_verified` (HMAC). Pair with `inbox_unread` in status/axon_init_project for the wake case. REQ-AXO-902419 — the batch is bounded in VOLUME (`budget_chars`, default 20000), not just in count: what the budget holds back is neither consumed nor archived, and the answer says how much.",
+                "description": "[MAILBOX] REQ-AXO-902114 (MBX-1/2) — read THIS project's inbox. mode=unread (since the read cursor, ADVANCES it), since (since `since_id`, non-destructive), all, or peek (non-destructive surveillance: counts, urgent/high breakdown, oldest unread age, durable cursor without rendering bodies). Each message carries `priority` and `signature_verified` (HMAC). Pair with `inbox_unread` in status/axon_init_project for the wake case. REQ-AXO-902419 — the batch is bounded in VOLUME (`budget_chars`, default 20000), not just in count: what the budget holds back is neither consumed nor archived, and the answer says how much.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "project": { "type": "string", "description": "Recipient project code. Default: cwd-resolved." },
-                        "mode": { "type": "string", "enum": ["unread", "since", "all"], "description": "Default unread." },
+                        "mode": { "type": "string", "enum": ["unread", "since", "all", "peek"], "description": "Default unread. `peek`: non-destructive surveillance summary (unread_count, unread_high_count, oldest_unread_age_s, last_read_id) without advancing cursor or returning message bodies." },
+                        "peek": { "type": "boolean", "description": "REQ-AXO-902413 — non-destructive surveillance flag: when true, returns surveillance metrics without advancing read cursor." },
+                        "summary_only": { "type": "boolean", "description": "Alias for peek." },
                         "since_id": { "type": "integer", "description": "Floor id for mode=since." },
                         "context_id": { "type": "string", "description": "MBX-4 — filter to one thread (non-destructive view, cursor not advanced)." },
                         "search": { "type": "string", "description": "MBX-4 — full-text search over subject+body (non-destructive view)." },

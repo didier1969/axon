@@ -663,3 +663,214 @@ fn c10b_un_message_plus_gros_que_le_budget_passe_quand_meme() {
         lot["data"]
     );
 }
+
+// ── C11 — priorité complète ('low', 'normal', 'high', 'urgent') et préservation (REQ-AXO-902413) ──
+#[test]
+fn c11_priority_levels_published_and_preserved() {
+    let server = create_test_server();
+
+    for (key, subject, priority) in [
+        ("c11-urgent", "panne critique", "urgent"),
+        ("c11-high", "incident majeur", "high"),
+        ("c11-normal", "tâche standard", "normal"),
+        ("c11-low", "remarque mineure", "low"),
+    ] {
+        let sent = send(
+            &server,
+            json!({
+                "from": FROM, "to_project": TO,
+                "idempotency_key": key,
+                "subject": subject, "body_dense": format!("corps de {subject}"),
+                "priority": priority
+            }),
+        );
+        assert_eq!(sent["data"]["status"].as_str(), Some("ok"));
+    }
+
+    // Lecture mode all: vérifie la publication du champ priority pour chaque message
+    let inbox = read(&server, json!({ "project": TO, "mode": "all" }));
+    let msgs = inbox["data"]["messages"].as_array().expect("messages array");
+    assert_eq!(msgs.len(), 4);
+
+    let urgent = msgs.iter().find(|m| m["subject"].as_str() == Some("panne critique")).expect("urgent");
+    assert_eq!(urgent["priority"].as_str(), Some("urgent"));
+
+    let high = msgs.iter().find(|m| m["subject"].as_str() == Some("incident majeur")).expect("high");
+    assert_eq!(high["priority"].as_str(), Some("high"));
+
+    let normal = msgs.iter().find(|m| m["subject"].as_str() == Some("tâche standard")).expect("normal");
+    assert_eq!(normal["priority"].as_str(), Some("normal"));
+
+    let low = msgs.iter().find(|m| m["subject"].as_str() == Some("remarque mineure")).expect("low");
+    assert_eq!(low["priority"].as_str(), Some("low"));
+
+    // En mode non-unread (ici all), le tri par priorité met urgent puis high en tête
+    assert_eq!(msgs[0]["priority"].as_str(), Some("urgent"));
+    assert_eq!(msgs[1]["priority"].as_str(), Some("high"));
+
+    // Préservation: 'urgent' et 'high' survivent à l'auto-archivage d'une lecture unread
+    let unread = read(&server, json!({ "project": TO, "mode": "unread" }));
+    assert_eq!(unread["data"]["count"].as_i64(), Some(4));
+
+    // Après lecture unread, 'normal' et 'low' ont été archivés, 'urgent' et 'high' restent en boîte
+    let restants = message_ids(&server, TO);
+    assert_eq!(restants.len(), 2, "seuls urgent et high doivent survivre en boîte");
+}
+
+// ── C12 — relèvement non destructif scopé projet (peek / summary_only) (REQ-AXO-902413) ──
+#[test]
+fn c12_peek_non_destructive_surveillance() {
+    let server = create_test_server();
+
+    // 0 messages: peek doit rendre 0 non-lus, age 0, et curseur durable 0
+    let empty_peek = read(&server, json!({ "project": TO, "mode": "peek" }));
+    assert_eq!(empty_peek["data"]["status"].as_str(), Some("ok"));
+    assert_eq!(empty_peek["data"]["peek"].as_bool(), Some(true));
+    assert_eq!(empty_peek["data"]["unread_count"].as_i64(), Some(0));
+    assert_eq!(empty_peek["data"]["unread_high_count"].as_i64(), Some(0));
+    assert_eq!(empty_peek["data"]["oldest_unread_age_s"].as_i64(), Some(0));
+    assert_eq!(empty_peek["data"]["last_read_id"].as_i64(), Some(0));
+    assert_eq!(empty_peek["data"]["read_cursor_id"].as_i64(), Some(0));
+    assert_eq!(empty_peek["data"]["messages"].as_array().map(|a| a.len()), Some(0));
+
+    // Envoi de messages: 1 urgent, 1 high, 2 normal
+    for (key, subject, prio) in [
+        ("c12-1", "m1-urgent", "urgent"),
+        ("c12-2", "m2-high", "high"),
+        ("c12-3", "m3-normal", "normal"),
+        ("c12-4", "m4-normal", "normal"),
+    ] {
+        send(
+            &server,
+            json!({
+                "from": FROM, "to_project": TO,
+                "idempotency_key": key,
+                "subject": subject, "body_dense": "corps confidentiel",
+                "priority": prio
+            }),
+        );
+    }
+
+    // Appel peek via mode="peek"
+    let peek1 = read(&server, json!({ "project": TO, "mode": "peek" }));
+    assert_eq!(peek1["data"]["unread_count"].as_i64(), Some(4));
+    assert_eq!(peek1["data"]["unread_high_count"].as_i64(), Some(2), "1 urgent + 1 high = 2");
+    assert!(peek1["data"]["oldest_unread_age_s"].as_i64().unwrap_or(-1) >= 0);
+    assert_eq!(peek1["data"]["last_read_id"].as_i64(), Some(0));
+    assert_eq!(peek1["data"]["read_cursor_id"].as_i64(), Some(0));
+    // Les corps de messages ne doivent PAS être rendus
+    assert_eq!(peek1["data"]["messages"].as_array().map(|a| a.len()), Some(0));
+    let text = peek1["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(!text.contains("corps confidentiel"), "aucun corps inliné dans le texte en mode peek");
+    assert!(text.contains("peek") || text.contains("non-lu"), "le texte résume la surveillance");
+
+    // Vérification que read_at est toujours NULL en DB pour tous les messages
+    let read_at_count = server
+        .graph_store
+        .query_single_i64_writer(&format!(
+            "SELECT count(*) FROM axon.mailbox_message WHERE to_project='{TO}' AND read_at IS NOT NULL"
+        ))
+        .ok()
+        .flatten()
+        .unwrap_or(-1);
+    assert_eq!(read_at_count, 0, "peek ne doit jamais marquer read_at");
+
+    // Vérification que le curseur durable n'a pas bougé
+    let cursor_count = server
+        .graph_store
+        .query_single_i64_writer(&format!(
+            "SELECT count(*) FROM axon.mailbox_cursor WHERE project_code='{TO}'"
+        ))
+        .ok()
+        .flatten()
+        .unwrap_or(-1);
+    assert_eq!(cursor_count, 0, "peek ne doit jamais avancer le curseur");
+
+    // Appel alternatif via argument peek: true ou summary_only: true
+    let peek2 = read(&server, json!({ "project": TO, "peek": true }));
+    assert_eq!(peek2["data"]["unread_count"].as_i64(), Some(4));
+    assert_eq!(peek2["data"]["unread_high_count"].as_i64(), Some(2));
+
+    let peek3 = read(&server, json!({ "project": TO, "summary_only": true }));
+    assert_eq!(peek3["data"]["unread_count"].as_i64(), Some(4));
+    assert_eq!(peek3["data"]["unread_high_count"].as_i64(), Some(2));
+
+    // Non destructif : un relèvement unread ultérieur voit toujours l'intégralité des 4 messages
+    let unread = read(&server, json!({ "project": TO, "mode": "unread" }));
+    assert_eq!(unread["data"]["count"].as_i64(), Some(4), "tous les messages sont consommables");
+    let new_cursor = unread["data"]["cursor"].as_i64().unwrap_or(0);
+    assert!(new_cursor > 0);
+
+    // Un nouveau peek après le drain unread voit 0 non-lus et le nouveau curseur durable
+    let peek_after = read(&server, json!({ "project": TO, "mode": "peek" }));
+    assert_eq!(peek_after["data"]["unread_count"].as_i64(), Some(0));
+    assert_eq!(peek_after["data"]["unread_high_count"].as_i64(), Some(0));
+    assert_eq!(peek_after["data"]["last_read_id"].as_i64(), Some(new_cursor));
+    assert_eq!(peek_after["data"]["read_cursor_id"].as_i64(), Some(new_cursor));
+}
+
+// ── C13 — mode since distingue le curseur de lecture du max_id (REQ-AXO-902413) ──
+#[test]
+fn c13_since_distinguishes_durable_cursor_from_batch_max_id() {
+    let server = create_test_server();
+
+    // Envoi de message 1 (priority: high pour survivre à la lecture unread)
+    send(
+        &server,
+        json!({
+            "from": FROM, "to_project": TO,
+            "idempotency_key": "c13-1",
+            "subject": "m1", "body_dense": "corps 1",
+            "priority": "high"
+        }),
+    );
+
+    // Draine message 1 avec mode=unread: établit le curseur durable sur message 1
+    let drain1 = read(&server, json!({ "project": TO, "mode": "unread" }));
+    let cursor1 = drain1["data"]["cursor"].as_i64().expect("cursor 1");
+    assert!(cursor1 > 0);
+
+    // Envoi de 2 nouveaux messages
+    send(
+        &server,
+        json!({
+            "from": FROM, "to_project": TO,
+            "idempotency_key": "c13-2",
+            "subject": "m2", "body_dense": "corps 2"
+        }),
+    );
+    send(
+        &server,
+        json!({
+            "from": FROM, "to_project": TO,
+            "idempotency_key": "c13-3",
+            "subject": "m3", "body_dense": "corps 3"
+        }),
+    );
+
+    // Appel mode=since avec since_id=0
+    let since_res = read(&server, json!({ "project": TO, "mode": "since", "since_id": 0 }));
+    let msgs = since_res["data"]["messages"].as_array().expect("messages");
+    assert_eq!(msgs.len(), 3);
+
+    let max_id = since_res["data"]["max_id"].as_i64().expect("max_id");
+    let last_read_id = since_res["data"]["last_read_id"].as_i64().expect("last_read_id");
+    let read_cursor_id = since_res["data"]["read_cursor_id"].as_i64().expect("read_cursor_id");
+
+    assert_eq!(last_read_id, cursor1, "last_read_id doit être le VRAI curseur durable");
+    assert_eq!(read_cursor_id, cursor1);
+    assert!(max_id > cursor1, "max_id ({max_id}) doit être supérieur au curseur durable ({cursor1})");
+    assert_ne!(last_read_id, max_id, "last_read_id et max_id doivent être distincts");
+
+    // Vérifie que le curseur durable en DB n'a pas été écrasé par max_id
+    let db_cursor = server
+        .graph_store
+        .query_single_i64_writer(&format!(
+            "SELECT last_read_id FROM axon.mailbox_cursor WHERE project_code='{TO}'"
+        ))
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    assert_eq!(db_cursor, cursor1, "le curseur durable en base ne doit pas avoir avancé");
+}
+
