@@ -11908,6 +11908,116 @@ fn test_document_intent_rejects_invalid_suggest_type_with_parameter_repair() {
 }
 
 #[test]
+fn test_document_intent_accepts_acceptance_criteria_and_milestone_linking() {
+    let _env = env_lock();
+    let server = create_test_server();
+    let code = "DIT".to_string();
+
+    let _ = server.graph_store.sync_project_registry_entry(
+        &code,
+        Some("Document Intent Test Project"),
+        Some("/tmp/dit_test"),
+    );
+
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Registry (project_code, id, last_pil, last_req, last_cpt, last_dec, last_mil) \
+             VALUES ('{code}', 'AXON_GLOBAL', 1, 0, 0, 0, 1) \
+             ON CONFLICT (project_code) DO UPDATE SET last_req = 0, last_mil = 1"
+        ))
+        .unwrap();
+
+    let pillar_id = format!("PIL-{code}-001");
+    let milestone_id = format!("MIL-{code}-001");
+
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('{pillar_id}', 'Pillar', '{code}', 'Anchor Pillar', '', 'current', '{{}}') \
+             ON CONFLICT (id) DO NOTHING"
+        ))
+        .unwrap();
+
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) \
+             VALUES ('{milestone_id}', 'Milestone', '{code}', 'Target Milestone', '', 'current', '{{}}') \
+             ON CONFLICT (id) DO NOTHING"
+        ))
+        .unwrap();
+
+    // REQ-AXO-902649 (Feedback #433) — document_intent accepts acceptance_criteria
+    // and an optional milestone id to link MIL -> REQ TARGETS in a single shot.
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "document_intent",
+            "arguments": {
+                "intent": "Gap in chunker token calculation",
+                "body": "the chunker fails to account for docstring overhead — fix needed",
+                "project_code": code,
+                "attach_to": pillar_id,
+                "acceptance_criteria": [
+                    "test passes with real files",
+                    "oversized chunk count drops to 0"
+                ],
+                "milestone": milestone_id
+            }
+        },
+        "id": 433
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.expect("expected result");
+    assert_ne!(
+        result.get("isError").and_then(|v| v.as_bool()),
+        Some(true),
+        "document_intent must succeed: {result:?}"
+    );
+
+    let data = result.get("data").expect("response data");
+    assert_eq!(data["status"].as_str(), Some("ok"));
+    assert_eq!(data["entity_type"].as_str(), Some("requirement"));
+    let canonical_id = data["canonical_id"].as_str().expect("canonical_id string");
+    assert!(canonical_id.starts_with(&format!("REQ-{code}-")));
+
+    // Verify metadata persisted acceptance_criteria
+    let row = server
+        .graph_store
+        .query_json(&format!(
+            "SELECT type, title, description, status, metadata FROM soll.Node WHERE id = '{}' LIMIT 1",
+            canonical_id
+        ))
+        .unwrap();
+    let parsed: Vec<Vec<String>> = serde_json::from_str(&row).unwrap_or_default();
+    let node = parsed.first().expect("created Node row");
+    let meta: serde_json::Value = serde_json::from_str(&node[4]).expect("valid json metadata");
+    let criteria = meta.get("acceptance_criteria").and_then(|v| v.as_array()).expect("criteria array in metadata");
+    assert_eq!(criteria.len(), 2);
+    assert_eq!(criteria[0].as_str(), Some("test passes with real files"));
+    assert_eq!(criteria[1].as_str(), Some("oversized chunk count drops to 0"));
+
+    // Verify MIL -> REQ TARGETS edge exists
+    let targets_count = server
+        .graph_store
+        .query_count(&format!(
+            "SELECT count(*) FROM soll.Edge WHERE source_id = '{milestone_id}' AND target_id = '{canonical_id}' AND relation_type = 'TARGETS'"
+        ))
+        .unwrap();
+    assert_eq!(targets_count, 1, "Milestone TARGETS edge must be created atomically");
+
+    // Verify content text does not warn about missing acceptance_criteria
+    let content_text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(!content_text.contains("No acceptance_criteria"), "should not warn when criteria provided");
+}
+
+#[test]
 fn test_soll_apply_plan_surfaces_unresolved_logical_keys_in_errors_and_parameter_repair() {
     let _env = env_lock();
     let _mj = crate::test_support::EnvVarGuard::unset("AXON_MCP_MUTATION_JOBS");

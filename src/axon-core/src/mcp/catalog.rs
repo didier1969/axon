@@ -455,7 +455,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tag list, persisted to metadata.tags." },
                         "project_code": { "type": "string", "description": "Optional canonical project code; resolved from cwd if omitted." },
                         "attach_to": { "type": "string", "description": "Optional canonical parent id (e.g. PIL-AXO-002, CPT-AXO-018). REQ-AXO-901615 — when omitted, the server auto-infers the lowest-id `current` Pillar in the project." },
-                        "relation_type": { "type": "string", "description": "Optional canonical relation type (e.g. BELONGS_TO, EXPLAINS, REFINES). Defaults to BELONGS_TO when omitted." }
+                        "relation_type": { "type": "string", "description": "Optional canonical relation type (e.g. BELONGS_TO, EXPLAINS, REFINES). Defaults to BELONGS_TO when omitted." },
+                        "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "description": "REQ-AXO-902649 (Feedback #433) — Optional acceptance criteria for requirement entities, persisted to metadata.acceptance_criteria." },
+                        "milestone": { "type": "string", "description": "REQ-AXO-902649 (Feedback #433) — Optional canonical milestone id (e.g. MIL-AXO-054). When creating a requirement, automatically links MIL -> REQ via TARGETS." }
                     },
                     "required": ["intent", "body"]
                 }

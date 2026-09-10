@@ -266,27 +266,50 @@ impl McpServer {
             },
         };
 
+        // REQ-AXO-902649 (Feedback #433) — accept optional acceptance_criteria and milestone.
+        let acceptance_criteria = args.get("acceptance_criteria").and_then(|v| {
+            if v.is_array() {
+                Some(v.clone())
+            } else if let Some(s) = v.as_str().filter(|s| !s.trim().is_empty()) {
+                Some(json!([s.trim()]))
+            } else {
+                None
+            }
+        });
+        let explicit_milestone = args
+            .get("milestone")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
         // REQ-AXO-141 — delegate to soll_manager.create so canonical id
         // assignment, project_code validation, and Registry counters all
         // go through the canonical mutation path. The wrapper only
         // pre-classifies + post-processes the response shape.
+        let mut create_data = json!({
+            "project_code": project_code,
+            "title": intent,
+            "description": body,
+            "status": "planned",
+            "attach_to": attach_to,
+            "relation_type": relation_type,
+            "metadata": {
+                "tags": tags,
+                "originator": "document_intent_mcp",
+                "classifier_reason": classifier_reason,
+                "attach_source": attach_source
+            }
+        });
+        if let Some(ref criteria) = acceptance_criteria {
+            create_data["acceptance_criteria"] = criteria.clone();
+            create_data["metadata"]["acceptance_criteria"] = criteria.clone();
+        }
+
         let create_args = json!({
             "action": "create",
             "entity": entity_type,
-            "data": {
-                "project_code": project_code,
-                "title": intent,
-                "description": body,
-                "status": "planned",
-                "attach_to": attach_to,
-                "relation_type": relation_type,
-                "metadata": {
-                    "tags": tags,
-                    "originator": "document_intent_mcp",
-                    "classifier_reason": classifier_reason,
-                    "attach_source": attach_source
-                }
-            }
+            "data": create_data
         });
 
         let response = self.axon_soll_manager(&create_args)?;
@@ -330,33 +353,81 @@ impl McpServer {
             }));
         }
 
+        // REQ-AXO-902649 (Feedback #433) — if milestone is provided and entity is a requirement,
+        // link MIL -> REQ TARGETS automatically.
+        let mut milestone_linked: Option<String> = None;
+        if let Some(ref mil_id) = explicit_milestone {
+            if entity_type == "requirement" {
+                let link_args = json!({
+                    "action": "link",
+                    "entity": "milestone",
+                    "data": {
+                        "source_id": mil_id,
+                        "target_id": &canonical_id,
+                        "relation_type": "TARGETS"
+                    }
+                });
+                let link_resp = self.axon_soll_manager(&link_args);
+                let link_err = link_resp
+                    .as_ref()
+                    .and_then(|r| r.get("isError").and_then(|v| v.as_bool()))
+                    .unwrap_or(false);
+                if !link_err {
+                    milestone_linked = Some(mil_id.clone());
+                } else {
+                    tracing::warn!(
+                        milestone = %mil_id,
+                        target = %canonical_id,
+                        response = ?link_resp,
+                        "document_intent: failed to link milestone TARGETS"
+                    );
+                }
+            }
+        }
+
+        let milestone_clause = match &milestone_linked {
+            Some(mil) => format!(" and targeted by milestone `{}` via TARGETS", mil),
+            None => String::new(),
+        };
+        let criteria_clause = match &acceptance_criteria {
+            Some(c) => format!(", criteria={}", c.as_array().map_or(0, |a| a.len())),
+            None => String::new(),
+        };
+        let mut response_data = json!({
+            "status": "ok",
+            "canonical_id": canonical_id,
+            "entity_type": entity_type,
+            "classifier_reason": classifier_reason,
+            "project_code": project_code,
+            "tags": tags,
+            "attach_to": attach_to,
+            "relation_type": relation_type,
+            "attach_source": attach_source,
+            "follow_up_tools": ["soll_manager", "soll_attach_evidence"],
+            "next_action": {
+                "tool": "soll_manager",
+                "kind": "link",
+                "when": "if_a_more_specific_anchor_is_known"
+            },
+            "hint": format!(
+                "node was attached to `{}` via {}. If a more specific parent (concept/requirement) is known, add a second edge via `soll_manager(action=link, source_id={}, target_id=<id>, relation_type=...)`. Use `soll_attach_evidence` once artifacts land.",
+                attach_to, relation_type, canonical_id
+            ),
+            "upstream": inner_data
+        });
+        if let Some(ref criteria) = acceptance_criteria {
+            response_data["acceptance_criteria"] = criteria.clone();
+        }
+        if let Some(ref mil) = milestone_linked {
+            response_data["milestone"] = json!(mil);
+        }
+
         Some(json!({
             "content": [{"type":"text","text": format!(
-                "document_intent: recorded {} `{}` as `{}` attached to `{}` via {} ({}, tags={:?}, attach_source={})",
-                entity_type, intent, canonical_id, attach_to, relation_type, classifier_reason, tags, attach_source
+                "document_intent: recorded {} `{}` as `{}` attached to `{}` via {}{}{} ({}, tags={:?}, attach_source={})",
+                entity_type, intent, canonical_id, attach_to, relation_type, milestone_clause, criteria_clause, classifier_reason, tags, attach_source
             )}],
-            "data": {
-                "status": "ok",
-                "canonical_id": canonical_id,
-                "entity_type": entity_type,
-                "classifier_reason": classifier_reason,
-                "project_code": project_code,
-                "tags": tags,
-                "attach_to": attach_to,
-                "relation_type": relation_type,
-                "attach_source": attach_source,
-                "follow_up_tools": ["soll_manager", "soll_attach_evidence"],
-                "next_action": {
-                    "tool": "soll_manager",
-                    "kind": "link",
-                    "when": "if_a_more_specific_anchor_is_known"
-                },
-                "hint": format!(
-                    "node was attached to `{}` via {}. If a more specific parent (concept/requirement) is known, add a second edge via `soll_manager(action=link, source_id={}, target_id=<id>, relation_type=...)`. Use `soll_attach_evidence` once artifacts land.",
-                    attach_to, relation_type, canonical_id
-                ),
-                "upstream": inner_data
-            }
+            "data": response_data
         }))
     }
 
