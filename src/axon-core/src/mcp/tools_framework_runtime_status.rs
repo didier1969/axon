@@ -882,14 +882,6 @@ impl McpServer {
             .get("ingress_hot_entries")
             .and_then(|value| value.as_u64())
             .unwrap_or(0) as usize;
-        let subtree_hints = peer_telemetry
-            .get("ingress_subtree_hints")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0) as usize;
-        let subtree_hint_in_flight = peer_telemetry
-            .get("ingress_subtree_hint_in_flight")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0) as usize;
         let graph_queue_machine = if use_peer_runtime {
             json!({
                 "queued": peer_telemetry.pointer("/graph_projection_queue/queued").and_then(|value| value.as_u64()).unwrap_or(0),
@@ -1270,7 +1262,8 @@ impl McpServer {
                 "vector_ready": vector_ready_depth,
                 "skipped": canonical_ingestion_stage_model.pointer("/explicitly_excluded_from_vectorization/current_count").and_then(|value| value.as_u64()).unwrap_or(0)
             },
-            // REQ-AXO-901893 (LEGACY FEED PURGE) — the ingress_buffer was ripped.
+            // REQ-AXO-901893 (LEGACY FEED PURGE) / REQ-AXO-902637 — the ingress_buffer
+            // was ripped, and orphaned ingress_subtree_hint* counters were purged.
             // These counters are 0 for a current-process indexer (Watchman feeds
             // pipeline A directly); a peer indexer on an older build may still
             // populate buffered_entries via its telemetry JSON.
@@ -1278,8 +1271,6 @@ impl McpServer {
                 "buffered_entries": ingress_buffered_entries,
                 "scan_buffered_entries": scan_buffered_entries,
                 "watcher_buffered_entries": watcher_buffered_entries,
-                "subtree_hints": subtree_hints,
-                "subtree_hint_in_flight": subtree_hint_in_flight,
                 "notes": "ingress_buffer RIPPED (REQ-AXO-901893); file source = Watchman + DBQ-A"
             },
             "queues": {

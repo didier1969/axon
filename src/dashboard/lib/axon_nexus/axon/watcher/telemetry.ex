@@ -87,15 +87,6 @@ defmodule Axon.Watcher.Telemetry do
       graph_worker_heartbeat_at_ms: Map.get(payload, "graph_worker_heartbeat_at_ms", 0),
       ingress_enabled: Map.get(payload, "ingress_enabled", false),
       ingress_buffered_entries: Map.get(payload, "ingress_buffered_entries", 0),
-      ingress_subtree_hints: Map.get(payload, "ingress_subtree_hints", 0),
-      ingress_subtree_hint_in_flight:
-        Map.get(payload, "ingress_subtree_hint_in_flight", 0),
-      ingress_subtree_hint_accepted_total:
-        Map.get(payload, "ingress_subtree_hint_accepted_total", 0),
-      ingress_subtree_hint_blocked_total:
-        Map.get(payload, "ingress_subtree_hint_blocked_total", 0),
-      ingress_subtree_hint_suppressed_total:
-        Map.get(payload, "ingress_subtree_hint_suppressed_total", 0),
       ingress_collapsed_total: Map.get(payload, "ingress_collapsed_total", 0),
       ingress_flush_count: Map.get(payload, "ingress_flush_count", 0),
       ingress_last_flush_duration_ms: Map.get(payload, "ingress_last_flush_duration_ms", 0),
@@ -330,15 +321,6 @@ defmodule Axon.Watcher.Telemetry do
       graph_worker_heartbeat_at_ms: Map.get(runtime, :graph_worker_heartbeat_at_ms, 0),
       ingress_enabled: Map.get(runtime, :ingress_enabled, false),
       ingress_buffered_entries: Map.get(runtime, :ingress_buffered_entries, 0),
-      ingress_subtree_hints: Map.get(runtime, :ingress_subtree_hints, 0),
-      ingress_subtree_hint_in_flight:
-        Map.get(runtime, :ingress_subtree_hint_in_flight, 0),
-      ingress_subtree_hint_accepted_total:
-        Map.get(runtime, :ingress_subtree_hint_accepted_total, 0),
-      ingress_subtree_hint_blocked_total:
-        Map.get(runtime, :ingress_subtree_hint_blocked_total, 0),
-      ingress_subtree_hint_suppressed_total:
-        Map.get(runtime, :ingress_subtree_hint_suppressed_total, 0),
       ingress_collapsed_total: Map.get(runtime, :ingress_collapsed_total, 0),
       ingress_flush_count: Map.get(runtime, :ingress_flush_count, 0),
       ingress_last_flush_duration_ms: Map.get(runtime, :ingress_last_flush_duration_ms, 0),
@@ -431,11 +413,6 @@ defmodule Axon.Watcher.Telemetry do
          graph_worker_heartbeat_at_ms: 0,
          ingress_enabled: false,
          ingress_buffered_entries: 0,
-         ingress_subtree_hints: 0,
-         ingress_subtree_hint_in_flight: 0,
-         ingress_subtree_hint_accepted_total: 0,
-         ingress_subtree_hint_blocked_total: 0,
-         ingress_subtree_hint_suppressed_total: 0,
          ingress_collapsed_total: 0,
          ingress_flush_count: 0,
          ingress_last_flush_duration_ms: 0,

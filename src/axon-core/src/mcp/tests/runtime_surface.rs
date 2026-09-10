@@ -5423,3 +5423,36 @@ fn practice_put_repare_inlining_xml_et_route_champs_perdus_902556() {
     assert!(!db_dense.contains("</dense>"));
     assert!(!db_dense.contains("<parameter"));
 }
+
+/// REQ-AXO-902637 — Les 5 compteurs `ingress_subtree_hint*` orphelins :
+/// Après arrachage de l'ingress_buffer (REQ-AXO-901893) et retrait de la politique (REQ-AXO-902634),
+/// aucune clé subtree_hint* ne doit subsister dans la télémétrie ingress de status.
+#[test]
+fn test_req_902637_status_ingress_does_not_render_orphaned_subtree_hints() {
+    let _guard = env_lock();
+    let _sg_guard = crate::service_guard::lock_for_tests();
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "verbose" }
+            })),
+            id: Some(json!(902637)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").unwrap();
+    let ingress = data.pointer("/machine_status/ingress").expect("ingress must exist");
+    assert!(ingress.get("subtree_hints").is_none(), "subtree_hints must not be rendered: {ingress}");
+    assert!(ingress.get("subtree_hint_in_flight").is_none(), "subtree_hint_in_flight must not be rendered: {ingress}");
+    assert!(ingress.get("subtree_hint_accepted_total").is_none(), "subtree_hint_accepted_total must not be rendered: {ingress}");
+    assert!(ingress.get("subtree_hint_blocked_total").is_none(), "subtree_hint_blocked_total must not be rendered: {ingress}");
+    assert!(ingress.get("subtree_hint_suppressed_total").is_none(), "subtree_hint_suppressed_total must not be rendered: {ingress}");
+}

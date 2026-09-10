@@ -296,10 +296,6 @@ def status_data_from_local_indexer_runtime() -> dict[str, Any]:
                 "buffered_entries": buffered_entries,
                 "scan_buffered_entries": scan_buffered_entries,
                 "watcher_buffered_entries": watcher_buffered_entries,
-                "subtree_hints": parse_int(telemetry.get("ingress_subtree_hints")),
-                "subtree_hint_in_flight": parse_int(
-                    telemetry.get("ingress_subtree_hint_in_flight")
-                ),
                 "flush_count": parse_int(telemetry.get("ingress_flush_count")),
                 "last_promoted_count": parse_int(
                     telemetry.get("ingress_last_promoted_count")
@@ -649,11 +645,6 @@ def runtime_metrics_from_status(status_data: dict[str, Any]) -> dict[str, Any]:
             "buffered_entries": parse_int(ingress.get("buffered_entries")),
             "scan_buffered_entries": parse_int(ingress.get("scan_buffered_entries")),
             "watcher_buffered_entries": parse_int(ingress.get("watcher_buffered_entries")),
-            "subtree_hints": parse_int(ingress.get("subtree_hints")),
-            "subtree_hint_in_flight": parse_int(ingress.get("subtree_hint_in_flight")),
-            "subtree_hint_accepted_total": 0,
-            "subtree_hint_blocked_total": 0,
-            "subtree_hint_suppressed_total": 0,
             "flush_count": parse_int(ingress.get("flush_count")),
             "last_promoted_count": parse_int(ingress.get("last_promoted_count")),
             "last_durably_persisted_count": parse_int(
@@ -771,11 +762,6 @@ def runtime_metrics_from_status(status_data: dict[str, Any]) -> dict[str, Any]:
         "watcher_buffered_entries": parse_int(
             nested_value(stage_model, "watcher_buffered", "current_count")
         ),
-        "subtree_hints": 0,
-        "subtree_hint_in_flight": 0,
-        "subtree_hint_accepted_total": 0,
-        "subtree_hint_blocked_total": 0,
-        "subtree_hint_suppressed_total": 0,
         "flush_count": parse_int(admission.get("admission_flush_count")),
         "last_promoted_count": parse_int(admission.get("admission_last_promoted_count")),
         "graph_projection_queue": {
@@ -814,19 +800,6 @@ def runtime_metrics_from_status(status_data: dict[str, Any]) -> dict[str, Any]:
             "buffered_entries": parse_int(peer_telemetry.get("ingress_buffered_entries")),
             "scan_buffered_entries": parse_int(peer_telemetry.get("ingress_scan_entries")),
             "watcher_buffered_entries": parse_int(peer_telemetry.get("ingress_hot_entries")),
-            "subtree_hints": parse_int(peer_telemetry.get("ingress_subtree_hints")),
-            "subtree_hint_in_flight": parse_int(
-                peer_telemetry.get("ingress_subtree_hint_in_flight")
-            ),
-            "subtree_hint_accepted_total": parse_int(
-                peer_telemetry.get("ingress_subtree_hint_accepted_total")
-            ),
-            "subtree_hint_blocked_total": parse_int(
-                peer_telemetry.get("ingress_subtree_hint_blocked_total")
-            ),
-            "subtree_hint_suppressed_total": parse_int(
-                peer_telemetry.get("ingress_subtree_hint_suppressed_total")
-            ),
             "flush_count": parse_int(peer_telemetry.get("ingress_flush_count")),
             "last_promoted_count": parse_int(
                 peer_telemetry.get("ingress_last_promoted_count")
@@ -1760,10 +1733,6 @@ def main() -> int:
                 f"buffered={cockpit.get('buffered_entries', '')} "
                 f"scan_buffered={cockpit.get('scan_buffered_entries', '')} "
                 f"watcher_buffered={cockpit.get('watcher_buffered_entries', '')} "
-                f"hints={cockpit.get('subtree_hints', '')} "
-                f"hint_in_flight={cockpit.get('subtree_hint_in_flight', '')} "
-                f"hint_blocked={cockpit.get('subtree_hint_blocked_total', '')} "
-                f"hint_suppressed={cockpit.get('subtree_hint_suppressed_total', '')} "
                 f"flushes={cockpit.get('flush_count', '')} "
                 f"last_promoted={cockpit.get('last_promoted_count', '')} "
                 f"admission_wip={cockpit.get('admission_wip_current', '')} "
@@ -1848,18 +1817,6 @@ def main() -> int:
     ) if samples else 0
     max_watcher_buffered = max(
         int(sample.get("cockpit", {}).get("watcher_buffered_entries", 0)) for sample in samples
-    ) if samples else 0
-    max_hints = max(
-        int(sample.get("cockpit", {}).get("subtree_hints", 0)) for sample in samples
-    ) if samples else 0
-    max_hints_in_flight = max(
-        int(sample.get("cockpit", {}).get("subtree_hint_in_flight", 0)) for sample in samples
-    ) if samples else 0
-    max_hint_blocked_total = max(
-        int(sample.get("cockpit", {}).get("subtree_hint_blocked_total", 0)) for sample in samples
-    ) if samples else 0
-    max_hint_suppressed_total = max(
-        int(sample.get("cockpit", {}).get("subtree_hint_suppressed_total", 0)) for sample in samples
     ) if samples else 0
     max_graph_projection_queue_total = max(
         int(sample.get("sql", {}).get("graph_projection_queue", {}).get("total", 0))
@@ -2025,10 +1982,6 @@ def main() -> int:
         "max_buffered_entries": max_buffered,
         "max_scan_buffered_entries": max_scan_buffered,
         "max_watcher_buffered_entries": max_watcher_buffered,
-        "max_subtree_hints": max_hints,
-        "max_subtree_hint_in_flight": max_hints_in_flight,
-        "max_subtree_hint_blocked_total": max_hint_blocked_total,
-        "max_subtree_hint_suppressed_total": max_hint_suppressed_total,
         "max_admission_flush_count": max_flush_count,
         "max_admission_last_promoted_count": max_last_promoted_count,
         "max_admission_last_durably_persisted_count": max_last_durably_persisted_count,
