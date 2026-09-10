@@ -843,7 +843,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "change_safety",
-                "description": "[SYSTEM/DX/SOLL] Summarizes change safety of a target via tests, traceability, and derived validation.",
+                "description": "[SYSTEM/DX/SOLL] Summarizes change safety of a target via tests, traceability, and derived validation. `data.change_safety` ∈ {safe, caution, unsafe, unknown, unknown_unindexed}.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -987,7 +987,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "promote_status",
-                "description": "[RELEASE] REQ-AXO-902111 — declarative release reconciler (read-only): one call returns `{phase, observed, gates, failed_gates, next_action, recovery}` for the live release. phase ∈ {brain_down, indexer_down, staged, drift, uninitialized, clean} (liveness failures take precedence). Reconciles the running build_id (AXON_BUILD_ID) against the promoted manifest (current.json) and any pending staging (pending.json), AND checks runtime liveness from the canonical in-process sources `status` trusts: `brain_serving` (a real SELECT 1 DB probe) + `indexer_alive` (PG heartbeat freshness, conditional on the manifest `runtime_contract` naming a separate indexer; never the answering brain's declared mode). So a manifest/runtime drift after a killed promote, a stranded pending.json, OR a crashed/never-launched indexer reads as a one-line `next_action` (with the distinct restart-vs-start remedy) instead of grepping the promote scripts. observed.liveness exposes the raw verdict. Never mutates state.",
+                "description": "[RELEASE] REQ-AXO-902111 — declarative release reconciler (read-only): one call returns `{phase, observed, gates, failed_gates, next_action, recovery}` for the live release. phase ∈ {brain_down, brain_accept_queue_saturated, indexer_down, staged, drift, uninitialized, clean} (liveness failures take precedence). Reconciles the running build_id (AXON_BUILD_ID) against the promoted manifest (current.json) and any pending staging (pending.json), AND checks runtime liveness from the canonical in-process sources `status` trusts: `brain_serving` (a real SELECT 1 DB probe) + `indexer_alive` (PG heartbeat freshness, conditional on the manifest `runtime_contract` naming a separate indexer; never the answering brain's declared mode). So a manifest/runtime drift after a killed promote, a stranded pending.json, OR a crashed/never-launched indexer reads as a one-line `next_action` (with the distinct restart-vs-start remedy) instead of grepping the promote scripts. observed.liveness exposes the raw verdict. Never mutates state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},

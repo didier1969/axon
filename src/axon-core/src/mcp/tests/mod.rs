@@ -455,3 +455,5 @@ mod session_pointer_mutation_tests;
 mod vram_budget_division_tests;
 /// REQ-AXO-902562 — reachability dispatch par trait et indexer_lifecycle désactivé par mode de runtime.
 mod reachability_and_lifecycle_tests;
+/// REQ-AXO-902513 — garde générique : tout état énuméré rendu par le code doit être annoncé dans la description publiée.
+mod tool_enum_catalog_contract;
