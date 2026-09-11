@@ -304,6 +304,8 @@ fn default_supported_extensions() -> Vec<String> {
         "cc".to_string(),
         "cxx".to_string(),
         "hxx".to_string(),
+        "cu".to_string(),
+        "cuh".to_string(),
         "cs".to_string(),
         "rb".to_string(),
         "ruby".to_string(),

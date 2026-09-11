@@ -6,6 +6,7 @@ pub struct SqlParser {
     create_table_re: Regex,
     create_view_re: Regex,
     create_func_re: Regex,
+    create_macro_re: Regex,
     dml_re: Regex,
     table_fk_re: Regex,
     inline_fk_re: Regex,
@@ -24,6 +25,7 @@ impl SqlParser {
             create_table_re: Regex::new(r"(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
             create_view_re: Regex::new(r"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
             create_func_re: Regex::new(r"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
+            create_macro_re: Regex::new(r"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMPORARY\s+)?MACRO\s+(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
             dml_re: Regex::new(r"(?im)^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
             table_fk_re: Regex::new(r"(?im)(?:CONSTRAINT\s+[`\x22]?(\w+)[`\x22]?\s+)?FOREIGN\s+KEY\s*\(\s*[`\x22]?(\w+)[`\x22]?\s*\)\s*REFERENCES\s+[`\x22]?(\w+)[`\x22]?(?:\s*\(\s*[`\x22]?(\w+)[`\x22]?\s*\))?").unwrap(),
             inline_fk_re: Regex::new(r"(?im)REFERENCES\s+[`\x22]?(\w+)[`\x22]?(?:\s*\(\s*[`\x22]?(\w+)[`\x22]?\s*\))?").unwrap(),
@@ -324,6 +326,33 @@ impl Parser for SqlParser {
             }
         }
 
+        for cap in self.create_macro_re.captures_iter(content) {
+            if let Some(m) = cap.get(1) {
+                let name = m.as_str().to_string();
+                let start_byte = cap.get(0).unwrap().start();
+                let line_no = get_line_no(start_byte);
+                let end_line = Self::find_statement_end(&lines, line_no.saturating_sub(1));
+
+                let mut props = HashMap::new();
+                props.insert("dialect".to_string(), "duckdb".to_string());
+
+                symbols.push(Symbol {
+                    name,
+                    kind: "macro".to_string(),
+                    start_line: line_no,
+                    end_line,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: props,
+                    embedding: None,
+                });
+            }
+        }
+
         for cap in self.dml_re.captures_iter(content) {
             if let (Some(m1), Some(m2)) = (cap.get(1), cap.get(2)) {
                 let action_raw = m1.as_str().to_uppercase();
@@ -427,5 +456,36 @@ CREATE TABLE orders (
             .relations
             .iter()
             .any(|r| r.from == "orders" && r.to == "users" && r.rel_type == "references"));
+    }
+
+    #[test]
+    fn test_duckdb_macro() {
+        let sql = r#"
+            CREATE MACRO add_tax(price, rate) AS price * (1 + rate);
+            CREATE OR REPLACE TEMPORARY MACRO dynamic_pricing(base, surge) AS base * surge;
+        "#;
+        let parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let add_tax = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "add_tax")
+            .expect("add_tax symbol");
+        assert_eq!(add_tax.kind, "macro");
+        assert_eq!(
+            add_tax.properties.get("dialect").map(String::as_str),
+            Some("duckdb")
+        );
+
+        let dyn_price = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "dynamic_pricing")
+            .expect("dynamic_pricing symbol");
+        assert_eq!(dyn_price.kind, "macro");
+        assert_eq!(
+            dyn_price.properties.get("dialect").map(String::as_str),
+            Some("duckdb")
+        );
     }
 }

@@ -317,6 +317,8 @@ pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "cc",
     "cxx",
     "hxx",
+    "cu",
+    "cuh",
     "cs",
     "rb",
     "ruby",
@@ -380,7 +382,9 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "go" => Some(Box::new(go::GoParser::new())),
         "java" => Some(Box::new(java::JavaParser::new())),
         "c" | "h" => Some(Box::new(c::CParser::new())),
-        "cpp" | "hpp" | "cc" | "cxx" | "hxx" => Some(Box::new(cpp::CppParser::new())),
+        "cpp" | "hpp" | "cc" | "cxx" | "hxx" | "cu" | "cuh" => {
+            Some(Box::new(cpp::CppParser::new()))
+        }
         "cs" => Some(Box::new(c_sharp::CSharpParser::new())),
         "rb" | "ruby" => Some(Box::new(ruby::RubyParser::new())),
         "kt" | "kts" => Some(Box::new(kotlin::KotlinParser::new())),
@@ -646,6 +650,20 @@ mod extensions_parsables_tests {
             );
             assert!(
                 get_parser_for_file(&PathBuf::from(format!("entete.{ext}"))).is_some(),
+                "{ext} doit obtenir un parser"
+            );
+        }
+    }
+
+    #[test]
+    fn les_fichiers_cuda_sont_parsables() {
+        for ext in ["cu", "cuh"] {
+            assert!(
+                PARSEABLE_EXTENSIONS.contains(&ext),
+                "{ext} doit etre declaree parsable"
+            );
+            assert!(
+                get_parser_for_file(&PathBuf::from(format!("kernel.{ext}"))).is_some(),
                 "{ext} doit obtenir un parser"
             );
         }

@@ -46,7 +46,110 @@ impl CppParser {
                     Self::extract_class(child, source_bytes, result, current_ns, is_template)
                 }
                 "call_expression" => Self::extract_call(child, source_bytes, result, ""),
-                _ => Self::walk(child, source_bytes, result, current_ns, is_template),
+                _ => {
+                    Self::extract_module_or_macro_definition(
+                        child,
+                        source_bytes,
+                        result,
+                        current_ns,
+                    );
+                    Self::walk(child, source_bytes, result, current_ns, is_template);
+                }
+            }
+        }
+    }
+
+    fn extract_module_or_macro_definition<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        current_ns: &str,
+    ) {
+        let text = node.utf8_text(source_bytes).unwrap_or("").trim();
+        if text.starts_with("export module ")
+            || (text.starts_with("module ") && !text.starts_with("module;"))
+        {
+            let prefix = if text.starts_with("export module ") {
+                "export module "
+            } else {
+                "module "
+            };
+            let is_export = prefix.starts_with("export");
+            if let Some(rest) = text.strip_prefix(prefix) {
+                let mod_name = rest.split(';').next().unwrap_or("").trim().to_string();
+                if !mod_name.is_empty()
+                    && !result
+                        .symbols
+                        .iter()
+                        .any(|s| s.name == mod_name && s.kind == "cpp_module")
+                {
+                    let mut properties = HashMap::new();
+                    if is_export {
+                        properties.insert("exported".to_string(), "true".to_string());
+                    }
+                    result.symbols.push(Symbol {
+                        name: mod_name,
+                        kind: "cpp_module".to_string(),
+                        start_line: node.start_position().row + 1,
+                        end_line: node.end_position().row + 1,
+                        docstring: None,
+                        is_entry_point: false,
+                        is_public: is_export,
+                        tested: false,
+                        is_nif: false,
+                        is_unsafe: false,
+                        properties,
+                        embedding: None,
+                    });
+                }
+            }
+        } else if text.starts_with("import ") || text.starts_with("export import ") {
+            let prefix = if text.starts_with("export import ") {
+                "export import "
+            } else {
+                "import "
+            };
+            if let Some(rest) = text.strip_prefix(prefix) {
+                let imported = rest.split(';').next().unwrap_or("").trim().to_string();
+                if !imported.is_empty()
+                    && !result
+                        .relations
+                        .iter()
+                        .any(|r| r.to == imported && r.rel_type == "imports")
+                {
+                    result.relations.push(Relation {
+                        from: current_ns.to_string(),
+                        to: imported,
+                        rel_type: "imports".to_string(),
+                        properties: HashMap::new(),
+                    });
+                }
+            }
+        } else if text.starts_with("DUCKDB_EXTENSION_ENTRYPOINT") {
+            if let Some(open) = text.find('(') {
+                let after_open = &text[open + 1..];
+                if let Some(comma_or_close) = after_open.find(|c| c == ',' || c == ')') {
+                    let ext_name = after_open[..comma_or_close].trim().to_string();
+                    if !ext_name.is_empty() && !result.symbols.iter().any(|s| s.name == ext_name) {
+                        let mut properties = HashMap::new();
+                        properties.insert("duckdb_extension".to_string(), "true".to_string());
+                        result.symbols.push(Symbol {
+                            name: ext_name.clone(),
+                            kind: "duckdb_extension".to_string(),
+                            start_line: node.start_position().row + 1,
+                            end_line: node.end_position().row + 1,
+                            docstring: None,
+                            is_entry_point: true,
+                            is_public: true,
+                            tested: false,
+                            is_nif: true,
+                            is_unsafe: true,
+                            properties,
+                            embedding: None,
+                        });
+                        Self::walk_for_calls(node, source_bytes, result, &ext_name);
+                    }
+                }
             }
         }
     }
@@ -219,12 +322,42 @@ impl CppParser {
             }
         }
 
+        let node_content = node.utf8_text(source_bytes).unwrap_or("");
+        if node_content.contains("DUCKDB_EXTENSION_ENTRYPOINT") {
+            if let Some(start) = node_content.find("DUCKDB_EXTENSION_ENTRYPOINT") {
+                if let Some(open) = node_content[start..].find('(') {
+                    let after_open = &node_content[start + open + 1..];
+                    if let Some(comma_or_close) = after_open.find(|c| c == ',' || c == ')') {
+                        let ext = after_open[..comma_or_close].trim();
+                        if !ext.is_empty() {
+                            name = ext.to_string();
+                        }
+                    }
+                }
+            }
+        } else if name.is_empty()
+            && (node_content.contains("__global__")
+                || node_content.contains("__device__")
+                || node_content.contains("__host__"))
+        {
+            if let Some(open_paren) = node_content.find('(') {
+                let prefix = node_content[..open_paren].trim();
+                if let Some(last_word) = prefix.split_whitespace().last() {
+                    let cleaned = last_word.trim_start_matches('*');
+                    if !cleaned.is_empty()
+                        && cleaned.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        name = cleaned.to_string();
+                    }
+                }
+            }
+        }
+
         if !name.is_empty() {
             let start_line = node.start_position().row + 1;
             let end_line = node.end_position().row + 1;
 
             let mut is_nif = false;
-            let node_content = node.utf8_text(source_bytes).unwrap_or("");
             if node_content.contains("JNIEXPORT")
                 || node_content.contains("JNICALL")
                 || node_content.contains("__declspec(dllexport)")
@@ -247,6 +380,44 @@ impl CppParser {
                 properties.insert("is_template".to_string(), "true".to_string());
             }
 
+            let mut kind = "function".to_string();
+            let mut is_entry_point = is_nif;
+
+            if node_content.contains("__global__") {
+                kind = "kernel".to_string();
+                is_entry_point = true;
+                properties.insert("cuda_execution_space".to_string(), "global".to_string());
+                properties.insert("gpu_kernel".to_string(), "true".to_string());
+            } else if node_content.contains("__device__") {
+                properties.insert("cuda_execution_space".to_string(), "device".to_string());
+                properties.insert("gpu_kernel".to_string(), "true".to_string());
+            } else if node_content.contains("__host__") {
+                properties.insert("cuda_execution_space".to_string(), "host".to_string());
+            }
+
+            if node_content.contains("co_await")
+                || node_content.contains("co_yield")
+                || node_content.contains("co_return")
+            {
+                properties.insert("is_coroutine".to_string(), "true".to_string());
+                properties.insert("coroutine".to_string(), "true".to_string());
+            }
+
+            if node_content.contains("DUCKDB_EXTENSION_ENTRYPOINT")
+                || (name.ends_with("_init") && node_content.contains("duckdb"))
+            {
+                properties.insert("duckdb_extension".to_string(), "true".to_string());
+                is_entry_point = true;
+                is_nif = true;
+            }
+
+            if node_content.contains("parallel_for")
+                || node_content.contains("sycl::")
+                || node_content.contains("sycl::queue")
+            {
+                properties.insert("gpu_offload".to_string(), "sycl".to_string());
+            }
+
             if let Some(body) = Self::find_child_by_type(node, "compound_statement") {
                 // REQ-AXO-91506 — propagate caller name into call extraction.
                 Self::walk_for_calls(body, source_bytes, result, &name);
@@ -256,11 +427,11 @@ impl CppParser {
 
             result.symbols.push(Symbol {
                 name,
-                kind: "function".to_string(),
+                kind,
                 start_line,
                 end_line,
                 docstring: None,
-                is_entry_point: is_nif,
+                is_entry_point,
                 is_public: true,
                 tested: false,
                 is_nif,
@@ -321,10 +492,21 @@ impl CppParser {
         if let Some(func_node) = node.named_child(0) {
             let call_name = func_node.utf8_text(source_bytes).unwrap_or("").to_string();
             if !call_name.is_empty() {
+                let mut rel_type = "calls".to_string();
+                if call_name.contains("parallel_for") || call_name.contains("single_task") {
+                    rel_type = "dispatches_kernel".to_string();
+                } else if call_name.contains("CreateScalarFunction")
+                    || call_name.contains("CreateTableFunction")
+                    || call_name.contains("CreateVectorizedFunction")
+                    || call_name.contains("CreateAggregateFunction")
+                {
+                    rel_type = "registers_duckdb_udf".to_string();
+                }
+
                 result.relations.push(Relation {
                     from: caller.to_string(),
                     to: call_name,
-                    rel_type: "calls".to_string(),
+                    rel_type,
                     properties: HashMap::new(),
                 });
             }
@@ -511,5 +693,194 @@ mod tests {
             run.unwrap().properties.get("namespace").map(String::as_str),
             Some("engine")
         );
+    }
+
+    #[test]
+    fn test_cuda_kernels_and_execution_spaces() {
+        let cuda_code = r#"
+        __global__ void matmul_kernel(float* a, float* b, float* c, int n) {
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx < n) {
+                c[idx] = a[idx] * b[idx];
+            }
+        }
+
+        __device__ float helper_device_func(float x) {
+            return x * 2.0f;
+        }
+
+        __host__ void launch(float* a, float* b, float* c, int n) {
+            matmul_kernel<<<128, 256>>>(a, b, c, n);
+        }
+        "#;
+        let result = parser().parse(cuda_code);
+        let kernel = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "matmul_kernel")
+            .expect("matmul_kernel symbol");
+        assert_eq!(kernel.kind, "kernel");
+        assert!(kernel.is_entry_point);
+        assert_eq!(
+            kernel
+                .properties
+                .get("cuda_execution_space")
+                .map(String::as_str),
+            Some("global")
+        );
+        assert_eq!(
+            kernel.properties.get("gpu_kernel").map(String::as_str),
+            Some("true")
+        );
+
+        let dev_fn = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "helper_device_func")
+            .expect("helper_device_func symbol");
+        assert_eq!(
+            dev_fn
+                .properties
+                .get("cuda_execution_space")
+                .map(String::as_str),
+            Some("device")
+        );
+        assert_eq!(
+            dev_fn.properties.get("gpu_kernel").map(String::as_str),
+            Some("true")
+        );
+
+        let host_fn = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "launch")
+            .expect("launch symbol");
+        assert_eq!(
+            host_fn
+                .properties
+                .get("cuda_execution_space")
+                .map(String::as_str),
+            Some("host")
+        );
+    }
+
+    #[test]
+    fn test_sycl_parallel_for_dispatch() {
+        let sycl_code = r#"
+        void run_sycl(sycl::queue& q, float* data, int n) {
+            q.parallel_for(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                data[idx] = data[idx] + 1.0f;
+            });
+        }
+        "#;
+        let result = parser().parse(sycl_code);
+        let fn_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "run_sycl")
+            .expect("run_sycl symbol");
+        assert_eq!(
+            fn_sym.properties.get("gpu_offload").map(String::as_str),
+            Some("sycl")
+        );
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.rel_type == "dispatches_kernel" && r.to.contains("parallel_for")));
+    }
+
+    #[test]
+    fn test_cpp20_modules_and_imports() {
+        let module_code = r#"
+        export module math.tensor;
+
+        import math.vector;
+        import std.core;
+
+        export int compute_norm() {
+            return 42;
+        }
+        "#;
+        let result = parser().parse(module_code);
+        let mod_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "math.tensor")
+            .expect("module symbol");
+        assert_eq!(mod_sym.kind, "cpp_module");
+        assert!(mod_sym.is_public);
+
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.rel_type == "imports" && r.to == "math.vector"));
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.rel_type == "imports" && r.to == "std.core"));
+    }
+
+    #[test]
+    fn test_cpp20_coroutines() {
+        let coro_code = r#"
+        generator<int> generate_sequence(int count) {
+            for (int i = 0; i < count; ++i) {
+                co_yield i;
+            }
+            co_return;
+        }
+
+        task<void> async_task() {
+            co_await fetch_data();
+        }
+        "#;
+        let result = parser().parse(coro_code);
+        let gen_fn = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "generate_sequence")
+            .expect("generate_sequence symbol");
+        assert_eq!(
+            gen_fn.properties.get("is_coroutine").map(String::as_str),
+            Some("true")
+        );
+
+        let task_fn = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "async_task")
+            .expect("async_task symbol");
+        assert_eq!(
+            task_fn.properties.get("is_coroutine").map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn test_duckdb_extension_entrypoint_and_udf() {
+        let duckdb_code = r#"
+        DUCKDB_EXTENSION_ENTRYPOINT(custom_ext, db) {
+            con.CreateScalarFunction("custom_scalar", &ScalarFunction);
+            con.CreateTableFunction("custom_table", &TableFunction);
+        }
+        "#;
+        let result = parser().parse(duckdb_code);
+        let ext_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "custom_ext" || s.name.contains("custom_ext"))
+            .expect("duckdb extension symbol");
+        assert!(ext_sym.is_entry_point);
+        assert_eq!(
+            ext_sym
+                .properties
+                .get("duckdb_extension")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.rel_type == "registers_duckdb_udf"));
     }
 }

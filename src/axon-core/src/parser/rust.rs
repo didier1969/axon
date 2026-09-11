@@ -463,18 +463,40 @@ impl RustParser {
         // their container in PG. Canonical name :
         //   * `impl Foo` → "Foo"
         //   * `impl Trait for Foo` → "Trait for Foo"
-        // so the IST can disambiguate inherent vs trait impls.
         let mut impl_symbol_name: Option<String> = None;
+        let mut impl_props = HashMap::new();
+        let mut is_entry_point = false;
 
         if has_for && type_nodes.len() >= 2 {
             let trait_name = type_nodes[0].utf8_text(source).unwrap_or("").to_string();
             struct_name = type_nodes[1].utf8_text(source).unwrap_or("").to_string();
 
+            let mut rel_props = HashMap::new();
+            if matches!(
+                trait_name.as_str(),
+                "ExecutionPlan"
+                    | "TableProvider"
+                    | "RecordBatchStream"
+                    | "Partitioning"
+                    | "PhysicalExpr"
+            ) {
+                rel_props.insert("analytics_engine".to_string(), "datafusion".to_string());
+                rel_props.insert("datafusion_trait".to_string(), trait_name.clone());
+                impl_props.insert("analytics_engine".to_string(), "datafusion".to_string());
+                impl_props.insert("datafusion_trait".to_string(), trait_name.clone());
+            } else if trait_name == "FlightService" {
+                rel_props.insert("arrow_flight".to_string(), "true".to_string());
+                rel_props.insert("protocol".to_string(), "arrow_flight".to_string());
+                impl_props.insert("arrow_flight".to_string(), "true".to_string());
+                impl_props.insert("protocol".to_string(), "arrow_flight".to_string());
+                is_entry_point = true;
+            }
+
             result.relations.push(Relation {
                 from: struct_name.clone(),
                 to: trait_name.clone(),
                 rel_type: "implements".to_string(),
-                properties: HashMap::new(),
+                properties: rel_props,
             });
 
             impl_symbol_name = Some(format!("{} for {}", trait_name, struct_name));
@@ -490,12 +512,12 @@ impl RustParser {
                 start_line: node.start_position().row + 1,
                 end_line: node.end_position().row + 1,
                 docstring: None,
-                is_entry_point: false,
+                is_entry_point,
                 is_public: false,
                 tested: false,
                 is_nif: false,
                 is_unsafe: false,
-                properties: HashMap::new(),
+                properties: impl_props,
                 embedding: None,
             });
         }
@@ -1648,5 +1670,77 @@ mod tests {
             .relations
             .iter()
             .any(|r| r.rel_type == "subscribes_to" && r.to == "orders.inbound"));
+    }
+
+    #[test]
+    fn test_datafusion_and_arrow_flight_extraction() {
+        let p = RustParser::new();
+        let code = r#"
+            struct CustomExecPlan;
+            impl ExecutionPlan for CustomExecPlan {
+                fn schema(&self) -> SchemaRef { unimplemented!() }
+            }
+
+            struct CustomTableProvider;
+            impl TableProvider for CustomTableProvider {
+                fn schema(&self) -> SchemaRef { unimplemented!() }
+            }
+
+            struct AnalyticsFlightService;
+            impl FlightService for AnalyticsFlightService {
+                async fn do_get(&self, req: Request<Ticket>) -> Result<Response<Self::DoGetStream>, Status> {
+                    unimplemented!()
+                }
+            }
+        "#;
+        let res = p.parse(code);
+        let exec_plan = res
+            .symbols
+            .iter()
+            .find(|s| s.name.contains("ExecutionPlan for CustomExecPlan"))
+            .expect("ExecutionPlan symbol");
+        assert_eq!(
+            exec_plan
+                .properties
+                .get("analytics_engine")
+                .map(String::as_str),
+            Some("datafusion")
+        );
+        assert_eq!(
+            exec_plan
+                .properties
+                .get("datafusion_trait")
+                .map(String::as_str),
+            Some("ExecutionPlan")
+        );
+
+        let tbl = res
+            .symbols
+            .iter()
+            .find(|s| s.name.contains("TableProvider for CustomTableProvider"))
+            .expect("TableProvider symbol");
+        assert_eq!(
+            tbl.properties.get("analytics_engine").map(String::as_str),
+            Some("datafusion")
+        );
+        assert_eq!(
+            tbl.properties.get("datafusion_trait").map(String::as_str),
+            Some("TableProvider")
+        );
+
+        let flight = res
+            .symbols
+            .iter()
+            .find(|s| s.name.contains("FlightService for AnalyticsFlightService"))
+            .expect("FlightService symbol");
+        assert!(flight.is_entry_point);
+        assert_eq!(
+            flight.properties.get("arrow_flight").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            flight.properties.get("protocol").map(String::as_str),
+            Some("arrow_flight")
+        );
     }
 }
