@@ -214,14 +214,32 @@ impl PythonParser {
 
             let is_col = right_text.contains("Column(") || right_text.contains("mapped_column(");
             let is_rel = right_text.contains("relationship(");
+            let is_pydantic_or_field = right_text.contains("Field(") || left_text.contains(':');
 
-            if is_col || is_rel {
+            if is_col
+                || is_rel
+                || (is_pydantic_or_field && super::is_sensitive_name(&var_name).is_some())
+            {
                 let mut field_props = HashMap::new();
                 if is_col {
                     field_props.insert("column".to_string(), "true".to_string());
                 }
                 if is_rel {
                     field_props.insert("relation".to_string(), "relationship".to_string());
+                }
+
+                if let Some(kind) = super::is_sensitive_name(&var_name) {
+                    field_props.insert("is_sensitive".to_string(), "true".to_string());
+                    field_props.insert("pii_kind".to_string(), kind.to_string());
+                    if let Some(cls_sym) = result
+                        .symbols
+                        .iter_mut()
+                        .find(|s| s.name == class_name && s.kind == "class")
+                    {
+                        cls_sym
+                            .properties
+                            .insert("has_sensitive_fields".to_string(), "true".to_string());
+                    }
                 }
 
                 let full_field_name = format!("{}.{}", class_name, var_name);
@@ -411,11 +429,41 @@ impl PythonParser {
                                 }
                             }
                         }
+                        let lower_dec = dec_text.to_ascii_lowercase();
+                        if lower_dec.contains("login_required")
+                            || lower_dec.contains("jwt_required")
+                            || lower_dec.contains("auth_required")
+                            || lower_dec.contains("permission_required")
+                        {
+                            props.insert("is_auth_boundary".to_string(), "true".to_string());
+                            props.insert(
+                                "auth_mechanism".to_string(),
+                                "decorator_guard".to_string(),
+                            );
+                        }
+
                         if let Some(id) = self.find_child_by_type(child, "identifier") {
                             let dec_name = id.utf8_text(source).unwrap_or("").to_string();
                             props.insert(format!("decorator_{}", dec_name), "true".to_string());
                         }
                     }
+                }
+            }
+        }
+
+        if let Some(params_node) = self.find_child_by_type(node, "parameters") {
+            let params_text = params_node.utf8_text(source).unwrap_or("");
+            if params_text.contains("Depends(") || params_text.contains("Security(") {
+                let lower_params = params_text.to_ascii_lowercase();
+                if lower_params.contains("auth")
+                    || lower_params.contains("user")
+                    || lower_params.contains("token")
+                    || lower_params.contains("jwt")
+                    || lower_params.contains("credential")
+                    || lower_params.contains("bearer")
+                {
+                    props.insert("is_auth_boundary".to_string(), "true".to_string());
+                    props.insert("auth_mechanism".to_string(), "fastapi_security".to_string());
                 }
             }
         }
@@ -1431,6 +1479,106 @@ async def send_events(producer):
                 .iter()
                 .any(|r| r.rel_type == "dispatches_job" && r.to == "process_order"),
             "should dispatch job process_order"
+        );
+    }
+
+    #[test]
+    fn test_python_security_boundaries_and_pii() {
+        let parser = PythonParser::new();
+        let content = r#"
+class Account(Base):
+    __tablename__ = "accounts"
+    id = Column(Integer, primary_key=True)
+    username = Column(String)
+    password_hash = Column(String)
+    ssn = Column(String)
+
+@router.get("/profile")
+def get_user_profile(user = Depends(get_current_user)):
+    return {"user": user}
+
+@app.route("/admin")
+@login_required
+def admin_panel():
+    return "admin"
+"#;
+
+        let result = parser.parse(content);
+
+        // 1. Verify sensitive fields on Account
+        let acct_cls = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Account" && s.kind == "class")
+            .expect("Account class");
+        assert_eq!(
+            acct_cls
+                .properties
+                .get("has_sensitive_fields")
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+
+        let pwd_field = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Account.password_hash")
+            .expect("password_hash field");
+        assert_eq!(
+            pwd_field.properties.get("is_sensitive").map(|s| s.as_str()),
+            Some("true")
+        );
+
+        let ssn_field = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Account.ssn")
+            .expect("ssn field");
+        assert_eq!(
+            ssn_field.properties.get("pii_kind").map(|s| s.as_str()),
+            Some("identity")
+        );
+
+        // 2. Verify FastAPI auth dependency
+        let profile_fn = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "get_user_profile")
+            .expect("get_user_profile function");
+        assert_eq!(
+            profile_fn
+                .properties
+                .get("is_auth_boundary")
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            profile_fn
+                .properties
+                .get("auth_mechanism")
+                .map(|s| s.as_str()),
+            Some("fastapi_security")
+        );
+
+        // 3. Verify decorator guard
+        let admin_fn = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "admin_panel")
+            .expect("admin_panel function");
+        assert_eq!(
+            admin_fn
+                .properties
+                .get("is_auth_boundary")
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            admin_fn
+                .properties
+                .get("auth_mechanism")
+                .map(|s| s.as_str()),
+            Some("decorator_guard")
         );
     }
 }

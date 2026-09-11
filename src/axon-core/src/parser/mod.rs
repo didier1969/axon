@@ -229,6 +229,7 @@ pub mod cpp;
 pub mod css;
 pub mod datalog;
 pub mod docker;
+pub mod dotenv;
 pub mod elixir;
 pub mod go;
 pub mod graphql;
@@ -244,6 +245,7 @@ pub mod openapi;
 pub mod php;
 pub mod proto;
 pub mod python;
+pub mod rego;
 pub mod ruby;
 pub mod rust;
 pub mod scheme;
@@ -255,6 +257,39 @@ pub mod typeql;
 pub mod typescript;
 pub mod xml;
 pub mod yaml;
+
+pub fn is_sensitive_name(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("password")
+        || lower.contains("passwd")
+        || lower.contains("salt")
+        || lower.contains("pin")
+    {
+        Some("credential")
+    } else if lower.contains("secret")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("token")
+        || lower.contains("private_key")
+    {
+        Some("secret")
+    } else if lower.contains("credit_card")
+        || lower.contains("card_number")
+        || lower.contains("cvv")
+        || lower.contains("cvc")
+        || lower.contains("iban")
+    {
+        Some("financial")
+    } else if lower.contains("ssn")
+        || lower.contains("social_security")
+        || lower.contains("passport")
+        || lower.contains("tax_id")
+    {
+        Some("identity")
+    } else {
+        None
+    }
+}
 
 const SUPPORTED_PARSER_ECOSYSTEMS: &[EcosystemId] = &[
     EcosystemId::JavaScript,
@@ -358,6 +393,8 @@ pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "timer",
     "socket",
     "target",
+    "rego",
+    "env",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
@@ -376,6 +413,9 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
             || (file_name.starts_with("requirements") && file_name.ends_with(".txt"))
         {
             return Some(Box::new(manifest::RequirementsTxtParser::new()));
+        }
+        if file_name == ".env" || file_name.starts_with(".env.") || file_name.ends_with(".env") {
+            return Some(Box::new(dotenv::DotenvParser::new()));
         }
     }
 
@@ -413,6 +453,8 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "toml" => Some(Box::new(toml::TomlParser::new())),
         "tf" | "tfvars" => Some(Box::new(hcl::HclParser::new())),
         "service" | "timer" | "socket" | "target" => Some(Box::new(systemd::SystemdParser::new())),
+        "rego" => Some(Box::new(rego::RegoParser::new())),
+        "env" => Some(Box::new(dotenv::DotenvParser::new())),
         // llmlang: construct WITH the real path so `lll export-ist` resolves the
         // file's `import`s against the actual workspace (REQ-LLL-021).
         "lll" => Some(Box::new(lll::LllParser::with_path(path.to_path_buf()))),
@@ -691,5 +733,27 @@ mod extensions_parsables_tests {
                 "{ext} doit obtenir un parser"
             );
         }
+    }
+
+    #[test]
+    fn les_fichiers_securite_et_env_sont_parsables() {
+        for ext in ["rego", "env"] {
+            assert!(
+                PARSEABLE_EXTENSIONS.contains(&ext),
+                "{ext} doit etre declaree parsable"
+            );
+            assert!(
+                get_parser_for_file(&PathBuf::from(format!("policy.{ext}"))).is_some(),
+                "{ext} doit obtenir un parser"
+            );
+        }
+        assert!(
+            get_parser_for_file(&PathBuf::from(".env.example")).is_some(),
+            ".env.example doit obtenir un parser"
+        );
+        assert!(
+            get_parser_for_file(&PathBuf::from(".env")).is_some(),
+            ".env doit obtenir un parser"
+        );
     }
 }

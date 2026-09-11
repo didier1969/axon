@@ -190,6 +190,23 @@ impl ElixirParser {
                     module_name,
                     aliases,
                 ),
+                "policies" => Self::extract_ash_policies(
+                    node,
+                    source_bytes,
+                    content,
+                    result,
+                    module_name,
+                    aliases,
+                ),
+                "plug" => Self::extract_plug(node, source_bytes, result, module_name, aliases),
+                "pipeline" => Self::extract_pipeline(
+                    node,
+                    source_bytes,
+                    content,
+                    result,
+                    module_name,
+                    aliases,
+                ),
                 x if IMPORT_DIRECTIVES.contains(&x) => {
                     Self::extract_import_directive(node, source_bytes, result, x, module_name)
                 }
@@ -551,6 +568,34 @@ impl ElixirParser {
                         let mut props = HashMap::new();
                         if !field_type.is_empty() {
                             props.insert("type".to_string(), field_type);
+                        }
+
+                        let is_redacted = arg_nodes.iter().any(|arg| {
+                            arg.utf8_text(source_bytes)
+                                .unwrap_or("")
+                                .contains("redact: true")
+                        });
+
+                        let sensitive_kind = if is_redacted {
+                            Some("redacted")
+                        } else {
+                            super::is_sensitive_name(&field_name)
+                        };
+
+                        if let Some(kind) = sensitive_kind {
+                            props.insert("is_sensitive".to_string(), "true".to_string());
+                            props.insert("pii_kind".to_string(), kind.to_string());
+
+                            let schema_sym_name = format!("{}.schema", module_name);
+                            if let Some(schema_sym) = result
+                                .symbols
+                                .iter_mut()
+                                .find(|s| s.name == schema_sym_name)
+                            {
+                                schema_sym
+                                    .properties
+                                    .insert("has_sensitive_fields".to_string(), "true".to_string());
+                            }
                         }
 
                         result.symbols.push(Symbol {
@@ -1172,6 +1217,267 @@ impl ElixirParser {
                     });
                 }
             }
+        }
+    }
+
+    fn extract_ash_policies<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        _content: &str,
+        result: &mut ExtractionResult,
+        module_name: &str,
+        _aliases: &HashMap<String, String>,
+    ) {
+        let set_name = format!("{}.policies", module_name);
+        let mut props = HashMap::new();
+        props.insert("framework".to_string(), "ash".to_string());
+        props.insert("is_auth_boundary".to_string(), "true".to_string());
+
+        result.symbols.push(Symbol {
+            name: set_name.clone(),
+            kind: "ash_policy_set".to_string(),
+            start_line: node.start_position().row + 1,
+            end_line: node.end_position().row + 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: props,
+            embedding: None,
+        });
+
+        result.relations.push(Relation {
+            from: module_name.to_string(),
+            to: set_name.clone(),
+            rel_type: "enforces_policy".to_string(),
+            properties: HashMap::new(),
+        });
+
+        let Some(do_block) = Self::find_child_by_type(node, "do_block") else {
+            return;
+        };
+
+        let mut cursor = do_block.walk();
+        for child in do_block.named_children(&mut cursor) {
+            if child.kind() != "call" {
+                continue;
+            }
+            let Some(ident) = Self::call_identifier(child, source_bytes) else {
+                continue;
+            };
+
+            if ident == "policy" || ident == "bypass" {
+                let is_bypass = ident == "bypass";
+                let args_text = Self::find_child_by_type(child, "arguments")
+                    .and_then(|a| a.utf8_text(source_bytes).ok())
+                    .unwrap_or("");
+
+                let action_desc = if !args_text.is_empty() {
+                    args_text
+                        .replace(' ', "")
+                        .replace(':', "")
+                        .replace(['(', ')', '[', ']', ','], "_")
+                } else {
+                    child.start_position().row.to_string()
+                };
+
+                let rule_name = format!("{}.{}:{}", module_name, ident, action_desc);
+                let mut rule_props = HashMap::new();
+                rule_props.insert("framework".to_string(), "ash".to_string());
+                rule_props.insert("is_bypass".to_string(), is_bypass.to_string());
+                if !args_text.is_empty() {
+                    rule_props.insert("action_type".to_string(), args_text.to_string());
+                }
+
+                result.symbols.push(Symbol {
+                    name: rule_name.clone(),
+                    kind: "policy_rule".to_string(),
+                    start_line: child.start_position().row + 1,
+                    end_line: child.end_position().row + 1,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: rule_props,
+                    embedding: None,
+                });
+
+                result.relations.push(Relation {
+                    from: set_name.clone(),
+                    to: rule_name,
+                    rel_type: "contains".to_string(),
+                    properties: HashMap::new(),
+                });
+            }
+        }
+    }
+
+    fn extract_plug<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        module_name: &str,
+        aliases: &HashMap<String, String>,
+    ) {
+        let Some(args) = Self::find_child_by_type(node, "arguments") else {
+            return;
+        };
+        let mut ac = args.walk();
+        let first_arg = args.named_children(&mut ac).next();
+        let Some(first_arg_node) = first_arg else {
+            return;
+        };
+
+        let raw_plug_name = first_arg_node.utf8_text(source_bytes).unwrap_or("");
+        let plug_name = raw_plug_name.trim_start_matches(':').to_string();
+        let full_target = aliases
+            .get(&plug_name)
+            .cloned()
+            .unwrap_or_else(|| plug_name.clone());
+
+        let lower = plug_name.to_ascii_lowercase();
+        let is_auth = lower.contains("auth")
+            || lower.contains("jwt")
+            || lower.contains("token")
+            || lower.contains("session")
+            || lower.contains("guardian")
+            || lower.contains("pow")
+            || lower.contains("security")
+            || lower.contains("permission");
+
+        let mut props = HashMap::new();
+        if is_auth {
+            props.insert("is_auth_boundary".to_string(), "true".to_string());
+            let auth_mech = if lower.contains("jwt") || lower.contains("guardian") {
+                "jwt"
+            } else if lower.contains("session") {
+                "session"
+            } else {
+                "auth"
+            };
+            props.insert("auth_mechanism".to_string(), auth_mech.to_string());
+
+            let root_module = if let Some(idx) = module_name.find(".pipeline:") {
+                &module_name[..idx]
+            } else {
+                module_name
+            };
+
+            if let Some(mod_sym) = result
+                .symbols
+                .iter_mut()
+                .find(|s| s.name == root_module || s.name == module_name)
+            {
+                mod_sym
+                    .properties
+                    .insert("is_auth_boundary".to_string(), "true".to_string());
+            }
+            if root_module != module_name {
+                if let Some(mod_sym) = result.symbols.iter_mut().find(|s| s.name == root_module) {
+                    mod_sym
+                        .properties
+                        .insert("is_auth_boundary".to_string(), "true".to_string());
+                }
+            }
+
+            let sym_name = format!("{}.plug:{}", module_name, plug_name);
+            result.symbols.push(Symbol {
+                name: sym_name,
+                kind: "plug".to_string(),
+                start_line: node.start_position().row + 1,
+                end_line: node.end_position().row + 1,
+                docstring: None,
+                is_entry_point: true,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: props.clone(),
+                embedding: None,
+            });
+
+            result.relations.push(Relation {
+                from: root_module.to_string(),
+                to: full_target,
+                rel_type: "enforces_auth".to_string(),
+                properties: props,
+            });
+        } else {
+            let root_module = if let Some(idx) = module_name.find(".pipeline:") {
+                &module_name[..idx]
+            } else {
+                module_name
+            };
+            result.relations.push(Relation {
+                from: root_module.to_string(),
+                to: full_target,
+                rel_type: "uses_plug".to_string(),
+                properties: HashMap::new(),
+            });
+        }
+    }
+
+    fn extract_pipeline<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        content: &str,
+        result: &mut ExtractionResult,
+        module_name: &str,
+        aliases: &HashMap<String, String>,
+    ) {
+        let pipe_name = Self::find_child_by_type(node, "arguments")
+            .and_then(|a| a.utf8_text(source_bytes).ok())
+            .map(|s| s.trim().trim_start_matches(':').to_string())
+            .unwrap_or_else(|| "pipeline".to_string());
+
+        let lower = pipe_name.to_ascii_lowercase();
+        let is_auth = lower.contains("auth")
+            || lower.contains("protect")
+            || lower.contains("secure")
+            || lower.contains("private");
+
+        let mut props = HashMap::new();
+        if is_auth {
+            props.insert("is_auth_boundary".to_string(), "true".to_string());
+        }
+
+        let full_pipe_name = format!("{}.pipeline:{}", module_name, pipe_name);
+        result.symbols.push(Symbol {
+            name: full_pipe_name.clone(),
+            kind: "pipeline".to_string(),
+            start_line: node.start_position().row + 1,
+            end_line: node.end_position().row + 1,
+            docstring: None,
+            is_entry_point: true,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: props,
+            embedding: None,
+        });
+
+        result.relations.push(Relation {
+            from: module_name.to_string(),
+            to: full_pipe_name.clone(),
+            rel_type: "contains".to_string(),
+            properties: HashMap::new(),
+        });
+
+        if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
+            Self::walk(
+                do_block,
+                source_bytes,
+                content,
+                result,
+                &full_pipe_name,
+                &mut Vec::new(),
+                aliases,
+            );
         }
     }
 
@@ -2873,5 +3179,136 @@ mod tests {
                 .any(|r| r.rel_type == "subscribes_to" && r.to == "room:lobby"),
             "channel should subscribe to room:lobby"
         );
+    }
+
+    #[test]
+    fn test_elixir_security_policies_plugs_and_pii() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule MyApp.Accounts.User do
+          use Ecto.Schema
+          use Ash.Resource
+
+          schema "users" do
+            field :email, :string
+            field :password_hash, :string, redact: true
+            field :credit_card, :string
+          end
+
+          policies do
+            policy action_type(:read) do
+              authorize_if always()
+            end
+
+            bypass actor_attribute_equals(:admin, true) do
+              authorize_if always()
+            end
+          end
+        end
+
+        defmodule MyAppWeb.Router do
+          use Phoenix.Router
+
+          pipeline :authenticated do
+            plug MyAppWeb.AuthPlug
+            plug Guardian.Plug.EnsureAuthenticated
+          end
+
+          scope "/api", MyAppWeb do
+            pipe_through :authenticated
+            get "/users", UserController, :index
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+
+        // 1. Verify Ecto sensitive fields & schema marking
+        let schema_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "MyApp.Accounts.User.schema")
+            .expect("schema symbol");
+        assert_eq!(
+            schema_sym
+                .properties
+                .get("has_sensitive_fields")
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+
+        let pwd_field = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "MyApp.Accounts.User.password_hash")
+            .expect("password_hash field");
+        assert_eq!(
+            pwd_field.properties.get("is_sensitive").map(|s| s.as_str()),
+            Some("true")
+        );
+
+        let cc_field = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "MyApp.Accounts.User.credit_card")
+            .expect("credit_card field");
+        assert_eq!(
+            cc_field.properties.get("is_sensitive").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            cc_field.properties.get("pii_kind").map(|s| s.as_str()),
+            Some("financial")
+        );
+
+        // 2. Verify Ash policies
+        let policy_set = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "MyApp.Accounts.User.policies")
+            .expect("ash policy set");
+        assert_eq!(
+            policy_set
+                .properties
+                .get("is_auth_boundary")
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "MyApp.Accounts.User"
+                && r.to == "MyApp.Accounts.User.policies"
+                && r.rel_type == "enforces_policy"));
+
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.kind == "policy_rule" && s.name.contains("policy")));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.kind == "policy_rule" && s.name.contains("bypass")));
+
+        // 3. Verify Plugs & Router auth boundary
+        let router_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "MyAppWeb.Router")
+            .expect("router symbol");
+        assert_eq!(
+            router_sym
+                .properties
+                .get("is_auth_boundary")
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+
+        assert!(result.relations.iter().any(|r| r.from == "MyAppWeb.Router"
+            && r.to == "MyAppWeb.AuthPlug"
+            && r.rel_type == "enforces_auth"));
+        assert!(result.relations.iter().any(|r| r.from == "MyAppWeb.Router"
+            && r.to == "Guardian.Plug.EnsureAuthenticated"
+            && r.rel_type == "enforces_auth"));
     }
 }

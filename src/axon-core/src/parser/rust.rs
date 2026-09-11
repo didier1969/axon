@@ -238,6 +238,21 @@ impl RustParser {
             }
         }
 
+        if let Some(params_node) = self.find_child_by_type(node, "parameters") {
+            if let Ok(params_text) = params_node.utf8_text(source) {
+                if params_text.contains("Claims")
+                    || params_text.contains("JwtClaims")
+                    || params_text.contains("BearerAuth")
+                    || params_text.contains("AuthUser")
+                    || params_text.contains("CurrentUser")
+                    || params_text.contains("AuthenticatedUser")
+                {
+                    props.insert("is_auth_boundary".to_string(), "true".to_string());
+                    props.insert("auth_mechanism".to_string(), "jwt".to_string());
+                }
+            }
+        }
+
         if let Some(block) = self.find_child_by_type(node, "block") {
             if let Ok(body_text) = block.utf8_text(source) {
                 if body_text.contains(".unwrap()")
@@ -245,6 +260,13 @@ impl RustParser {
                     || body_text.contains(".expect(")
                 {
                     props.insert("can_panic".to_string(), "true".to_string());
+                }
+                if body_text.contains("ValidateRequestHeaderLayer")
+                    || body_text.contains("auth_layer")
+                    || body_text.contains("require_authorization")
+                {
+                    props.insert("is_auth_boundary".to_string(), "true".to_string());
+                    props.insert("auth_mechanism".to_string(), "layer_middleware".to_string());
                 }
             }
             props.insert(
@@ -374,6 +396,52 @@ impl RustParser {
             return;
         };
 
+        let mut has_sensitive_fields = false;
+        if let Some(field_list) = self.find_child_by_type(node, "field_declaration_list") {
+            let mut cursor = field_list.walk();
+            for field in field_list.children(&mut cursor) {
+                if field.kind() == "field_declaration" {
+                    if let Some(field_id) = self.find_child_by_type(field, "field_identifier") {
+                        let fname = field_id.utf8_text(source).unwrap_or("");
+                        if let Some(kind) = super::is_sensitive_name(fname) {
+                            has_sensitive_fields = true;
+                            let full_field_name = format!("{}.{}", name, fname);
+                            let mut field_props = HashMap::new();
+                            field_props.insert("is_sensitive".to_string(), "true".to_string());
+                            field_props.insert("pii_kind".to_string(), kind.to_string());
+
+                            result.symbols.push(Symbol {
+                                name: full_field_name.clone(),
+                                kind: "field".to_string(),
+                                start_line: field.start_position().row + 1,
+                                end_line: field.end_position().row + 1,
+                                docstring: None,
+                                is_entry_point: false,
+                                is_public: self.has_visibility(field),
+                                tested: false,
+                                is_nif: false,
+                                is_unsafe: false,
+                                properties: field_props,
+                                embedding: None,
+                            });
+
+                            result.relations.push(Relation {
+                                from: name.clone(),
+                                to: full_field_name,
+                                rel_type: "contains".to_string(),
+                                properties: HashMap::new(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut struct_props = HashMap::new();
+        if has_sensitive_fields {
+            struct_props.insert("has_sensitive_fields".to_string(), "true".to_string());
+        }
+
         result.symbols.push(Symbol {
             name,
             kind: "struct".to_string(),
@@ -385,7 +453,7 @@ impl RustParser {
             tested: false,
             is_nif: false,
             is_unsafe: false,
-            properties: HashMap::new(),
+            properties: struct_props,
             embedding: None,
         });
     }
@@ -1741,6 +1809,103 @@ mod tests {
         assert_eq!(
             flight.properties.get("protocol").map(String::as_str),
             Some("arrow_flight")
+        );
+    }
+
+    #[test]
+    fn test_rust_security_boundaries_and_pii() {
+        let parser = RustParser::new();
+        let code = r#"
+pub struct UserAccount {
+    pub id: u64,
+    pub username: String,
+    pub password_hash: String,
+    pub api_key: String,
+}
+
+pub async fn secure_handler(
+    claims: Claims,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    "ok"
+}
+
+pub fn create_router() -> Router {
+    Router::new()
+        .route("/protected", get(secure_handler))
+        .layer(auth_layer)
+}
+"#;
+
+        let res = parser.parse(code);
+
+        // 1. Verify UserAccount sensitive fields
+        let acct_struct = res
+            .symbols
+            .iter()
+            .find(|s| s.name == "UserAccount" && s.kind == "struct")
+            .expect("UserAccount struct");
+        assert_eq!(
+            acct_struct
+                .properties
+                .get("has_sensitive_fields")
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+
+        let pwd_field = res
+            .symbols
+            .iter()
+            .find(|s| s.name == "UserAccount.password_hash")
+            .expect("password_hash field");
+        assert_eq!(
+            pwd_field.properties.get("is_sensitive").map(|s| s.as_str()),
+            Some("true")
+        );
+
+        let key_field = res
+            .symbols
+            .iter()
+            .find(|s| s.name == "UserAccount.api_key")
+            .expect("api_key field");
+        assert_eq!(
+            key_field.properties.get("pii_kind").map(|s| s.as_str()),
+            Some("secret")
+        );
+
+        // 2. Verify secure_handler auth boundary
+        let handler_fn = res
+            .symbols
+            .iter()
+            .find(|s| s.name == "secure_handler")
+            .expect("secure_handler function");
+        assert_eq!(
+            handler_fn
+                .properties
+                .get("is_auth_boundary")
+                .map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            handler_fn
+                .properties
+                .get("auth_mechanism")
+                .map(|s| s.as_str()),
+            Some("jwt")
+        );
+
+        // 3. Verify router auth layer
+        let router_fn = res
+            .symbols
+            .iter()
+            .find(|s| s.name == "create_router")
+            .expect("create_router function");
+        assert_eq!(
+            router_fn
+                .properties
+                .get("is_auth_boundary")
+                .map(|s| s.as_str()),
+            Some("true")
         );
     }
 }
