@@ -336,6 +336,10 @@ fn default_supported_extensions() -> Vec<String> {
         "target".to_string(),
         "rego".to_string(),
         "env".to_string(),
+        "fbs".to_string(),
+        "capnp".to_string(),
+        "avsc".to_string(),
+        "wit".to_string(),
         // llmlang: a `.lll` file is parsed by the shell-out bridge (parser/lll.rs
         // → `lll export-ist`), which yields semantic symbols (content-hash,
         // purity, contracts). Without this the scanner excludes it pre-parse

@@ -223,14 +223,17 @@ mod security_finding_tests {
 
 pub mod phantom;
 
+pub mod avro;
 pub mod c;
 pub mod c_sharp;
+pub mod capnp;
 pub mod cpp;
 pub mod css;
 pub mod datalog;
 pub mod docker;
 pub mod dotenv;
 pub mod elixir;
+pub mod fbs;
 pub mod go;
 pub mod graphql;
 pub mod hcl;
@@ -255,6 +258,7 @@ pub mod text;
 pub mod toml;
 pub mod typeql;
 pub mod typescript;
+pub mod wit;
 pub mod xml;
 pub mod yaml;
 
@@ -395,6 +399,10 @@ pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "target",
     "rego",
     "env",
+    "fbs",
+    "capnp",
+    "avsc",
+    "wit",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
@@ -455,6 +463,10 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "service" | "timer" | "socket" | "target" => Some(Box::new(systemd::SystemdParser::new())),
         "rego" => Some(Box::new(rego::RegoParser::new())),
         "env" => Some(Box::new(dotenv::DotenvParser::new())),
+        "fbs" => Some(Box::new(fbs::FbsParser::new())),
+        "capnp" => Some(Box::new(capnp::CapnpParser::new())),
+        "avsc" => Some(Box::new(avro::AvroParser::new())),
+        "wit" => Some(Box::new(wit::WitParser::new())),
         // llmlang: construct WITH the real path so `lll export-ist` resolves the
         // file's `import`s against the actual workspace (REQ-LLL-021).
         "lll" => Some(Box::new(lll::LllParser::with_path(path.to_path_buf()))),
@@ -755,5 +767,19 @@ mod extensions_parsables_tests {
             get_parser_for_file(&PathBuf::from(".env")).is_some(),
             ".env doit obtenir un parser"
         );
+    }
+
+    #[test]
+    fn les_fichiers_serialisation_et_wasm_sont_parsables() {
+        for ext in ["fbs", "capnp", "avsc", "wit"] {
+            assert!(
+                PARSEABLE_EXTENSIONS.contains(&ext),
+                "{ext} doit etre declaree parsable"
+            );
+            assert!(
+                get_parser_for_file(&PathBuf::from(format!("schema.{ext}"))).is_some(),
+                "{ext} doit obtenir un parser"
+            );
+        }
     }
 }

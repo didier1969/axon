@@ -268,6 +268,65 @@ impl ElixirParser {
                 &mut Vec::new(),
                 &module_aliases,
             );
+
+            // Check Ecto migration reversibility
+            let is_migration = result
+                .symbols
+                .iter()
+                .find(|s| s.name == new_module_name && s.kind == "module")
+                .map(|s| s.properties.get("is_migration").map(|v| v.as_str()) == Some("true"))
+                .unwrap_or(false);
+
+            if is_migration {
+                let has_change = result
+                    .symbols
+                    .iter()
+                    .any(|s| s.name == format!("{}.change", new_module_name));
+                let has_up = result
+                    .symbols
+                    .iter()
+                    .any(|s| s.name == format!("{}.up", new_module_name));
+                let has_down = result
+                    .symbols
+                    .iter()
+                    .any(|s| s.name == format!("{}.down", new_module_name));
+                let has_raw_exec = result
+                    .symbols
+                    .iter()
+                    .find(|s| s.name == format!("{}.change", new_module_name))
+                    .and_then(|s| s.properties.get("raw_execute"))
+                    .map(|v| v == "true")
+                    .unwrap_or(false);
+
+                let (is_rev, risk) = if has_up && !has_down {
+                    ("false", Some("irreversible_up_only"))
+                } else if has_up && has_down {
+                    ("true", None)
+                } else if has_change {
+                    if has_raw_exec {
+                        ("false", Some("raw_execute_in_change"))
+                    } else {
+                        ("true", None)
+                    }
+                } else {
+                    ("false", None)
+                };
+
+                if let Some(mod_sym) = result
+                    .symbols
+                    .iter_mut()
+                    .find(|s| s.name == new_module_name && s.kind == "module")
+                {
+                    mod_sym
+                        .properties
+                        .insert("is_reversible".to_string(), is_rev.to_string());
+                    if let Some(r) = risk {
+                        mod_sym
+                            .properties
+                            .insert("migration_risk".to_string(), r.to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -751,6 +810,14 @@ impl ElixirParser {
             }
             let complexity = 1 + Self::count_branches(body_node, source_bytes);
             properties.insert("cyclomatic_complexity".to_string(), complexity.to_string());
+
+            if func_name == "change" {
+                if let Ok(body_text) = body_node.utf8_text(source_bytes) {
+                    if body_text.contains("execute ") || body_text.contains("execute(") {
+                        properties.insert("raw_execute".to_string(), "true".to_string());
+                    }
+                }
+            }
         }
 
         let node_content = node.utf8_text(source_bytes).unwrap_or("");
@@ -1156,6 +1223,16 @@ impl ElixirParser {
                     properties: props,
                     embedding: None,
                 });
+            } else if module_alias == "Ecto.Migration" || module_alias.ends_with(".Migration") {
+                if let Some(mod_sym) = result
+                    .symbols
+                    .iter_mut()
+                    .find(|s| s.name == module_name && s.kind == "module")
+                {
+                    mod_sym
+                        .properties
+                        .insert("is_migration".to_string(), "true".to_string());
+                }
             }
         }
     }
@@ -3310,5 +3387,107 @@ mod tests {
         assert!(result.relations.iter().any(|r| r.from == "MyAppWeb.Router"
             && r.to == "Guardian.Plug.EnsureAuthenticated"
             && r.rel_type == "enforces_auth"));
+    }
+
+    #[test]
+    fn test_elixir_migration_reversibility() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Repo.Migrations.AddUsersTable do
+          use Ecto.Migration
+
+          def change do
+            create table(:users) do
+              add :email, :string
+            end
+          end
+        end
+
+        defmodule Repo.Migrations.IrreversibleUpOnly do
+          use Ecto.Migration
+
+          def up do
+            execute "ALTER TABLE users ADD COLUMN age INT"
+          end
+        end
+
+        defmodule Repo.Migrations.ReversibleUpDown do
+          use Ecto.Migration
+
+          def up do
+            execute "CREATE INDEX idx_users_email ON users(email)"
+          end
+
+          def down do
+            execute "DROP INDEX idx_users_email"
+          end
+        end
+
+        defmodule Repo.Migrations.ChangeWithExecute do
+          use Ecto.Migration
+
+          def change do
+            execute "DROP TABLE legacy_data"
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+
+        // 1. Standard change is reversible
+        let m1 = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Repo.Migrations.AddUsersTable")
+            .unwrap();
+        assert_eq!(
+            m1.properties.get("is_migration").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            m1.properties.get("is_reversible").map(|s| s.as_str()),
+            Some("true")
+        );
+
+        // 2. Up only is not reversible
+        let m2 = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Repo.Migrations.IrreversibleUpOnly")
+            .unwrap();
+        assert_eq!(
+            m2.properties.get("is_reversible").map(|s| s.as_str()),
+            Some("false")
+        );
+        assert_eq!(
+            m2.properties.get("migration_risk").map(|s| s.as_str()),
+            Some("irreversible_up_only")
+        );
+
+        // 3. Up and Down is reversible
+        let m3 = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Repo.Migrations.ReversibleUpDown")
+            .unwrap();
+        assert_eq!(
+            m3.properties.get("is_reversible").map(|s| s.as_str()),
+            Some("true")
+        );
+
+        // 4. Change with raw execute is flagged as risk
+        let m4 = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Repo.Migrations.ChangeWithExecute")
+            .unwrap();
+        assert_eq!(
+            m4.properties.get("is_reversible").map(|s| s.as_str()),
+            Some("false")
+        );
+        assert_eq!(
+            m4.properties.get("migration_risk").map(|s| s.as_str()),
+            Some("raw_execute_in_change")
+        );
     }
 }
