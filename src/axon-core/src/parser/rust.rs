@@ -764,6 +764,54 @@ impl RustParser {
             }
         }
 
+        let call_text = node.utf8_text(source).unwrap_or("");
+        if call_text.contains(".publish(")
+            || call_text.contains(".send(")
+            || call_text.contains(".subscribe(")
+        {
+            let is_sub = call_text.contains(".subscribe(");
+            if let Some(first_quote) = call_text.find('"') {
+                let rest = &call_text[first_quote + 1..];
+                if let Some(second_quote) = rest.find('"') {
+                    let topic_name = rest[..second_quote].to_string();
+                    if !topic_name.is_empty() {
+                        let start_line = node.start_position().row + 1;
+                        let end_line = node.end_position().row + 1;
+                        if !result
+                            .symbols
+                            .iter()
+                            .any(|s| s.kind == "topic" && s.name == topic_name)
+                        {
+                            result.symbols.push(Symbol {
+                                name: topic_name.clone(),
+                                kind: "topic".to_string(),
+                                start_line,
+                                end_line,
+                                docstring: None,
+                                is_entry_point: false,
+                                is_public: true,
+                                tested: false,
+                                is_nif: false,
+                                is_unsafe: false,
+                                properties: HashMap::new(),
+                                embedding: None,
+                            });
+                        }
+                        result.relations.push(Relation {
+                            from: current_function.to_string(),
+                            to: topic_name,
+                            rel_type: if is_sub {
+                                "subscribes_to".to_string()
+                            } else {
+                                "publishes_to".to_string()
+                            },
+                            properties: HashMap::new(),
+                        });
+                    }
+                }
+            }
+        }
+
         self.walk_for_calls(node, source, result, true, current_function);
     }
 
@@ -788,10 +836,54 @@ impl RustParser {
             }
             result.relations.push(Relation {
                 from: current_function.to_string(),
-                to: name,
+                to: name.clone(),
                 rel_type: "calls".to_string(),
                 properties: props,
             });
+
+            if name == "publish" || name == "send" || name == "subscribe" {
+                let text = node.utf8_text(source).unwrap_or("");
+                if let Some(first_quote) = text.find('"') {
+                    let rest = &text[first_quote + 1..];
+                    if let Some(second_quote) = rest.find('"') {
+                        let topic_name = rest[..second_quote].to_string();
+                        if !topic_name.is_empty() {
+                            let start_line = node.start_position().row + 1;
+                            let end_line = node.end_position().row + 1;
+                            if !result
+                                .symbols
+                                .iter()
+                                .any(|s| s.kind == "topic" && s.name == topic_name)
+                            {
+                                result.symbols.push(Symbol {
+                                    name: topic_name.clone(),
+                                    kind: "topic".to_string(),
+                                    start_line,
+                                    end_line,
+                                    docstring: None,
+                                    is_entry_point: false,
+                                    is_public: true,
+                                    tested: false,
+                                    is_nif: false,
+                                    is_unsafe: false,
+                                    properties: HashMap::new(),
+                                    embedding: None,
+                                });
+                            }
+                            result.relations.push(Relation {
+                                from: current_function.to_string(),
+                                to: topic_name,
+                                rel_type: if name == "subscribe" {
+                                    "subscribes_to".to_string()
+                                } else {
+                                    "publishes_to".to_string()
+                                },
+                                properties: HashMap::new(),
+                            });
+                        }
+                    }
+                }
+            }
         }
         self.walk_for_calls(node, source, result, false, current_function);
     }
@@ -1516,5 +1608,45 @@ mod tests {
             jni_fn.is_entry_point,
             "jni function must have is_entry_point=true"
         );
+    }
+
+    #[test]
+    fn test_tranche7_rust_pubsub_topic_extraction() {
+        let p = parser();
+        let code = r#"
+            async fn publish_telemetry(client: &Client) {
+                client.publish("telemetry.v1", payload).await;
+            }
+            async fn subscribe_orders(consumer: &Consumer) {
+                consumer.subscribe("orders.inbound").await;
+            }
+        "#;
+        let res = p.parse(code);
+        if res.symbols.is_empty() {
+            eprintln!("rust wasm grammar unavailable, skipping");
+            return;
+        }
+        let topics: Vec<&str> = res
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "topic")
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            topics.contains(&"telemetry.v1"),
+            "telemetry.v1 topic extracted, got {topics:?}"
+        );
+        assert!(
+            topics.contains(&"orders.inbound"),
+            "orders.inbound topic extracted, got {topics:?}"
+        );
+        assert!(res
+            .relations
+            .iter()
+            .any(|r| r.rel_type == "publishes_to" && r.to == "telemetry.v1"));
+        assert!(res
+            .relations
+            .iter()
+            .any(|r| r.rel_type == "subscribes_to" && r.to == "orders.inbound"));
     }
 }

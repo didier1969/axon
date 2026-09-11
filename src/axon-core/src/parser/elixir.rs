@@ -183,6 +183,13 @@ impl ElixirParser {
                     module_name,
                     aliases,
                 ),
+                "dispatch" => Self::extract_commanded_dispatch(
+                    node,
+                    source_bytes,
+                    result,
+                    module_name,
+                    aliases,
+                ),
                 x if IMPORT_DIRECTIVES.contains(&x) => {
                     Self::extract_import_directive(node, source_bytes, result, x, module_name)
                 }
@@ -792,6 +799,90 @@ impl ElixirParser {
                 }
             }
         }
+
+        if func_name == "join" {
+            if let Some(args) = Self::find_child_by_type(node, "arguments") {
+                let mut cursor = args.walk();
+                for child in args.named_children(&mut cursor) {
+                    if child.kind() == "call" {
+                        if let Some(inner_args) = Self::find_child_by_type(child, "arguments") {
+                            for s in Self::find_string_args(inner_args, source_bytes) {
+                                if !result
+                                    .symbols
+                                    .iter()
+                                    .any(|sym| sym.kind == "topic" && sym.name == s)
+                                {
+                                    result.symbols.push(Symbol {
+                                        name: s.clone(),
+                                        kind: "topic".to_string(),
+                                        start_line,
+                                        end_line,
+                                        docstring: None,
+                                        is_entry_point: false,
+                                        is_public: true,
+                                        tested: false,
+                                        is_nif: false,
+                                        is_unsafe: false,
+                                        properties: HashMap::new(),
+                                        embedding: None,
+                                    });
+                                }
+                                result.relations.push(Relation {
+                                    from: module_name.to_string(),
+                                    to: s,
+                                    rel_type: "subscribes_to".to_string(),
+                                    properties: HashMap::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        } else if func_name == "execute" || func_name == "apply" {
+            let rel_type = if func_name == "execute" {
+                "handles_command"
+            } else {
+                "applies_event"
+            };
+            if let Some(args) = Self::find_child_by_type(node, "arguments") {
+                let mut cursor = args.walk();
+                for child in args.named_children(&mut cursor) {
+                    if child.kind() == "call" {
+                        if let Some(inner_args) = Self::find_child_by_type(child, "arguments") {
+                            let mut i_cursor = inner_args.walk();
+                            let mut arg_idx = 0;
+                            for inner_child in inner_args.named_children(&mut i_cursor) {
+                                arg_idx += 1;
+                                if arg_idx == 2 {
+                                    let text = inner_child.utf8_text(source_bytes).unwrap_or("");
+                                    if let Some(pos) = text.find('%') {
+                                        let rest = &text[pos + 1..];
+                                        let end_pos = rest
+                                            .find(|c: char| {
+                                                c == '{' || c == ' ' || c == '(' || c == '='
+                                            })
+                                            .unwrap_or(rest.len());
+                                        let raw = rest[..end_pos].trim();
+                                        if !raw.is_empty() {
+                                            let resolved = aliases
+                                                .get(raw)
+                                                .cloned()
+                                                .unwrap_or_else(|| raw.to_string());
+                                            result.relations.push(Relation {
+                                                from: module_name.to_string(),
+                                                to: resolved,
+                                                rel_type: rel_type.to_string(),
+                                                properties: HashMap::new(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// REQ-AXO-902227 — does this `def` carry an `@impl` annotation? `@impl true` /
@@ -872,6 +963,68 @@ impl ElixirParser {
         }
     }
 
+    fn find_string_args<'a>(args_node: Node<'a>, source_bytes: &[u8]) -> Vec<String> {
+        let mut strings = Vec::new();
+        let mut cursor = args_node.walk();
+        for child in args_node.named_children(&mut cursor) {
+            if child.kind() == "string" {
+                let s = child
+                    .utf8_text(source_bytes)
+                    .unwrap_or("")
+                    .trim_matches('"');
+                if !s.is_empty() {
+                    strings.push(s.to_string());
+                }
+            }
+        }
+        strings
+    }
+
+    fn extract_keyword_props<'a>(
+        args_node: Node<'a>,
+        source_bytes: &[u8],
+    ) -> HashMap<String, String> {
+        let mut props = HashMap::new();
+        let mut cursor = args_node.walk();
+        for child in args_node.named_children(&mut cursor) {
+            if child.kind() == "keywords" {
+                let mut kw_cursor = child.walk();
+                for pair in child.named_children(&mut kw_cursor) {
+                    let text = pair.utf8_text(source_bytes).unwrap_or("").trim();
+                    if let Some((k, v)) = text.split_once(':') {
+                        let key = k.trim().to_string();
+                        let val = v
+                            .trim()
+                            .trim_start_matches(':')
+                            .trim_matches('"')
+                            .to_string();
+                        if !key.is_empty() && !val.is_empty() {
+                            props.insert(key, val);
+                        }
+                    }
+                }
+            }
+        }
+        if props.is_empty() {
+            let full_text = args_node.utf8_text(source_bytes).unwrap_or("");
+            for part in full_text.split(',') {
+                let trimmed = part.trim();
+                if let Some((k, v)) = trimmed.split_once(':') {
+                    let key = k.trim().to_string();
+                    let val = v
+                        .trim()
+                        .trim_start_matches(':')
+                        .trim_matches('"')
+                        .to_string();
+                    if !key.is_empty() && !val.is_empty() {
+                        props.insert(key, val);
+                    }
+                }
+            }
+        }
+        props
+    }
+
     fn extract_import_directive<'a>(
         node: Node<'a>,
         source_bytes: &[u8],
@@ -905,6 +1058,120 @@ impl ElixirParser {
                 rel_type: "uses".to_string(),
                 properties: HashMap::new(),
             });
+
+            let props = Self::extract_keyword_props(args_node, source_bytes);
+            let start_line = node.start_position().row + 1;
+            let end_line = node.end_position().row + 1;
+
+            if module_alias == "Oban.Worker" || module_alias.ends_with(".Worker") {
+                result.symbols.push(Symbol {
+                    name: format!("{}.worker", module_name),
+                    kind: "worker".to_string(),
+                    start_line,
+                    end_line,
+                    docstring: None,
+                    is_entry_point: true,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: props,
+                    embedding: None,
+                });
+            } else if module_alias == "Phoenix.Channel" || module_alias.ends_with(".Channel") {
+                result.symbols.push(Symbol {
+                    name: format!("{}.channel", module_name),
+                    kind: "channel".to_string(),
+                    start_line,
+                    end_line,
+                    docstring: None,
+                    is_entry_point: true,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: props,
+                    embedding: None,
+                });
+            } else if module_alias.contains("Commanded.Projections")
+                || module_alias.contains("Commanded.Event.Handler")
+                || module_alias.ends_with("Projector")
+            {
+                result.symbols.push(Symbol {
+                    name: format!("{}.projector", module_name),
+                    kind: "projector".to_string(),
+                    start_line,
+                    end_line,
+                    docstring: None,
+                    is_entry_point: true,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: props,
+                    embedding: None,
+                });
+            }
+        }
+    }
+
+    fn extract_commanded_dispatch<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        module_name: &str,
+        aliases: &HashMap<String, String>,
+    ) {
+        if let Some(args) = Self::find_child_by_type(node, "arguments") {
+            let mut cursor = args.walk();
+            let mut command = String::new();
+            let mut target = String::new();
+            for child in args.named_children(&mut cursor) {
+                if child.kind() == "alias" && command.is_empty() {
+                    let cmd_raw = child.utf8_text(source_bytes).unwrap_or("");
+                    command = aliases
+                        .get(cmd_raw)
+                        .cloned()
+                        .unwrap_or_else(|| cmd_raw.to_string());
+                } else if child.kind() == "keywords" {
+                    let mut kw_cursor = child.walk();
+                    for pair in child.named_children(&mut kw_cursor) {
+                        if pair.kind() == "pair" {
+                            let mut p_cursor = pair.walk();
+                            let mut is_to = false;
+                            for p_child in pair.named_children(&mut p_cursor) {
+                                let text = p_child.utf8_text(source_bytes).unwrap_or("");
+                                if p_child.kind() == "keyword" && text.starts_with("to") {
+                                    is_to = true;
+                                } else if is_to && p_child.kind() == "alias" {
+                                    target = aliases
+                                        .get(text)
+                                        .cloned()
+                                        .unwrap_or_else(|| text.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !command.is_empty() {
+                result.relations.push(Relation {
+                    from: module_name.to_string(),
+                    to: command.clone(),
+                    rel_type: "dispatches_command".to_string(),
+                    properties: HashMap::new(),
+                });
+                if !target.is_empty() {
+                    result.relations.push(Relation {
+                        from: command,
+                        to: target,
+                        rel_type: "routes_to".to_string(),
+                        properties: HashMap::new(),
+                    });
+                }
+            }
         }
     }
 
@@ -1169,6 +1436,66 @@ impl ElixirParser {
                         rel_type,
                         properties: props,
                     });
+
+                    let is_pubsub = receiver == "Phoenix.PubSub"
+                        || receiver.ends_with("PubSub")
+                        || receiver == "Endpoint";
+                    let is_gnat = receiver == "Gnat";
+                    let is_broadcast =
+                        func_name.starts_with("broadcast") || (is_gnat && func_name == "pub");
+                    let is_subscribe = func_name == "subscribe" || (is_gnat && func_name == "sub");
+
+                    if (is_pubsub || is_gnat) && (is_broadcast || is_subscribe) {
+                        if let Some(args_node) = Self::find_child_by_type(node, "arguments") {
+                            for s in Self::find_string_args(args_node, source_bytes) {
+                                let start_line = node.start_position().row + 1;
+                                let end_line = node.end_position().row + 1;
+                                if !result
+                                    .symbols
+                                    .iter()
+                                    .any(|sym| sym.kind == "topic" && sym.name == s)
+                                {
+                                    result.symbols.push(Symbol {
+                                        name: s.clone(),
+                                        kind: "topic".to_string(),
+                                        start_line,
+                                        end_line,
+                                        docstring: None,
+                                        is_entry_point: false,
+                                        is_public: true,
+                                        tested: false,
+                                        is_nif: false,
+                                        is_unsafe: false,
+                                        properties: HashMap::new(),
+                                        embedding: None,
+                                    });
+                                }
+                                result.relations.push(Relation {
+                                    from: caller_name.to_string(),
+                                    to: s,
+                                    rel_type: if is_broadcast {
+                                        "publishes_to".to_string()
+                                    } else {
+                                        "subscribes_to".to_string()
+                                    },
+                                    properties: HashMap::new(),
+                                });
+                            }
+                        }
+                    }
+
+                    if func_name == "new"
+                        && (resolved_receiver.ends_with("Worker")
+                            || resolved_receiver.contains(".Workers.")
+                            || receiver.ends_with("Worker"))
+                    {
+                        result.relations.push(Relation {
+                            from: caller_name.to_string(),
+                            to: resolved_receiver.clone(),
+                            rel_type: "dispatches_job".to_string(),
+                            properties: HashMap::new(),
+                        });
+                    }
                 }
             }
         } else if let Some(func_name) = Self::call_identifier(node, source_bytes) {
@@ -2338,5 +2665,213 @@ mod tests {
             .collect();
         assert!(refs.contains(&"phoenix"));
         assert!(refs.contains(&"ecto_sql"));
+    }
+
+    #[test]
+    fn test_tranche7_oban_worker_and_dispatch() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule MyApp.Workers.Mailer do
+          use Oban.Worker, queue: :mailers, max_attempts: 5
+
+          @impl Oban.Worker
+          def perform(%Oban.Job{args: args}) do
+            deliver(args)
+          end
+        end
+
+        defmodule MyApp.Accounts do
+          alias MyApp.Workers.Mailer
+
+          def register(user) do
+            Mailer.new(%{email: user.email})
+            |> Oban.insert()
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+        let worker_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.kind == "worker" && s.name == "MyApp.Workers.Mailer.worker");
+        assert!(worker_sym.is_some(), "worker symbol should be extracted");
+        let sym = worker_sym.unwrap();
+        assert_eq!(sym.properties.get("queue"), Some(&"mailers".to_string()));
+        assert_eq!(sym.properties.get("max_attempts"), Some(&"5".to_string()));
+
+        let dispatch_rel = result
+            .relations
+            .iter()
+            .find(|r| r.rel_type == "dispatches_job" && r.to == "MyApp.Workers.Mailer");
+        assert!(
+            dispatch_rel.is_some(),
+            "dispatches_job relation should be extracted to MyApp.Workers.Mailer, got: {:?}",
+            result.relations
+        );
+    }
+
+    #[test]
+    fn test_tranche7_pubsub_kafka_nats_topics() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule MyApp.Events do
+          def notify_order(order) do
+            Phoenix.PubSub.broadcast(MyApp.PubSub, "orders:created", {:order, order})
+            Gnat.pub(:gnat, "orders.nats", "payload")
+          end
+
+          def subscribe_events do
+            Phoenix.PubSub.subscribe(MyApp.PubSub, "events:all")
+            Gnat.sub(:gnat, self(), "orders.nats")
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+        let topic_names: Vec<&str> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "topic")
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            topic_names.contains(&"orders:created"),
+            "should extract orders:created topic: {topic_names:?}"
+        );
+        assert!(
+            topic_names.contains(&"orders.nats"),
+            "should extract orders.nats topic: {topic_names:?}"
+        );
+        assert!(
+            topic_names.contains(&"events:all"),
+            "should extract events:all topic: {topic_names:?}"
+        );
+
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "publishes_to" && r.to == "orders:created"),
+            "should have publishes_to orders:created"
+        );
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "publishes_to" && r.to == "orders.nats"),
+            "should have publishes_to orders.nats"
+        );
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "subscribes_to" && r.to == "events:all"),
+            "should have subscribes_to events:all"
+        );
+    }
+
+    #[test]
+    fn test_tranche7_commanded_cqrs_event_sourcing() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule MyApp.Router do
+          use Commanded.Commands.Router
+
+          dispatch MyApp.OpenAccount, to: MyApp.AccountAggregate, identity: :account_id
+        end
+
+        defmodule MyApp.AccountAggregate do
+          def execute(%MyApp.AccountAggregate{}, %MyApp.OpenAccount{} = cmd) do
+            %MyApp.AccountOpened{account_id: cmd.account_id}
+          end
+
+          def apply(%MyApp.AccountAggregate{} = state, %MyApp.AccountOpened{} = evt) do
+            %MyApp.AccountAggregate{state | account_id: evt.account_id}
+          end
+        end
+
+        defmodule MyApp.AccountProjector do
+          use Commanded.Projections.Ecto, name: "AccountProjector"
+        end
+        "#;
+
+        let result = parser.parse(content);
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "dispatches_command" && r.to == "MyApp.OpenAccount"),
+            "router should dispatch command MyApp.OpenAccount"
+        );
+        assert!(
+            result.relations.iter().any(|r| r.rel_type == "routes_to"
+                && r.from == "MyApp.OpenAccount"
+                && r.to == "MyApp.AccountAggregate"),
+            "command should route to MyApp.AccountAggregate"
+        );
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "handles_command" && r.to == "MyApp.OpenAccount"),
+            "aggregate should handle command MyApp.OpenAccount"
+        );
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "applies_event" && r.to == "MyApp.AccountOpened"),
+            "aggregate should apply event MyApp.AccountOpened"
+        );
+        assert!(
+            result
+                .symbols
+                .iter()
+                .any(|s| s.kind == "projector" && s.name == "MyApp.AccountProjector.projector"),
+            "projector symbol should be extracted"
+        );
+    }
+
+    #[test]
+    fn test_tranche7_phoenix_channel_websocket() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule MyAppWeb.RoomChannel do
+          use Phoenix.Channel
+
+          def join("room:lobby", _message, socket) do
+            {:ok, socket}
+          end
+
+          def handle_in("new_msg", %{"body" => body}, socket) do
+            broadcast!(socket, "new_msg", %{body: body})
+            {:noreply, socket}
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+        assert!(
+            result
+                .symbols
+                .iter()
+                .any(|s| s.kind == "channel" && s.name == "MyAppWeb.RoomChannel.channel"),
+            "channel symbol should be extracted"
+        );
+        assert!(
+            result
+                .symbols
+                .iter()
+                .any(|s| s.kind == "topic" && s.name == "room:lobby"),
+            "topic room:lobby should be extracted"
+        );
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "subscribes_to" && r.to == "room:lobby"),
+            "channel should subscribe to room:lobby"
+        );
     }
 }

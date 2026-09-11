@@ -361,6 +361,8 @@ impl PythonParser {
         // the framework runtime and represent canonical entry points.
         let mut is_fixture = false;
         let mut is_ioc_entry = false;
+        let mut is_worker = false;
+        let mut is_websocket = false;
         if let Some(parent) = node.parent() {
             if parent.kind() == "decorated_definition" {
                 let mut cursor = parent.walk();
@@ -373,6 +375,41 @@ impl PythonParser {
                         if Self::is_ioc_decorator(dec_text) {
                             is_ioc_entry = true;
                             props.insert("framework_ioc".to_string(), "true".to_string());
+                        }
+                        if dec_text.contains(".task")
+                            || dec_text.starts_with("@task")
+                            || dec_text.starts_with("@shared_task")
+                        {
+                            is_worker = true;
+                            if let Some(q_pos) = dec_text.find("queue=") {
+                                let rest = &dec_text[q_pos + 6..];
+                                let quote = rest.chars().next().unwrap_or('"');
+                                if quote == '"' || quote == '\'' {
+                                    let inner = &rest[1..];
+                                    if let Some(end_q) = inner.find(quote) {
+                                        props.insert(
+                                            "queue".to_string(),
+                                            inner[..end_q].to_string(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if dec_text.contains(".websocket(") {
+                            is_websocket = true;
+                            if let Some(p_pos) = dec_text.find(".websocket(") {
+                                let rest = &dec_text[p_pos + 11..];
+                                let quote = rest.chars().next().unwrap_or('"');
+                                if quote == '"' || quote == '\'' {
+                                    let inner = &rest[1..];
+                                    if let Some(end_q) = inner.find(quote) {
+                                        props.insert(
+                                            "route".to_string(),
+                                            inner[..end_q].to_string(),
+                                        );
+                                    }
+                                }
+                            }
                         }
                         if let Some(id) = self.find_child_by_type(child, "identifier") {
                             let dec_name = id.utf8_text(source).unwrap_or("").to_string();
@@ -428,7 +465,11 @@ impl PythonParser {
 
         result.symbols.push(Symbol {
             name: full_name.clone(),
-            kind: if is_method {
+            kind: if is_worker {
+                "worker".to_string()
+            } else if is_websocket {
+                "websocket_endpoint".to_string()
+            } else if is_method {
                 "method".to_string()
             } else {
                 "function".to_string()
@@ -436,7 +477,11 @@ impl PythonParser {
             start_line: node.start_position().row + 1,
             end_line: node.end_position().row + 1,
             docstring: None,
-            is_entry_point: func_name == "main" || is_nif || is_ioc_entry,
+            is_entry_point: func_name == "main"
+                || is_nif
+                || is_ioc_entry
+                || is_worker
+                || is_websocket,
             is_public: !func_name.starts_with("_") || func_name == "__init__",
             // REQ-AXO-901958 — fixtures fold into `tested` (framework-invoked, no
             // inbound CALLS edge → would be mis-flagged as dead).
@@ -511,14 +556,75 @@ impl PythonParser {
                 if !callee_name.is_empty() {
                     let mut props = HashMap::new();
                     if !receiver.is_empty() {
-                        props.insert("receiver".to_string(), receiver);
+                        props.insert("receiver".to_string(), receiver.clone());
                     }
                     result.relations.push(Relation {
                         from: scope.to_string(),
-                        to: callee_name,
+                        to: callee_name.clone(),
                         rel_type: "calls".to_string(),
                         properties: props,
                     });
+
+                    if (callee_name == "delay" || callee_name == "apply_async")
+                        && !receiver.is_empty()
+                    {
+                        result.relations.push(Relation {
+                            from: scope.to_string(),
+                            to: receiver.clone(),
+                            rel_type: "dispatches_job".to_string(),
+                            properties: HashMap::new(),
+                        });
+                    }
+
+                    if callee_name == "send_and_wait"
+                        || callee_name == "send"
+                        || callee_name == "publish"
+                    {
+                        if let Some(args) = self.find_child_by_type(node, "argument_list") {
+                            let mut ac = args.walk();
+                            for arg in args.children(&mut ac) {
+                                if arg.kind() == "string" {
+                                    let topic_name = arg
+                                        .utf8_text(source)
+                                        .unwrap_or("")
+                                        .trim_matches('"')
+                                        .trim_matches('\'')
+                                        .to_string();
+                                    if !topic_name.is_empty() {
+                                        let start_line = node.start_position().row + 1;
+                                        let end_line = node.end_position().row + 1;
+                                        if !result
+                                            .symbols
+                                            .iter()
+                                            .any(|s| s.kind == "topic" && s.name == topic_name)
+                                        {
+                                            result.symbols.push(Symbol {
+                                                name: topic_name.clone(),
+                                                kind: "topic".to_string(),
+                                                start_line,
+                                                end_line,
+                                                docstring: None,
+                                                is_entry_point: false,
+                                                is_public: true,
+                                                tested: false,
+                                                is_nif: false,
+                                                is_unsafe: false,
+                                                properties: HashMap::new(),
+                                                embedding: None,
+                                            });
+                                        }
+                                        result.relations.push(Relation {
+                                            from: scope.to_string(),
+                                            to: topic_name,
+                                            rel_type: "publishes_to".to_string(),
+                                            properties: HashMap::new(),
+                                        });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
                 let call_name = n.utf8_text(source).unwrap_or("").to_string();
@@ -1254,5 +1360,77 @@ class User(Base):
             .symbols
             .iter()
             .any(|s| s.name == "User.org_id" && s.kind == "field"));
+    }
+
+    #[test]
+    fn test_tranche7_python_async_workers_and_messaging() {
+        let p = PythonParser::new();
+        let code = r#"
+from celery import Celery
+from fastapi import FastAPI, WebSocket
+
+app = FastAPI()
+
+@app.task(queue="orders_queue")
+def process_order(order_id):
+    return order_id
+
+@app.websocket("/ws/market_feed")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+
+async def send_events(producer):
+    await producer.send_and_wait("orders.completed", b"payload")
+    process_order.delay(42)
+"#;
+        let result = p.parse(code);
+        if result.symbols.is_empty() {
+            eprintln!("python wasm grammar unavailable, skipping");
+            return;
+        }
+
+        let worker = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "process_order" && s.kind == "worker");
+        assert!(worker.is_some(), "process_order should be marked as worker");
+        assert_eq!(
+            worker.unwrap().properties.get("queue").map(|s| s.as_str()),
+            Some("orders_queue")
+        );
+
+        let ws = result
+            .symbols
+            .iter()
+            .find(|s| s.kind == "websocket_endpoint");
+        assert!(ws.is_some(), "websocket endpoint should be found");
+        assert_eq!(
+            ws.unwrap().properties.get("route").map(|s| s.as_str()),
+            Some("/ws/market_feed")
+        );
+
+        let topic = result
+            .symbols
+            .iter()
+            .find(|s| s.kind == "topic" && s.name == "orders.completed");
+        assert!(
+            topic.is_some(),
+            "topic orders.completed should be extracted"
+        );
+
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "publishes_to" && r.to == "orders.completed"),
+            "should publish to orders.completed"
+        );
+        assert!(
+            result
+                .relations
+                .iter()
+                .any(|r| r.rel_type == "dispatches_job" && r.to == "process_order"),
+            "should dispatch job process_order"
+        );
     }
 }
