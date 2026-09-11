@@ -331,6 +331,52 @@ mod tests {
             .expect("create_trigger_if_absent (2e passe)")
             .get(0);
         assert!(!trg_again, "2e passe : rien à faire");
+
+        // drop_trigger_if_present (REQ-AXO-902475)
+        let dropped_trg: bool = client
+            .query_one(
+                "SELECT public.drop_trigger_if_present('ddlguard', 'probe', 'probe_trg')",
+                &[],
+            )
+            .await
+            .expect("drop_trigger_if_present")
+            .get(0);
+        assert!(dropped_trg, "trigger présent : il doit être supprimé");
+        let dropped_trg_again: bool = client
+            .query_one(
+                "SELECT public.drop_trigger_if_present('ddlguard', 'probe', 'probe_trg')",
+                &[],
+            )
+            .await
+            .expect("drop_trigger_if_present (2e passe)")
+            .get(0);
+        assert!(
+            !dropped_trg_again,
+            "2e passe : rien à faire car déjà supprimé"
+        );
+
+        // drop_index_if_present (REQ-AXO-902475)
+        let dropped_idx: bool = client
+            .query_one(
+                "SELECT public.drop_index_if_present('ddlguard', 'probe_n_idx')",
+                &[],
+            )
+            .await
+            .expect("drop_index_if_present")
+            .get(0);
+        assert!(dropped_idx, "index présent : il doit être supprimé");
+        let dropped_idx_again: bool = client
+            .query_one(
+                "SELECT public.drop_index_if_present('ddlguard', 'probe_n_idx')",
+                &[],
+            )
+            .await
+            .expect("drop_index_if_present (2e passe)")
+            .get(0);
+        assert!(
+            !dropped_idx_again,
+            "2e passe : rien à faire car déjà supprimé"
+        );
     }
 
     // ── Le nom passé à la garde doit désigner l'objet que l'énoncé crée ──
@@ -373,18 +419,45 @@ mod tests {
     async fn every_guarded_index_and_trigger_really_exists_after_bootstrap() {
         let statements = crate::postgres::ddl::generate_global_schema();
 
+        // REQ-AXO-902475 : Vérifier l'absence totale de CREATE INDEX IF NOT EXISTS,
+        // CREATE UNIQUE INDEX IF NOT EXISTS, DROP INDEX IF EXISTS et DROP TRIGGER IF EXISTS.
+        for stmt in &statements {
+            if stmt.contains("CREATE OR REPLACE FUNCTION public.") {
+                continue;
+            }
+            let code_only: String = stmt
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let s_upper = code_only.to_uppercase();
+            assert!(
+                !s_upper.contains("CREATE INDEX IF NOT EXISTS")
+                    && !s_upper.contains("CREATE UNIQUE INDEX IF NOT EXISTS"),
+                "Énoncé avec CREATE INDEX IF NOT EXISTS non gardé détecté (REQ-AXO-902475) : {stmt}"
+            );
+            assert!(
+                !s_upper.contains("DROP INDEX IF EXISTS"),
+                "Énoncé avec DROP INDEX IF EXISTS non gardé détecté (REQ-AXO-902475) : {stmt}"
+            );
+            assert!(
+                !s_upper.contains("DROP TRIGGER IF EXISTS"),
+                "Énoncé avec DROP TRIGGER IF EXISTS non gardé détecté (REQ-AXO-902475) : {stmt}"
+            );
+        }
+
         let indexes = first_two_string_args(&statements, "create_index_if_absent");
         assert!(
-            indexes.len() >= 20,
-            "extraction des index gardés cassée : {} trouvés, ≥20 attendus — \
+            indexes.len() >= 55,
+            "extraction des index gardés cassée : {} trouvés, ≥55 attendus (REQ-AXO-902475) — \
              le test se croirait vert en ne vérifiant rien",
             indexes.len()
         );
 
         let triggers = first_two_string_args(&statements, "create_trigger_if_absent");
         assert!(
-            triggers.len() >= 4,
-            "extraction des triggers gardés cassée : {} trouvés, ≥4 attendus",
+            triggers.len() >= 5,
+            "extraction des triggers gardés cassée : {} trouvés, ≥5 attendus (REQ-AXO-902475)",
             triggers.len()
         );
 

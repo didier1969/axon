@@ -377,26 +377,9 @@ export AXON_WATCH_DIR="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
 # legacy-watcher cutover. Set =0 only as an emergency rollback to the (also
 # stall-prone) notify path. Propagated to the indexer via process-compose env.
 export AXON_USE_WATCHMAN="${AXON_USE_WATCHMAN:-1}"
-# Resolve the watchman binary to an ABSOLUTE path so the indexer's Connector
-# (which shells out `<bin> get-sockname`) can find it — the indexer runs OUTSIDE
-# the devenv PATH (process-compose inherits start.sh's non-devenv PATH, same as
-# the ORT libs which are passed by absolute env path). Prefer the project-local
-# devenv profile symlink (stable, NOT a hardcoded nix-store hash path); fall
-# back to PATH lookup then the bare name.
-if [[ -z "${AXON_WATCHMAN_BIN:-}" ]]; then
-    if [[ -x "$PROJECT_ROOT/.devenv/profile/bin/watchman" ]]; then
-        export AXON_WATCHMAN_BIN="$PROJECT_ROOT/.devenv/profile/bin/watchman"
-    else
-        export AXON_WATCHMAN_BIN="$(command -v watchman 2>/dev/null || echo watchman)"
-    fi
-fi
-# NOTE (REQ-AXO-902345): there is deliberately NO `AXON_ELIXIR_BIN` here. An
-# earlier pass added one, mirroring AXON_WATCHMAN_BIN above — and it did not
-# work, because `elixir -S mix` resolves `mix` through the PATH by design. That
-# dead end is what proved the per-binary approach wrong; the class is now solved
-# once, at the process-compose launch site, by putting the devenv profile on the
-# children's PATH. AXON_WATCHMAN_BIN survives only because the indexer reads it
-# from Rust; retiring it is tracked in REQ-AXO-902345.
+# NOTE (REQ-AXO-902345 / REQ-AXO-902363): AXON_WATCHMAN_BIN and per-binary knobs
+# are retired. The devenv profile is injected on PATH at the process-compose launch
+# site, so watchman, elixir, mix and other toolchain binaries resolve directly.
 # Use COPY BINARY for PG writes instead of INSERT VALUES SQL text.
 export AXON_BULK_WRITER_ENABLED="${AXON_BULK_WRITER_ENABLED:-1}"
 # Absolute path to this Axon repo root.
@@ -457,7 +440,6 @@ _axon_stage="resolve_pc_bin"
 # Resolve process-compose binary from devenv
 PC_BIN="$(run_devenv 'which process-compose' 2>/dev/null | tail -1)"
 [[ -x "${PC_BIN:-}" ]] || { echo "❌ process-compose not found in devenv."; exit 1; }
-export AXON_PGREADY_BIN="$(run_devenv 'which pg_isready' 2>/dev/null | tail -1)"
 
 # REQ-AXO-902064 slice 1 (measure-first) — stamp the launch→readyz window so
 # every promote prints the brain-boot contribution to MCP downtime (the comment

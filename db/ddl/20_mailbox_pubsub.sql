@@ -7,13 +7,9 @@
 -- tous leur verrou AVANT le test d'existence : sur `axon.practice` et
 -- `axon.mailbox_message`, écrites en continu, c'est une famine, pas une course.
 -- Les `ADD COLUMN` de ce fichier passent désormais par `add_column_if_absent`.
---
--- ⚠️ Les `CREATE INDEX IF NOT EXISTS` NE sont PAS convertis, et c'est délibéré :
--- les 16 fichiers appliqués au boot depuis toujours en portent 26 de la même
--- forme, sans incident mesuré. Les convertir ici seulement donnerait DEUX
--- disciplines pour une seule classe d'énoncé — exactement la divergence que
--- REQ-AXO-902328 ferme. La classe entière (45 CREATE INDEX + 3 DROP nus sur les
--- 25 fichiers) est logée en REQ, à traiter d'un bloc ou pas du tout.
+-- REQ-AXO-902475 — l'ensemble des `CREATE INDEX IF NOT EXISTS` et `DROP` sur les
+-- 25 fichiers passe désormais par les gardes catalogue lock-free
+-- `create_index_if_absent`, `drop_index_if_present`, `drop_trigger_if_present`.
 
 -- REQ-AXO-902119 (MBX-7) — MAILBOX pub/sub + broadcast/multicast + rooms.
 -- Decouples the emitter from N subscribers (topics), supports broadcast decisions
@@ -51,8 +47,9 @@ CREATE TABLE IF NOT EXISTS axon.mailbox_subscription (
 );
 
 -- Fan-out lookup: resolve all subscribers of a topic at send time.
-CREATE INDEX IF NOT EXISTS mailbox_subscription_topic_idx
-    ON axon.mailbox_subscription (topic);
+SELECT public.create_index_if_absent('axon', 'mailbox_subscription_topic_idx', $idx$
+    CREATE INDEX mailbox_subscription_topic_idx ON axon.mailbox_subscription (topic)
+$idx$);
 
 -- MBX-7 — rooms (multi-party). A room groups N projects; a message addressed
 -- `to_room` is delivered to every member. `created_by` is the room owner.
@@ -70,8 +67,9 @@ CREATE TABLE IF NOT EXISTS axon.mailbox_room_member (
 );
 
 -- Fan-out lookup: resolve all members of a room at send time.
-CREATE INDEX IF NOT EXISTS mailbox_room_member_room_idx
-    ON axon.mailbox_room_member (room_id);
+SELECT public.create_index_if_absent('axon', 'mailbox_room_member_room_idx', $idx$
+    CREATE INDEX mailbox_room_member_room_idx ON axon.mailbox_room_member (room_id)
+$idx$);
 
 -- Materialised fan-out provenance: every delivered broadcast/multicast row records
 -- the topic / room it was stamped from (NULL for a point-to-point send). IF NOT
@@ -83,6 +81,20 @@ SELECT public.add_column_if_absent('axon', 'mailbox_message', 'room_id', 'TEXT')
 -- rejects rows 2..N of a single broadcast (same sender + key, different recipient).
 -- Widen the dedup key to include the recipient so point-to-point idempotency is
 -- preserved while fan-out can materialise one row per recipient under one key.
-DROP INDEX IF EXISTS axon.mailbox_message_idem_idx;
-CREATE UNIQUE INDEX IF NOT EXISTS mailbox_message_idem_idx
-    ON axon.mailbox_message (from_project, to_project, idempotency_key);
+DO $do$
+BEGIN
+    -- Drop legacy 2-column index if present (REQ-AXO-902475 lock-free migration)
+    IF EXISTS (
+        SELECT 1 FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'axon' AND c.relname = 'mailbox_message_idem_idx' AND i.indnatts = 2
+    ) THEN
+        PERFORM public.drop_index_if_present('axon', 'mailbox_message_idem_idx');
+    END IF;
+END
+$do$;
+SELECT public.create_index_if_absent('axon', 'mailbox_message_idem_idx', $idx$
+    CREATE UNIQUE INDEX mailbox_message_idem_idx
+        ON axon.mailbox_message (from_project, to_project, idempotency_key)
+$idx$);

@@ -69,8 +69,9 @@ ALTER TABLE axon.mcp_call_stat
     ADD COLUMN IF NOT EXISTS request_bytes_sum  BIGINT  NOT NULL DEFAULT 0;
 
 -- Recent-window scans (analytics projections + retention sweeps).
-CREATE INDEX IF NOT EXISTS mcp_call_stat_recent_idx
-    ON axon.mcp_call_stat (bucket_hour DESC, tool);
+SELECT public.create_index_if_absent('axon', 'mcp_call_stat_recent_idx', $idx$
+    CREATE INDEX mcp_call_stat_recent_idx ON axon.mcp_call_stat (bucket_hour DESC, tool)
+$idx$);
 
 -- CPT-AXO-90052 — `sql` tool query-SHAPE rollup. mcp_call_stat proves `sql` is
 -- the 2nd most-called tool (clients drop to raw SQL for want of a command) but is
@@ -92,5 +93,6 @@ CREATE TABLE IF NOT EXISTS axon.sql_shape_stat (
     PRIMARY KEY (shape_hash, status, bucket_hour)
 );
 
-CREATE INDEX IF NOT EXISTS sql_shape_stat_freq_idx
-    ON axon.sql_shape_stat (bucket_hour DESC, call_count DESC);
+SELECT public.create_index_if_absent('axon', 'sql_shape_stat_freq_idx', $idx$
+    CREATE INDEX sql_shape_stat_freq_idx ON axon.sql_shape_stat (bucket_hour DESC, call_count DESC)
+$idx$);

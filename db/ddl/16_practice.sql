@@ -7,13 +7,9 @@
 -- tous leur verrou AVANT le test d'existence : sur `axon.practice` et
 -- `axon.mailbox_message`, écrites en continu, c'est une famine, pas une course.
 -- Les `ADD COLUMN` de ce fichier passent désormais par `add_column_if_absent`.
---
--- ⚠️ Les `CREATE INDEX IF NOT EXISTS` NE sont PAS convertis, et c'est délibéré :
--- les 16 fichiers appliqués au boot depuis toujours en portent 26 de la même
--- forme, sans incident mesuré. Les convertir ici seulement donnerait DEUX
--- disciplines pour une seule classe d'énoncé — exactement la divergence que
--- REQ-AXO-902328 ferme. La classe entière (45 CREATE INDEX + 3 DROP nus sur les
--- 25 fichiers) est logée en REQ, à traiter d'un bloc ou pas du tout.
+-- REQ-AXO-902475 — l'ensemble des `CREATE INDEX IF NOT EXISTS` et `DROP` sur les
+-- 25 fichiers passe désormais par les gardes catalogue lock-free
+-- `create_index_if_absent`, `drop_index_if_present`, `drop_trigger_if_present`.
 
 -- REQ-AXO-902131 — CROSS-TENANT BEST-PRACTICE MEMORY (governed, self-improving).
 -- Generalises the proven Nexus lesson-loop (DEC-NEX-008) into an Axon product so
@@ -67,19 +63,29 @@ SELECT public.add_column_if_absent('axon', 'practice', 'model', $def$TEXT NOT NU
 -- reinforces, no dup). REQ-AXO-902149 extended the key with role+model so the same
 -- prose can coexist across distinct agents/models without UPSERT collision; legacy
 -- puts default to ('*','*') so back-compat holds. The old scope-only index is dropped.
-DROP INDEX IF EXISTS axon.practice_scope_practice_idx;
-CREATE UNIQUE INDEX IF NOT EXISTS practice_scope_role_model_practice_idx
-    ON axon.practice (scope, role, model, md5(practice));
+SELECT public.drop_index_if_present('axon', 'practice_scope_practice_idx');
+SELECT public.create_index_if_absent('axon', 'practice_scope_role_model_practice_idx', $idx$
+    CREATE UNIQUE INDEX practice_scope_role_model_practice_idx
+        ON axon.practice (scope, role, model, md5(practice))
+$idx$);
 
 -- recall: scoped ANN (same HNSW params as ist.ChunkEmbedding) + a partial index so a
 -- scoped exact-scan over active rows is cheap (exact scan bypasses HNSW corruption,
 -- the REQ-AXO-902129 lesson).
-CREATE INDEX IF NOT EXISTS practice_embedding_hnsw_idx
-    ON axon.practice USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
-CREATE INDEX IF NOT EXISTS practice_scope_active_idx
-    ON axon.practice (scope, status) WHERE status = 'active';
+SELECT public.create_index_if_absent('axon', 'practice_embedding_hnsw_idx', $idx$
+    CREATE INDEX practice_embedding_hnsw_idx
+        ON axon.practice USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)
+$idx$);
+SELECT public.create_index_if_absent('axon', 'practice_scope_active_idx', $idx$
+    CREATE INDEX practice_scope_active_idx
+        ON axon.practice (scope, status) WHERE status = 'active'
+$idx$);
 -- REQ-AXO-902149 — partition filter (scope hierarchy ∩ role ∩ model) on active rows.
-CREATE INDEX IF NOT EXISTS practice_partition_idx
-    ON axon.practice (scope, role, model, status) WHERE status = 'active';
-CREATE INDEX IF NOT EXISTS practice_tick_idx
-    ON axon.practice (status, last_used_at) WHERE status = 'active';
+SELECT public.create_index_if_absent('axon', 'practice_partition_idx', $idx$
+    CREATE INDEX practice_partition_idx
+        ON axon.practice (scope, role, model, status) WHERE status = 'active'
+$idx$);
+SELECT public.create_index_if_absent('axon', 'practice_tick_idx', $idx$
+    CREATE INDEX practice_tick_idx
+        ON axon.practice (status, last_used_at) WHERE status = 'active'
+$idx$);

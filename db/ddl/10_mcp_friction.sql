@@ -29,5 +29,6 @@ CREATE TABLE IF NOT EXISTS axon.mcp_friction (
         UNIQUE (project_code, tool, problem_class, field_in_error)
 );
 
-CREATE INDEX IF NOT EXISTS mcp_friction_open_freq_idx
-    ON axon.mcp_friction (status, occurrence_count DESC);
+SELECT public.create_index_if_absent('axon', 'mcp_friction_open_freq_idx', $idx$
+    CREATE INDEX mcp_friction_open_freq_idx ON axon.mcp_friction (status, occurrence_count DESC)
+$idx$);

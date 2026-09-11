@@ -7,13 +7,9 @@
 -- tous leur verrou AVANT le test d'existence : sur `axon.practice` et
 -- `axon.mailbox_message`, écrites en continu, c'est une famine, pas une course.
 -- Les `ADD COLUMN` de ce fichier passent désormais par `add_column_if_absent`.
---
--- ⚠️ Les `CREATE INDEX IF NOT EXISTS` NE sont PAS convertis, et c'est délibéré :
--- les 16 fichiers appliqués au boot depuis toujours en portent 26 de la même
--- forme, sans incident mesuré. Les convertir ici seulement donnerait DEUX
--- disciplines pour une seule classe d'énoncé — exactement la divergence que
--- REQ-AXO-902328 ferme. La classe entière (45 CREATE INDEX + 3 DROP nus sur les
--- 25 fichiers) est logée en REQ, à traiter d'un bloc ou pas du tout.
+-- REQ-AXO-902475 — l'ensemble des `CREATE INDEX IF NOT EXISTS` et `DROP` sur les
+-- 25 fichiers passe désormais par les gardes catalogue lock-free
+-- `create_index_if_absent`, `drop_index_if_present`, `drop_trigger_if_present`.
 
 -- REQ-AXO-902112 (umbrella) / DEC-AXO-901663 — MAILBOX MVP store.
 -- Inter-project asynchronous LLM mailbox: Axon is the central exchange. A2A
@@ -76,20 +72,25 @@ SELECT public.add_column_if_absent('axon', 'mailbox_message', 'acknowledged_at',
 -- 20_mailbox_pubsub.sql corrigeait deja la definition, mais TROP TARD : le fichier
 -- 15 s'applique avant et meurt. Les deux fichiers declarent desormais la MEME
 -- definition, donc l'ordre d'application cesse d'importer.
-CREATE UNIQUE INDEX IF NOT EXISTS mailbox_message_idem_idx
-    ON axon.mailbox_message (from_project, to_project, idempotency_key);
+SELECT public.create_index_if_absent('axon', 'mailbox_message_idem_idx', $idx$
+    CREATE UNIQUE INDEX mailbox_message_idem_idx
+        ON axon.mailbox_message (from_project, to_project, idempotency_key)
+$idx$);
 
 -- inbox_read(to=project, unread|since): scan the recipient's messages by id.
-CREATE INDEX IF NOT EXISTS mailbox_message_inbox_idx
-    ON axon.mailbox_message (to_project, id);
+SELECT public.create_index_if_absent('axon', 'mailbox_message_inbox_idx', $idx$
+    CREATE INDEX mailbox_message_inbox_idx ON axon.mailbox_message (to_project, id)
+$idx$);
 
 -- MBX-4 — thread retrieval (conversation_id) + FTS over subject+body for
 -- searchable threads. The btree serves exact-thread fetch; the GIN index serves
 -- `inbox_read(search=…)` full-text queries.
-CREATE INDEX IF NOT EXISTS mailbox_message_thread_idx
-    ON axon.mailbox_message (context_id, id);
-CREATE INDEX IF NOT EXISTS mailbox_message_fts_idx
-    ON axon.mailbox_message USING gin (to_tsvector('simple', subject || ' ' || body_dense));
+SELECT public.create_index_if_absent('axon', 'mailbox_message_thread_idx', $idx$
+    CREATE INDEX mailbox_message_thread_idx ON axon.mailbox_message (context_id, id)
+$idx$);
+SELECT public.create_index_if_absent('axon', 'mailbox_message_fts_idx', $idx$
+    CREATE INDEX mailbox_message_fts_idx ON axon.mailbox_message USING gin (to_tsvector('simple', subject || ' ' || body_dense))
+$idx$);
 
 -- MBX-2 — per-recipient read cursor. `unread` = messages to=project with
 -- id > last_read_id. Advanced (monotonically) when the recipient reads.
@@ -120,7 +121,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS mailbox_message_notify ON axon.mailbox_message;
-CREATE TRIGGER mailbox_message_notify
-    AFTER INSERT ON axon.mailbox_message
-    FOR EACH ROW EXECUTE FUNCTION axon.mailbox_notify();
+SELECT public.create_trigger_if_absent(
+    'axon', 'mailbox_message', 'mailbox_message_notify', $trg$
+    CREATE TRIGGER mailbox_message_notify
+        AFTER INSERT ON axon.mailbox_message
+        FOR EACH ROW EXECUTE FUNCTION axon.mailbox_notify()
+$trg$);

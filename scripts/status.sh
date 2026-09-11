@@ -121,14 +121,38 @@ instance_kind = sys.argv[1]
 role_hint = sys.argv[2]
 data = json.loads(os.environ["AXONCTL_JSON"])
 
+run_root = os.environ.get("AXON_RUN_ROOT", "").strip()
+heartbeat = {}
+if run_root:
+    heartbeat_path = os.path.join(run_root, "runtime-heartbeat.json")
+    try:
+        with open(heartbeat_path, "r", encoding="utf-8") as fh:
+            heartbeat = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+provider_compute_mismatch = bool(
+    heartbeat.get("provider_compute_mismatch")
+    or heartbeat.get("embedder_provider_compute_mismatch")
+)
+if not provider_compute_mismatch:
+    eff_prov = str(heartbeat.get("embedder_provider") or heartbeat.get("effective_embed_provider") or "").lower()
+    obs_comp = str(heartbeat.get("embedder_compute") or heartbeat.get("observed_compute") or "").upper()
+    if eff_prov in ("cuda", "tensorrt", "gpu") and obs_comp and obs_comp != "GPU":
+        provider_compute_mismatch = True
+
 instance = data.get("instance_kind", instance_kind)
 role = data.get("role", role_hint)
 overall = data.get("overall", "unknown")
-# REQ-AXO-902264 — an abandoned role degrades the runtime BEFORE the header is printed.
-# axonctl's `overall` only knows the single role this invocation is about, so leaving the
-# survey to degrade further down produced `OVERALL HEALTHY` above `STATUS DEGRADED` in the
+# REQ-AXO-902264 / REQ-AXO-902363 / REQ-AXO-901735 — degrade the runtime BEFORE the header is printed.
+# axonctl's `overall` only knows the single role this invocation is about, so leaving any
+# condition to degrade further down produced `OVERALL HEALTHY` above `STATUS DEGRADED` in the
 # same output — two answers to one question, which is the ambiguity this REQ removes.
 if os.environ.get("AXON_ROLE_SURVEY_DEGRADED", "0") == "1":
+    overall = "degraded"
+if os.environ.get("AXON_DEAD_BRAIN", "0") == "1":
+    overall = "degraded"
+if provider_compute_mismatch:
     overall = "degraded"
 
 print("Axon status")
@@ -208,23 +232,13 @@ violations = data.get("role_contract_violations", [])
 for v in violations:
     print(f"FAIL    role contract: {v}")
 
-# REQ-AXO-185 #5 — surface heartbeat degraded_reason so operators see silent
-# fallbacks (e.g. embedder_provider_fallback: requested=cuda effective=cpu) at
-# `axon status` time instead of after a probe window. Heartbeat path comes
-# from AXON_RUN_ROOT exported by axon_apply_runtime_role_layout.
-run_root = os.environ.get("AXON_RUN_ROOT", "").strip()
-if run_root:
-    heartbeat_path = os.path.join(run_root, "runtime-heartbeat.json")
-    try:
-        with open(heartbeat_path, "r", encoding="utf-8") as fh:
-            heartbeat = json.load(fh)
-        degraded_reason = heartbeat.get("degraded_reason")
-        if isinstance(degraded_reason, str) and degraded_reason.strip():
-            print(f"WARN    heartbeat degraded_reason: {degraded_reason.strip()}")
-    except (OSError, json.JSONDecodeError):
-        # Heartbeat absent or malformed: silent — the process-state lines
-        # above already convey liveness; this surface is additive.
-        pass
+# REQ-AXO-185 #5 / REQ-AXO-902363 — surface heartbeat degraded_reason and provider_compute_mismatch
+# so operators see silent fallbacks (e.g. requested=cuda effective=cpu) at `axon status` time.
+if provider_compute_mismatch:
+    print("FAIL    provider_compute_mismatch: embed provider intends GPU but worker runs on CPU (silent fallback; REQ-AXO-902363)")
+degraded_reason = heartbeat.get("degraded_reason")
+if isinstance(degraded_reason, str) and degraded_reason.strip():
+    print(f"WARN    heartbeat degraded_reason: {degraded_reason.strip()}")
 
 # REQ-AXO-902264 — supervised-role survey. Rendered LAST (just above STATUS) because it
 # is the section that decides whether a role has been silently abandoned. The lines and

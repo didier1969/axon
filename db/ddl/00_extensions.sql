@@ -259,3 +259,65 @@ BEGIN
     RETURN true;
 END
 $fn$;
+
+-- Supprime un trigger seulement s'il existe sous ce nom sur cette table (REQ-AXO-902475).
+-- Évite le verrou bloquant (ACCESS EXCLUSIVE) pris par DROP TRIGGER IF EXISTS quand le trigger est absent.
+CREATE OR REPLACE FUNCTION public.drop_trigger_if_present(
+    p_schema    text,
+    p_table     text,
+    p_trigger   text
+) RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $fn$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_trigger   t
+          JOIN pg_class     c ON c.oid = t.tgrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = lower(p_schema)
+           AND c.relname = lower(p_table)
+           AND t.tgname  = lower(p_trigger)
+           AND NOT t.tgisinternal
+    ) THEN
+        RETURN false;
+    END IF;
+
+    EXECUTE format(
+        'DROP TRIGGER IF EXISTS %I ON %I.%I',
+        lower(p_trigger), lower(p_schema), lower(p_table)
+    );
+    RETURN true;
+END
+$fn$;
+
+-- Supprime un index seulement s'il existe sous ce nom dans ce schéma (REQ-AXO-902475).
+-- Évite le verrou bloquant (ACCESS EXCLUSIVE) pris par DROP INDEX IF EXISTS quand l'index est absent.
+CREATE OR REPLACE FUNCTION public.drop_index_if_present(
+    p_schema    text,
+    p_index     text
+) RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $fn$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_class     c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = lower(p_schema)
+           AND c.relname = lower(p_index)
+           AND c.relkind IN ('i', 'I')
+    ) THEN
+        RETURN false;
+    END IF;
+
+    EXECUTE format(
+        'DROP INDEX IF EXISTS %I.%I',
+        lower(p_schema), lower(p_index)
+    );
+    RETURN true;
+END
+$fn$;
+

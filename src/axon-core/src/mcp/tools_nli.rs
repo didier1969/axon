@@ -104,6 +104,7 @@ pub(crate) fn soll_ids_cites(candidat: &str) -> Vec<String> {
     trouves
 }
 
+#[allow(dead_code)]
 struct ShortlistCandidate {
     id: String,
     passage: String,

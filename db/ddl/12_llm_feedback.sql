@@ -34,8 +34,9 @@ CREATE TABLE IF NOT EXISTS axon.llm_feedback (
 ALTER TABLE axon.llm_feedback ADD COLUMN IF NOT EXISTS severity TEXT NOT NULL DEFAULT 'minor';
 
 -- Recent-window + severity scans for the feedback report / triage.
-CREATE INDEX IF NOT EXISTS llm_feedback_recent_idx
-    ON axon.llm_feedback (created_at DESC, severity, category);
+SELECT public.create_index_if_absent('axon', 'llm_feedback_recent_idx', $idx$
+    CREATE INDEX llm_feedback_recent_idx ON axon.llm_feedback (created_at DESC, severity, category)
+$idx$);
 
 -- REQ-AXO-902020 — read/triage surface (mcp_feedback_report), symmetric to the
 -- friction log's mark_resolved. The original event content stays IMMUTABLE
@@ -48,5 +49,6 @@ ALTER TABLE axon.llm_feedback ADD COLUMN IF NOT EXISTS resolved_by_req TEXT;
 ALTER TABLE axon.llm_feedback ADD COLUMN IF NOT EXISTS resolution_note TEXT;
 
 -- Open-first triage scan.
-CREATE INDEX IF NOT EXISTS llm_feedback_triage_idx
-    ON axon.llm_feedback (triage_status, created_at DESC);
+SELECT public.create_index_if_absent('axon', 'llm_feedback_triage_idx', $idx$
+    CREATE INDEX llm_feedback_triage_idx ON axon.llm_feedback (triage_status, created_at DESC)
+$idx$);

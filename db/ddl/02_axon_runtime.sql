@@ -394,15 +394,20 @@ CREATE TABLE IF NOT EXISTS axon.project_scope_truth (
 );
 
 -- ── Indexes ──────────────────────────────────────────────────────────
-CREATE INDEX IF NOT EXISTS idx_role_exit_event_role_ms
-    ON axon.role_exit_event (role, observed_ms DESC);
+SELECT public.create_index_if_absent('axon', 'idx_role_exit_event_role_ms', $idx$
+    CREATE INDEX idx_role_exit_event_role_ms ON axon.role_exit_event (role, observed_ms DESC)
+$idx$);
 
-CREATE INDEX IF NOT EXISTS vector_persist_outbox_status_idx
-    ON axon.VectorPersistOutbox (status, queued_at_ms);
-CREATE INDEX IF NOT EXISTS vector_persist_outbox_lease_idx
-    ON axon.VectorPersistOutbox (lease_owner, lease_heartbeat_at_ms);
-CREATE INDEX IF NOT EXISTS vector_persist_outbox_claim_idx
-    ON axon.VectorPersistOutbox (claim_token);
+SELECT public.create_index_if_absent('axon', 'vector_persist_outbox_status_idx', $idx$
+    CREATE INDEX vector_persist_outbox_status_idx ON axon.VectorPersistOutbox (status, queued_at_ms)
+$idx$);
+SELECT public.create_index_if_absent('axon', 'vector_persist_outbox_lease_idx', $idx$
+    CREATE INDEX vector_persist_outbox_lease_idx ON axon.VectorPersistOutbox (lease_owner, lease_heartbeat_at_ms)
+$idx$);
+SELECT public.create_index_if_absent('axon', 'vector_persist_outbox_claim_idx', $idx$
+    CREATE INDEX vector_persist_outbox_claim_idx ON axon.VectorPersistOutbox (claim_token)
+$idx$);
 
-CREATE INDEX IF NOT EXISTS vector_batch_run_kind_started_idx
-    ON axon.vector_batch_run (instance_kind, runtime_mode, started_at_ms);
+SELECT public.create_index_if_absent('axon', 'vector_batch_run_kind_started_idx', $idx$
+    CREATE INDEX vector_batch_run_kind_started_idx ON axon.vector_batch_run (instance_kind, runtime_mode, started_at_ms)
+$idx$);

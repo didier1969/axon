@@ -78,7 +78,10 @@ fn sql_shape_hash(shape: &str) -> String {
 /// embedder fell back to CPU silently — the 2026-08-17 defect where compute=CPU
 /// was reported under a HEALTHY banner. `cpu`→CPU is consistent (no mismatch);
 /// a non-GPU provider running on GPU is not a defect either. Pure → unit-testable.
-fn embed_provider_compute_mismatch(effective_provider: &str, observed_compute: &str) -> bool {
+pub(crate) fn embed_provider_compute_mismatch(
+    effective_provider: &str,
+    observed_compute: &str,
+) -> bool {
     let provider_intends_gpu = matches!(effective_provider, "cuda" | "tensorrt" | "gpu");
     provider_intends_gpu && !observed_compute.eq_ignore_ascii_case("GPU")
 }

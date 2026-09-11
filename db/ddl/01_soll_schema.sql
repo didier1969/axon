@@ -256,10 +256,12 @@ $project_code_canonical$;
 --  index on ProjectCodeRegistry.project_code — it is the PRIMARY KEY, whose
 --  implicit unique index already covers it.)
 
-CREATE INDEX IF NOT EXISTS soll_node_project_idx
-    ON soll.Node (project_code, type);
-CREATE INDEX IF NOT EXISTS soll_node_status_idx
-    ON soll.Node (status) WHERE status IS NOT NULL;
+SELECT public.create_index_if_absent('soll', 'soll_node_project_idx', $idx$
+    CREATE INDEX soll_node_project_idx ON soll.Node (project_code, type)
+$idx$);
+SELECT public.create_index_if_absent('soll', 'soll_node_status_idx', $idx$
+    CREATE INDEX soll_node_status_idx ON soll.Node (status) WHERE status IS NOT NULL
+$idx$);
 -- REQ-AXO-901757 slice A — Full-Text Search over SOLL title+description. Unlike
 -- the (deliberately absent) trigram GIN above, this serves a REAL new consumer:
 -- the `search` mode of soll_query_context, which uses `to_tsvector @@
@@ -268,44 +270,56 @@ CREATE INDEX IF NOT EXISTS soll_node_status_idx
 -- no stemming — correct for the heavily mixed FR/EN SOLL corpus (EN+FR stemming
 -- is a deferred slice-A nuance). The expression here MUST match the query side
 -- byte-for-byte or the planner skips the index.
-CREATE INDEX IF NOT EXISTS soll_node_fts_idx
-    ON soll.Node
-    USING GIN (to_tsvector('simple', COALESCE(title,'') || ' ' || COALESCE(description,'')));
+SELECT public.create_index_if_absent('soll', 'soll_node_fts_idx', $idx$
+    CREATE INDEX soll_node_fts_idx
+        ON soll.Node
+        USING GIN (to_tsvector('simple', COALESCE(title,'') || ' ' || COALESCE(description,'')))
+$idx$);
 -- No bare soll_node_type_idx: soll_node_project_idx (project_code, type) serves
 -- type filters via its leading prefix / bitmap scan. No title/description
 -- trigram GIN: the only lexical predicate is lower(title|description) LIKE,
 -- which a GIN on the BARE column cannot serve (expression mismatch -> idx_scan=0),
 -- and soll.Node is small enough that the seq-scan fallback wins.
 
-CREATE INDEX IF NOT EXISTS soll_edge_project_source_idx
-    ON soll.Edge (project_code, source_id);
-CREATE INDEX IF NOT EXISTS soll_edge_project_target_idx
-    ON soll.Edge (project_code, target_id);
+SELECT public.create_index_if_absent('soll', 'soll_edge_project_source_idx', $idx$
+    CREATE INDEX soll_edge_project_source_idx ON soll.Edge (project_code, source_id)
+$idx$);
+SELECT public.create_index_if_absent('soll', 'soll_edge_project_target_idx', $idx$
+    CREATE INDEX soll_edge_project_target_idx ON soll.Edge (project_code, target_id)
+$idx$);
 -- REFINES / SUPERSEDES / SOLVES walks scan by relation_type.
-CREATE INDEX IF NOT EXISTS soll_edge_relation_idx
-    ON soll.Edge (relation_type);
+SELECT public.create_index_if_absent('soll', 'soll_edge_relation_idx', $idx$
+    CREATE INDEX soll_edge_relation_idx ON soll.Edge (relation_type)
+$idx$);
 
-CREATE INDEX IF NOT EXISTS soll_revision_project_idx
-    ON soll.Revision (project_code, created_at);
-CREATE INDEX IF NOT EXISTS soll_revision_change_project_idx
-    ON soll.RevisionChange (revision_id);
+SELECT public.create_index_if_absent('soll', 'soll_revision_project_idx', $idx$
+    CREATE INDEX soll_revision_project_idx ON soll.Revision (project_code, created_at)
+$idx$);
+SELECT public.create_index_if_absent('soll', 'soll_revision_change_project_idx', $idx$
+    CREATE INDEX soll_revision_change_project_idx ON soll.RevisionChange (revision_id)
+$idx$);
 -- "All revisions touching entity X" — soll_query_context impact path.
-CREATE INDEX IF NOT EXISTS soll_revision_change_entity_idx
-    ON soll.RevisionChange (entity_id, entity_type);
+SELECT public.create_index_if_absent('soll', 'soll_revision_change_entity_idx', $idx$
+    CREATE INDEX soll_revision_change_entity_idx ON soll.RevisionChange (entity_id, entity_type)
+$idx$);
 
-CREATE INDEX IF NOT EXISTS soll_traceability_entity_idx
-    ON soll.Traceability (soll_entity_id, soll_entity_type);
+SELECT public.create_index_if_absent('soll', 'soll_traceability_entity_idx', $idx$
+    CREATE INDEX soll_traceability_entity_idx ON soll.Traceability (soll_entity_id, soll_entity_type)
+$idx$);
 -- Reverse lookup ("which SOLL nodes carry this commit as evidence").
-CREATE INDEX IF NOT EXISTS soll_traceability_artifact_idx
-    ON soll.Traceability (artifact_ref);
-CREATE INDEX IF NOT EXISTS soll_traceability_status_idx
-    ON soll.Traceability (artifact_status)
-    WHERE artifact_status IS NOT NULL;
+SELECT public.create_index_if_absent('soll', 'soll_traceability_artifact_idx', $idx$
+    CREATE INDEX soll_traceability_artifact_idx ON soll.Traceability (artifact_ref)
+$idx$);
+SELECT public.create_index_if_absent('soll', 'soll_traceability_status_idx', $idx$
+    CREATE INDEX soll_traceability_status_idx ON soll.Traceability (artifact_status) WHERE artifact_status IS NOT NULL
+$idx$);
 
-CREATE INDEX IF NOT EXISTS soll_mcp_job_status_idx
-    ON soll.McpJob (status, submitted_at);
-CREATE INDEX IF NOT EXISTS soll_mcp_job_project_idx
-    ON soll.McpJob (project_code, status);
+SELECT public.create_index_if_absent('soll', 'soll_mcp_job_status_idx', $idx$
+    CREATE INDEX soll_mcp_job_status_idx ON soll.McpJob (status, submitted_at)
+$idx$);
+SELECT public.create_index_if_absent('soll', 'soll_mcp_job_project_idx', $idx$
+    CREATE INDEX soll_mcp_job_project_idx ON soll.McpJob (project_code, status)
+$idx$);
 
 -- REQ-AXO-901757 slice B — semantic embeddings of SOLL node descriptions
 -- (title+description), so retrieve_context can find intent by meaning, not just
@@ -321,10 +335,12 @@ CREATE TABLE IF NOT EXISTS soll.NodeEmbedding (
     embedded_at_ms BIGINT NOT NULL,
     PRIMARY KEY (node_id, model_id)
 );
-CREATE INDEX IF NOT EXISTS soll_node_embedding_hnsw_idx
-    ON soll.NodeEmbedding USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX IF NOT EXISTS soll_node_embedding_project_idx
-    ON soll.NodeEmbedding (project_code);
+SELECT public.create_index_if_absent('soll', 'soll_node_embedding_hnsw_idx', $idx$
+    CREATE INDEX soll_node_embedding_hnsw_idx ON soll.NodeEmbedding USING hnsw (embedding vector_cosine_ops)
+$idx$);
+SELECT public.create_index_if_absent('soll', 'soll_node_embedding_project_idx', $idx$
+    CREATE INDEX soll_node_embedding_project_idx ON soll.NodeEmbedding (project_code)
+$idx$);
 
 -- ── Functions ────────────────────────────────────────────────────────
 

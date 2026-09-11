@@ -7,13 +7,9 @@
 -- tous leur verrou AVANT le test d'existence : sur `axon.practice` et
 -- `axon.mailbox_message`, écrites en continu, c'est une famine, pas une course.
 -- Les `ADD COLUMN` de ce fichier passent désormais par `add_column_if_absent`.
---
--- ⚠️ Les `CREATE INDEX IF NOT EXISTS` NE sont PAS convertis, et c'est délibéré :
--- les 16 fichiers appliqués au boot depuis toujours en portent 26 de la même
--- forme, sans incident mesuré. Les convertir ici seulement donnerait DEUX
--- disciplines pour une seule classe d'énoncé — exactement la divergence que
--- REQ-AXO-902328 ferme. La classe entière (45 CREATE INDEX + 3 DROP nus sur les
--- 25 fichiers) est logée en REQ, à traiter d'un bloc ou pas du tout.
+-- REQ-AXO-902475 — l'ensemble des `CREATE INDEX IF NOT EXISTS` et `DROP` sur les
+-- 25 fichiers passe désormais par les gardes catalogue lock-free
+-- `create_index_if_absent`, `drop_index_if_present`, `drop_trigger_if_present`.
 
 -- REQ-AXO-902088 (S1 store canonique) + REQ-AXO-902093 (S6 réconciliation) —
 -- persistance du squelette ContractNode (REQ-AXO-902087, modèle A : tables soll.*
@@ -71,7 +67,9 @@ CREATE TABLE IF NOT EXISTS soll.Contract (
 );
 
 -- Réconciliation S6 : index sur l'ancre d'identité (lookup contrat↔symbole).
-CREATE INDEX IF NOT EXISTS contract_realized_by_idx ON soll.Contract (realized_by);
+SELECT public.create_index_if_absent('soll', 'contract_realized_by_idx', $idx$
+    CREATE INDEX contract_realized_by_idx ON soll.Contract (realized_by)
+$idx$);
 
 -- ── Les arêtes typées du graphe de contrats ───────────────────────────
 -- Composite PK (même idiome que soll.Edge) : un même couple peut porter plusieurs
@@ -89,5 +87,9 @@ CREATE TABLE IF NOT EXISTS soll.ContractEdge (
     PRIMARY KEY (source_id, target_id, relation_type)
 );
 
-CREATE INDEX IF NOT EXISTS contractedge_source_idx ON soll.ContractEdge (source_id);
-CREATE INDEX IF NOT EXISTS contractedge_target_idx ON soll.ContractEdge (target_id);
+SELECT public.create_index_if_absent('soll', 'contractedge_source_idx', $idx$
+    CREATE INDEX contractedge_source_idx ON soll.ContractEdge (source_id)
+$idx$);
+SELECT public.create_index_if_absent('soll', 'contractedge_target_idx', $idx$
+    CREATE INDEX contractedge_target_idx ON soll.ContractEdge (target_id)
+$idx$);

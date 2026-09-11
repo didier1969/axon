@@ -7,13 +7,9 @@
 -- tous leur verrou AVANT le test d'existence : sur `axon.practice` et
 -- `axon.mailbox_message`, écrites en continu, c'est une famine, pas une course.
 -- Les `ADD COLUMN` de ce fichier passent désormais par `add_column_if_absent`.
---
--- ⚠️ Les `CREATE INDEX IF NOT EXISTS` NE sont PAS convertis, et c'est délibéré :
--- les 16 fichiers appliqués au boot depuis toujours en portent 26 de la même
--- forme, sans incident mesuré. Les convertir ici seulement donnerait DEUX
--- disciplines pour une seule classe d'énoncé — exactement la divergence que
--- REQ-AXO-902328 ferme. La classe entière (45 CREATE INDEX + 3 DROP nus sur les
--- 25 fichiers) est logée en REQ, à traiter d'un bloc ou pas du tout.
+-- REQ-AXO-902475 — l'ensemble des `CREATE INDEX IF NOT EXISTS` et `DROP` sur les
+-- 25 fichiers passe désormais par les gardes catalogue lock-free
+-- `create_index_if_absent`, `drop_index_if_present`, `drop_trigger_if_present`.
 
 -- REQ-AXO-902119 (MBX-7) — MAILBOX TTL / dead-letter sweep.
 -- The MVP store (db/ddl/15_mailbox.sql) carries an optional retention horizon
@@ -32,9 +28,11 @@ SELECT public.add_column_if_absent('axon', 'mailbox_message', 'archived_at', 'TI
 
 -- Partial index: the sweep and inbox reads both want "live" rows (not yet
 -- archived). Keeps the hot path off the archived tail as the log grows.
-CREATE INDEX IF NOT EXISTS mailbox_message_live_idx
-    ON axon.mailbox_message (to_project, id)
-    WHERE archived_at IS NULL;
+SELECT public.create_index_if_absent('axon', 'mailbox_message_live_idx', $idx$
+    CREATE INDEX mailbox_message_live_idx
+        ON axon.mailbox_message (to_project, id)
+        WHERE archived_at IS NULL
+$idx$);
 
 -- MBX-7 — TTL sweep. Stamps `archived_at = now()` on every row whose retention
 -- horizon has passed and that is not already archived. Idempotent (a second

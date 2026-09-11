@@ -72,8 +72,10 @@ CREATE TABLE IF NOT EXISTS ist.SecurityFinding (
     detected_ms      BIGINT NOT NULL,
     PRIMARY KEY (project_code, file_path, rule_id, line)
 );
-CREATE INDEX IF NOT EXISTS security_finding_project_idx
-    ON ist.SecurityFinding (project_code, severity, file_path, line);
+SELECT public.create_index_if_absent('ist', 'security_finding_project_idx', $idx$
+    CREATE INDEX security_finding_project_idx
+        ON ist.SecurityFinding (project_code, severity, file_path, line)
+$idx$);
 
 -- REQ-AXO-901897 (DBQ slice 1) — idempotent ALTERs so an EXISTING live table
 -- (30k rows) is migrated forward at the next boot's `apply_canonical_ddl`
@@ -153,9 +155,8 @@ $status_check$;
 -- REQ-AXO-901897 — claimable partial index. Replaces the discovered-only
 -- index: the A claimer's hot predicate is `status IN ('discovered','parsing')`
 -- (a stale-lease 'parsing' row is reclaimable), ordered by discovered_ms.
--- `DROP INDEX IF EXISTS` résout le nom AVANT de verrouiller : sur un index
--- absent il ne prend rien, il reste donc tel quel (REQ-AXO-902339).
-DROP INDEX IF EXISTS ist.idx_indexedfile_discovered;
+-- REQ-AXO-902475 : suppression lock-free via garde catalogue.
+SELECT public.drop_index_if_present('ist', 'idx_indexedfile_discovered');
 SELECT public.create_index_if_absent('ist', 'idx_indexedfile_claimable', $idx$
     CREATE INDEX idx_indexedfile_claimable
         ON ist.IndexedFile (discovered_ms) INCLUDE (path, content_hash, retry_count, lease_until_ms)

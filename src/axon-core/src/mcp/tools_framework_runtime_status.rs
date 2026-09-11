@@ -568,14 +568,15 @@ impl McpServer {
         // Interroge le superviseur pour observer l'état réel du processus axon-indexer.
         // Si le superviseur détecte une boucle de redémarrage (Restarting ou restarts élevés à bas âge),
         // l'indexeur n'est PAS prêt, et l'alerte prime sur un éventuel battement résiduel.
+        let raw_indexer_hb = self
+            .graph_store
+            .latest_lifecycle_heartbeat("indexer")
+            .ok()
+            .flatten();
         let (peer_indexer_ready, supervisor_obs) = {
-            let hb = self
-                .graph_store
-                .latest_lifecycle_heartbeat("indexer")
-                .ok()
-                .flatten();
-            let sup_facts =
-                self.collect_supervisor_facts(hb.as_ref().map(|row| now_ms - row.heartbeat_ms));
+            let sup_facts = self.collect_supervisor_facts(
+                raw_indexer_hb.as_ref().map(|row| now_ms - row.heartbeat_ms),
+            );
             let observation = if sup_facts.reachable && sup_facts.role_found {
                 Some(
                     super::runtime_topology_support::IndexerSupervisorObservation {
@@ -591,12 +592,30 @@ impl McpServer {
             };
             let liveness = super::runtime_topology_support::resolve_indexer_liveness(
                 now_ms,
-                hb.as_ref().map(|row| row.heartbeat_ms),
+                raw_indexer_hb.as_ref().map(|row| row.heartbeat_ms),
                 super::runtime_topology_support::EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS,
                 observation.as_ref(),
             );
             (liveness.ready, observation)
         };
+        let embedder_lifecycle_heartbeat = raw_indexer_hb.filter(|row| {
+            (now_ms - row.heartbeat_ms).max(0)
+                <= super::runtime_topology_support::EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS
+        });
+        let embedder_compute = match embedder_lifecycle_heartbeat
+            .as_ref()
+            .and_then(|row| row.compute.as_deref())
+        {
+            Some(c) => c.to_string(),
+            None => crate::embedder::query_worker_compute_label()
+                .unwrap_or("CPU")
+                .to_string(),
+        };
+        let effective_embed_provider = crate::embedder::query_embed_effective_provider();
+        let provider_compute_mismatch = crate::mcp::tools_system::embed_provider_compute_mismatch(
+            &effective_embed_provider,
+            &embedder_compute,
+        );
         let indexed_projection_fresh = indexer_feed_state == "fresh"
             && indexer_feed_reason.is_none()
             && runtime_authority_converged
@@ -623,6 +642,7 @@ impl McpServer {
             runtime_authority_converged,
             standalone_brain_only,
             &subsystem_reports,
+            provider_compute_mismatch,
         );
         if let Some(obs) = supervisor_obs.as_ref() {
             if obs.is_restart_loop() {
@@ -1041,14 +1061,6 @@ impl McpServer {
         // `embedding_status` (tools_system.rs). REQ-AXO-901859 — single
         // source for the window, shared with `runtime_topology_snapshot`.
         use super::runtime_topology_support::EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS;
-        let embedder_lifecycle_heartbeat = self
-            .graph_store
-            .latest_lifecycle_heartbeat("indexer")
-            .ok()
-            .flatten()
-            .filter(|row| {
-                (now_ms - row.heartbeat_ms).max(0) <= EMBEDDER_LIFECYCLE_HEARTBEAT_FRESHNESS_MS
-            });
         let embedder_lifecycle_source = if embedder_lifecycle_heartbeat.is_some() {
             "indexer_heartbeat"
         } else {
@@ -1101,24 +1113,6 @@ impl McpServer {
             .graph_store
             .embedder_observed_state()
             .unwrap_or_default();
-        // DEC-AXO-901626 — the compute verdict is OBSERVED and PUBLISHED by the
-        // indexer (self nvidia-smi → EmbedderLifecycleHeartbeat.compute). The
-        // brain is a pure reader here: no remote pid, no nvidia-smi. Defaults
-        // to CPU/unknown when no fresh indexer heartbeat exists.
-        // REQ-AXO-901979 — when no indexer heartbeat exists (brain_only), the
-        // cross-process nvidia-smi verdict is absent and the old default lied
-        // `CPU` even when the brain's OWN query worker ran on GPU (post-901978
-        // B1). Fall back to the worker's self-reported provider (it knows whether
-        // it loaded the CUDA EP) before defaulting CPU.
-        let embedder_compute = match embedder_lifecycle_heartbeat
-            .as_ref()
-            .and_then(|row| row.compute.as_deref())
-        {
-            Some(c) => c.to_string(),
-            None => crate::embedder::query_worker_compute_label()
-                .unwrap_or("CPU")
-                .to_string(),
-        };
         let embedder_compute_source = match embedder_lifecycle_heartbeat
             .as_ref()
             .and_then(|row| row.compute_source.as_deref())
@@ -1139,6 +1133,8 @@ impl McpServer {
                 .as_ref()
                 .and_then(|row| row.build_id.clone()),
             "heartbeat_age_ms": embedder_lifecycle_heartbeat_age_ms,
+            "provider_compute_mismatch": provider_compute_mismatch,
+            "effective_embed_provider": effective_embed_provider,
         });
         // Provider strings for the (legacy) vector_pipeline_telemetry block,
         // kept coherent with the observable verdict above so neither surface
@@ -1946,6 +1942,7 @@ impl McpServer {
     /// the indexer behind the most-recent ingestion ? Returns 0 stale files
     /// when IndexedFile keeps pace (pipeline writes in-line ; the legacy
     /// "modified files since last publish" decoupling is gone).
+    #[allow(dead_code)]
     pub(crate) fn compute_staleness_snapshot(&self) -> Result<Value, String> {
         self.compute_staleness_snapshot_for_project(None)
     }
@@ -2035,6 +2032,7 @@ pub(crate) fn compute_degraded_notes(
     runtime_authority_converged: bool,
     standalone_brain_only: bool,
     subsystem_reports: &[crate::runtime_readiness::SubsystemReport],
+    provider_compute_mismatch: bool,
 ) -> Vec<String> {
     let mut degraded_notes = Vec::<String>::new();
     if !indexed_projection_fresh {
@@ -2046,6 +2044,12 @@ pub(crate) fn compute_degraded_notes(
     }
     if !runtime_authority_converged && !standalone_brain_only {
         degraded_notes.push("runtime_authority_not_converged".to_string());
+    }
+    // REQ-AXO-902363: un mismatch entre le provider demandé/effectif (GPU) et le
+    // compute observé (CPU) dégrade la vérité servie. Le fallback silencieux sur CPU
+    // n'est pas un état sain.
+    if provider_compute_mismatch {
+        degraded_notes.push("provider_compute_mismatch".to_string());
     }
     // REQ-AXO-902618 — « rien n'a changé » et « rien n'a pu être écrit » sont deux
     // états, pas un. Un écrivain mort ne modifie rien, et l'absence de modification
@@ -2111,6 +2115,21 @@ pub(crate) fn derive_recovery_action(degraded_notes: &[String]) -> (Value, Value
                 "command": "tail -n 50 /tmp/axon-live-indexer.log",
                 "reason": "axon-indexer is crash-looping under supervisor (process-compose)",
                 "verification": "fix root cause (e.g. database URL or env) and verify supervisor restarts stabilize"
+            }),
+        ),
+        // REQ-AXO-902363 (issue de REQ-AXO-902345) — mismatch provider/compute GPU vs CPU.
+        "provider_compute_mismatch" => (
+            json!({
+                "kind": "inspect_embedding_provider",
+                "tool": "embedding_status",
+                "arguments": {},
+                "when": "now"
+            }),
+            json!({
+                "action": "inspect_embedding_provider",
+                "command": "embedding_status",
+                "reason": "embed provider intends GPU but worker runs on CPU (GPU execution provider failed to load silently)",
+                "verification": "check LD_LIBRARY_PATH (libcuda.so.1) and brain/indexer logs for 'CUDA init failed' (REQ-AXO-902345, REQ-AXO-902363)"
             }),
         ),
         _ => (
@@ -2513,7 +2532,7 @@ mod ist_writer_degradation_recovery_tests {
 /// REQ-AXO-902618 critère 3 — la contradiction mesurée le 2026-09-04, reproduite.
 #[cfg(test)]
 mod degraded_notes_tests {
-    use super::compute_degraded_notes;
+    use super::{compute_degraded_notes, derive_recovery_action};
     use crate::runtime_readiness::{SubsystemReport, SubsystemState};
 
     fn rapport(subsystem: &str, state: SubsystemState) -> SubsystemReport {
@@ -2540,6 +2559,7 @@ mod degraded_notes_tests {
                     reason: "A3 persistence failed 101 consecutive batches".to_string(),
                 },
             )],
+            false,
         );
         assert!(
             !notes.is_empty(),
@@ -2557,6 +2577,44 @@ mod degraded_notes_tests {
         );
     }
 
+    /// REQ-AXO-902363 : un mismatch entre le provider effectif et le compute observé
+    /// doit dégrader la vérité et orienter vers `embedding_status`.
+    #[test]
+    fn un_mismatch_compute_provider_degrade_la_verite() {
+        let notes = compute_degraded_notes(
+            true,
+            false,
+            None,
+            true,
+            false,
+            &[rapport("ist_writer", SubsystemState::Ready)],
+            true, // provider_compute_mismatch
+        );
+        assert!(
+            !notes.is_empty(),
+            "un mismatch provider/compute DOIT dégrader la vérité"
+        );
+        assert!(
+            notes.contains(&"provider_compute_mismatch".to_string()),
+            "la note spécifique 'provider_compute_mismatch' doit être présente: {notes:?}"
+        );
+        let (action, recovery_hint) = derive_recovery_action(&notes);
+        assert_eq!(
+            action.get("tool").and_then(|v| v.as_str()),
+            Some("embedding_status"),
+            "l'action de remédiation doit orienter vers embedding_status"
+        );
+        assert_eq!(
+            action.get("kind").and_then(|v| v.as_str()),
+            Some("inspect_embedding_provider"),
+            "le type d'action doit être inspect_embedding_provider"
+        );
+        assert_eq!(
+            recovery_hint.get("action").and_then(|v| v.as_str()),
+            Some("inspect_embedding_provider")
+        );
+    }
+
     /// Et un runtime réellement sain reste canonique — sinon la correction
     /// dégraderait tout le parc en permanence.
     #[test]
@@ -2568,6 +2626,7 @@ mod degraded_notes_tests {
             true,
             false,
             &[rapport("ist_writer", SubsystemState::Ready)],
+            false,
         );
         assert!(notes.is_empty(), "{notes:?}");
     }
@@ -2575,6 +2634,6 @@ mod degraded_notes_tests {
     /// Registre froid : ne rien savoir de l'écrivain n'est pas savoir qu'il est cassé.
     #[test]
     fn un_registre_froid_ne_degrade_pas_la_verite() {
-        assert!(compute_degraded_notes(true, false, None, true, false, &[]).is_empty());
+        assert!(compute_degraded_notes(true, false, None, true, false, &[], false).is_empty());
     }
 }
