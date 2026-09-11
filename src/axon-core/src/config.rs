@@ -291,6 +291,7 @@ fn default_supported_extensions() -> Vec<String> {
         "toml".to_string(),
         "conf".to_string(),
         "html".to_string(),
+        "xml".to_string(),
         "css".to_string(),
         // REQ-AXO-902631 — ces extensions ont TOUJOURS eu un parser
         // (`parser::get_parser_for_file`) et n'ont jamais franchi ce filtre : le

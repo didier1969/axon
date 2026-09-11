@@ -392,6 +392,8 @@ impl GraphStore {
             "tests" => Some("TESTS"),
             // REQ-AXO-902423 — Symbol -> Symbol CONTAINS edges.
             "contains" => Some("CONTAINS"),
+            // REQ-AXO-902330 — IoC framework invocations (XML views, @api.*, compute=...)
+            "framework_invokes" | "framework-invokes" => Some("FRAMEWORK_INVOKES"),
             _ => None,
         }
     }
@@ -1698,7 +1700,7 @@ impl GraphStore {
                 // edge kind keeps the file-local id (source/containment edges are
                 // always co-located with their file).
                 let target_id = match table {
-                    "CALLS" | "CALLS_NIF" => {
+                    "CALLS" | "CALLS_NIF" | "FRAMEWORK_INVOKES" => {
                         let raw_receiver = relation.properties.get("receiver").map(String::as_str);
                         // REQ-AXO-902582 — resolve alias receivers (e.g. NA -> nexus-admission)
                         let resolved_receiver = raw_receiver
@@ -2836,5 +2838,22 @@ mod req_axo_140_call_resolution {
     fn relation_table_maps_contains() {
         assert_eq!(GraphStore::relation_table("contains"), Some("CONTAINS"));
         assert_eq!(GraphStore::relation_table("CONTAINS"), Some("CONTAINS"));
+    }
+
+    /// REQ-AXO-902330 — relation_table mappe "framework_invokes" vers Some("FRAMEWORK_INVOKES").
+    #[test]
+    fn relation_table_maps_framework_invokes() {
+        assert_eq!(
+            GraphStore::relation_table("framework_invokes"),
+            Some("FRAMEWORK_INVOKES")
+        );
+        assert_eq!(
+            GraphStore::relation_table("FRAMEWORK_INVOKES"),
+            Some("FRAMEWORK_INVOKES")
+        );
+        assert_eq!(
+            GraphStore::relation_table("framework-invokes"),
+            Some("FRAMEWORK_INVOKES")
+        );
     }
 }

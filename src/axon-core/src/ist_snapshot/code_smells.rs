@@ -424,14 +424,22 @@ pub fn orphan_code_symbols(graph: &IstGraph, project: &str, limit: usize) -> (Ve
         if NodeFlags(flags.0).tested() {
             continue;
         }
+        // REQ-AXO-902330 / REQ-AXO-902227 — an entry point (runtime / framework-invoked /
+        // IoC decorated / @impl callback) is not an orphan.
+        if NodeFlags(flags.0).entry() {
+            continue;
+        }
         let empty = String::new();
         let path = file_map.get(&idx).unwrap_or(&empty);
         if !path.is_empty() && is_test_path(path) {
             continue;
         }
-        let has_caller = graph
-            .reverse_neighbors(idx)
-            .any(|(_, rel)| matches!(rel, RelationType::Calls));
+        let has_caller = graph.reverse_neighbors(idx).any(|(_, rel)| {
+            matches!(
+                rel,
+                RelationType::Calls | RelationType::CallsNif | RelationType::FrameworkInvokes
+            )
+        });
         if has_caller {
             continue;
         }
@@ -1388,7 +1396,10 @@ fn wiring_classify_node(
     let mut prod_callers = 0usize;
     let mut test_callers = 0usize;
     for (src, rel) in graph.reverse_neighbors(idx) {
-        if !matches!(rel, RelationType::Calls | RelationType::CallsNif) {
+        if !matches!(
+            rel,
+            RelationType::Calls | RelationType::CallsNif | RelationType::FrameworkInvokes
+        ) {
             continue;
         }
         let (_, _, sflags) = graph.node_meta(src);
@@ -1730,7 +1741,10 @@ pub fn orphan_clusters(
             let mut has_caller = false;
             let mut all_test = true;
             for (src, rel) in graph.reverse_neighbors(idx) {
-                if !matches!(rel, RelationType::Calls | RelationType::CallsNif) {
+                if !matches!(
+                    rel,
+                    RelationType::Calls | RelationType::CallsNif | RelationType::FrameworkInvokes
+                ) {
                     continue;
                 }
                 has_caller = true;
@@ -2400,6 +2414,69 @@ mod tests {
             vec!["orphan_one".to_string(), "orphan_two".to_string()]
         );
         assert_eq!(total_orphans, 2, "deux orphelins trouvés, donc total = 2");
+    }
+
+    #[test]
+    fn req_902330_orphan_code_skips_entry_point_and_framework_invokes() {
+        let nodes = vec![
+            file("AXO::src/lib.rs"),
+            func_entry("AXO::src/lib.rs::_compute_total", false), // IoC decorated / entry point
+            func("AXO::src/lib.rs::_action_dry_run", false),      // invoked via framework
+            func("AXO::src/lib.rs::_actual_orphan", false),       // true orphan
+        ];
+        let edges = vec![
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::_compute_total",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::_action_dry_run",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/lib.rs",
+                "AXO::src/lib.rs::_actual_orphan",
+                RelationType::Contains,
+            ),
+            edge(
+                "AXO::src/view.xml::button",
+                "AXO::src/lib.rs::_action_dry_run",
+                RelationType::FrameworkInvokes,
+            ),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let (orphans, total) = orphan_code_symbols(&g, "AXO", 10);
+        assert_eq!(orphans, vec!["_actual_orphan".to_string()]);
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn req_902330_wiring_counts_framework_invokes_as_prod_caller() {
+        let nodes = vec![
+            file("AXO::src/view.xml"),
+            func("AXO::src/models.py::action_import", true),
+        ];
+        let edges = vec![edge(
+            "AXO::src/view.xml::btn",
+            "AXO::src/models.py::action_import",
+            RelationType::FrameworkInvokes,
+        )];
+        let g = IstGraph::build(nodes, edges);
+        let file_map = build_file_path_map(&g);
+        let empty_set = std::collections::HashSet::new();
+        let declared = DeclaredSymbolRefs::from_set(&empty_set);
+        let phantom_callers = std::collections::HashMap::new();
+        let report = wiring_classify_node(
+            &g,
+            g.index_of("AXO::src/models.py::action_import").unwrap(),
+            &declared,
+            &file_map,
+            &phantom_callers,
+        );
+        // It has a prod caller via FrameworkInvokes -> not isolated, not orphan!
+        assert!(report.is_none());
     }
 
     #[test]

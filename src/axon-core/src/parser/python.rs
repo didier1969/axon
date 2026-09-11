@@ -141,6 +141,30 @@ impl PythonParser {
         }
     }
 
+    fn is_ioc_decorator(dec_text: &str) -> bool {
+        let t = dec_text.trim().trim_start_matches('@').trim();
+        t.starts_with("api.depends")
+            || t.starts_with("api.constrains")
+            || t.starts_with("api.onchange")
+            || t.starts_with("api.model_create_multi")
+            || t.starts_with("api.ondelete")
+            || t.starts_with("api.autovacuum")
+            || t.starts_with("api.model")
+            || t.starts_with("api.returns")
+            || t.starts_with("task")
+            || t.starts_with("shared_task")
+            || t.contains(".task")
+            || t.starts_with("receiver")
+            || t.contains(".receiver")
+            || t.contains(".route")
+            || t.contains(".get(")
+            || t.contains(".post(")
+            || t.contains(".put(")
+            || t.contains(".delete(")
+            || t.starts_with("click.command")
+            || t.starts_with("click.group")
+    }
+
     fn extract_function<'a>(
         &self,
         node: Node<'a>,
@@ -179,7 +203,11 @@ impl PythonParser {
         // was mis-reported as dead code. We fold it into the already-persisted
         // `tested` flag (which dead_code_count / orphan_code_symbols already skip),
         // avoiding a new Symbol column on the COPY-BINARY ingestion path.
+        // REQ-AXO-902330 — recognise IoC framework decorators (Odoo @api.*, Celery @task,
+        // Django @receiver, Flask/FastAPI @*.route / @*.get). These methods are invoked by
+        // the framework runtime and represent canonical entry points.
         let mut is_fixture = false;
+        let mut is_ioc_entry = false;
         if let Some(parent) = node.parent() {
             if parent.kind() == "decorated_definition" {
                 let mut cursor = parent.walk();
@@ -188,6 +216,10 @@ impl PythonParser {
                         let dec_text = child.utf8_text(source).unwrap_or("");
                         if dec_text.contains("fixture") {
                             is_fixture = true;
+                        }
+                        if Self::is_ioc_decorator(dec_text) {
+                            is_ioc_entry = true;
+                            props.insert("framework_ioc".to_string(), "true".to_string());
                         }
                         if let Some(id) = self.find_child_by_type(child, "identifier") {
                             let dec_name = id.utf8_text(source).unwrap_or("").to_string();
@@ -251,7 +283,7 @@ impl PythonParser {
             start_line: node.start_position().row + 1,
             end_line: node.end_position().row + 1,
             docstring: None,
-            is_entry_point: func_name == "main" || is_nif,
+            is_entry_point: func_name == "main" || is_nif || is_ioc_entry,
             is_public: !func_name.starts_with("_") || func_name == "__init__",
             // REQ-AXO-901958 — fixtures fold into `tested` (framework-invoked, no
             // inbound CALLS edge → would be mis-flagged as dead).
@@ -349,9 +381,57 @@ impl PythonParser {
         if let Some(args) = self.find_child_by_type(node, "argument_list") {
             let mut cursor = args.walk();
             for child in args.children(&mut cursor) {
+                if child.kind() == "keyword_argument" {
+                    self.extract_framework_keyword_arg(child, source, result, scope);
+                }
                 self.walk(child, source, result, scope);
             }
         }
+    }
+
+    fn extract_framework_keyword_arg<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        scope: &str,
+    ) {
+        let name_node = node.child_by_field_name("name").or_else(|| node.child(0));
+        let val_node = node.child_by_field_name("value").or_else(|| {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).last()
+        });
+        let (Some(name_n), Some(val_n)) = (name_node, val_node) else {
+            return;
+        };
+        let key = name_n.utf8_text(source).unwrap_or("");
+        if !matches!(
+            key,
+            "compute" | "inverse" | "search" | "default" | "selection"
+        ) {
+            return;
+        }
+        let val_text = val_n.utf8_text(source).unwrap_or("").trim();
+        let target_name = val_text.trim_matches(|c| c == '\'' || c == '"');
+        if target_name.is_empty() || target_name.contains(' ') || target_name.contains('\n') {
+            return;
+        }
+        let from_target = if scope.is_empty() {
+            "module".to_string()
+        } else {
+            scope.to_string()
+        };
+        let to_target = if !scope.is_empty() && !target_name.contains('.') {
+            format!("{}.{}", scope, target_name)
+        } else {
+            target_name.to_string()
+        };
+        result.relations.push(Relation {
+            from: from_target,
+            to: to_target,
+            rel_type: "framework_invokes".to_string(),
+            properties: HashMap::new(),
+        });
     }
 
     fn extract_import<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {
@@ -582,6 +662,29 @@ impl Parser for PythonParser {
             self.walk(root, source, &mut result, "");
         }
 
+        // REQ-AXO-902330 — mark local target functions of framework_invokes relations
+        // as entry points so that intra-file IoC callbacks (e.g. compute="_compute_x")
+        // are recognized as active entry points at the parser layer.
+        let mut invoked_targets: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for r in &result.relations {
+            if r.rel_type == "framework_invokes" {
+                invoked_targets.insert(r.to.clone());
+                if let Some(leaf) = r.to.split('.').last() {
+                    invoked_targets.insert(leaf.to_string());
+                }
+            }
+        }
+
+        if !invoked_targets.is_empty() {
+            for sym in &mut result.symbols {
+                let leaf = sym.name.split('.').last().unwrap_or(&sym.name);
+                if invoked_targets.contains(&sym.name) || invoked_targets.contains(leaf) {
+                    sym.is_entry_point = true;
+                }
+            }
+        }
+
         result
     }
 }
@@ -758,6 +861,140 @@ class Agent:
             contains_agent_execute,
             "Agent must contain Agent.execute: {:?}",
             result.relations
+        );
+    }
+
+    #[test]
+    fn test_req_902330_python_ioc_decorators() {
+        let p = parser();
+        let code = r#"
+class AccountMove:
+    @api.depends('line_ids.price_subtotal')
+    def _compute_amount(self):
+        pass
+
+    @api.constrains('date')
+    def _check_date(self):
+        pass
+
+    def regular_private_method(self):
+        pass
+
+@task
+def background_worker():
+    pass
+"#;
+        let result = p.parse(code);
+        if result.symbols.is_empty() {
+            eprintln!("python wasm grammar unavailable, skipping");
+            return;
+        }
+
+        let compute_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "AccountMove._compute_amount")
+            .expect("AccountMove._compute_amount must be parsed");
+        assert!(
+            compute_sym.is_entry_point,
+            "@api.depends method must be an entry point"
+        );
+        assert_eq!(
+            compute_sym
+                .properties
+                .get("framework_ioc")
+                .map(String::as_str),
+            Some("true")
+        );
+
+        let constrains_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "AccountMove._check_date")
+            .expect("AccountMove._check_date must be parsed");
+        assert!(
+            constrains_sym.is_entry_point,
+            "@api.constrains method must be an entry point"
+        );
+
+        let regular_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "AccountMove.regular_private_method")
+            .expect("AccountMove.regular_private_method must be parsed");
+        assert!(
+            !regular_sym.is_entry_point,
+            "Unannotated private method must not be an entry point"
+        );
+
+        let worker_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "background_worker")
+            .expect("background_worker must be parsed");
+        assert!(
+            worker_sym.is_entry_point,
+            "@task function must be an entry point"
+        );
+    }
+
+    #[test]
+    fn test_req_902330_python_framework_keyword_args() {
+        let p = parser();
+        let code = r#"
+class SaleOrder:
+    amount = fields.Monetary(compute='_compute_amount', inverse='_inverse_amount')
+
+    def _compute_amount(self):
+        pass
+
+    def _inverse_amount(self):
+        pass
+"#;
+        let result = p.parse(code);
+        if result.symbols.is_empty() {
+            eprintln!("python wasm grammar unavailable, skipping");
+            return;
+        }
+
+        let compute_rel = result
+            .relations
+            .iter()
+            .find(|r| r.rel_type == "framework_invokes" && r.to == "SaleOrder._compute_amount");
+        assert!(
+            compute_rel.is_some(),
+            "compute='_compute_amount' must emit framework_invokes relation: {:?}",
+            result.relations
+        );
+
+        let inverse_rel = result
+            .relations
+            .iter()
+            .find(|r| r.rel_type == "framework_invokes" && r.to == "SaleOrder._inverse_amount");
+        assert!(
+            inverse_rel.is_some(),
+            "inverse='_inverse_amount' must emit framework_invokes relation: {:?}",
+            result.relations
+        );
+
+        let compute_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "SaleOrder._compute_amount")
+            .expect("SaleOrder._compute_amount must be parsed");
+        assert!(
+            compute_sym.is_entry_point,
+            "Target of compute= must be marked as entry point"
+        );
+
+        let inverse_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "SaleOrder._inverse_amount")
+            .expect("SaleOrder._inverse_amount must be parsed");
+        assert!(
+            inverse_sym.is_entry_point,
+            "Target of inverse= must be marked as entry point"
         );
     }
 }

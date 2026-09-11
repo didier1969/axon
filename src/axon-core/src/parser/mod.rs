@@ -244,6 +244,7 @@ pub mod sql;
 pub mod text;
 pub mod typeql;
 pub mod typescript;
+pub mod xml;
 pub mod yaml;
 
 const SUPPORTED_PARSER_ECOSYSTEMS: &[EcosystemId] = &[
@@ -290,8 +291,8 @@ pub fn supported_parser_ecosystems() -> &'static [EcosystemId] {
 pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "py", "ex", "exs", "rs", "scm", "ss", "sld", "sls", "ts", "tsx", "js", "jsx", "go", "java",
     "c", "h", "cpp", "hpp", "cc", "cxx", "hxx", "cs", "rb", "ruby", "kt", "kts", "php", "yaml",
-    "yml", "html", "htm", "css", "scss", "md", "markdown", "sql", "tql", "typeql", "dl", "datalog",
-    "lll", "txt", "conf", "ini",
+    "yml", "html", "htm", "xml", "css", "scss", "md", "markdown", "sql", "tql", "typeql", "dl",
+    "datalog", "lll", "txt", "conf", "ini",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
@@ -313,6 +314,7 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "php" => Some(Box::new(php::PhpParser::new())),
         "yaml" | "yml" => Some(Box::new(yaml::YamlParser::new())),
         "html" | "htm" => Some(Box::new(html::HtmlParser::new())),
+        "xml" => Some(Box::new(xml::XmlParser::new())),
         "css" | "scss" => Some(Box::new(css::CssParser::new())),
         "md" | "markdown" => Some(Box::new(markdown::MarkdownParser::new())),
         "sql" => Some(Box::new(sql::SqlParser::new())),

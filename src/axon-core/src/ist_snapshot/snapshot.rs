@@ -37,6 +37,9 @@ pub enum RelationType {
     // by a periodic pgvector HNSW scan (never by the parser). Appended (not
     // inserted) so existing CSR u8 encodings stay stable.
     SimilarTo = 9,
+    // REQ-AXO-902330 — framework invocation (IoC / Odoo XML button / ORM hook / event).
+    // Appended so existing CSR u8 encodings stay stable.
+    FrameworkInvokes = 10,
     Other = 255,
 }
 
@@ -57,6 +60,7 @@ impl RelationType {
             "DECLARES" => Self::Declares,
             "READS_ARTIFACT" => Self::ReadsArtifact,
             "SIMILAR_TO" => Self::SimilarTo,
+            "FRAMEWORK_INVOKES" | "FRAMEWORK-INVOKES" => Self::FrameworkInvokes,
             _ => Self::Other,
         }
     }
@@ -73,6 +77,7 @@ impl RelationType {
             Self::Declares => "DECLARES",
             Self::ReadsArtifact => "READS_ARTIFACT",
             Self::SimilarTo => "SIMILAR_TO",
+            Self::FrameworkInvokes => "FRAMEWORK_INVOKES",
             Self::Other => "OTHER",
         }
     }
@@ -93,7 +98,8 @@ impl RelationType {
             | Self::Imports
             | Self::Uses
             | Self::Reads
-            | Self::ReadsArtifact => true,
+            | Self::ReadsArtifact
+            | Self::FrameworkInvokes => true,
             Self::Contains | Self::SimilarTo | Self::Declares | Self::Other => false,
         }
     }
@@ -613,6 +619,17 @@ impl IstGraph {
                         .entry(name.to_string())
                         .and_modify(|e| e.1 = true)
                         .or_insert((idx, false));
+                    // REQ-AXO-902330 — when the method is qualified as `Class.method`
+                    // (e.g. Python method), also index the bare leaf method name so
+                    // XML framework buttons and framework string references resolve.
+                    if let Some(leaf) = name.rsplit('.').next() {
+                        if leaf != name {
+                            name_to_func
+                                .entry(leaf.to_string())
+                                .and_modify(|e| e.1 = true)
+                                .or_insert((idx, false));
+                        }
+                    }
                     if record.flags.nif() {
                         name_to_nif.entry(name.to_string()).or_default().push(idx);
                     }
@@ -1178,6 +1195,7 @@ fn relation_from_u8(value: u8) -> RelationType {
         7 => RelationType::Declares,
         8 => RelationType::ReadsArtifact,
         9 => RelationType::SimilarTo,
+        10 => RelationType::FrameworkInvokes,
         _ => RelationType::Other,
     }
 }
@@ -1197,6 +1215,7 @@ mod tests {
             RelationType::Uses,
             RelationType::Reads,
             RelationType::ReadsArtifact,
+            RelationType::FrameworkInvokes,
         ] {
             assert!(r.is_dependency(), "{r:?} must count as a dependency");
         }

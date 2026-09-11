@@ -799,7 +799,10 @@ pub fn dead_clusters(graph: &IstGraph, roots: &[u32], candidates: &[u32]) -> Dea
         let mut next: Vec<u32> = Vec::new();
         for node in frontier {
             for (target, rel) in graph.forward_neighbors(node) {
-                if !matches!(rel, RelationType::Calls | RelationType::CallsNif) {
+                if !matches!(
+                    rel,
+                    RelationType::Calls | RelationType::CallsNif | RelationType::FrameworkInvokes
+                ) {
                     continue;
                 }
                 if reached.insert(target) {
@@ -1843,6 +1846,37 @@ mod tests {
         assert_eq!(
             result.unreached_count, 1,
             "CONTAINS must never be treated as an invocation edge"
+        );
+    }
+
+    #[test]
+    fn req_902330_dead_clusters_follows_framework_invokes() {
+        let nodes = vec![
+            n("main"),
+            n("view_button"),
+            n("action_confirm"),
+            n("confirm_helper"),
+        ];
+        let edges = vec![
+            e("main", "view_button", RelationType::Calls),
+            e(
+                "view_button",
+                "action_confirm",
+                RelationType::FrameworkInvokes,
+            ),
+            e("action_confirm", "confirm_helper", RelationType::Calls),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let roots = vec![idx(&g, "main")];
+        let candidates = vec![
+            idx(&g, "main"),
+            idx(&g, "action_confirm"),
+            idx(&g, "confirm_helper"),
+        ];
+        let result = dead_clusters(&g, &roots, &candidates);
+        assert_eq!(
+            result.unreached_count, 0,
+            "FrameworkInvokes must be traversed in dead_clusters multi-source reachability"
         );
     }
 
