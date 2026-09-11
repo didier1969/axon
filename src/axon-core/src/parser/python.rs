@@ -1,6 +1,14 @@
 use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::collections::HashMap;
 use tree_sitter::Node;
+
+static SQLA_FK_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"ForeignKey\(\s*["']([^"']+)["']\s*\)"#).unwrap());
+static SQLA_REL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"relationship\(\s*(?:argument=\s*)?["']?([A-Za-z0-9_]+)["']?"#).unwrap()
+});
 
 pub struct PythonParser {
     wasm_bytes: &'static [u8],
@@ -140,7 +148,143 @@ impl PythonParser {
         }
 
         if let Some(body) = self.find_child_by_type(node, "block") {
+            self.extract_sqlalchemy_attributes(body, source, result, &name);
             self.walk(body, source, result, &name);
+        }
+    }
+
+    fn extract_sqlalchemy_attributes<'a>(
+        &self,
+        body: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        class_name: &str,
+    ) {
+        let mut cursor = body.walk();
+        for stmt in body.children(&mut cursor) {
+            let assign_node = if stmt.kind() == "assignment" {
+                Some(stmt)
+            } else if stmt.kind() == "expression_statement" {
+                self.find_child_by_type(stmt, "assignment")
+            } else {
+                None
+            };
+
+            let Some(assign) = assign_node else {
+                continue;
+            };
+
+            let left = assign.child_by_field_name("left");
+            let right = assign.child_by_field_name("right");
+            let (Some(left_node), Some(right_node)) = (left, right) else {
+                continue;
+            };
+
+            let left_text = left_node.utf8_text(source).unwrap_or("").trim();
+            let var_name = left_text
+                .split(':')
+                .next()
+                .unwrap_or(left_text)
+                .trim()
+                .to_string();
+            let right_text = right_node.utf8_text(source).unwrap_or("").trim();
+
+            if var_name == "__tablename__" {
+                let table_name = right_text.trim_matches('"').trim_matches('\'').to_string();
+                if let Some(cls_sym) = result
+                    .symbols
+                    .iter_mut()
+                    .find(|s| s.name == class_name && s.kind == "class")
+                {
+                    cls_sym
+                        .properties
+                        .insert("table".to_string(), table_name.clone());
+                }
+                let mut p = HashMap::new();
+                p.insert("orm".to_string(), "sqlalchemy".to_string());
+                p.insert("table".to_string(), table_name.clone());
+                result.relations.push(Relation {
+                    from: class_name.to_string(),
+                    to: table_name,
+                    rel_type: "references".to_string(),
+                    properties: p,
+                });
+                continue;
+            }
+
+            let is_col = right_text.contains("Column(") || right_text.contains("mapped_column(");
+            let is_rel = right_text.contains("relationship(");
+
+            if is_col || is_rel {
+                let mut field_props = HashMap::new();
+                if is_col {
+                    field_props.insert("column".to_string(), "true".to_string());
+                }
+                if is_rel {
+                    field_props.insert("relation".to_string(), "relationship".to_string());
+                }
+
+                let full_field_name = format!("{}.{}", class_name, var_name);
+                result.symbols.push(Symbol {
+                    name: full_field_name.clone(),
+                    kind: "field".to_string(),
+                    start_line: stmt.start_position().row + 1,
+                    end_line: stmt.end_position().row + 1,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: !var_name.starts_with('_'),
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: field_props,
+                    embedding: None,
+                });
+
+                result.relations.push(Relation {
+                    from: class_name.to_string(),
+                    to: full_field_name,
+                    rel_type: "contains".to_string(),
+                    properties: HashMap::new(),
+                });
+            }
+
+            if let Some(fk_cap) = SQLA_FK_RE.captures(right_text) {
+                if let Some(fk_target) = fk_cap.get(1) {
+                    let fk_str = fk_target.as_str();
+                    let target_table = fk_str.split('.').next().unwrap_or(fk_str).to_string();
+
+                    let mut props = HashMap::new();
+                    props.insert("orm".to_string(), "sqlalchemy".to_string());
+                    props.insert("foreign_key".to_string(), fk_str.to_string());
+                    props.insert("field".to_string(), var_name.clone());
+
+                    result.relations.push(Relation {
+                        from: class_name.to_string(),
+                        to: target_table,
+                        rel_type: "references".to_string(),
+                        properties: props,
+                    });
+                }
+            }
+
+            if is_rel {
+                if let Some(rel_cap) = SQLA_REL_RE.captures(right_text) {
+                    if let Some(target_cap) = rel_cap.get(1) {
+                        let target_cls = target_cap.as_str().to_string();
+                        let mut props = HashMap::new();
+                        props.insert("orm".to_string(), "sqlalchemy".to_string());
+                        props.insert("relation".to_string(), "relationship".to_string());
+                        props.insert("field".to_string(), var_name);
+
+                        result.relations.push(Relation {
+                            from: class_name.to_string(),
+                            to: target_cls,
+                            rel_type: "references".to_string(),
+                            properties: props,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -1049,5 +1193,66 @@ def helper_function_test():
             .find(|s| s.name == "helper_function_test")
             .expect("Function must exist");
         assert!(func.tested, "Function ending in _test must be tested=true");
+    }
+
+    #[test]
+    fn req_902663_python_sqlalchemy_models_and_relationships() {
+        let p = PythonParser::new();
+        let code = r#"
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"))
+    organization = relationship("Organization", back_populates="users")
+    posts = relationship("Post", back_populates="author")
+"#;
+        let result = p.parse(code);
+        if result.symbols.is_empty() {
+            eprintln!("python wasm grammar unavailable, skipping");
+            return;
+        }
+
+        let user_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "User")
+            .expect("User class must exist");
+        assert_eq!(
+            user_sym.properties.get("table").map(|s| s.as_str()),
+            Some("users")
+        );
+
+        // References to table "users"
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "User" && r.to == "users" && r.rel_type == "references"));
+
+        // ForeignKey references "organizations"
+        assert!(result.relations.iter().any(|r| r.from == "User"
+            && r.to == "organizations"
+            && r.rel_type == "references"
+            && r.properties.get("foreign_key") == Some(&"organizations.id".to_string())));
+
+        // Relationships reference "Organization" and "Post"
+        assert!(result.relations.iter().any(|r| r.from == "User"
+            && r.to == "Organization"
+            && r.rel_type == "references"
+            && r.properties.get("relation") == Some(&"relationship".to_string())));
+        assert!(result.relations.iter().any(|r| r.from == "User"
+            && r.to == "Post"
+            && r.rel_type == "references"
+            && r.properties.get("relation") == Some(&"relationship".to_string())));
+
+        // Field symbols
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "User.id" && s.kind == "field"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "User.org_id" && s.kind == "field"));
     }
 }

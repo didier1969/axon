@@ -175,6 +175,14 @@ impl ElixirParser {
                     module_name,
                     aliases,
                 ),
+                "schema" | "embedded_schema" => Self::extract_ecto_schema(
+                    node,
+                    source_bytes,
+                    content,
+                    result,
+                    module_name,
+                    aliases,
+                ),
                 x if IMPORT_DIRECTIVES.contains(&x) => {
                     Self::extract_import_directive(node, source_bytes, result, x, module_name)
                 }
@@ -440,6 +448,184 @@ impl ElixirParser {
                 &full_name,
                 aliases,
             );
+        }
+    }
+
+    fn extract_ecto_schema<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        _content: &str,
+        result: &mut ExtractionResult,
+        module_name: &str,
+        aliases: &HashMap<String, String>,
+    ) {
+        let mut table_name = String::new();
+        if let Some(args) = Self::find_child_by_type(node, "arguments") {
+            let mut ac = args.walk();
+            for child in args.named_children(&mut ac) {
+                let text = child.utf8_text(source_bytes).unwrap_or("");
+                if child.kind() == "string" || text.starts_with('"') {
+                    table_name = text.trim_matches('"').to_string();
+                    break;
+                }
+            }
+        }
+
+        let start_line = node.start_position().row + 1;
+        let end_line = node.end_position().row + 1;
+
+        let mut schema_props = HashMap::new();
+        if !table_name.is_empty() {
+            schema_props.insert("table".to_string(), table_name.clone());
+        }
+
+        result.symbols.push(Symbol {
+            name: format!("{}.schema", module_name),
+            kind: "schema".to_string(),
+            start_line,
+            end_line,
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: schema_props,
+            embedding: None,
+        });
+
+        if !table_name.is_empty() {
+            result.relations.push(Relation {
+                from: module_name.to_string(),
+                to: table_name,
+                rel_type: "references".to_string(),
+                properties: {
+                    let mut p = HashMap::new();
+                    p.insert("schema".to_string(), "true".to_string());
+                    p
+                },
+            });
+        }
+
+        let Some(do_block) = Self::find_child_by_type(node, "do_block") else {
+            return;
+        };
+
+        let mut cursor = do_block.walk();
+        for child in do_block.named_children(&mut cursor) {
+            if child.kind() != "call" {
+                continue;
+            }
+
+            let Some(ident) = Self::call_identifier(child, source_bytes) else {
+                continue;
+            };
+
+            let Some(args) = Self::find_child_by_type(child, "arguments") else {
+                Self::extract_generic_call(child, source_bytes, result, module_name, aliases);
+                continue;
+            };
+
+            let mut ac = args.walk();
+            let arg_nodes: Vec<Node> = args.named_children(&mut ac).collect();
+
+            match ident.as_str() {
+                "field" => {
+                    if let Some(first_arg) = arg_nodes.first() {
+                        let raw_name = first_arg.utf8_text(source_bytes).unwrap_or("");
+                        let field_name = raw_name.trim_start_matches(':').to_string();
+                        let field_type = if let Some(second_arg) = arg_nodes.get(1) {
+                            second_arg.utf8_text(source_bytes).unwrap_or("").to_string()
+                        } else {
+                            String::new()
+                        };
+
+                        let full_field_name = format!("{}.{}", module_name, field_name);
+                        let mut props = HashMap::new();
+                        if !field_type.is_empty() {
+                            props.insert("type".to_string(), field_type);
+                        }
+
+                        result.symbols.push(Symbol {
+                            name: full_field_name.clone(),
+                            kind: "field".to_string(),
+                            start_line: child.start_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                            docstring: None,
+                            is_entry_point: false,
+                            is_public: true,
+                            tested: false,
+                            is_nif: false,
+                            is_unsafe: false,
+                            properties: props,
+                            embedding: None,
+                        });
+
+                        result.relations.push(Relation {
+                            from: module_name.to_string(),
+                            to: full_field_name,
+                            rel_type: "contains".to_string(),
+                            properties: HashMap::new(),
+                        });
+                    }
+                }
+                "belongs_to" | "has_many" | "has_one" | "many_to_many" => {
+                    if let Some(first_arg) = arg_nodes.first() {
+                        let raw_name = first_arg.utf8_text(source_bytes).unwrap_or("");
+                        let field_name = raw_name.trim_start_matches(':').to_string();
+
+                        let target_mod = if let Some(second_arg) = arg_nodes.get(1) {
+                            let raw_mod =
+                                second_arg.utf8_text(source_bytes).unwrap_or("").to_string();
+                            aliases.get(&raw_mod).cloned().unwrap_or(raw_mod)
+                        } else {
+                            String::new()
+                        };
+
+                        let mut rel_props = HashMap::new();
+                        rel_props.insert("relation".to_string(), ident.clone());
+                        rel_props.insert("field".to_string(), field_name.clone());
+
+                        if !target_mod.is_empty() {
+                            result.relations.push(Relation {
+                                from: module_name.to_string(),
+                                to: target_mod,
+                                rel_type: "references".to_string(),
+                                properties: rel_props,
+                            });
+                        }
+
+                        let full_field_name = format!("{}.{}", module_name, field_name);
+                        let mut field_props = HashMap::new();
+                        field_props.insert("association".to_string(), ident);
+
+                        result.symbols.push(Symbol {
+                            name: full_field_name.clone(),
+                            kind: "field".to_string(),
+                            start_line: child.start_position().row + 1,
+                            end_line: child.end_position().row + 1,
+                            docstring: None,
+                            is_entry_point: false,
+                            is_public: true,
+                            tested: false,
+                            is_nif: false,
+                            is_unsafe: false,
+                            properties: field_props,
+                            embedding: None,
+                        });
+
+                        result.relations.push(Relation {
+                            from: module_name.to_string(),
+                            to: full_field_name,
+                            rel_type: "contains".to_string(),
+                            properties: HashMap::new(),
+                        });
+                    }
+                }
+                _ => {
+                    Self::extract_generic_call(child, source_bytes, result, module_name, aliases);
+                }
+            }
         }
     }
 
@@ -1968,5 +2154,87 @@ mod tests {
             "Calls inside ExUnit test must be linked to the test symbol; got: {:?}",
             result.relations
         );
+    }
+
+    #[test]
+    fn req_902663_elixir_ecto_schema_and_relations() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule MyApp.Accounts.User do
+          use Ecto.Schema
+          import Ecto.Changeset
+
+          alias MyApp.Accounts.Organization
+          alias MyApp.Blog.Post
+
+          schema "users" do
+            field :name, :string
+            field :email, :string
+            belongs_to :organization, Organization
+            has_many :posts, Post
+            has_one :profile, MyApp.Accounts.Profile
+            timestamps()
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+
+        // Schema symbol
+        let schema_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.kind == "schema")
+            .expect("Ecto schema must be extracted as a symbol");
+        assert_eq!(
+            schema_sym.properties.get("table").map(|s| s.as_str()),
+            Some("users")
+        );
+
+        // Field symbols
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name.contains("MyApp.Accounts.User.name")
+                && s.kind == "field"
+                && s.properties.get("type") == Some(&":string".to_string())));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name.contains("MyApp.Accounts.User.email") && s.kind == "field"));
+
+        // Schema references table
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "MyApp.Accounts.User"
+                && r.to == "users"
+                && r.rel_type == "references"));
+
+        // belongs_to resolved via alias
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "MyApp.Accounts.User"
+                && r.to == "MyApp.Accounts.Organization"
+                && r.rel_type == "references"
+                && r.properties.get("relation") == Some(&"belongs_to".to_string())));
+
+        // has_many resolved via alias
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "MyApp.Accounts.User"
+                && r.to == "MyApp.Blog.Post"
+                && r.rel_type == "references"
+                && r.properties.get("relation") == Some(&"has_many".to_string())));
+
+        // has_one with full module name
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "MyApp.Accounts.User"
+                && r.to == "MyApp.Accounts.Profile"
+                && r.rel_type == "references"
+                && r.properties.get("relation") == Some(&"has_one".to_string())));
     }
 }

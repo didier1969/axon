@@ -55,7 +55,7 @@ impl RelationType {
             "CALLS_NIF" | "CALLS_FFI" | "CALLS-FFI" | "CALLS_NATIVE" => Self::CallsNif,
             "IMPLEMENTS" => Self::Implements,
             "IMPORTS" => Self::Imports,
-            "USES" => Self::Uses,
+            "USES" | "REFERENCES" => Self::Uses,
             "READS" => Self::Reads,
             "DECLARES" => Self::Declares,
             "READS_ARTIFACT" => Self::ReadsArtifact,

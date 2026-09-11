@@ -1,5 +1,10 @@
 use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use tree_sitter::Node;
+
+static JPA_TABLE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"@Table\s*\(\s*(?:name\s*=\s*)?"([^"]+)""#).unwrap());
 
 pub struct JavaParser {
     wasm_bytes: &'static [u8],
@@ -25,7 +30,10 @@ impl JavaParser {
         for child in node.children(&mut cursor) {
             match child.kind() {
                 "class_declaration" => {
-                    self.extract_class(child, content, symbols);
+                    self.extract_class(child, content, symbols, relations);
+                }
+                "field_declaration" => {
+                    self.extract_field(child, content, symbols, relations, class_name);
                 }
                 "method_declaration" => {
                     self.extract_method(child, content, symbols, relations, class_name);
@@ -53,10 +61,19 @@ impl JavaParser {
         }
     }
 
-    fn extract_class(&self, node: Node, content: &[u8], symbols: &mut Vec<Symbol>) {
+    fn extract_class(
+        &self,
+        node: Node,
+        content: &[u8],
+        symbols: &mut Vec<Symbol>,
+        relations: &mut Vec<Relation>,
+    ) {
         if let Some(name_node) = node.child_by_field_name("name") {
             if let Ok(name) = name_node.utf8_text(content) {
                 let mut is_public = false;
+                let mut is_entity = false;
+                let mut table_name = None;
+
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     if child.kind() == "modifiers" {
@@ -64,9 +81,35 @@ impl JavaParser {
                             if mod_text.contains("public") {
                                 is_public = true;
                             }
+                            if mod_text.contains("@Entity") {
+                                is_entity = true;
+                            }
+                            if let Some(cap) = JPA_TABLE_RE.captures(mod_text) {
+                                if let Some(m) = cap.get(1) {
+                                    table_name = Some(m.as_str().to_string());
+                                }
+                            }
                         }
                     }
                 }
+
+                let mut properties = std::collections::HashMap::new();
+                if is_entity {
+                    properties.insert("is_entity".to_string(), "true".to_string());
+                }
+                if let Some(ref tbl) = table_name {
+                    properties.insert("table".to_string(), tbl.clone());
+                    let mut rel_props = std::collections::HashMap::new();
+                    rel_props.insert("orm".to_string(), "jpa".to_string());
+                    rel_props.insert("table".to_string(), tbl.clone());
+                    relations.push(Relation {
+                        from: name.to_string(),
+                        to: tbl.clone(),
+                        rel_type: "references".to_string(),
+                        properties: rel_props,
+                    });
+                }
+
                 symbols.push(Symbol {
                     name: name.to_string(),
                     kind: "class".to_string(),
@@ -78,10 +121,136 @@ impl JavaParser {
                     tested: name.contains("Test"),
                     is_nif: false,
                     is_unsafe: false,
-                    properties: std::collections::HashMap::new(),
+                    properties,
                     embedding: None,
                 });
             }
+        }
+    }
+
+    fn extract_field(
+        &self,
+        node: Node,
+        content: &[u8],
+        symbols: &mut Vec<Symbol>,
+        relations: &mut Vec<Relation>,
+        class_name: &str,
+    ) {
+        if class_name.is_empty() {
+            return;
+        }
+
+        let mut mod_text = String::new();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "modifiers" {
+                if let Ok(txt) = child.utf8_text(content) {
+                    mod_text = txt.to_string();
+                }
+            }
+        }
+
+        let jpa_rel = if mod_text.contains("@ManyToOne") {
+            Some("ManyToOne")
+        } else if mod_text.contains("@OneToMany") {
+            Some("OneToMany")
+        } else if mod_text.contains("@OneToOne") {
+            Some("OneToOne")
+        } else if mod_text.contains("@ManyToMany") {
+            Some("ManyToMany")
+        } else {
+            None
+        };
+
+        // Get variable declarator
+        let mut field_name = String::new();
+        let mut decl_cursor = node.walk();
+        for child in node.children(&mut decl_cursor) {
+            if child.kind() == "variable_declarator" {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    if let Ok(name) = name_node.utf8_text(content) {
+                        field_name = name.to_string();
+                    }
+                }
+            }
+        }
+
+        if field_name.is_empty() {
+            return;
+        }
+
+        // Get type
+        let type_node = node.child_by_field_name("type");
+        let type_text = type_node
+            .and_then(|n| n.utf8_text(content).ok())
+            .unwrap_or("")
+            .to_string();
+
+        let mut target_entity = String::new();
+        if let Some(tn) = type_node {
+            if tn.kind() == "generic_type" {
+                let mut tc = tn.walk();
+                for child in tn.children(&mut tc) {
+                    if child.kind() == "type_arguments" {
+                        let mut arg_cursor = child.walk();
+                        for arg in child.children(&mut arg_cursor) {
+                            if arg.kind() == "type_identifier" {
+                                if let Ok(arg_txt) = arg.utf8_text(content) {
+                                    target_entity = arg_txt.to_string();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if tn.kind() == "type_identifier" {
+                target_entity = type_text.clone();
+            }
+        }
+
+        if let Some(rel) = jpa_rel {
+            let mut props = std::collections::HashMap::new();
+            props.insert("orm".to_string(), "jpa".to_string());
+            props.insert("relation".to_string(), rel.to_string());
+            props.insert("field".to_string(), field_name.clone());
+
+            if !target_entity.is_empty() {
+                relations.push(Relation {
+                    from: class_name.to_string(),
+                    to: target_entity,
+                    rel_type: "references".to_string(),
+                    properties: props,
+                });
+            }
+
+            let mut field_props = std::collections::HashMap::new();
+            if !type_text.is_empty() {
+                field_props.insert("type".to_string(), type_text);
+            }
+            field_props.insert("jpa_relation".to_string(), rel.to_string());
+
+            let full_field_name = format!("{}.{}", class_name, field_name);
+            symbols.push(Symbol {
+                name: full_field_name.clone(),
+                kind: "field".to_string(),
+                start_line: node.start_position().row + 1,
+                end_line: node.end_position().row + 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: mod_text.contains("public"),
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: field_props,
+                embedding: None,
+            });
+
+            relations.push(Relation {
+                from: class_name.to_string(),
+                to: full_field_name,
+                rel_type: "contains".to_string(),
+                properties: std::collections::HashMap::new(),
+            });
         }
     }
 
@@ -459,5 +628,69 @@ mod tests {
             "NativeBridge.compute must emit calls_nif relation to compute: {:?}",
             result.relations
         );
+    }
+
+    #[test]
+    fn req_902663_java_jpa_entities_and_relationships() {
+        let code = r#"
+            @Entity
+            @Table(name = "users")
+            public class User {
+                @Id
+                private Long id;
+
+                @ManyToOne
+                @JoinColumn(name = "org_id")
+                private Organization organization;
+
+                @OneToMany(mappedBy = "user")
+                private List<Post> posts;
+            }
+        "#;
+        let result = parser().parse(code);
+        if result.symbols.is_empty() {
+            eprintln!("java wasm grammar unavailable, skipping");
+            return;
+        }
+
+        let user_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "User")
+            .expect("User class must exist");
+        assert_eq!(
+            user_sym.properties.get("is_entity").map(|s| s.as_str()),
+            Some("true")
+        );
+        assert_eq!(
+            user_sym.properties.get("table").map(|s| s.as_str()),
+            Some("users")
+        );
+
+        // References to table "users"
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "User" && r.to == "users" && r.rel_type == "references"));
+
+        // Relationships reference Organization and Post
+        assert!(result.relations.iter().any(|r| r.from == "User"
+            && r.to == "Organization"
+            && r.rel_type == "references"
+            && r.properties.get("relation") == Some(&"ManyToOne".to_string())));
+        assert!(result.relations.iter().any(|r| r.from == "User"
+            && r.to == "Post"
+            && r.rel_type == "references"
+            && r.properties.get("relation") == Some(&"OneToMany".to_string())));
+
+        // Field symbols
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "User.organization" && s.kind == "field"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "User.posts" && s.kind == "field"));
     }
 }
