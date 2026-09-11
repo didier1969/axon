@@ -232,6 +232,7 @@ pub mod docker;
 pub mod elixir;
 pub mod go;
 pub mod graphql;
+pub mod hcl;
 pub mod html;
 pub mod java;
 pub mod kotlin;
@@ -247,6 +248,7 @@ pub mod ruby;
 pub mod rust;
 pub mod scheme;
 pub mod sql;
+pub mod systemd;
 pub mod text;
 pub mod toml;
 pub mod typeql;
@@ -350,6 +352,12 @@ pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "nix",
     "dockerfile",
     "toml",
+    "tf",
+    "tfvars",
+    "service",
+    "timer",
+    "socket",
+    "target",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
@@ -403,6 +411,8 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "nix" => Some(Box::new(nix::NixParser::new())),
         "dockerfile" | "containerfile" => Some(Box::new(docker::DockerParser::new())),
         "toml" => Some(Box::new(toml::TomlParser::new())),
+        "tf" | "tfvars" => Some(Box::new(hcl::HclParser::new())),
+        "service" | "timer" | "socket" | "target" => Some(Box::new(systemd::SystemdParser::new())),
         // llmlang: construct WITH the real path so `lll export-ist` resolves the
         // file's `import`s against the actual workspace (REQ-LLL-021).
         "lll" => Some(Box::new(lll::LllParser::with_path(path.to_path_buf()))),
@@ -664,6 +674,20 @@ mod extensions_parsables_tests {
             );
             assert!(
                 get_parser_for_file(&PathBuf::from(format!("kernel.{ext}"))).is_some(),
+                "{ext} doit obtenir un parser"
+            );
+        }
+    }
+
+    #[test]
+    fn les_fichiers_iac_et_systemd_sont_parsables() {
+        for ext in ["tf", "tfvars", "service", "timer", "socket", "target"] {
+            assert!(
+                PARSEABLE_EXTENSIONS.contains(&ext),
+                "{ext} doit etre declaree parsable"
+            );
+            assert!(
+                get_parser_for_file(&PathBuf::from(format!("infra.{ext}"))).is_some(),
                 "{ext} doit obtenir un parser"
             );
         }
