@@ -212,6 +212,21 @@ impl JavaParser {
                         properties: std::collections::HashMap::new(),
                     });
                 }
+
+                // REQ-AXO-902662 — emit calls_nif edge for Java native method stubs
+                if is_nif {
+                    let from_sym = if !class_name.is_empty() {
+                        format!("{}.{}", class_name, name)
+                    } else {
+                        name.to_string()
+                    };
+                    relations.push(Relation {
+                        from: from_sym,
+                        to: name.to_string(),
+                        rel_type: "calls_nif".to_string(),
+                        properties: std::collections::HashMap::new(),
+                    });
+                }
             }
         }
     }
@@ -415,6 +430,34 @@ mod tests {
         assert!(
             m2.tested,
             "parameterizedTest with @ParameterizedTest must be tested=true"
+        );
+    }
+
+    #[test]
+    fn req_902662_java_native_method_emits_calls_nif() {
+        let result = parser().parse(
+            "class NativeBridge { \
+                public native int compute(int x); \
+            }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("java wasm grammar unavailable, skipping");
+            return;
+        }
+        let m = result.symbols.iter().find(|s| s.name == "compute").unwrap();
+        assert!(m.is_nif, "compute must have is_nif=true");
+        assert!(
+            m.is_entry_point,
+            "native method must have is_entry_point=true"
+        );
+
+        let calls_nif = result.relations.iter().any(|r| {
+            r.rel_type == "calls_nif" && r.from == "NativeBridge.compute" && r.to == "compute"
+        });
+        assert!(
+            calls_nif,
+            "NativeBridge.compute must emit calls_nif relation to compute: {:?}",
+            result.relations
         );
     }
 }

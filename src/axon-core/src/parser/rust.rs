@@ -200,21 +200,42 @@ impl RustParser {
 
         let mut is_nif = false;
         let mut tested = false;
+
+        let check_attr = |attr_text: &str, is_nif: &mut bool, tested: &mut bool| {
+            if attr_text.contains("rustler::nif")
+                || attr_text.contains("no_mangle")
+                || attr_text.contains("pyfunction")
+                || attr_text.contains("pymethods")
+                || attr_text.contains("napi")
+                || attr_text.contains("wasm_bindgen")
+                || attr_text.contains("export_name")
+            {
+                *is_nif = true;
+            }
+            if attr_text.contains("test") {
+                *tested = true;
+            }
+        };
+
         let mut prev_node = node.prev_sibling();
         while let Some(sibling) = prev_node {
             if sibling.kind() == "attribute_item" {
                 if let Ok(attr_text) = sibling.utf8_text(source) {
-                    if attr_text.contains("rustler::nif") || attr_text.contains("no_mangle") {
-                        is_nif = true;
-                    }
-                    if attr_text.contains("test") {
-                        tested = true;
-                    }
+                    check_attr(attr_text, &mut is_nif, &mut tested);
                 }
             } else if sibling.kind() != "line_comment" && sibling.kind() != "block_comment" {
                 break;
             }
             prev_node = sibling.prev_sibling();
+        }
+
+        let mut child_cursor = node.walk();
+        for child in node.children(&mut child_cursor) {
+            if child.kind() == "attribute_item" {
+                if let Ok(attr_text) = child.utf8_text(source) {
+                    check_attr(attr_text, &mut is_nif, &mut tested);
+                }
+            }
         }
 
         if let Some(block) = self.find_child_by_type(node, "block") {
@@ -1431,6 +1452,69 @@ mod tests {
             contains_worker_execute,
             "Worker must contain execute: {:?}",
             res.relations
+        );
+    }
+
+    #[test]
+    fn test_rust_parser_flags_pyo3_napi_wasm_and_c_ffi() {
+        let p = parser();
+        let code = r#"
+            #[pyfunction]
+            pub fn py_fast_calc(x: i64) -> i64 {
+                x * 2
+            }
+
+            #[napi]
+            pub fn js_fast_calc(x: f64) -> f64 {
+                x * 2.0
+            }
+
+            #[wasm_bindgen]
+            pub fn wasm_greet(name: &str) -> String {
+                format!("Hello {}", name)
+            }
+
+            #[no_mangle]
+            pub extern "system" fn Java_com_example_NativeBridge_compute(val: i32) -> i32 {
+                val + 1
+            }
+        "#;
+        let res = p.parse(code);
+        let py_fn = res
+            .symbols
+            .iter()
+            .find(|s| s.name == "py_fast_calc")
+            .unwrap();
+        assert!(py_fn.is_nif, "pyfunction must have is_nif=true");
+        assert!(
+            py_fn.is_entry_point,
+            "pyfunction must have is_entry_point=true"
+        );
+
+        let js_fn = res
+            .symbols
+            .iter()
+            .find(|s| s.name == "js_fast_calc")
+            .unwrap();
+        assert!(js_fn.is_nif, "napi must have is_nif=true");
+        assert!(js_fn.is_entry_point, "napi must have is_entry_point=true");
+
+        let wasm_fn = res.symbols.iter().find(|s| s.name == "wasm_greet").unwrap();
+        assert!(wasm_fn.is_nif, "wasm_bindgen must have is_nif=true");
+        assert!(
+            wasm_fn.is_entry_point,
+            "wasm_bindgen must have is_entry_point=true"
+        );
+
+        let jni_fn = res
+            .symbols
+            .iter()
+            .find(|s| s.name == "Java_com_example_NativeBridge_compute")
+            .unwrap();
+        assert!(jni_fn.is_nif, "jni function must have is_nif=true");
+        assert!(
+            jni_fn.is_entry_point,
+            "jni function must have is_entry_point=true"
         );
     }
 }

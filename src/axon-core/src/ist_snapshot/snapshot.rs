@@ -52,7 +52,7 @@ impl RelationType {
         match s.to_ascii_uppercase().as_str() {
             "CONTAINS" => Self::Contains,
             "CALLS" => Self::Calls,
-            "CALLS_NIF" => Self::CallsNif,
+            "CALLS_NIF" | "CALLS_FFI" | "CALLS-FFI" | "CALLS_NATIVE" => Self::CallsNif,
             "IMPLEMENTS" => Self::Implements,
             "IMPORTS" => Self::Imports,
             "USES" => Self::Uses,
@@ -632,6 +632,14 @@ impl IstGraph {
                     }
                     if record.flags.nif() {
                         name_to_nif.entry(name.to_string()).or_default().push(idx);
+                        // REQ-AXO-902662 — when JNI function Java_package_Class_method, also index leaf "method"
+                        if name.starts_with("Java_") {
+                            if let Some(leaf) = name.rsplit('_').next() {
+                                if !leaf.is_empty() && leaf != name {
+                                    name_to_nif.entry(leaf.to_string()).or_default().push(idx);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -683,27 +691,28 @@ impl IstGraph {
                     // canonical function/method node of that name before falling
                     // back to a phantom. This is the whole REQ-AXO-134 workaround,
                     // moved from per-query PG SQL into the canonical RAM projection.
-                    let resolved = edge
-                        .target
-                        .rsplit("::")
-                        .next()
-                        .and_then(|name| name_to_func.get(name))
-                        .and_then(|&(idx, ambiguous)| (!ambiguous).then_some(idx))
-                        // REQ-AXO-901986 — CALLS_NIF cross-language fallback: when
-                        // the bare nif name is ambiguous (Elixir stub + Rust
-                        // #[rustler::nif] share it), resolve to the is_nif node of
-                        // that name that isn't the caller (the stub→impl hop).
-                        .or_else(|| {
-                            if edge.rel != RelationType::CallsNif {
-                                return None;
-                            }
-                            let name = edge.target.rsplit("::").next()?;
-                            name_to_nif
-                                .get(name)?
-                                .iter()
-                                .copied()
-                                .find(|&i| i != src_idx)
-                        });
+                    let resolved = edge.target.rsplit("::").next().and_then(|name| {
+                        name_to_func
+                            .get(name)
+                            .and_then(|&(idx, ambiguous)| {
+                                (!ambiguous
+                                    && (edge.rel != RelationType::CallsNif || idx != src_idx))
+                                    .then_some(idx)
+                            })
+                            // REQ-AXO-901986 & REQ-AXO-902662 — CALLS_NIF cross-language fallback:
+                            // when the bare nif name is ambiguous or resolves to the stub itself,
+                            // resolve to the is_nif node of that name that isn't the caller (the stub→impl hop).
+                            .or_else(|| {
+                                if edge.rel != RelationType::CallsNif {
+                                    return None;
+                                }
+                                name_to_nif
+                                    .get(name)?
+                                    .iter()
+                                    .copied()
+                                    .find(|&i| i != src_idx)
+                            })
+                    });
                     match resolved {
                         Some(i) => i,
                         None => {
@@ -1405,6 +1414,41 @@ mod tests {
         // And impact (reverse) on the Rust impl now sees the Elixir caller.
         let rev: Vec<_> = g.reverse_neighbors(rust).map(|(s, _)| s).collect();
         assert_eq!(rev, vec![stub]);
+    }
+
+    #[test]
+    fn build_resolves_calls_nif_across_java_jni_boundary() {
+        // REQ-AXO-902662 — the Java stub `NativeBridge.compute` (is_nif) calls the JNI
+        // `Java_com_example_NativeBridge_compute` in Rust/C (is_nif).
+        let nodes = vec![
+            nif_node("KKI::src/main/java/NativeBridge.java::NativeBridge.compute"),
+            nif_node("KKI::src/native/bridge.rs::Java_com_example_NativeBridge_compute"),
+        ];
+        let edges = vec![edge(
+            "KKI::src/main/java/NativeBridge.java::NativeBridge.compute",
+            "KKI::src/main/java/NativeBridge.java::compute",
+            RelationType::CallsNif,
+        )];
+        let g = IstGraph::build(nodes, edges);
+        let stub = g
+            .index_of("KKI::src/main/java/NativeBridge.java::NativeBridge.compute")
+            .unwrap();
+        let jni_impl = g
+            .index_of("KKI::src/native/bridge.rs::Java_com_example_NativeBridge_compute")
+            .unwrap();
+        let fwd: Vec<_> = g.forward_neighbors(stub).map(|(t, _)| t).collect();
+        assert_eq!(
+            fwd,
+            vec![jni_impl],
+            "CALLS_NIF must resolve cross-language from Java stub to JNI impl"
+        );
+    }
+
+    #[test]
+    fn relation_type_from_db_accepts_calls_ffi() {
+        assert_eq!(RelationType::from_db("CALLS_FFI"), RelationType::CallsNif);
+        assert_eq!(RelationType::from_db("calls_ffi"), RelationType::CallsNif);
+        assert_eq!(RelationType::from_db("CALLS-FFI"), RelationType::CallsNif);
     }
 
     #[test]
