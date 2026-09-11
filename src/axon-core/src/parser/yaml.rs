@@ -17,6 +17,10 @@ impl YamlParser {
 
 impl Parser for YamlParser {
     fn parse(&self, content: &str) -> ExtractionResult {
+        if content.contains("openapi:") || content.contains("swagger:") {
+            return super::openapi::OpenApiParser::new().parse(content);
+        }
+
         let mut symbols = Vec::new();
         let relations = Vec::new();
 

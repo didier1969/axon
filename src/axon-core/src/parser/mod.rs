@@ -230,12 +230,15 @@ pub mod css;
 pub mod datalog;
 pub mod elixir;
 pub mod go;
+pub mod graphql;
 pub mod html;
 pub mod java;
 pub mod kotlin;
 pub mod lll;
 pub mod markdown;
+pub mod openapi;
 pub mod php;
+pub mod proto;
 pub mod python;
 pub mod ruby;
 pub mod rust;
@@ -292,7 +295,7 @@ pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "py", "ex", "exs", "rs", "scm", "ss", "sld", "sls", "ts", "tsx", "js", "jsx", "go", "java",
     "c", "h", "cpp", "hpp", "cc", "cxx", "hxx", "cs", "rb", "ruby", "kt", "kts", "php", "yaml",
     "yml", "html", "htm", "xml", "css", "scss", "md", "markdown", "sql", "tql", "typeql", "dl",
-    "datalog", "lll", "txt", "conf", "ini",
+    "datalog", "lll", "txt", "conf", "ini", "proto", "graphql", "gql", "json",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
@@ -320,6 +323,9 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "sql" => Some(Box::new(sql::SqlParser::new())),
         "tql" | "typeql" => Some(Box::new(typeql::TypeQLParser::new())),
         "dl" | "datalog" => Some(Box::new(datalog::DatalogParser::new())),
+        "proto" => Some(Box::new(proto::ProtoParser::new())),
+        "graphql" | "gql" => Some(Box::new(graphql::GraphQLParser::new())),
+        "json" => Some(Box::new(openapi::OpenApiParser::new())),
         // llmlang: construct WITH the real path so `lll export-ist` resolves the
         // file's `import`s against the actual workspace (REQ-LLL-021).
         "lll" => Some(Box::new(lll::LllParser::with_path(path.to_path_buf()))),
