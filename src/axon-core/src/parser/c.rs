@@ -23,6 +23,8 @@ impl CParser {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             match child.kind() {
+                "preproc_include" => Self::extract_include(child, source_bytes, result),
+                "type_definition" => Self::extract_typedef(child, source_bytes, result),
                 "function_definition" => Self::extract_function(child, source_bytes, result),
                 "struct_specifier" | "union_specifier" | "enum_specifier" => {
                     Self::extract_struct(child, source_bytes, result)
@@ -30,6 +32,72 @@ impl CParser {
                 "call_expression" => Self::extract_call(child, source_bytes, result, ""),
                 _ => Self::walk(child, source_bytes, result),
             }
+        }
+    }
+
+    fn extract_include<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+        if let Some(path_node) = Self::find_child_by_type(node, "system_lib_string")
+            .or_else(|| Self::find_child_by_type(node, "string_literal"))
+        {
+            let path = path_node
+                .utf8_text(source_bytes)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !path.is_empty() {
+                result.relations.push(Relation {
+                    from: "".to_string(),
+                    to: path,
+                    rel_type: "includes".to_string(),
+                    properties: HashMap::new(),
+                });
+            }
+        }
+    }
+
+    fn extract_typedef<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+        if let Some(struct_node) = Self::find_child_by_type(node, "struct_specifier")
+            .or_else(|| Self::find_child_by_type(node, "union_specifier"))
+            .or_else(|| Self::find_child_by_type(node, "enum_specifier"))
+        {
+            Self::extract_struct(struct_node, source_bytes, result);
+        }
+
+        let alias_name = if let Some(decl) = node.child_by_field_name("declarator") {
+            decl.utf8_text(source_bytes).unwrap_or("").to_string()
+        } else {
+            let mut last_name = String::new();
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() == "type_identifier" || child.kind() == "primitive_type" {
+                    last_name = child.utf8_text(source_bytes).unwrap_or("").to_string();
+                }
+            }
+            last_name
+        };
+
+        if !alias_name.is_empty()
+            && !result
+                .symbols
+                .iter()
+                .any(|s| s.name == alias_name && s.kind == "struct")
+        {
+            let start_line = node.start_position().row + 1;
+            let end_line = node.end_position().row + 1;
+            result.symbols.push(Symbol {
+                name: alias_name,
+                kind: "type_alias".to_string(),
+                start_line,
+                end_line,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: HashMap::new(),
+                embedding: None,
+            });
         }
     }
 
@@ -245,5 +313,49 @@ mod tests {
                 .map(String::as_str),
             Some("6")
         );
+    }
+
+    #[test]
+    fn c_parses_includes_and_typedefs() {
+        let code = r#"
+        #include <stdio.h>
+        #include "axon_runtime.h"
+
+        typedef unsigned long size_t;
+        typedef struct Config {
+            int timeout;
+        } Config;
+
+        int run() {
+            return 0;
+        }
+        "#;
+        let result = parser().parse(code);
+        if result.symbols.is_empty() && result.relations.is_empty() {
+            eprintln!("c wasm grammar unavailable, skipping");
+            return;
+        }
+
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.to == "<stdio.h>" && r.rel_type == "includes"));
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.to == "\"axon_runtime.h\"" && r.rel_type == "includes"));
+
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "size_t" && s.kind == "type_alias"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "Config" && s.kind == "struct"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "run" && s.kind == "function"));
     }
 }

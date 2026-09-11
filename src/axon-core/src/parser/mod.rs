@@ -354,7 +354,7 @@ pub fn language_has_coverage_model(module_id: &str) -> bool {
         .to_ascii_lowercase();
     matches!(
         ext.as_str(),
-        "rs" | "ex" | "exs" | "py" | "java" | "ts" | "tsx" | "js" | "jsx"
+        "rs" | "ex" | "exs" | "py" | "java" | "ts" | "tsx" | "js" | "jsx" | "go"
     )
 }
 
@@ -364,7 +364,7 @@ mod coverage_capability_tests {
 
     #[test]
     fn test_coverage_model_capabilities_polyglot() {
-        // REQ-AXO-902214 & REQ-AXO-902660 — Rust, Elixir, Python, Java, TypeScript/JS propagate test reachability.
+        // REQ-AXO-902214, REQ-AXO-902660 & REQ-AXO-902661 — Rust, Elixir, Python, Java, TypeScript/JS, Go propagate test reachability.
         assert!(language_has_coverage_model(
             "AXO::src::axon-core::src::mailbox.rs"
         ));
@@ -381,6 +381,7 @@ mod coverage_capability_tests {
         assert!(language_has_coverage_model("X::src::main.tsx"));
         assert!(language_has_coverage_model("X::src::main.js"));
         assert!(language_has_coverage_model("X::src::main.jsx"));
+        assert!(language_has_coverage_model("G::main.go"));
         // Case-insensitive, like the parser dispatch it pairs with.
         assert!(language_has_coverage_model("X::src::Foo.RS"));
         assert!(language_has_coverage_model("X::src::Foo.EX"));

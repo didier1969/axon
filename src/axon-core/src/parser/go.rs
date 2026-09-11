@@ -250,13 +250,16 @@ impl GoParser {
             let end_line = node.end_position().row + 1;
 
             let mut kind = "type_alias".to_string();
+            let mut type_node = None;
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 if child.kind() == "struct_type" {
                     kind = "struct".to_string();
+                    type_node = Some(child);
                     break;
                 } else if child.kind() == "interface_type" {
                     kind = "interface".to_string();
+                    type_node = Some(child);
                     break;
                 }
             }
@@ -265,7 +268,7 @@ impl GoParser {
 
             result.symbols.push(Symbol {
                 name: name.clone(),
-                kind,
+                kind: kind.clone(),
                 start_line,
                 end_line,
                 docstring: None,
@@ -277,6 +280,116 @@ impl GoParser {
                 properties: HashMap::new(),
                 embedding: None,
             });
+
+            if let Some(tn) = type_node {
+                if kind == "struct" {
+                    Self::extract_struct_fields(tn, source_bytes, result, &name);
+                } else if kind == "interface" {
+                    Self::extract_interface_members(tn, source_bytes, result, &name);
+                }
+            }
+        }
+    }
+
+    fn extract_struct_fields<'a>(
+        struct_node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        struct_name: &str,
+    ) {
+        if let Some(field_list) = Self::find_child_by_type(struct_node, "field_declaration_list") {
+            let mut cursor = field_list.walk();
+            for field in field_list.named_children(&mut cursor) {
+                if field.kind() == "field_declaration" {
+                    if Self::find_child_by_type(field, "field_identifier").is_none() {
+                        let embedded_type = if let Some(t) =
+                            Self::find_child_by_type(field, "type_identifier")
+                        {
+                            t.utf8_text(source_bytes).unwrap_or("").to_string()
+                        } else if let Some(ptr) = Self::find_child_by_type(field, "pointer_type") {
+                            if let Some(inner) = Self::find_child_by_type(ptr, "type_identifier") {
+                                inner.utf8_text(source_bytes).unwrap_or("").to_string()
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        };
+
+                        if !embedded_type.is_empty() {
+                            result.relations.push(Relation {
+                                from: struct_name.to_string(),
+                                to: embedded_type,
+                                rel_type: "embeds".to_string(),
+                                properties: HashMap::new(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn extract_interface_members<'a>(
+        iface_node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        interface_name: &str,
+    ) {
+        let mut cursor = iface_node.walk();
+        for child in iface_node.named_children(&mut cursor) {
+            match child.kind() {
+                "method_spec" | "method_elem" => {
+                    if let Some(id) = Self::find_child_by_type(child, "field_identifier")
+                        .or_else(|| Self::find_child_by_type(child, "identifier"))
+                    {
+                        let method_name = id.utf8_text(source_bytes).unwrap_or("").to_string();
+                        if !method_name.is_empty() {
+                            let start_line = child.start_position().row + 1;
+                            let end_line = child.end_position().row + 1;
+                            let is_public =
+                                method_name.chars().next().is_some_and(|c| c.is_uppercase());
+                            let mut properties = HashMap::new();
+                            properties.insert("interface".to_string(), interface_name.to_string());
+                            result.symbols.push(Symbol {
+                                name: method_name,
+                                kind: "method".to_string(),
+                                start_line,
+                                end_line,
+                                docstring: None,
+                                is_entry_point: false,
+                                is_public,
+                                tested: false,
+                                is_nif: false,
+                                is_unsafe: false,
+                                properties,
+                                embedding: None,
+                            });
+                        }
+                    }
+                }
+                "type_elem" | "type_identifier" => {
+                    let embedded_iface =
+                        if let Some(t) = Self::find_child_by_type(child, "type_identifier") {
+                            t.utf8_text(source_bytes).unwrap_or("").to_string()
+                        } else {
+                            child
+                                .utf8_text(source_bytes)
+                                .unwrap_or("")
+                                .trim()
+                                .to_string()
+                        };
+                    if !embedded_iface.is_empty() {
+                        result.relations.push(Relation {
+                            from: interface_name.to_string(),
+                            to: embedded_iface,
+                            rel_type: "embeds".to_string(),
+                            properties: HashMap::new(),
+                        });
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -521,5 +634,72 @@ mod tests {
                 .map(String::as_str),
             Some("2")
         );
+    }
+
+    #[test]
+    fn go_parses_struct_and_interface_embedding_and_methods() {
+        let p = parser();
+        let code = r#"
+        package main
+
+        type Reader interface {
+            Read(p []byte) (n int, err error)
+        }
+
+        type ReadCloser interface {
+            Reader
+            Close() error
+        }
+
+        type BaseService struct {
+            ID string
+        }
+
+        type UserService struct {
+            BaseService
+            *Config
+            Name string
+        }
+        "#;
+        let result = p.parse(code);
+        if result.symbols.is_empty() && result.relations.is_empty() {
+            eprintln!("go wasm grammar unavailable, skipping");
+            return;
+        }
+
+        // Check interfaces and structs
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "Reader" && s.kind == "interface"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "ReadCloser" && s.kind == "interface"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "UserService" && s.kind == "struct"));
+
+        // Check interface embedding: ReadCloser embeds Reader
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "ReadCloser" && r.to == "Reader" && r.rel_type == "embeds"));
+
+        // Check struct embedding: UserService embeds BaseService and Config
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "UserService" && r.to == "BaseService" && r.rel_type == "embeds"));
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "UserService" && r.to == "Config" && r.rel_type == "embeds"));
+
+        // Check interface method
+        assert!(result.symbols.iter().any(|s| s.name == "Read"
+            && s.kind == "method"
+            && s.properties.get("interface").map(String::as_str) == Some("Reader")));
     }
 }

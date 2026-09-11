@@ -1,8 +1,16 @@
-use super::{ExtractionResult, Parser};
-use std::io::Write;
-use std::process::Command;
-use tempfile::NamedTempFile;
-use tracing::error;
+use super::{ExtractionResult, Parser, Relation, Symbol};
+use once_cell::sync::Lazy;
+use regex::Regex;
+use std::collections::HashMap;
+
+static RE_DECL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\.decl\s+([a-zA-Z0-9_-]+)\s*\(").expect("valid regex"));
+
+static RE_RULE_HEAD: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^([a-zA-Z0-9_-]+)\s*\([^)]*\)\s*:-").expect("valid regex"));
+
+static RE_ATOM: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"([a-zA-Z0-9_-]+)\s*\(").expect("valid regex"));
 
 pub struct DatalogParser;
 
@@ -23,58 +31,67 @@ impl Parser for DatalogParser {
         let mut symbols = Vec::new();
         let mut relations = Vec::new();
 
-        let mut temp_file = match NamedTempFile::new() {
-            Ok(f) => f,
-            Err(e) => {
-                error!("Failed to create temp file for Datalog parser: {}", e);
-                return ExtractionResult {
-                    project_code: None,
-                    symbols,
-                    relations,
-                };
+        // 1. Extract declarations
+        for cap in RE_DECL.captures_iter(content) {
+            if let Some(m) = cap.get(1) {
+                symbols.push(Symbol {
+                    name: m.as_str().to_string(),
+                    kind: "datalog_relation".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: HashMap::new(),
+                    embedding: None,
+                });
             }
-        };
-
-        if let Err(e) = temp_file.write_all(content.as_bytes()) {
-            error!(
-                "Failed to write content to temp file for Datalog parser: {}",
-                e
-            );
-            return ExtractionResult {
-                project_code: None,
-                symbols,
-                relations,
-            };
         }
 
-        let current_dir = std::env::current_dir().unwrap_or_default();
-        let script_path = if current_dir.ends_with("src/axon-core") {
-            current_dir.join("src/parser/python_bridge/datalog_parser.py")
-        } else {
-            current_dir.join("src/axon-core/src/parser/python_bridge/datalog_parser.py")
-        };
-
-        let output = Command::new("python3")
-            .arg(script_path)
-            .arg(temp_file.path())
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => {
-                let json_str = String::from_utf8_lossy(&out.stdout);
-                if let Ok(result) = serde_json::from_str::<ExtractionResult>(&json_str) {
-                    symbols = result.symbols;
-                    relations = result.relations;
+        // 2. Extract rule symbols
+        for cap in RE_RULE_HEAD.captures_iter(content) {
+            if let Some(m) = cap.get(1) {
+                let name = m.as_str();
+                if !symbols
+                    .iter()
+                    .any(|s| s.name == name && s.kind == "datalog_rule")
+                {
+                    symbols.push(Symbol {
+                        name: name.to_string(),
+                        kind: "datalog_rule".to_string(),
+                        start_line: 1,
+                        end_line: 1,
+                        docstring: None,
+                        is_entry_point: false,
+                        is_public: true,
+                        tested: false,
+                        is_nif: false,
+                        is_unsafe: false,
+                        properties: HashMap::new(),
+                        embedding: None,
+                    });
                 }
             }
-            Ok(out) => {
-                error!(
-                    "Datalog python parser script failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-            Err(e) => {
-                error!("Failed to execute python Datalog parser: {}", e);
+        }
+
+        // 3. Extract rule dependencies (head :- body)
+        for line in content.lines() {
+            if let Some((head_part, body_part)) = line.split_once(":-") {
+                if let Some(head_cap) = RE_ATOM.captures(head_part) {
+                    let head = &head_cap[1];
+                    for body_cap in RE_ATOM.captures_iter(body_part) {
+                        let body_rel = &body_cap[1];
+                        relations.push(Relation {
+                            from: head.to_string(),
+                            to: body_rel.to_string(),
+                            rel_type: "depends_on".to_string(),
+                            properties: HashMap::new(),
+                        });
+                    }
+                }
             }
         }
 

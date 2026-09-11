@@ -1,8 +1,22 @@
-use super::{ExtractionResult, Parser};
-use std::io::Write;
-use std::process::Command;
-use tempfile::NamedTempFile;
-use tracing::error;
+use super::{ExtractionResult, Parser, Relation, Symbol};
+use once_cell::sync::Lazy;
+use regex::Regex;
+use std::collections::HashMap;
+
+static RE_ENTITY: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)([a-zA-Z0-9_-]+)\s+sub\s+entity\b").expect("valid regex"));
+
+static RE_RELATION: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)([a-zA-Z0-9_-]+)\s+sub\s+relation\b").expect("valid regex"));
+
+static RE_RULE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)([a-zA-Z0-9_-]+):\s*rule\s+when\s*\{").expect("valid regex"));
+
+static RE_OWNS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"owns\s+([a-zA-Z0-9_-]+)").expect("valid regex"));
+
+static RE_SUB_NAME: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"([a-zA-Z0-9_-]+)\s+sub").expect("valid regex"));
 
 pub struct TypeQLParser;
 
@@ -23,58 +37,108 @@ impl Parser for TypeQLParser {
         let mut symbols = Vec::new();
         let mut relations = Vec::new();
 
-        let mut temp_file = match NamedTempFile::new() {
-            Ok(f) => f,
-            Err(e) => {
-                error!("Failed to create temp file for TypeQL parser: {}", e);
-                return ExtractionResult {
-                    project_code: None,
-                    symbols,
-                    relations,
-                };
+        // 1. Entities
+        for cap in RE_ENTITY.captures_iter(content) {
+            if let Some(m) = cap.get(1) {
+                symbols.push(Symbol {
+                    name: m.as_str().to_string(),
+                    kind: "entity_type".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: HashMap::new(),
+                    embedding: None,
+                });
             }
-        };
-
-        if let Err(e) = temp_file.write_all(content.as_bytes()) {
-            error!(
-                "Failed to write content to temp file for TypeQL parser: {}",
-                e
-            );
-            return ExtractionResult {
-                project_code: None,
-                symbols,
-                relations,
-            };
         }
 
-        let current_dir = std::env::current_dir().unwrap_or_default();
-        let script_path = if current_dir.ends_with("src/axon-core") {
-            current_dir.join("src/parser/python_bridge/typeql_parser.py")
-        } else {
-            current_dir.join("src/axon-core/src/parser/python_bridge/typeql_parser.py")
-        };
+        // 2. Relations
+        for cap in RE_RELATION.captures_iter(content) {
+            if let Some(m) = cap.get(1) {
+                symbols.push(Symbol {
+                    name: m.as_str().to_string(),
+                    kind: "relation_type".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: HashMap::new(),
+                    embedding: None,
+                });
+            }
+        }
 
-        let output = Command::new("python3")
-            .arg(script_path)
-            .arg(temp_file.path())
-            .output();
+        // 3. Rules
+        for cap in RE_RULE.captures_iter(content) {
+            if let Some(m) = cap.get(1) {
+                symbols.push(Symbol {
+                    name: m.as_str().to_string(),
+                    kind: "rule".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: HashMap::new(),
+                    embedding: None,
+                });
+            }
+        }
 
-        match output {
-            Ok(out) if out.status.success() => {
-                let json_str = String::from_utf8_lossy(&out.stdout);
-                if let Ok(result) = serde_json::from_str::<ExtractionResult>(&json_str) {
-                    symbols = result.symbols;
-                    relations = result.relations;
+        // 4. Ownerships (owns)
+        for block in content.split(';') {
+            if block.contains("sub entity") || block.contains("sub relation") {
+                let mut current_entity = None;
+                for line in block.lines() {
+                    if line.contains("sub entity") || line.contains("sub relation") {
+                        if let Some(cap) = RE_SUB_NAME.captures(line) {
+                            current_entity = Some(cap[1].to_string());
+                        }
+                    } else if let Some(ref entity) = current_entity {
+                        if line.contains("owns") {
+                            for cap in RE_OWNS.captures_iter(line) {
+                                let attr = cap[1].to_string();
+                                if !symbols
+                                    .iter()
+                                    .any(|s| s.name == attr && s.kind == "attribute")
+                                {
+                                    symbols.push(Symbol {
+                                        name: attr.clone(),
+                                        kind: "attribute".to_string(),
+                                        start_line: 1,
+                                        end_line: 1,
+                                        docstring: None,
+                                        is_entry_point: false,
+                                        is_public: true,
+                                        tested: false,
+                                        is_nif: false,
+                                        is_unsafe: false,
+                                        properties: HashMap::new(),
+                                        embedding: None,
+                                    });
+                                }
+                                relations.push(Relation {
+                                    from: entity.clone(),
+                                    to: attr,
+                                    rel_type: "owns".to_string(),
+                                    properties: HashMap::new(),
+                                });
+                            }
+                        }
+                    }
                 }
-            }
-            Ok(out) => {
-                error!(
-                    "TypeQL python parser script failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-            Err(e) => {
-                error!("Failed to execute python TypeQL parser: {}", e);
             }
         }
 

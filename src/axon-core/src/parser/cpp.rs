@@ -19,16 +19,159 @@ impl CppParser {
         }
     }
 
-    fn walk<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+    fn walk<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        current_ns: &str,
+        is_template: bool,
+    ) {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             match child.kind() {
-                "function_definition" => Self::extract_function(child, source_bytes, result),
+                "preproc_include" => Self::extract_include(child, source_bytes, result),
+                "namespace_definition" => {
+                    Self::extract_namespace(child, source_bytes, result, current_ns)
+                }
+                "template_declaration" => {
+                    Self::extract_template(child, source_bytes, result, current_ns)
+                }
+                "alias_declaration" | "type_definition" => {
+                    Self::extract_type_alias(child, source_bytes, result, current_ns)
+                }
+                "function_definition" => {
+                    Self::extract_function(child, source_bytes, result, current_ns, is_template)
+                }
                 "class_specifier" | "struct_specifier" | "enum_specifier" => {
-                    Self::extract_class(child, source_bytes, result)
+                    Self::extract_class(child, source_bytes, result, current_ns, is_template)
                 }
                 "call_expression" => Self::extract_call(child, source_bytes, result, ""),
-                _ => Self::walk(child, source_bytes, result),
+                _ => Self::walk(child, source_bytes, result, current_ns, is_template),
+            }
+        }
+    }
+
+    fn extract_include<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+        if let Some(path_node) = Self::find_child_by_type(node, "system_lib_string")
+            .or_else(|| Self::find_child_by_type(node, "string_literal"))
+        {
+            let path = path_node
+                .utf8_text(source_bytes)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !path.is_empty() {
+                result.relations.push(Relation {
+                    from: "".to_string(),
+                    to: path,
+                    rel_type: "includes".to_string(),
+                    properties: HashMap::new(),
+                });
+            }
+        }
+    }
+
+    fn extract_namespace<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        current_ns: &str,
+    ) {
+        let mut ns_name = String::new();
+        if let Some(name_node) = Self::find_child_by_type(node, "namespace_identifier")
+            .or_else(|| Self::find_child_by_type(node, "identifier"))
+            .or_else(|| Self::find_child_by_type(node, "nested_namespace_specifier"))
+        {
+            ns_name = name_node.utf8_text(source_bytes).unwrap_or("").to_string();
+        }
+
+        let full_ns = if current_ns.is_empty() {
+            ns_name.clone()
+        } else if !ns_name.is_empty() {
+            format!("{}::{}", current_ns, ns_name)
+        } else {
+            current_ns.to_string()
+        };
+
+        if !ns_name.is_empty() {
+            let start_line = node.start_position().row + 1;
+            let end_line = node.end_position().row + 1;
+            result.symbols.push(Symbol {
+                name: full_ns.clone(),
+                kind: "namespace".to_string(),
+                start_line,
+                end_line,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: HashMap::new(),
+                embedding: None,
+            });
+        }
+
+        if let Some(body) = Self::find_child_by_type(node, "declaration_list") {
+            Self::walk(body, source_bytes, result, &full_ns, false);
+        }
+    }
+
+    fn extract_template<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        current_ns: &str,
+    ) {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "template_parameter_list" {
+                continue;
+            }
+            match child.kind() {
+                "function_definition" => {
+                    Self::extract_function(child, source_bytes, result, current_ns, true)
+                }
+                "class_specifier" | "struct_specifier" => {
+                    Self::extract_class(child, source_bytes, result, current_ns, true)
+                }
+                "alias_declaration" | "type_definition" => {
+                    Self::extract_type_alias(child, source_bytes, result, current_ns)
+                }
+                _ => Self::walk(child, source_bytes, result, current_ns, true),
+            }
+        }
+    }
+
+    fn extract_type_alias<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        current_ns: &str,
+    ) {
+        if let Some(name_node) = Self::find_child_by_type(node, "type_identifier") {
+            let name = name_node.utf8_text(source_bytes).unwrap_or("").to_string();
+            if !name.is_empty() {
+                let start_line = node.start_position().row + 1;
+                let end_line = node.end_position().row + 1;
+                let mut properties = HashMap::new();
+                if !current_ns.is_empty() {
+                    properties.insert("namespace".to_string(), current_ns.to_string());
+                }
+                result.symbols.push(Symbol {
+                    name,
+                    kind: "type_alias".to_string(),
+                    start_line,
+                    end_line,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties,
+                    embedding: None,
+                });
             }
         }
     }
@@ -60,7 +203,13 @@ impl CppParser {
         count
     }
 
-    fn extract_function<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+    fn extract_function<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        current_ns: &str,
+        is_template: bool,
+    ) {
         let mut name = String::new();
         if let Some(decl) = Self::find_child_by_type(node, "function_declarator") {
             if let Some(id) = Self::find_child_by_type(decl, "identifier")
@@ -91,6 +240,13 @@ impl CppParser {
             }
 
             let mut properties = HashMap::new();
+            if !current_ns.is_empty() {
+                properties.insert("namespace".to_string(), current_ns.to_string());
+            }
+            if is_template {
+                properties.insert("is_template".to_string(), "true".to_string());
+            }
+
             if let Some(body) = Self::find_child_by_type(node, "compound_statement") {
                 // REQ-AXO-91506 — propagate caller name into call extraction.
                 Self::walk_for_calls(body, source_bytes, result, &name);
@@ -115,11 +271,25 @@ impl CppParser {
         }
     }
 
-    fn extract_class<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
+    fn extract_class<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        result: &mut ExtractionResult,
+        current_ns: &str,
+        is_template: bool,
+    ) {
         if let Some(name_node) = Self::find_child_by_type(node, "type_identifier") {
             let name = name_node.utf8_text(source_bytes).unwrap_or("").to_string();
             let start_line = node.start_position().row + 1;
             let end_line = node.end_position().row + 1;
+
+            let mut properties = HashMap::new();
+            if !current_ns.is_empty() {
+                properties.insert("namespace".to_string(), current_ns.to_string());
+            }
+            if is_template {
+                properties.insert("is_template".to_string(), "true".to_string());
+            }
 
             result.symbols.push(Symbol {
                 name: name.clone(),
@@ -132,12 +302,12 @@ impl CppParser {
                 tested: false,
                 is_nif: false,
                 is_unsafe: false,
-                properties: HashMap::new(),
+                properties,
                 embedding: None,
             });
 
             if let Some(body) = Self::find_child_by_type(node, "field_declaration_list") {
-                Self::walk(body, source_bytes, result);
+                Self::walk(body, source_bytes, result, current_ns, false);
             }
         }
     }
@@ -198,7 +368,7 @@ impl Parser for CppParser {
         };
 
         if let Some(tree) = parse_with_wasm_safe("cpp", self.wasm_bytes, content) {
-            Self::walk(tree.root_node(), content.as_bytes(), &mut result);
+            Self::walk(tree.root_node(), content.as_bytes(), &mut result, "", false);
         }
 
         result
@@ -251,6 +421,95 @@ mod tests {
                 .get("cyclomatic_complexity")
                 .map(String::as_str),
             Some("5")
+        );
+    }
+
+    #[test]
+    fn cpp_parses_includes_namespaces_aliases_and_templates() {
+        let code = r#"
+        #include <vector>
+        #include "engine/core.hpp"
+
+        namespace engine {
+            using ByteVector = std::vector<uint8_t>;
+            typedef unsigned long ulong;
+
+            template <typename T>
+            class Buffer {
+            public:
+                void reset() {}
+            };
+
+            void run() {
+                Buffer<int> b;
+                b.reset();
+            }
+        }
+        "#;
+        let result = parser().parse(code);
+        if result.symbols.is_empty() && result.relations.is_empty() {
+            eprintln!("cpp wasm grammar unavailable, skipping");
+            return;
+        }
+
+        // Check includes
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.to == "<vector>" && r.rel_type == "includes"));
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.to == "\"engine/core.hpp\"" && r.rel_type == "includes"));
+
+        // Check namespace
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "engine" && s.kind == "namespace"));
+
+        // Check type alias
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "ByteVector" && s.kind == "type_alias"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "ulong" && s.kind == "type_alias"));
+
+        // Check template class
+        let buffer = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "Buffer" && s.kind == "class");
+        assert!(buffer.is_some());
+        assert_eq!(
+            buffer
+                .unwrap()
+                .properties
+                .get("is_template")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            buffer
+                .unwrap()
+                .properties
+                .get("namespace")
+                .map(String::as_str),
+            Some("engine")
+        );
+
+        // Check enclosed function
+        let run = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "run" && s.kind == "function");
+        assert!(run.is_some());
+        assert_eq!(
+            run.unwrap().properties.get("namespace").map(String::as_str),
+            Some("engine")
         );
     }
 }
