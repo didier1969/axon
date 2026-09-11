@@ -228,6 +228,7 @@ pub mod c_sharp;
 pub mod cpp;
 pub mod css;
 pub mod datalog;
+pub mod docker;
 pub mod elixir;
 pub mod go;
 pub mod graphql;
@@ -235,7 +236,9 @@ pub mod html;
 pub mod java;
 pub mod kotlin;
 pub mod lll;
+pub mod manifest;
 pub mod markdown;
+pub mod nix;
 pub mod openapi;
 pub mod php;
 pub mod proto;
@@ -245,6 +248,7 @@ pub mod rust;
 pub mod scheme;
 pub mod sql;
 pub mod text;
+pub mod toml;
 pub mod typeql;
 pub mod typescript;
 pub mod xml;
@@ -292,13 +296,79 @@ pub fn supported_parser_ecosystems() -> &'static [EcosystemId] {
 /// `chaque_extension_declaree_a_bien_un_parser` le dit), jamais devenir inerte :
 /// filtrer sur la constante deplacerait le trou au lieu de le fermer.
 pub const PARSEABLE_EXTENSIONS: &[&str] = &[
-    "py", "ex", "exs", "rs", "scm", "ss", "sld", "sls", "ts", "tsx", "js", "jsx", "go", "java",
-    "c", "h", "cpp", "hpp", "cc", "cxx", "hxx", "cs", "rb", "ruby", "kt", "kts", "php", "yaml",
-    "yml", "html", "htm", "xml", "css", "scss", "md", "markdown", "sql", "tql", "typeql", "dl",
-    "datalog", "lll", "txt", "conf", "ini", "proto", "graphql", "gql", "json",
+    "py",
+    "ex",
+    "exs",
+    "rs",
+    "scm",
+    "ss",
+    "sld",
+    "sls",
+    "ts",
+    "tsx",
+    "js",
+    "jsx",
+    "go",
+    "java",
+    "c",
+    "h",
+    "cpp",
+    "hpp",
+    "cc",
+    "cxx",
+    "hxx",
+    "cs",
+    "rb",
+    "ruby",
+    "kt",
+    "kts",
+    "php",
+    "yaml",
+    "yml",
+    "html",
+    "htm",
+    "xml",
+    "css",
+    "scss",
+    "md",
+    "markdown",
+    "sql",
+    "tql",
+    "typeql",
+    "dl",
+    "datalog",
+    "lll",
+    "txt",
+    "conf",
+    "ini",
+    "proto",
+    "graphql",
+    "gql",
+    "json",
+    "nix",
+    "dockerfile",
+    "toml",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+        if file_name == "Dockerfile"
+            || file_name.starts_with("Dockerfile.")
+            || file_name == "Containerfile"
+            || file_name.starts_with("Containerfile.")
+        {
+            return Some(Box::new(docker::DockerParser::new()));
+        }
+        if file_name == "package.json" {
+            return Some(Box::new(manifest::PackageJsonParser::new()));
+        }
+        if file_name == "requirements.txt"
+            || (file_name.starts_with("requirements") && file_name.ends_with(".txt"))
+        {
+            return Some(Box::new(manifest::RequirementsTxtParser::new()));
+        }
+    }
+
     let ext = path.extension()?.to_str()?.to_lowercase();
     match ext.as_str() {
         "py" => Some(Box::new(python::PythonParser::new())),
@@ -326,6 +396,9 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "proto" => Some(Box::new(proto::ProtoParser::new())),
         "graphql" | "gql" => Some(Box::new(graphql::GraphQLParser::new())),
         "json" => Some(Box::new(openapi::OpenApiParser::new())),
+        "nix" => Some(Box::new(nix::NixParser::new())),
+        "dockerfile" | "containerfile" => Some(Box::new(docker::DockerParser::new())),
+        "toml" => Some(Box::new(toml::TomlParser::new())),
         // llmlang: construct WITH the real path so `lll export-ist` resolves the
         // file's `import`s against the actual workspace (REQ-LLL-021).
         "lll" => Some(Box::new(lll::LllParser::with_path(path.to_path_buf()))),

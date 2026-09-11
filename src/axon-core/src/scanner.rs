@@ -507,6 +507,17 @@ impl Scanner {
             }
         }
 
+        // 2.5 SPECIAL FILENAMES (Dockerfile, Containerfile)
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name == "Dockerfile"
+                || name.starts_with("Dockerfile.")
+                || name == "Containerfile"
+                || name.starts_with("Containerfile.")
+            {
+                return true;
+            }
+        }
+
         // 3. EXTENSION FILTER
         if let Some(ext) = path.extension() {
             let ext_str = ext.to_string_lossy().to_lowercase();

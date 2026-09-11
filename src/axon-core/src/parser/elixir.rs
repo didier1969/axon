@@ -748,6 +748,50 @@ impl ElixirParser {
                 aliases,
             );
         }
+
+        if func_name == "deps" {
+            if let Some((body_node, _)) = Self::find_function_body_node(node, source_bytes) {
+                let body_text = body_node.utf8_text(source_bytes).unwrap_or("");
+                for line in body_text.lines() {
+                    let trimmed = line.trim();
+                    if let Some(colon_pos) = trimmed.find("{:") {
+                        let rest = &trimmed[colon_pos + 2..];
+                        let end_atom = rest
+                            .find(|c: char| !c.is_alphanumeric() && c != '_')
+                            .unwrap_or(rest.len());
+                        let dep_name = &rest[..end_atom];
+                        if !dep_name.is_empty() {
+                            let mut dep_props = HashMap::new();
+                            dep_props.insert("ecosystem".to_string(), "hex".to_string());
+                            result.symbols.push(Symbol {
+                                name: dep_name.to_string(),
+                                kind: "dependency".to_string(),
+                                start_line,
+                                end_line,
+                                docstring: None,
+                                is_entry_point: false,
+                                is_public: true,
+                                tested: false,
+                                is_nif: false,
+                                is_unsafe: false,
+                                properties: dep_props,
+                                embedding: None,
+                            });
+                            result.relations.push(Relation {
+                                from: if module_name.is_empty() {
+                                    full_name.clone()
+                                } else {
+                                    module_name.to_string()
+                                },
+                                to: dep_name.to_string(),
+                                rel_type: "references".to_string(),
+                                properties: HashMap::new(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// REQ-AXO-902227 — does this `def` carry an `@impl` annotation? `@impl true` /
@@ -2236,5 +2280,63 @@ mod tests {
                 && r.to == "MyApp.Accounts.Profile"
                 && r.rel_type == "references"
                 && r.properties.get("relation") == Some(&"has_one".to_string())));
+    }
+
+    #[test]
+    fn test_mix_exs_deps_extraction() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule MyApp.MixProject do
+          use Mix.Project
+
+          def project do
+            [
+              app: :my_app,
+              version: "0.1.0",
+              deps: deps()
+            ]
+          end
+
+          defp deps do
+            [
+              {:phoenix, "~> 1.7.10"},
+              {:ecto_sql, "~> 3.10"},
+              {:postgrex, ">= 0.0.0"},
+              {:jason, "~> 1.2"}
+            ]
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+        let deps: Vec<&str> = result
+            .symbols
+            .iter()
+            .filter(|s| s.kind == "dependency")
+            .map(|s| s.name.as_str())
+            .collect();
+
+        assert!(
+            deps.contains(&"phoenix"),
+            "should contain phoenix: {deps:?}"
+        );
+        assert!(
+            deps.contains(&"ecto_sql"),
+            "should contain ecto_sql: {deps:?}"
+        );
+        assert!(
+            deps.contains(&"postgrex"),
+            "should contain postgrex: {deps:?}"
+        );
+        assert!(deps.contains(&"jason"), "should contain jason: {deps:?}");
+
+        let refs: Vec<&str> = result
+            .relations
+            .iter()
+            .filter(|r| r.rel_type == "references" && r.from == "MyApp.MixProject")
+            .map(|r| r.to.as_str())
+            .collect();
+        assert!(refs.contains(&"phoenix"));
+        assert!(refs.contains(&"ecto_sql"));
     }
 }

@@ -321,6 +321,11 @@ fn default_supported_extensions() -> Vec<String> {
         "dl".to_string(),
         "datalog".to_string(),
         "ini".to_string(),
+        "proto".to_string(),
+        "graphql".to_string(),
+        "gql".to_string(),
+        "nix".to_string(),
+        "dockerfile".to_string(),
         // llmlang: a `.lll` file is parsed by the shell-out bridge (parser/lll.rs
         // → `lll export-ist`), which yields semantic symbols (content-hash,
         // purity, contracts). Without this the scanner excludes it pre-parse
