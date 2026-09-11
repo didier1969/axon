@@ -105,6 +105,9 @@ impl PythonParser {
             return;
         };
 
+        let is_test =
+            name.starts_with("Test") || name.ends_with("Test") || name.ends_with("TestCase");
+
         result.symbols.push(Symbol {
             name: name.clone(),
             kind: "class".to_string(),
@@ -113,7 +116,7 @@ impl PythonParser {
             docstring: None,
             is_entry_point: false,
             is_public: !name.starts_with("_"),
-            tested: name.starts_with("Test"),
+            tested: is_test,
             is_nif: false,
             is_unsafe: false,
             properties: HashMap::new(),
@@ -194,7 +197,13 @@ impl PythonParser {
         };
 
         // Determine if it's a test function
-        let is_test = func_name.starts_with("test_");
+        let is_test = func_name.starts_with("test_")
+            || func_name.ends_with("_test")
+            || (is_method
+                && (scope.starts_with("Test")
+                    || scope.ends_with("Test")
+                    || scope.ends_with("TestCase"))
+                && !func_name.starts_with('_'));
 
         // Find decorators
         // REQ-AXO-901958 — recognise pytest fixtures (`@fixture` / `@pytest.fixture`
@@ -996,5 +1005,49 @@ class SaleOrder:
             inverse_sym.is_entry_point,
             "Target of inverse= must be marked as entry point"
         );
+    }
+
+    #[test]
+    fn req_902660_python_tests_and_testcases_marked_as_tested() {
+        let p = PythonParser::new();
+        let code = r#"
+import unittest
+
+class CalculationTestCase(unittest.TestCase):
+    def run_calculation_test(self):
+        assert 1 == 1
+
+def helper_function_test():
+    pass
+"#;
+        let result = p.parse(code);
+        if result.symbols.is_empty() {
+            eprintln!("python wasm grammar unavailable, skipping");
+            return;
+        }
+
+        let cls = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "CalculationTestCase")
+            .expect("Class must exist");
+        assert!(cls.tested, "TestCase class must be tested=true");
+
+        let method = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "CalculationTestCase.run_calculation_test")
+            .expect("Method must exist");
+        assert!(
+            method.tested,
+            "Method inside TestCase or ending in _test must be tested=true"
+        );
+
+        let func = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "helper_function_test")
+            .expect("Function must exist");
+        assert!(func.tested, "Function ending in _test must be tested=true");
     }
 }

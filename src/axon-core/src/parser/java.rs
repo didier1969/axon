@@ -384,4 +384,37 @@ mod tests {
             result.relations
         );
     }
+
+    #[test]
+    fn req_902660_java_test_annotation_marks_method_tested() {
+        let result = parser().parse(
+            "class CalculatorTest { \
+                @Test \
+                public void testAdd() { assert true; } \
+                @ParameterizedTest \
+                public void parameterizedTest() {} \
+            }",
+        );
+        if result.symbols.is_empty() {
+            eprintln!("java wasm grammar unavailable, skipping");
+            return;
+        }
+        let cls = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "CalculatorTest")
+            .unwrap();
+        assert!(cls.tested, "CalculatorTest class must be tested=true");
+        let m1 = result.symbols.iter().find(|s| s.name == "testAdd").unwrap();
+        assert!(m1.tested, "testAdd with @Test must be tested=true");
+        let m2 = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "parameterizedTest")
+            .unwrap();
+        assert!(
+            m2.tested,
+            "parameterizedTest with @ParameterizedTest must be tested=true"
+        );
+    }
 }

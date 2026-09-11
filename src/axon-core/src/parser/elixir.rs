@@ -167,6 +167,14 @@ impl ElixirParser {
                     identifier.as_str(),
                     aliases,
                 ),
+                "test" => Self::extract_test_macro(
+                    node,
+                    source_bytes,
+                    content,
+                    result,
+                    module_name,
+                    aliases,
+                ),
                 x if IMPORT_DIRECTIVES.contains(&x) => {
                     Self::extract_import_directive(node, source_bytes, result, x, module_name)
                 }
@@ -365,6 +373,74 @@ impl ElixirParser {
             }
         }
         None
+    }
+
+    fn extract_test_macro<'a>(
+        node: Node<'a>,
+        source_bytes: &[u8],
+        _content: &str,
+        result: &mut ExtractionResult,
+        module_name: &str,
+        aliases: &HashMap<String, String>,
+    ) {
+        let args = match Self::find_child_by_type(node, "arguments") {
+            Some(a) => a,
+            None => return,
+        };
+
+        let mut test_name = String::new();
+        let mut cursor = args.walk();
+        for child in args.named_children(&mut cursor) {
+            if child.kind() == "string" || child.kind() == "atom" || child.kind() == "identifier" {
+                let raw_text = child.utf8_text(source_bytes).unwrap_or("");
+                let clean_text = raw_text.trim_matches('"').trim_start_matches(':').trim();
+                if !clean_text.is_empty() {
+                    test_name = clean_text.to_string();
+                    break;
+                }
+            }
+        }
+
+        if test_name.is_empty() {
+            test_name = format!("test_at_line_{}", node.start_position().row + 1);
+        }
+
+        let full_name = if module_name.is_empty() {
+            format!("test {}", test_name)
+        } else {
+            format!("{}.test {}", module_name, test_name)
+        };
+
+        let start_line = node.start_position().row + 1;
+        let end_line = node.end_position().row + 1;
+
+        let mut properties = HashMap::new();
+        properties.insert("test_framework".to_string(), "ex_unit".to_string());
+
+        result.symbols.push(Symbol {
+            name: full_name.clone(),
+            kind: "function".to_string(),
+            start_line,
+            end_line,
+            docstring: None,
+            is_entry_point: true,
+            is_public: false,
+            tested: true,
+            is_nif: false,
+            is_unsafe: false,
+            properties,
+            embedding: None,
+        });
+
+        if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
+            Self::extract_calls_from_expression(
+                do_block,
+                source_bytes,
+                result,
+                &full_name,
+                aliases,
+            );
+        }
     }
 
     fn extract_function<'a>(
@@ -1860,6 +1936,36 @@ mod tests {
                 .iter()
                 .any(|r| r.to.contains("register") && r.rel_type == "CALLS"),
             "Calls inside @moduledoc must never be emitted; got: {:?}",
+            result.relations
+        );
+    }
+
+    #[test]
+    fn req_902660_exunit_test_macro_emits_tested_symbol_and_calls() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule CalculatorTest do
+          use ExUnit.Case
+
+          test "adds numbers correctly" do
+            assert Calculator.add(1, 2) == 3
+          end
+        end
+        "#;
+        let result = parser.parse(content);
+        let test_sym = result
+            .symbols
+            .iter()
+            .find(|s| s.name.contains("adds numbers correctly"))
+            .expect("ExUnit test macro must be extracted as a symbol");
+        assert!(test_sym.tested, "ExUnit test symbol must have tested=true");
+        assert_eq!(test_sym.kind, "function");
+
+        assert!(
+            result.relations.iter().any(|r| r.from == test_sym.name
+                && r.to.contains("Calculator.add")
+                && r.rel_type.to_lowercase() == "calls"),
+            "Calls inside ExUnit test must be linked to the test symbol; got: {:?}",
             result.relations
         );
     }

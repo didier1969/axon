@@ -352,7 +352,10 @@ pub fn language_has_coverage_model(module_id: &str) -> bool {
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    matches!(ext.as_str(), "rs")
+    matches!(
+        ext.as_str(),
+        "rs" | "ex" | "exs" | "py" | "java" | "ts" | "tsx" | "js" | "jsx"
+    )
 }
 
 #[cfg(test)]
@@ -360,20 +363,32 @@ mod coverage_capability_tests {
     use super::language_has_coverage_model;
 
     #[test]
-    fn only_rust_carries_a_coverage_model_today() {
-        // REQ-AXO-902214 — Rust propagates #[test] → covered; nothing else does (yet).
+    fn test_coverage_model_capabilities_polyglot() {
+        // REQ-AXO-902214 & REQ-AXO-902660 — Rust, Elixir, Python, Java, TypeScript/JS propagate test reachability.
         assert!(language_has_coverage_model(
             "AXO::src::axon-core::src::mailbox.rs"
         ));
         assert!(language_has_coverage_model("AXO::a::b::snapshot.rs")); // module id form
-                                                                        // Languages Axon PARSES but has no coverage extraction for → false (the capability is
-                                                                        // a DIFFERENT question from parser existence; see get_parser_for_file).
-        assert!(!language_has_coverage_model("AXO::x::runtime_contracts.py"));
-        assert!(!language_has_coverage_model("LLL::x::foo.lll"));
-        assert!(!language_has_coverage_model("NEX::lib::app_web::page.ex"));
-        assert!(!language_has_coverage_model("X::src::main.ts"));
+        assert!(language_has_coverage_model("AXO::x::runtime_contracts.py"));
+        assert!(language_has_coverage_model("NEX::lib::app_web::page.ex"));
+        assert!(language_has_coverage_model(
+            "NEX::test::app_web::page_test.exs"
+        ));
+        assert!(language_has_coverage_model(
+            "KKI::src::main::java::Calculator.java"
+        ));
+        assert!(language_has_coverage_model("X::src::main.ts"));
+        assert!(language_has_coverage_model("X::src::main.tsx"));
+        assert!(language_has_coverage_model("X::src::main.js"));
+        assert!(language_has_coverage_model("X::src::main.jsx"));
         // Case-insensitive, like the parser dispatch it pairs with.
         assert!(language_has_coverage_model("X::src::Foo.RS"));
+        assert!(language_has_coverage_model("X::src::Foo.EX"));
+
+        // Languages Axon PARSES but has no coverage extraction for → false
+        assert!(!language_has_coverage_model("LLL::x::foo.lll"));
+        assert!(!language_has_coverage_model("PHP::x::index.php"));
+        assert!(!language_has_coverage_model("SCM::x::init.scm"));
         // No file extension (external call-target id) → false.
         assert!(!language_has_coverage_model("AXO::unwrap"));
         assert!(!language_has_coverage_model("bare"));

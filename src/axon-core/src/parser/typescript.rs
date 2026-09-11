@@ -497,6 +497,7 @@ impl Parser for TypeScriptParser {
                             props.insert("class_name".to_string(), class_name);
                         }
 
+                        let lower_name = text.to_lowercase();
                         symbols.push(Symbol {
                             name: text.clone(),
                             kind: "method".to_string(),
@@ -505,7 +506,7 @@ impl Parser for TypeScriptParser {
                             docstring: None,
                             is_entry_point: false,
                             is_public: true, // TS methods are public by default unless private keyword
-                            tested: false,
+                            tested: lower_name.contains("test") || lower_name.contains("spec"),
                             is_nif: false,
                             is_unsafe: false,
                             properties: props,
@@ -701,5 +702,39 @@ function outer(x) {
                 .map(String::as_str),
             Some("2")
         );
+    }
+
+    #[test]
+    fn req_902660_ts_test_methods_marked_as_tested() {
+        let parser = TypeScriptParser::new();
+        let result = parser.parse(
+            r#"
+class CalculatorTest {
+  testAdd() {
+    expect(1 + 1).toBe(2);
+  }
+}
+function runUnitTest() {
+  expect(true).toBe(true);
+}
+"#,
+        );
+        if result.symbols.is_empty() {
+            eprintln!("typescript wasm grammar unavailable, skipping");
+            return;
+        }
+        let method = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "testAdd")
+            .expect("testAdd symbol");
+        assert!(method.tested, "TS method named test* must be tested=true");
+
+        let func = result
+            .symbols
+            .iter()
+            .find(|s| s.name == "runUnitTest")
+            .expect("runUnitTest symbol");
+        assert!(func.tested, "TS function named *Test must be tested=true");
     }
 }
