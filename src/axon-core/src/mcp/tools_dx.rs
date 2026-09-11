@@ -3338,8 +3338,121 @@ impl McpServer {
         let surfaces_used: Vec<&'static str> = vec!["graph_ram"];
         let surfaces_degraded: Vec<&'static str> = Vec::new();
         let proj_key = effective_project.as_deref().unwrap_or("");
+
+        // Retrieve target symbol metadata for contract classification
+        let target_escaped = target_id.replace('\'', "''");
+        let target_sql = format!(
+            "SELECT name, kind, COALESCE(is_nif, false), COALESCE(is_public, true), COALESCE(project_code, 'unknown') FROM Symbol WHERE id = '{target_escaped}'"
+        );
+        let target_meta_raw = self
+            .graph_store
+            .query_json(&target_sql)
+            .unwrap_or_else(|_| "[]".to_string());
+        let target_rows: Vec<Vec<String>> =
+            serde_json::from_str(&target_meta_raw).unwrap_or_default();
+
+        let (target_name, target_kind, is_nif, _is_public, _target_project) =
+            if let Some(row) = target_rows.first() {
+                let name = row.get(0).cloned().unwrap_or_else(|| symbol.to_string());
+                let kind = row
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| "function".to_string());
+                let nif = row.get(2).map(|s| s == "true" || s == "t").unwrap_or(false);
+                let publ = row.get(3).map(|s| s == "true" || s == "t").unwrap_or(true);
+                let proj = row.get(4).cloned().unwrap_or_else(|| proj_key.to_string());
+                (name, kind, nif, publ, proj)
+            } else {
+                (
+                    symbol.to_string(),
+                    "function".to_string(),
+                    false,
+                    true,
+                    proj_key.to_string(),
+                )
+            };
+
+        // Polyglot contract classification (Protobuf RPC, HTTP Endpoint, OpenAPI Schema, DB DDL, NIF/FFI, Supply-Chain)
+        let (contract_category, contract_risk_summary, contract_actions) = if is_nif {
+            (
+                "NATIVE_FFI_CONTRACT",
+                "Native C/Rustler FFI Interface (NIF). Modifying C/Rustler function signatures, memory structures, or return types risks memory corruption, segfault, or VM crash on the BEAM/host runtime.",
+                vec![
+                    "verify C-ABI / Rustler NIF argument decoding and term encoding",
+                    "audit memory safety and thread safety (enif_alloc / dirty schedulers)",
+                    "run `simulate_mutation` before changing signature",
+                ],
+            )
+        } else {
+            match target_kind.to_ascii_lowercase().as_str() {
+                "rpc" | "service" | "message" => (
+                    "NETWORK_RPC_CONTRACT",
+                    "Protobuf RPC / Message wire-contract. Incompatible field alterations, deletions, or tag renumbering break cross-service RPC communication across network boundaries.",
+                    vec![
+                        "validate Protobuf wire backward-compatibility (reserved fields, tag immutability)",
+                        "inspect downstream gRPC client services",
+                        "run `simulate_mutation` before changing signature",
+                    ],
+                ),
+                "endpoint" => (
+                    "REST_API_CONTRACT",
+                    "HTTP / Webhook endpoint interface. Direct risk of breaking external API consumers, mobile clients, frontend single-page apps, or HTTP webhooks.",
+                    vec![
+                        "verify OpenAPI specification diff and semver impact",
+                        "check client deprecation headers and versioning routes",
+                        "run `simulate_mutation` before changing signature",
+                    ],
+                ),
+                "schema" => (
+                    "DATA_EXCHANGE_SCHEMA",
+                    "OpenAPI / GraphQL schema entity. Alters structured payload expectations, field validations, or client serialization contracts.",
+                    vec![
+                        "verify GraphQL / OpenAPI schema compatibility",
+                        "inspect consumers using this data schema",
+                        "run `simulate_mutation` before changing signature",
+                    ],
+                ),
+                "table" | "column" | "view" => (
+                    "DATABASE_DDL_CONTRACT",
+                    "Database DDL / storage schema definition. Column removal, type mutation, or table rename directly impacts SQL queries, ORM models, and database migrations.",
+                    vec![
+                        "generate idempotent, backward-compatible SQL migration scripts",
+                        "inspect SQL queries and ORM models referencing this column/table",
+                        "run `simulate_mutation` before changing signature",
+                    ],
+                ),
+                "dependency" => (
+                    "SUPPLY_CHAIN_DEPENDENCY",
+                    "External package / supply-chain dependency. Upgrading, downgrading, or removing this dependency impacts all internal modules referencing it, with risk of transitive API break or ABI mismatch.",
+                    vec![
+                        "audit semver range and breaking changes in upstream package changelog",
+                        "inspect all files and modules importing this dependency",
+                        "run `simulate_mutation` before changing signature",
+                    ],
+                ),
+                _ => (
+                    "CODE_SYMBOL_CONTRACT",
+                    "Public code symbol interface. Signature, visibility, or type alterations directly impact upstream callers across modules and crates.",
+                    vec![
+                        "inspect top consumers",
+                        "run `simulate_mutation` before changing signature",
+                    ],
+                ),
+            }
+        };
+
+        let consumer_rels = [
+            crate::ist_snapshot::RelationType::Calls,
+            crate::ist_snapshot::RelationType::CallsNif,
+            crate::ist_snapshot::RelationType::Uses,
+            crate::ist_snapshot::RelationType::Imports,
+            crate::ist_snapshot::RelationType::Implements,
+            crate::ist_snapshot::RelationType::Reads,
+            crate::ist_snapshot::RelationType::ReadsArtifact,
+            crate::ist_snapshot::RelationType::FrameworkInvokes,
+        ];
         let consumer_ids: Vec<String> = view
-            .reverse_at_radius(proj_key, &target_id, 1, 10_000, &[])
+            .reverse_at_radius(proj_key, &target_id, 1, 10_000, &consumer_rels)
             .unwrap_or_default();
 
         // Materialise display rows : [caller_name, caller_kind, caller_project_code]
@@ -3381,16 +3494,41 @@ impl McpServer {
                     evidence.push_str(&note);
                     evidence.push('\n');
                 }
+
+                evidence.push_str(&format!(
+                    "### 🛡️ Contract Classification\n\
+                     - **Symbol:** `{}` (`{}`)\n\
+                     - **Category:** `{}`\n\
+                     - **Forensic Risk:** {}\n\n",
+                    target_name, target_kind, contract_category, contract_risk_summary
+                ));
+
                 if rows.is_empty() {
+                    let summary = if matches!(
+                        contract_category,
+                        "REST_API_CONTRACT" | "NETWORK_RPC_CONTRACT" | "DATABASE_DDL_CONTRACT"
+                    ) {
+                        "no in-repo consumers detected, but symbol is an exposed external/network/storage contract"
+                    } else {
+                        "no external consumers detected for the resolved public symbol"
+                    };
+                    if matches!(
+                        contract_category,
+                        "REST_API_CONTRACT" | "NETWORK_RPC_CONTRACT" | "DATABASE_DDL_CONTRACT"
+                    ) {
+                        evidence.push_str(
+                            "> ⚠️ **External Contract Notice:** While no in-repo callers were found in IST graph, this symbol is exposed across an external architectural boundary (REST/RPC/DDL). Remote services, external API clients, or database engines may be actively consuming it.\n\n",
+                        );
+                    }
                     let report = format!(
                         "## 🧯 API Break Check : {}\n\n{}",
                         symbol,
                         format_standard_contract(
                             "ok",
-                            "no external consumers detected for the resolved public symbol",
+                            summary,
                             &scope,
                             &evidence_by_mode(&evidence, mode),
-                            &["run `impact` for broader dependency view"],
+                            &contract_actions,
                             "high",
                         )
                     );
@@ -3399,6 +3537,10 @@ impl McpServer {
                         "data": {
                             "symbol": symbol,
                             "project": project,
+                            "target_kind": target_kind,
+                            "contract_category": contract_category,
+                            "contract_risk": contract_risk_summary,
+                            "is_nif": is_nif,
                             "consumer_count": 0,
                             "surfaces_used": surfaces_used,
                             "surfaces_degraded": surfaces_degraded,
@@ -3422,10 +3564,7 @@ impl McpServer {
                             "public api consumer impact detected",
                             &scope,
                             &evidence_by_mode(&evidence, mode),
-                            &[
-                                "inspect top consumers",
-                                "run `simulate_mutation` before changing signature"
-                            ],
+                            &contract_actions,
                             "high",
                         )
                     );
@@ -3435,6 +3574,10 @@ impl McpServer {
                         "data": {
                             "symbol": symbol,
                             "project": project,
+                            "target_kind": target_kind,
+                            "contract_category": contract_category,
+                            "contract_risk": contract_risk_summary,
+                            "is_nif": is_nif,
                             "consumer_count": total_available,
                             "surfaces_used": surfaces_used,
                             "surfaces_degraded": surfaces_degraded,
@@ -3591,7 +3734,8 @@ mod inspect_callers_query_tests {
     // `inspect` reports the combined caller count over the OR clause.
     use crate::mcp::JsonRpcRequest;
     use crate::test_support::ist_fixtures::{
-        assert_ist_count, create_test_server_with_ist_seed, CallFixture, IstSeed, SymbolFixture,
+        assert_ist_count, create_test_server_with_ist_seed, CallFixture, EdgeFixture, IstSeed,
+        SymbolFixture,
     };
     use serde_json::json;
 
@@ -3789,6 +3933,270 @@ mod inspect_callers_query_tests {
             text.contains(" 3 "),
             "expected callers count 3 in inspect output, got: {text}"
         );
+        crate::ist_snapshot::process_view()
+            .cache_handle()
+            .evict("AXO");
+    }
+
+    #[test]
+    fn test_api_break_check_classifies_protobuf_rpc_contract() {
+        let harness = create_test_server_with_ist_seed(
+            IstSeed::new()
+                .symbol(SymbolFixture::new(
+                    "TRD::ml::proto::ml_service.proto::PricePredictor.Predict",
+                    "PricePredictor.Predict",
+                    "rpc",
+                    "TRD",
+                ))
+                .symbol(SymbolFixture::new(
+                    "TRD::engine::client",
+                    "client",
+                    "function",
+                    "TRD",
+                ))
+                .call(CallFixture::canonical(
+                    "TRD::engine::client",
+                    "TRD::ml::proto::ml_service.proto::PricePredictor.Predict",
+                    "TRD",
+                )),
+        )
+        .unwrap();
+
+        assert!(harness.server.ensure_ram_snapshot_warm("TRD"));
+
+        let response = harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "api_break_check",
+                    "arguments": {
+                        "symbol": "PricePredictor.Predict",
+                        "project": "TRD"
+                    }
+                })),
+                id: Some(json!(9001)),
+            })
+            .expect("handle_request returned envelope");
+
+        let result = response.result.expect("result body present");
+        let text = result["content"][0]["text"].as_str().expect("text string");
+        assert!(
+            text.contains("NETWORK_RPC_CONTRACT"),
+            "must identify NETWORK_RPC_CONTRACT in text: {text}"
+        );
+        assert!(
+            text.contains("warn_api_break_risk"),
+            "must report warn_api_break_risk: {text}"
+        );
+        assert!(
+            text.contains("client"),
+            "must list consumer 'client' in impact table: {text}"
+        );
+
+        let data = &result["data"];
+        assert_eq!(
+            data["contract_category"].as_str(),
+            Some("NETWORK_RPC_CONTRACT")
+        );
+        assert_eq!(data["target_kind"].as_str(), Some("rpc"));
+        assert_eq!(data["consumer_count"].as_u64(), Some(1));
+
+        crate::ist_snapshot::process_view()
+            .cache_handle()
+            .evict("TRD");
+    }
+
+    #[test]
+    fn test_api_break_check_classifies_native_nif_contract() {
+        let harness = create_test_server_with_ist_seed(
+            IstSeed::new()
+                .symbol(
+                    SymbolFixture::new(
+                        "MLD::native::fast_graph::add_edge",
+                        "add_edge",
+                        "function",
+                        "MLD",
+                    )
+                    .is_nif(true),
+                )
+                .symbol(SymbolFixture::new(
+                    "MLD::elixir::bridge",
+                    "bridge",
+                    "function",
+                    "MLD",
+                ))
+                .edge(EdgeFixture::new(
+                    "CALLS_NIF",
+                    "MLD::elixir::bridge",
+                    "MLD::native::fast_graph::add_edge",
+                    "MLD",
+                )),
+        )
+        .unwrap();
+
+        assert!(harness.server.ensure_ram_snapshot_warm("MLD"));
+
+        let response = harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "api_break_check",
+                    "arguments": {
+                        "symbol": "add_edge",
+                        "project": "MLD"
+                    }
+                })),
+                id: Some(json!(9002)),
+            })
+            .expect("handle_request returned envelope");
+
+        let result = response.result.expect("result body present");
+        let text = result["content"][0]["text"].as_str().expect("text string");
+        assert!(
+            text.contains("NATIVE_FFI_CONTRACT"),
+            "must identify NATIVE_FFI_CONTRACT: {text}"
+        );
+        assert!(
+            text.contains("warn_api_break_risk"),
+            "must report warn_api_break_risk: {text}"
+        );
+        assert!(
+            text.contains("bridge"),
+            "must list consumer 'bridge': {text}"
+        );
+
+        let data = &result["data"];
+        assert_eq!(
+            data["contract_category"].as_str(),
+            Some("NATIVE_FFI_CONTRACT")
+        );
+        assert_eq!(data["is_nif"].as_bool(), Some(true));
+        assert_eq!(data["consumer_count"].as_u64(), Some(1));
+
+        crate::ist_snapshot::process_view()
+            .cache_handle()
+            .evict("MLD");
+    }
+
+    #[test]
+    fn test_api_break_check_classifies_supply_chain_dependency() {
+        let harness = create_test_server_with_ist_seed(
+            IstSeed::new()
+                .symbol(SymbolFixture::new(
+                    "AXO::Cargo.toml::tokio",
+                    "tokio",
+                    "dependency",
+                    "AXO",
+                ))
+                .symbol(SymbolFixture::new(
+                    "AXO::src::main.rs::main",
+                    "main",
+                    "function",
+                    "AXO",
+                ))
+                .edge(EdgeFixture::new(
+                    "USES",
+                    "AXO::src::main.rs::main",
+                    "AXO::Cargo.toml::tokio",
+                    "AXO",
+                )),
+        )
+        .unwrap();
+
+        assert!(harness.server.ensure_ram_snapshot_warm("AXO"));
+
+        let response = harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "api_break_check",
+                    "arguments": {
+                        "symbol": "tokio",
+                        "project": "AXO"
+                    }
+                })),
+                id: Some(json!(9003)),
+            })
+            .expect("handle_request returned envelope");
+
+        let result = response.result.expect("result body present");
+        let text = result["content"][0]["text"].as_str().expect("text string");
+        assert!(
+            text.contains("SUPPLY_CHAIN_DEPENDENCY"),
+            "must identify SUPPLY_CHAIN_DEPENDENCY: {text}"
+        );
+        assert!(
+            text.contains("warn_api_break_risk"),
+            "must report warn_api_break_risk: {text}"
+        );
+        assert!(text.contains("main"), "must list consumer 'main': {text}");
+
+        let data = &result["data"];
+        assert_eq!(
+            data["contract_category"].as_str(),
+            Some("SUPPLY_CHAIN_DEPENDENCY")
+        );
+        assert_eq!(data["target_kind"].as_str(), Some("dependency"));
+        assert_eq!(data["consumer_count"].as_u64(), Some(1));
+
+        crate::ist_snapshot::process_view()
+            .cache_handle()
+            .evict("AXO");
+    }
+
+    #[test]
+    fn test_api_break_check_endpoint_with_zero_consumers_warns_boundary() {
+        let harness = create_test_server_with_ist_seed(IstSeed::new().symbol(SymbolFixture::new(
+            "AXO::api::orders_post",
+            "orders_post",
+            "endpoint",
+            "AXO",
+        )))
+        .unwrap();
+
+        assert!(harness.server.ensure_ram_snapshot_warm("AXO"));
+
+        let response = harness
+            .server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "api_break_check",
+                    "arguments": {
+                        "symbol": "orders_post",
+                        "project": "AXO"
+                    }
+                })),
+                id: Some(json!(9004)),
+            })
+            .expect("handle_request returned envelope");
+
+        let result = response.result.expect("result body present");
+        let text = result["content"][0]["text"].as_str().expect("text string");
+        assert!(
+            text.contains("REST_API_CONTRACT"),
+            "must identify REST_API_CONTRACT: {text}"
+        );
+        assert!(
+            text.contains("External Contract Notice"),
+            "must warn on boundary contract: {text}"
+        );
+
+        let data = &result["data"];
+        assert_eq!(
+            data["contract_category"].as_str(),
+            Some("REST_API_CONTRACT")
+        );
+        assert_eq!(data["target_kind"].as_str(), Some("endpoint"));
+        assert_eq!(data["consumer_count"].as_u64(), Some(0));
+
         crate::ist_snapshot::process_view()
             .cache_handle()
             .evict("AXO");

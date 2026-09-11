@@ -1474,11 +1474,13 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "api_break_check",
-                "description": "[RISK] Checks whether modifying a public symbol impacts external components.",
+                "description": "[RISK] Checks whether modifying a public symbol impacts external components and classifies contract breaks (RPC, REST, DDL, NIF, supply-chain).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "symbol": { "type": "string" }
+                        "mode": { "type": "string", "description": "Output mode: brief (default) or verbose" },
+                        "project": { "type": "string", "description": "Target project code (optional; defaults to auto-resolved project from symbol)" },
+                        "symbol": { "type": "string", "description": "Target symbol name or id (RPC, endpoint, schema, table, NIF, function, dependency)" }
                     },
                     "required": ["symbol"]
                 }
