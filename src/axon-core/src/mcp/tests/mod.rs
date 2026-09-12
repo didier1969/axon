@@ -437,6 +437,8 @@ mod mailbox_reactivity;
 mod mailbox_wake_tests;
 /// REQ-AXO-902514 — mesure empirique du comportement NLI sur affirmations fausses de technologies retirées.
 mod nli_retirements_measurement_tests;
+/// REQ-AXO-902677 / DEC-AXO-901709 — porte de sécurité SAST automatisée dans axon_pre_flight_check.
+mod pre_flight_taint_gate_tests;
 /// REQ-AXO-902658 (Feedback #428) — gouvernance d'initialisation et préservation du project_name.
 mod project_init_governance_tests;
 /// REQ-AXO-902562 — reachability dispatch par trait et indexer_lifecycle désactivé par mode de runtime.

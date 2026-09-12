@@ -161,6 +161,54 @@ impl ShardedIstGraph {
             strategy: self.strategy.clone(),
         }
     }
+
+    /// Federates multiple project sub-graphs into a unified multi-project ShardedIstGraph.
+    /// Each sub-graph is assigned a ShardId partition, linked by CrossShardEdge connections.
+    pub fn federate_subgraphs(
+        federation_code: &str,
+        subgraphs: Vec<(ShardId, &str, Arc<IstGraph>)>,
+        cross_edges: Vec<CrossShardEdge>,
+    ) -> Self {
+        let mut shards = HashMap::new();
+        let mut symbol_to_shard = HashMap::new();
+        let mut prefix_rules = Vec::new();
+
+        for (shard_id, project_code, graph) in subgraphs {
+            let mut local_symbol_set = HashSet::new();
+            for idx in 0..graph.node_count() {
+                let id = graph.id_of(idx as u32).to_string();
+                local_symbol_set.insert(id.clone());
+                symbol_to_shard.insert(id, shard_id);
+            }
+
+            let mut outgoing_cross = Vec::new();
+            for edge in &cross_edges {
+                if edge.source_shard == shard_id {
+                    outgoing_cross.push(edge.clone());
+                }
+            }
+
+            shards.insert(
+                shard_id,
+                Arc::new(CsrShard {
+                    id: shard_id,
+                    graph,
+                    local_symbol_set,
+                    outgoing_cross_edges: outgoing_cross,
+                }),
+            );
+
+            prefix_rules.push((format!("{project_code}::"), shard_id));
+        }
+
+        Self {
+            project_code: federation_code.to_string(),
+            shards,
+            symbol_to_shard,
+            cross_shard_edges: cross_edges,
+            strategy: ShardingStrategy::PrefixRule(prefix_rules),
+        }
+    }
 }
 
 pub struct ShardedIstGraphBuilder {

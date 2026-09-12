@@ -160,6 +160,10 @@ libc = "0.2"
 parquet = { version = "54", default-features = false, features = ["zstd", "arrow"] }
 arrow-array = "54"
 arrow-schema = "54"
+arrow-ipc = "54"
+axon-plugin-abi = { path = "../../crates/axon-plugin-abi" }
+
+
 
 # MIL-AXO-015 P1 (DEC-AXO-075): PostgreSQL backend.
 # tokio-postgres + deadpool-postgres preferred over sqlx because Axon's

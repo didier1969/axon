@@ -382,9 +382,11 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "arrow-array",
+ "arrow-ipc",
  "arrow-schema",
  "ascent",
  "async-trait",
+ "axon-plugin-abi",
  "axum 0.8.8",
  "chrono",
  "console-subscriber",
@@ -437,6 +439,10 @@ dependencies = [
  "watchman_client",
  "yyjson",
 ]
+
+[[package]]
+name = "axon-plugin-abi"
+version = "0.1.0"
 
 [[package]]
 name = "axum"

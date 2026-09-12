@@ -1262,6 +1262,13 @@ async fn boot(profile: RuntimeBootProfile, runtime_profile: RuntimeProfile) -> a
     // only. Indexer has no SOLL writer; spawning it there would be a no-op churn.
     if profile.role == RuntimeBootRole::Brain {
         main_background::spawn_soll_embedding_sweep(graph_store.clone());
+        // REQ-AXO-902679 — Optional Arrow Flight native streaming server
+        if std::env::var("AXON_FLIGHT_SERVER")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false)
+        {
+            crate::arrow_flight::flight_server::spawn_flight_server();
+        }
     }
 
     // REQ-AXO-902233 — graceful shutdown. Both keep-alive paths (the telemetry

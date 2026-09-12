@@ -22,6 +22,8 @@ pub mod view;
 #[cfg(test)]
 mod cluster_pubsub_tests;
 #[cfg(test)]
+mod cross_project_tests;
+#[cfg(test)]
 mod dataflow_tests;
 #[cfg(test)]
 mod shard_tests;
@@ -41,6 +43,11 @@ use std::sync::{Arc, OnceLock};
 fn process_cache() -> &'static Arc<IstSnapshotCache> {
     static CACHE: OnceLock<Arc<IstSnapshotCache>> = OnceLock::new();
     CACHE.get_or_init(|| Arc::new(IstSnapshotCache::new()))
+}
+
+/// Returns a reference-counted handle to the process-level IstSnapshotCache.
+pub fn shared_cache() -> Arc<IstSnapshotCache> {
+    Arc::clone(process_cache())
 }
 
 /// REQ-AXO-91486 — caller-facing handle. Clones are cheap. Use this from

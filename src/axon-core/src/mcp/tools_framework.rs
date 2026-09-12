@@ -249,6 +249,75 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902677 / DEC-AXO-901709 — Automated SAST Taint Analysis pre-flight gate.
+    /// Traverses the in-memory CSR data-flow graph to block unsanitized injection flows.
+    pub(crate) fn audit_pre_flight_taint(&self, project_code: &str) -> Option<Value> {
+        let view = crate::ist_snapshot::process_view();
+        let options = crate::ist_snapshot::dataflow::TaintTraceOptions {
+            max_depth: 10,
+            include_sanitized: true,
+            category: None,
+            source_filter: None,
+            sink_filter: None,
+        };
+        let findings = view.trace_taint_flows(project_code, &options)?;
+
+        let mut critical_violations = Vec::new();
+        let mut warnings = Vec::new();
+        let mut sanitized_count = 0usize;
+
+        for f in findings {
+            if f.sanitized {
+                sanitized_count += 1;
+                continue;
+            }
+            match f.sink_kind {
+                crate::ist_snapshot::dataflow::SinkKind::SqlInjection
+                | crate::ist_snapshot::dataflow::SinkKind::CommandInjection
+                | crate::ist_snapshot::dataflow::SinkKind::CodeEval
+                | crate::ist_snapshot::dataflow::SinkKind::PathTraversal => {
+                    critical_violations.push(json!({
+                        "source": f.source,
+                        "source_kind": format!("{:?}", f.source_kind),
+                        "sink": f.sink,
+                        "sink_kind": format!("{:?}", f.sink_kind),
+                        "path": f.path,
+                        "edges": f.edges,
+                        "sanitized": false,
+                        "crosses_ffi": f.crosses_ffi,
+                        "description": format!(
+                            "Unsanitized taint flow reaches {:?} sink: {} -> {}",
+                            f.sink_kind, f.source, f.sink
+                        )
+                    }));
+                }
+                _ => {
+                    warnings.push(json!({
+                        "source": f.source,
+                        "source_kind": format!("{:?}", f.source_kind),
+                        "sink": f.sink,
+                        "sink_kind": format!("{:?}", f.sink_kind),
+                        "path": f.path,
+                        "sanitized": false,
+                        "description": format!(
+                            "Potential taint flow to {:?}: {} -> {}",
+                            f.sink_kind, f.source, f.sink
+                        )
+                    }));
+                }
+            }
+        }
+
+        Some(json!({
+            "status": if critical_violations.is_empty() { "PASSED" } else { "FAILED" },
+            "critical_count": critical_violations.len(),
+            "warning_count": warnings.len(),
+            "sanitized_count": sanitized_count,
+            "critical_violations": critical_violations,
+            "warnings": warnings,
+        }))
+    }
+
     pub(crate) fn axon_pre_flight_check(&self, args: &Value) -> Option<Value> {
         let diff_paths = args.get("diff_paths")?.as_array()?.clone();
         let message = args
@@ -284,6 +353,19 @@ impl McpServer {
             }
         };
 
+        // REQ-AXO-902677 / DEC-AXO-901709 — In-memory CSR SAST Taint Analysis gate
+        let project_code = args
+            .get("project_code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AXO");
+        let taint_audit_value = self.audit_pre_flight_taint(project_code);
+        let taint_has_critical = taint_audit_value
+            .as_ref()
+            .and_then(|v| v.get("critical_count"))
+            .and_then(Value::as_u64)
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
         if !incremental {
             let mut response = self.axon_commit_work(&json!({
                 "diff_paths": diff_paths,
@@ -296,12 +378,35 @@ impl McpServer {
                 "oracle_command": args.get("oracle_command"),
                 "formatter_command": args.get("formatter_command"),
             }))?;
+            if response.get("data").is_none() {
+                response["data"] = json!({});
+            }
             if let Some(data) = response.get_mut("data") {
                 if let Some(lp) = &legacy_proximity_value {
                     data["legacy_proximity"] = lp.clone();
                 }
                 if let Some(td) = &tech_debt_residue_value {
                     data["tech_debt_residue"] = td.clone();
+                }
+                if let Some(ta) = &taint_audit_value {
+                    data["taint_audit"] = ta.clone();
+                }
+            }
+            if taint_has_critical {
+                response["isError"] = json!(true);
+                let crit_count = taint_audit_value
+                    .as_ref()
+                    .and_then(|v| v.get("critical_count"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if let Some(content) = response.get_mut("content").and_then(|c| c.as_array_mut()) {
+                    content.insert(
+                        0,
+                        json!({
+                            "type": "text",
+                            "text": format!("❌ Porte SAST Pré-Flight BLOQUÉE : {} vulnérabilité(s) critique(s) de flux de données non assaini (injection SQL/Command) détectée(s) !", crit_count)
+                        }),
+                    );
                 }
             }
             return Some(response);
@@ -387,6 +492,12 @@ impl McpServer {
         }
         if let Some(td) = tech_debt_residue_value {
             response["data"]["tech_debt_residue"] = td;
+        }
+        if let Some(ta) = taint_audit_value {
+            response["data"]["taint_audit"] = ta;
+        }
+        if taint_has_critical {
+            response["isError"] = json!(true);
         }
         Some(response)
     }
