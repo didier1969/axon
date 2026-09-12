@@ -2,6 +2,7 @@
 
 extern crate self as axon_core;
 
+pub mod arrow_flight;
 pub mod bench_pipeline_stages;
 pub mod bridge;
 pub mod build_identity;
@@ -41,6 +42,7 @@ pub mod optimizer;
 pub mod parser;
 pub mod pipeline;
 pub mod pipeline_runtime;
+pub mod plugin_ffi;
 pub mod postgres;
 pub mod practice_memory;
 pub mod project_meta;

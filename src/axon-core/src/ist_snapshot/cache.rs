@@ -52,6 +52,7 @@ pub struct IstCacheStats {
 /// Atomic per-project snapshot cache with LRU capacity & TTL eviction (REQ-AXO-902647).
 pub struct IstSnapshotCache {
     inner: Arc<ArcSwap<HashMap<String, Arc<IstGraph>>>>,
+    sharded: Arc<ArcSwap<HashMap<String, Arc<crate::ist_snapshot::shard::ShardedIstGraph>>>>,
     /// REQ-AXO-902005 — rebuild single-flight + freshness + LRU/TTL timestamps, keyed by project.
     state: Arc<Mutex<HashMap<String, ProjectState>>>,
     capacity: usize,
@@ -80,6 +81,7 @@ impl IstSnapshotCache {
     pub fn with_policy(capacity: usize, ttl: std::time::Duration) -> Self {
         Self {
             inner: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
+            sharded: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
             state: Arc::new(Mutex::new(HashMap::new())),
             capacity,
             ttl,
@@ -89,6 +91,7 @@ impl IstSnapshotCache {
     pub fn handle(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            sharded: Arc::clone(&self.sharded),
             state: Arc::clone(&self.state),
             capacity: self.capacity,
             ttl: self.ttl,
@@ -146,6 +149,45 @@ impl IstSnapshotCache {
         }
 
         Some(snap)
+    }
+
+    pub fn get_sharded(
+        &self,
+        project_code: &str,
+    ) -> Option<Arc<crate::ist_snapshot::shard::ShardedIstGraph>> {
+        self.sharded.load().get(project_code).cloned()
+    }
+
+    pub fn publish_sharded(
+        &self,
+        project_code: String,
+        sharded_graph: Arc<crate::ist_snapshot::shard::ShardedIstGraph>,
+    ) {
+        self.sharded.rcu(|current| {
+            let mut next = (**current).clone();
+            next.insert(project_code.clone(), Arc::clone(&sharded_graph));
+            next
+        });
+    }
+
+    pub fn invalidate_shard(
+        &self,
+        project_code: &str,
+        shard_id: crate::ist_snapshot::shard::ShardId,
+    ) -> bool {
+        let mut found = false;
+        self.sharded.rcu(|current| {
+            if let Some(existing) = current.get(project_code) {
+                found = true;
+                let mut next = (**current).clone();
+                let updated = existing.invalidate_shard(shard_id);
+                next.insert(project_code.to_string(), Arc::new(updated));
+                next
+            } else {
+                (**current).clone()
+            }
+        });
+        found
     }
 
     /// REQ-AXO-902625 / REQ-AXO-902647 — `rcu`, jamais `load` puis `store`.
@@ -660,5 +702,60 @@ mod tests {
         assert_eq!(stats.cached_count, 2);
         assert!(stats.cached_projects.contains(&"STAT1".to_string()));
         assert!(stats.cached_projects.contains(&"STAT2".to_string()));
+    }
+
+    #[test]
+    fn req_902678_selective_shard_invalidation() {
+        use crate::ist_snapshot::shard::{ShardedIstGraph, ShardingStrategy};
+        use crate::ist_snapshot::snapshot::{NodeFlags, NodeKind, NodeRecord};
+
+        let cache = IstSnapshotCache::new();
+        let mut builder = ShardedIstGraph::builder(
+            "PRJ",
+            ShardingStrategy::PrefixRule(vec![
+                ("PRJ::s0::".to_string(), 0),
+                ("PRJ::s1::".to_string(), 1),
+            ]),
+        );
+
+        let nodes = vec![
+            NodeRecord {
+                id: "PRJ::s0::fn0".to_string(),
+                name: "fn0".to_string(),
+                project_code: "PRJ".to_string(),
+                kind: NodeKind::Function,
+                flags: NodeFlags::default(),
+                complexity: Some(1),
+            },
+            NodeRecord {
+                id: "PRJ::s1::fn1".to_string(),
+                name: "fn1".to_string(),
+                project_code: "PRJ".to_string(),
+                kind: NodeKind::Function,
+                flags: NodeFlags::default(),
+                complexity: Some(1),
+            },
+        ];
+
+        let sharded = Arc::new(builder.build(nodes, vec![]).expect("build"));
+        cache.publish_sharded("PRJ".to_string(), Arc::clone(&sharded));
+
+        let retrieved = cache.get_sharded("PRJ").expect("sharded graph present");
+        assert_eq!(retrieved.shard_count(), 2);
+        assert!(retrieved.get_shard(0).is_some());
+        assert!(retrieved.get_shard(1).is_some());
+
+        // Selective invalidation of shard 1
+        assert!(cache.invalidate_shard("PRJ", 1));
+
+        let after = cache
+            .get_sharded("PRJ")
+            .expect("sharded graph still present");
+        // Shard 0 remains intact, Shard 1 is invalidated (removed/pending reload)
+        assert!(
+            after.get_shard(0).is_some(),
+            "Shard 0 must remain available"
+        );
+        assert!(after.get_shard(1).is_none(), "Shard 1 must be invalidated");
     }
 }

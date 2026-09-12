@@ -1737,6 +1737,99 @@ fn test_path_uses_ram_snapshot_when_warm() {
 }
 
 #[test]
+fn test_req_902678_sharded_graph_status_mcp_tool() {
+    use crate::ist_snapshot::shard::{ShardedIstGraphBuilder, ShardingStrategy};
+    use crate::ist_snapshot::snapshot::{
+        EdgeTriple, NodeFlags, NodeKind, NodeRecord, RelationType,
+    };
+    use std::sync::Arc;
+
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_path, project_name) \
+             VALUES ('TEST_SHARDED', '/tmp/test_sharded', 'test_sharded') \
+             ON CONFLICT (project_code) DO NOTHING",
+        )
+        .unwrap();
+
+    // 1. Cold status
+    let cold_response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "sharded_graph_status",
+                "arguments": {
+                    "project_code": "TEST_SHARDED"
+                }
+            })),
+            id: Some(json!(9026781)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let cold_data = &cold_response["data"];
+    assert_eq!(cold_data["status"], "ok");
+    assert_eq!(cold_data["is_sharded"], false);
+    assert_eq!(cold_data["project_code"], "TEST_SHARDED");
+
+    // 2. Warm status with ShardedIstGraph
+    let nodes = vec![
+        NodeRecord {
+            id: "s1".into(),
+            name: "fn_1".into(),
+            project_code: "TEST_SHARDED".into(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::default(),
+            complexity: None,
+        },
+        NodeRecord {
+            id: "s2".into(),
+            name: "fn_2".into(),
+            project_code: "TEST_SHARDED".into(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::default(),
+            complexity: None,
+        },
+    ];
+    let edges = vec![EdgeTriple {
+        source: "s1".into(),
+        target: "s2".into(),
+        rel: RelationType::Calls,
+    }];
+    let mut builder =
+        ShardedIstGraphBuilder::new("TEST_SHARDED".into(), ShardingStrategy::HashModulo(2));
+    let sharded_graph = Arc::new(builder.build(nodes, edges).unwrap());
+    crate::ist_snapshot::publish_process_sharded_snapshot("TEST_SHARDED".into(), sharded_graph);
+
+    let warm_response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "sharded_graph_status",
+                "arguments": {
+                    "project_code": "TEST_SHARDED"
+                }
+            })),
+            id: Some(json!(9026782)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let warm_data = &warm_response["data"];
+    assert_eq!(warm_data["status"], "ok");
+    assert_eq!(warm_data["is_sharded"], true);
+    assert_eq!(warm_data["project_code"], "TEST_SHARDED");
+    assert_eq!(warm_data["shard_count"], 2);
+    assert_eq!(warm_data["total_nodes"], 2);
+}
+
+#[test]
 fn test_path_missing_anchor_still_exposes_canonical_sources_and_guidance() {
     let server = create_test_server();
 

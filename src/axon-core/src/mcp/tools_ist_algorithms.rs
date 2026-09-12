@@ -2247,6 +2247,61 @@ impl McpServer {
         }))
     }
 
+    /// REQ-AXO-902678 / DEC-AXO-901710 — Sharded CSR Graph and Cluster PubSub Topology Status.
+    pub(crate) fn axon_sharded_graph_status(&self, args: &Value) -> Option<Value> {
+        let project = match self.ist_resolve_project(args, "sharded_graph_status") {
+            Ok(p) => p,
+            Err(e) => return Some(e),
+        };
+
+        let sharded_opt = crate::ist_snapshot::process_sharded_snapshot(&project);
+
+        let (shard_count, total_nodes, total_edges, cross_edges) =
+            if let Some(ref sharded) = sharded_opt {
+                (
+                    sharded.shard_count(),
+                    sharded.total_node_count(),
+                    sharded.total_edge_count(),
+                    sharded.cross_shard_edge_count(),
+                )
+            } else {
+                let warm = self.ensure_ram_snapshot_warm(&project);
+                let view = process_view();
+                let (nodes, edges) = if warm {
+                    if let Some(snap) = view.try_snapshot(&project) {
+                        (snap.node_count(), snap.edge_count())
+                    } else {
+                        (0, 0)
+                    }
+                } else {
+                    (0, 0)
+                };
+                (1, nodes, edges, 0)
+            };
+
+        let text = format!(
+            "### 🌐 Sharded CSR Graph `{}`\n- **Topology:** {} shard(s) active\n- **Total Nodes:** {}\n- **Total Edges:** {}\n- **Cross-Shard Edges:** {}\n- **Cluster PubSub:** Active (In-Process + Postgres LISTEN/NOTIFY bridge)",
+            project, shard_count, total_nodes, total_edges, cross_edges
+        );
+
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": text
+            }],
+            "data": {
+                "status": "ok",
+                "is_sharded": sharded_opt.is_some(),
+                "project_code": project,
+                "shard_count": shard_count,
+                "total_nodes": total_nodes,
+                "total_edges": total_edges,
+                "cross_shard_edges": cross_edges,
+                "cluster_pubsub": "active"
+            }
+        }))
+    }
+
     fn ist_resolve_project(&self, args: &Value, tool: &str) -> Result<String, Value> {
         // REQ-AXO-902467 / CPT-AXO-90059 — auto-resolve project_code when omitted.
         let raw = args

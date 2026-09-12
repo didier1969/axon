@@ -8,17 +8,23 @@
 
 pub mod algorithms;
 pub mod cache;
+pub mod cluster_pubsub;
 pub mod code_smells;
 pub mod dataflow;
 pub mod drift_history;
 pub mod loader;
 pub mod notify_listener;
+pub mod shard;
 pub mod snapshot;
 pub mod structural_invariants;
 pub mod view;
 
 #[cfg(test)]
+mod cluster_pubsub_tests;
+#[cfg(test)]
 mod dataflow_tests;
+#[cfg(test)]
+mod shard_tests;
 
 pub use cache::{IstCacheStats, IstSnapshotCache, DEFAULT_CACHE_CAPACITY, DEFAULT_TTL_SECS};
 pub use dataflow::{trace_taint_flows, SinkKind, TaintFlowFinding, TaintKind, TaintTraceOptions};
@@ -120,6 +126,19 @@ pub fn process_view() -> IstGraphView {
 /// Idempotent ; replaces the existing snapshot atomically via ArcSwap.
 pub fn publish_process_snapshot(project_code: String, snapshot: Arc<IstGraph>) {
     process_cache().publish(project_code, snapshot);
+}
+
+/// REQ-AXO-902678 — populate the sharded graph snapshot in the process cache.
+pub fn publish_process_sharded_snapshot(
+    project_code: String,
+    snapshot: Arc<shard::ShardedIstGraph>,
+) {
+    process_cache().publish_sharded(project_code, snapshot);
+}
+
+/// REQ-AXO-902678 — retrieve the sharded snapshot for a project from the process cache.
+pub fn process_sharded_snapshot(project_code: &str) -> Option<Arc<shard::ShardedIstGraph>> {
+    process_cache().get_sharded(project_code)
 }
 
 /// REQ-AXO-91486 / REQ-AXO-902647 — evict a project from the process cache.
