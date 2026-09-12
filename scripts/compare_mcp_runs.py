@@ -109,6 +109,21 @@ def compare_family(
         base_ms = base.get(key)
         cand_ms = candidate.get(key)
         if base_ms is None or cand_ms is None:
+            if family == "core_slow_tools" and base_ms is not None and cand_ms is None:
+                # The tool was slow in baseline (> 1500ms) but is now fast (<= 1500ms).
+                # This is a performance improvement, not a regression or problematic shape change.
+                findings.append(
+                    {
+                        "family": family,
+                        "tool": key,
+                        "status": "ok",
+                        "base_ms": round(base_ms, 1),
+                        "candidate_ms": None,
+                        "delta_ms": None,
+                        "note": "tool improved below 1500ms threshold",
+                    }
+                )
+                continue
             findings.append(
                 {
                     "family": family,
