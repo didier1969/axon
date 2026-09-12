@@ -18,10 +18,15 @@ pub struct PendingFile {
 /// no per-store tokio runtime. `NativePgCtx` is auto `Send + Sync`
 /// (`Pool` + `Option<String>`), so no `unsafe impl` is needed.
 pub(crate) struct LatticePool {
-    pub(crate) native: crate::postgres::native::NativePgCtx,
+    pub(crate) native: Arc<crate::postgres::native::NativePgCtx>,
+    #[allow(dead_code)]
+    pub(crate) engine: Arc<dyn crate::storage::StorageEngine>,
 }
 
 impl GraphStore {
+    pub fn storage_engine(&self) -> &Arc<dyn crate::storage::StorageEngine> {
+        &self.pool.engine
+    }
     /// REQ-AXO-271 slice 2d : under PG canonical (post-MIL-AXO-017 / AGE
     /// retirement), the legacy SQL relation tables (CALLS, CALLS_NIF,
     /// CONTAINS, IMPACTS, SUBSTANTIATES) are dropped or empty. Callers

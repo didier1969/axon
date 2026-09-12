@@ -148,10 +148,15 @@ impl GraphStore {
         // via libloading + pg_init_db_compat). schema = None matches the
         // plugin's pg_init_db_compat (null search_path; SOLL/IST reads use
         // fully-qualified soll.X / ist.X names).
-        let native = crate::postgres::native::NativePgCtx::connect(&pg_database_url, None)
-            .context("native PostgreSQL pool init failed")?;
+        let native = Arc::new(
+            crate::postgres::native::NativePgCtx::connect(&pg_database_url, None)
+                .context("native PostgreSQL pool init failed")?,
+        );
+        let engine: Arc<dyn crate::storage::StorageEngine> = Arc::new(
+            crate::storage::PostgresStorageEngine::from_arc(Arc::clone(&native)),
+        );
         let store = Self {
-            pool: Arc::new(LatticePool { native }),
+            pool: Arc::new(LatticePool { native, engine }),
             soll_attached: !matches!(soll_access_mode, SollAccessMode::Detached),
             soll_read_only_mode: matches!(soll_access_mode, SollAccessMode::ReadOnlyOrEmptySchema),
         };

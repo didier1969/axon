@@ -69,6 +69,7 @@ pub mod runtime_writer_guard;
 pub mod scanner;
 pub mod service_guard;
 pub mod soll_snapshot;
+pub mod storage;
 pub mod structural_health;
 pub mod supervisor_probe;
 #[cfg(test)]
