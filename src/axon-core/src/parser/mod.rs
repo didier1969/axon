@@ -233,17 +233,21 @@ pub mod datalog;
 pub mod docker;
 pub mod dotenv;
 pub mod elixir;
+pub mod erlang;
 pub mod fbs;
 pub mod go;
 pub mod graphql;
+pub mod haskell;
 pub mod hcl;
 pub mod html;
 pub mod java;
+pub mod julia;
 pub mod kotlin;
 pub mod lll;
 pub mod manifest;
 pub mod markdown;
 pub mod nix;
+pub mod ocaml;
 pub mod openapi;
 pub mod php;
 pub mod proto;
@@ -261,6 +265,7 @@ pub mod typescript;
 pub mod wit;
 pub mod xml;
 pub mod yaml;
+pub mod zig;
 
 pub fn is_sensitive_name(name: &str) -> Option<&'static str> {
     let lower = name.to_ascii_lowercase();
@@ -403,6 +408,15 @@ pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "capnp",
     "avsc",
     "wit",
+    "erl",
+    "hrl",
+    "zig",
+    "jl",
+    "hs",
+    "lhs",
+    "ml",
+    "mli",
+    "re",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
@@ -467,6 +481,11 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "capnp" => Some(Box::new(capnp::CapnpParser::new())),
         "avsc" => Some(Box::new(avro::AvroParser::new())),
         "wit" => Some(Box::new(wit::WitParser::new())),
+        "erl" | "hrl" => Some(Box::new(erlang::ErlangParser::new())),
+        "zig" => Some(Box::new(zig::ZigParser::new())),
+        "jl" => Some(Box::new(julia::JuliaParser::new())),
+        "hs" | "lhs" => Some(Box::new(haskell::HaskellParser::new())),
+        "ml" | "mli" | "re" => Some(Box::new(ocaml::OCamlParser::new())),
         // llmlang: construct WITH the real path so `lll export-ist` resolves the
         // file's `import`s against the actual workspace (REQ-LLL-021).
         "lll" => Some(Box::new(lll::LllParser::with_path(path.to_path_buf()))),
@@ -778,6 +797,20 @@ mod extensions_parsables_tests {
             );
             assert!(
                 get_parser_for_file(&PathBuf::from(format!("schema.{ext}"))).is_some(),
+                "{ext} doit obtenir un parser"
+            );
+        }
+    }
+
+    #[test]
+    fn les_fichiers_systemes_natifs_et_beam_sont_parsables() {
+        for ext in ["erl", "hrl", "zig", "jl", "hs", "lhs", "ml", "mli", "re"] {
+            assert!(
+                PARSEABLE_EXTENSIONS.contains(&ext),
+                "{ext} doit etre declaree parsable"
+            );
+            assert!(
+                get_parser_for_file(&PathBuf::from(format!("code.{ext}"))).is_some(),
                 "{ext} doit obtenir un parser"
             );
         }

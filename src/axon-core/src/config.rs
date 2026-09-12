@@ -340,6 +340,15 @@ fn default_supported_extensions() -> Vec<String> {
         "capnp".to_string(),
         "avsc".to_string(),
         "wit".to_string(),
+        "erl".to_string(),
+        "hrl".to_string(),
+        "zig".to_string(),
+        "jl".to_string(),
+        "hs".to_string(),
+        "lhs".to_string(),
+        "ml".to_string(),
+        "mli".to_string(),
+        "re".to_string(),
         // llmlang: a `.lll` file is parsed by the shell-out bridge (parser/lll.rs
         // → `lll export-ist`), which yields semantic symbols (content-hash,
         // purity, contracts). Without this the scanner excludes it pre-parse
