@@ -40,6 +40,11 @@ pub enum RelationType {
     // REQ-AXO-902330 — framework invocation (IoC / Odoo XML button / ORM hook / event).
     // Appended so existing CSR u8 encodings stay stable.
     FrameworkInvokes = 10,
+    // REQ-AXO-902677 — DFG/CFG data flow and taint propagation.
+    // Appended so existing CSR u8 encodings stay stable.
+    FlowsTo = 11,
+    Taints = 12,
+    Sanitizes = 13,
     Other = 255,
 }
 
@@ -61,6 +66,9 @@ impl RelationType {
             "READS_ARTIFACT" => Self::ReadsArtifact,
             "SIMILAR_TO" => Self::SimilarTo,
             "FRAMEWORK_INVOKES" | "FRAMEWORK-INVOKES" => Self::FrameworkInvokes,
+            "FLOWS_TO" | "FLOWS-TO" | "FLOWSTO" => Self::FlowsTo,
+            "TAINTS" => Self::Taints,
+            "SANITIZES" => Self::Sanitizes,
             _ => Self::Other,
         }
     }
@@ -78,6 +86,9 @@ impl RelationType {
             Self::ReadsArtifact => "READS_ARTIFACT",
             Self::SimilarTo => "SIMILAR_TO",
             Self::FrameworkInvokes => "FRAMEWORK_INVOKES",
+            Self::FlowsTo => "FLOWS_TO",
+            Self::Taints => "TAINTS",
+            Self::Sanitizes => "SANITIZES",
             Self::Other => "OTHER",
         }
     }
@@ -99,7 +110,10 @@ impl RelationType {
             | Self::Uses
             | Self::Reads
             | Self::ReadsArtifact
-            | Self::FrameworkInvokes => true,
+            | Self::FrameworkInvokes
+            | Self::FlowsTo
+            | Self::Taints
+            | Self::Sanitizes => true,
             Self::Contains | Self::SimilarTo | Self::Declares | Self::Other => false,
         }
     }
@@ -1205,6 +1219,9 @@ fn relation_from_u8(value: u8) -> RelationType {
         8 => RelationType::ReadsArtifact,
         9 => RelationType::SimilarTo,
         10 => RelationType::FrameworkInvokes,
+        11 => RelationType::FlowsTo,
+        12 => RelationType::Taints,
+        13 => RelationType::Sanitizes,
         _ => RelationType::Other,
     }
 }
@@ -1212,6 +1229,50 @@ fn relation_from_u8(value: u8) -> RelationType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dfg_and_taint_relations_roundtrip_csr_storage() {
+        assert_eq!(relation_from_u8(11), RelationType::FlowsTo);
+        assert_eq!(RelationType::FlowsTo as u8, 11);
+        assert_eq!(relation_from_u8(12), RelationType::Taints);
+        assert_eq!(RelationType::Taints as u8, 12);
+        assert_eq!(relation_from_u8(13), RelationType::Sanitizes);
+        assert_eq!(RelationType::Sanitizes as u8, 13);
+        assert_eq!(RelationType::from_db("flows_to"), RelationType::FlowsTo);
+        assert_eq!(RelationType::from_db("taints"), RelationType::Taints);
+        assert_eq!(RelationType::from_db("sanitizes"), RelationType::Sanitizes);
+        assert!(RelationType::FlowsTo.is_dependency());
+        assert!(RelationType::Taints.is_dependency());
+        assert!(RelationType::Sanitizes.is_dependency());
+
+        let nodes = vec![
+            node("src", "AXO", NodeKind::Function),
+            node("pass", "AXO", NodeKind::Function),
+            node("barrier", "AXO", NodeKind::Function),
+            node("sink", "AXO", NodeKind::Function),
+        ];
+        let edges = vec![
+            edge("src", "pass", RelationType::Taints),
+            edge("pass", "barrier", RelationType::FlowsTo),
+            edge("barrier", "sink", RelationType::Sanitizes),
+        ];
+        let g = IstGraph::build(nodes, edges);
+        let src = g.index_of("src").unwrap();
+        let pass = g.index_of("pass").unwrap();
+        let barrier = g.index_of("barrier").unwrap();
+        assert_eq!(
+            g.forward_neighbors(src).next().unwrap().1,
+            RelationType::Taints
+        );
+        assert_eq!(
+            g.forward_neighbors(pass).next().unwrap().1,
+            RelationType::FlowsTo
+        );
+        assert_eq!(
+            g.forward_neighbors(barrier).next().unwrap().1,
+            RelationType::Sanitizes
+        );
+    }
 
     #[test]
     fn relation_is_dependency_classifies_every_variant() {

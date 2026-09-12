@@ -2495,6 +2495,7 @@ impl McpServer {
             "wiring" => self.axon_wiring(arguments),
             "orphan_clusters" => self.axon_orphan_clusters(arguments),
             "ist_shortest_path" => self.axon_ist_shortest_path(arguments),
+            "taint_trace" => self.axon_taint_trace(arguments),
             "infer_soll_mutation" => self.axon_infer_soll_mutation(arguments),
             "entrench_nuance" => self.axon_entrench_nuance(arguments),
             "soll_apply_plan" => self.axon_soll_apply_plan(arguments),

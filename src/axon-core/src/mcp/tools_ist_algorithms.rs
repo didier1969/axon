@@ -2137,6 +2137,116 @@ impl McpServer {
         }
     }
 
+    /// REQ-AXO-902677 / DEC-AXO-901709 — Inter-procedural CSR Taint Analysis.
+    pub(crate) fn axon_taint_trace(&self, args: &Value) -> Option<Value> {
+        let project = match self.ist_resolve_project(args, "taint_trace") {
+            Ok(p) => p,
+            Err(e) => return Some(e),
+        };
+        if !self.ensure_ram_snapshot_warm(&project) {
+            return Some(ist_cache_miss_error("taint_trace", &project));
+        }
+        let view = process_view();
+
+        let max_depth = args
+            .get("max_depth")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(10);
+        let include_sanitized = args
+            .get("include_sanitized")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let category = args
+            .get("category")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let source_filter = args
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let sink_filter = args
+            .get("sink")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let options = crate::ist_snapshot::dataflow::TaintTraceOptions {
+            max_depth,
+            include_sanitized,
+            category,
+            source_filter,
+            sink_filter,
+        };
+
+        let findings = view
+            .trace_taint_flows(&project, &options)
+            .unwrap_or_default();
+        let vulnerable_count = findings.iter().filter(|f| !f.sanitized).count();
+        let sanitized_count = findings.iter().filter(|f| f.sanitized).count();
+
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "### 🛡️ Taint Trace `{}` — {} finding(s) (⚠️ {} active, 🛡️ {} sanitized)",
+            project,
+            findings.len(),
+            vulnerable_count,
+            sanitized_count
+        ));
+
+        for (i, f) in findings.iter().take(20).enumerate() {
+            let status_icon = if f.sanitized {
+                "🛡️ [SANITIZED]"
+            } else {
+                "🚨 [VULNERABLE]"
+            };
+            let ffi_str = if f.crosses_ffi {
+                " [CROSSES FFI/NIF]"
+            } else {
+                ""
+            };
+            let path_str = f.path.join(" ➔ ");
+            let sanitizer_str = f
+                .sanitizer
+                .as_ref()
+                .map(|s| format!(" (barrier: `{s}`)"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{}. {} `{:?}` ➔ `{:?}`{}{}\n   **Path:** {}\n",
+                i + 1,
+                status_icon,
+                f.source_kind,
+                f.sink_kind,
+                ffi_str,
+                sanitizer_str,
+                path_str
+            ));
+        }
+
+        if findings.len() > 20 {
+            lines.push(format!(
+                "… and {} additional findings omitted in text summary.",
+                findings.len() - 20
+            ));
+        }
+
+        let summary = lines.join("\n");
+
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": summary
+            }],
+            "data": {
+                "status": "ok",
+                "project_code": project,
+                "total_findings": findings.len(),
+                "active_vulnerabilities": vulnerable_count,
+                "sanitized_flows": sanitized_count,
+                "findings": findings
+            }
+        }))
+    }
+
     fn ist_resolve_project(&self, args: &Value, tool: &str) -> Result<String, Value> {
         // REQ-AXO-902467 / CPT-AXO-90059 — auto-resolve project_code when omitted.
         let raw = args

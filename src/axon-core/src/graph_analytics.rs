@@ -68,6 +68,18 @@ impl GraphStore {
         ))
     }
 
+    /// REQ-AXO-902677 / DEC-AXO-901709 — In-memory CSR Data-flow & Taint Analysis.
+    pub fn get_taint_findings(
+        &self,
+        project: &str,
+        options: &crate::ist_snapshot::dataflow::TaintTraceOptions,
+    ) -> Result<Vec<crate::ist_snapshot::dataflow::TaintFlowFinding>> {
+        let findings = crate::ist_snapshot::process_view()
+            .trace_taint_flows(project, options)
+            .unwrap_or_default();
+        Ok(findings)
+    }
+
     pub fn get_coverage_score(&self, project: &str) -> Result<i64> {
         if !structural_graph_analytics_available() {
             return Ok(0);

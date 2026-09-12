@@ -5153,6 +5153,50 @@ fn test_axon_audit_cross_language_taint() {
 }
 
 #[test]
+fn test_mcp_taint_trace_tool() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    let code = "TST";
+    server
+        .graph_store
+        .execute(&format!(
+            "INSERT INTO axon.Project (code) VALUES ('{code}') ON CONFLICT (code) DO NOTHING"
+        ))
+        .unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.IndexedFile (path, project_code, content_hash, last_seen_ms) VALUES ('{code}/app.rs', '{code}', 'hash-app', 0) ON CONFLICT (path) DO NOTHING")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('{code}::req_param', 'req_param', 'function', false, true, false, false, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('{code}::query_raw', 'query_raw', 'function', false, true, false, true, '{code}')")).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO ist.Edge (source_id, target_id, relation_type, project_code, created_at_ms) VALUES ('{code}::req_param', '{code}::query_raw', 'FLOWS_TO', '{code}', 0)")).unwrap();
+
+    crate::ist_snapshot::evict_process_snapshot(code);
+    server.soll_cache().invalidate(code);
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "taint_trace",
+            "arguments": {
+                "project_code": code,
+                "category": "injection"
+            }
+        })),
+        id: Some(json!(999)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(content.contains("Taint Trace `TST`"), "{content}");
+    assert!(content.contains("VULNERABLE"), "{content}");
+    assert!(content.contains("SqlInjection"), "{content}");
+}
+
+#[test]
 fn test_axon_audit_injection_risk_paths() {
     // REQ-AXO-902210 — a public fn reaching the raw-SQL gateway sink through a
     // transitive CALLS chain surfaces in the audit report.

@@ -719,6 +719,21 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "taint_trace",
+                "description": "[IST/SECURITY] REQ-AXO-902677 / DEC-AXO-901709 — inter-procedural CSR data-flow and taint analysis. Verifies data propagation from untrusted sources (user inputs, PII) to sensitive execution sinks (SQL, commands, eval, leaks), detecting sanitizer barriers and cross-language FFI crossings.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Canonical project code (e.g. AXO). Auto-resolved from cwd when omitted." },
+                        "category": { "type": "string", "description": "Taint category filter: 'injection', 'pii', or 'all' (default)." },
+                        "source": { "type": "string", "description": "Optional substring filter on source symbol id." },
+                        "sink": { "type": "string", "description": "Optional substring filter on sink symbol id." },
+                        "max_depth": { "type": "integer", "description": "Max BFS search depth. Default 10." },
+                        "include_sanitized": { "type": "boolean", "description": "Whether to include sanitized flows in results. Default true." }
+                    }
+                }
+            },
+            {
                 "name": "job_status",
                 "description": "[SYSTEM] Returns detailed state of a mutator MCP job accepted by the shared server. Canonical async mutation tracking: read `data.state`, `data.result`, `data.error_text`. REQ-AXO-146: pass `wait: true` to block until terminal (completed|failed) or `timeout_ms` elapses, eliminating polling round-trips.",
                 "inputSchema": {

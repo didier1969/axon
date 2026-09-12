@@ -385,6 +385,18 @@ impl IstGraphView {
             &snap, project, query_text, limit,
         ))
     }
+
+    /// REQ-AXO-902677 / DEC-AXO-901709 — In-memory CSR Data-flow & Taint Analysis.
+    pub fn trace_taint_flows(
+        &self,
+        project: &str,
+        options: &crate::ist_snapshot::dataflow::TaintTraceOptions,
+    ) -> Option<Vec<crate::ist_snapshot::dataflow::TaintFlowFinding>> {
+        let snap = self.try_snapshot(project)?;
+        Some(crate::ist_snapshot::dataflow::trace_taint_flows(
+            &snap, project, options,
+        ))
+    }
 }
 
 #[cfg(test)]

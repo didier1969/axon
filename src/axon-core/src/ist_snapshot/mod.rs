@@ -9,6 +9,7 @@
 pub mod algorithms;
 pub mod cache;
 pub mod code_smells;
+pub mod dataflow;
 pub mod drift_history;
 pub mod loader;
 pub mod notify_listener;
@@ -16,7 +17,11 @@ pub mod snapshot;
 pub mod structural_invariants;
 pub mod view;
 
+#[cfg(test)]
+mod dataflow_tests;
+
 pub use cache::{IstCacheStats, IstSnapshotCache, DEFAULT_CACHE_CAPACITY, DEFAULT_TTL_SECS};
+pub use dataflow::{trace_taint_flows, SinkKind, TaintFlowFinding, TaintKind, TaintTraceOptions};
 pub use loader::{load_snapshot, LoadStats};
 pub use snapshot::{IstGraph, NodeFlags, NodeKind, RelationType};
 pub use view::IstGraphView;
