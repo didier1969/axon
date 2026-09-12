@@ -404,6 +404,7 @@ pub struct IstGraph {
     rev_offsets: Vec<u32>,
     rev_sources: Vec<u32>,
     rev_rel: Vec<u8>,
+    declared_count: usize,
 }
 
 impl IstGraph {
@@ -471,7 +472,14 @@ impl IstGraph {
             })
             .map(|(_, s)| s.as_str())
             .collect();
-        hits.sort_unstable();
+        hits.sort_by_key(|id| {
+            let is_phantom = self
+                .id_to_idx
+                .get(*id)
+                .map(|&idx| idx >= self.declared_count as u32)
+                .unwrap_or(true);
+            (is_phantom, *id)
+        });
         hits
     }
 
@@ -582,6 +590,7 @@ impl IstGraph {
     /// the order they are first observed (declared records first, then
     /// edge-implied endpoints).
     pub fn build(nodes: Vec<NodeRecord>, edges: Vec<EdgeTriple>) -> Self {
+        let declared_count = nodes.len();
         let mut ids: Vec<String> = Vec::with_capacity(nodes.len());
         let mut names: Vec<String> = Vec::with_capacity(nodes.len());
         let mut id_to_idx: HashMap<String, u32> = HashMap::with_capacity(nodes.len());
@@ -823,6 +832,7 @@ impl IstGraph {
             rev_offsets,
             rev_sources,
             rev_rel,
+            declared_count,
         }
     }
 
@@ -1378,6 +1388,32 @@ mod tests {
         assert_eq!(kind_a, NodeKind::File as u8);
         let (kind_b, _, _) = g.node_meta(1);
         assert_eq!(kind_b, NodeKind::Other as u8);
+    }
+
+    #[test]
+    fn ids_with_short_name_prioritizes_declared_nodes_over_edge_implied_phantoms() {
+        // Declared node has an alphabetical path that sorts AFTER the importer
+        let declared = NodeRecord {
+            id: "AXO::z_module.rs::TargetSymbol".to_string(),
+            name: "TargetSymbol".to_string(),
+            project_code: "AXO".to_string(),
+            kind: NodeKind::Struct,
+            flags: NodeFlags::default(),
+            complexity: None,
+        };
+        let nodes = vec![declared];
+        // Edge implies a phantom target whose id sorts BEFORE "z_module.rs"
+        let edges = vec![edge(
+            "AXO::caller.rs",
+            "AXO::a_import.rs::TargetSymbol",
+            RelationType::Imports,
+        )];
+        let g = IstGraph::build(nodes, edges);
+        let hits = g.ids_with_short_name("TargetSymbol");
+        assert_eq!(hits.len(), 2);
+        // Declared symbol must come FIRST despite sorting alphabetically later
+        assert_eq!(hits[0], "AXO::z_module.rs::TargetSymbol");
+        assert_eq!(hits[1], "AXO::a_import.rs::TargetSymbol");
     }
 
     // REQ-AXO-902187 — the `covered` propagation: a #[test] node covers itself and

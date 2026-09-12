@@ -2474,6 +2474,180 @@ impl McpServer {
         out
     }
 
+    fn inspect_symbol_not_found(
+        &self,
+        symbol: &str,
+        project: Option<&str>,
+        mode: Option<&str>,
+        backend_pressure: bool,
+    ) -> Option<Value> {
+        let suggestions = self.suggest_scoped_symbols_canonical(symbol, project, 8);
+        let suggestion_rows: Vec<Vec<Value>> =
+            serde_json::from_str(&suggestions).unwrap_or_default();
+        let canonical_sources = crate::mcp::McpServer::canonical_sources_snapshot();
+        let candidates = GuidanceCandidates {
+            symbols: suggestion_rows
+                .iter()
+                .filter_map(|row| row.first().and_then(Value::as_str))
+                .map(str::to_string)
+                .collect(),
+            project_codes: suggestion_rows
+                .iter()
+                .filter_map(|row| row.get(2).and_then(Value::as_str))
+                .map(str::to_string)
+                .collect(),
+            canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
+        };
+        let guidance_facts = self.extract_inspect_guidance_facts(
+            symbol,
+            project,
+            &candidates,
+            self.degraded_symbol_count(symbol, project),
+            true,
+            backend_pressure,
+        );
+        let guidance = crate::mcp::classify_guidance(&guidance_facts);
+        let guidance_shadow = crate::mcp::guidance_outcome_to_value(&guidance);
+        let scope = project
+            .map(|p| format!("project:{}", p))
+            .unwrap_or_else(|| "workspace:*".to_string());
+        let evidence = format!(
+            "{}{}",
+            self.project_scope_truth_note(project).unwrap_or_default(),
+            format_table_from_json(&suggestions, &["Suggested symbol", "Type", "Project"])
+        );
+        let has_suggestions = !suggestion_rows.is_empty();
+        let next_actions: &[&str] = if has_suggestions {
+            &[
+                "pick one suggested symbol",
+                "or pass the exact canonical symbol id",
+            ]
+        } else {
+            &[
+                "broaden the search via `query` with a less specific term",
+                "verify spelling and project scope",
+                "or pass the exact canonical symbol id",
+            ]
+        };
+        let report = format!(
+            "### 🔍 Symbol Inspection : {}\n\n{}",
+            symbol,
+            format_standard_contract(
+                "warn_input_not_found",
+                "symbol not found in current scope",
+                &scope,
+                &evidence_by_mode(&evidence, mode),
+                next_actions,
+                "low",
+            )
+        );
+        let suggestions = suggestion_rows
+            .iter()
+            .filter_map(|row| row.first().and_then(Value::as_str))
+            .map(|value| Value::from(value.to_string()))
+            .collect::<Vec<_>>();
+        let recommended_action = if has_suggestions {
+            "pick one suggested canonical symbol or retry with the exact canonical symbol id"
+        } else {
+            "broaden the search via `query` with a less specific term, or verify spelling and project scope"
+        };
+        let blocking_factors = vec![json!({
+            "factor": "symbol_not_found_in_scope",
+            "severity": "high",
+            "recommended_action": recommended_action
+        })];
+        let remediation_actions: Vec<Value> = if has_suggestions {
+            vec![Value::from(
+                "pick one suggested canonical symbol or retry with the exact canonical symbol id",
+            )]
+        } else {
+            vec![
+                Value::from("broaden the search via `query` with a less specific term"),
+                Value::from("verify spelling and project scope"),
+                Value::from("or pass the exact canonical symbol id"),
+            ]
+        };
+        let next_action_kind = if has_suggestions {
+            "pick_canonical_symbol"
+        } else {
+            "broaden_search"
+        };
+        let next_action_tool = if has_suggestions { "inspect" } else { "query" };
+        let next_action_when = if has_suggestions {
+            "after_selecting_a_suggestion"
+        } else {
+            "after_widening_or_correcting_the_search"
+        };
+        let widening_actions: Vec<&str> = if has_suggestions {
+            vec![
+                "pick one of `suggestions` and retry `inspect`",
+                "or pass the exact canonical symbol id",
+            ]
+        } else {
+            vec![
+                "retry `query` with a less specific term (drop the trailing `::method`, prefix-only, single token)",
+                "verify spelling and project scope",
+                "use `schema_overview` to list indexed kinds when the symbol class is uncertain",
+            ]
+        };
+        let parameter_repair = json!({
+            "invalid_field": "symbol",
+            "supplied_value": symbol,
+            "scope": scope,
+            "suggestions": suggestions,
+            "widening_actions": widening_actions,
+            "follow_up_tools": if has_suggestions {
+                vec!["inspect"]
+            } else {
+                vec!["query", "schema_overview", "inspect"]
+            },
+            "hint": if has_suggestions {
+                format!(
+                    "no exact match for `{}` in {}; pick one of `suggestions` or pass a canonical symbol id",
+                    symbol, scope
+                )
+            } else {
+                format!(
+                    "no candidate found for `{}` in {}; widen the search via `query` or list kinds via `schema_overview`",
+                    symbol, scope
+                )
+            },
+        });
+        let response = json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "symbol": symbol,
+                "project": project,
+                "symbol_found": false,
+                "suggestions": suggestions,
+                "operator_guidance": {
+                    "actionable_now": false,
+                    "blocking_factors": blocking_factors,
+                    "remediation_actions": remediation_actions,
+                    "follow_up_tools": if has_suggestions { vec!["inspect"] } else { vec!["query", "inspect"] },
+                    "next_action": {
+                        "kind": next_action_kind,
+                        "tool": next_action_tool,
+                        "when": next_action_when
+                    }
+                },
+                "next_action": {
+                    "kind": next_action_kind,
+                    "tool": next_action_tool,
+                    "when": next_action_when
+                },
+                "parameter_repair": parameter_repair
+            }
+        });
+        Some(if Self::mcp_guidance_authoritative_enabled() {
+            crate::mcp::attach_guidance_authoritative(response, guidance)
+        } else if Self::mcp_guidance_shadow_enabled() {
+            crate::mcp::attach_guidance_shadow(response, guidance_shadow)
+        } else {
+            response
+        })
+    }
+
     pub(crate) fn axon_inspect(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
@@ -2499,181 +2673,7 @@ impl McpServer {
             .and_then(ScopedSymbolResolution::ambiguity_note)
             .unwrap_or_default();
         let Some(symbol_id) = resolved.map(|r| r.id) else {
-            let suggestions = self.suggest_scoped_symbols_canonical(symbol, project, 8);
-            let suggestion_rows: Vec<Vec<Value>> =
-                serde_json::from_str(&suggestions).unwrap_or_default();
-            let canonical_sources = crate::mcp::McpServer::canonical_sources_snapshot();
-            let candidates = GuidanceCandidates {
-                symbols: suggestion_rows
-                    .iter()
-                    .filter_map(|row| row.first().and_then(Value::as_str))
-                    .map(str::to_string)
-                    .collect(),
-                project_codes: suggestion_rows
-                    .iter()
-                    .filter_map(|row| row.get(2).and_then(Value::as_str))
-                    .map(str::to_string)
-                    .collect(),
-                canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
-            };
-            let guidance_facts = self.extract_inspect_guidance_facts(
-                symbol,
-                project,
-                &candidates,
-                self.degraded_symbol_count(symbol, project),
-                true,
-                backend_pressure,
-            );
-            let guidance = crate::mcp::classify_guidance(&guidance_facts);
-            let guidance_shadow = crate::mcp::guidance_outcome_to_value(&guidance);
-            let scope = project
-                .map(|p| format!("project:{}", p))
-                .unwrap_or_else(|| "workspace:*".to_string());
-            let evidence = format!(
-                "{}{}",
-                self.project_scope_truth_note(project).unwrap_or_default(),
-                format_table_from_json(&suggestions, &["Suggested symbol", "Type", "Project"])
-            );
-            // REQ-AXO-043 — when the suggestions table is empty, the action
-            // "pick one suggested symbol" is unactionable because there is
-            // nothing to pick from. Tailor the recovery hints to the actual
-            // state of suggestions so the LLM does not waste a turn on a
-            // dead-end instruction.
-            let has_suggestions = !suggestion_rows.is_empty();
-            let next_actions: &[&str] = if has_suggestions {
-                &[
-                    "pick one suggested symbol",
-                    "or pass the exact canonical symbol id",
-                ]
-            } else {
-                &[
-                    "broaden the search via `query` with a less specific term",
-                    "verify spelling and project scope",
-                    "or pass the exact canonical symbol id",
-                ]
-            };
-            let report = format!(
-                "### 🔍 Symbol Inspection : {}\n\n{}",
-                symbol,
-                format_standard_contract(
-                    "warn_input_not_found",
-                    "symbol not found in current scope",
-                    &scope,
-                    &evidence_by_mode(&evidence, mode),
-                    next_actions,
-                    "low",
-                )
-            );
-            let suggestions = suggestion_rows
-                .iter()
-                .filter_map(|row| row.first().and_then(Value::as_str))
-                .map(|value| Value::from(value.to_string()))
-                .collect::<Vec<_>>();
-            let recommended_action = if has_suggestions {
-                "pick one suggested canonical symbol or retry with the exact canonical symbol id"
-            } else {
-                "broaden the search via `query` with a less specific term, or verify spelling and project scope"
-            };
-            let blocking_factors = vec![json!({
-                "factor": "symbol_not_found_in_scope",
-                "severity": "high",
-                "recommended_action": recommended_action
-            })];
-            let remediation_actions: Vec<Value> = if has_suggestions {
-                vec![Value::from(
-                    "pick one suggested canonical symbol or retry with the exact canonical symbol id",
-                )]
-            } else {
-                vec![
-                    Value::from("broaden the search via `query` with a less specific term"),
-                    Value::from("verify spelling and project scope"),
-                    Value::from("or pass the exact canonical symbol id"),
-                ]
-            };
-            let next_action_kind = if has_suggestions {
-                "pick_canonical_symbol"
-            } else {
-                "broaden_search"
-            };
-            let next_action_tool = if has_suggestions { "inspect" } else { "query" };
-            let next_action_when = if has_suggestions {
-                "after_selecting_a_suggestion"
-            } else {
-                "after_widening_or_correcting_the_search"
-            };
-            // REQ-AXO-139 slice — universal parameter_repair contract for
-            // inspect symbol-not-found. Mirrors cypher-binder + evidence
-            // slices so the LLM can fix the input field in one round-trip:
-            // pick a suggestion when present, else widen the search via the
-            // suggested follow-up tools.
-            let widening_actions: Vec<&str> = if has_suggestions {
-                vec![
-                    "pick one of `suggestions` and retry `inspect`",
-                    "or pass the exact canonical symbol id",
-                ]
-            } else {
-                vec![
-                    "retry `query` with a less specific term (drop the trailing `::method`, prefix-only, single token)",
-                    "verify spelling and project scope",
-                    "use `schema_overview` to list indexed kinds when the symbol class is uncertain",
-                ]
-            };
-            let parameter_repair = json!({
-                "invalid_field": "symbol",
-                "supplied_value": symbol,
-                "scope": scope,
-                "suggestions": suggestions,
-                "widening_actions": widening_actions,
-                "follow_up_tools": if has_suggestions {
-                    vec!["inspect"]
-                } else {
-                    vec!["query", "schema_overview", "inspect"]
-                },
-                "hint": if has_suggestions {
-                    format!(
-                        "no exact match for `{}` in {}; pick one of `suggestions` or pass a canonical symbol id",
-                        symbol, scope
-                    )
-                } else {
-                    format!(
-                        "no candidate found for `{}` in {}; widen the search via `query` or list kinds via `schema_overview`",
-                        symbol, scope
-                    )
-                },
-            });
-            let response = json!({
-                "content": [{ "type": "text", "text": report }],
-                "data": {
-                    "symbol": symbol,
-                    "project": project,
-                    "symbol_found": false,
-                    "suggestions": suggestions,
-                    "operator_guidance": {
-                        "actionable_now": false,
-                        "blocking_factors": blocking_factors,
-                        "remediation_actions": remediation_actions,
-                        "follow_up_tools": if has_suggestions { vec!["inspect"] } else { vec!["query", "inspect"] },
-                        "next_action": {
-                            "kind": next_action_kind,
-                            "tool": next_action_tool,
-                            "when": next_action_when
-                        }
-                    },
-                    "next_action": {
-                        "kind": next_action_kind,
-                        "tool": next_action_tool,
-                        "when": next_action_when
-                    },
-                    "parameter_repair": parameter_repair
-                }
-            });
-            return Some(if Self::mcp_guidance_authoritative_enabled() {
-                crate::mcp::attach_guidance_authoritative(response, guidance)
-            } else if Self::mcp_guidance_shadow_enabled() {
-                crate::mcp::attach_guidance_shadow(response, guidance_shadow)
-            } else {
-                response
-            });
+            return self.inspect_symbol_not_found(symbol, project, mode, backend_pressure);
         };
 
         // REQ-AXO-140 — synthetic CALLS targets (`<caller_file>::<name>`) are now
@@ -2750,10 +2750,7 @@ impl McpServer {
             Ok(res) => {
                 let mut rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
                 if rows.is_empty() {
-                    return Some(json!({
-                        "content": [{ "type": "text", "text": format!("Symbol '{}' not found in current scope", symbol) }],
-                        "isError": true
-                    }));
+                    return self.inspect_symbol_not_found(symbol, project, mode, backend_pressure);
                 }
                 // REQ-AXO-140 — the rendered table must reflect the RAM-MERGED
                 // caller/callee counts. The warm RAM path resolves synthetic CALLS
