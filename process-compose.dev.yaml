@@ -156,6 +156,26 @@ processes:
       # the indexer to be down seconds to 2-3 min, which this stays well inside.
       timeout_seconds: 120
 
+  axon-mailbox-watcher:
+    command: "${AXON_MAILBOX_WATCHER_BIN:-bin/axon-mailbox-watcher}"
+    working_dir: "."
+    log_location: "/tmp/axon-dev-mailbox-watcher.log"
+    environment:
+      - "PGHOST=127.0.0.1"
+      - "PGPORT=${PGPORT:-44144}"
+      - "PGDATABASE=${AXON_DEV_DATABASE:-axon_live}"
+      - "PGUSER=axon"
+      - "AXON_MAILBOX_SOCK=/tmp/axon_mailbox.sock"
+    depends_on:
+      postgres-check:
+        condition: "process_completed_successfully"
+    availability:
+      restart: "on_failure"
+      backoff_seconds: 5
+    shutdown:
+      signal: 15
+      timeout_seconds: 3
+
   dashboard:
     # REQ-AXO-901830 — pre-compile deps + clean stale locks BEFORE
     # `mix phx.server` so the BEAM application boots in seconds
