@@ -228,6 +228,7 @@ pub mod c;
 pub mod c_sharp;
 pub mod capnp;
 pub mod clojure;
+pub mod cmake;
 pub mod cpp;
 pub mod css;
 pub mod datalog;
@@ -237,6 +238,7 @@ pub mod drl;
 pub mod elixir;
 pub mod erlang;
 pub mod fbs;
+pub mod fish_zsh;
 pub mod go;
 pub mod graphql;
 pub mod groovy;
@@ -245,9 +247,11 @@ pub mod hcl;
 pub mod html;
 pub mod java;
 pub mod julia;
+pub mod justfile;
 pub mod kotlin;
 pub mod lll;
 pub mod lua;
+pub mod makefile;
 pub mod manifest;
 pub mod markdown;
 pub mod nix;
@@ -261,6 +265,7 @@ pub mod ruby;
 pub mod rust;
 pub mod scala;
 pub mod scheme;
+pub mod shell;
 pub mod sql;
 pub mod systemd;
 pub mod text;
@@ -435,6 +440,15 @@ pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "gy",
     "gsh",
     "gradle",
+    "sh",
+    "bash",
+    "ebuild",
+    "mk",
+    "just",
+    "fish",
+    "zsh",
+    "zsh-theme",
+    "cmake",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
@@ -456,6 +470,15 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         }
         if file_name == ".env" || file_name.starts_with(".env.") || file_name.ends_with(".env") {
             return Some(Box::new(dotenv::DotenvParser::new()));
+        }
+        if file_name == "Makefile" || file_name == "makefile" || file_name == "GNUmakefile" {
+            return Some(Box::new(makefile::MakefileParser::new()));
+        }
+        if file_name == "Justfile" || file_name == "justfile" {
+            return Some(Box::new(justfile::JustfileParser::new()));
+        }
+        if file_name == "CMakeLists.txt" {
+            return Some(Box::new(cmake::CMakeParser::new()));
         }
     }
 
@@ -509,6 +532,11 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "drl" => Some(Box::new(drl::DrlParser::new())),
         "lua" => Some(Box::new(lua::LuaParser::new())),
         "groovy" | "gvy" | "gy" | "gsh" | "gradle" => Some(Box::new(groovy::GroovyParser::new())),
+        "sh" | "bash" | "ebuild" => Some(Box::new(shell::ShellParser::new())),
+        "mk" => Some(Box::new(makefile::MakefileParser::new())),
+        "just" => Some(Box::new(justfile::JustfileParser::new())),
+        "fish" | "zsh" | "zsh-theme" => Some(Box::new(fish_zsh::FishZshParser::new())),
+        "cmake" => Some(Box::new(cmake::CMakeParser::new())),
         // llmlang: construct WITH the real path so `lll export-ist` resolves the
         // file's `import`s against the actual workspace (REQ-LLL-021).
         "lll" => Some(Box::new(lll::LllParser::with_path(path.to_path_buf()))),
@@ -852,6 +880,43 @@ mod extensions_parsables_tests {
             assert!(
                 get_parser_for_file(&PathBuf::from(format!("code.{ext}"))).is_some(),
                 "{ext} doit obtenir un parser"
+            );
+        }
+    }
+
+    #[test]
+    fn les_fichiers_automatisation_systeme_et_build_sont_parsables() {
+        for ext in [
+            "sh",
+            "bash",
+            "ebuild",
+            "mk",
+            "just",
+            "fish",
+            "zsh",
+            "zsh-theme",
+            "cmake",
+        ] {
+            assert!(
+                PARSEABLE_EXTENSIONS.contains(&ext),
+                "{ext} doit etre declaree parsable"
+            );
+            assert!(
+                get_parser_for_file(&PathBuf::from(format!("code.{ext}"))).is_some(),
+                "{ext} doit obtenir un parser"
+            );
+        }
+        for special_file in [
+            "Makefile",
+            "makefile",
+            "GNUmakefile",
+            "Justfile",
+            "justfile",
+            "CMakeLists.txt",
+        ] {
+            assert!(
+                get_parser_for_file(&PathBuf::from(special_file)).is_some(),
+                "{special_file} doit obtenir un parser par son nom"
             );
         }
     }

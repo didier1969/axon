@@ -362,6 +362,15 @@ fn default_supported_extensions() -> Vec<String> {
         "gy".to_string(),
         "gsh".to_string(),
         "gradle".to_string(),
+        "sh".to_string(),
+        "bash".to_string(),
+        "ebuild".to_string(),
+        "mk".to_string(),
+        "just".to_string(),
+        "fish".to_string(),
+        "zsh".to_string(),
+        "zsh-theme".to_string(),
+        "cmake".to_string(),
         // llmlang: a `.lll` file is parsed by the shell-out bridge (parser/lll.rs
         // → `lll export-ist`), which yields semantic symbols (content-hash,
         // purity, contracts). Without this the scanner excludes it pre-parse
