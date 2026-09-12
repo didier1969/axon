@@ -227,16 +227,19 @@ pub mod avro;
 pub mod c;
 pub mod c_sharp;
 pub mod capnp;
+pub mod clojure;
 pub mod cpp;
 pub mod css;
 pub mod datalog;
 pub mod docker;
 pub mod dotenv;
+pub mod drl;
 pub mod elixir;
 pub mod erlang;
 pub mod fbs;
 pub mod go;
 pub mod graphql;
+pub mod groovy;
 pub mod haskell;
 pub mod hcl;
 pub mod html;
@@ -244,6 +247,7 @@ pub mod java;
 pub mod julia;
 pub mod kotlin;
 pub mod lll;
+pub mod lua;
 pub mod manifest;
 pub mod markdown;
 pub mod nix;
@@ -255,6 +259,7 @@ pub mod python;
 pub mod rego;
 pub mod ruby;
 pub mod rust;
+pub mod scala;
 pub mod scheme;
 pub mod sql;
 pub mod systemd;
@@ -417,6 +422,19 @@ pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "ml",
     "mli",
     "re",
+    "scala",
+    "sc",
+    "clj",
+    "cljs",
+    "cljc",
+    "edn",
+    "drl",
+    "lua",
+    "groovy",
+    "gvy",
+    "gy",
+    "gsh",
+    "gradle",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
@@ -486,6 +504,11 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "jl" => Some(Box::new(julia::JuliaParser::new())),
         "hs" | "lhs" => Some(Box::new(haskell::HaskellParser::new())),
         "ml" | "mli" | "re" => Some(Box::new(ocaml::OCamlParser::new())),
+        "scala" | "sc" => Some(Box::new(scala::ScalaParser::new())),
+        "clj" | "cljs" | "cljc" | "edn" => Some(Box::new(clojure::ClojureParser::new())),
+        "drl" => Some(Box::new(drl::DrlParser::new())),
+        "lua" => Some(Box::new(lua::LuaParser::new())),
+        "groovy" | "gvy" | "gy" | "gsh" | "gradle" => Some(Box::new(groovy::GroovyParser::new())),
         // llmlang: construct WITH the real path so `lll export-ist` resolves the
         // file's `import`s against the actual workspace (REQ-LLL-021).
         "lll" => Some(Box::new(lll::LllParser::with_path(path.to_path_buf()))),
@@ -805,6 +828,23 @@ mod extensions_parsables_tests {
     #[test]
     fn les_fichiers_systemes_natifs_et_beam_sont_parsables() {
         for ext in ["erl", "hrl", "zig", "jl", "hs", "lhs", "ml", "mli", "re"] {
+            assert!(
+                PARSEABLE_EXTENSIONS.contains(&ext),
+                "{ext} doit etre declaree parsable"
+            );
+            assert!(
+                get_parser_for_file(&PathBuf::from(format!("code.{ext}"))).is_some(),
+                "{ext} doit obtenir un parser"
+            );
+        }
+    }
+
+    #[test]
+    fn les_fichiers_jvm_etendue_et_regles_metier_sont_parsables() {
+        for ext in [
+            "scala", "sc", "clj", "cljs", "cljc", "edn", "drl", "lua", "groovy", "gvy", "gy",
+            "gsh", "gradle",
+        ] {
             assert!(
                 PARSEABLE_EXTENSIONS.contains(&ext),
                 "{ext} doit etre declaree parsable"
