@@ -6,8 +6,11 @@
 
 pub mod abi;
 pub mod manager;
+pub mod nexus_plugin;
 
 #[cfg(test)]
 mod abi_tests;
+#[cfg(test)]
+mod nexus_plugin_tests;
 #[cfg(test)]
 mod plugin_tests;

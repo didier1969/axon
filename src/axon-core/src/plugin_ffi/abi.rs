@@ -26,6 +26,9 @@ pub struct AxonPluginDescriptor {
     pub capabilities: u64,
 }
 
+unsafe impl Send for AxonPluginDescriptor {}
+unsafe impl Sync for AxonPluginDescriptor {}
+
 /// Standard output envelope returned by analytical plugin query invocations.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -35,6 +38,9 @@ pub struct AxonQueryResult {
     pub data_len: usize,
     pub error_msg: *const c_char,
 }
+
+unsafe impl Send for AxonQueryResult {}
+unsafe impl Sync for AxonQueryResult {}
 
 // Function pointer signatures that dynamic libraries must export:
 pub type AxonPluginInitFn = unsafe extern "C" fn(config_json: *const c_char) -> c_int;
