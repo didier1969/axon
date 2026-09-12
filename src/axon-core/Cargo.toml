@@ -25,6 +25,10 @@ name = "axonctl"
 path = "src/bin/axonctl.rs"
 
 [[bin]]
+name = "axon-mailbox-watcher"
+path = "src/bin/axon-mailbox-watcher.rs"
+
+[[bin]]
 name = "embedder-bench"
 path = "src/bin/embedder-bench.rs"
 

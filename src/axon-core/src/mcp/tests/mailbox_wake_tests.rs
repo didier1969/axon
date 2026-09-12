@@ -357,3 +357,59 @@ fn quad_state_full_lifecycle_progression() {
         Some("acknowledged")
     );
 }
+
+#[test]
+fn uds_notification_dispatches_instantly_on_mailbox_delivery() {
+    let (server, _db_url) = create_test_server_with_url();
+
+    // Enrol test project in registry
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO soll.ProjectCodeRegistry (project_code, project_name, project_path) \
+             VALUES ('UDSRCV', 'UDS Recipient Project', '/tmp/UDSRCV') \
+             ON CONFLICT (project_code) DO NOTHING",
+        )
+        .expect("seed UDSRCV in registry");
+
+    let test_sock_path = format!("/tmp/test_axon_mailbox_{}.sock", std::process::id());
+    let _ = std::fs::remove_file(&test_sock_path);
+
+    let socket = std::os::unix::net::UnixDatagram::bind(&test_sock_path)
+        .expect("bind test unix datagram socket");
+    socket
+        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .expect("set socket timeout");
+
+    std::env::set_var("AXON_MAILBOX_SOCK", &test_sock_path);
+
+    let sent = send(
+        &server,
+        json!({
+            "from": "AXO",
+            "to_project": "UDSRCV",
+            "idempotency_key": "uds-test-wake-key-1",
+            "subject": "Instant UDS Alert",
+            "body_dense": "Wake notification check for LLM active sessions",
+            "priority": "urgent"
+        }),
+    );
+    assert_eq!(sent["data"]["status"].as_str(), Some("ok"));
+
+    let mut buf = [0u8; 1024];
+    let (len, _) = socket
+        .recv_from(&mut buf)
+        .expect("must receive UDS notification datagram without delay");
+
+    let received: Value =
+        serde_json::from_slice(&buf[..len]).expect("notification payload must be valid JSON");
+
+    assert_eq!(received["event"].as_str(), Some("NEW_MAIL"));
+    assert_eq!(received["to"].as_str(), Some("UDSRCV"));
+    assert_eq!(received["from"].as_str(), Some("AXO"));
+    assert_eq!(received["priority"].as_str(), Some("urgent"));
+    assert_eq!(received["subject"].as_str(), Some("Instant UDS Alert"));
+
+    let _ = std::fs::remove_file(&test_sock_path);
+    std::env::remove_var("AXON_MAILBOX_SOCK");
+}

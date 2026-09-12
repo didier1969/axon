@@ -167,8 +167,42 @@ pub fn message_id(from: &str, to: &str, idempotency_key: &str) -> String {
     format!("msg-{}", &to_hex(&h.finalize())[..24])
 }
 
+/// Dispatches a non-blocking notification datagram to a local Unix socket if present.
+/// Used to immediately wake or notify active LLM coding sessions without DB polling.
+pub fn dispatch_uds_notification(
+    to: &str,
+    from: &str,
+    message_id: &str,
+    context_id: &str,
+    priority: &str,
+    subject: &str,
+) {
+    let sock_path =
+        std::env::var("AXON_MAILBOX_SOCK").unwrap_or_else(|_| "/tmp/axon_mailbox.sock".to_string());
+    let path = std::path::Path::new(&sock_path);
+    if !path.exists() {
+        return;
+    }
+    use std::os::unix::net::UnixDatagram;
+    if let Ok(sock) = UnixDatagram::unbound() {
+        let payload = serde_json::json!({
+            "event": "NEW_MAIL",
+            "to": to,
+            "from": from,
+            "message_id": message_id,
+            "context_id": context_id,
+            "priority": priority,
+            "subject": subject
+        });
+        if let Ok(bytes) = serde_json::to_vec(&payload) {
+            let _ = sock.send_to(&bytes, path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

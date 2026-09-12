@@ -579,10 +579,21 @@ impl McpServer {
             .query_json_writer(&sql)
             .map(|s| serde_json::from_str(&s).unwrap_or_default())
             .map_err(|e| e.to_string())?;
+        let deduped = rows.is_empty();
+        if !deduped {
+            crate::mailbox::dispatch_uds_notification(
+                to,
+                from,
+                &message_id,
+                &context_id,
+                priority,
+                subject,
+            );
+        }
         Ok(SentMessage {
             message_id,
             context_id,
-            deduped: rows.is_empty(),
+            deduped,
             sig,
         })
     }
