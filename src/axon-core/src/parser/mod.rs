@@ -231,10 +231,13 @@ pub mod clojure;
 pub mod cmake;
 pub mod cpp;
 pub mod css;
+pub mod cue_jsonnet;
+pub mod cypher;
 pub mod datalog;
 pub mod docker;
 pub mod dotenv;
 pub mod drl;
+pub mod edgeql;
 pub mod elixir;
 pub mod erlang;
 pub mod fbs;
@@ -258,6 +261,7 @@ pub mod nix;
 pub mod ocaml;
 pub mod openapi;
 pub mod php;
+pub mod prisma;
 pub mod proto;
 pub mod python;
 pub mod rego;
@@ -266,6 +270,7 @@ pub mod rust;
 pub mod scala;
 pub mod scheme;
 pub mod shell;
+pub mod sparql_turtle;
 pub mod sql;
 pub mod systemd;
 pub mod text;
@@ -449,6 +454,17 @@ pub const PARSEABLE_EXTENSIONS: &[&str] = &[
     "zsh",
     "zsh-theme",
     "cmake",
+    "cql",
+    "cypher",
+    "prisma",
+    "esdl",
+    "edgeql",
+    "sparql",
+    "rq",
+    "ttl",
+    "cue",
+    "jsonnet",
+    "libsonnet",
 ];
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
@@ -537,6 +553,11 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "just" => Some(Box::new(justfile::JustfileParser::new())),
         "fish" | "zsh" | "zsh-theme" => Some(Box::new(fish_zsh::FishZshParser::new())),
         "cmake" => Some(Box::new(cmake::CMakeParser::new())),
+        "cql" | "cypher" => Some(Box::new(cypher::CypherParser::new())),
+        "prisma" => Some(Box::new(prisma::PrismaParser::new())),
+        "esdl" | "edgeql" => Some(Box::new(edgeql::EdgeqlParser::new())),
+        "sparql" | "rq" | "ttl" => Some(Box::new(sparql_turtle::SparqlTurtleParser::new())),
+        "cue" | "jsonnet" | "libsonnet" => Some(Box::new(cue_jsonnet::CueJsonnetParser::new())),
         // llmlang: construct WITH the real path so `lll export-ist` resolves the
         // file's `import`s against the actual workspace (REQ-LLL-021).
         "lll" => Some(Box::new(lll::LllParser::with_path(path.to_path_buf()))),
@@ -917,6 +938,32 @@ mod extensions_parsables_tests {
             assert!(
                 get_parser_for_file(&PathBuf::from(special_file)).is_some(),
                 "{special_file} doit obtenir un parser par son nom"
+            );
+        }
+    }
+
+    #[test]
+    fn les_fichiers_modelisation_graphe_orm_et_config_sont_parsables() {
+        for ext in [
+            "cql",
+            "cypher",
+            "prisma",
+            "esdl",
+            "edgeql",
+            "sparql",
+            "rq",
+            "ttl",
+            "cue",
+            "jsonnet",
+            "libsonnet",
+        ] {
+            assert!(
+                PARSEABLE_EXTENSIONS.contains(&ext),
+                "{ext} doit etre declaree parsable"
+            );
+            assert!(
+                get_parser_for_file(&PathBuf::from(format!("code.{ext}"))).is_some(),
+                "{ext} doit obtenir un parser"
             );
         }
     }
