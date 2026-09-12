@@ -18,8 +18,7 @@ pub struct PendingFile {
 /// no per-store tokio runtime. `NativePgCtx` is auto `Send + Sync`
 /// (`Pool` + `Option<String>`), so no `unsafe impl` is needed.
 pub(crate) struct LatticePool {
-    pub(crate) native: Arc<crate::postgres::native::NativePgCtx>,
-    #[allow(dead_code)]
+    pub(crate) native: Option<Arc<crate::postgres::native::NativePgCtx>>,
     pub(crate) engine: Arc<dyn crate::storage::StorageEngine>,
 }
 

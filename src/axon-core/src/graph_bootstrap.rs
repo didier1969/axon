@@ -137,37 +137,57 @@ impl GraphStore {
 
         // Under PostgreSQL the "DB path" is a DATABASE_URL. SOLL + per-project
         // IST live in the same database via schema namespacing (CPT-AXO-039).
-        // DEC-AXO-901594 : caller can override env resolution for per-test DBs.
-        let pg_database_url = resolve_pg_database_url_with_override(database_url_override)
-            .with_context(|| {
-                "PostgreSQL is the only backend — set AXON_LIVE_DATABASE_URL, \
-                 AXON_DEV_DATABASE_URL, or DATABASE_URL"
-            })?;
+        let storage_mode = crate::storage::StorageEngineMode::from_env();
+        let store = match storage_mode {
+            crate::storage::StorageEngineMode::Embedded => {
+                info!("GraphStore startup: using in-process EmbeddedStorageEngine (rusqlite/WAL)");
+                let engine: Arc<dyn crate::storage::StorageEngine> =
+                    Arc::new(crate::storage::EmbeddedStorageEngine::open(db_root)?);
+                Self {
+                    pool: Arc::new(LatticePool {
+                        native: None,
+                        engine,
+                    }),
+                    soll_attached: !matches!(soll_access_mode, SollAccessMode::Detached),
+                    soll_read_only_mode: matches!(
+                        soll_access_mode,
+                        SollAccessMode::ReadOnlyOrEmptySchema
+                    ),
+                }
+            }
+            crate::storage::StorageEngineMode::Postgres => {
+                let pg_database_url = resolve_pg_database_url_with_override(database_url_override)
+                    .with_context(|| {
+                        "PostgreSQL is the only backend — set AXON_LIVE_DATABASE_URL, \
+                         AXON_DEV_DATABASE_URL, or DATABASE_URL"
+                    })?;
 
-        // REQ-AXO-901881 W2 — native deadpool pool (was the FFI cdylib loaded
-        // via libloading + pg_init_db_compat). schema = None matches the
-        // plugin's pg_init_db_compat (null search_path; SOLL/IST reads use
-        // fully-qualified soll.X / ist.X names).
-        let native = Arc::new(
-            crate::postgres::native::NativePgCtx::connect(&pg_database_url, None)
-                .context("native PostgreSQL pool init failed")?,
-        );
-        let engine: Arc<dyn crate::storage::StorageEngine> = Arc::new(
-            crate::storage::PostgresStorageEngine::from_arc(Arc::clone(&native)),
-        );
-        let store = Self {
-            pool: Arc::new(LatticePool { native, engine }),
-            soll_attached: !matches!(soll_access_mode, SollAccessMode::Detached),
-            soll_read_only_mode: matches!(soll_access_mode, SollAccessMode::ReadOnlyOrEmptySchema),
+                let native = Arc::new(
+                    crate::postgres::native::NativePgCtx::connect(&pg_database_url, None)
+                        .context("native PostgreSQL pool init failed")?,
+                );
+                let engine: Arc<dyn crate::storage::StorageEngine> = Arc::new(
+                    crate::storage::PostgresStorageEngine::from_arc(Arc::clone(&native)),
+                );
+                let store = Self {
+                    pool: Arc::new(LatticePool {
+                        native: Some(native),
+                        engine,
+                    }),
+                    soll_attached: !matches!(soll_access_mode, SollAccessMode::Detached),
+                    soll_read_only_mode: matches!(
+                        soll_access_mode,
+                        SollAccessMode::ReadOnlyOrEmptySchema
+                    ),
+                };
+
+                store.bootstrap_global_pg_schema()?;
+                info!(
+                    "GraphStore startup: PostgreSQL global schema bootstrapped (CPT-AXO-039 + CPT-AXO-040 + CPT-AXO-041)."
+                );
+                store
+            }
         };
-
-        // MIL-AXO-015 P3 slice 3c: bootstrap the PG global schema (extensions
-        // + soll layer) via the canonical DDL generator. Per-project IST
-        // schemas are deferred to axon_init_project (P5).
-        store.bootstrap_global_pg_schema()?;
-        info!(
-            "GraphStore startup: PostgreSQL global schema bootstrapped (CPT-AXO-039 + CPT-AXO-040 + CPT-AXO-041)."
-        );
 
         Ok(store)
     }
@@ -227,10 +247,11 @@ impl GraphStore {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let statements = crate::postgres::ddl::generate_global_schema();
-        self.pool
-            .native
-            .run_bootstrap_global_ddl(&statements)
-            .map_err(|err| anyhow!("PostgreSQL global schema bootstrap failed — {err}"))?;
+        if let Some(ref native) = self.pool.native {
+            native
+                .run_bootstrap_global_ddl(&statements)
+                .map_err(|err| anyhow!("PostgreSQL global schema bootstrap failed — {err}"))?;
+        }
 
         if let Ok(seed_path) = std::env::var("AXON_SOLL_SEED_PATH") {
             if !seed_path.trim().is_empty() {

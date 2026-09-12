@@ -149,7 +149,7 @@ hmac = "0.12"
 ascent = "0.8.0"
 # REQ-AXO-902117 (MBX-5 mechanism) — random per-project mailbox secret provisioning.
 rand = "0.8"
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+rusqlite = { version = "0.39.0", features = ["bundled", "functions"] }
 libc = "0.2"
 
 # DEC-AXO-073: Parquet side-store for ChunkEmbedding (vector hot-path).

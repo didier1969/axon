@@ -9,6 +9,26 @@ use crate::graph_ingestion::rows::ChunkEmbeddingPersistRow;
 use crate::postgres::bulk_writer::PgBulkBatch;
 use crate::postgres::native::QueryTableOutput;
 
+/// Calcule la similarité cosinus entre deux vecteurs de nombres flottants.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0;
+    let mut norm_a = 0.0;
+    let mut norm_b = 0.0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    if norm_a <= 0.0 || norm_b <= 0.0 {
+        0.0
+    } else {
+        dot / (norm_a.sqrt() * norm_b.sqrt())
+    }
+}
+
 /// Moteur de stockage in-process embarqué pur Rust basé sur SQLite (sans aucun démon externe).
 pub struct EmbeddedStorageEngine {
     conn: Arc<Mutex<Connection>>,
@@ -22,7 +42,7 @@ impl EmbeddedStorageEngine {
         let engine = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
-        engine.bootstrap_schemas()?;
+        engine.bootstrap_schemas(":memory:")?;
         Ok(engine)
     }
 
@@ -43,22 +63,93 @@ impl EmbeddedStorageEngine {
         let engine = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
-        engine.bootstrap_schemas()?;
+        engine.bootstrap_schemas(db_root)?;
         Ok(engine)
     }
 
-    /// Initialise les schémas virtuels attachés (`soll`, `ist`, `public`) pour respecter
-    /// l'exacte syntaxe SQL attendue par les requêtes d'Axon.
-    fn bootstrap_schemas(&self) -> Result<()> {
+    /// Initialise les fonctions scalaires vectorielles et les schémas virtuels attachés (`soll`, `ist`, `public`).
+    fn bootstrap_schemas(&self, db_root: &str) -> Result<()> {
         let conn = self.conn.lock();
-        // Attachement des bases en mémoire pour soll et ist si pas déjà attachées
-        let _ = conn.execute_batch(
-            r#"
-            ATTACH DATABASE ':memory:' AS soll;
-            ATTACH DATABASE ':memory:' AS ist;
-            ATTACH DATABASE ':memory:' AS public;
-            "#,
-        );
+
+        // Enregistrement des fonctions vectorielles in-process
+        conn.create_scalar_function(
+            "cosine_similarity",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                let a_str: String = ctx.get(0)?;
+                let b_str: String = ctx.get(1)?;
+                let a: Vec<f32> = serde_json::from_str(&a_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let b: Vec<f32> = serde_json::from_str(&b_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let sim = cosine_similarity(&a, &b);
+                Ok(sim as f64)
+            },
+        )?;
+
+        conn.create_scalar_function(
+            "cosine_distance",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                let a_str: String = ctx.get(0)?;
+                let b_str: String = ctx.get(1)?;
+                let a: Vec<f32> = serde_json::from_str(&a_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let b: Vec<f32> = serde_json::from_str(&b_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let sim = cosine_similarity(&a, &b);
+                Ok((1.0 - sim) as f64)
+            },
+        )?;
+
+        // Attachement des bases pour soll, ist et public
+        if db_root == ":memory:" {
+            let _ = conn.execute_batch(
+                r#"
+                ATTACH DATABASE ':memory:' AS soll;
+                ATTACH DATABASE ':memory:' AS ist;
+                ATTACH DATABASE ':memory:' AS public;
+                "#,
+            );
+        } else {
+            let root = PathBuf::from(db_root);
+            let soll_path = root.join("soll.db");
+            let ist_path = root.join("ist.db");
+            let public_path = root.join("public.db");
+            let soll_esc = soll_path.to_string_lossy().replace('\'', "''");
+            let ist_esc = ist_path.to_string_lossy().replace('\'', "''");
+            let public_esc = public_path.to_string_lossy().replace('\'', "''");
+
+            let _ = conn.execute_batch(&format!(
+                r#"
+                ATTACH DATABASE '{soll_esc}' AS soll;
+                ATTACH DATABASE '{ist_esc}' AS ist;
+                ATTACH DATABASE '{public_esc}' AS public;
+                "#
+            ));
+        }
 
         // Création minimale des tables SOLL
         let _ = conn.execute_batch(
@@ -123,7 +214,8 @@ impl EmbeddedStorageEngine {
                 from_id TEXT NOT NULL,
                 to_id TEXT NOT NULL,
                 rel_type TEXT NOT NULL,
-                properties TEXT DEFAULT '{}'
+                properties TEXT DEFAULT '{}',
+                PRIMARY KEY (from_id, to_id, rel_type)
             );
 
             CREATE TABLE IF NOT EXISTS ist.ChunkEmbedding (
@@ -221,18 +313,146 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.run_query_json(sql)
     }
 
-    fn flush_batch_copy(&self, _batch: &PgBulkBatch) -> Result<()> {
-        // En mode embarqué, les batches peuvent être insérés directement
+    fn flush_batch_copy(&self, batch: &PgBulkBatch) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .context("Failed to begin SQLite transaction")?;
+
+        // 1. Ingestion des indexed_files
+        {
+            let mut stmt = tx.prepare(
+                r#"
+                INSERT INTO ist.indexedfile (path, content_hash, mtime_ms, size_bytes, language)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(path) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    mtime_ms = excluded.mtime_ms,
+                    size_bytes = excluded.size_bytes;
+                "#,
+            )?;
+            for file in &batch.indexed_files {
+                stmt.execute(rusqlite::params![&file.0, &file.1, file.2, file.3, "",])?;
+            }
+        }
+
+        // 2. Ingestion des symbols
+        {
+            let mut stmt = tx.prepare(
+                r#"
+                INSERT INTO ist.symbol (id, name, kind, file_path, start_line, end_line, properties)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    kind = excluded.kind,
+                    properties = excluded.properties;
+                "#,
+            )?;
+            for sym in &batch.symbols {
+                let props = serde_json::json!({
+                    "project_code": sym.project_code,
+                    "tested": sym.tested,
+                    "is_public": sym.is_public,
+                    "is_nif": sym.is_nif,
+                    "is_unsafe": sym.is_unsafe,
+                    "is_entry_point": sym.is_entry_point,
+                    "cyclomatic_complexity": sym.cyclomatic_complexity,
+                });
+                stmt.execute(rusqlite::params![
+                    &sym.symbol_id,
+                    &sym.name,
+                    &sym.kind,
+                    "",
+                    0,
+                    0,
+                    props.to_string(),
+                ])?;
+            }
+        }
+
+        // 3. Ingestion des relations (contains, calls, calls_nif, other_edges)
+        {
+            let mut stmt = tx.prepare(
+                r#"
+                INSERT INTO ist.edge (from_id, to_id, rel_type, properties)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(from_id, to_id, rel_type) DO NOTHING;
+                "#,
+            )?;
+            for rel in &batch.contains {
+                stmt.execute(rusqlite::params![
+                    &rel.source_id,
+                    &rel.target_id,
+                    "CONTAINS",
+                    "{}"
+                ])?;
+            }
+            for rel in &batch.calls {
+                stmt.execute(rusqlite::params![
+                    &rel.source_id,
+                    &rel.target_id,
+                    "CALLS",
+                    "{}"
+                ])?;
+            }
+            for rel in &batch.calls_nif {
+                stmt.execute(rusqlite::params![
+                    &rel.source_id,
+                    &rel.target_id,
+                    "CALLS_NIF",
+                    "{}"
+                ])?;
+            }
+            for (rel_type, rel) in &batch.other_edges {
+                stmt.execute(rusqlite::params![
+                    &rel.source_id,
+                    &rel.target_id,
+                    rel_type,
+                    "{}"
+                ])?;
+            }
+        }
+
+        tx.commit().context("Failed to commit SQLite transaction")?;
         Ok(())
     }
 
     fn flush_chunk_embeddings_copy(
         &self,
-        _project_code: &str,
-        _model_id: &str,
-        _rows: &[ChunkEmbeddingPersistRow],
-        _embedded_at_ms: i64,
+        project_code: &str,
+        model_id: &str,
+        rows: &[ChunkEmbeddingPersistRow],
+        embedded_at_ms: i64,
     ) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .context("Failed to begin SQLite transaction")?;
+        {
+            let mut stmt = tx.prepare(
+                r#"
+                INSERT INTO ist.ChunkEmbedding (chunk_id, project_code, model_id, embedding_json, embedded_at_ms)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    project_code = excluded.project_code,
+                    model_id = excluded.model_id,
+                    embedding_json = excluded.embedding_json,
+                    embedded_at_ms = excluded.embedded_at_ms;
+                "#,
+            )?;
+            for row in rows {
+                let embedding_json =
+                    serde_json::to_string(&row.embedding).unwrap_or_else(|_| "[]".to_string());
+                stmt.execute(rusqlite::params![
+                    &row.chunk_id,
+                    project_code,
+                    model_id,
+                    embedding_json,
+                    embedded_at_ms,
+                ])?;
+            }
+        }
+        tx.commit().context("Failed to commit SQLite transaction")?;
         Ok(())
     }
 }

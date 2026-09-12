@@ -1424,7 +1424,7 @@ impl GraphStore {
         // native pool (correct DB + lifetime-scoped), not bulk_writer's global
         // env-resolved pool. Unblocks per-test DB isolation for the pipeline
         // stage_a3/orchestrator tests (REQ-AXO-901877 linchpin).
-        self.pool.native.flush_batch_copy(&batch)?;
+        self.pool.engine.flush_batch_copy(&batch)?;
         Ok(chunk_ids_emitted)
     }
 
@@ -1814,7 +1814,7 @@ impl GraphStore {
         // native pool (correct DB + lifetime-scoped), not bulk_writer's global
         // env-resolved pool. Unblocks per-test DB isolation for the pipeline
         // stage_a3/orchestrator tests (REQ-AXO-901877 linchpin).
-        self.pool.native.flush_batch_copy(&batch)?;
+        self.pool.engine.flush_batch_copy(&batch)?;
         Ok(chunk_ids_per_file)
     }
 
@@ -2046,7 +2046,7 @@ impl GraphStore {
                 )
                 .collect();
             self.pool
-                .native
+                .engine
                 .flush_chunk_embeddings_copy(project_code, model_id, &rows, embedded_at_ms)
                 // REQ-AXO-902047 — preserve the error CHAIN (`.context` keeps the
                 // source) instead of flattening it with `anyhow!("…: {e}")`. The

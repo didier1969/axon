@@ -19,7 +19,7 @@ impl GraphStore {
     }
 
     fn query_count_on_writer(&self, query: &str) -> Result<i64> {
-        Ok(self.pool.native.run_query_count(query))
+        Ok(self.pool.engine.run_query_count(query))
     }
 
     pub fn execute_raw_sql_gateway(&self, query: &str) -> Result<String> {
@@ -69,7 +69,7 @@ impl GraphStore {
         // REQ-AXO-901881 W2 — native deadpool execute (was the FFI exec_fn).
         // REQ-AXO-902075 — surface the real PG error, not just the query text.
         self.pool
-            .native
+            .engine
             .run_execute(query)
             .map_err(|e| anyhow!("Writer Error: {e} | query: {query}"))
     }
@@ -80,7 +80,7 @@ impl GraphStore {
     }
 
     pub fn query_table(&self, query: &str) -> Result<crate::postgres::native::QueryTableOutput> {
-        match self.pool.native.run_query_table(query) {
+        match self.pool.engine.run_query_table(query) {
             Ok(table) => Ok(table),
             Err(envelope) => {
                 let _ = Self::decode_native_envelope(envelope)?;
@@ -139,11 +139,12 @@ impl GraphStore {
 
     /// Async row read — typed `tokio_postgres::Row`s for `FromRow`/`try_get`.
     pub async fn query_rows(&self, sql: &str) -> Result<Vec<tokio_postgres::Row>> {
-        self.pool
+        let native = self
+            .pool
             .native
-            .query(sql)
-            .await
-            .map_err(Self::pg_to_anyhow)
+            .as_ref()
+            .ok_or_else(|| anyhow!("query_rows requires PostgreSQL backend"))?;
+        native.query(sql).await.map_err(Self::pg_to_anyhow)
     }
 
     /// Async typed read: rows decoded into `T: FromRow`.
@@ -183,8 +184,12 @@ impl GraphStore {
         sql: &str,
         ef_search: u32,
     ) -> Result<Vec<tokio_postgres::Row>> {
-        self.pool
+        let native = self
+            .pool
             .native
+            .as_ref()
+            .ok_or_else(|| anyhow!("query_ann_rows requires PostgreSQL backend"))?;
+        native
             .query_ann(sql, ef_search)
             .await
             .map_err(Self::pg_to_anyhow)
@@ -192,8 +197,12 @@ impl GraphStore {
 
     /// Async multi-statement execute (writes / DDL / BEGIN…COMMIT batches).
     pub async fn execute_async(&self, sql: &str) -> Result<()> {
-        self.pool
+        let native = self
+            .pool
             .native
+            .as_ref()
+            .ok_or_else(|| anyhow!("execute_async requires PostgreSQL backend"))?;
+        native
             .execute_batch_async(sql)
             .await
             .map_err(Self::pg_to_anyhow)
@@ -313,7 +322,7 @@ impl GraphStore {
         combined.push_str("COMMIT;");
 
         self.pool
-            .native
+            .engine
             .run_execute(&combined)
             .map_err(|e| anyhow!("Batch Writer Error (size={}): {e}", queries.len()))
     }
@@ -325,7 +334,7 @@ impl GraphStore {
     /// unchanged (kept byte-identical so the contract + the "Graph plugin
     /// error" message callers/tests match on are preserved).
     pub(crate) fn query_native(&self, query: &str) -> Result<String> {
-        Self::decode_native_envelope(self.pool.native.run_query_json(query))
+        Self::decode_native_envelope(self.pool.engine.run_query_json(query))
     }
 
     /// REQ-AXO-901883 — ANN (HNSW) semantic read for `retrieve_context` /
@@ -335,13 +344,13 @@ impl GraphStore {
     /// `chunk_embedding_hnsw_idx` regardless of table size. The
     /// success/error envelope contract is identical to `query_native`.
     pub(crate) fn query_ann_json(&self, query: &str, ef_search: u32) -> Result<String> {
-        Self::decode_native_envelope(self.pool.native.run_ann_query_json(query, ef_search))
+        Self::decode_native_envelope(self.pool.engine.run_ann_query_json(query, ef_search))
     }
 
     /// REQ-AXO-902129 — exact scoped vector scan (no HNSW), for bounded scopes where
     /// a corrupt/unreachable HNSW graph would return a tiny arbitrary pocket.
     pub(crate) fn query_exact_scan_json(&self, query: &str) -> Result<String> {
-        Self::decode_native_envelope(self.pool.native.run_exact_scan_query_json(query))
+        Self::decode_native_envelope(self.pool.engine.run_exact_scan_query_json(query))
     }
 
     /// REQ-AXO-129 envelope decoder shared by the native read paths.
