@@ -49,6 +49,12 @@ fn parse_overrides_each_flag() {
 }
 
 #[test]
+fn parse_accepts_embedded_backend() {
+    let parsed = Args::parse_from(&args(&["--backend", "embedded"])).unwrap();
+    assert_eq!(parsed.backend, "embedded");
+}
+
+#[test]
 fn parse_rejects_unknown_arg() {
     let res = Args::parse_from(&args(&["--unknown-flag", "x"]));
     assert!(res.is_err(), "unknown flag must error");

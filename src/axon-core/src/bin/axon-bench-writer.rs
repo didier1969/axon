@@ -143,13 +143,15 @@ impl Args {
 }
 
 fn print_help() {
-    println!("axon-bench-writer [--backend noop|pgvector] [--total N] [--batch N] [--dim N]");
+    println!(
+        "axon-bench-writer [--backend noop|pgvector|embedded] [--total N] [--batch N] [--dim N]"
+    );
     println!("                  [--project-code C] [--model-id M] [--label L] [--csv|--human]");
     println!();
     println!("REQ-AXO-260 (Bench 3 of the 4-bench framework).");
     println!("  Pre-built synthetic chunks + embeddings → backend persist.");
     println!();
-    println!("  --backend B          'noop' (CPU rate ceiling) or 'pgvector' (real PG persist).");
+    println!("  --backend B          'noop' (CPU ceiling), 'pgvector' (PG persist), or 'embedded' (SQLite/WAL).");
     println!("  --total N            total chunks to write (default 10000)");
     println!("  --batch N            batch size per persist call (default 1000)");
     println!("  --dim N              embedding dim (default 1024 = BGE-Large)");
@@ -183,7 +185,8 @@ fn run() -> anyhow::Result<()> {
             |_rows| Ok(()),
         )?,
         "pgvector" => bench_pgvector(&args)?,
-        other => anyhow::bail!("unknown backend: {other} (expected noop|pgvector)"),
+        "embedded" => bench_embedded(&args)?,
+        other => anyhow::bail!("unknown backend: {other} (expected noop|pgvector|embedded)"),
     };
 
     match args.output {
@@ -250,6 +253,48 @@ fn bench_pgvector(args: &Args) -> anyhow::Result<axon_core::bench_pipeline_stage
             Ok(())
         },
     )
+}
+
+fn bench_embedded(args: &Args) -> anyhow::Result<axon_core::bench_pipeline_stages::WriterBench> {
+    use axon_core::graph_ingestion::rows::ChunkEmbeddingPersistRow;
+    use axon_core::storage::{EmbeddedStorageEngine, StorageEngine};
+
+    let bench_dir =
+        std::env::temp_dir().join(format!("axon_bench_embedded_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&bench_dir);
+    std::fs::create_dir_all(&bench_dir)?;
+    let engine = EmbeddedStorageEngine::open(bench_dir.to_str().unwrap_or("/tmp"))?;
+
+    let project_code = args.project_code.clone();
+    let model_id = args.model_id.clone();
+    let embedded_at_ms = chrono_now_ms();
+
+    let res = axon_core::bench_pipeline_stages::run_writer_bench(
+        &args.label,
+        args.total,
+        args.batch,
+        args.dim,
+        "embedded",
+        |rows| {
+            let persist_rows: Vec<ChunkEmbeddingPersistRow> = rows
+                .iter()
+                .map(|r| ChunkEmbeddingPersistRow {
+                    chunk_id: r.symbol_id.clone(),
+                    source_hash: r.content_hash.clone(),
+                    embedding: r.embedding.clone(),
+                })
+                .collect();
+            engine.flush_chunk_embeddings_copy(
+                &project_code,
+                &model_id,
+                &persist_rows,
+                embedded_at_ms,
+            )?;
+            Ok(())
+        },
+    );
+    let _ = std::fs::remove_dir_all(&bench_dir);
+    res
 }
 
 fn chrono_now_ms() -> i64 {
