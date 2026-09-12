@@ -904,6 +904,10 @@ fn cutover_start_command(
             "--collect",
             "--slice=nexus-core.slice",
         ]);
+        command.arg(format!(
+            "--setenv=AXON_LIVE_RELEASE_MANIFEST={}",
+            install_from.display()
+        ));
         command.arg(format!("--unit={unit}")).arg("bash");
         command
     } else {
@@ -3272,6 +3276,8 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--user"));
         assert!(args.iter().any(|arg| arg == "--scope"));
         assert!(args.iter().any(|arg| arg == "--slice=nexus-core.slice"));
+        assert!(args.iter().any(|arg| arg
+            == "--setenv=AXON_LIVE_RELEASE_MANIFEST=/srv/axon/.axon/releases/pending.json"));
         assert!(args
             .windows(4)
             .any(|window| window == ["--instance", "live", "start", "full"]));

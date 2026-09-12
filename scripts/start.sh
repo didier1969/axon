@@ -26,11 +26,13 @@ source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
 _SAVED_INSTANCE_KIND="${AXON_INSTANCE_KIND:-}"
 _SAVED_WATCH_DIR="${AXON_WATCH_DIR:-}"
 _SAVED_BULK_WRITER="${AXON_BULK_WRITER_ENABLED:-}"
+_SAVED_LIVE_RELEASE_MANIFEST="${AXON_LIVE_RELEASE_MANIFEST:-}"
 axon_clear_inherited_env
 [[ -n "$_SAVED_INSTANCE_KIND" ]] && export AXON_INSTANCE_KIND="$_SAVED_INSTANCE_KIND"
 [[ -n "$_SAVED_WATCH_DIR" ]] && export AXON_WATCH_DIR="$_SAVED_WATCH_DIR"
 [[ -n "$_SAVED_BULK_WRITER" ]] && export AXON_BULK_WRITER_ENABLED="$_SAVED_BULK_WRITER"
-unset _SAVED_INSTANCE_KIND _SAVED_WATCH_DIR _SAVED_BULK_WRITER
+[[ -n "$_SAVED_LIVE_RELEASE_MANIFEST" ]] && export AXON_LIVE_RELEASE_MANIFEST="$_SAVED_LIVE_RELEASE_MANIFEST"
+unset _SAVED_INSTANCE_KIND _SAVED_WATCH_DIR _SAVED_BULK_WRITER _SAVED_LIVE_RELEASE_MANIFEST
 # shellcheck source=scripts/lib/axon-role-layout.sh
 source "$PROJECT_ROOT/scripts/lib/axon-role-layout.sh"
 # shellcheck source=scripts/lib/axon-resource-policy.sh
@@ -273,7 +275,17 @@ if [[ "$AXON_INSTANCE_KIND" == "live" ]]; then
     INDEXER_BIN="$PROJECT_ROOT/bin/axon-indexer"
 
     # Live release manifest: install promoted binaries + propagate identity
-    MANIFEST="${AXON_LIVE_RELEASE_MANIFEST:-$PROJECT_ROOT/.axon/live-release/current.json}"
+    # REQ-AXO-902258 — start from the staged manifest during a cutover: current.json
+    # still names the OLD release before finalize. If AXON_LIVE_RELEASE_MANIFEST was not
+    # propagated across the supervisor boundary, fall back to pending.json if present.
+    if [[ -n "${AXON_LIVE_RELEASE_MANIFEST:-}" ]]; then
+        MANIFEST="$AXON_LIVE_RELEASE_MANIFEST"
+    elif [[ -f "$PROJECT_ROOT/.axon/live-release/pending.json" ]]; then
+        MANIFEST="$PROJECT_ROOT/.axon/live-release/pending.json"
+    else
+        MANIFEST="$PROJECT_ROOT/.axon/live-release/current.json"
+    fi
+    echo "   Release manifest: $MANIFEST"
     if [[ -f "$MANIFEST" ]]; then
         eval "$(python3 -c "
 import json, os
