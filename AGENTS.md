@@ -6,7 +6,7 @@ La SOLL fait foi ; ce fichier n'est qu'un point d'entrée. Source canonique : `P
 
 ## Connexion
 
-Même surface (114 outils) sur les deux transports ; le harnais choisit :
+Même surface (118 outils) sur les deux transports ; le harnais choisit :
 stdio `~/.local/bin/axon-mcp` · HTTP `http://127.0.0.1:44129/mcp`
 
 ## Séquence d'ouverture de session — `GUI-PRO-102`
