@@ -40,6 +40,7 @@ BREAK_GLASS_ACTOR=""
 # deadline, but make it operator-configurable and long enough to converge on a
 # cold worktree. The effective value is recorded by run_step's journal event.
 PROMOTE_LIVE_BUILD_TIMEOUT_S="${PROMOTE_LIVE_BUILD_TIMEOUT_S:-3600}"
+PROMOTE_LATENCY_BASELINE_TIMEOUT_S="${PROMOTE_LATENCY_BASELINE_TIMEOUT_S:-300}"
 # REQ-AXO-902165 / DEC-AXO-901666 / REQ-AXO-902256 — step 5 runs via `axonctl cutover`
 # (the Rust health-gated cutover with NATIVE auto-rollback). There is no longer a second
 # step-5 implementation to choose between: the `USE_CUTOVER` toggle and the
@@ -695,7 +696,7 @@ run_step() {
 step_timeout_seconds() {
   case "$1" in
     build) echo "$PROMOTE_LIVE_BUILD_TIMEOUT_S" ;; dev_restart) echo 480 ;; test_targets_compile) echo 3600 ;;
-    lifecycle_gate) echo 240 ;; latency_baseline) echo 240 ;; cutover_prepare) echo 420 ;;
+    lifecycle_gate) echo 240 ;; latency_baseline) echo "$PROMOTE_LATENCY_BASELINE_TIMEOUT_S" ;; cutover_prepare) echo 420 ;;
     qualify_mcp|qualify_indexer_truth) echo 240 ;;
     preflight|candidate_recheck|manifest|apply_ddl_live) echo 180 ;;
     cutover_finalize) echo 60 ;; *) echo 300 ;;
@@ -1206,7 +1207,7 @@ promote_log "   ✅ step 4 (manifest) done — $manifest_path"
 PROMOTE_BASELINE_ROOT="$LOG_DIR/baselines/$RELEASE_ATTEMPT_ID"
 capture_latency_baseline_step() {
   mkdir -p "$PROMOTE_BASELINE_ROOT"
-  if ! timeout 180 python3 "$ROOT_DIR/scripts/measure_mcp_suite.py" \
+  if ! timeout "$PROMOTE_LATENCY_BASELINE_TIMEOUT_S" python3 "$ROOT_DIR/scripts/measure_mcp_suite.py" \
       --url "http://127.0.0.1:44129/mcp" \
       --project "$PROJECT_CODE" \
       --timeout 60 \
