@@ -313,9 +313,9 @@ axon_resolve_ort_runtime() {
         # diagnostic, le « Build log: » final) sont dans ce bloc.
         ORT_BUILD_LOG="$(mktemp /tmp/axon-ort-build.XXXXXX.log)"
         if [[ "$ORT_BUILD_TARGET" == "nixpkgs#onnxruntime" ]]; then
-            ORT_OUT_PATH="$(nix build --no-link --print-out-paths "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | axon_ort_last_store_path)"
+            ORT_OUT_PATH="$(NEXUS_ADMISSION_ACTIVE=1 nix build --no-link --print-out-paths "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | axon_ort_last_store_path)"
         else
-            ORT_OUT_PATH="$(nix build --impure --no-link --print-out-paths --expr "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | axon_ort_last_store_path)"
+            ORT_OUT_PATH="$(NEXUS_ADMISSION_ACTIVE=1 nix build --impure --no-link --print-out-paths --expr "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | axon_ort_last_store_path)"
         fi
         if [[ -z "${ORT_OUT_PATH:-}" || ! -f "$ORT_OUT_PATH/lib/libonnxruntime.so" ]]; then
             echo "❌ Unable to materialize a valid ONNX Runtime output path."
