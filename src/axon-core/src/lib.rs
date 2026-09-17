@@ -16,6 +16,7 @@ pub mod embedder;
 pub mod embedding_contract;
 pub mod embedding_profile;
 pub mod env_alias;
+pub mod gpu_arbiter;
 pub mod graph;
 pub mod graph_analytics;
 pub mod graph_bootstrap;

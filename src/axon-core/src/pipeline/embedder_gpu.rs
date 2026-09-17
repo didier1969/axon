@@ -125,6 +125,9 @@ impl GpuB2Embedder {
             // CUDA/TensorRT session → the VRAM arena returns to the device.
             *guard = None;
             process_lifecycle().mark_sleeping();
+            // REQ-AXO-902680 / DEC-AXO-901713: Release GPU arbiter lease on drop/idle
+            let _ =
+                crate::gpu_arbiter::GpuArbiter::release_lease(crate::gpu_arbiter::GpuRole::Indexer);
             true
         } else {
             false
@@ -371,6 +374,30 @@ impl B2Embedder for GpuB2Embedder {
         }
         if !self.use_gpu {
             return self.embed_slice_resident(texts);
+        }
+        // REQ-AXO-902680 / DEC-AXO-901713: Tri-State GPU Arbiter Check.
+        // If Brain currently holds the exclusive GPU lease, Indexer must NOT compete
+        // for VRAM or allocate CUDA memory concurrently. It routes directly to CPU overflow.
+        match crate::gpu_arbiter::GpuArbiter::try_acquire(
+            crate::gpu_arbiter::GpuRole::Indexer,
+            std::time::Duration::from_secs(60),
+        ) {
+            Ok(Some(_lease)) => {
+                // Granted: Indexer owns GPU exclusively.
+            }
+            Ok(None) => {
+                // Denied: Brain has active GPU session! Route to CPU overflow without blocking.
+                tracing::info!(
+                    "GpuB2Embedder: GPU lease held by Brain; routing batch to CPU overflow"
+                );
+                return self.embed_batch_on_cpu(texts);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "GpuB2Embedder: GPU arbiter check error {e}; routing batch to CPU overflow"
+                );
+                return self.embed_batch_on_cpu(texts);
+            }
         }
         // Pre-split at the largest size the GPU is known to accept, so a learned
         // ceiling is applied BEFORE paying for a failure instead of rediscovering
@@ -925,6 +952,48 @@ void* onnxruntime::BFCArena::Alloc(size_t) Failed to allocate memory";
             "engine cache is corrupt",
         ] {
             assert!(!is_gpu_allocation_failure(msg), "should NOT match: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_b2_embedder_respects_gpu_arbiter_and_falls_back_to_cpu() {
+        use std::time::Duration;
+        let _env = crate::test_support::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let lock_path = tmp.path().join("gpu.lock");
+        let state_path = tmp.path().join("gpu-state.json");
+        unsafe {
+            std::env::set_var("AXON_GPU_ARBITER_LOCK_PATH", lock_path.to_str().unwrap());
+            std::env::set_var("AXON_GPU_ARBITER_STATE_PATH", state_path.to_str().unwrap());
+        }
+
+        // Brain acquires GPU lease
+        let brain_lease = crate::gpu_arbiter::GpuArbiter::try_acquire(
+            crate::gpu_arbiter::GpuRole::Brain,
+            Duration::from_secs(60),
+        )
+        .expect("arbiter acquire")
+        .expect("granted to brain");
+
+        assert_eq!(crate::gpu_arbiter::GpuArbiter::models_in_gpu(), 1);
+
+        // An Indexer attempt to acquire must fail
+        let indexer_res = crate::gpu_arbiter::GpuArbiter::try_acquire(
+            crate::gpu_arbiter::GpuRole::Indexer,
+            Duration::from_secs(10),
+        )
+        .expect("indexer try");
+        assert!(indexer_res.is_none());
+
+        // Drop brain lease -> arbiter becomes idle (0 models)
+        drop(brain_lease);
+        assert_eq!(crate::gpu_arbiter::GpuArbiter::models_in_gpu(), 0);
+
+        unsafe {
+            std::env::remove_var("AXON_GPU_ARBITER_LOCK_PATH");
+            std::env::remove_var("AXON_GPU_ARBITER_STATE_PATH");
         }
     }
 }

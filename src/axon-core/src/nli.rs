@@ -68,10 +68,18 @@ impl NliClassifier {
     /// the ORT dynamic library to be initialised process-wide (the brain already
     /// loads it for the embedder).
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self> {
-        if std::env::var("AXON_NLI_FORCE_CPU")
+        // REQ-AXO-902680 / DEC-AXO-901713: Invariant de zéro présence CUDA in-process.
+        // axon-brain ne doit pas instancier d'arènes CUDA in-process, qui monopolisent
+        // ~3.6 Go de VRAM de manière irréversible. Le mode nominal de NLI dans le process
+        // hôte est CPU, sauf si explicitement opté via AXON_NLI_USE_GPU=1 ET que
+        // AXON_NLI_FORCE_CPU n'est pas actif.
+        let use_gpu = std::env::var("AXON_NLI_USE_GPU")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        let force_cpu = std::env::var("AXON_NLI_FORCE_CPU")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if force_cpu || !use_gpu {
             return Self::load_cpu(model_dir);
         }
         let dir = model_dir.as_ref();

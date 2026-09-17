@@ -59,6 +59,7 @@ struct WorkerConnection {
     child: Child,
     stream: UnixStream,
     socket_path: PathBuf,
+    _lease: Option<crate::gpu_arbiter::GpuLease>,
 }
 
 impl WorkerConnection {
@@ -392,7 +393,29 @@ fn start_worker_with(
         .context("restrict query worker socket permissions")?;
     listener.set_nonblocking(true)?;
 
-    let provider = kind.provider();
+    let requested_provider = kind.provider();
+    let is_gpu = requested_provider.eq_ignore_ascii_case("gpu")
+        || requested_provider.eq_ignore_ascii_case("cuda");
+    let (provider, lease) = if is_gpu {
+        match crate::gpu_arbiter::GpuArbiter::try_acquire(
+            crate::gpu_arbiter::GpuRole::Brain,
+            Duration::from_secs(DEFAULT_IDLE_SECS + 30),
+        ) {
+            Ok(Some(lease)) => (requested_provider, Some(lease)),
+            Ok(None) => {
+                tracing::info!(
+                    "GPU arbiter lease held by indexer; falling back query worker to CPU without stall"
+                );
+                ("cpu".to_string(), None)
+            }
+            Err(err) => {
+                tracing::warn!("GPU arbiter error ({err}); falling back query worker to CPU");
+                ("cpu".to_string(), None)
+            }
+        }
+    } else {
+        (requested_provider, None)
+    };
     let mut child = Command::new(binary)
         .arg("--socket")
         .arg(&socket_path)
@@ -468,6 +491,7 @@ fn start_worker_with(
         child,
         stream,
         socket_path,
+        _lease: lease,
     })
 }
 
