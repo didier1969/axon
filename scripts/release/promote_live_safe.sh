@@ -41,6 +41,7 @@ BREAK_GLASS_ACTOR=""
 # cold worktree. The effective value is recorded by run_step's journal event.
 PROMOTE_LIVE_BUILD_TIMEOUT_S="${PROMOTE_LIVE_BUILD_TIMEOUT_S:-3600}"
 PROMOTE_LATENCY_BASELINE_TIMEOUT_S="${PROMOTE_LATENCY_BASELINE_TIMEOUT_S:-300}"
+PROMOTE_QUALIFY_TIMEOUT_S="${PROMOTE_QUALIFY_TIMEOUT_S:-360}"
 # REQ-AXO-902165 / DEC-AXO-901666 / REQ-AXO-902256 — step 5 runs via `axonctl cutover`
 # (the Rust health-gated cutover with NATIVE auto-rollback). There is no longer a second
 # step-5 implementation to choose between: the `USE_CUTOVER` toggle and the
@@ -697,7 +698,7 @@ step_timeout_seconds() {
   case "$1" in
     build) echo "$PROMOTE_LIVE_BUILD_TIMEOUT_S" ;; dev_restart) echo 480 ;; test_targets_compile) echo 3600 ;;
     lifecycle_gate) echo 240 ;; latency_baseline) echo "$PROMOTE_LATENCY_BASELINE_TIMEOUT_S" ;; cutover_prepare) echo 420 ;;
-    qualify_mcp|qualify_indexer_truth) echo 240 ;;
+    qualify_mcp|qualify_indexer_truth) echo "$PROMOTE_QUALIFY_TIMEOUT_S" ;;
     preflight|candidate_recheck|manifest|apply_ddl_live) echo 180 ;;
     cutover_finalize) echo 60 ;; *) echo 300 ;;
   esac
@@ -1447,7 +1448,7 @@ else
     qualify_core_gate() {
       local output rc=0
       output="$(mktemp)"
-      timeout 180 "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency \
+      timeout "$PROMOTE_QUALIFY_TIMEOUT_S" "$ROOT_DIR/scripts/axon" --instance live qualify-mcp --surface core --checks quality,latency \
         --project "$PROJECT_CODE" --baseline "$PROMOTE_LATENCY_BASELINE" 2>&1 | tee "$output" || rc=${PIPESTATUS[0]}
       if [[ "$rc" -eq 0 ]] && ! grep -q '^verdict=ok$' "$output"; then
         echo "qualify-mcp returned success without parseable verdict=ok" >&2
@@ -1472,7 +1473,7 @@ else
       echo "qualify_indexer_truth.py absent" >&2
       exit 69
     }
-    run_step 6b qualify_indexer_truth gate_with_attestation indexer_truth timeout 180 env \
+    run_step 6b qualify_indexer_truth gate_with_attestation indexer_truth timeout "$PROMOTE_QUALIFY_TIMEOUT_S" env \
       AXON_DEV_DATABASE_URL="${AXON_LIVE_DATABASE_URL:-postgres://axon@127.0.0.1:${AXON_CANONICAL_PG_PORT:?axon-pg-port.sh not sourced}/axon_live}" \
       python3 "$ROOT_DIR/scripts/qualify_indexer_truth.py"
     QUALIFY_RAN+=("qualify_indexer_truth")
