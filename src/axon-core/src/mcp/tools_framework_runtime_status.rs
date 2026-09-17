@@ -1655,6 +1655,7 @@ impl McpServer {
         // expected to invoke this session against its own context. Real
         // invocation-tracking via skill_invoke audit log = slice 2 (a
         // future REQ adds the audit ring buffer + diff computation).
+        let cache_write_ts_ms = crate::clock::now_unix_ms();
         if let Some(data) = response.get_mut("data").and_then(Value::as_object_mut) {
             let methodology_drift = self.methodology_drift_warnings_v0();
             let methodology_drift = if brief_mode {
@@ -1667,13 +1668,18 @@ impl McpServer {
                 "cache_meta".to_string(),
                 json!({
                     "is_cached": false,
-                    "epoch_ms": now_ms,
+                    "epoch_ms": cache_write_ts_ms,
                     "cache_age_ms": 0,
                     "ttl_ms": status_cache_ttl_ms,
                 }),
             );
         }
-        cache_write(Self::status_cache(), cache_key, now_ms, &response);
+        cache_write(
+            Self::status_cache(),
+            cache_key,
+            cache_write_ts_ms,
+            &response,
+        );
         Some(response)
     }
 

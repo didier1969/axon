@@ -46,8 +46,8 @@ def main() -> int:
     ]
 
     measurements: dict[str, list[dict[str, object]]] = {name: [] for name, _ in probes}
-    for _sample in range(args.samples):
-        for tool_name, tool_args in probes:
+    for tool_name, tool_args in probes:
+        for _sample in range(args.samples):
             try:
                 latency_ms, response = call_tool(args.url, args.timeout, tool_name, tool_args)
                 text = response_text(response)
