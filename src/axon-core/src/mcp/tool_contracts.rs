@@ -1908,6 +1908,10 @@ pub(crate) const AXON_PRE_FLIGHT_CHECK_DISPOSITIONS: &[ParameterDeclaration] = &
         name: "project_path",
         disposition: ParameterDisposition::Honoured,
     },
+    ParameterDeclaration {
+        name: "taint_detail",
+        disposition: ParameterDisposition::Honoured,
+    },
 ];
 
 /// Ce qu'on sait des paramètres d'un outil — et ce qu'on ne sait PAS encore.

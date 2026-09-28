@@ -169,3 +169,99 @@ fn test_pre_flight_check_passes_sanitized_sql_flow() {
         "sanitized flows count must be >= 1 for sanitized flow"
     );
 }
+
+// 25 flux non assainis vers 25 puits SQL distincts : de quoi dépasser l'échantillon de 20.
+fn setup_many_violations_snapshot(cache: &IstSnapshotCache, project: &str, n: usize) {
+    let src = format!("{}::controller::user_input_endpoint", project);
+    let mut nodes = vec![NodeRecord {
+        id: src.clone(),
+        name: "user_input_endpoint".to_string(),
+        project_code: project.to_string(),
+        kind: NodeKind::Function,
+        flags: NodeFlags::default(),
+        complexity: Some(1),
+    }];
+    let mut edges = Vec::new();
+    for i in 0..n {
+        let id = format!("{}::db::execute_sql_query_{}", project, i);
+        nodes.push(NodeRecord {
+            id: id.clone(),
+            name: format!("execute_sql_query_{}", i),
+            project_code: project.to_string(),
+            kind: NodeKind::Function,
+            flags: NodeFlags::default(),
+            complexity: Some(1),
+        });
+        edges.push(EdgeTriple {
+            source: src.clone(),
+            target: id,
+            rel: RelationType::Calls,
+        });
+    }
+    let graph = crate::ist_snapshot::snapshot::IstGraph::build(nodes, edges);
+    cache.publish(project.to_string(), Arc::new(graph));
+}
+
+fn taint_audit_of(res: &Value) -> &Value {
+    res.get("data")
+        .and_then(|d| d.get("taint_audit"))
+        .expect("taint_audit field present")
+}
+
+#[test]
+fn test_pre_flight_taint_sample_is_bounded_but_counts_are_exact() {
+    let server = create_test_server();
+    let cache = crate::ist_snapshot::shared_cache();
+    let project = "TST_SAST_MANY";
+    setup_many_violations_snapshot(&cache, project, 25);
+
+    let res = server
+        .axon_pre_flight_check(&json!({
+            "project_code": project,
+            "diff_paths": ["src/controller/user_input.rs"],
+        }))
+        .expect("pre_flight_check must answer");
+    let ta = taint_audit_of(&res);
+    assert_eq!(ta.get("critical_count").and_then(Value::as_u64), Some(25));
+    assert_eq!(
+        ta.get("critical_violations")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(20),
+        "l'échantillon par défaut est borné à 20"
+    );
+    assert_eq!(ta.get("truncated").and_then(Value::as_bool), Some(true));
+
+    let full = server
+        .axon_pre_flight_check(&json!({
+            "project_code": project,
+            "diff_paths": ["src/controller/user_input.rs"],
+            "taint_detail": "full",
+        }))
+        .expect("pre_flight_check must answer");
+    let ta = taint_audit_of(&full);
+    assert_eq!(
+        ta.get("critical_violations")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(25),
+        "taint_detail=full rend la liste entière"
+    );
+    assert_eq!(ta.get("truncated").and_then(Value::as_bool), Some(false));
+}
+
+#[test]
+fn test_pre_flight_taint_without_project_is_skipped_not_defaulted_to_axo() {
+    let server = create_test_server();
+    let res = server
+        .axon_pre_flight_check(&json!({
+            "diff_paths": ["src/controller/user_input.rs"],
+        }))
+        .expect("pre_flight_check must answer");
+    let ta = taint_audit_of(&res);
+    assert_eq!(ta.get("status").and_then(Value::as_str), Some("SKIPPED"));
+    assert!(
+        ta.get("critical_count").is_none(),
+        "aucun audit sans projet"
+    );
+}

@@ -188,3 +188,68 @@ fn test_pii_leak_to_logger_detected() {
     assert_eq!(f.sink_kind, SinkKind::PiiLeak);
     assert!(!f.sanitized);
 }
+
+// Puits de commande jugés sur le NOM DE L'APPEL : les faux positifs mesurés sur LXL le
+// 2026-09-28 (ids réels, chemin compris) ne doivent PLUS être des puits.
+fn injection_sinks_from(sink_ids: &[&str]) -> Vec<TaintFlowFinding> {
+    let mut nodes = vec![node("api::user_input", "TST", NodeKind::Function)];
+    let mut edges = Vec::new();
+    for id in sink_ids {
+        nodes.push(node(id, "TST", NodeKind::Function));
+        edges.push(edge("api::user_input", id, RelationType::Calls));
+    }
+    let g = IstGraph::build(nodes, edges);
+    let opts = TaintTraceOptions {
+        max_depth: 10,
+        include_sanitized: true,
+        category: Some("injection".to_string()),
+        source_filter: None,
+        sink_filter: None,
+    };
+    trace_taint_flows(&g, "TST", &opts)
+}
+
+#[test]
+fn test_command_sink_ignores_path_and_substring_false_positives() {
+    let faux = [
+        "LXL::Lexoria::elixir::apps::fiscaly_ai::lib::fiscaly_ai::cache.ex::System.system_time",
+        "LXL::Lexoria::elixir::apps::fiscaly_ai::lib::fiscaly_ai::claude.ex::System.get_env",
+        "LXL::Lexoria::elixir::apps::lexgraph::lib::lexgraph::bridge.ex::System.put_env",
+        "LXL::Lexoria::elixir::apps::lexgraph::cozo::nif_server.ex::System.unique_integer",
+        "LXL::Lexoria::elixir::apps::fiscaly_ai::lib::fiscaly_ai::prompts.ex::FiscalyAi.Prompts.extraction_system",
+        "LXL::Lexoria::elixir::apps::lexgraph::lib::lexgraph::bridge.ex:::telemetry.execute",
+        "LXL::Lexoria::elixir::apps::fiscaly_core::lib::fiscaly_core::ecosystem::hydra_bridge.ex::Node.ping",
+        "LXL::Lexoria::elixir::apps::lexoria_inference::test::conditional_test.exs::LexoriaInference.ConditionalTest.execute",
+        "TST::src::system::exec_helpers.rs::format_report",
+    ];
+    let findings = injection_sinks_from(&faux);
+    let cmd: Vec<&str> = findings
+        .iter()
+        .filter(|f| f.sink_kind == SinkKind::CommandInjection)
+        .map(|f| f.sink.as_str())
+        .collect();
+    assert!(cmd.is_empty(), "faux puits de commande : {cmd:?}");
+}
+
+#[test]
+fn test_command_sink_detects_real_process_launch_calls() {
+    let vrais = [
+        "TST::lib::runner.ex::System.cmd",
+        "TST::lib::runner.ex::System.shell",
+        "TST::lib::runner.ex:::os.cmd",
+        "TST::lib::runner.ex::Port.open",
+        "TST::app::tools.py::os.system",
+        "TST::app::tools.py::subprocess.run",
+        "TST::src::main.rs::std::process::Command::new",
+        "libc::system",
+    ];
+    let findings = injection_sinks_from(&vrais);
+    for id in vrais {
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.sink == id && f.sink_kind == SinkKind::CommandInjection),
+            "vrai puits de commande non détecté : {id}"
+        );
+    }
+}

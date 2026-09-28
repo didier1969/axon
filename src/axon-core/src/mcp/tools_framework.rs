@@ -251,7 +251,7 @@ impl McpServer {
 
     /// REQ-AXO-902677 / DEC-AXO-901709 — Automated SAST Taint Analysis pre-flight gate.
     /// Traverses the in-memory CSR data-flow graph to block unsanitized injection flows.
-    pub(crate) fn audit_pre_flight_taint(&self, project_code: &str) -> Option<Value> {
+    pub(crate) fn audit_pre_flight_taint(&self, project_code: &str, full: bool) -> Option<Value> {
         let view = crate::ist_snapshot::process_view();
         let options = crate::ist_snapshot::dataflow::TaintTraceOptions {
             max_depth: 10,
@@ -308,13 +308,30 @@ impl McpServer {
             }
         }
 
+        // Réponse bornée par défaut : les compteurs restent exacts, la liste est un échantillon.
+        // Mesuré 2026-09-28 : 42 788 flux sur AXO = une ligne JSON-RPC de plus de 20 Mo, et le
+        // client MCP coupe le transport stdio à 16 Mo (Axon « déconnecté » à chaque pre-flight).
+        // `taint_detail: "full"` rend la liste entière, sur demande explicite.
+        const ECHANTILLON_MAX: usize = 20;
+        let critical_count = critical_violations.len();
+        let warning_count = warnings.len();
+        let truncated =
+            !full && (critical_count > ECHANTILLON_MAX || warning_count > ECHANTILLON_MAX);
+        if !full {
+            critical_violations.truncate(ECHANTILLON_MAX);
+            warnings.truncate(ECHANTILLON_MAX);
+        }
         Some(json!({
-            "status": if critical_violations.is_empty() { "PASSED" } else { "FAILED" },
-            "critical_count": critical_violations.len(),
-            "warning_count": warnings.len(),
+            "status": if critical_count == 0 { "PASSED" } else { "FAILED" },
+            "project_code": project_code,
+            "critical_count": critical_count,
+            "warning_count": warning_count,
             "sanitized_count": sanitized_count,
             "critical_violations": critical_violations,
             "warnings": warnings,
+            "truncated": truncated,
+            "sample_limit": if full { Value::Null } else { json!(ECHANTILLON_MAX) },
+            "full_list_via": "axon_pre_flight_check taint_detail=\"full\"",
         }))
     }
 
@@ -354,11 +371,30 @@ impl McpServer {
         };
 
         // REQ-AXO-902677 / DEC-AXO-901709 — In-memory CSR SAST Taint Analysis gate
-        let project_code = args
+        // Projet audité : `project_code`, sinon celui de `project_path` (registre). Sans l'un ni
+        // l'autre, AUCUN audit — et on le dit : l'ancien repli silencieux sur AXO faisait auditer
+        // le graphe d'Axon par le pre-flight d'un autre projet (décision opérateur 2026-09-28).
+        let project_code: Option<String> = args
             .get("project_code")
             .and_then(|v| v.as_str())
-            .unwrap_or("AXO");
-        let taint_audit_value = self.audit_pre_flight_taint(project_code);
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                args.get("project_path")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .and_then(|p| self.lookup_project_code_by_path(std::path::Path::new(p)))
+            });
+        let taint_full = args.get("taint_detail").and_then(|v| v.as_str()) == Some("full");
+        let taint_audit_value = match project_code.as_deref() {
+            Some(code) => self.audit_pre_flight_taint(code, taint_full),
+            None => Some(json!({
+                "status": "SKIPPED",
+                "reason": "projet requis : passer project_code, ou un project_path enregistré — aucun audit SAST sans projet",
+            })),
+        };
         let taint_has_critical = taint_audit_value
             .as_ref()
             .and_then(|v| v.get("critical_count"))

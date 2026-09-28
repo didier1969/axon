@@ -233,6 +233,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         },
                         "message": { "type": "string", "description": "Optional message to log the validation. Default: 'pre-flight-check'." },
                         "incremental": { "type": "boolean", "description": "If true (default false), validate each file individually and return per-file violations. Use to detect a TDD-gate failure on file 1 without first authoring files 2..N." },
+                        "taint_detail": { "type": "string", "enum": ["sample", "full"], "description": "SAST taint audit detail. Default `sample`: exact counts + at most 20 violations of each kind (a full list can exceed the 16 MB stdio frame limit of MCP clients). `full`: every violation. The audit needs a project (`project_code`, or a registered `project_path`); without one it is SKIPPED, never defaulted to AXO." },
                         "project_path": { "type": "string", "description": "Absolute path of the project." },
                         "project_code": { "type": "string", "description": "Canonical project code." },
                         "oracle_proof": { "type": "object", "description": "REQ-AXO-902451: execution proof for declared project oracle ({ executed_at_ms: number, verdict: 'pass'|'fail' })." },

@@ -288,20 +288,19 @@ fn classify_sink(graph: &IstGraph, idx: u32) -> Option<SinkKind> {
         return Some(SinkKind::SqlInjection);
     }
 
-    // Command Injection Sinks
-    let cmd_sinks = [
-        "system",
-        "exec",
-        "popen",
-        "command::new",
-        "spawn_process",
-        "sh_exec",
-        "eval_bash",
-    ];
-    if cmd_sinks
-        .iter()
-        .any(|s| id_lower.contains(s) || name_lower.contains(s))
-    {
+    // Command Injection Sinks — jugés sur le NOM DE L'APPEL, jamais sur l'id complet.
+    // L'id porte le chemin du fichier : une recherche de sous-chaîne « system » / « exec » y
+    // classait `System.get_env`, `System.system_time`, `:telemetry.execute`, une fonction
+    // `extraction_system` ou tout fichier sous un dossier `ecosystem/` comme puits de commande
+    // (mesuré 2026-09-28 sur LXL : 155 flux « critiques », 155 faux positifs, 0 vrai).
+    // Les deux DERNIERS segments de l'id rattrapent un appel dont le nom est coupé au `::`
+    // (Rust : id `…::Command::new`, nom `new`) sans jamais lire les dossiers du chemin.
+    let id_tail = {
+        let mut segs: Vec<&str> = id_lower.rsplit("::").take(2).collect();
+        segs.reverse();
+        segs.join("::")
+    };
+    if is_command_sink(&name_lower) || is_command_sink(&id_tail) {
         return Some(SinkKind::CommandInjection);
     }
 
@@ -331,6 +330,70 @@ fn classify_sink(graph: &IstGraph, idx: u32) -> Option<SinkKind> {
     }
 
     None
+}
+
+/// Appels qui lancent un processus ou un shell, reconnus par leur nom QUALIFIÉ (comparaison
+/// exacte, ou suffixe après `.` / `::`), jamais par sous-chaîne.
+const COMMAND_SINKS_QUALIFIED: &[&str] = &[
+    "system.cmd",
+    "system.shell",
+    ":os.cmd",
+    "os.cmd",
+    "port.open",
+    "os.system",
+    "os.popen",
+    "os.execv",
+    "os.execve",
+    "os.execvp",
+    "os.spawnv",
+    "subprocess.run",
+    "subprocess.call",
+    "subprocess.popen",
+    "subprocess.check_call",
+    "subprocess.check_output",
+    "command::new",
+    "command.new",
+    "child_process.exec",
+    "child_process.execsync",
+    "child_process.spawn",
+    "child_process.spawnsync",
+    "runtime.exec",
+];
+
+/// Noms NUS dont la seule présence désigne un lancement de commande (fonction nommée exactement
+/// ainsi, p. ex. `libc::system`). Comparés au DERNIER segment du nom, jamais par sous-chaîne :
+/// `extraction_system`, `system_time` ou `execute` ne sont pas des puits.
+const COMMAND_SINKS_BARE: &[&str] = &[
+    "system",
+    "exec",
+    "execv",
+    "execve",
+    "execvp",
+    "execl",
+    "execlp",
+    "popen",
+    "shell_exec",
+    "proc_open",
+    "passthru",
+    "spawn_process",
+    "sh_exec",
+    "eval_bash",
+];
+
+fn is_command_sink(name_lower: &str) -> bool {
+    let qualified = COMMAND_SINKS_QUALIFIED.iter().any(|q| {
+        name_lower == *q
+            || name_lower.ends_with(&format!(".{q}"))
+            || name_lower.ends_with(&format!("::{q}"))
+    });
+    if qualified {
+        return true;
+    }
+    let last = name_lower
+        .rsplit(|c| c == '.' || c == ':')
+        .find(|s| !s.is_empty())
+        .unwrap_or(name_lower);
+    COMMAND_SINKS_BARE.contains(&last)
 }
 
 fn is_sanitizer_node(graph: &IstGraph, idx: u32) -> bool {

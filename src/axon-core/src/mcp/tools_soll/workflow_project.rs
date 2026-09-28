@@ -1828,7 +1828,7 @@ impl McpServer {
     /// the registry. Used by the pre-flight gate to scope guideline
     /// queries to (`PRO`, effective_project) so sibling-project
     /// duplicates don't leak into commit validation.
-    fn lookup_project_code_by_path(&self, path: &std::path::Path) -> Option<String> {
+    pub(crate) fn lookup_project_code_by_path(&self, path: &std::path::Path) -> Option<String> {
         let path_str = path.to_str()?;
         let escaped = escape_sql(path_str);
         let raw = self
