@@ -54,6 +54,12 @@ case "$ACTION" in
         ;;
 esac
 
-# Les scripts de build (ort-sys) sont liés à l'OpenSSL de Nix sans rpath : sans ce chemin, leur exécution
-# échoue sur « libssl.so.3: cannot open shared object file » et cargo sort en 101 (promotion 29.09, bbe82cf3).
-exec devenv shell -- bash -lc 'export LD_LIBRARY_PATH="$(pkg-config --variable=libdir openssl)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; '"$BUILD_COMMAND"
+# Build de release hermétique vis-à-vis de la config cargo de l'utilisateur (REQ-AXO-902681, 29.09).
+# ~/.cargo/config.toml (modifié le 24.09) injecte `target.x86_64-unknown-linux-gnu.rustflags =
+# ["-C", "link-arg=-fuse-ld=mold"]`. Avec -fuse-ld=mold, gcc appelle /usr/bin/ld.mold au lieu du
+# ld-wrapper de Nix : les -L/-rpath de NIX_LDFLAGS sont perdus, mold résout libssl/libstdc++ dans
+# /usr/lib/x86_64-linux-gnu, et le binaire (interpréteur glibc Nix, RUNPATH réduit au devenv-shell-env)
+# ne démarre pas (« libstdc++.so.6: cannot open shared object file »). Même cause pour le script de
+# build d'ort-sys (cargo 101). CARGO_ENCODED_RUSTFLAGS vide est prioritaire sur toute config
+# rustflags : l'édition de liens repasse par le ld-wrapper de Nix, qui pose le RUNPATH des libs Nix.
+exec devenv shell -- bash -lc 'export CARGO_ENCODED_RUSTFLAGS=""; unset RUSTFLAGS; '"$BUILD_COMMAND"
