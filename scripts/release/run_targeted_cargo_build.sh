@@ -54,4 +54,6 @@ case "$ACTION" in
         ;;
 esac
 
-exec devenv shell -- bash -lc "$BUILD_COMMAND"
+# Les scripts de build (ort-sys) sont liés à l'OpenSSL de Nix sans rpath : sans ce chemin, leur exécution
+# échoue sur « libssl.so.3: cannot open shared object file » et cargo sort en 101 (promotion 29.09, bbe82cf3).
+exec devenv shell -- bash -lc 'export LD_LIBRARY_PATH="$(pkg-config --variable=libdir openssl)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; '"$BUILD_COMMAND"
