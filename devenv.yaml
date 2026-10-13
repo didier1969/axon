@@ -4,3 +4,6 @@ inputs:
     inputs:
       nixpkgs:
         follows: nixpkgs
+# REQ-AXO-902350 (2026-10-13) : devenv 2.x décale le port quand il le croit occupé (PG sur :44145
+# après un redémarrage, clients sur :44144). Port strict : échec franc plutôt que dérive.
+strict_ports: true
